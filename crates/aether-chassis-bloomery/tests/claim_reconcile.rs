@@ -283,9 +283,9 @@ fn a_supersede_retry_resumes_a_claim_transfer_that_failed_after_k_of_n_refs() {
     // k=2 of n=4 (w1, w2, w3, admission): the first two members transferred.
     stage_hold_at(&fake, &claim_ref("w1"), &successor.id());
     stage_hold_at(&fake, &claim_ref("w2"), &successor.id());
-    assert_eq!(enumerated_holder(&state, ClaimRefKind::Workpiece(workpiece("w1"))), successor.id());
-    assert_eq!(enumerated_holder(&state, ClaimRefKind::Workpiece(workpiece("w2"))), successor.id());
-    assert_eq!(enumerated_holder(&state, ClaimRefKind::Workpiece(workpiece("w3"))), predecessor.id());
+    assert_eq!(enumerated_holder(&state, &ClaimRefKind::Workpiece(workpiece("w1"))), successor.id());
+    assert_eq!(enumerated_holder(&state, &ClaimRefKind::Workpiece(workpiece("w2"))), successor.id());
+    assert_eq!(enumerated_holder(&state, &ClaimRefKind::Workpiece(workpiece("w3"))), predecessor.id());
 
     let reply = drive_transfer(&state, &transfer_seal_mail(&snapshot, &predecessor.id(), &successor).unwrap());
 
@@ -435,8 +435,8 @@ fn drive_enumerate(state: &SourceCapabilityState) -> Vec<ClaimRefState> {
 /// The bloom currently holding `kind` on the production enumeration — the same
 /// surface [`plan_heals`] folds. A missing or tombstoned ref is a fixture error:
 /// this is a holder oracle, not a presence check.
-fn enumerated_holder(state: &SourceCapabilityState, kind: ClaimRefKind) -> BloomId {
-    match drive_enumerate(state).into_iter().find(|row| row.ref_kind == kind) {
+fn enumerated_holder(state: &SourceCapabilityState, kind: &ClaimRefKind) -> BloomId {
+    match drive_enumerate(state).into_iter().find(|row| &row.ref_kind == kind) {
         Some(ClaimRefState { holder: ClaimHolder::Held(holder), .. }) => holder,
         other => panic!("expected a live hold on {kind:?}, got {other:?}"),
     }
@@ -556,7 +556,7 @@ fn boot_reconcile_restores_refs_held_by_a_bloom_the_journal_never_sealed() {
 
     stage_hold_at(&fake, &claim_ref("w1"), &successor.id());
     assert_eq!(
-        enumerated_holder(&state, ClaimRefKind::Workpiece(workpiece("w1"))),
+        enumerated_holder(&state, &ClaimRefKind::Workpiece(workpiece("w1"))),
         successor.id(),
         "the interrupted transfer left w1 on the uncommitted successor",
     );
@@ -567,20 +567,20 @@ fn boot_reconcile_restores_refs_held_by_a_bloom_the_journal_never_sealed() {
     let (ref_kind, held_by) = decode_held(&drive_seal(&state, &seal_claim_mail(&contender.id(), &contender).unwrap()));
     assert_eq!((ref_kind, held_by), (ClaimRefKind::Workpiece(workpiece("w1")), predecessor.id()));
     assert_eq!(
-        enumerated_holder(&state, ClaimRefKind::Workpiece(workpiece("w2"))),
+        enumerated_holder(&state, &ClaimRefKind::Workpiece(workpiece("w2"))),
         predecessor.id(),
         "an already-predecessor-held sibling is not released",
     );
     assert_eq!(
-        enumerated_holder(&state, ClaimRefKind::MainlineAdmission),
+        enumerated_holder(&state, &ClaimRefKind::MainlineAdmission),
         predecessor.id(),
         "admission stays with the still-sealed predecessor",
     );
     // Idempotent: a second boot over the restored holding re-drives to no effect.
     drive_heals(&state, &snapshot);
-    assert_eq!(enumerated_holder(&state, ClaimRefKind::Workpiece(workpiece("w1"))), predecessor.id());
-    assert_eq!(enumerated_holder(&state, ClaimRefKind::Workpiece(workpiece("w2"))), predecessor.id());
-    assert_eq!(enumerated_holder(&state, ClaimRefKind::MainlineAdmission), predecessor.id());
+    assert_eq!(enumerated_holder(&state, &ClaimRefKind::Workpiece(workpiece("w1"))), predecessor.id());
+    assert_eq!(enumerated_holder(&state, &ClaimRefKind::Workpiece(workpiece("w2"))), predecessor.id());
+    assert_eq!(enumerated_holder(&state, &ClaimRefKind::MainlineAdmission), predecessor.id());
 }
 
 #[test]
