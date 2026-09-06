@@ -1,6 +1,7 @@
 //! Fail-closed admission refusals. Each named reason has its own message so a
 //! caller cannot mistake one closed door for another.
 
+use std::env;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -422,7 +423,7 @@ fn an_established_base_blob_keeps_the_human_gate_when_cwd_is_stale_proposed() {
     let repo = tempfile::tempdir().expect("a temp dir for the fixture creates");
     assert_ne!(
         repo.path().canonicalize().expect("fixture repo canonicalizes"),
-        std::env::current_dir().expect("process cwd").canonicalize().expect("cwd canonicalizes"),
+        env::current_dir().expect("process cwd").canonicalize().expect("cwd canonicalizes"),
         "admission must consult the configured repository, not process cwd",
     );
     git(repo.path(), &["init", "--object-format=sha1", "--quiet"]);
@@ -440,10 +441,8 @@ fn an_established_base_blob_keeps_the_human_gate_when_cwd_is_stale_proposed() {
     let mut revision = revision("wp-1", "problem");
     revision.declared_surface = vec![path.to_owned()];
     let digest = digest_of(&revision);
-    let policy = ApprovalPolicy {
-        default: Tier::Auto,
-        rules: vec![ApprovalRule { glob: path.to_owned(), tier: Tier::Judge }],
-    };
+    let policy =
+        ApprovalPolicy { default: Tier::Auto, rules: vec![ApprovalRule { glob: path.to_owned(), tier: Tier::Judge }] };
 
     let established = admit_member(
         digest,

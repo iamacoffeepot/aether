@@ -26,7 +26,7 @@ pub enum SealedAdrStatus {
 /// Look up an ADR path at the sealed base.
 ///
 /// [`Some(SealedAdrStatus::Proposed)`] is the only confirmed still-Proposed
-/// blob. [`Some(Established)`] is a confirmed non-Proposed status. [`None`]
+/// blob. [`Some(SealedAdrStatus::Established)`] is a confirmed non-Proposed status. [`None`]
 /// is everything else: a missing path, unresolved correspondence, a missing
 /// git object, or a spawn/decode failure. None of those are confirmed
 /// Proposed, so the Human hard gate stays armed. [`None`] is not a confirmed
@@ -167,6 +167,7 @@ fn status_token(text: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
     use std::fs;
     use std::path::Path;
     use std::process::Command;
@@ -239,7 +240,7 @@ mod tests {
         let repo = adr_repo();
         assert_ne!(
             repo.path().canonicalize().expect("fixture repo canonicalizes"),
-            std::env::current_dir().expect("process cwd").canonicalize().expect("cwd canonicalizes"),
+            env::current_dir().expect("process cwd").canonicalize().expect("cwd canonicalizes"),
             "the configured repository must not be the process cwd",
         );
         write_adr(repo.path(), path, "Accepted");
@@ -322,10 +323,8 @@ mod tests {
         // sha1 repository and is the correspondence split ADR-0150 records.
         let sha = "3a3f8c0b9e1d2a4f6b8c0e2d4a6f8b0c1e3d5a7f";
         let base = Digest::from_bytes([7; 32]);
-        let correspondence = OnePair {
-            digest: base,
-            object: BackendObjectId::from(GitObjectId::from_hex(sha).expect("40-hex sha1")),
-        };
+        let correspondence =
+            OnePair { digest: base, object: BackendObjectId::from(GitObjectId::from_hex(sha).expect("40-hex sha1")) };
 
         let resolved = sealed_commit_hex(Some(&correspondence), base).expect("the recorded pair resolves");
         assert_eq!(resolved, sha);
@@ -362,10 +361,6 @@ mod tests {
 
     fn git(root: &Path, args: &[&str]) {
         let output = Command::new("git").current_dir(root).args(args).output().expect("git starts");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr),
-        );
+        assert!(output.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&output.stderr),);
     }
 }

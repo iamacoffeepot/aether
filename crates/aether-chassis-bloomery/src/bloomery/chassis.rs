@@ -8,9 +8,8 @@
 use std::error::Error;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
 #[cfg(feature = "github")]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(feature = "github")]
