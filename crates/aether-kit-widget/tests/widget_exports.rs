@@ -19,8 +19,6 @@
 //! CI sets `AETHER_REQUIRE_RUNTIME=1` to turn that skip into a hard failure.
 //! The parent builds `aether_kit_widget` and `aether_kit_widget_behavior`.
 
-#![allow(clippy::print_stderr)]
-
 use std::fs;
 
 use aether_actor::Addressable;
