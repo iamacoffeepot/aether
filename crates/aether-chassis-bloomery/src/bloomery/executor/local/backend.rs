@@ -1746,15 +1746,8 @@ impl LocalExecutor {
         let _ = slot;
         self.retire(&handle.nonce.0);
         self.pump();
-        vec![executor_fault_ref(
-            handle,
-            subject,
-            bytes,
-            candidate,
-            parse_findings(bytes),
-            parse_cost(bytes),
-            parse_calls(bytes),
-        )]
+        let (cost, calls) = parse_measured(bytes).map_or((None, None), |(cost, calls)| (Some(cost), calls));
+        vec![executor_fault_ref(handle, subject, bytes, candidate, parse_findings(bytes), cost, calls)]
     }
 
     fn capture_worktree(
@@ -2399,6 +2392,7 @@ fn judged_evidence_ref(
         judgement;
     let overlay = apply_containment(verdict, failed_verifiers, parse_findings(bytes), &violating_paths);
     let detail = Digest::of_wire_bytes(bytes);
+    let (cost, calls) = parse_measured(bytes).map_or((None, None), |(cost, calls)| (Some(cost), calls));
     EvidenceRef {
         name: NameEvidenceClaims::attempt_artifact_name(
             &handle.nonce,
@@ -2417,8 +2411,8 @@ fn judged_evidence_ref(
             candidate,
             findings: overlay.findings,
             failed_verifiers: overlay.failed_verifiers,
-            cost: parse_cost(bytes),
-            calls: parse_calls(bytes),
+            cost,
+            calls,
             session_reuse_arm: parse_session_reuse_arm(bytes),
             session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
             peak_resident_bytes: parse_peak_resident_bytes(bytes),
@@ -3077,16 +3071,15 @@ fn parse_suppression_requests(bytes: &[u8]) -> Vec<(String, u32, String, String)
 /// columns do not parse. `None` means *unmeasured* and writes no study row —
 /// the alternative, a row of zeroes, would make an unmeasured attempt
 /// indistinguishable from a free one and quietly corrupt every average taken
-/// over the ledger.
+/// over the ledger. Dual-consumer observation paths parse here once and split
+/// the pair; fabricating a zero cost for the `None` case is the defect.
 fn parse_measured(bytes: &[u8]) -> Option<(StudyCost, Option<Vec<aether_bloomery::StudyCall>>)> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     parse_study(&serde_json::to_vec(value.get("result_record")?).ok()?).ok()
 }
 
-fn parse_cost(bytes: &[u8]) -> Option<StudyCost> {
-    parse_measured(bytes).map(|(cost, _)| cost)
-}
-
+/// Session-reuse stamping needs only the call vector. Dual-consumer observation
+/// paths call [`parse_measured`] once instead of this wrapper.
 fn parse_calls(bytes: &[u8]) -> Option<Vec<aether_bloomery::StudyCall>> {
     parse_measured(bytes).and_then(|(_, calls)| calls)
 }
