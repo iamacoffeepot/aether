@@ -263,7 +263,10 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
                 HarnessOp::send_and_settle(&dropdown, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_ENTER }),
             ),
             ("dropdown_down", HarnessOp::send_and_settle(&dropdown, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
-            ("dropdown_commit", HarnessOp::send_and_settle(&dropdown, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            (
+                "dropdown_commit",
+                HarnessOp::send_and_settle(&dropdown, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER }),
+            ),
             (
                 "menu_frame",
                 HarnessOp::send_and_settle(&menu, &WidgetFrame { x: 10.0, y: 10.0, width: 200.0, height: 24.0 }),
