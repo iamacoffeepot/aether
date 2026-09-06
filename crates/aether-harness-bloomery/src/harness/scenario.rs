@@ -922,63 +922,70 @@ fn spawn_listening_coordinator(
     poll_interval_secs: u64,
     cas_land_enabled: bool,
 ) -> (Coordinator, TcpStream) {
-    let heartbeat = heartbeat_silence_secs.map(|secs| secs.to_string());
-    let poll = poll_interval_secs.to_string();
-    let cas_land = if cas_land_enabled {
-        "true"
-    } else {
-        "false"
-    };
     let lane_program = crate::mock_lane_program();
     spawn_and_connect("lane-boundary-harness", COORDINATOR_HANDSHAKE_BUDGET, || {
-        Coordinator::spawn_in(
-            0,
-            Some(&repo.work_dir()),
-            &forked_lane_env(
-                store_path,
-                artifacts_root,
-                lane_program.as_str(),
-                worktree_base,
-                poll.as_str(),
-                cas_land,
-                repo.head(),
-                heartbeat.as_deref(),
-            ),
-        )
+        let env = ForkedLaneSettings {
+            store_path,
+            artifacts_root,
+            lane_program: lane_program.as_str(),
+            worktree_base,
+            poll_interval_secs,
+            cas_land_enabled,
+            fixture_base_sha: repo.head(),
+            heartbeat_silence_secs,
+        }
+        .env();
+        let env: Vec<_> = env.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect();
+        Coordinator::spawn_in(0, Some(&repo.work_dir()), &env)
     })
 }
 
-/// Env the forked `bloomery` child resolves through the production Config
-/// derive. Poll cadence and the landing gate are builder settings, not
-/// harness constants: in-process boots already honoured them, and a child
-/// that omits either key silently runs the derive default (#5599).
-fn forked_lane_env<'a>(
-    store_path: &'a str,
-    artifacts_root: &'a str,
-    lane_program: &'a str,
-    worktree_base: &'a str,
-    poll_interval_secs: &'a str,
-    cas_land_enabled: &'a str,
-    fixture_base_sha: &'a str,
-    heartbeat_silence_secs: Option<&'a str>,
-) -> Vec<(&'static str, &'a str)> {
-    let mut env = vec![
-        ("AETHER_STORE_PATH", store_path),
-        ("AETHER_ARTIFACTS_ROOT", artifacts_root),
-        ("AETHER_BLOOMERY_LANE_PROGRAM", lane_program),
-        ("AETHER_GITHUB_LOCAL_WORKTREE_BASE", worktree_base),
-        ("AETHER_GITHUB_LOCAL_LANE_COMMANDS", "construct.,review.,verify."),
-        ("AETHER_GITHUB_POLL_INTERVAL_SECS", poll_interval_secs),
-        ("AETHER_GITHUB_CAS_LAND_ENABLED", cas_land_enabled),
-        ("AETHER_GITHUB_BACKEND", "fixture"),
-        ("AETHER_GITHUB_FIXTURE_BASE_SHA", fixture_base_sha),
-        ("AETHER_BLOOMERY_OPERATOR_NAME", "lane harness"),
-        ("AETHER_BLOOMERY_OPERATOR_EMAIL", "lane-harness@example.test"),
-    ];
-    if let Some(secs) = heartbeat_silence_secs {
-        env.push(("AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS", secs));
+/// Env a forked `bloomery` child resolves through the production Config derive.
+///
+/// Poll cadence and the landing gate are builder settings, not harness
+/// constants: in-process boots already honoured them, and a child that omits
+/// either key silently runs the derive default (#5599).
+pub struct ForkedLaneSettings<'a> {
+    /// Journal file the child opens.
+    pub store_path: &'a str,
+    /// Artifacts content-store root.
+    pub artifacts_root: &'a str,
+    /// `AETHER_BLOOMERY_LANE_PROGRAM`.
+    pub lane_program: &'a str,
+    /// Scratch-worktree base for local lanes.
+    pub worktree_base: &'a str,
+    /// `AETHER_GITHUB_POLL_INTERVAL_SECS`.
+    pub poll_interval_secs: u64,
+    /// `AETHER_GITHUB_CAS_LAND_ENABLED`.
+    pub cas_land_enabled: bool,
+    /// Commit the fixture's base digest names.
+    pub fixture_base_sha: &'a str,
+    /// Optional `AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS`.
+    pub heartbeat_silence_secs: Option<u64>,
+}
+
+impl ForkedLaneSettings<'_> {
+    /// Production env keys a forked coordinator Config derive accepts.
+    #[must_use]
+    pub fn env(&self) -> Vec<(String, String)> {
+        let mut env = vec![
+            (String::from("AETHER_STORE_PATH"), self.store_path.to_owned()),
+            (String::from("AETHER_ARTIFACTS_ROOT"), self.artifacts_root.to_owned()),
+            (String::from("AETHER_BLOOMERY_LANE_PROGRAM"), self.lane_program.to_owned()),
+            (String::from("AETHER_GITHUB_LOCAL_WORKTREE_BASE"), self.worktree_base.to_owned()),
+            (String::from("AETHER_GITHUB_LOCAL_LANE_COMMANDS"), String::from("construct.,review.,verify.")),
+            (String::from("AETHER_GITHUB_POLL_INTERVAL_SECS"), self.poll_interval_secs.to_string()),
+            (String::from("AETHER_GITHUB_CAS_LAND_ENABLED"), self.cas_land_enabled.to_string()),
+            (String::from("AETHER_GITHUB_BACKEND"), String::from("fixture")),
+            (String::from("AETHER_GITHUB_FIXTURE_BASE_SHA"), self.fixture_base_sha.to_owned()),
+            (String::from("AETHER_BLOOMERY_OPERATOR_NAME"), String::from("lane harness")),
+            (String::from("AETHER_BLOOMERY_OPERATOR_EMAIL"), String::from("lane-harness@example.test")),
+        ];
+        if let Some(secs) = self.heartbeat_silence_secs {
+            env.push((String::from("AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS"), secs.to_string()));
+        }
+        env
     }
-    env
 }
 
 fn author_catalog(store_path: &str, wall_clock_secs: u64) -> ConfigRegistry {
@@ -1353,51 +1360,5 @@ fn lower_lane_script(script: &LaneScript) -> LaneMode {
         LaneScript::OutsideSurface(_) | LaneScript::VerifyFail(_) | LaneScript::BaseVerifyFail(_) => LaneMode::Fail,
         LaneScript::Die => LaneMode::ExitsNonZero,
         LaneScript::WrongSubject => LaneMode::WrongSubject,
-    }
-}
-
-#[cfg(test)]
-mod forked_lane_env_tests {
-    use super::forked_lane_env;
-
-    fn value<'a>(env: &[(&'static str, &'a str)], key: &str) -> Option<&'a str> {
-        env.iter().find_map(|(name, value)| (*name == key).then_some(*value))
-    }
-
-    #[test]
-    fn forked_child_env_forwards_poll_and_landing_gate_on_production_keys() {
-        let env = forked_lane_env(
-            "/tmp/store",
-            "/tmp/artifacts",
-            "/mock-lane",
-            "/tmp/worktrees",
-            "86400",
-            "false",
-            "abc123",
-            None,
-        );
-
-        // Tripwire: a production bloomery child resolves these Config-derive keys.
-        // Hardcoding poll to 1 or omitting cas_land leaves the child on the derive
-        // defaults and the forked builder knobs become no-ops (#5599).
-        assert_eq!(value(&env, "AETHER_GITHUB_POLL_INTERVAL_SECS"), Some("86400"));
-        assert_eq!(value(&env, "AETHER_GITHUB_CAS_LAND_ENABLED"), Some("false"));
-        assert_eq!(value(&env, "AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS"), None);
-    }
-
-    #[test]
-    fn forked_child_env_still_forwards_heartbeat_silence() {
-        let env = forked_lane_env(
-            "/tmp/store",
-            "/tmp/artifacts",
-            "/mock-lane",
-            "/tmp/worktrees",
-            "1",
-            "true",
-            "abc123",
-            Some("15"),
-        );
-
-        assert_eq!(value(&env, "AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS"), Some("15"));
     }
 }

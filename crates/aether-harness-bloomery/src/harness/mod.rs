@@ -50,7 +50,7 @@ use crate::support::repo::Repo;
 #[doc(inline)]
 pub use aether_bloomery::testing::digest;
 pub use drive::{draft, passed};
-pub use scenario::ScenarioHarness;
+pub use scenario::{ForkedLaneSettings, ScenarioHarness};
 
 /// The promoted [`ScenarioHarness`], named to match the crate the way
 /// `FleetHarness` matches its own.
