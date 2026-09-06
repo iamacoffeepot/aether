@@ -226,3 +226,38 @@ fn a_per_line_cap_truncates_the_rendered_line_and_still_advances() {
     assert_eq!(page.lines[1], "next");
     assert_eq!(page.next_cursor, None);
 }
+
+#[test]
+fn a_line_longer_than_the_page_budget_still_advances() {
+    // The LINE_CAP test uses a page much larger than its line, so it never
+    // hits the stall: limit+1 bytes with no newline consumed 0 and returned
+    // the input cursor forever. The following line must remain reachable.
+    let dir = tempfile::tempdir().expect("a scratch directory is available");
+    let path = dir.path().join("transcript.jsonl");
+    let limit = 32_u64;
+    let huge = "x".repeat(128);
+    fs::write(&path, format!("{huge}\nnext\n")).expect("the fixture writes");
+
+    let first = read_ranged(&path, Some(0), limit).expect("the over-budget line is readable");
+    assert_eq!(first.cursor, 0);
+    assert_eq!(first.lines.len(), 1, "the oversized line still renders a capped prefix");
+    assert!(!first.lines[0].is_empty());
+    assert!(first.lines[0].chars().all(|ch| ch == 'x'));
+    assert!(first.lines[0].len() < huge.len(), "the prefix must not be the whole over-budget line");
+    let next = first.next_cursor.expect("the page must name a following cursor");
+    assert!(next > first.cursor, "next_cursor must strictly advance");
+
+    let mut seen = first.lines;
+    let mut cursor = Some(next);
+    let mut steps = 0_u32;
+    while let Some(from) = cursor {
+        steps += 1;
+        assert!(steps < 8, "pagination must not stall on a line larger than the page");
+        let page = read_ranged(&path, Some(from), limit).expect("later pages succeed");
+        assert_eq!(page.cursor, from, "next_cursor must land on a line start so a follow-up page is not snapped away");
+        assert_ne!(page.next_cursor, Some(from), "next_cursor must not repeat the input");
+        seen.extend(page.lines);
+        cursor = page.next_cursor;
+    }
+    assert!(seen.iter().any(|line| line == "next"), "later complete lines must remain reachable");
+}
