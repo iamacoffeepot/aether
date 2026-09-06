@@ -1287,6 +1287,9 @@ impl Snapshot {
     /// or verify failure means the member moved, so the request has been
     /// answered or overtaken and the entry is dropped — the `requests` counter
     /// resets with the bloom, which is what ADR-0207's per-bloom budget says.
+    /// The clear arm takes effect only when the decision set carries the
+    /// outcome the reducer returns when it accepts that fact; a fact it
+    /// rejected changes nothing.
     fn record_surface_request(&mut self, event: &Event, decisions: &Decisions) {
         match &event.fact {
             Fact::SurfaceRequested { bloom, workpiece, stage, evidence, request } => {
@@ -1303,9 +1306,33 @@ impl Snapshot {
                     },
                 );
             }
-            Fact::AttemptCompleted { bloom, workpiece, passed: true, .. }
-            | Fact::Integrate { bloom, claim: ResolutionClaim { workpiece, .. } }
-            | Fact::VerifyFailed { bloom, workpiece, .. } => {
+            Fact::AttemptCompleted { bloom, workpiece, passed: true, .. } => {
+                if !matches!(decisions.outcome, Outcome::AttemptAdvanced { .. } | Outcome::VerifyReused { .. }) {
+                    return;
+                }
+                if let Some(members) = self.surface_requests.get_mut(bloom) {
+                    members.remove(workpiece);
+                }
+            }
+            Fact::Integrate { bloom, claim: ResolutionClaim { workpiece, .. } } => {
+                let Outcome::Integrated { .. } = &decisions.outcome else {
+                    return;
+                };
+                if let Some(members) = self.surface_requests.get_mut(bloom) {
+                    members.remove(workpiece);
+                }
+            }
+            Fact::VerifyFailed { bloom, workpiece, .. } => {
+                if !matches!(
+                    decisions.outcome,
+                    Outcome::RefineReentered { .. }
+                        | Outcome::AttemptWedged { stage: StageId::Verify, .. }
+                        | Outcome::MachineryWedged { stage: StageId::Verify, .. }
+                        | Outcome::AttemptRetried { stage: StageId::Verify, .. }
+                        | Outcome::VerifyHostFaultHeld { .. }
+                ) {
+                    return;
+                }
                 if let Some(members) = self.surface_requests.get_mut(bloom) {
                     members.remove(workpiece);
                 }
@@ -1377,10 +1404,10 @@ impl Snapshot {
     /// - **Acquisition and eviction** ride [`Fact::LaneWritesObserved`], gated
     ///   on the matching outcome so a refused observation cannot plant a lease
     ///   the reducer rejected.
-    /// - **Integration** releases the member's leases: its work is folded, so
-    ///   nothing of it is still being written. The same fold drops the
-    ///   evictions it caused, because the resume dispatches were decided on
-    ///   this row.
+    /// - **Integration** releases the member's leases, gated on
+    ///   [`Outcome::Integrated`] so a refused claim cannot drop a lease the
+    ///   reducer rejected. The same fold drops the evictions it caused,
+    ///   because the resume dispatches were decided on this row.
     /// - **Retirement** releases them too — a wedged or withdrawn member is
     ///   never going to write again — and a bloom reaching a terminal status
     ///   drops its whole table, so no lease survives its bloom.
@@ -1406,9 +1433,11 @@ impl Snapshot {
                 }
             }
             Fact::Integrate { bloom, claim } => {
-                self.release_member_leases(bloom, &claim.workpiece);
-                if let Some(evictions) = self.lease_evictions.get_mut(bloom) {
-                    evictions.retain(|_, eviction| eviction.by != claim.workpiece);
+                if matches!(decisions.outcome, Outcome::Integrated { .. }) {
+                    self.release_member_leases(bloom, &claim.workpiece);
+                    if let Some(evictions) = self.lease_evictions.get_mut(bloom) {
+                        evictions.retain(|_, eviction| eviction.by != claim.workpiece);
+                    }
                 }
             }
             _ => {}
