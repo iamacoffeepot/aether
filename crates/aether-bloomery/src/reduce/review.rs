@@ -18,6 +18,11 @@ use super::{
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{Evidence, EvidenceKind, ResolvedBloom};
 
+/// Candidate-review judgments per bloom (ADR-0153). Independent of the sealed
+/// `AggregateReview` retry budget, which ADR-0176 assigns to the executor-fault
+/// ledger.
+const CANDIDATE_REVIEW_PASS_CEILING: u32 = 2;
+
 /// The bloom record and the integration fold a fold-bound aggregate-review
 /// result may act on, or the refusal it earns.
 ///
@@ -160,13 +165,14 @@ pub(super) fn reduce_aggregate_review_completed(
         effects.extend(resolution);
         return Decisions { outcome: Outcome::Resolved(resolved), effects };
     }
-    if rolls >= record.stage_catalog.retry_budget_of(StageId::AggregateReview).unwrap_or(1) {
+    if rolls >= CANDIDATE_REVIEW_PASS_CEILING {
         // The delta-confirm still failed: the two-pass ceiling parks the bloom
         // to the owner (ADR-0151's hold vocabulary at bloom scope). The fold
         // stays held (the owner's decision context), no member re-opens, no
         // further review dispatches; the failing review's record artifact is
         // the parked question an adopting answer must name to re-arm the
-        // cycle.
+        // cycle. The sealed catalog budget is not consulted — a valid authored
+        // `retry_budget` of 3 must not buy a third judgment.
         //
         // The finding is filed first (#4977): a ceiling refusal is a refusal of
         // the composed tree with its evidence in hand, exactly as the re-weave
