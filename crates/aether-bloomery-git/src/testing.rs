@@ -179,6 +179,10 @@ struct State {
     unread_issue_creates: HashSet<u64>,
     created_issues: usize,
     updated_issues: usize,
+    // Invocations of `GitDataApi::create_commit`, not unique commit objects.
+    // Content-addressed remints of the same claim still increment, so a seal
+    // that reused one SHA after N GitHub creates cannot hide (#5608).
+    create_commit_invocations: usize,
 }
 
 /// An in-memory GitHub double implementing [`GithubApi`].
@@ -464,6 +468,16 @@ impl FakeGithub {
     #[must_use]
     pub fn updated_issue_count(&self) -> usize {
         self.lock().updated_issues
+    }
+
+    /// How many times [`GitDataApi::create_commit`] has been invoked.
+    ///
+    /// Counts calls, not unique shas: a content-addressed remint of an existing
+    /// claim commit still increments, which is what a seal-reuse regression has
+    /// to observe.
+    #[must_use]
+    pub fn create_commit_count(&self) -> usize {
+        self.lock().create_commit_invocations
     }
 
     /// The next [`GitDataApi::get_ref`] fails as a transport/`Command` fault
@@ -906,6 +920,7 @@ impl GitDataApi for FakeGithub {
     }
 
     fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GitDataError> {
+        self.lock().create_commit_invocations += 1;
         let sha = mint_commit(self.object_repo().as_deref(), message, tree, parents)?;
         self.lock().commits.insert(
             sha.clone(),
