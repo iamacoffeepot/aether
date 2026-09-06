@@ -157,21 +157,32 @@ pub fn written_paths(repo: &Path) -> Result<Vec<String>, GitCommandError> {
 
 /// Strip the two-letter status field from each `-z` porcelain entry.
 ///
-/// A rename emits two tokens: the entry proper (`R  <new>`) and a bare
-/// following token holding the old name. The bare token is a path a lane
+/// A rename or copy emits two tokens: the entry proper (`R  <new>`) and a
+/// bare following token holding the old name. The bare token is a path a lane
 /// touched just as much as the new name is, so it is kept as written rather
 /// than dropped — a rename out of a file another member is editing is exactly
-/// the contention a lease exists to catch. An entry is recognized by the
-/// separating space git puts at index 2; anything shorter, or without it, is
-/// the bare form.
+/// the contention a lease exists to catch. Status-prefixed entries are
+/// recognized by the separating space git puts at index 2; a following rename
+/// or copy source is consumed as a pair so a path with a space at that index
+/// (`ab old.rs`) is not mistaken for another status field.
 fn porcelain_path_tokens(entries: Vec<String>) -> Vec<String> {
-    entries
-        .into_iter()
-        .map(|entry| match entry.as_bytes().get(2) {
-            Some(b' ') if entry.len() > 3 => entry[3..].to_owned(),
-            _ => entry,
-        })
-        .collect()
+    let mut paths = Vec::with_capacity(entries.len());
+    let mut expect_source = false;
+    for entry in entries {
+        if expect_source {
+            paths.push(entry);
+            expect_source = false;
+        } else {
+            match entry.as_bytes().get(2) {
+                Some(b' ') if entry.len() > 3 => {
+                    expect_source = entry.as_bytes()[..2].iter().any(|byte| matches!(*byte, b'R' | b'C'));
+                    paths.push(entry[3..].to_owned());
+                }
+                _ => paths.push(entry),
+            }
+        }
+    }
+    paths
 }
 
 /// Split a `-z` path list. Empty tokens (a trailing NUL) are dropped.
@@ -583,6 +594,23 @@ mod tests {
                 "crates/a/src/to.rs".to_string(),
                 "crates/a/src/from.rs".to_string(),
             ],
+        );
+    }
+
+    #[test]
+    fn a_rename_source_with_a_space_at_byte_two_is_kept_verbatim() {
+        // The plausible bug: `git status --porcelain -z` emits a rename as two
+        // NUL-delimited tokens, `R  <new>` then a bare `<old>`. Treating every
+        // token with a space at byte two as status-prefixed turns `ab old.rs`
+        // into `old.rs`, so write leases observe a path nobody wrote and miss
+        // the source a sibling may still be editing. A copy uses the same
+        // two-token record; an ordinary `M` still strips a real status field
+        // even when the path itself has a space at byte two.
+        let entries = split_nul("R  new.rs\0ab old.rs\0C  copied.rs\0xy source.rs\0M  ab other.rs\0");
+
+        assert_eq!(
+            porcelain_path_tokens(entries),
+            ["new.rs", "ab old.rs", "copied.rs", "xy source.rs", "ab other.rs"]
         );
     }
 
