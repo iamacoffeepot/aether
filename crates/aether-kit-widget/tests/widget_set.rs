@@ -658,10 +658,7 @@ fn radio_up_down_clamps_at_the_ends_without_endpoint_events() {
         .expect("radio focus and top-end Up");
 
     let (selections, joined) = choice_selections(&mut harness);
-    assert!(
-        selections.is_empty(),
-        "Up at the first option must emit no selection event; log was:\n{joined}",
-    );
+    assert!(selections.is_empty(), "Up at the first option must emit no selection event; log was:\n{joined}",);
 
     harness
         .execute(vec![
