@@ -233,15 +233,11 @@ fn strip_ansi(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{BootLog, HTTP_BOUND, RPC_BOUND, TAIL_LINES, announced_port};
+    use std::sync::{Arc, Condvar, Mutex};
 
     impl BootLog {
         fn recording() -> Self {
-            Self {
-                announced: std::sync::Arc::new((
-                    std::sync::Mutex::new(super::Announced::default()),
-                    std::sync::Condvar::new(),
-                )),
-            }
+            Self { announced: Arc::new((Mutex::new(super::Announced::default()), Condvar::new())) }
         }
 
         fn push_line(&self, line: &str) {
