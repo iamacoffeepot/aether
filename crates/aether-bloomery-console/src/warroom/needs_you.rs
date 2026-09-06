@@ -36,10 +36,7 @@ pub struct DismissKey {
 impl NeedsYouRow {
     #[must_use]
     pub fn dismiss_key(&self) -> DismissKey {
-        DismissKey {
-            focus: self.focus.clone(),
-            facts: tagged("dismiss", [&self.happened, &self.action, &self.source]),
-        }
+        DismissKey { focus: self.focus.clone(), facts: tagged("dismiss", [&self.happened, &self.action, &self.source]) }
     }
 }
 
