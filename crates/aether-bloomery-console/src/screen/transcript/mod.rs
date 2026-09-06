@@ -305,7 +305,9 @@ impl Transcript {
     }
 
     fn prompt_query(&self) -> PromptQuery {
-        PromptQuery { nonce: self.nonce.clone(), cursor: self.prompt.started.then_some(self.prompt.have) }
+        // The shared ranged endpoint treats a missing cursor as tail. Prompts
+        // are written once, so the first page must start at byte zero.
+        PromptQuery { nonce: self.nonce.clone(), cursor: Some(self.prompt.have) }
     }
 
     fn ingest(&mut self, store: &Store) {
@@ -654,7 +656,7 @@ mod tests {
 
     fn store_with_prompt(transcript: DispatchFilePage, prompt: DispatchFilePage) -> Store {
         let mut store = store_with(transcript);
-        store.apply_prompt(PromptQuery { nonce: "dispatch-1".to_owned(), cursor: None }, Ok(prompt));
+        store.apply_prompt(PromptQuery { nonce: "dispatch-1".to_owned(), cursor: Some(0) }, Ok(prompt));
         store
     }
 
@@ -824,12 +826,46 @@ mod tests {
             notice: None,
         };
         let mut store = Store::new(Duration::from_secs(1));
-        store.apply_prompt(PromptQuery { nonce: "dispatch-1".to_owned(), cursor: None }, Ok(first));
+        store.apply_prompt(PromptQuery { nonce: "dispatch-1".to_owned(), cursor: Some(0) }, Ok(first));
         let mut view = Transcript::new("dispatch-1");
         assert_eq!(view.handle_key(KeyEvent::from(KeyCode::Char('p')), &store), Outcome::Handled);
         view.reseat(&store);
         store.apply_prompt(PromptQuery { nonce: "dispatch-1".to_owned(), cursor: Some(20) }, Ok(second));
         view.reseat(&store);
         assert_eq!(view.prompt.lines, ["# Task", "do the thing", "more prompt"]);
+    }
+
+    #[test]
+    fn the_first_prompt_request_starts_at_byte_zero() {
+        // The plausible bug: an omitted cursor is a tail read on the shared
+        // prompt/transcript endpoint (64 KiB default). A 100 KiB prompt would
+        // open ~36 KiB in, and the pane only paginates forward from there.
+        let opening = DispatchFilePage {
+            lines: vec!["# Opening instructions".to_owned()],
+            cursor: 0,
+            next_cursor: Some(24),
+            length: 100_000,
+            notice: None,
+        };
+        let tail = DispatchFilePage {
+            lines: vec!["...tail of a 100 KiB prompt".to_owned()],
+            cursor: 36_000,
+            next_cursor: None,
+            length: 100_000,
+            notice: None,
+        };
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_prompt(PromptQuery { nonce: "dispatch-1".to_owned(), cursor: None }, Ok(tail));
+        store.apply_prompt(PromptQuery { nonce: "dispatch-1".to_owned(), cursor: Some(0) }, Ok(opening));
+        let mut view = Transcript::new("dispatch-1");
+        assert_eq!(view.handle_key(KeyEvent::from(KeyCode::Char('p')), &store), Outcome::Handled);
+        match view.subscriptions().as_slice() {
+            [ResourceKey::Prompt(query)] => {
+                assert_eq!(query.cursor, Some(0), "first prompt page starts at byte zero");
+            }
+            other => panic!("expected a prompt subscription, got {other:?}"),
+        }
+        view.reseat(&store);
+        assert_eq!(view.prompt.lines, ["# Opening instructions"]);
     }
 }
