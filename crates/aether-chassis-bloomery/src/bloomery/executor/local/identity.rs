@@ -286,7 +286,10 @@ fn wait_until_pgid_gone(pgid: u32) -> bool {
 /// unknown, not gone: unknown is live so cancellation escalates instead of
 /// returning success into an unbounded `child.wait`.
 fn any_process_in_group(pgid: u32) -> bool {
-    group_is_live(proc_group_is_live(pgid), ps_group_is_live(pgid), group_responds_to_signal_zero(pgid))
+    proc_group_is_live(pgid)
+        .or_else(|| ps_group_is_live(pgid))
+        .or_else(|| group_responds_to_signal_zero(pgid))
+        .unwrap_or(true)
 }
 
 /// First probe that could observe wins. If every probe is unknown, the group
@@ -505,11 +508,7 @@ mod tests {
         // mapping that to "no members" is the same false exit as a missing
         // /proc. Injected unknown probes must stay live so terminate_pgid
         // escalates and times out rather than succeeding into child.wait.
-        assert_eq!(
-            signal_zero_observation(Ok(false)),
-            None,
-            "a nonzero kill -0 is ESRCH or EPERM, not confirmed exit",
-        );
+        assert_eq!(signal_zero_observation(Ok(false)), None, "a nonzero kill -0 is ESRCH or EPERM, not confirmed exit",);
         assert_eq!(
             signal_zero_observation(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "kill"))),
             None,
@@ -605,10 +604,7 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(20));
         }
-        assert!(
-            head_gone_with_grandchild,
-            "the head must exit leaving a TERM-ignoring grandchild in its group",
-        );
+        assert!(head_gone_with_grandchild, "the head must exit leaving a TERM-ignoring grandchild in its group",);
         terminate_pgid(pgid).expect("SIGKILL must finish a group that ignored SIGTERM");
         assert!(!any_process_in_group(pgid), "no member of the lane group survives teardown");
     }
