@@ -46,7 +46,7 @@ fn a_forked_cas_land_false_resolves_and_never_lands() {
 
     for _ in 0..8 {
         harness.land_tick();
-        assert_eq!(harness.bloom(bloom).status, BloomStatus::Resolved, "cas_land(false) must refuse every land wake",);
+        assert_eq!(harness.bloom(bloom).status, BloomStatus::Resolved, "cas_land(false) must refuse every land wake");
         assert_eq!(harness.view().mainline, sealed_on, "a gated land must not move mainline");
     }
 }
@@ -69,7 +69,8 @@ fn forked_lane_settings_reach_the_production_resolver() {
         heartbeat_silence_secs: None,
     };
     let exe = env::current_exe().expect("the test executable");
-    let test_name = thread::current().name().expect("libtest names the test thread");
+    let test_thread = thread::current();
+    let test_name = test_thread.name().expect("libtest names the test thread");
     let mut command = Command::new(exe);
     command.arg(test_name).arg("--exact").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     isolate_resolve_child(&mut command);
@@ -77,7 +78,7 @@ fn forked_lane_settings_reach_the_production_resolver() {
         command.env(key, value);
     }
     let output = command.env(RESOLVE_REPORT, report.path()).output().expect("the isolated resolver child forks");
-    assert!(output.status.success(), "resolver child failed: {}", String::from_utf8_lossy(&output.stderr),);
+    assert!(output.status.success(), "resolver child failed: {}", String::from_utf8_lossy(&output.stderr));
 
     let body = fs::read_to_string(report.path()).expect("the child wrote a resolve report");
     assert_eq!(
