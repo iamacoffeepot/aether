@@ -246,6 +246,75 @@ fn a_cold_release_cannot_jump_a_held_lease() {
 }
 
 #[test]
+fn a_stale_releaser_on_another_connection_cannot_overwrite_the_reacquired_row() {
+    // Tripwire (#5568 / F0017): lease proof and deposit are one write. Two WAL
+    // connections to one pool file are the production boundary a SELECT-then-
+    // upsert window opened — Y reacquires on `live`, then X's stale `release`
+    // on `stale` must refuse and must leave Y's transcript and token untouched
+    // on disk. Inspecting the file (not a follow-up acquire) is what catches an
+    // overwrite that kept the row leased.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sessions.db");
+    let path = path.to_str().unwrap();
+
+    let mut stale = SqliteSessionStore::open(path, HOUR_SECS, LEASE_SECS, CAP).unwrap();
+    let mut live = SqliteSessionStore::open(path, HOUR_SECS, LEASE_SECS, CAP).unwrap();
+
+    stale.release(&key(), None, "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
+    let x = stale.acquire(&key(), "head-A", 1000).unwrap().expect("X leases the pooled session");
+    let y = live
+        .acquire(&key(), "head-A", 1000 + LEASE_SECS)
+        .unwrap()
+        .expect("Y reacquires on a second connection once X's lease expires");
+    assert_ne!(x.lease, y.lease, "two acquires of one key mint distinct tokens");
+
+    assert_eq!(
+        stale.release(&key(), Some(&x.lease), "digest-STALE", &manifest("head-A", 1000, 1002)).unwrap(),
+        ReleaseOutcome::NotLeaseHolder,
+        "X no longer holds the lease on disk, so its deposit is refused",
+    );
+
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let (bytes, token, leased_until): (String, Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT session_bytes, lease_token, leased_until FROM sessions
+             WHERE model = ?1 AND effort = ?2 AND task = ?3",
+            rusqlite::params![key().model, key().effort, key().task],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(bytes, "digest-1", "a refused deposit must not overwrite the live transcript");
+    assert_eq!(
+        token.as_deref(),
+        Some(y.lease.0.as_str()),
+        "Y's token must still be the row's lease",
+    );
+    assert!(leased_until.is_some(), "the live holder's lease must not have been cleared");
+
+    assert_eq!(
+        live.release(&key(), Some(&y.lease), "digest-2", &manifest("head-A", 1000, 1003)).unwrap(),
+        ReleaseOutcome::Deposited,
+        "the live holder still releases normally",
+    );
+}
+
+#[test]
+fn a_cold_deposit_still_replaces_an_unleased_row() {
+    // Last-writer-wins on a free row. Tripwire: proving the lease with
+    // `lease_token = ?` (SQL NULL ≠ NULL) would refuse every subsequent cold
+    // deposit and freeze the first transcript in the pool.
+    let mut store = store();
+    store.release(&key(), None, "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
+    assert_eq!(
+        store.release(&key(), None, "digest-2", &manifest("head-A", 1000, 1001)).unwrap(),
+        ReleaseOutcome::Deposited,
+        "a second cold deposit over a free row must land",
+    );
+    let leased = store.acquire(&key(), "head-A", 1002).unwrap().expect("the later cold deposit is what resumes");
+    assert_eq!(leased.session_bytes, "digest-2");
+}
+
+#[test]
 fn release_chains_parent_receipt() {
     // Manifest chaining: a resumed `release` names the acquired session's receipt
     // as its `parent_receipt`, and the pool hands the new receipt to the next

@@ -405,30 +405,20 @@ impl SqliteSessionStore {
         manifest: &SessionManifest,
         routing: Option<(u32, &str, bool)>,
     ) -> rusqlite::Result<ReleaseOutcome> {
-        // Prove ownership before depositing (#3665). A release presenting a
-        // lease the row no longer holds is a stale holder returning after its
-        // lease expired and was re-acquired by someone else; depositing anyway
-        // would overwrite the live holder's session bytes with an older
-        // transcript and clear their lease, so a third holder could then acquire
-        // a transcript still being resumed. Refusing is what makes the lease
-        // exclusive rather than advisory.
+        // Prove ownership in the same write that deposits (#3665, #5568). A
+        // release presenting a lease the row no longer holds is a stale holder
+        // returning after its lease expired and was re-acquired; depositing
+        // anyway would overwrite the live holder's session bytes with an older
+        // transcript and clear their lease. A prior SELECT then an unconditional
+        // upsert leaves a window where another connection can reacquire between
+        // the check and the write; the ON CONFLICT WHERE is the proof, so that
+        // window does not exist. `IS` (not `=`) keeps a cold deposit (`None`)
+        // matching an unleased row (`lease_token` NULL). A conflicting row whose
+        // token does not match is a no-op (`changes() == 0`), not an error.
         //
-        // A cold deposit (`None`) is held to the same rule: it is legitimate
-        // only against a row nobody holds, or no row at all. Otherwise dropping
-        // the token would be a way to win the race by presenting nothing.
-        let held: Option<Option<String>> = self
-            .conn
-            .query_row(
-                "SELECT lease_token FROM sessions WHERE model = ?1 AND effort = ?2 AND task = ?3",
-                rusqlite::params![key.model, key.effort, key.task],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?;
-        if let Some(held) = held
-            && held.as_deref() != lease.map(|lease| lease.0.as_str())
-        {
-            return Ok(ReleaseOutcome::NotLeaseHolder);
-        }
+        // A cold deposit is still legitimate against no row at all: INSERT of a
+        // new key does not evaluate the WHERE. Dropping the token is not a way
+        // to win a held row, because a live token fails `IS NULL`.
 
         // The read set is audit-only (#3341) — carried as JSON so a caller's
         // path list round-trips without a delimiter convention.
@@ -443,7 +433,7 @@ impl SqliteSessionStore {
         // a warm release updates the row a resume leased, a cold release inserts.
         // Routing columns use COALESCE so a mail-path / slot-guard release that
         // carries no provenance keeps whatever a prior routed deposit wrote.
-        self.conn.execute(
+        match self.conn.execute(
             "INSERT INTO sessions
                (model, effort, task, session_bytes, receipt, parent_receipt, head_hash,
                 context_tokens, workspace_tree_hash, read_files, deposited_at, leased_until,
@@ -462,7 +452,8 @@ impl SqliteSessionStore {
                lease_token = NULL,
                deposit_count = COALESCE(excluded.deposit_count, sessions.deposit_count),
                canonical_slot = COALESCE(excluded.canonical_slot, sessions.canonical_slot),
-               builder_eligible = COALESCE(excluded.builder_eligible, sessions.builder_eligible)",
+               builder_eligible = COALESCE(excluded.builder_eligible, sessions.builder_eligible)
+             WHERE sessions.lease_token IS ?15",
             rusqlite::params![
                 key.model,
                 key.effort,
@@ -478,9 +469,12 @@ impl SqliteSessionStore {
                 deposit_count,
                 canonical_slot,
                 builder_eligible,
+                lease.map(|lease| lease.0.as_str()),
             ],
-        )?;
-        Ok(ReleaseOutcome::Deposited)
+        )? {
+            0 => Ok(ReleaseOutcome::NotLeaseHolder),
+            _ => Ok(ReleaseOutcome::Deposited),
+        }
     }
 }
 
