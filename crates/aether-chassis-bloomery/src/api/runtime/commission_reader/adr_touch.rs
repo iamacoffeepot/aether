@@ -7,7 +7,7 @@
 //! `Proposed` must not waive the Human hard gate on an established-at-base
 //! ADR, and a stale local `Accepted` must not refuse a still-Proposed one.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aether_bloomery::{Correspondence, Digest, SurfacePattern};
 use aether_bloomery_git::{GitObjectId, command};
@@ -23,8 +23,14 @@ pub enum SealedAdrStatus {
     Established,
 }
 
-/// Look up an ADR path at the sealed base. [`None`] means the path is absent
-/// (a new ADR).
+/// Look up an ADR path at the sealed base.
+///
+/// [`Some(SealedAdrStatus::Proposed)`] is the only confirmed still-Proposed
+/// blob. [`Some(Established)`] is a confirmed non-Proposed status. [`None`]
+/// is everything else: a missing path, unresolved correspondence, a missing
+/// git object, or a spawn/decode failure. None of those are confirmed
+/// Proposed, so the Human hard gate stays armed. [`None`] is not a confirmed
+/// absence — an I/O failure and a missing file are indistinguishable here.
 pub trait AdrMaturity {
     fn status(&self, path: &str) -> Option<SealedAdrStatus>;
 }
@@ -43,23 +49,32 @@ impl AdrMaturity for AbsentAdrs {
 /// ADR markdown as of one git commit in `repo`.
 ///
 /// `commit` is a real git object name from correspondence, never a Bloomery
-/// digest hex-pun. [`None`] means the sealed base could not be resolved, so
-/// every path is absent (a new ADR) rather than falling back to cwd.
-pub struct TreeAdrs<'a> {
-    repo: &'a Path,
-    commit: Option<&'a str>,
+/// digest hex-pun. [`None`] means the sealed base could not be resolved;
+/// every lookup then returns [`AdrMaturity::status`]'s uncertain [`None`]
+/// (Human hard gate), never Proposed, and never falls back to cwd.
+pub struct TreeAdrs {
+    repo: PathBuf,
+    commit: Option<String>,
 }
 
-impl AdrMaturity for TreeAdrs<'_> {
+impl AdrMaturity for TreeAdrs {
     fn status(&self, path: &str) -> Option<SealedAdrStatus> {
-        blob_markdown(self.repo, self.commit?, path).map(|text| status_from_markdown(&text))
+        blob_markdown(&self.repo, self.commit.as_deref()?, path).map(|text| status_from_markdown(&text))
     }
 }
 
-impl<'a> TreeAdrs<'a> {
-    /// Git blobs at `commit` in `repo`. A missing path at that commit is new.
-    pub fn at(repo: &'a Path, commit: Option<&'a str>) -> Self {
-        Self { repo, commit }
+impl TreeAdrs {
+    /// Git blobs at `commit` in `repo`. `repo` is the configured lane
+    /// repository (a local bare authority, or the boot-time cwd), not the
+    /// process working tree at seal time.
+    pub fn at(repo: impl AsRef<Path>, commit: Option<String>) -> Self {
+        Self { repo: repo.as_ref().to_path_buf(), commit }
+    }
+
+    /// Resolve the sealed-base commit through correspondence, then read blobs
+    /// from `repo`. Unresolved correspondence yields an uncertain catalog.
+    pub fn resolve(repo: impl AsRef<Path>, correspondence: Option<&dyn Correspondence>, base: Digest) -> Self {
+        Self::at(repo, sealed_commit_hex(correspondence, base))
     }
 }
 
@@ -69,11 +84,14 @@ impl<'a> TreeAdrs<'a> {
 /// A Bloomery [`Digest`] is never a git sha. Reading `{digest-hex}:{path}`
 /// would miss the sealed blob on today's sha1 repositories and is the hex-pun
 /// ADR-0150 forbids.
-pub(super) fn sealed_commit_hex(correspondence: &dyn Correspondence, base: Digest) -> Option<String> {
-    let object = correspondence.resolve_backend_object(&base).ok()??;
+fn sealed_commit_hex(correspondence: Option<&dyn Correspondence>, base: Digest) -> Option<String> {
+    let object = correspondence?.resolve_backend_object(&base).ok()??;
     GitObjectId::try_from(object).ok().map(|id| id.to_hex())
 }
 
+/// Blob text at `commit:path`, or [`None`] when the read does not confirm a
+/// status line. A missing path, a missing object, and a spawn/decode fault
+/// all return [`None`] — uncertain, not a confirmed Proposed blob.
 fn blob_markdown(repo: &Path, commit: &str, path: &str) -> Option<String> {
     let spec = format!("{commit}:{path}");
     let output = command::run(repo, &["cat-file", "-p", &spec]).ok()?;
@@ -219,11 +237,16 @@ mod tests {
         // gate. The inverse (local Accepted, base Proposed) refused valid work.
         let path = "docs/adr/0999-sealed-base.md";
         let repo = adr_repo();
+        assert_ne!(
+            repo.path().canonicalize().expect("fixture repo canonicalizes"),
+            std::env::current_dir().expect("process cwd").canonicalize().expect("cwd canonicalizes"),
+            "the configured repository must not be the process cwd",
+        );
         write_adr(repo.path(), path, "Accepted");
         let accepted = commit(repo.path(), "accepted at base");
         write_adr(repo.path(), path, "Proposed");
         assert_eq!(
-            adr_touch(&[path.to_owned()], &TreeAdrs::at(repo.path(), Some(&accepted))),
+            adr_touch(&[path.to_owned()], &TreeAdrs::at(repo.path(), Some(accepted.clone()))),
             AdrTouch::NewOrEstablished,
             "cwd Proposed must not reclassify an Accepted blob at the sealed commit",
         );
@@ -231,14 +254,64 @@ mod tests {
         let proposed = commit(repo.path(), "later proposed rewrite");
         write_adr(repo.path(), path, "Accepted");
         assert_eq!(
-            adr_touch(&[path.to_owned()], &TreeAdrs::at(repo.path(), Some(&proposed))),
+            adr_touch(&[path.to_owned()], &TreeAdrs::at(repo.path(), Some(proposed.clone()))),
             AdrTouch::ProposedOnly,
             "cwd Accepted must not reclassify a still-Proposed blob at the named commit",
         );
         assert_eq!(
             adr_touch(&[path.to_owned()], &TreeAdrs::at(repo.path(), None)),
             AdrTouch::NewOrEstablished,
-            "an unresolved base must not read cwd; absence is a new ADR",
+            "unresolved correspondence is uncertain and must not become Proposed",
+        );
+        assert_eq!(
+            adr_touch(
+                &[path.to_owned()],
+                &TreeAdrs::at(repo.path(), Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned())),
+            ),
+            AdrTouch::NewOrEstablished,
+            "a missing git object is uncertain and must not become Proposed",
+        );
+
+        let base = Digest::from_bytes([7; 32]);
+        let correspondence = OnePair {
+            digest: base,
+            object: BackendObjectId::from(GitObjectId::from_hex(&proposed).expect("the sealed commit is a git object")),
+        };
+        assert_eq!(
+            adr_touch(&[path.to_owned()], &TreeAdrs::resolve(repo.path(), Some(&correspondence), base)),
+            AdrTouch::ProposedOnly,
+            "resolve must read the configured repo's Proposed blob, not cwd Accepted",
+        );
+        assert_eq!(
+            adr_touch(&[path.to_owned()], &TreeAdrs::resolve(repo.path(), None, base)),
+            AdrTouch::NewOrEstablished,
+            "resolve without correspondence is uncertain and must not become Proposed",
+        );
+    }
+
+    #[test]
+    fn a_bare_authority_repo_is_the_object_database_not_cwd() {
+        // Local authority names a bare repo. cat-file still answers; the
+        // process working tree must not stand in.
+        let path = "docs/adr/0999-sealed-base.md";
+        let working = adr_repo();
+        write_adr(working.path(), path, "Proposed");
+        let proposed = commit(working.path(), "proposed at base");
+        let bare = tempfile::tempdir().expect("a bare clone dir creates");
+        let dest = bare.path().join("authority.git");
+        git(working.path(), &["clone", "--bare", "--quiet", ".", dest.to_str().expect("utf-8 dest")]);
+        write_adr(working.path(), path, "Accepted");
+
+        assert_eq!(
+            adr_touch(&[path.to_owned()], &TreeAdrs::at(&dest, Some(proposed.clone()))),
+            AdrTouch::ProposedOnly,
+            "the bare authority still has the Proposed blob after cwd was rewritten",
+        );
+        let other = adr_repo();
+        assert_eq!(
+            adr_touch(&[path.to_owned()], &TreeAdrs::at(other.path(), Some(proposed))),
+            AdrTouch::NewOrEstablished,
+            "a repository that does not hold the object is uncertain and must not become Proposed",
         );
     }
 
@@ -254,10 +327,11 @@ mod tests {
             object: BackendObjectId::from(GitObjectId::from_hex(sha).expect("40-hex sha1")),
         };
 
-        let resolved = sealed_commit_hex(&correspondence, base).expect("the recorded pair resolves");
+        let resolved = sealed_commit_hex(Some(&correspondence), base).expect("the recorded pair resolves");
         assert_eq!(resolved, sha);
         assert_ne!(resolved, base.to_hex(), "the git object name is not the digest hex");
-        assert_eq!(sealed_commit_hex(&correspondence, Digest::from_bytes([1; 32])), None);
+        assert_eq!(sealed_commit_hex(Some(&correspondence), Digest::from_bytes([1; 32])), None);
+        assert_eq!(sealed_commit_hex(None, base), None, "no correspondence is unresolved, not a digest hex-pun");
     }
 
     fn adr_repo() -> TempDir {
@@ -288,6 +362,10 @@ mod tests {
 
     fn git(root: &Path, args: &[&str]) {
         let output = Command::new("git").current_dir(root).args(args).output().expect("git starts");
-        assert!(output.status.success(), "git {args:?} failed: {}", String::from_utf8(output.stderr));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 }

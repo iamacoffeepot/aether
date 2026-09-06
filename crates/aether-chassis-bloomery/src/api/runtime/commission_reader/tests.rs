@@ -420,6 +420,11 @@ fn an_established_base_blob_keeps_the_human_gate_when_cwd_is_stale_proposed() {
     // instead of the Human hard gate an Accepted-at-base ADR requires.
     let path = "docs/adr/0999-sealed-base.md";
     let repo = tempfile::tempdir().expect("a temp dir for the fixture creates");
+    assert_ne!(
+        repo.path().canonicalize().expect("fixture repo canonicalizes"),
+        std::env::current_dir().expect("process cwd").canonicalize().expect("cwd canonicalizes"),
+        "admission must consult the configured repository, not process cwd",
+    );
     git(repo.path(), &["init", "--object-format=sha1", "--quiet"]);
     git(repo.path(), &["config", "user.name", "adr-touch"]);
     git(repo.path(), &["config", "user.email", "adr-touch@test"]);
@@ -429,29 +434,61 @@ fn an_established_base_blob_keeps_the_human_gate_when_cwd_is_stale_proposed() {
     fs::write(&adr, "- **Status:** Accepted\n").expect("the sealed-base ADR writes");
     git(repo.path(), &["add", "-A"]);
     git(repo.path(), &["commit", "--quiet", "--message", "accepted at base"]);
-    let base = git_head(repo.path());
+    let accepted = git_head(repo.path());
     fs::write(&adr, "- **Status:** Proposed\n").expect("the stale working-tree rewrite writes");
 
     let mut revision = revision("wp-1", "problem");
     revision.declared_surface = vec![path.to_owned()];
     let digest = digest_of(&revision);
-    let admitted = admit_member(
-        digest,
-        loaded("wp-1", &revision, vec![auto_approval(digest)]),
-        &TreeAdrs::at(repo.path(), Some(&base)),
-        &DependencyResolution::default(),
-    )
-    .expect("admitted");
-
-    assert_eq!(admitted.projection.adr_touch, AdrTouch::NewOrEstablished);
     let policy = ApprovalPolicy {
         default: Tier::Auto,
         rules: vec![ApprovalRule { glob: path.to_owned(), tier: Tier::Judge }],
     };
+
+    let established = admit_member(
+        digest,
+        loaded("wp-1", &revision, vec![auto_approval(digest)]),
+        &TreeAdrs::at(repo.path(), Some(accepted)),
+        &DependencyResolution::default(),
+    )
+    .expect("admitted");
+    assert_eq!(established.projection.adr_touch, AdrTouch::NewOrEstablished);
     assert_eq!(
-        Gate::new(&policy).evaluate(&gate_request(&admitted, false)),
+        Gate::new(&policy).evaluate(&gate_request(&established, false)),
         Decision::RequiresStatement(Tier::Human),
         "an established-at-base ADR must not take the Judge rule a stale Proposed file would have used",
+    );
+
+    git(repo.path(), &["add", "-A"]);
+    git(repo.path(), &["commit", "--quiet", "--message", "proposed rewrite"]);
+    let proposed = git_head(repo.path());
+    fs::write(&adr, "- **Status:** Accepted\n").expect("the inverse working-tree rewrite writes");
+    let still_proposed = admit_member(
+        digest,
+        loaded("wp-1", &revision, vec![auto_approval(digest)]),
+        &TreeAdrs::at(repo.path(), Some(proposed)),
+        &DependencyResolution::default(),
+    )
+    .expect("admitted");
+    assert_eq!(still_proposed.projection.adr_touch, AdrTouch::ProposedOnly);
+    assert_eq!(
+        Gate::new(&policy).evaluate(&gate_request(&still_proposed, false)),
+        Decision::RequiresStatement(Tier::Judge),
+        "a still-Proposed blob at the sealed commit defers to the Judge rule even if cwd was rewritten Accepted",
+    );
+
+    let missing = admit_member(
+        digest,
+        loaded("wp-1", &revision, vec![auto_approval(digest)]),
+        &TreeAdrs::at(repo.path(), Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned())),
+        &DependencyResolution::default(),
+    )
+    .expect("admitted");
+    assert_eq!(missing.projection.adr_touch, AdrTouch::NewOrEstablished);
+    assert_eq!(
+        Gate::new(&policy).evaluate(&gate_request(&missing, false)),
+        Decision::RequiresStatement(Tier::Human),
+        "a missing git object is uncertain and must not become Proposed",
     );
 }
 

@@ -10,23 +10,20 @@
 //! moment one does not.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::Path;
 
 use serde::de::DeserializeOwned;
 
 use aether_actor::Manual;
 use aether_bloomery::{
     Admit, ApprovalPolicy, AuthorityDoor, BloomDraft, BloomId, BloomSpec, CommissionStatus, ConfigScopes,
-    DependencyError, Digest, Event, Fact, IdempotencyKey, MemberDependency, Membership, ScopeRevision, SpendCeiling,
-    Statement, SurfacePattern, WorkpieceId, resolve_member_dependencies, surface_intersection,
+    Correspondence, DependencyError, Digest, Event, Fact, IdempotencyKey, MemberDependency, Membership, ScopeRevision,
+    SpendCeiling, Statement, SurfacePattern, WorkpieceId, resolve_member_dependencies, surface_intersection,
 };
 use aether_data::wire::to_vec;
 use aether_http::HttpServerResponse;
 use aether_substrate::actor::native::NativeCtx;
 
 use super::commission_reader::{DependencyResolution, TreeAdrs, admit_member};
-#[cfg(feature = "github")]
-use super::commission_reader::sealed_commit_hex;
 use super::hex::{self, hex_encode};
 use super::response::error_response;
 use super::state::{
@@ -228,8 +225,7 @@ impl ApiCapabilityState {
         loaded: &mut BTreeMap<String, LoadCommissionResult>,
     ) -> Routed {
         let resolution = seal_dependency_resolution(&draft, loaded);
-        let sealed_commit = self.sealed_base_commit(draft.base);
-        let maturity = TreeAdrs::at(Path::new("."), sealed_commit.as_deref());
+        let maturity = self.sealed_adr_catalog(draft.base);
         let mut projections = Vec::with_capacity(draft.proposals.len());
         let mut descriptions = BTreeMap::new();
         for proposal in &draft.proposals {
@@ -251,20 +247,22 @@ impl ApiCapabilityState {
         self.gate_and_admit(ctx, draft, predecessor, &projections, descriptions, idempotency_key, &edges)
     }
 
-    /// Git object name of `base` via correspondence, or [`None`] when this
-    /// chassis has no mapping. [`None`] is an absent catalog, not cwd: the
-    /// process working tree is never the sealed-base stand-in.
-    fn sealed_base_commit(&self, base: Digest) -> Option<String> {
-        #[cfg(feature = "github")]
-        {
-            self.correspondence.as_ref().and_then(|correspondence| sealed_commit_hex(correspondence.as_ref(), base))
-        }
-        #[cfg(not(feature = "github"))]
-        {
-            let _ = self;
-            let _ = base;
-            None
-        }
+    /// ADR catalog at `base` in the configured lane repository.
+    ///
+    /// Unresolved correspondence or a blob that cannot be read is uncertain
+    /// and keeps the Human hard gate; it is never classified Proposed.
+    fn sealed_adr_catalog(&self, base: Digest) -> TreeAdrs {
+        let correspondence: Option<&dyn Correspondence> = {
+            #[cfg(feature = "github")]
+            {
+                self.correspondence.as_deref()
+            }
+            #[cfg(not(feature = "github"))]
+            {
+                None
+            }
+        };
+        TreeAdrs::resolve(&self.lane_repository, correspondence, base)
     }
 
     /// The gate-then-admit core both doors share (#4638): resolve every

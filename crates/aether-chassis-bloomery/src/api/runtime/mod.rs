@@ -190,6 +190,9 @@ pub struct ApiParams {
     pub pusher: Option<Arc<dyn CandidatePush>>,
     /// Scratch-worktree base: `{nonce}-evidence` directories live here.
     pub worktree_base: String,
+    /// Git repository ADR maturity is read from at seal. A local authority's
+    /// bare path, or the process cwd captured at boot — never re-read later.
+    pub lane_repository: PathBuf,
     /// Archive-tier root. Empty resolves to `<worktree_base>/archive`.
     pub archive_base: String,
     /// Artifacts root used to resolve study cost on the dispatch list. `None`
@@ -248,6 +251,7 @@ impl NativeActor for BloomeryApiCapability {
             #[cfg(feature = "github")]
             pusher: params.pusher,
             worktree_base: PathBuf::from(&params.worktree_base),
+            lane_repository: params.lane_repository,
             archive_base: if params.archive_base.is_empty() {
                 PathBuf::from(&params.worktree_base).join("archive")
             } else {
