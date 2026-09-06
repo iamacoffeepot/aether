@@ -608,10 +608,7 @@ mod tests {
         // even when the path itself has a space at byte two.
         let entries = split_nul("R  new.rs\0ab old.rs\0C  copied.rs\0xy source.rs\0M  ab other.rs\0");
 
-        assert_eq!(
-            porcelain_path_tokens(entries),
-            ["new.rs", "ab old.rs", "copied.rs", "xy source.rs", "ab other.rs"]
-        );
+        assert_eq!(porcelain_path_tokens(entries), ["new.rs", "ab old.rs", "copied.rs", "xy source.rs", "ab other.rs"]);
     }
 
     #[test]
