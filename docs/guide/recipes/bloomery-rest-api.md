@@ -51,6 +51,11 @@ There is no production knob that turns that styling off. Strip SGR
 (`ESC[` + digits + `m`) first, then the existing `port=` sed matches the
 same announcement the harness already parses after CSI strip.
 
+The child is `exec`'d from `$TRIAL`, not the repository: `env -i` leaves
+`HOME` unset, and some helpers then write relative fallback state (a
+`.local/` tree under the process cwd). That belongs in the trial
+directory. Do not set `HOME` to invent a different fallback.
+
 ```bash
 set -euo pipefail
 REPO=$(git rev-parse --show-toplevel)
@@ -66,22 +71,28 @@ test -x "$BIN"
 
 TOKEN=local-only-example-token
 : > "$TRIAL/bloomery.stderr"
-env -i \
-  PATH="$PATH" \
-  AETHER_LOG_FILTER=info \
-  AETHER_HTTP_PORT=0 \
-  AETHER_RPC_PORT=0 \
-  AETHER_STORE_PATH="$TRIAL/journal.sqlite" \
-  AETHER_ARTIFACTS_ROOT="$TRIAL/artifacts" \
-  AETHER_SESSION_DB_PATH="$TRIAL/sessions.sqlite" \
-  AETHER_GITHUB_LOCAL_WORKTREE_BASE="$TRIAL/worktrees" \
-  AETHER_BLOOMERY_ARCHIVE_BASE="$TRIAL/archive" \
-  AETHER_APPROVAL_POLICY_FILE="$TRIAL/approval-policy.toml" \
-  AETHER_HTTP_CONTROL_TOKEN="$TOKEN" \
-  AETHER_GITHUB_LOCAL_LANE_ENABLED=false \
-  AETHER_GITHUB_CAS_LAND_ENABLED=false \
-  AETHER_BLOOMERY_AUTHORITY_BACKEND=github \
-  "$BIN" >>"$TRIAL/bloomery.stderr" 2>&1 &
+# cwd is $TRIAL so relative fallback state (a helper's `.local/` tree under
+# the process working directory when HOME is unset) stays in the trial
+# directory, not the repository. HOME is not invented.
+(
+  cd "$TRIAL"
+  exec env -i \
+    PATH="$PATH" \
+    AETHER_LOG_FILTER=info \
+    AETHER_HTTP_PORT=0 \
+    AETHER_RPC_PORT=0 \
+    AETHER_STORE_PATH="$TRIAL/journal.sqlite" \
+    AETHER_ARTIFACTS_ROOT="$TRIAL/artifacts" \
+    AETHER_SESSION_DB_PATH="$TRIAL/sessions.sqlite" \
+    AETHER_GITHUB_LOCAL_WORKTREE_BASE="$TRIAL/worktrees" \
+    AETHER_BLOOMERY_ARCHIVE_BASE="$TRIAL/archive" \
+    AETHER_APPROVAL_POLICY_FILE="$TRIAL/approval-policy.toml" \
+    AETHER_HTTP_CONTROL_TOKEN="$TOKEN" \
+    AETHER_GITHUB_LOCAL_LANE_ENABLED=false \
+    AETHER_GITHUB_CAS_LAND_ENABLED=false \
+    AETHER_BLOOMERY_AUTHORITY_BACKEND=github \
+    "$BIN"
+) >>"$TRIAL/bloomery.stderr" 2>&1 &
 pid=$!
 
 stop_owned() {
