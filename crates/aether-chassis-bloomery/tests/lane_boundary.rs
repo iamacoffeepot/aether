@@ -630,26 +630,19 @@ fn a_lane_beating_only_its_heartbeat_is_not_silence() {
         || thread::sleep(Duration::from_secs(12)),
     );
 
-    let outstanding = harness.outstanding();
-    let observed_at = Instant::now();
-    let observed_unix_millis = unix_millis();
-    let lost = nonces.iter().any(|nonce| !outstanding.contains(nonce));
-    let diag = lost.then(|| {
-        heartbeat_loss_report(
-            &harness,
-            &runs,
-            &nonces,
-            &captured_outstanding,
-            &outstanding,
-            observed_at,
-            observed_unix_millis,
-            &pump,
-        )
-    });
+    let observed = LossObservation {
+        outstanding: harness.outstanding(),
+        observed_at: Instant::now(),
+        observed_unix_millis: unix_millis(),
+    };
+    let pump = pump.into_inner().expect("the pump trace lock is held only after the helper thread stops");
+    let lost = nonces.iter().any(|nonce| !observed.outstanding.contains(nonce));
+    let diag = lost.then(|| heartbeat_loss_report(&harness, &runs, &nonces, &captured_outstanding, &observed, &pump));
     for nonce in &nonces {
         assert!(
-            outstanding.contains(nonce),
-            "a lane beating its heartbeat must keep its original nonce, not be cancelled and redispatched; outstanding={outstanding:?} original={nonces:?}{}",
+            observed.outstanding.contains(nonce),
+            "a lane beating its heartbeat must keep its original nonce, not be cancelled and redispatched; outstanding={:?} original={nonces:?}{}",
+            observed.outstanding,
             diag.as_deref().unwrap_or("")
         );
     }
@@ -698,21 +691,23 @@ impl PumpWrites {
     }
 }
 
+struct LossObservation {
+    outstanding: Vec<String>,
+    observed_at: Instant,
+    observed_unix_millis: u128,
+}
+
 fn heartbeat_loss_report(
     harness: &LaneHarness,
     runs: &Path,
     original: &[String],
     captured_outstanding: &[String],
-    final_outstanding: &[String],
-    observed_at: Instant,
-    observed_unix_millis: u128,
-    pump: &Mutex<PumpWrites>,
+    observed: &LossObservation,
+    pump: &PumpWrites,
 ) -> String {
-    let pump = pump.lock().expect("the pump trace lock is held only after the helper thread stops");
     let final_gap = pump
         .last_ok
-        .map(|last| format!("{:?}", observed_at.saturating_duration_since(last)))
-        .unwrap_or_else(|| "n/a".to_owned());
+        .map_or_else(|| "n/a".to_owned(), |last| format!("{:?}", observed.observed_at.saturating_duration_since(last)));
     let ledger = bounded_ledger_summary(&harness.ledger());
     let files = original
         .iter()
@@ -726,10 +721,10 @@ fn heartbeat_loss_report(
         })
         .collect::<Vec<_>>()
         .join("; ");
-    let first = pump.first_unix_millis.map(|millis| format!("{millis} millis")).unwrap_or_else(|| "none".to_owned());
-    let last = pump.last_unix_millis.map(|millis| format!("{millis} millis")).unwrap_or_else(|| "none".to_owned());
-    let initial_gap = pump.initial_gap.map(|gap| format!("{gap:?}")).unwrap_or_else(|| "n/a".to_owned());
-    let max_pump_gap = pump.max_pump_gap.map(|gap| format!("{gap:?}")).unwrap_or_else(|| "n/a".to_owned());
+    let first = pump.first_unix_millis.map_or_else(|| "none".to_owned(), |millis| format!("{millis} millis"));
+    let last = pump.last_unix_millis.map_or_else(|| "none".to_owned(), |millis| format!("{millis} millis"));
+    let initial_gap = pump.initial_gap.map_or_else(|| "n/a".to_owned(), |gap| format!("{gap:?}"));
+    let max_pump_gap = pump.max_pump_gap.map_or_else(|| "n/a".to_owned(), |gap| format!("{gap:?}"));
     let write_error = pump.last_error.as_deref().unwrap_or("none");
     let tail = match harness.coordinator_boot_log_tail() {
         None => "no forked coordinator".to_owned(),
@@ -748,8 +743,8 @@ fn heartbeat_loss_report(
         }
     };
     format!(
-        "\ncapture outstanding={captured_outstanding:?}\nledger={ledger}\nfiles={files}\nseed_ok={} pump_ok={} first={first} last={last} observed={observed_unix_millis} millis initial_gap={initial_gap} max_pump_gap={max_pump_gap} final_gap={final_gap} write_error={write_error}\nfinal outstanding={final_outstanding:?}\nboot-log tail: {tail}",
-        pump.seed_ok, pump.pump_ok,
+        "\ncapture outstanding={captured_outstanding:?}\nledger={ledger}\nfiles={files}\nseed_ok={} pump_ok={} first={first} last={last} observed={} millis initial_gap={initial_gap} max_pump_gap={max_pump_gap} final_gap={final_gap} write_error={write_error}\nfinal outstanding={:?}\nboot-log tail: {tail}",
+        pump.seed_ok, pump.pump_ok, observed.observed_unix_millis, observed.outstanding,
     )
 }
 
@@ -772,10 +767,9 @@ fn unix_millis() -> u128 {
 
 fn file_mtime_millis(path: &Path) -> String {
     match fs::metadata(path).and_then(|meta| meta.modified()) {
-        Ok(modified) => match modified.duration_since(UNIX_EPOCH) {
-            Ok(since) => format!("{} millis", since.as_millis()),
-            Err(_) => String::from("before-epoch"),
-        },
+        Ok(modified) => modified
+            .duration_since(UNIX_EPOCH)
+            .map_or_else(|_| String::from("before-epoch"), |since| format!("{} millis", since.as_millis())),
         Err(error) => format!("unreadable ({error})"),
     }
 }
