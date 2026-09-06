@@ -62,11 +62,15 @@ pub use theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 // listed actor. This is a grab-bag widget module (ADR-0138), so the bare list
 // designates NO default: every actor is selector-only by `module@actor`
 // selector (`aether_kit_widget@aether.kit.widget.*` /
-// `aether_kit_widget@aether.kit.widget.editor`), never by list position. The
-// `behavior` feature (ADR-0137, issue 2687) appends `aether-behavior`'s
-// `BehaviorHost` so the panel's `WidgetKind::BehaviorHost` arm can spawn it by
-// tag; the two invocations are cfg-exclusive, keeping the ordinary build's
-// exported set (and its `aether.kinds` section) unchanged.
+// `aether_kit_widget@aether.kit.widget.editor`), never by list position. ADR-0114
+// §5 reconstructs inline children from this same list, so every instanced
+// composable widget — including Dropdown, TabStrip, MenuBar, Tooltip, Toast,
+// Dialog, and Splitter — must appear in both cfg arms; omitting one drops that
+// type from named load and from replace_component reconstruct. The `behavior`
+// feature (ADR-0137, issue 2687) appends `aether-behavior`'s `BehaviorHost` so
+// the panel's `WidgetKind::BehaviorHost` arm can spawn it by tag; the two
+// invocations are cfg-exclusive, keeping the ordinary build's exported set
+// (and its `aether.kinds` section) unchanged.
 //
 // The `export!` macro itself gates its emitted entry surface behind the invoking
 // crate's `library` feature, so a consuming cdylib (aether-kit's workbench) links
@@ -88,6 +92,13 @@ aether_actor::export!(
     set::ToggleWidget,
     set::SegmentedWidget,
     set::NumericWidget,
+    set::DropdownWidget,
+    set::TabStripWidget,
+    set::MenuBarWidget,
+    set::TooltipWidget,
+    set::ToastWidget,
+    set::DialogWidget,
+    set::SplitterWidget,
     EditorShell,
     WidgetPanel
 );
@@ -107,6 +118,13 @@ aether_actor::export!(
     set::ToggleWidget,
     set::SegmentedWidget,
     set::NumericWidget,
+    set::DropdownWidget,
+    set::TabStripWidget,
+    set::MenuBarWidget,
+    set::TooltipWidget,
+    set::ToastWidget,
+    set::DialogWidget,
+    set::SplitterWidget,
     EditorShell,
     WidgetPanel,
     aether_behavior::BehaviorHost
