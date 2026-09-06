@@ -90,10 +90,8 @@ fn get_ref_is_exact_when_only_descendants_exist() {
     with_each_backend(|label, git| {
         let child = git.create_commit("child", EMPTY_TREE, &[]).expect(label).sha;
         let other = git.create_commit("other", EMPTY_TREE, &[]).expect(label).sha;
-        git.create_ref("heads/topic/child", &child)
-            .unwrap_or_else(|error| panic!("{label}: create child: {error}"));
-        git.create_ref("heads/topic/other", &other)
-            .unwrap_or_else(|error| panic!("{label}: create other: {error}"));
+        git.create_ref("heads/topic/child", &child).unwrap_or_else(|error| panic!("{label}: create child: {error}"));
+        git.create_ref("heads/topic/other", &other).unwrap_or_else(|error| panic!("{label}: create other: {error}"));
 
         match git.get_ref("heads/topic") {
             Ok(None) => {}
