@@ -713,7 +713,7 @@ impl NativeActor for SessionPoolCapability {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReleaseOutcome, SessionBackend, SqliteSessionStore, LEASE_SEQUENCE};
+    use super::{LEASE_SEQUENCE, ReleaseOutcome, SessionBackend, SqliteSessionStore};
     use crate::session::kinds::{SessionKey, SessionManifest};
 
     const HOUR_SECS: u64 = 3600;
@@ -1041,7 +1041,7 @@ CREATE TABLE sessions (
                 .expect("writer reservation");
             let _unblock = UnblockOnDrop;
             let release = scope.spawn(|| {
-                stale.release(&key(), Some(&x_lease), "digest-STALE", &manifest("head-A", 1000, 1002))
+                stale.release(&key, Some(&x_lease), "digest-STALE", &manifest("head-A", 1000, 1002))
             });
             assert!(
                 stale_deposit_busy::wait_blocked(),
