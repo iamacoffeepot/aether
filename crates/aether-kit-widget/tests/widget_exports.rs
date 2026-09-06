@@ -4,12 +4,12 @@
 //! Both the default and `behavior` wasm builds are grab-bag defaultless
 //! modules (ADR-0138). A type missing from `export!` cannot be loaded by
 //! `module@actor` selector, and ADR-0114 §5 reconstructs inline children
-//! from that same list — so a panel-spawned Dropdown, TabStrip, or MenuBar
+//! from that same list — so a panel-spawned Dropdown, `TabStrip`, or `MenuBar`
 //! vanishes across `replace_component` even though typed spawn still works
 //! on a cold Tick.
 //!
 //! Reconstruction assertions send input to the original child aliases
-//! *without* a post-replace Tick: WidgetPanel does not persist `spawned`,
+//! *without* a post-replace Tick: `WidgetPanel` does not persist `spawned`,
 //! so a later Tick would re-run typed `spawn_inline_child` and mask a
 //! reconstruct miss. The stock widgets declare no `type Persist`, so these
 //! tests prove post-replace behavior at the original aliases, not that a
@@ -197,7 +197,7 @@ fn assert_selectors(wasm: &[u8], stem: &str) {
     }
 }
 
-/// ADR-0114 §5: panel-reachable Dropdown / TabStrip / MenuBar children keep
+/// ADR-0114 §5: panel-reachable Dropdown / `TabStrip` / `MenuBar` children keep
 /// handling their kinds at the original aliases after replace, without a
 /// post-replace Tick that would re-spawn them through typed spawn.
 fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
