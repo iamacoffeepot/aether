@@ -988,7 +988,8 @@ mod tests {
             ..CoordinatorConfig::default()
         };
         let error = actor_setups(&github, &coordinator, &SessionConfig::default(), &NotifyConfig::default())
-            .expect_err("unknown authority must not select a source");
+            .err()
+            .expect("unknown authority must not select a source");
         let message = error.to_string();
         assert!(message.contains("AETHER_BLOOMERY_AUTHORITY_BACKEND"), "{message}");
         assert!(message.contains("locla"), "{message}");
@@ -1069,8 +1070,8 @@ mod authority_backend_resolution {
         let github = BloomeryEnv::resolve(&github).expect("github resolves");
         assert!(!github.coordinator.uses_local_authority());
 
-        let local =
-            BloomeryCli::try_parse_from(["bloomery", "--github-authority-backend", "local"]).expect("local flag parses");
+        let local = BloomeryCli::try_parse_from(["bloomery", "--github-authority-backend", "local"])
+            .expect("local flag parses");
         let local = BloomeryEnv::resolve(&local).expect("local resolves");
         assert!(local.coordinator.uses_local_authority());
     }
