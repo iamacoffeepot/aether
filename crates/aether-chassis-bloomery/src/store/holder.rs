@@ -11,10 +11,12 @@
 //! The claim is one row in the journal itself, in a table this module creates
 //! and reads *before* the schema migrations run: a refused open must not
 //! migrate and must not write, so the guard cannot sit behind a migration step.
-//! The read, liveness check, and write run inside one `BEGIN IMMEDIATE`
-//! transaction: two processes that both observe an absent or stale row must
-//! not both commit a claim. A deferred transaction would still let them both
-//! read before either writes, and WAL would then accept both writers.
+//! Taking the row is one `BEGIN IMMEDIATE` transaction: the write lock is
+//! acquired before the read, so a second process waits and then decides against
+//! the committed claim (live holder → `Held`, stale → takeover). Wrapping the
+//! same steps in a deferred transaction is not enough — both connections can
+//! still read a stale snapshot, and the loser's read-to-write upgrade reports
+//! `BUSY` / `BUSY_SNAPSHOT` rather than a current ownership decision.
 //!
 //! A bare pid is not an identity — the kernel recycles them — so the row also
 //! carries the machine's boot token, which makes every claim written before a
@@ -114,13 +116,15 @@ impl Claim {
 ///
 /// Runs before the schema migrations: a refusal leaves the database exactly as
 /// it was found, which is what makes the guard safe to put in front of a
-/// migration that is otherwise unconditional. The read/check/write is one
-/// immediate transaction so a second process waits, then sees the first
-/// process's committed claim rather than racing it.
+/// migration that is otherwise unconditional. Immediate acquisition serializes
+/// the read/check/write so a waiting process decides against current ownership
+/// instead of failing a stale snapshot's write upgrade with `BUSY` /
+/// `BUSY_SNAPSHOT`.
 pub(super) fn claim(conn: &Connection, path: &str) -> Result<(), JournalHolderError> {
-    // `new_unchecked` keeps the existing `&Connection` surface on a fresh open;
-    // Immediate is the lock we need — Deferred would still let two processes
-    // both read an empty row before either writes.
+    // `new_unchecked` keeps the existing `&Connection` surface on a fresh open.
+    // Immediate takes the write lock before the read so the waiter sees the
+    // committed claim. Deferred would still let both read a stale snapshot;
+    // the losing write then reports BUSY/BUSY_SNAPSHOT rather than Held.
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     tx.execute_batch(HOLDER_TABLE)?;
     if let Some(recorded) = read_claim(&tx)? {
@@ -326,9 +330,11 @@ mod tests {
 
     #[test]
     fn two_live_coordinators_cannot_both_claim_an_absent_holder() {
-        // The bug this catches: claim read the holder and wrote a new one as
-        // separate autocommit statements, so two processes that both saw an
-        // empty row both committed ownership and then both migrated.
+        // Two coordinator processes overlapping `open_as_holder` on an empty
+        // journal. The start barrier raises the chance they contend; it does
+        // not pin both inside a read-then-write window, so this is the
+        // exclusivity invariant under overlap, not a deterministic repro of
+        // the old autocommit race.
         if run_as_claim_child() {
             return;
         }
@@ -340,9 +346,9 @@ mod tests {
 
     #[test]
     fn two_live_coordinators_cannot_both_take_over_a_stale_holder() {
-        // Same race, other starting state: both read a dead pid, both decide
-        // it is stale, both write. Serializing only the empty-row insert would
-        // still let a crashed generation's leftover claim be taken twice.
+        // Same exclusivity check from the other starting state: a dead pid's
+        // leftover row. Overlapping starts, not a deterministic stale-snapshot
+        // reproducer.
         if run_as_claim_child() {
             return;
         }
@@ -360,8 +366,8 @@ mod tests {
     }
 
     /// When the parent re-execs this test with the handshake env, become one
-    /// of the two racing coordinators. Returns `true` when this process was a
-    /// child so the parent body does not run again.
+    /// of the two overlapping coordinators. Returns `true` when this process was
+    /// a child so the parent body does not run again.
     fn run_as_claim_child() -> bool {
         let Some(path) = test_env("AETHER_TEST_JOURNAL_HOLDER_PATH") else {
             return false;
@@ -369,18 +375,18 @@ mod tests {
         let go = test_env("AETHER_TEST_JOURNAL_HOLDER_GO").expect("the go path is set");
         let ready = test_env("AETHER_TEST_JOURNAL_HOLDER_READY").expect("the ready path is set");
         let result = test_env("AETHER_TEST_JOURNAL_HOLDER_RESULT").expect("the result path is set");
-        fs::write(&ready, b"ready").expect("the ready file writes");
+        publish_file(Path::new(&ready), b"ready");
         wait_for_file(Path::new(&go), Duration::from_secs(30));
         match SqliteStore::open_as_holder(&path) {
             Ok(_store) => {
-                fs::write(&result, format!("claimed {}", process::id())).expect("the claim result writes");
+                publish_file(Path::new(&result), format!("claimed {}", process::id()));
                 hold_until_killed();
             }
             Err(JournalHolderError::Held { pid, .. }) => {
-                fs::write(&result, format!("held {pid}")).expect("the claim result writes");
+                publish_file(Path::new(&result), format!("held {pid}"));
             }
             Err(error) => {
-                fs::write(&result, format!("error {error}")).expect("the claim result writes");
+                publish_file(Path::new(&result), format!("error {error}"));
                 panic!("claim child failed: {error}");
             }
         }
@@ -397,11 +403,11 @@ mod tests {
         let result_a = dir.path().join("result-a");
         let result_b = dir.path().join("result-b");
 
-        let child_a = KillOnDrop(spawn_holder_child(&exe, &test_name, path, &go, &ready_a, &result_a));
-        let child_b = KillOnDrop(spawn_holder_child(&exe, &test_name, path, &go, &ready_b, &result_b));
+        let child_a = KillOnDrop(spawn_holder_child(&exe, test_name, path, &go, &ready_a, &result_a));
+        let child_b = KillOnDrop(spawn_holder_child(&exe, test_name, path, &go, &ready_b, &result_b));
         wait_for_file(&ready_a, Duration::from_secs(30));
         wait_for_file(&ready_b, Duration::from_secs(30));
-        fs::write(&go, b"go").expect("the go file writes");
+        publish_file(&go, b"go");
 
         let body_a = wait_for_file(&result_a, Duration::from_secs(30));
         let body_b = wait_for_file(&result_b, Duration::from_secs(30));
@@ -449,6 +455,15 @@ mod tests {
             .env("AETHER_TEST_JOURNAL_HOLDER_RESULT", result)
             .spawn()
             .expect("a claim child forks")
+    }
+
+    /// Publish `contents` under `path` by writing a sibling and renaming onto
+    /// it. `fs::write` can make a nonempty prefix visible before the rest of
+    /// the line lands; a same-directory rename is the complete file or nothing.
+    fn publish_file(path: &Path, contents: impl AsRef<[u8]>) {
+        let staging = path.with_extension("part");
+        fs::write(&staging, contents).expect("the handshake file writes");
+        fs::rename(&staging, path).expect("the handshake file publishes");
     }
 
     fn wait_for_file(path: &Path, budget: Duration) -> String {
