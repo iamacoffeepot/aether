@@ -153,11 +153,7 @@ fn seed_member(store: &mut SqliteStore, bloom: BloomId, workpiece: &str, message
 // Journal `members` as the resolved set of a sealed bloom, then file the
 // dispatch row and optional lane message each one contributes to the proposal.
 fn seed_resolved_bloom(store: &mut SqliteStore, members: &[(&str, Option<&str>)]) -> BloomId {
-    let bloom = journal_membership(
-        store,
-        &members.iter().map(|&(workpiece, _)| workpiece).collect::<Vec<_>>(),
-        &[],
-    );
+    let bloom = journal_membership(store, &members.iter().map(|&(workpiece, _)| workpiece).collect::<Vec<_>>(), &[]);
     for &(workpiece, message) in members {
         seed_member(store, bloom, workpiece, message);
     }
@@ -429,10 +425,8 @@ fn a_second_drain_does_not_stack_a_second_landing_comment() {
     fake.seed_issue(4242, "the addressing member");
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = seed_resolved_bloom(
-        &mut store,
-        &[("issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas"))],
-    );
+    let bloom =
+        seed_resolved_bloom(&mut store, &[("issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas"))]);
     enqueue_land(&mut store, bloom, base, new_head);
 
     drain_and_land(&mut store, &source).unwrap();
@@ -631,12 +625,7 @@ fn landing_does_not_close_a_withdrawn_members_source_issue() {
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
     let bloom = journal_membership(&mut store, &["issue-11"], &["issue-22"]);
-    seed_member(
-        &mut store,
-        bloom,
-        "issue-11",
-        Some("fix(crate:aether-fs): reject a traversal\n\nThe join escaped."),
-    );
+    seed_member(&mut store, bloom, "issue-11", Some("fix(crate:aether-fs): reject a traversal\n\nThe join escaped."));
     seed_member(
         &mut store,
         bloom,
@@ -654,17 +643,12 @@ fn landing_does_not_close_a_withdrawn_members_source_issue() {
         "a withdrawn member is not in the landing receipt: {}",
         fake.comments_on(11)[0]
     );
-    assert_eq!(
-        fake.issue_is_closed(22),
-        Some(false),
-        "a withdrawn member's source issue stays open for the next wave"
-    );
+    assert_eq!(fake.issue_is_closed(22), Some(false), "a withdrawn member's source issue stays open for the next wave");
     assert!(fake.comments_on(22).is_empty(), "a withdrawn member must not receive a landed receipt");
 
     let (title, body) = proposal_of(&fake, bloom);
     assert_eq!(
-        title,
-        "fix(crate:aether-fs): reject a traversal",
+        title, "fix(crate:aether-fs): reject a traversal",
         "one remaining resolved member names the commit: {title}"
     );
     assert!(body.contains("Closes #11"), "the resolved member still closes on merge: {body}");
