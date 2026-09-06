@@ -13,7 +13,7 @@
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -252,8 +252,13 @@ impl StatFields {
 }
 
 fn signal_group(pgid: u32, signal: &str) -> Result<(), LocalExecutorError> {
-    let status =
-        Command::new("kill").args([signal, "--", &format!("-{pgid}")]).status().map_err(LocalExecutorError::Io)?;
+    // No `--`: BSD `kill` (macOS) treats it as a pid, and `-{pgid}` is already numeric.
+    let status = Command::new("kill")
+        .args([signal, &format!("-{pgid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(LocalExecutorError::Io)?;
     // `kill` exits non-zero when every member is already gone, which is the
     // success the waiter below is about to observe — not a reason to stop.
     let _ = status;
@@ -273,16 +278,89 @@ fn wait_until_pgid_gone(pgid: u32) -> bool {
     }
 }
 
+/// Whether any live (non-zombie) process is in `pgid`.
+///
+/// `/proc` is the precise reading where it exists. A missing `/proc` is not an
+/// empty group — that skipped SIGKILL on macOS — so the next probes are `ps`
+/// (state-aware) and `kill -0` on the group. A probe that cannot observe is
+/// unknown, not gone: unknown is live so cancellation escalates instead of
+/// returning success into an unbounded `child.wait`.
 fn any_process_in_group(pgid: u32) -> bool {
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
+    group_is_live(proc_group_is_live(pgid), || ps_group_is_live(pgid), || group_responds_to_signal_zero(pgid))
+}
+
+/// First probe that could observe wins. Later probes are closures so `ps` and
+/// `kill -0` do not run once `/proc` answered. If every probe is unknown, the
+/// group is live: a timeout-and-error is honest, a false "gone" is not.
+fn group_is_live(
+    proc: Option<bool>,
+    ps: impl FnOnce() -> Option<bool>,
+    signal_zero: impl FnOnce() -> Option<bool>,
+) -> bool {
+    proc.or_else(ps).or_else(signal_zero).unwrap_or(true)
+}
+
+fn proc_group_is_live(pgid: u32) -> Option<bool> {
+    proc_listing_is_live(fs::read_dir("/proc"), pgid)
+}
+
+/// `None` means the listing could not be read — not that the group is empty.
+fn proc_listing_is_live(listing: io::Result<fs::ReadDir>, pgid: u32) -> Option<bool> {
+    let entries = listing.ok()?;
+    Some(entries.flatten().any(|entry| {
         let Some(member) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
             return false;
         };
         ProcessIdentity::observe(member).is_some_and(|live| live.pgid == pgid)
+    }))
+}
+
+fn ps_group_is_live(pgid: u32) -> Option<bool> {
+    let output = Command::new("ps")
+        .args(["-A", "-o", "pgid=", "-o", "state="])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(ps_listing_has_live_member(&String::from_utf8_lossy(&output.stdout), pgid))
+}
+
+/// Whether `listing` from `ps -A -o pgid= -o state=` contains a non-zombie
+/// member of `pgid`. Zombies are already dead: counting them as live waits out
+/// the SIGKILL budget and reports [`LocalExecutorError::Unterminated`] for a
+/// child this process is about to reap.
+fn ps_listing_has_live_member(listing: &str, pgid: u32) -> bool {
+    listing.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        let Some(member_pgid) = fields.next().and_then(|field| field.parse::<u32>().ok()) else {
+            return false;
+        };
+        let Some(state) = fields.next() else {
+            return false;
+        };
+        member_pgid == pgid && !state.starts_with('Z')
     })
+}
+
+fn group_responds_to_signal_zero(pgid: u32) -> Option<bool> {
+    signal_zero_observation(
+        Command::new("kill")
+            .args(["-0", &format!("-{pgid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success()),
+    )
+}
+
+/// `kill -0` can confirm a live group. A spawn fault or nonzero exit cannot
+/// confirm exit: ESRCH and EPERM are the same command status, and a missing
+/// `kill` is not an empty group.
+fn signal_zero_observation(result: io::Result<bool>) -> Option<bool> {
+    result.ok().filter(|&alive| alive)
 }
 
 fn unterminated(detail: impl Into<String>) -> LocalExecutorError {
@@ -301,9 +379,22 @@ fn write_json_record(evidence_dir: &Path, name: &str, value: &impl Serialize) ->
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io::{Error, ErrorKind};
     use std::iter::repeat_n;
+    #[cfg(unix)]
+    use std::process::{Child, Command, Stdio};
+    #[cfg(unix)]
+    use std::thread;
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
 
-    use super::{ProcessIdentity, StatFields};
+    use super::{
+        ProcessIdentity, StatFields, group_is_live, proc_listing_is_live, ps_listing_has_live_member,
+        signal_zero_observation,
+    };
+    #[cfg(unix)]
+    use super::{any_process_in_group, terminate_pgid};
 
     fn stat_line(comm: &str, pgid: u32, starttime: u64) -> String {
         stat_line_state('S', comm, pgid, starttime)
@@ -374,5 +465,181 @@ mod tests {
             ProcessIdentity::from_stat(9, &stat_line("sleep", 9, 1), "boot").is_some(),
             "the same line with a running state still attaches",
         );
+    }
+
+    #[test]
+    fn a_failed_proc_listing_is_unknown_not_an_empty_group() {
+        // Tripwire: the macOS bug was mapping read_dir("/proc") failure to "no
+        // members", which skipped SIGKILL. An IO error must be unknown so
+        // any_process_in_group falls through; a readable empty table is gone.
+        assert_eq!(
+            proc_listing_is_live(Err(Error::new(ErrorKind::NotFound, "no /proc")), 1),
+            None,
+            "a missing proc filesystem is not proof the group is gone",
+        );
+        let empty = tempfile::tempdir().expect("an empty stand-in for a readable /proc");
+        assert_eq!(
+            proc_listing_is_live(fs::read_dir(empty.path()), 1),
+            Some(false),
+            "a readable proc table with no members is an empty group",
+        );
+    }
+
+    #[test]
+    fn ps_listing_treats_zombies_as_gone_and_live_members_as_present() {
+        // Tripwire: the portable fallback must not treat a zombie as live (that
+        // waits out the SIGKILL budget and reports Unterminated for a child
+        // this process is about to reap) and must not miss a live member in the
+        // group (that skips SIGKILL on a host without /proc).
+        let listing = "\
+    10 S
+    10 Z+
+    99 R
+";
+        assert!(ps_listing_has_live_member(listing, 10), "a running member keeps the group live");
+        assert!(
+            !ps_listing_has_live_member("    10 Z+\n    99 R\n", 10),
+            "a zombie is gone, even when other groups still have runners",
+        );
+        assert!(!ps_listing_has_live_member(listing, 7), "a live process in another group is not this group");
+        assert!(!ps_listing_has_live_member("", 10), "an empty table is an empty group");
+        assert!(!ps_listing_has_live_member("not a ps line\n", 10), "garbage lines do not invent members");
+    }
+
+    #[test]
+    fn unavailable_probes_are_live_not_gone() {
+        // Tripwire: if ps cannot run and kill -0 cannot run or returns EPERM,
+        // mapping that to "no members" is the same false exit as a missing
+        // /proc. Injected unknown probes must stay live so terminate_pgid
+        // escalates and times out rather than succeeding into child.wait.
+        assert_eq!(signal_zero_observation(Ok(false)), None, "a nonzero kill -0 is ESRCH or EPERM, not confirmed exit");
+        assert_eq!(
+            signal_zero_observation(Err(Error::new(ErrorKind::NotFound, "kill"))),
+            None,
+            "a kill that cannot be spawned is unknown, not an empty group",
+        );
+        assert_eq!(signal_zero_observation(Ok(true)), Some(true), "a successful kill -0 is a live group");
+        assert!(
+            group_is_live(None, || None, || signal_zero_observation(Ok(false))),
+            "ambiguous kill -0 after failed proc and ps is live",
+        );
+        assert!(
+            group_is_live(None, || None, || signal_zero_observation(Err(Error::new(ErrorKind::NotFound, "kill")))),
+            "every probe unavailable is live, not an empty group",
+        );
+        assert!(group_is_live(None, || None, || None), "three unknown probes are live");
+        assert!(group_is_live(None, || None, || Some(true)), "kill -0 success still confirms live");
+        assert!(
+            !group_is_live(None, || Some(false), || panic!("kill -0 must not run after ps observes")),
+            "a successful empty ps listing is gone",
+        );
+        assert!(
+            !group_is_live(
+                Some(false),
+                || panic!("ps must not run when /proc observed"),
+                || panic!("kill -0 must not run when /proc observed"),
+            ),
+            "a successful empty proc scan is gone",
+        );
+    }
+
+    #[test]
+    fn a_proc_observation_does_not_invoke_fallback_probes() {
+        // Tripwire: eager Option::or evaluates ps and kill even after /proc
+        // answered. The production helper must skip those closures.
+        let mut ps_calls = 0;
+        let mut kill_calls = 0;
+        assert!(
+            group_is_live(
+                Some(true),
+                || {
+                    ps_calls += 1;
+                    Some(false)
+                },
+                || {
+                    kill_calls += 1;
+                    Some(false)
+                },
+            ),
+            "a live /proc reading is the answer",
+        );
+        assert_eq!(ps_calls, 0, "ps is not spawned when /proc observed");
+        assert_eq!(kill_calls, 0, "kill -0 is not spawned when /proc observed");
+    }
+
+    #[cfg(unix)]
+    fn spawn_group(program: &str, args: &[&str]) -> (Child, u32) {
+        use std::os::unix::process::CommandExt as _;
+        let child = Command::new(program)
+            .args(args)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the test child forks");
+        let pgid = child.id();
+        (child, pgid)
+    }
+
+    #[cfg(unix)]
+    struct GroupGuard(u32);
+
+    #[cfg(unix)]
+    impl Drop for GroupGuard {
+        fn drop(&mut self) {
+            let _ = Command::new("kill")
+                .args(["-KILL", &format!("-{}", self.0)])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_live_process_group_is_observed_without_proc() {
+        // Tripwire: read_dir("/proc") fails on macOS. Treating that IO error as
+        // "no members" makes wait_until_pgid_gone return immediately, skip
+        // SIGKILL, and leave the child for an unbounded wait().
+        let (mut child, pgid) = spawn_group("sleep", &["60"]);
+        let _guard = GroupGuard(pgid);
+        assert!(any_process_in_group(pgid), "a just-spawned group must still look live when /proc is missing");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_pgid_does_not_treat_a_reaped_or_zombie_child_as_live() {
+        // Tripwire: kill -0 still succeeds for a zombie. After SIGTERM the
+        // child is dead but unreaped; counting that as live waits out the
+        // SIGKILL budget and returns Unterminated for a group that is gone.
+        let (mut child, pgid) = spawn_group("sleep", &["60"]);
+        let _guard = GroupGuard(pgid);
+        terminate_pgid(pgid).expect("a TERM-honoring group is gone, including as a zombie");
+        child.wait().expect("the head is reaped");
+        assert!(!any_process_in_group(pgid), "no live member remains after a successful terminate");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_pgid_sigkills_a_term_ignoring_grandchild() {
+        // Tripwire: a missing /proc used to report the group gone after SIGTERM,
+        // skip SIGKILL, and leave a TERM-ignoring grandchild reparented to init.
+        let (mut child, pgid) = spawn_group("sh", &["-c", "trap '' TERM; sleep 60 & exit 0"]);
+        let _guard = GroupGuard(pgid);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut head_gone_with_grandchild = false;
+        while Instant::now() < deadline {
+            if child.try_wait().ok().flatten().is_some() && any_process_in_group(pgid) {
+                head_gone_with_grandchild = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(head_gone_with_grandchild, "the head must exit leaving a TERM-ignoring grandchild in its group");
+        terminate_pgid(pgid).expect("SIGKILL must finish a group that ignored SIGTERM");
+        assert!(!any_process_in_group(pgid), "no member of the lane group survives teardown");
     }
 }
