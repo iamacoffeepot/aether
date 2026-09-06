@@ -8,6 +8,9 @@ use std::io;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 /// Which class of record a path on the tier holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecordClass {
@@ -54,7 +57,11 @@ pub struct ArchivedRecord {
     pub bytes: u64,
 }
 
-/// Why a move did not complete. The source is still where it was.
+/// Why a move did not complete.
+///
+/// An incomplete destination is discarded and the source is left in place. A
+/// confirmed destination whose source cleanup then fails is retained; the
+/// message names the leftover source.
 #[derive(Debug)]
 pub struct ArchiveError {
     message: String,
@@ -108,11 +115,14 @@ impl ArchiveTier {
     /// Tries a filesystem rename first and falls back to a recursive copy
     /// across filesystems. The source is unlinked only after the destination
     /// is confirmed present. A name already on the tier is disambiguated
-    /// rather than overwritten. Every failure leaves the source in place.
+    /// rather than overwritten. A copy that fails before that confirmation
+    /// discards the incomplete destination and leaves the source in place.
+    /// Once source cleanup begins, the confirmed destination is retained.
     ///
     /// # Errors
-    /// The source could not be moved, copied, or confirmed. The source is
-    /// still at `source`.
+    /// The source could not be moved, copied, or confirmed, or a confirmed
+    /// destination could not have its source fully removed. An incomplete
+    /// destination is discarded; a confirmed destination is kept.
     pub fn archive(&self, class: RecordClass, name: &str, source: &Path) -> Result<ArchivedRecord, ArchiveError> {
         if !source.is_dir() {
             return Err(ArchiveError::message(format!("{} is not a directory", source.display())));
@@ -196,9 +206,24 @@ impl ArchiveTier {
                 dest_bytes
             )));
         }
-        if let Err(error) = fs::remove_dir_all(source) {
-            let _ = remove_tree(dest);
-            return Err(ArchiveError::io(source, &error));
+        match remove_confirmed_source(source) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                // The destination is the only complete copy once unlinking starts.
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::janitor",
+                    source = %source.display(),
+                    dest = %dest.display(),
+                    %error,
+                    "janitor: archive copy is complete but the source could not be removed; destination left in place",
+                );
+                return Err(ArchiveError::message(format!(
+                    "copied {} to {}; source cleanup failed ({error}); destination left in place",
+                    source.display(),
+                    dest.display(),
+                )));
+            }
         }
         Ok(ArchivedRecord { class, name: name.to_owned(), path: dest.to_path_buf(), bytes: dest_bytes })
     }
@@ -267,6 +292,18 @@ fn remove_tree(path: &Path) -> bool {
     }
 }
 
+/// Unlink `source` after the destination copy is confirmed.
+///
+/// Production always calls `remove_dir_all`. Tests may inject a remover that
+/// unlinks part of the tree and then fails.
+fn remove_confirmed_source(source: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(fault) = take_source_remove_fault() {
+        return fault(source);
+    }
+    fs::remove_dir_all(source)
+}
+
 fn tree_bytes(path: &Path) -> u64 {
     let mut bytes: u64 = 0;
     let mut stack = vec![path.to_path_buf()];
@@ -286,4 +323,94 @@ fn tree_bytes(path: &Path) -> u64 {
         }
     }
     bytes
+}
+
+#[cfg(test)]
+type SourceRemoveFaultFn = fn(&Path) -> io::Result<()>;
+
+#[cfg(test)]
+thread_local! {
+    static SOURCE_REMOVE_FAULT: Cell<Option<SourceRemoveFaultFn>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+fn take_source_remove_fault() -> Option<SourceRemoveFaultFn> {
+    SOURCE_REMOVE_FAULT.with(Cell::take)
+}
+
+#[cfg(test)]
+#[must_use]
+fn install_source_remove_fault(fault: SourceRemoveFaultFn) -> SourceRemoveFault {
+    SOURCE_REMOVE_FAULT.with(|slot| slot.set(Some(fault)));
+    SourceRemoveFault
+}
+
+#[cfg(test)]
+struct SourceRemoveFault;
+
+#[cfg(test)]
+impl Drop for SourceRemoveFault {
+    fn drop(&mut self) {
+        SOURCE_REMOVE_FAULT.with(|slot| slot.set(None));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io;
+
+    use super::*;
+
+    #[test]
+    fn a_confirmed_copy_unlinks_the_source() {
+        // The fallback path must still finish the move: dest present, source gone.
+        let scratch = tempfile::tempdir().expect("a working root is created");
+        let source = scratch.path().join("source");
+        fs::create_dir_all(&source).expect("the source dir is created");
+        fs::write(source.join("record"), b"kept").expect("the record writes");
+        let dest = scratch.path().join("dest");
+
+        let record = ArchiveTier::copy_then_remove(RecordClass::Evidence, "record-evidence", &source, &dest)
+            .expect("the copy-then-remove path completes");
+
+        assert_eq!(record.bytes, 4);
+        assert_eq!(fs::read(dest.join("record")).expect("the destination reads"), b"kept");
+        assert!(!source.exists(), "the source is gone after a confirmed copy");
+    }
+
+    #[test]
+    fn a_source_cleanup_failure_keeps_the_complete_destination() {
+        // Tripwire: once unlinking has already removed a source record, deleting
+        // the confirmed destination loses the only complete copy of that record.
+        let scratch = tempfile::tempdir().expect("a working root is created");
+        let source = scratch.path().join("source");
+        fs::create_dir_all(&source).expect("the source dir is created");
+        fs::write(source.join("gone"), b"already-copied").expect("the removed record writes");
+        fs::write(source.join("kept"), b"still-there").expect("the leftover record writes");
+        let dest = scratch.path().join("dest");
+        let _source_remove_fault = install_source_remove_fault(unlink_one_source_record_then_fail);
+
+        let error = ArchiveTier::copy_then_remove(RecordClass::Evidence, "record-evidence", &source, &dest)
+            .expect_err("source cleanup cannot finish");
+
+        assert!(!source.join("gone").exists(), "the injected remover unlinked one source record");
+        assert_eq!(
+            fs::read(dest.join("gone")).expect("the unlinked source record still lives on the tier"),
+            b"already-copied"
+        );
+        assert_eq!(fs::read(dest.join("kept")).expect("the rest of the copy is intact"), b"still-there");
+        assert!(source.join("kept").is_file(), "leftover source remains as cleanup debt");
+        let message = error.to_string();
+        assert!(
+            message.contains("destination left in place"),
+            "the error reports the destination as retained: {message}"
+        );
+        assert!(message.contains("source cleanup failed"), "the error reports leftover source cleanup debt: {message}");
+    }
+
+    fn unlink_one_source_record_then_fail(source: &Path) -> io::Result<()> {
+        fs::remove_file(source.join("gone"))?;
+        Err(io::Error::other("injected source cleanup fault"))
+    }
 }
