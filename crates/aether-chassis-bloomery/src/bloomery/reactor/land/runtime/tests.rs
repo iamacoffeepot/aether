@@ -150,6 +150,16 @@ fn seed_member(store: &mut SqliteStore, bloom: BloomId, workpiece: &str, message
     }
 }
 
+// Journal `members` as the resolved set of a sealed bloom, then file the
+// dispatch row and optional lane message each one contributes to the proposal.
+fn seed_resolved_bloom(store: &mut SqliteStore, members: &[(&str, Option<&str>)]) -> BloomId {
+    let bloom = journal_membership(store, &members.iter().map(|&(workpiece, _)| workpiece).collect::<Vec<_>>(), &[]);
+    for &(workpiece, message) in members {
+        seed_member(store, bloom, workpiece, message);
+    }
+    bloom
+}
+
 // The title and body the proposal for `bloom` was opened with.
 fn proposal_of(fake: &FakeGithub, bloom: BloomId) -> (String, String) {
     let number = fake
@@ -171,12 +181,9 @@ fn a_single_member_lands_under_the_message_its_lane_wrote() {
     fake.seed_git_object(&new_head);
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-    seed_member(
+    let bloom = seed_resolved_bloom(
         &mut store,
-        bloom,
-        "issue-4242",
-        Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nGlyphs arrive one at a time."),
+        &[("issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nGlyphs arrive one at a time."))],
     );
     enqueue_land(&mut store, bloom, base, new_head);
 
@@ -201,8 +208,7 @@ fn an_unusable_subject_does_not_read_a_github_issue_title() {
     fake.seed_issue_with_title(4242, "fix(crate:aether-fs): reject a traversing path", "the order");
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-    seed_member(&mut store, bloom, "issue-4242", Some("Rewrote the path joining\n\nIt was wrong."));
+    let bloom = seed_resolved_bloom(&mut store, &[("issue-4242", Some("Rewrote the path joining\n\nIt was wrong."))]);
     enqueue_land(&mut store, bloom, base, new_head);
 
     drain_and_land(&mut store, &source).unwrap();
@@ -228,8 +234,7 @@ fn a_bloom_with_nothing_to_name_it_lands_under_the_floor() {
     fake.seed_issue_with_title(4242, "Rework the atlas", "the order");
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-    seed_member(&mut store, bloom, "issue-4242", None);
+    let bloom = seed_resolved_bloom(&mut store, &[("issue-4242", None)]);
     enqueue_land(&mut store, bloom, base, new_head);
 
     drain_and_land(&mut store, &source).unwrap();
@@ -251,9 +256,13 @@ fn several_members_each_get_a_section_and_the_bloom_lands_under_the_floor() {
     fake.seed_git_object(&new_head);
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-    seed_member(&mut store, bloom, "issue-11", Some("fix(crate:aether-fs): reject a traversal\n\nThe join escaped."));
-    seed_member(&mut store, bloom, "local-spike", Some("docs(guide): describe the atlas\n\nThe recipe was silent."));
+    let bloom = seed_resolved_bloom(
+        &mut store,
+        &[
+            ("issue-11", Some("fix(crate:aether-fs): reject a traversal\n\nThe join escaped.")),
+            ("local-spike", Some("docs(guide): describe the atlas\n\nThe recipe was silent.")),
+        ],
+    );
     enqueue_land(&mut store, bloom, base, new_head);
 
     drain_and_land(&mut store, &source).unwrap();
@@ -305,12 +314,9 @@ fn a_landed_bloom_closes_the_issue_its_member_names() {
     fake.seed_issue(4242, "the addressing member");
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-    seed_member(
+    let bloom = seed_resolved_bloom(
         &mut store,
-        bloom,
-        "issue-4242",
-        Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nGlyphs arrive one at a time."),
+        &[("issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nGlyphs arrive one at a time."))],
     );
     enqueue_land(&mut store, bloom, base, new_head);
 
@@ -332,12 +338,9 @@ fn the_landing_comment_carries_the_lane_message_and_the_stages_walked() {
     fake.seed_issue(4242, "the addressing member");
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-    seed_member(
+    let bloom = seed_resolved_bloom(
         &mut store,
-        bloom,
-        "issue-4242",
-        Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nGlyphs arrive one at a time."),
+        &[("issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nGlyphs arrive one at a time."))],
     );
     seed_dispatch(&mut store, bloom, "issue-4242", StageId::Construct, 10);
     seed_dispatch(&mut store, bloom, "issue-4242", StageId::Verify, 11);
@@ -374,8 +377,10 @@ fn an_adjudicated_bloom_names_what_was_waived_in_its_landing_comment() {
     fake.seed_issue(4242, "the addressing member");
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-    seed_member(&mut store, bloom, "issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nprose."));
+    let bloom = seed_resolved_bloom(
+        &mut store,
+        &[("issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nprose."))],
+    );
     journal_adjudication(&mut store, bloom, "the fixture nit is filed forward", Disposition::Deferred { issue: 4958 });
     enqueue_land(&mut store, bloom, base, new_head);
 
@@ -397,12 +402,9 @@ fn a_bloom_with_no_rollup_rows_renders_no_stages_heading() {
     fake.seed_issue(4242, "the addressing member");
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-    seed_member(
+    let bloom = seed_resolved_bloom(
         &mut store,
-        bloom,
-        "issue-4242",
-        Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nGlyphs arrive one at a time."),
+        &[("issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nGlyphs arrive one at a time."))],
     );
     enqueue_land(&mut store, bloom, base, new_head);
 
@@ -423,8 +425,8 @@ fn a_second_drain_does_not_stack_a_second_landing_comment() {
     fake.seed_issue(4242, "the addressing member");
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-    seed_member(&mut store, bloom, "issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas"));
+    let bloom =
+        seed_resolved_bloom(&mut store, &[("issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas"))]);
     enqueue_land(&mut store, bloom, base, new_head);
 
     drain_and_land(&mut store, &source).unwrap();
@@ -443,8 +445,10 @@ fn a_member_that_names_no_object_is_skipped() {
     fake.seed_git_object(&new_head);
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-    seed_member(&mut store, bloom, "reactor-core", Some("feat(crate:aether-text): shelf-pack the glyph atlas"));
+    let bloom = seed_resolved_bloom(
+        &mut store,
+        &[("reactor-core", Some("feat(crate:aether-text): shelf-pack the glyph atlas"))],
+    );
     enqueue_land(&mut store, bloom, base, new_head);
     let before = fake.issue_count();
 
@@ -465,10 +469,14 @@ fn landing_closes_only_the_issue_the_member_names() {
     fake.seed_issue(42, "not in this bloom");
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-    seed_member(&mut store, bloom, "issue-11", Some("fix(crate:aether-fs): reject a traversal\n\nThe join escaped."));
-    seed_member(&mut store, bloom, "local-spike", Some("docs(guide): describe the atlas\n\nThe recipe was silent."));
-    seed_member(&mut store, bloom, "issue-9999", Some("chore(meta): tidy the leftover\n\nNothing to close."));
+    let bloom = seed_resolved_bloom(
+        &mut store,
+        &[
+            ("issue-11", Some("fix(crate:aether-fs): reject a traversal\n\nThe join escaped.")),
+            ("local-spike", Some("docs(guide): describe the atlas\n\nThe recipe was silent.")),
+            ("issue-9999", Some("chore(meta): tidy the leftover\n\nNothing to close.")),
+        ],
+    );
     enqueue_land(&mut store, bloom, base, new_head);
 
     let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
@@ -600,6 +608,52 @@ fn a_withdrawn_members_commission_stays_open_when_the_bloom_lands() {
         CommissionStatus::Open,
         "a withdrawn member's commission must stay open for the next wave"
     );
+}
+
+#[test]
+fn landing_does_not_close_a_withdrawn_members_source_issue() {
+    // Tripwire (#5567): a withdrawn member keeps its dispatch_description row
+    // and still names a canonical issue, but it produced no claim and
+    // contributed nothing to the landed head. Closing it posts a false
+    // completion receipt over work that never reached mainline, and a Closes
+    // line in the proposal would name the same false completion.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    fake.seed_issue(11, "resolved into the landed head");
+    fake.seed_issue(22, "withdrawn before the land");
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = journal_membership(&mut store, &["issue-11"], &["issue-22"]);
+    seed_member(&mut store, bloom, "issue-11", Some("fix(crate:aether-fs): reject a traversal\n\nThe join escaped."));
+    seed_member(
+        &mut store,
+        bloom,
+        "issue-22",
+        Some("chore(meta): the work that left the line\n\nWithdrawn before it resolved."),
+    );
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    drain_and_land(&mut store, &source).unwrap();
+
+    assert_eq!(fake.issue_is_closed(11), Some(true), "the resolved member's source issue closes with the land");
+    assert_eq!(fake.comments_on(11).len(), 1, "the resolved member receives the landing receipt");
+    assert!(
+        !fake.comments_on(11)[0].contains("the work that left the line"),
+        "a withdrawn member is not in the landing receipt: {}",
+        fake.comments_on(11)[0]
+    );
+    assert_eq!(fake.issue_is_closed(22), Some(false), "a withdrawn member's source issue stays open for the next wave");
+    assert!(fake.comments_on(22).is_empty(), "a withdrawn member must not receive a landed receipt");
+
+    let (title, body) = proposal_of(&fake, bloom);
+    assert_eq!(
+        title, "fix(crate:aether-fs): reject a traversal",
+        "one remaining resolved member names the commit: {title}"
+    );
+    assert!(body.contains("Closes #11"), "the resolved member still closes on merge: {body}");
+    assert!(!body.contains("Closes #22"), "a withdrawn member contributes no closing line: {body}");
+    assert!(!body.contains("the work that left the line"), "a withdrawn member is not in the proposal roster: {body}");
 }
 
 #[test]
@@ -1001,8 +1055,10 @@ fn an_adjudicated_bloom_lands_naming_what_was_waived_and_why() {
     fake.seed_git_object(&new_head);
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-    seed_member(&mut store, bloom, "issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nprose."));
+    let bloom = seed_resolved_bloom(
+        &mut store,
+        &[("issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nprose."))],
+    );
     journal_adjudication(&mut store, bloom, "the fixture nit is filed forward", Disposition::Deferred { issue: 4958 });
     // A second bloom's adjudication is not this bloom's: the scan binds on the
     // bloom the fact names, so a coordinator running many blooms does not quote
@@ -1031,8 +1087,10 @@ fn an_unadjudicated_bloom_lands_with_no_waiver_section() {
     fake.seed_git_object(&new_head);
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-    seed_member(&mut store, bloom, "issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nprose."));
+    let bloom = seed_resolved_bloom(
+        &mut store,
+        &[("issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nprose."))],
+    );
     enqueue_land(&mut store, bloom, base, new_head);
 
     drain_and_land(&mut store, &source).unwrap();

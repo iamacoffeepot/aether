@@ -11,11 +11,11 @@
 //! `Lint title` check would refuse, drops to the floor title. A GitHub issue
 //! title is not a rung — GitHub is a replica.
 
-use aether_bloomery::{Adjudication, BloomId, Disposition, Event, Fact, SuppressionRequest};
+use aether_bloomery::{Adjudication, BloomId, Disposition, Event, Fact, SuppressionRequest, WorkpieceId};
 use aether_bloomery_github::{ACCEPTED_TYPES, LandingProposal, canonical_issue_number};
 use aether_data::wire::from_bytes;
 
-use crate::store::StoreBackend;
+use crate::store::{StoreBackend, membership};
 
 /// One member's contribution to the proposal: the message its lane wrote, and
 /// the object its workpiece addresses.
@@ -134,21 +134,23 @@ fn finding_count(adjudication: &Adjudication) -> String {
     }
 }
 
-/// The bloom's members, in workpiece order, each with whatever its lane left.
+/// The bloom's resolved members, in workpiece order, each with whatever its lane left.
 ///
-/// The persisted work-order roster is the membership read the host already has
-/// — the same one the aggregate review's findings decomposition attributes
-/// against — because the land outbox payload carries three digests and no
-/// membership.
+/// Dispatch descriptions name the sealed spec, including members an operator
+/// withdrew while the bloom walked. Those members produced no claim and are
+/// not in the landed head, so they do not contribute a title, a section, or a
+/// closing line. The resolution — not the persisted roster — decides, matching
+/// the land path's commission and source-issue filters.
 pub(super) fn roster(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<Vec<Member>> {
+    let resolved = membership::resolved_members(store, bloom)?;
     store
         .list_dispatch_descriptions(bloom.0.as_bytes())?
         .into_iter()
-        .map(|(workpiece, _)| workpiece)
-        .filter(|workpiece| !workpiece.is_empty())
+        .map(|(workpiece, _)| WorkpieceId(workpiece))
+        .filter(|workpiece| !workpiece.0.is_empty() && resolved.contains(workpiece))
         .map(|workpiece| {
-            let message = store.lookup_candidate_commit_message(bloom.0.as_bytes(), &workpiece)?;
-            let issue = canonical_issue_number(&workpiece);
+            let message = store.lookup_candidate_commit_message(bloom.0.as_bytes(), &workpiece.0)?;
+            let issue = canonical_issue_number(&workpiece.0);
             Ok(Member { message, issue })
         })
         .collect()
