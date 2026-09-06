@@ -30,8 +30,9 @@ use super::source::SourceShell;
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_GITHUB", cli_prefix = "github")]
 pub struct GithubConnectionConfig {
-    /// The bearer token the mirror authenticates with. Pinned to the
-    /// conventional unprefixed `GITHUB_TOKEN`; empty means unconfigured.
+    /// The bearer token the static-PAT path authenticates with. Pinned to the
+    /// conventional unprefixed `GITHUB_TOKEN`. Empty is unused when App-auth is
+    /// configured ([`Self::app_auth_configured`]).
     #[config(env = "GITHUB_TOKEN", default = "")]
     pub token: String,
     /// The repository owner (user or org) the projections live under.
@@ -684,12 +685,21 @@ impl GithubConnectionConfig {
         }
     }
 
+    /// Connection knobs still empty after resolving PAT-or-App authentication.
+    ///
+    /// Owner and repo are always required. Authentication is a nonempty
+    /// `GITHUB_TOKEN` *or* complete App credentials, matching
+    /// [`Self::connect_client`].
     #[must_use]
     pub fn missing_connection_knobs(&self) -> Vec<&'static str> {
-        [("GITHUB_TOKEN", &self.token), ("AETHER_GITHUB_OWNER", &self.owner), ("AETHER_GITHUB_REPO", &self.repo)]
-            .into_iter()
-            .filter_map(|(name, value)| value.is_empty().then_some(name))
-            .collect()
+        [
+            (self.token.is_empty() && !self.app_auth_configured(), "GITHUB_TOKEN"),
+            (self.owner.is_empty(), "AETHER_GITHUB_OWNER"),
+            (self.repo.is_empty(), "AETHER_GITHUB_REPO"),
+        ]
+        .into_iter()
+        .filter_map(|(missing, name)| missing.then_some(name))
+        .collect()
     }
 
     #[must_use]
@@ -847,6 +857,56 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         assert!(!configured(0, "/keys/app.pem", 42).app_auth_configured());
         assert!(!configured(12345, "", 42).app_auth_configured());
         assert!(!configured(12345, "/keys/app.pem", 0).app_auth_configured());
+    }
+
+    #[test]
+    fn complete_app_credentials_do_not_require_a_pat() {
+        // Tripwire: `connect_client` takes the App branch without `GITHUB_TOKEN`,
+        // but `missing_connection_knobs` used to treat an empty PAT as unconfigured
+        // and disable GitHub-backed setup/replication before that path ran (#5586).
+        let github = GithubConnectionConfig {
+            owner: "octo".into(),
+            repo: "shadow".into(),
+            ..configured(12345, "/keys/app.pem", 42)
+        };
+
+        assert!(github.token.is_empty(), "this case is App-only");
+        assert!(
+            github.missing_connection_knobs().is_empty(),
+            "complete App credentials plus owner/repo are a configured connection"
+        );
+
+        let local = CoordinatorConfig {
+            authority_backend: "local".into(),
+            authority_repo: "/tmp/authority.git".into(),
+            ..CoordinatorConfig::default()
+        };
+        assert!(local.source_replica_enabled(&github), "App-only credentials must not disable source replication");
+    }
+
+    #[test]
+    fn incomplete_app_credentials_still_name_a_missing_pat() {
+        // Partial App knobs never silently half-enable auth. Owner and repo
+        // without a PAT and without all three App knobs is still unconfigured.
+        let github = GithubConnectionConfig {
+            owner: "octo".into(),
+            repo: "shadow".into(),
+            ..configured(12345, "/keys/app.pem", 0)
+        };
+
+        assert_eq!(github.missing_connection_knobs(), ["GITHUB_TOKEN"]);
+    }
+
+    #[test]
+    fn app_auth_does_not_excuse_a_missing_repository() {
+        // Auth and repository are independent: complete App credentials satisfy
+        // `GITHUB_TOKEN`, not owner/repo. A predicate that collapsed "has App
+        // auth" into "configured" would drop the repository from the missing
+        // list and mount a connection with nowhere to talk.
+        assert_eq!(
+            configured(12345, "/keys/app.pem", 42).missing_connection_knobs(),
+            ["AETHER_GITHUB_OWNER", "AETHER_GITHUB_REPO"]
+        );
     }
 
     #[test]
