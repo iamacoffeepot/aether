@@ -6,13 +6,13 @@
 //! — it does not move mainline.
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use aether_bloomery::{BloomId, Digest, LandingReceipt};
 use aether_bloomery_git::{
     GitDataApi, GitDataError, GitSource, GithubApi, GithubError, IssueStateApi, MainlineRef, Marker, NewComment,
-    NewPullRequest, PullMergeResult, PullRequestApi, PullRequestState, SourceError, landing_branch, render_marker,
-    short_hex, strip_heads, to_hex,
+    NewPullRequest, PullMergeResult, PullRequest, PullRequestApi, PullRequestState, SourceError, landing_branch,
+    render_marker, short_hex, strip_heads, to_hex,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -273,14 +273,27 @@ pub trait LandingSource: Send + Sync {
     fn close_issue(&self, number: u64, key: &str, comment: &str) -> Result<(), SourceError>;
 }
 
+/// The head [`GithubLanding::land_proposal`] last offered for a bloom. The
+/// poll signature does not carry it, and the watch takes [`LandProposal::Landed`]
+/// as already accepted, so the adapter remembers the proven candidate the same
+/// way the local face does — otherwise a force-push merged onto the configured
+/// mainline would mint a receipt for work this bloom never proved.
+struct IssuedLand {
+    bloom: BloomId,
+    expected_base: Digest,
+    new_head: Digest,
+    number: u64,
+}
+
 /// GitHub landing over a repository-backed [`GitSource`].
 pub struct GithubLanding<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> {
     source: Arc<GitSource<C>>,
+    issued: Arc<Mutex<Option<IssuedLand>>>,
 }
 
 impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> Clone for GithubLanding<C> {
     fn clone(&self) -> Self {
-        Self { source: Arc::clone(&self.source) }
+        Self { source: Arc::clone(&self.source), issued: Arc::clone(&self.issued) }
     }
 }
 
@@ -288,13 +301,13 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GithubLanding<C
     /// Wrap a git-data [`GitSource`] as the GitHub landing face.
     #[must_use]
     pub fn new(source: GitSource<C>) -> Self {
-        Self { source: Arc::new(source) }
+        Self { source: Arc::new(source), issued: Arc::new(Mutex::new(None)) }
     }
 
     /// Share an existing repository backend as the GitHub landing face.
     #[must_use]
     pub fn from_arc(source: Arc<GitSource<C>>) -> Self {
-        Self { source }
+        Self { source, issued: Arc::new(Mutex::new(None)) }
     }
 
     /// Borrow the underlying repository backend.
@@ -313,6 +326,53 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GithubLanding<C
         }
         self.source.client().create_comment(&NewComment { issue_number: number, body })?;
         Ok(())
+    }
+
+    /// Whether `pull` still proposes this bloom's landing onto the configured
+    /// mainline, and — when `proven_head` is given — still offers that head.
+    ///
+    /// A merged proposal is not exempt: GitHub will merge a retargeted or
+    /// force-pushed landing, and the watch treats [`LandProposal::Landed`] as
+    /// already accepted, so the same structural gates that refuse an open
+    /// drift have to hold before a receipt is minted.
+    fn proposal_drift(
+        &self,
+        pull: &PullRequest,
+        bloom: &BloomId,
+        proven_head: Option<&Digest>,
+        number: u64,
+    ) -> Result<Option<String>, SourceError> {
+        let branch = landing_branch(bloom);
+        if strip_heads(&pull.head_ref) != branch {
+            return Ok(Some(format!(
+                "proposal #{number} proposes `{}`, not this bloom's landing branch `{branch}`",
+                pull.head_ref,
+            )));
+        }
+        let mainline = self.source.mainline().branch();
+        if strip_heads(&pull.base) != mainline {
+            return Ok(Some(format!("proposal #{number} aims at `{}`, not `{mainline}`", pull.base)));
+        }
+        let Some(proven_head) = proven_head else {
+            return Ok(None);
+        };
+        let proven = self.source.resolve_git_sha(proven_head, "landing acceptance head digest")?;
+        if pull.head_sha == proven {
+            return Ok(None);
+        }
+        Ok(Some(format!("proposal #{number} is at `{}`, not the proven head `{proven}`", pull.head_sha)))
+    }
+
+    fn remember_issued(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest, number: u64) {
+        *self.issued.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(IssuedLand { bloom: *bloom, expected_base: *expected_base, new_head: *new_head, number });
+    }
+
+    fn issued_head(&self, bloom: &BloomId, expected_base: &Digest, number: u64) -> Option<Digest> {
+        self.issued.lock().unwrap_or_else(PoisonError::into_inner).as_ref().and_then(|issued| {
+            (issued.bloom == *bloom && issued.expected_base == *expected_base && issued.number == number)
+                .then_some(issued.new_head)
+        })
     }
 }
 
@@ -360,6 +420,7 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi + Send + Sync> L
                     self.source.point_landing_branch(bloom, &proven)?;
                 }
             }
+            self.remember_issued(bloom, expected_base, new_head, existing.number);
             return Ok(ProposalOutcome::Proposed { number: existing.number });
         }
 
@@ -373,13 +434,17 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi + Send + Sync> L
         let opening =
             NewPullRequest { title, body, head: branch.clone(), base: self.source.mainline().branch().to_owned() };
         match self.source.client().create_pull_request(&opening) {
-            Ok(opened) => Ok(ProposalOutcome::Proposed { number: opened.number }),
-            Err(GitDataError::RefConflict(detail)) => self
-                .source
-                .client()
-                .find_pull_request_for_head(&branch)?
-                .map(|raced| ProposalOutcome::Proposed { number: raced.number })
-                .ok_or(SourceError::Git(GitDataError::RefConflict(detail))),
+            Ok(opened) => {
+                self.remember_issued(bloom, expected_base, new_head, opened.number);
+                Ok(ProposalOutcome::Proposed { number: opened.number })
+            }
+            Err(GitDataError::RefConflict(detail)) => match self.source.client().find_pull_request_for_head(&branch)? {
+                Some(raced) => {
+                    self.remember_issued(bloom, expected_base, new_head, raced.number);
+                    Ok(ProposalOutcome::Proposed { number: raced.number })
+                }
+                None => Err(SourceError::Git(GitDataError::RefConflict(detail))),
+            },
             Err(error) => Err(SourceError::Git(error)),
         }
     }
@@ -398,33 +463,14 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi + Send + Sync> L
         let Some(pull) = self.source.client().get_pull_request(number)? else {
             return Ok(refused_drift(format!("proposal #{number} is gone")));
         };
+        if let Some(detail) = self.proposal_drift(&pull, bloom, Some(new_head), number)? {
+            return Ok(refused_drift(detail));
+        }
         if pull.merged {
             return Ok(LandAcceptance::Accepted);
         }
         if pull.state != PullRequestState::Open {
             return Ok(refused_drift(format!("proposal #{number} is closed without having merged")));
-        }
-        let branch = landing_branch(bloom);
-        if strip_heads(&pull.head_ref) != branch {
-            return Ok(refused_drift(format!(
-                "proposal #{number} proposes `{}`, not this bloom's landing branch `{branch}`",
-                pull.head_ref,
-            )));
-        }
-        if strip_heads(&pull.base) != self.source.mainline().branch() {
-            return Ok(refused_drift(format!(
-                "proposal #{number} aims at `{}`, not `{}`",
-                pull.base,
-                self.source.mainline().branch(),
-            )));
-        }
-
-        let proven = self.source.resolve_git_sha(new_head, "landing acceptance head digest")?;
-        if pull.head_sha != proven {
-            return Ok(refused_drift(format!(
-                "proposal #{number} is at `{}`, not the proven head `{proven}`",
-                pull.head_sha,
-            )));
         }
 
         let actual = self.source.mainline_digest(&self.source.mainline_head()?.sha)?;
@@ -450,6 +496,14 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi + Send + Sync> L
             }
             return Ok(LandProposal::Open);
         };
+        // A merge is this bloom's land only when the proposal still offers the
+        // bloom's landing branch at the configured mainline. An external
+        // retarget-and-merge would otherwise mint a receipt for a commit the
+        // mainline never received; the watch takes Landed as already accepted.
+        let proven_head = self.issued_head(bloom, expected_base, number);
+        if self.proposal_drift(&pull, bloom, proven_head.as_ref(), number)?.is_some() {
+            return Ok(LandProposal::Declined);
+        }
 
         let new_head = self.source.record_landed_commit(&merge_commit)?;
         Ok(LandProposal::Landed(LandingReceipt { bloom: *bloom, previous_base: *expected_base, new_head }))
@@ -529,7 +583,7 @@ mod tests {
     use std::sync::Arc;
 
     use aether_bloomery::{BloomId, Digest};
-    use aether_bloomery_git::{GitSource, MainlineRef, landing_branch, to_hex};
+    use aether_bloomery_git::{GitSource, MainlineRef, NewPullRequest, landing_branch, to_hex};
 
     use super::{
         GithubLanding, LandAcceptance, LandProposal, LandingRefusal, LandingSource, ProposalOutcome,
@@ -842,6 +896,94 @@ mod tests {
         assert_eq!(
             source.accept_land(&bloom(), &base, &new_head, number).expect("the landing fixture"),
             LandAcceptance::Accepted
+        );
+    }
+
+    #[test]
+    fn poll_land_does_not_record_a_merge_aimed_off_the_configured_mainline() {
+        // This fails if an externally retargeted merge is taken as this bloom's
+        // land: the watch treats Landed as already accepted and would admit a
+        // Fact::Land for a commit the configured mainline never received.
+        let fake = FakeGithub::new();
+        let bloom = bloom();
+        let day = MainlineRef::new("refs/heads/bloomery/daily/2026-08-13");
+        let base = digest(10);
+        fake.seed_ref(day.git_ref(), &"a1".repeat(20));
+        fake.seed_correspondence(&base, &"a1".repeat(20));
+        fake.seed_ref("heads/main", &"b2".repeat(20));
+        let new_head = digest(90);
+        fake.seed_git_object(&new_head);
+        fake.seed_ref(&format!("heads/{}", landing_branch(&bloom)), &to_hex(&new_head));
+
+        let number = fake
+            .create_pull_request(&NewPullRequest {
+                title: landing_floor_title(&bloom),
+                body: String::new(),
+                head: landing_branch(&bloom),
+                base: "main".to_owned(),
+            })
+            .expect("the landing fixture")
+            .number;
+        fake.merge_pull_request(number, &"5c".repeat(20));
+
+        let source = landing_on(&fake, true, day.clone());
+        assert_eq!(
+            source.poll_land(&bloom, &base, number).expect("the landing fixture"),
+            LandProposal::Declined,
+            "a merge onto main is not a land onto the configured day ref",
+        );
+        match source.accept_land(&bloom, &base, &new_head, number).expect("the landing fixture") {
+            LandAcceptance::Refused(LandingRefusal::Drifted { detail }) => {
+                assert!(detail.contains("main"), "the refusal names the base it found: {detail}");
+                assert!(detail.contains(day.branch()), "the refusal names the configured mainline: {detail}");
+            }
+            other => panic!("expected a drift refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn poll_land_does_not_record_a_merge_from_another_branch() {
+        let fake = FakeGithub::new();
+        let (base, new_head) = (digest(10), digest(90));
+        let (source, _, _) = proposed(&fake, &base, &new_head);
+        fake.seed_ref("heads/other", &to_hex(&new_head));
+        let number = fake
+            .create_pull_request(&NewPullRequest {
+                title: landing_floor_title(&bloom()),
+                body: String::new(),
+                head: "other".to_owned(),
+                base: "main".to_owned(),
+            })
+            .expect("the landing fixture")
+            .number;
+        fake.merge_pull_request(number, &"5c".repeat(20));
+
+        assert_eq!(
+            source.poll_land(&bloom(), &base, number).expect("the landing fixture"),
+            LandProposal::Declined,
+            "a merge from a branch that is not this bloom's landing is not this bloom's land",
+        );
+    }
+
+    #[test]
+    fn accepting_a_merged_proposal_still_requires_the_proven_head() {
+        let fake = FakeGithub::new();
+        let (base, new_head) = (digest(10), digest(90));
+        let (source, number, _) = proposed(&fake, &base, &new_head);
+        let pushed = "ee".repeat(20);
+        fake.push_to_pull_request(number, &pushed);
+        fake.merge_pull_request(number, &"5c".repeat(20));
+
+        match source.accept_land(&bloom(), &base, &new_head, number).expect("the landing fixture") {
+            LandAcceptance::Refused(LandingRefusal::Drifted { detail }) => {
+                assert!(detail.contains(&pushed), "the refusal names the head it found: {detail}");
+            }
+            other => panic!("expected a drift refusal, got {other:?}"),
+        }
+        assert_eq!(
+            source.poll_land(&bloom(), &base, number).expect("the landing fixture"),
+            LandProposal::Declined,
+            "the watch must not take a force-pushed merge as this bloom's land",
         );
     }
 
