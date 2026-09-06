@@ -209,6 +209,25 @@ fn projection_shell(github: &GithubConnectionConfig, configured: bool) -> Result
     configured.then(|| ProjectionShell::connect(github)).transpose().map_err(|error| BootError::Other(Box::new(error)))
 }
 
+/// Mount the source replica when local authority has a fully-configured GitHub
+/// connection. App-only credentials resolve a rotating token source per push
+/// rather than freezing the empty PAT field.
+#[cfg(feature = "github")]
+fn replica_shell(
+    github: &GithubConnectionConfig,
+    coordinator: &CoordinatorConfig,
+) -> Result<Option<SourceReplicaShell>, BootError> {
+    if !coordinator.source_replica_enabled(github) {
+        return Ok(None);
+    }
+    Ok(Some(SourceReplicaShell::connect_with_token_source(
+        &coordinator.authority_repo,
+        &github_push_url(&github.api_base, &github.owner, &github.repo),
+        coordinator.mainline(),
+        github.token_source().map_err(|error| BootError::Other(Box::new(error)))?,
+    )))
+}
+
 /// The cadence every reactor that reaches the GitHub API runs at (#5412): the
 /// configured interval, floored by what the hourly REST allowance affords.
 ///
@@ -347,14 +366,7 @@ fn actor_setups(
         mirror: MirrorReactorSetup {
             projection: projection_shell(github, configured)?,
             source: configured.then(|| source.clone()),
-            replica: replica_enabled.then(|| {
-                SourceReplicaShell::connect(
-                    &coordinator.authority_repo,
-                    &github_push_url(&github.api_base, &github.owner, &github.repo),
-                    coordinator.mainline(),
-                    &github.token,
-                )
-            }),
+            replica: replica_shell(github, coordinator)?,
             poll_interval_secs: github_poll_interval_secs,
             repository: repository.clone(),
         },
@@ -809,7 +821,7 @@ mod tests {
 
     use super::{
         ArtifactsConfig, BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, GithubConnectionConfig,
-        NotifyConfig, SessionConfig, actor_setups, mounted_correspondence,
+        NotifyConfig, SessionConfig, actor_setups, mounted_correspondence, replica_shell,
     };
     use crate::signing::SigningConfig;
     use crate::store::StoreConfig;
@@ -902,5 +914,47 @@ mod tests {
         assert_eq!(BloomeryChassis::PROFILE, "bloomery");
         // Dropped without `run()` — teardown, no signal wait.
         drop(chassis);
+    }
+
+    #[test]
+    fn app_only_replica_wiring_reads_the_token_source_not_the_empty_pat() {
+        // Tripwire: complete App credentials now count as configured, which
+        // enables source replication. Passing `github.token` (empty on App-only)
+        // would construct a replica that pushes with no credential. replica_shell
+        // must go through token_source, so an App key path that does not exist is
+        // a boot fault rather than a silent empty PAT (#5586).
+        let github = GithubConnectionConfig {
+            owner: "octo".into(),
+            repo: "shadow".into(),
+            app_id: 12345,
+            app_private_key_path: "/nonexistent/does-not-exist.pem".into(),
+            app_installation_id: 42,
+            ..GithubConnectionConfig::default()
+        };
+        let coordinator = CoordinatorConfig {
+            authority_backend: "local".into(),
+            authority_repo: "/tmp/authority.git".into(),
+            ..CoordinatorConfig::default()
+        };
+        assert!(github.token.is_empty(), "this case is App-only");
+        assert!(github.missing_connection_knobs().is_empty(), "complete App credentials are configured");
+        assert!(coordinator.source_replica_enabled(&github), "App-only must enable replication");
+        assert!(
+            replica_shell(&github, &coordinator).is_err(),
+            "App-only replica construction must read the key, not freeze an empty PAT"
+        );
+
+        let pat = GithubConnectionConfig {
+            token: "t".into(),
+            owner: "octo".into(),
+            repo: "shadow".into(),
+            ..GithubConnectionConfig::default()
+        };
+        assert!(replica_shell(&pat, &coordinator).expect("PAT replica constructs").is_some());
+        assert!(
+            replica_shell(&GithubConnectionConfig::default(), &CoordinatorConfig::default())
+                .expect("unconfigured")
+                .is_none()
+        );
     }
 }
