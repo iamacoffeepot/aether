@@ -607,50 +607,36 @@ impl<C: GitDataApi> GitSource<C> {
     ///
     /// Walks bloom ids recorded on the workpiece's claim-commit lineage trailer,
     /// looking up each ancestor's candidate ref by name. That is the supersession
-    /// chain, not a listing of every bloom namespace — a first-match scan can
-    /// copy an unrelated bloom's work for the same workpiece (#5552).
-    ///
-    /// A claim minted before the trailer (no lineage line) falls back to adopting
-    /// only when a single remaining candidate exists, so a competing unrelated
-    /// bloom cannot win the listing. Two or more remaining candidates is
-    /// `Ok(false)`, the same answer as genuine absence: the caller must not fold
-    /// work it cannot attribute to the predecessor lineage.
+    /// chain, not a listing of every bloom namespace — a first-match or
+    /// unique-match scan can copy an unrelated bloom's work for the same
+    /// workpiece (#5552). Missing provenance is `Ok(false)`: a lone foreign
+    /// candidate is not evidence.
     fn adopt_from_chain(
         &self,
         predecessor: &BloomId,
+        successor: &BloomId,
         target: &str,
         workpiece: &str,
     ) -> Result<bool, SourceError> {
-        let ancestors = self.recorded_ancestors(predecessor, workpiece)?;
-        if !ancestors.is_empty() {
-            for bloom in &ancestors {
-                if let Some(source) = self.client.get_ref(&candidate_ref(bloom, workpiece))? {
-                    return self.client.create_ref(target, &source.sha).map(|_| true).map_err(SourceError::Git);
-                }
+        for bloom in self.recorded_ancestors(predecessor, successor, workpiece)? {
+            if let Some(source) = self.client.get_ref(&candidate_ref(&bloom, workpiece))? {
+                return self.client.create_ref(target, &source.sha).map(|_| true).map_err(SourceError::Git);
             }
-            return Ok(false);
         }
-
-        let suffix = format!("/candidate/{}", sanitize_ref_segment(workpiece));
-        let mut matches = self
-            .client
-            .list_matching_refs("heads/bloom/")?
-            .into_iter()
-            .filter(|git_ref| git_ref.name.ends_with(&suffix) && git_ref.name != target);
-        let Some(first) = matches.next() else {
-            return Ok(false);
-        };
-        if matches.next().is_some() {
-            return Ok(false);
-        }
-        self.client.create_ref(target, &first.sha).map(|_| true).map_err(SourceError::Git)
+        Ok(false)
     }
 
     /// Ancestor bloom ids on the workpiece claim, closest first, excluding
-    /// `predecessor` (already tried). An absent ref or a sha that is not a
-    /// commit is an empty lineage, not a fault — a genesis hold carries no
-    /// trailer.
-    fn recorded_ancestors(&self, predecessor: &BloomId, workpiece: &str) -> Result<Vec<BloomId>, SourceError> {
+    /// `predecessor` and `successor` (already tried). Empty when there is no
+    /// claim, the sha is not a commit, the hold is a tombstone, or the live
+    /// claim is not linked to `predecessor` — a reacquired foreign hold is not
+    /// this successor's supersession chain.
+    fn recorded_ancestors(
+        &self,
+        predecessor: &BloomId,
+        successor: &BloomId,
+        workpiece: &str,
+    ) -> Result<Vec<BloomId>, SourceError> {
         let name = Self::workpiece_claim_ref(&WorkpieceId(workpiece.to_owned()));
         let Some(current) = self.client.get_ref(&name)? else {
             return Ok(Vec::new());
@@ -660,7 +646,17 @@ impl<C: GitDataApi> GitSource<C> {
             Err(GitDataError::MissingObject(_)) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
         };
-        Ok(parse_bloom_lineage(&message)?.into_iter().filter(|bloom| bloom != predecessor).collect())
+        let holder = match parse_bloom_line(&message)? {
+            ClaimHolder::Held(bloom) => bloom,
+            ClaimHolder::Tombstoned => return Ok(Vec::new()),
+        };
+        let lineage = parse_bloom_lineage(&message)?;
+        let linked = holder == *predecessor
+            || (holder == *successor && lineage.iter().any(|bloom| bloom == predecessor));
+        if !linked {
+            return Ok(Vec::new());
+        }
+        Ok(lineage.into_iter().filter(|bloom| bloom != predecessor && bloom != successor).collect())
     }
 
     /// Lineage trailer a transfer writes onto the successor's claim commit:
@@ -1269,7 +1265,7 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
             return self.client.create_ref(&target, &source.sha).map(|_| true).map_err(SourceError::Git);
         }
 
-        self.adopt_from_chain(predecessor, &target, workpiece)
+        self.adopt_from_chain(predecessor, successor, &target, workpiece)
     }
 
     fn land(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> Result<LandOutcome, Self::Error> {
@@ -1670,12 +1666,14 @@ mod tests {
     fn adopt_candidate_walks_past_the_immediate_predecessor() {
         // Tripwire: a bloom superseded twice still has the inherited candidate
         // under the grandparent. Looking only at the parent refuses a set that
-        // has the work.
+        // has the work. The claim transfers A→B→C are the provenance that
+        // names A as an ancestor; a namespace scan is not.
         let (fake, successor, _base) = seeded();
         let source = git_source(&fake, false);
         let parent = bloom_id(2);
         let grandparent = bloom_id(3);
         let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        transfer_chain(&source, &grandparent, &[parent, successor], "wp-0");
         fake.seed_ref(candidate_ref_name(&grandparent, "wp-0").trim_start_matches("refs/"), sha);
 
         assert!(source.adopt_candidate(&parent, &successor, "wp-0").unwrap(), "the grandparent's ref is adopted");
@@ -1711,27 +1709,20 @@ mod tests {
     }
 
     #[test]
-    fn adopt_candidate_refuses_competing_candidates_when_the_claim_has_no_lineage() {
-        // Tripwire: a chain minted before lineage trailers has no ancestor list.
-        // Copying the first remaining suffix is the #5552 bug; two remaining
-        // candidates must refuse rather than pick one.
+    fn adopt_candidate_refuses_a_single_unrelated_candidate_without_lineage() {
+        // Tripwire: the original bug needs only one foreign candidate. A unique
+        // remaining suffix is not ancestry evidence; missing provenance must
+        // refuse rather than copy it.
         let (fake, successor, _base) = seeded();
         let source = git_source(&fake, false);
         let parent = bloom_id(2);
-        let grandparent = bloom_id(3);
         let unrelated = bloom_id(0);
-        fake.seed_ref(
-            candidate_ref_name(&unrelated, "wp-0").trim_start_matches("refs/"),
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        );
-        fake.seed_ref(
-            candidate_ref_name(&grandparent, "wp-0").trim_start_matches("refs/"),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        );
+        let foreign = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        fake.seed_ref(candidate_ref_name(&unrelated, "wp-0").trim_start_matches("refs/"), foreign);
 
         assert!(
             !source.adopt_candidate(&parent, &successor, "wp-0").unwrap(),
-            "two remaining candidates without lineage must not fold either"
+            "a lone unrelated candidate is not the predecessor lineage"
         );
         assert!(
             fake.ref_target(candidate_ref_name(&successor, "wp-0").trim_start_matches("refs/")).is_none(),
@@ -1740,18 +1731,41 @@ mod tests {
     }
 
     #[test]
+    fn adopt_candidate_refuses_when_the_current_claim_is_foreign() {
+        // Tripwire: a live claim reacquired on an unrelated chain can carry its
+        // own lineage trailer and candidate. Walking that trailer would adopt
+        // foreign work while naming the requested predecessor.
+        let (fake, successor, _base) = seeded();
+        let source = git_source(&fake, false);
+        let parent = bloom_id(2);
+        let foreign = bloom_id(0);
+        let foreign_parent = bloom_id(4);
+        let foreign_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        transfer_chain(&source, &foreign_parent, &[foreign], "wp-0");
+        fake.seed_ref(candidate_ref_name(&foreign_parent, "wp-0").trim_start_matches("refs/"), foreign_sha);
+
+        assert!(
+            !source.adopt_candidate(&parent, &successor, "wp-0").unwrap(),
+            "a claim not linked to the requested predecessor is not this chain"
+        );
+        assert!(
+            fake.ref_target(candidate_ref_name(&successor, "wp-0").trim_start_matches("refs/")).is_none(),
+            "the successor must not receive the foreign chain's candidate",
+        );
+    }
+
+    #[test]
     fn an_inherited_candidate_is_adopted_from_a_crowded_namespace() {
-        // Tripwire: a listing-position cap on the already-materialized bloom
-        // namespace answers Ok(false) for a candidate that is present past the
-        // cutoff — the same answer as genuine absence, which turns a later
-        // successor's fold into a permanent refusal. The scan has to walk the
-        // whole listing.
+        // Tripwire: ancestor lookup is by recorded bloom id, not listing
+        // position. Crowding the namespace must not hide a grandparent the
+        // claim lineage names.
         let (fake, successor, _base) = seeded();
         let source = git_source(&fake, false);
         let parent = bloom_id(2);
         let grandparent = bloom_id(3);
         let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let filler = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        transfer_chain(&source, &grandparent, &[parent, successor], "wp-0");
         for index in 0..300 {
             fake.seed_ref(&format!("heads/bloom/{index:012x}/unrelated"), filler);
         }
@@ -1769,13 +1783,14 @@ mod tests {
 
     #[test]
     fn adopt_candidate_still_refuses_when_the_ref_exists_nowhere() {
-        // Absence answers false. A crowded namespace that still holds the
-        // candidate does not — that is the sibling of this test, not this
-        // answer.
+        // Absence answers false even when the claim chain is real: lineage
+        // without a candidate is not a namespace scan.
         let (fake, successor, _base) = seeded();
         let source = git_source(&fake, false);
+        let parent = bloom_id(2);
+        transfer_chain(&source, &parent, &[successor], "wp-0");
         assert!(
-            !source.adopt_candidate(&bloom_id(2), &successor, "wp-0").unwrap(),
+            !source.adopt_candidate(&parent, &successor, "wp-0").unwrap(),
             "a member with no candidate in the chain has nothing to fold"
         );
     }

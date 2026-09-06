@@ -329,12 +329,14 @@ pub trait SourceBackend {
     /// the successor keeps the capture it produced instead of having the
     /// predecessor's superseded candidate written over it.
     ///
-    /// Walks the supersession chain rather than one link of it: the successor,
-    /// then `predecessor`, then any remaining bloom namespace that still holds
-    /// this workpiece's candidate, stopping when the ref is found or the chain
-    /// is exhausted. `Ok(false)` says the ref exists nowhere in that chain —
-    /// the member has no captured candidate to fold at all, which the caller
-    /// reads rather than treating as a fault.
+    /// Walks the supersession chain rather than one link of it: the successor's
+    /// own ref, then `predecessor`, then ancestor blooms recorded on the
+    /// workpiece claim that is linked to `predecessor`. Other bloom namespaces
+    /// are not searched — a candidate for the same workpiece under an unrelated
+    /// bloom is not adopted, even when it is the only remaining match. `Ok(false)`
+    /// says the ref exists nowhere in that chain, or that no claim provenance
+    /// links this workpiece to `predecessor`. The caller reads that rather than
+    /// treating it as a fault.
     ///
     /// # Errors
     /// Backend-defined — e.g. the ref could not be read or written.
