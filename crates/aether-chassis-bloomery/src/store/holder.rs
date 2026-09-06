@@ -435,14 +435,7 @@ mod tests {
         );
     }
 
-    fn spawn_holder_child(
-        exe: &Path,
-        test_name: &str,
-        journal: &str,
-        go: &Path,
-        ready: &Path,
-        result: &Path,
-    ) -> Child {
+    fn spawn_holder_child(exe: &Path, test_name: &str, journal: &str, go: &Path, ready: &Path, result: &Path) -> Child {
         Command::new(exe)
             .arg(test_name)
             .arg("--exact")
