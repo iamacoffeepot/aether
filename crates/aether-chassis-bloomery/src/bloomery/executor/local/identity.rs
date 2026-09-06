@@ -379,9 +379,11 @@ fn write_json_record(evidence_dir: &Path, name: &str, value: &impl Serialize) ->
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io::{Error, ErrorKind};
     use std::iter::repeat_n;
     #[cfg(unix)]
-    use std::process::{Command, Stdio};
+    use std::process::{Child, Command, Stdio};
     #[cfg(unix)]
     use std::thread;
     #[cfg(unix)]
@@ -471,13 +473,13 @@ mod tests {
         // members", which skipped SIGKILL. An IO error must be unknown so
         // any_process_in_group falls through; a readable empty table is gone.
         assert_eq!(
-            proc_listing_is_live(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no /proc")), 1),
+            proc_listing_is_live(Err(Error::new(ErrorKind::NotFound, "no /proc")), 1),
             None,
             "a missing proc filesystem is not proof the group is gone",
         );
         let empty = tempfile::tempdir().expect("an empty stand-in for a readable /proc");
         assert_eq!(
-            proc_listing_is_live(std::fs::read_dir(empty.path()), 1),
+            proc_listing_is_live(fs::read_dir(empty.path()), 1),
             Some(false),
             "a readable proc table with no members is an empty group",
         );
@@ -510,9 +512,9 @@ mod tests {
         // mapping that to "no members" is the same false exit as a missing
         // /proc. Injected unknown probes must stay live so terminate_pgid
         // escalates and times out rather than succeeding into child.wait.
-        assert_eq!(signal_zero_observation(Ok(false)), None, "a nonzero kill -0 is ESRCH or EPERM, not confirmed exit",);
+        assert_eq!(signal_zero_observation(Ok(false)), None, "a nonzero kill -0 is ESRCH or EPERM, not confirmed exit");
         assert_eq!(
-            signal_zero_observation(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "kill"))),
+            signal_zero_observation(Err(Error::new(ErrorKind::NotFound, "kill"))),
             None,
             "a kill that cannot be spawned is unknown, not an empty group",
         );
@@ -522,11 +524,7 @@ mod tests {
             "ambiguous kill -0 after failed proc and ps is live",
         );
         assert!(
-            group_is_live(
-                None,
-                || None,
-                || signal_zero_observation(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "kill"))),
-            ),
+            group_is_live(None, || None, || signal_zero_observation(Err(Error::new(ErrorKind::NotFound, "kill")))),
             "every probe unavailable is live, not an empty group",
         );
         assert!(group_is_live(None, || None, || None), "three unknown probes are live");
@@ -570,7 +568,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn spawn_group(program: &str, args: &[&str]) -> (std::process::Child, u32) {
+    fn spawn_group(program: &str, args: &[&str]) -> (Child, u32) {
         use std::os::unix::process::CommandExt as _;
         let child = Command::new(program)
             .args(args)
@@ -640,7 +638,7 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(20));
         }
-        assert!(head_gone_with_grandchild, "the head must exit leaving a TERM-ignoring grandchild in its group",);
+        assert!(head_gone_with_grandchild, "the head must exit leaving a TERM-ignoring grandchild in its group");
         terminate_pgid(pgid).expect("SIGKILL must finish a group that ignored SIGTERM");
         assert!(!any_process_in_group(pgid), "no member of the lane group survives teardown");
     }
