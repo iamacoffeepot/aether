@@ -64,12 +64,8 @@ fn a_second_member_script_does_not_erase_the_first_members_fault() {
 
 #[test]
 fn two_members_verify_keep_distinct_faults_without_a_task_header() {
-    // WrongSubject at Verify is the Construct intake contract (DigestMismatch
-    // recovered as a machinery fault) and does not leave a named excuse or a
-    // follow-up dispatch: with a sibling still walking, liveness sees wp-b
-    // sealed with nothing in flight. Die vs VerifyFail are distinct verify
-    // outcomes the coordinator actually re-enters — environment vs judged
-    // failure — so a global overwrite still collapses them to one mode.
+    // Distinct environment-vs-judged Verify outcomes so a global script
+    // overwrite collapses their modes.
     let mut harness = BloomeryHarness::start();
     harness.script_lane(&WorkpieceId("wp-a".into()), StageId::Verify, &[LaneScript::Die]);
     harness.script_lane(
