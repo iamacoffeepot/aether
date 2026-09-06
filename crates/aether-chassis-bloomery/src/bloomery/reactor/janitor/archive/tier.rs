@@ -54,7 +54,11 @@ pub struct ArchivedRecord {
     pub bytes: u64,
 }
 
-/// Why a move did not complete. The source is still where it was.
+/// Why a move did not complete.
+///
+/// An incomplete destination is discarded and the source is left in place. A
+/// confirmed destination whose source cleanup then fails is retained; the
+/// message names the leftover source.
 #[derive(Debug)]
 pub struct ArchiveError {
     message: String,
@@ -108,11 +112,14 @@ impl ArchiveTier {
     /// Tries a filesystem rename first and falls back to a recursive copy
     /// across filesystems. The source is unlinked only after the destination
     /// is confirmed present. A name already on the tier is disambiguated
-    /// rather than overwritten. Every failure leaves the source in place.
+    /// rather than overwritten. A copy that fails before that confirmation
+    /// discards the incomplete destination and leaves the source in place.
+    /// Once source cleanup begins, the confirmed destination is retained.
     ///
     /// # Errors
-    /// The source could not be moved, copied, or confirmed. The source is
-    /// still at `source`.
+    /// The source could not be moved, copied, or confirmed, or a confirmed
+    /// destination could not have its source fully removed. An incomplete
+    /// destination is discarded; a confirmed destination is kept.
     pub fn archive(&self, class: RecordClass, name: &str, source: &Path) -> Result<ArchivedRecord, ArchiveError> {
         if !source.is_dir() {
             return Err(ArchiveError::message(format!("{} is not a directory", source.display())));
@@ -196,9 +203,24 @@ impl ArchiveTier {
                 dest_bytes
             )));
         }
-        if let Err(error) = fs::remove_dir_all(source) {
-            let _ = remove_tree(dest);
-            return Err(ArchiveError::io(source, &error));
+        match fs::remove_dir_all(source) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                // The destination is the only complete copy once unlinking starts.
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::janitor",
+                    source = %source.display(),
+                    dest = %dest.display(),
+                    %error,
+                    "janitor: archive copy is complete but the source could not be removed; destination left in place",
+                );
+                return Err(ArchiveError::message(format!(
+                    "copied {} to {}; source cleanup failed ({error}); destination left in place",
+                    source.display(),
+                    dest.display(),
+                )));
+            }
         }
         Ok(ArchivedRecord { class, name: name.to_owned(), path: dest.to_path_buf(), bytes: dest_bytes })
     }
@@ -286,4 +308,71 @@ fn tree_bytes(path: &Path) -> u64 {
         }
     }
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    fn a_confirmed_copy_unlinks_the_source() {
+        // The fallback path must still finish the move: dest present, source gone.
+        let scratch = tempfile::tempdir().expect("a working root is created");
+        let source = scratch.path().join("source");
+        fs::create_dir_all(&source).expect("the source dir is created");
+        fs::write(source.join("record"), b"kept").expect("the record writes");
+        let dest = scratch.path().join("dest");
+
+        let record = ArchiveTier::copy_then_remove(RecordClass::Evidence, "record-evidence", &source, &dest)
+            .expect("the copy-then-remove path completes");
+
+        assert_eq!(record.bytes, 4);
+        assert_eq!(fs::read(dest.join("record")).expect("the destination reads"), b"kept");
+        assert!(!source.exists(), "the source is gone after a confirmed copy");
+    }
+
+    #[test]
+    fn a_source_cleanup_failure_keeps_the_complete_destination() {
+        // Tripwire: `remove_dir_all` can unlink some source files and then fail.
+        // Deleting the confirmed destination at that point loses the only complete
+        // copy of those records.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let scratch = tempfile::tempdir().expect("a working root is created");
+        let source = scratch.path().join("source");
+        let nested = source.join("nested");
+        fs::create_dir_all(&nested).expect("the source tree is created");
+        fs::write(source.join("gone"), b"already-copied").expect("the top-level record writes");
+        fs::write(nested.join("kept"), b"still-there").expect("the nested record writes");
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o500)).expect("the nested dir refuses unlinks");
+        let dest = scratch.path().join("dest");
+
+        let error = ArchiveTier::copy_then_remove(RecordClass::Evidence, "record-evidence", &source, &dest)
+            .expect_err("source cleanup cannot finish");
+        let _ = fs::set_permissions(&nested, fs::Permissions::from_mode(0o700));
+
+        assert!(dest.is_dir(), "the confirmed destination remains");
+        assert_eq!(
+            fs::read(dest.join("gone")).expect("the unlinked source file still lives on the tier"),
+            b"already-copied"
+        );
+        assert_eq!(
+            fs::read(dest.join("nested").join("kept")).expect("the nested record is intact"),
+            b"still-there"
+        );
+        assert!(source.is_dir(), "leftover source remains as cleanup debt");
+        let message = error.to_string();
+        assert!(
+            message.contains("destination left in place"),
+            "the error reports the destination as retained: {message}"
+        );
+        assert!(
+            message.contains("source cleanup failed"),
+            "the error reports leftover source cleanup debt: {message}"
+        );
+    }
 }
