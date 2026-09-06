@@ -104,7 +104,7 @@ fn load_panel_with_host(harness: &mut SubstrateHarness, kit_wasm: &[u8], script:
     load_panel_with_host_spec(
         harness,
         kit_wasm,
-        BehaviorHostSpec {
+        &BehaviorHostSpec {
             wrapped: WidgetKind::Slider,
             wrapped_config,
             script: ScriptRef::Inline(script),
@@ -129,7 +129,7 @@ fn load_panel_with_radio_host(harness: &mut SubstrateHarness, kit_wasm: &[u8]) {
     load_panel_with_host_spec(
         harness,
         kit_wasm,
-        BehaviorHostSpec {
+        &BehaviorHostSpec {
             wrapped: WidgetKind::Radio,
             wrapped_config,
             script: ScriptRef::None,
@@ -140,7 +140,7 @@ fn load_panel_with_radio_host(harness: &mut SubstrateHarness, kit_wasm: &[u8]) {
     );
 }
 
-fn load_panel_with_host_spec(harness: &mut SubstrateHarness, kit_wasm: &[u8], host_spec: BehaviorHostSpec) {
+fn load_panel_with_host_spec(harness: &mut SubstrateHarness, kit_wasm: &[u8], host_spec: &BehaviorHostSpec) {
     let config = PanelConfig {
         x: 10.0,
         y: 10.0,
