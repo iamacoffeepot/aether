@@ -397,10 +397,14 @@ pub struct CoordinatorConfig {
     /// the GitHub REST adapter remains authoritative) or `local` (an absolute
     /// bare-repository path via [`authority_repo`](Self::authority_repo)).
     ///
+    /// Those two names are the whole vocabulary. An unknown value is a boot
+    /// fault rather than a silent GitHub selection: a typo such as `locla`
+    /// would otherwise point mutations at the wrong authority.
+    ///
     /// Named `AETHER_BLOOMERY_AUTHORITY_BACKEND` rather than under this
     /// struct's `AETHER_GITHUB` prefix: which store owns the refs is how the
     /// coordinator is being operated, not a GitHub-connection property.
-    #[config(env = "AETHER_BLOOMERY_AUTHORITY_BACKEND", default = "github")]
+    #[config(env = "AETHER_BLOOMERY_AUTHORITY_BACKEND", default = "github", parse = parse_authority_backend)]
     pub authority_backend: String,
     /// Absolute filesystem path to the bare repository used when
     /// [`authority_backend`](Self::authority_backend) is `local`. Empty (the
@@ -528,6 +532,39 @@ const GITHUB_REQUESTS_PER_TICK: u32 = 6;
 /// inspects on the shared client.
 pub const JANITOR_REF_PRUNES_PER_TICK: usize = 1;
 
+/// Closed git-data backends [`CoordinatorConfig::authority_backend`] may name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthorityBackend {
+    /// GitHub REST adapter; the default.
+    Github,
+    /// Fleet-local bare repository at [`CoordinatorConfig::authority_repo`].
+    Local,
+}
+
+impl AuthorityBackend {
+    fn parse(name: &str) -> Result<Self, UnknownAuthorityBackend> {
+        match name.trim() {
+            "github" => Ok(Self::Github),
+            "local" => Ok(Self::Local),
+            _ => Err(UnknownAuthorityBackend),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Github => "github",
+            Self::Local => "local",
+        }
+    }
+}
+
+/// Confique `parse_env` for [`CoordinatorConfig::authority_backend`]: only
+/// `github` and `local` resolve; empty is unset (the default); any other
+/// name is a hard error rather than GitHub.
+fn parse_authority_backend(s: &str) -> Result<String, UnknownAuthorityBackend> {
+    AuthorityBackend::parse(s).map(|backend| backend.as_str().to_owned())
+}
+
 impl CoordinatorConfig {
     /// The resolved mainline ref, normalized into the forms the source port
     /// addresses it by (ADR-0186).
@@ -537,10 +574,21 @@ impl CoordinatorConfig {
         MainlineRef::new(&self.mainline_ref)
     }
 
+    /// The resolved git-data backend, or a boot fault when the name is not
+    /// `github` or `local`.
+    pub fn authority(&self) -> Result<AuthorityBackend, ConfigError> {
+        AuthorityBackend::parse(&self.authority_backend).map_err(|error| {
+            ConfigError::unparseable("AETHER_BLOOMERY_AUTHORITY_BACKEND", &self.authority_backend, error)
+        })
+    }
+
     /// Whether the source port should open a fleet-local git-data backend.
+    ///
+    /// Unknown names are a resolve/boot fault via [`Self::authority`]; this
+    /// predicate is only meaningful after that gate.
     #[must_use]
     pub fn uses_local_authority(&self) -> bool {
-        self.authority_backend == "local"
+        matches!(self.authority(), Ok(AuthorityBackend::Local))
     }
 
     /// The git repository the transform runner materializes worktrees from.
@@ -641,6 +689,11 @@ impl CoordinatorConfig {
 #[derive(Debug)]
 struct HeartbeatSilenceZero;
 
+/// Why an authority-backend name outside `{github, local}` is refused rather
+/// than treated as GitHub.
+#[derive(Debug)]
+struct UnknownAuthorityBackend;
+
 /// Why a source-replica boot without the single-writer marker is refused.
 #[derive(Debug)]
 pub struct MissingWriterMarker {
@@ -655,6 +708,14 @@ impl fmt::Display for HeartbeatSilenceZero {
 }
 
 impl Error for HeartbeatSilenceZero {}
+
+impl fmt::Display for UnknownAuthorityBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("must be github or local")
+    }
+}
+
+impl Error for UnknownAuthorityBackend {}
 
 impl fmt::Display for MissingWriterMarker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -818,7 +879,7 @@ impl GithubConnectionConfig {
 mod tests {
     use clap::Parser as _;
 
-    use super::{CoordinatorConfig, GithubConnectionConfig};
+    use super::{AuthorityBackend, CoordinatorConfig, GithubConnectionConfig, parse_authority_backend};
     use crate::bloomery::BloomeryCli;
 
     // A throwaway 2048-bit RSA keypair (never a real credential) — the fixture
@@ -1015,6 +1076,7 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         assert_eq!(coordinator.batch_restart_young_secs, 60);
         assert_eq!(coordinator.batch_restart_addition, 24);
         assert_eq!(coordinator.authority_backend, "github");
+        assert_eq!(coordinator.authority().expect("the default is github"), AuthorityBackend::Github);
         assert!(!coordinator.uses_local_authority());
         assert!(coordinator.single_writer_marker.is_empty());
     }
@@ -1053,6 +1115,32 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
             CoordinatorConfig::default().require_single_writer_marker(&GithubConnectionConfig::default()).is_ok(),
             "a GitHub-authority boot does not need the marker",
         );
+    }
+
+    #[test]
+    fn an_unknown_authority_backend_is_refused_rather_than_selecting_github() {
+        // The plausible bug: `AETHER_BLOOMERY_AUTHORITY_BACKEND=locla` parsed as
+        // a free String and `uses_local_authority` compared only against
+        // "local", so every other value — including a typo for local — took the
+        // GitHub branch and pointed mutations at the wrong authority (#5585).
+        assert!(
+            parse_authority_backend("locla").is_err(),
+            "parse_env must refuse unknown names instead of passing them through"
+        );
+        assert_eq!(parse_authority_backend("github").expect("github is a backend"), "github");
+        assert_eq!(parse_authority_backend("local").expect("local is a backend"), "local");
+        assert!(parse_authority_backend("").is_err(), "empty is unset so the default github applies");
+
+        let coordinator = CoordinatorConfig { authority_backend: "locla".into(), ..CoordinatorConfig::default() };
+        let error = coordinator.authority().expect_err("unknown must not resolve");
+        let message = error.to_string();
+        assert!(message.contains("AETHER_BLOOMERY_AUTHORITY_BACKEND"), "{message}");
+        assert!(message.contains("locla"), "{message}");
+        assert!(message.contains("github or local"), "{message}");
+
+        let local = CoordinatorConfig { authority_backend: "local".into(), ..CoordinatorConfig::default() };
+        assert_eq!(local.authority().expect("local is a backend"), AuthorityBackend::Local);
+        assert!(local.uses_local_authority());
     }
 
     #[test]
