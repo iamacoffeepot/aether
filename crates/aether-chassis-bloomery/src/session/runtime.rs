@@ -405,30 +405,20 @@ impl SqliteSessionStore {
         manifest: &SessionManifest,
         routing: Option<(u32, &str, bool)>,
     ) -> rusqlite::Result<ReleaseOutcome> {
-        // Prove ownership before depositing (#3665). A release presenting a
-        // lease the row no longer holds is a stale holder returning after its
-        // lease expired and was re-acquired by someone else; depositing anyway
-        // would overwrite the live holder's session bytes with an older
-        // transcript and clear their lease, so a third holder could then acquire
-        // a transcript still being resumed. Refusing is what makes the lease
-        // exclusive rather than advisory.
+        // Prove ownership in the same write that deposits (#3665, #5568). A
+        // release presenting a lease the row no longer holds is a stale holder
+        // returning after its lease expired and was re-acquired; depositing
+        // anyway would overwrite the live holder's session bytes with an older
+        // transcript and clear their lease. A prior SELECT then an unconditional
+        // upsert leaves a window where another connection can reacquire between
+        // the check and the write; the ON CONFLICT WHERE is the proof, so that
+        // window does not exist. `IS` (not `=`) keeps a cold deposit (`None`)
+        // matching an unleased row (`lease_token` NULL). A conflicting row whose
+        // token does not match is a no-op (`changes() == 0`), not an error.
         //
-        // A cold deposit (`None`) is held to the same rule: it is legitimate
-        // only against a row nobody holds, or no row at all. Otherwise dropping
-        // the token would be a way to win the race by presenting nothing.
-        let held: Option<Option<String>> = self
-            .conn
-            .query_row(
-                "SELECT lease_token FROM sessions WHERE model = ?1 AND effort = ?2 AND task = ?3",
-                rusqlite::params![key.model, key.effort, key.task],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?;
-        if let Some(held) = held
-            && held.as_deref() != lease.map(|lease| lease.0.as_str())
-        {
-            return Ok(ReleaseOutcome::NotLeaseHolder);
-        }
+        // A cold deposit is still legitimate against no row at all: INSERT of a
+        // new key does not evaluate the WHERE. Dropping the token is not a way
+        // to win a held row, because a live token fails `IS NULL`.
 
         // The read set is audit-only (#3341) — carried as JSON so a caller's
         // path list round-trips without a delimiter convention.
@@ -443,7 +433,7 @@ impl SqliteSessionStore {
         // a warm release updates the row a resume leased, a cold release inserts.
         // Routing columns use COALESCE so a mail-path / slot-guard release that
         // carries no provenance keeps whatever a prior routed deposit wrote.
-        self.conn.execute(
+        match self.conn.execute(
             "INSERT INTO sessions
                (model, effort, task, session_bytes, receipt, parent_receipt, head_hash,
                 context_tokens, workspace_tree_hash, read_files, deposited_at, leased_until,
@@ -462,7 +452,8 @@ impl SqliteSessionStore {
                lease_token = NULL,
                deposit_count = COALESCE(excluded.deposit_count, sessions.deposit_count),
                canonical_slot = COALESCE(excluded.canonical_slot, sessions.canonical_slot),
-               builder_eligible = COALESCE(excluded.builder_eligible, sessions.builder_eligible)",
+               builder_eligible = COALESCE(excluded.builder_eligible, sessions.builder_eligible)
+             WHERE sessions.lease_token IS ?15",
             rusqlite::params![
                 key.model,
                 key.effort,
@@ -478,9 +469,12 @@ impl SqliteSessionStore {
                 deposit_count,
                 canonical_slot,
                 builder_eligible,
+                lease.map(|lease| lease.0.as_str()),
             ],
-        )?;
-        Ok(ReleaseOutcome::Deposited)
+        )? {
+            0 => Ok(ReleaseOutcome::NotLeaseHolder),
+            _ => Ok(ReleaseOutcome::Deposited),
+        }
     }
 }
 
@@ -719,7 +713,7 @@ impl NativeActor for SessionPoolCapability {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionBackend, SqliteSessionStore};
+    use super::{LEASE_SEQUENCE, ReleaseOutcome, SessionBackend, SqliteSessionStore};
     use crate::session::kinds::{SessionKey, SessionManifest};
 
     const HOUR_SECS: u64 = 3600;
@@ -926,5 +920,173 @@ CREATE TABLE sessions (
         let saturated =
             super::CalibrationAggregates { observations: 1, turn_sum: u64::MAX, context_sum: 0 }.fold(10, 0);
         assert_eq!(saturated.turn_sum, u64::MAX, "a saturated sum must not wrap");
+    }
+
+    /// Handshake for [`a_stale_release_blocked_on_a_writer_sees_the_reacquired_lease`]:
+    /// the busy handler is a `fn` pointer, so the blocked/unblock flags live here.
+    mod stale_deposit_busy {
+        use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+        use std::time::{Duration, Instant};
+
+        pub const TIMEOUT: Duration = Duration::from_secs(5);
+
+        struct Gate {
+            blocked: bool,
+            unblock: bool,
+        }
+
+        static GATE: Mutex<Gate> = Mutex::new(Gate { blocked: false, unblock: false });
+        static CV: Condvar = Condvar::new();
+
+        fn lock() -> MutexGuard<'static, Gate> {
+            GATE.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+
+        fn wait_until(mut gate: MutexGuard<'static, Gate>, ready: fn(&Gate) -> bool) -> bool {
+            let deadline = Instant::now() + TIMEOUT;
+            while !ready(&gate) {
+                let now = Instant::now();
+                if now >= deadline {
+                    return false;
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                let (next, timed) = match CV.wait_timeout(gate, remaining) {
+                    Ok(pair) => pair,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                gate = next;
+                if timed.timed_out() && !ready(&gate) {
+                    return false;
+                }
+            }
+            true
+        }
+
+        pub fn reset() {
+            *lock() = Gate { blocked: false, unblock: false };
+        }
+
+        pub fn on_busy(n: i32) -> bool {
+            if n > 1_000 {
+                return false;
+            }
+            let mut gate = lock();
+            gate.blocked = true;
+            CV.notify_all();
+            wait_until(gate, |gate| gate.unblock)
+        }
+
+        pub fn wait_blocked() -> bool {
+            wait_until(lock(), |gate| gate.blocked)
+        }
+
+        pub fn unblock() {
+            let mut gate = lock();
+            gate.unblock = true;
+            drop(gate);
+            CV.notify_all();
+        }
+
+        pub struct UnblockOnDrop;
+
+        impl Drop for UnblockOnDrop {
+            fn drop(&mut self) {
+                unblock();
+            }
+        }
+    }
+
+    #[test]
+    fn a_stale_release_blocked_on_a_writer_sees_the_reacquired_lease() {
+        // Tripwire (#5568 / F0017): lease proof must be the write, not a prior
+        // SELECT. WAL lets a reader proceed against a BEGIN IMMEDIATE writer, so
+        // the old SELECT-then-unconditional-upsert would observe X's token, block
+        // on the INSERT, then overwrite Y after this reservation commits. The
+        // single UPSERT evaluates `lease_token` only once the writer lock is
+        // free, so it sees Y. Lives here because it must install a busy_handler
+        // and hold Immediate on the real pool connections.
+        use std::sync::atomic::Ordering;
+        use std::thread;
+
+        use rusqlite::TransactionBehavior;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sessions.db");
+        let path = path.to_str().expect("utf-8 temp path");
+
+        let mut stale = SqliteSessionStore::open(path, HOUR_SECS, LEASE_SECS, CAP).expect("stale pool opens");
+        let mut live = SqliteSessionStore::open(path, HOUR_SECS, LEASE_SECS, CAP).expect("live pool opens");
+        stale.release(&key(), None, "digest-1", &manifest("head-A", 1000, 1000)).expect("cold deposit");
+        let x = stale.acquire(&key(), "head-A", 1000).expect("X leases").expect("X leases the pooled session");
+
+        stale_deposit_busy::reset();
+        stale.conn.busy_handler(Some(stale_deposit_busy::on_busy)).expect("busy handler installs");
+
+        let key = key();
+        let now = 1000 + LEASE_SECS;
+        let y_token = format!(
+            "{}:{}:{}:{now}:{}",
+            key.model,
+            key.effort,
+            key.task,
+            LEASE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let y_expiry = now.saturating_add(LEASE_SECS);
+        let x_lease = x.lease;
+
+        let outcome = thread::scope(|scope| {
+            // Immediate must be taken before spawn so the deposit thread blocks,
+            // and it must be a scope local so a panic drops the reservation
+            // (and UnblockOnDrop) before `scope` joins that thread.
+            let tx = live
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .expect("writer reservation");
+            let _unblock = stale_deposit_busy::UnblockOnDrop;
+            let release = scope.spawn(|| {
+                stale.release(&key, Some(&x_lease), "digest-STALE", &manifest("head-A", 1000, 1002))
+            });
+            assert!(
+                stale_deposit_busy::wait_blocked(),
+                "stale.release must block on the Immediate writer reservation ({:?})",
+                stale_deposit_busy::TIMEOUT,
+            );
+            // acquire's lease-marking UPDATE, on the reserved writer: acquire()
+            // itself would try to open a nested transaction on this connection.
+            tx.execute(
+                "UPDATE sessions SET leased_until = ?4, lease_token = ?5 WHERE model = ?1 AND effort = ?2 AND task = ?3",
+                rusqlite::params![
+                    key.model,
+                    key.effort,
+                    key.task,
+                    i64::try_from(y_expiry).unwrap_or(i64::MAX),
+                    y_token.as_str(),
+                ],
+            )
+            .expect("Y's lease lands while X is blocked");
+            tx.commit().expect("reservation releases");
+            stale_deposit_busy::unblock();
+            release.join().expect("release thread panicked")
+        })
+        .expect("blocked release sqlite");
+        stale.conn.busy_handler(None).expect("busy handler clears");
+
+        assert_eq!(
+            outcome,
+            ReleaseOutcome::NotLeaseHolder,
+            "X's deposit must refuse after Y reacquired while it waited",
+        );
+        let (bytes, token, leased_until): (String, Option<String>, Option<i64>) = live
+            .conn
+            .query_row(
+                "SELECT session_bytes, lease_token, leased_until FROM sessions
+                 WHERE model = ?1 AND effort = ?2 AND task = ?3",
+                rusqlite::params![key.model, key.effort, key.task],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("row still exists");
+        assert_eq!(bytes, "digest-1", "a refused deposit must not overwrite the live transcript");
+        assert_eq!(token.as_deref(), Some(y_token.as_str()), "Y's token must still be the row's lease");
+        assert!(leased_until.is_some(), "the live holder's lease must not have been cleared");
     }
 }

@@ -246,6 +246,22 @@ fn a_cold_release_cannot_jump_a_held_lease() {
 }
 
 #[test]
+fn a_cold_deposit_still_replaces_an_unleased_row() {
+    // Last-writer-wins on a free row. Tripwire: proving the lease with
+    // `lease_token = ?` (SQL NULL ≠ NULL) would refuse every subsequent cold
+    // deposit and freeze the first transcript in the pool.
+    let mut store = store();
+    store.release(&key(), None, "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
+    assert_eq!(
+        store.release(&key(), None, "digest-2", &manifest("head-A", 1000, 1001)).unwrap(),
+        ReleaseOutcome::Deposited,
+        "a second cold deposit over a free row must land",
+    );
+    let leased = store.acquire(&key(), "head-A", 1002).unwrap().expect("the later cold deposit is what resumes");
+    assert_eq!(leased.session_bytes, "digest-2");
+}
+
+#[test]
 fn release_chains_parent_receipt() {
     // Manifest chaining: a resumed `release` names the acquired session's receipt
     // as its `parent_receipt`, and the pool hands the new receipt to the next
