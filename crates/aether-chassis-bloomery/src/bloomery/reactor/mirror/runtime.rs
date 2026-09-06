@@ -506,7 +506,7 @@ mod tests {
     //! the timer / `spawn_detached` are the thin glue the chassis-boot test and
     //! compilation cover; this pins the behavior that actually mirrors and acks.
 
-    use std::fmt::{Debug, Write as _};
+    use std::fmt::Debug;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::Receiver;
     use std::sync::{Arc, Mutex};
@@ -895,25 +895,45 @@ mod tests {
         assert!(store.drain_topic(Topic::LandingReceipt).unwrap().is_empty(), "the land receipt topic is untouched");
     }
 
-    #[derive(Debug)]
+    #[derive(Clone, Debug, Default)]
     struct CapturedEvent {
         level: String,
         target: String,
-        fields: String,
+        sequence: Option<u64>,
+        error: Option<String>,
+        message: Option<String>,
+    }
+
+    impl CapturedEvent {
+        fn set_text(&mut self, name: &str, value: String) {
+            match name {
+                "error" => self.error = Some(value),
+                "message" => self.message = Some(value),
+                _ => {}
+            }
+        }
+    }
+
+    impl Visit for CapturedEvent {
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            if field.name() == "sequence" {
+                self.sequence = Some(value);
+            }
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.set_text(field.name(), value.to_owned());
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+            self.set_text(field.name(), format!("{value:?}"));
+        }
     }
 
     #[derive(Default)]
     struct RecordedEvents(Mutex<Vec<CapturedEvent>>);
 
     struct EventRecorder(Arc<RecordedEvents>);
-
-    struct RenderedEvent(String);
-
-    impl Visit for RenderedEvent {
-        fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
-            let _ = write!(self.0, " {}={value:?}", field.name());
-        }
-    }
 
     impl Subscriber for EventRecorder {
         fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
@@ -929,13 +949,13 @@ mod tests {
         fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
 
         fn event(&self, event: &TracingEvent<'_>) {
-            let mut fields = RenderedEvent(String::new());
-            event.record(&mut fields);
-            self.0.0.lock().unwrap().push(CapturedEvent {
+            let mut captured = CapturedEvent {
                 level: event.metadata().level().to_string(),
                 target: event.metadata().target().to_owned(),
-                fields: fields.0,
-            });
+                ..CapturedEvent::default()
+            };
+            event.record(&mut captured);
+            self.0.0.lock().unwrap().push(captured);
         }
 
         fn enter(&self, _span: &Id) {}
@@ -943,26 +963,23 @@ mod tests {
         fn exit(&self, _span: &Id) {}
     }
 
-    #[test]
-    fn publish_replica_batch_emits_production_diagnostics() {
-        // Tripwire: FakeReplica used to manufacture its own alerts vector, so
-        // deleting production tracing::error still left these tests green.
-        // Capture the thread-local subscriber events publish_replica_batch emits.
-        struct ExpectedDiagnostic {
-            level: &'static str,
-            target: &'static str,
-            error: &'static str,
-            message: &'static str,
-        }
-        struct Case {
-            replica: Arc<FakeReplica>,
-            sequence: u64,
-            acks: bool,
-            diagnostic: Option<ExpectedDiagnostic>,
-        }
+    struct ExpectedDiagnostic {
+        level: &'static str,
+        target: &'static str,
+        error: &'static str,
+        message: &'static str,
+    }
 
-        let cases = [
-            Case {
+    struct ReplicaPublishCase {
+        replica: Arc<FakeReplica>,
+        sequence: u64,
+        acks: bool,
+        diagnostic: Option<ExpectedDiagnostic>,
+    }
+
+    fn replica_diagnostic_cases() -> [ReplicaPublishCase; 4] {
+        [
+            ReplicaPublishCase {
                 replica: FakeReplica::rejecting(),
                 sequence: 3,
                 acks: false,
@@ -973,7 +990,7 @@ mod tests {
                     message: "source replica force-push was rejected; GitHub was not updated",
                 }),
             },
-            Case {
+            ReplicaPublishCase {
                 replica: FakeReplica::refusing(),
                 sequence: 11,
                 acks: false,
@@ -984,7 +1001,7 @@ mod tests {
                     message: "source replica push was refused; GitHub was not updated",
                 }),
             },
-            Case {
+            ReplicaPublishCase {
                 replica: FakeReplica::failing(),
                 sequence: 17,
                 acks: false,
@@ -995,54 +1012,52 @@ mod tests {
                     message: "source replica push failed; leaving it undelivered to re-drive",
                 }),
             },
-            Case { replica: FakeReplica::ok(), sequence: 23, acks: true, diagnostic: None },
-        ];
+            ReplicaPublishCase { replica: FakeReplica::ok(), sequence: 23, acks: true, diagnostic: None },
+        ]
+    }
 
-        for case in cases {
-            let events = Arc::new(RecordedEvents::default());
-            let shell = SourceReplicaShell::new(Arc::clone(&case.replica));
-            let acks = with_default(EventRecorder(Arc::clone(&events)), || {
-                publish_replica_batch(&shell, &[replica_entry(case.sequence)])
-            });
-            assert_eq!(case.replica.count(), 1, "the fake only records the publish it was asked for");
-            if case.acks {
-                assert_eq!(acks.len(), 1, "success acks the replica topic");
-                assert!(
-                    acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::SourceReplica),
-                    "the ack covers the replica topic",
-                );
-                assert_eq!(acks[0].through_sequence, case.sequence, "success acks through the published sequence");
-            } else {
-                assert!(acks.is_empty(), "a failed push is not acked");
-            }
+    fn assert_replica_publish_outcome(case: ReplicaPublishCase) {
+        let events = Arc::new(RecordedEvents::default());
+        let shell = SourceReplicaShell::new(case.replica.clone());
+        let acks = with_default(EventRecorder(Arc::clone(&events)), || {
+            publish_replica_batch(&shell, &[replica_entry(case.sequence)])
+        });
+        assert_eq!(case.replica.count(), 1, "the fake only records the publish it was asked for");
+        if case.acks {
+            assert_eq!(acks.len(), 1, "success acks the replica topic");
+            assert!(
+                acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::SourceReplica),
+                "the ack covers the replica topic",
+            );
+            assert_eq!(acks[0].through_sequence, case.sequence, "success acks through the published sequence");
+        } else {
+            assert!(acks.is_empty(), "a failed push is not acked");
+        }
 
-            let captured = events.0.lock().unwrap();
-            match case.diagnostic {
-                Some(expected) => {
-                    assert_eq!(captured.len(), 1, "one production diagnostic: {captured:?}");
-                    assert_eq!(captured[0].level, expected.level, "{captured:?}");
-                    assert_eq!(captured[0].target, expected.target, "{captured:?}");
-                    assert!(
-                        captured[0].fields.contains(&format!("sequence={}", case.sequence)),
-                        "sequence {} missing from {}",
-                        case.sequence,
-                        captured[0].fields,
-                    );
-                    assert!(
-                        captured[0].fields.contains(expected.error),
-                        "error detail missing from {}",
-                        captured[0].fields,
-                    );
-                    assert!(
-                        captured[0].fields.contains(expected.message),
-                        "distinguishing message missing from {}",
-                        captured[0].fields,
-                    );
-                }
-                None => {
-                    assert!(captured.is_empty(), "success must not raise an operator alert: {captured:?}");
-                }
+        let captured = events.0.lock().unwrap();
+        match case.diagnostic {
+            Some(expected) => {
+                assert_eq!(captured.len(), 1, "one production diagnostic: {captured:?}");
+                let event = &captured[0];
+                assert_eq!(event.level, expected.level, "{event:?}");
+                assert_eq!(event.target, expected.target, "{event:?}");
+                assert_eq!(event.sequence, Some(case.sequence), "{event:?}");
+                assert_eq!(event.error.as_deref(), Some(expected.error), "{event:?}");
+                assert_eq!(event.message.as_deref(), Some(expected.message), "{event:?}");
             }
+            None => {
+                assert!(captured.is_empty(), "success must not raise an operator alert: {captured:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn publish_replica_batch_emits_production_diagnostics() {
+        // Tripwire: FakeReplica used to manufacture its own alerts vector, so
+        // deleting production tracing::error still left these tests green.
+        // Capture the thread-local subscriber events publish_replica_batch emits.
+        for case in replica_diagnostic_cases() {
+            assert_replica_publish_outcome(case);
         }
     }
 
