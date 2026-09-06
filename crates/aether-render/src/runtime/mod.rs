@@ -103,7 +103,7 @@ mod texture;
 pub use self::config::{RenderParams, RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay};
 pub use self::pipeline::RenderGpu;
 
-use self::pipeline::{record_material_batches, record_overlay_batches};
+use self::pipeline::{OverlayObservation, record_material_batches, record_overlay_batches};
 use self::surface::{boot_offscreen, build_wireframe_overlay_pipeline, try_boot_offscreen};
 #[cfg(feature = "desktop")]
 use self::target::{DesktopGpuContext, FirstWindowGpu, RenderTarget, WindowTargets};
@@ -198,6 +198,11 @@ pub struct RenderCapabilityState {
     /// because `record_overlay_batches` takes `&Mutex<_>` (the harness sink's
     /// shape); the pumped state is single-threaded, so it never contends.
     overlay_observation: Mutex<Vec<DrawTexturedQuads>>,
+    /// The shape batches that survived the same record (ADR-0213), kept
+    /// beside `overlay_observation` because the sink's element is a quad
+    /// batch and a shape batch carries shapes, not quads. Same lifetime,
+    /// same reader.
+    shape_observation: Mutex<Vec<DrawShapes>>,
 
     pending_capture: Option<PendingCapture>,
 
@@ -281,6 +286,19 @@ impl RenderCapabilityState {
     #[must_use]
     pub fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
         self.overlay_observation.lock().expect("mutex poisoned; fail-fast per ADR-0063").clone()
+    }
+
+    /// Snapshot the ordered shape batches from the most recently committed
+    /// frame as their public [`DrawShapes`] shape (ADR-0213) — the shape
+    /// companion of [`Self::committed_overlay_snapshot`], populated by the
+    /// same record. Empty until a frame with a recorded shape batch commits.
+    ///
+    /// # Panics
+    ///
+    /// If the observation mutex is poisoned (fail-fast per ADR-0063).
+    #[must_use]
+    pub fn committed_shape_snapshot(&self) -> Vec<DrawShapes> {
+        self.shape_observation.lock().expect("mutex poisoned; fail-fast per ADR-0063").clone()
     }
 
     /// Push a dispatched kind id into the `SubstrateHarness` observation
@@ -606,7 +624,7 @@ impl RenderCapabilityState {
                 &mut self.textures,
                 &self.quad_last_submitted,
                 self.camera_state,
-                Some(&self.overlay_observation),
+                Some(OverlayObservation { quads: &self.overlay_observation, shapes: &self.shape_observation }),
             );
         }
         // Every pass above rasterized into the multisampled pair; resolve
@@ -776,6 +794,7 @@ impl NativeActor for RenderCapability {
             wire_pipeline: None,
             last_submission: None,
             overlay_observation: Mutex::new(Vec::new()),
+            shape_observation: Mutex::new(Vec::new()),
             pending_capture: None,
             registry,
             mailer,
@@ -1375,6 +1394,7 @@ mod tests {
             wire_pipeline: None,
             last_submission: None,
             overlay_observation: Mutex::new(Vec::new()),
+            shape_observation: Mutex::new(Vec::new()),
             pending_capture: None,
             registry: Arc::clone(mailer.registry()),
             mailer: Arc::clone(mailer),

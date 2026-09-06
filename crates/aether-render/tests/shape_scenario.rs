@@ -16,7 +16,7 @@ use std::env;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::visual::{Image, background_top_left, coverage, decode_png};
 use aether_harness_substrate_capture::{
-    RenderHarnessBuilderExt,
+    RenderHarnessBuilderExt, RenderHarnessExt,
     test_helpers::{envelope, has_wgpu_adapter, pixel_is_lit, rgba_at},
 };
 use aether_kinds::{ClipRect, QuadSpace};
@@ -187,4 +187,14 @@ fn a_shape_batch_is_bounded_by_its_clip() {
     assert!(pixel_is_lit(&img, 24, 16, bg, TOLERANCE), "a pixel inside the clip is painted");
     assert!(!pixel_is_lit(&img, 16, 16, bg, TOLERANCE), "a pixel of the shape outside the clip stays clear");
     assert!(pixel_is_lit(&img, 48, 34, bg, TOLERANCE), "the following unclipped batch paints outside the clip");
+
+    // The harness's shape view of the committed overlay reports both
+    // batches in submission order with their clips — what a widget
+    // scenario reads instead of the pixels.
+    let snapshot = harness.committed_shape_snapshot();
+    assert_eq!(snapshot.len(), 2, "both shape batches were recorded; snapshot: {snapshot:?}");
+    assert_eq!(snapshot[0].clip, Some(ClipRect { x: 20.0, y: 12.0, width: 12.0, height: 10.0 }));
+    assert_eq!(snapshot[0].shapes[0].corner_radius, 4.0);
+    assert_eq!(snapshot[1].clip, None);
+    assert_eq!(snapshot[1].shapes[0].x, 44.0);
 }

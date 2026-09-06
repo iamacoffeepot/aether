@@ -10,17 +10,18 @@ use aether_kinds::{QuadScale, QuadSpace};
 use aether_substrate::render::{
     CompositeBlend, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw, MaterialPassDraw,
     MaterialPassRecord, MaterialPipelines, OverlayDraw, OverlaySource, Pipeline, QUAD_VERTEX_BUFFER_BYTES,
-    QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD, QUAD_VERTICES_PER_TRIANGLE, QuadPipeline, SHAPE_VERTEX_STRIDE,
-    SHAPE_VERTICES_PER_SHAPE, ShapeParams, Targets, TextureBindings, build_main_pipeline, build_material_pipelines,
-    build_quad_pipeline, build_texture_bindings, push_coverage_params, push_material_rect_vertices,
-    push_screen_quad_vertices, push_screen_shape_vertices, push_screen_triangle_vertices, push_textured_params,
-    push_world_quad_vertices, push_world_shape_vertices, record_material_pass, record_quad_overlay_pass,
+    QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD, QUAD_VERTICES_PER_TRIANGLE, QuadPipeline, SHAPE_VERTEX_BUFFER_BYTES,
+    SHAPE_VERTEX_STRIDE, SHAPE_VERTICES_PER_SHAPE, ShapeParams, Targets, TextureBindings, build_main_pipeline,
+    build_material_pipelines, build_quad_pipeline, build_texture_bindings, push_coverage_params,
+    push_material_rect_vertices, push_screen_quad_vertices, push_screen_shape_vertices, push_screen_triangle_vertices,
+    push_textured_params, push_world_quad_vertices, push_world_shape_vertices, record_material_pass,
+    record_quad_overlay_pass,
 };
 
 use super::material::{MaterialBatch, accepts_coverage_texture};
 use super::quad::{OverlayGeometry, QuadBatch};
 use super::texture::TextureRegistry;
-use crate::{DrawTexturedQuads, QuadBlend, Shape};
+use crate::{DrawShapes, DrawTexturedQuads, QuadBlend, Shape};
 
 /// The mail vocabulary's blend, as the record layer's selector. Two
 /// enums rather than one because the substrate's render module owns no
@@ -59,6 +60,14 @@ fn shape_params(shape: &Shape) -> ShapeParams {
     }
 }
 
+/// The `SubstrateHarness`-only committed-overlay sinks
+/// [`record_overlay_batches`] fills: the quad batches and the shape batches
+/// that survived one record, each as its public mail shape.
+pub(super) struct OverlayObservation<'a> {
+    pub quads: &'a Mutex<Vec<DrawTexturedQuads>>,
+    pub shapes: &'a Mutex<Vec<DrawShapes>>,
+}
+
 /// Mirror the low-level overlay pass's scissor rejection without moving that
 /// validation earlier in the production render path. This runs only when
 /// `SubstrateHarness` has installed an observation sink; keep its arithmetic aligned
@@ -82,8 +91,9 @@ fn overlay_clip_is_visible(clip: Option<[f32; 4]>, target_width: u32, target_hei
 /// `encoder`. The pumped render runtime records its owned-field quad
 /// accumulator through here, so the realize-then-expand logic lives once.
 /// `targets` and `registry` are the already-borrowed offscreen targets and
-/// texture registry; `observation` is the `SubstrateHarness`-only
-/// committed-overlay sink (production passes `None`).
+/// texture registry; `observation` is the `SubstrateHarness`-only pair of
+/// committed-overlay sinks — quad batches and shape batches — (production
+/// passes `None`).
 ///
 /// Two-pass texture realization + quad expansion in a single function
 /// avoids threading split borrows through multiple helpers; the line
@@ -96,11 +106,12 @@ pub(super) fn record_overlay_batches(
     registry: &mut TextureRegistry,
     batches: &[QuadBatch],
     view_proj: [f32; 16],
-    observation: Option<&Mutex<Vec<DrawTexturedQuads>>>,
+    observation: Option<OverlayObservation<'_>>,
 ) {
     if batches.is_empty() {
-        if let Some(observed) = observation {
-            observed.lock().expect("mutex poisoned; fail-fast per ADR-0063").clear();
+        if let Some(observation) = observation {
+            observation.quads.lock().expect("mutex poisoned; fail-fast per ADR-0063").clear();
+            observation.shapes.lock().expect("mutex poisoned; fail-fast per ADR-0063").clear();
         }
         return;
     }
@@ -242,10 +253,24 @@ pub(super) fn record_overlay_batches(
         view_proj,
     );
 
-    if let Some(observed) = observation {
+    if let Some(observation) = observation {
         let mut recorded = Vec::new();
-        if vertex_bytes.len() <= QUAD_VERTEX_BUFFER_BYTES {
+        let mut recorded_shapes = Vec::new();
+        let pass_recorded =
+            vertex_bytes.len() <= QUAD_VERTEX_BUFFER_BYTES && shape_vertex_bytes.len() <= SHAPE_VERTEX_BUFFER_BYTES;
+        if pass_recorded {
             for batch in batches {
+                if let OverlayGeometry::Shapes { space, shapes } = &batch.geometry {
+                    let clip = batch.clip.as_ref().map(|clip| [clip.x, clip.y, clip.width, clip.height]);
+                    if !shapes.is_empty() && overlay_clip_is_visible(clip, targets.width(), targets.height()) {
+                        recorded_shapes.push(DrawShapes {
+                            space: space.clone(),
+                            clip: batch.clip.clone(),
+                            shapes: shapes.clone(),
+                        });
+                    }
+                    continue;
+                }
                 // The sink's element is `DrawTexturedQuads`, so a
                 // screen-triangle or shape batch has no quad list to
                 // report here. The snapshot is a quad-batch view of the
@@ -272,7 +297,8 @@ pub(super) fn record_overlay_batches(
                 }
             }
         }
-        *observed.lock().expect("mutex poisoned; fail-fast per ADR-0063") = recorded;
+        *observation.quads.lock().expect("mutex poisoned; fail-fast per ADR-0063") = recorded;
+        *observation.shapes.lock().expect("mutex poisoned; fail-fast per ADR-0063") = recorded_shapes;
     }
 }
 

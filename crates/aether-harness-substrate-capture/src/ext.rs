@@ -18,7 +18,8 @@ use aether_harness_substrate::{
     ExecutionError, FrameHook, HarnessOp, RenderHookWiring, SubstrateHarness, SubstrateHarnessBuilder,
 };
 use aether_render::{
-    DrawTexturedQuads, Frame, ProgramTimings, ProgramTimingsResult, RenderCapability, RenderParams, RenderTuningConfig,
+    DrawShapes, DrawTexturedQuads, Frame, ProgramTimings, ProgramTimingsResult, RenderCapability, RenderParams,
+    RenderTuningConfig,
 };
 use aether_substrate::PumpedSlot;
 use aether_substrate::mail::mailer::Mailer;
@@ -50,6 +51,16 @@ impl GpuFrameHook {
     #[allow(clippy::redundant_closure_for_method_calls)]
     pub fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
         self.slot.read_state(|state| state.committed_overlay_snapshot()).unwrap_or_default()
+    }
+
+    /// The shape batches (ADR-0213) that survived the most recently
+    /// committed frame's record, in submission order — the shape companion
+    /// of [`Self::committed_overlay_snapshot`].
+    // Same unnameable-state closure form as `committed_overlay_snapshot`.
+    #[allow(clippy::redundant_closure_for_method_calls)]
+    #[must_use]
+    pub fn committed_shape_snapshot(&self) -> Vec<DrawShapes> {
+        self.slot.read_state(|state| state.committed_shape_snapshot()).unwrap_or_default()
     }
 
     /// Deterministically lose the concrete offscreen device. This is a
@@ -188,6 +199,13 @@ pub trait RenderHarnessExt {
     #[must_use]
     fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads>;
 
+    /// The `draw_shapes` batches (ADR-0213) that survived the most recently
+    /// committed frame's record, in submission order — the shape companion
+    /// of [`Self::committed_overlay_snapshot`], read the same way and under
+    /// the same `with_render` requirement.
+    #[must_use]
+    fn committed_shape_snapshot(&self) -> Vec<DrawShapes>;
+
     /// Force loss of the currently installed offscreen device and return its
     /// generation. The next request/frame services the normal ADR-0173
     /// replacement transaction. Available only on a harness built with
@@ -218,6 +236,13 @@ impl RenderHarnessExt for SubstrateHarness {
             .and_then(|hook| hook.as_any().downcast_ref::<GpuFrameHook>())
             .expect("committed_overlay_snapshot requires a harness built with .with_render() (issue #3764)")
             .committed_overlay_snapshot()
+    }
+
+    fn committed_shape_snapshot(&self) -> Vec<DrawShapes> {
+        self.frame_hook()
+            .and_then(|hook| hook.as_any().downcast_ref::<GpuFrameHook>())
+            .expect("committed_shape_snapshot requires a harness built with .with_render() (issue #3764)")
+            .committed_shape_snapshot()
     }
 
     fn force_render_device_loss(&self) -> Result<u64, String> {
