@@ -400,13 +400,13 @@ fn decode_seed(bytes: &[u8]) -> Option<[u8; 32]> {
     if let Ok(raw) = <[u8; 32]>::try_from(bytes) {
         return Some(raw);
     }
-    let text = str::from_utf8(bytes).ok()?.trim();
-    if text.len() != 64 {
+    let raw = str::from_utf8(bytes).ok()?.trim().as_bytes();
+    if raw.len() != 64 {
         return None;
     }
     let mut seed = [0_u8; 32];
-    for (index, slot) in seed.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).ok()?;
+    for (slot, pair) in seed.iter_mut().zip(raw.chunks_exact(2)) {
+        *slot = u8::from_str_radix(str::from_utf8(pair).ok()?, 16).ok()?;
     }
     Some(seed)
 }
@@ -439,8 +439,8 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::{
-        AuthorityDoor, AuthorizedSigner, Ed25519KeyProvider, KeyProvider, OperatorKey, SignatureEnvelope,
-        authorization_message, sign_authorization,
+        AuthorityDoor, AuthorizedSigner, Ed25519KeyProvider, KeyProvider, OperatorKey, OperatorKeyError,
+        SignatureEnvelope, authorization_message, sign_authorization,
     };
     use crate::digest::Digest;
     use crate::ids::KeyId;
@@ -644,5 +644,31 @@ mod tests {
         let from_raw = OperatorKey::load(KeyId("operator".into()), &raw_path).expect("raw loads");
         let from_hex = OperatorKey::load(KeyId("operator".into()), &hex_path).expect("hex loads");
         assert_eq!(from_raw.seed(), from_hex.seed());
+    }
+
+    // Tripwire: a 64-byte UTF-8 seed is not 64 hex characters. Matching the hex
+    // form's byte length must still be InvalidSeed when a pair is not two hex
+    // digits — including when those two bytes sit inside a multi-byte character.
+    #[test]
+    fn a_malformed_unicode_seed_is_invalid_not_a_panic() {
+        let dir = scratch("unicode-seed");
+        let path = dir.join("seed");
+        let seed = format!("a\u{e9}{}", "0".repeat(61));
+        assert_eq!(seed.len(), 64);
+        assert!(!seed.is_char_boundary(2), "the first hex pair must split é");
+        fs::write(&path, seed.as_bytes()).unwrap_or_else(|error| panic!("write seed: {error}"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .unwrap_or_else(|error| panic!("set mode: {error}"));
+        }
+
+        let error = OperatorKey::load(KeyId("operator".into()), &path)
+            .expect_err("a unicode seed of hex length is not a seed");
+        assert!(
+            matches!(error, OperatorKeyError::InvalidSeed { .. }),
+            "malformed unicode is InvalidSeed, not a panic or another refusal: {error}"
+        );
     }
 }
