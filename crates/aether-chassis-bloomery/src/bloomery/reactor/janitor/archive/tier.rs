@@ -8,6 +8,9 @@ use std::io;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 /// Which class of record a path on the tier holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecordClass {
@@ -203,7 +206,7 @@ impl ArchiveTier {
                 dest_bytes
             )));
         }
-        match fs::remove_dir_all(source) {
+        match remove_confirmed_source(source) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -289,6 +292,18 @@ fn remove_tree(path: &Path) -> bool {
     }
 }
 
+/// Unlink `source` after the destination copy is confirmed.
+///
+/// Production always calls `remove_dir_all`. Tests may inject a remover that
+/// unlinks part of the tree and then fails.
+fn remove_confirmed_source(source: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(fault) = take_source_remove_fault() {
+        return fault(source);
+    }
+    fs::remove_dir_all(source)
+}
+
 fn tree_bytes(path: &Path) -> u64 {
     let mut bytes: u64 = 0;
     let mut stack = vec![path.to_path_buf()];
@@ -311,10 +326,36 @@ fn tree_bytes(path: &Path) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
+thread_local! {
+    static SOURCE_REMOVE_FAULT: Cell<Option<fn(&Path) -> io::Result<()>>> = const { Cell::new(None) };
+}
 
+#[cfg(test)]
+fn take_source_remove_fault() -> Option<fn(&Path) -> io::Result<()>> {
+    SOURCE_REMOVE_FAULT.with(Cell::take)
+}
+
+#[cfg(test)]
+#[must_use]
+fn install_source_remove_fault(fault: fn(&Path) -> io::Result<()>) -> SourceRemoveFault {
+    SOURCE_REMOVE_FAULT.with(|slot| slot.set(Some(fault)));
+    SourceRemoveFault
+}
+
+#[cfg(test)]
+struct SourceRemoveFault;
+
+#[cfg(test)]
+impl Drop for SourceRemoveFault {
+    fn drop(&mut self) {
+        SOURCE_REMOVE_FAULT.with(|slot| slot.set(None));
+    }
+}
+
+#[cfg(test)]
+mod tests {
     use std::fs;
+    use std::io;
 
     use super::*;
 
@@ -337,34 +378,26 @@ mod tests {
 
     #[test]
     fn a_source_cleanup_failure_keeps_the_complete_destination() {
-        // Tripwire: `remove_dir_all` can unlink some source files and then fail.
-        // Deleting the confirmed destination at that point loses the only complete
-        // copy of those records.
-        use std::os::unix::fs::PermissionsExt as _;
-
+        // Tripwire: once unlinking has already removed a source record, deleting
+        // the confirmed destination loses the only complete copy of that record.
         let scratch = tempfile::tempdir().expect("a working root is created");
         let source = scratch.path().join("source");
-        let nested = source.join("nested");
-        fs::create_dir_all(&nested).expect("the source tree is created");
-        fs::write(source.join("gone"), b"already-copied").expect("the top-level record writes");
-        fs::write(nested.join("kept"), b"still-there").expect("the nested record writes");
-        fs::set_permissions(&nested, fs::Permissions::from_mode(0o500)).expect("the nested dir refuses unlinks");
+        fs::create_dir_all(&source).expect("the source dir is created");
+        fs::write(source.join("gone"), b"already-copied").expect("the removed record writes");
+        fs::write(source.join("kept"), b"still-there").expect("the leftover record writes");
         let dest = scratch.path().join("dest");
+        let _source_remove_fault = install_source_remove_fault(unlink_one_source_record_then_fail);
 
         let error = ArchiveTier::copy_then_remove(RecordClass::Evidence, "record-evidence", &source, &dest)
             .expect_err("source cleanup cannot finish");
-        let _ = fs::set_permissions(&nested, fs::Permissions::from_mode(0o700));
 
-        assert!(dest.is_dir(), "the confirmed destination remains");
+        assert!(!source.join("gone").exists(), "the injected remover unlinked one source record");
         assert_eq!(
-            fs::read(dest.join("gone")).expect("the unlinked source file still lives on the tier"),
+            fs::read(dest.join("gone")).expect("the unlinked source record still lives on the tier"),
             b"already-copied"
         );
-        assert_eq!(
-            fs::read(dest.join("nested").join("kept")).expect("the nested record is intact"),
-            b"still-there"
-        );
-        assert!(source.is_dir(), "leftover source remains as cleanup debt");
+        assert_eq!(fs::read(dest.join("kept")).expect("the rest of the copy is intact"), b"still-there");
+        assert!(source.join("kept").is_file(), "leftover source remains as cleanup debt");
         let message = error.to_string();
         assert!(
             message.contains("destination left in place"),
@@ -374,5 +407,10 @@ mod tests {
             message.contains("source cleanup failed"),
             "the error reports leftover source cleanup debt: {message}"
         );
+    }
+
+    fn unlink_one_source_record_then_fail(source: &Path) -> io::Result<()> {
+        fs::remove_file(source.join("gone"))?;
+        Err(io::Error::other("injected source cleanup fault"))
     }
 }
