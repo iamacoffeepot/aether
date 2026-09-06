@@ -6,8 +6,8 @@
 use aether_bloomery::testing::digest;
 use aether_bloomery::{
     AwaitingSurfaceView, BloomId, BloomStatus, BloomView, Digest, Evidence, EvidenceKind, Excuse, ExecutorFaultView,
-    HostFaultView, LeaseEvictionView, MemberPark, MemberView, StageId, VerifyFailureSet, ViewDocument, Wedge,
-    WithdrawnView, WorkpieceId,
+    HostFaultView, LeaseEvictionView, MemberPark, MemberView, OperatorHold, StageId, VerifyFailureSet, ViewDocument,
+    Wedge, WithdrawnView, WorkpieceId,
 };
 use aether_harness_bloomery::{Oracle, Progress, Quiescence, classify, is_answerable};
 
@@ -123,6 +123,81 @@ fn a_construct_park_is_an_accountable_stop() {
         MemberView { park: Some(MemberPark { stage: StageId::Construct, evidence: digest(9) }), ..member(false, None) };
 
     assert!(matches!(classify(&document(BloomStatus::Sealed, vec![parked]), &[]), Quiescence::Wedged(_)));
+}
+
+fn operator_hold() -> OperatorHold {
+    OperatorHold { reason: "the run looks wrong".into(), operator: "eve".into() }
+}
+
+fn held_document(status: BloomStatus, members: Vec<MemberView>) -> ViewDocument {
+    let mut document = document(status, members);
+    document.blooms[0].operator_hold = Some(operator_hold());
+    document
+}
+
+#[test]
+fn a_bloom_hold_is_an_accountable_stop_for_that_blooms_unresolved_members() {
+    // Tripwire (#4976): after the last in-flight lane finishes under a
+    // bloom-wide operator hold, no outstanding order or member-level excuse
+    // remains. That pause is the hold, not a stall. Clearing the hold must
+    // re-expose the same unresolved members as work owed.
+    let held = held_document(BloomStatus::Sealed, vec![member(false, None)]);
+    let quiescence = classify(&held, &[]);
+
+    assert!(
+        matches!(quiescence, Quiescence::Wedged(_)),
+        "a hold with no outstanding work is an accountable stop: {quiescence:?}"
+    );
+    Oracle::check(&held, None, &[])
+        .unwrap_or_else(|violation| panic!("termination must agree the hold is a named stop: {violation}"));
+
+    let mut released = held;
+    released.blooms[0].operator_hold = None;
+    let stalled = classify(&released, &[]);
+    assert!(
+        matches!(stalled, Quiescence::Stalled(_)),
+        "releasing the hold re-exposes the unresolved stall: {stalled:?}"
+    );
+}
+
+#[test]
+fn a_bloom_hold_does_not_excuse_an_outstanding_order() {
+    // Tripwire: outstanding still outranks the projection. A hold that froze
+    // dispatch does not explain a lane that never completed.
+    let stalled = classify(&held_document(BloomStatus::Sealed, vec![member(false, None)]), &["n-lost".to_owned()]);
+
+    assert!(matches!(stalled, Quiescence::Stalled(_)), "an outstanding order outranks a bloom-wide hold: {stalled:?}");
+}
+
+#[test]
+fn a_held_bloom_does_not_excuse_another_blooms_unresolved_members() {
+    // Tripwire: the hold is per bloom. A sibling with no hold and no member
+    // excuse is still work owed.
+    let mixed = ViewDocument {
+        blooms: vec![
+            BloomView {
+                id: BloomId(digest(7)),
+                status: BloomStatus::Sealed,
+                members: vec![member(false, None)],
+                operator_hold: Some(operator_hold()),
+                ..BloomView::default()
+            },
+            BloomView {
+                id: BloomId(digest(8)),
+                status: BloomStatus::Sealed,
+                members: vec![MemberView { workpiece: WorkpieceId("other".to_owned()), ..member(false, None) }],
+                ..BloomView::default()
+            },
+        ],
+        ..ViewDocument::default()
+    };
+
+    match classify(&mixed, &[]) {
+        Quiescence::Stalled(why) => {
+            assert!(why.contains("other"), "the unheld sibling is the work owed: {why}");
+        }
+        other => panic!("a hold on one bloom must not quiet another's unexplained members: {other:?}"),
+    }
 }
 
 fn member_carrying(excuse: Excuse) -> MemberView {
