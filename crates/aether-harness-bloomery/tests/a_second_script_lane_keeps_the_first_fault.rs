@@ -11,12 +11,25 @@
 #![allow(clippy::unwrap_used)]
 
 use aether_bloomery::testing::digest;
-use aether_bloomery::{MemberView, StageId, VerifyFailureSet, WorkpieceId};
+use aether_bloomery::{BloomId, MemberView, StageId, VerifyFailureSet, WorkpieceId};
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun};
-use aether_harness_bloomery::{BloomeryHarness, LaneScript, Oracle};
+use aether_harness_bloomery::{BloomeryHarness, LaneScript, Oracle, Progress, is_answerable};
 
 fn named<'a>(members: &'a [MemberView], workpiece: &str) -> &'a MemberView {
     members.iter().find(|member| member.workpiece.0 == workpiece).unwrap_or_else(|| panic!("no member {workpiece}"))
+}
+
+// The named stops Excuse::ALL counts — not host_fault alone.
+// Die/missing-evidence admits MemberExecutorFault (machinery retry or
+// wedge). Projection host_fault is only the preflight VerifyHostFault hold.
+fn named_stop(member: &MemberView) -> bool {
+    member.resolution.is_some()
+        || member.wedge.is_some()
+        || member.host_fault.is_some()
+        || member.park.is_some()
+        || member.awaiting_surface.is_some()
+        || member.evicted_by.is_some()
+        || member.withdrawn.is_some()
 }
 
 #[test]
@@ -77,25 +90,74 @@ fn two_members_verify_keep_distinct_faults_without_a_task_header() {
     );
     harness.script_lane(&WorkpieceId("wp-b".into()), StageId::Refine, &[LaneScript::Decline]);
     let bloom = harness.seal_members(&[("wp-a", digest(0x51)), ("wp-b", digest(0x52))]);
-    harness.run_until(
-        |harness| {
-            let ledger = harness.ledger();
-            let view = harness.bloom(bloom);
-            verify_mode(&ledger, "wp-a") == Some(LaneMode::ExitsNonZero)
-                && verify_mode(&ledger, "wp-b") == Some(LaneMode::Fail)
-                && view.members.iter().any(|member| {
-                    member.workpiece.0 == "wp-a" && (member.host_fault.is_some() || member.wedge.is_some())
-                })
-                && view.members.iter().any(|member| member.workpiece.0 == "wp-b" && member.park.is_some())
-        },
-        80,
-    );
+    wait_until_distinct_verify_faults(&mut harness, bloom, 80);
 
     let ledger = harness.ledger();
     assert_eq!(verify_mode(&ledger, "wp-a"), Some(LaneMode::ExitsNonZero), "A's verify Die survived B's later script");
     assert_eq!(verify_mode(&ledger, "wp-b"), Some(LaneMode::Fail), "B's verify Fail was not consumed by A's Die");
     Oracle::check(&harness.view(), harness.doctor().as_ref(), &harness.outstanding())
         .unwrap_or_else(|violation| panic!("{violation}"));
+}
+
+fn wait_until_distinct_verify_faults(harness: &mut BloomeryHarness, bloom: BloomId, ticks: u32) {
+    let mut last = None;
+    let mut still = 0_u32;
+    for _ in 0..ticks {
+        harness.tick();
+        let progress = Progress::observe(&harness.view(), harness.outstanding(), harness.ledger().len());
+        if last.as_ref() == Some(&progress) {
+            still += 1;
+        } else {
+            last = Some(progress.clone());
+            still = 0;
+        }
+        if still >= 2 && is_answerable(&progress) {
+            check_oracle(harness, "");
+        }
+        let ledger = harness.ledger();
+        let view = harness.bloom(bloom);
+        if verify_mode(&ledger, "wp-a") == Some(LaneMode::ExitsNonZero)
+            && verify_mode(&ledger, "wp-b") == Some(LaneMode::Fail)
+            && view.members.iter().all(named_stop)
+        {
+            let progress = Progress::observe(&harness.view(), harness.outstanding(), harness.ledger().len());
+            if is_answerable(&progress) {
+                check_oracle(harness, "");
+            }
+            return;
+        }
+    }
+    check_oracle(harness, "tick budget exhausted: ");
+    let view = harness.bloom(bloom);
+    let members: Vec<_> = view
+        .members
+        .iter()
+        .map(|member| {
+            format!(
+                "{} resolution={} wedge={} host_fault={} park={} awaiting_surface={} evicted_by={} machinery_rolls={}",
+                member.workpiece.0,
+                member.resolution.is_some(),
+                member.wedge.is_some(),
+                member.host_fault.is_some(),
+                member.park.is_some(),
+                member.awaiting_surface.is_some(),
+                member.evicted_by.is_some(),
+                member.machinery_rolls,
+            )
+        })
+        .collect();
+    let ledger: Vec<_> = harness
+        .ledger()
+        .iter()
+        .map(|run| format!("{:?} {:?} {:?} {:?}", run.workpiece, run.stage, run.command, run.mode))
+        .collect();
+    panic!("predicate not reached inside {ticks} ticks; members={members:?} ledger={ledger:?}");
+}
+
+fn check_oracle(harness: &mut BloomeryHarness, context: &str) {
+    harness.doctor_tick();
+    Oracle::check(&harness.view(), harness.doctor().as_ref(), &harness.outstanding())
+        .unwrap_or_else(|violation| panic!("{context}{violation}"));
 }
 
 #[test]
