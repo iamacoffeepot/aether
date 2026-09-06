@@ -219,7 +219,7 @@ mod tests {
     use std::path::Path;
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
-    use std::{fs, process};
+    use std::{env, fs, process, thread};
 
     use rusqlite::Connection;
     use tempfile::TempDir;
@@ -362,7 +362,7 @@ mod tests {
 
     #[allow(clippy::disallowed_methods, reason = "test child handshake, not capability configuration")]
     fn test_env(name: &str) -> Option<String> {
-        std::env::var(name).ok()
+        env::var(name).ok()
     }
 
     /// When the parent re-execs this test with the handshake env, become one
@@ -394,8 +394,8 @@ mod tests {
     }
 
     fn race_two_holders(dir: &TempDir, path: &str) {
-        let exe = std::env::current_exe().expect("the test executable");
-        let test_thread = std::thread::current();
+        let exe = env::current_exe().expect("the test executable");
+        let test_thread = thread::current();
         let test_name = test_thread.name().expect("libtest names the test thread");
         let go = dir.path().join("go");
         let ready_a = dir.path().join("ready-a");
@@ -411,14 +411,15 @@ mod tests {
 
         let body_a = wait_for_file(&result_a, Duration::from_secs(30));
         let body_b = wait_for_file(&result_b, Duration::from_secs(30));
-        let (claimed, held) = match (parse_claim_result(&body_a), parse_claim_result(&body_b)) {
-            (ClaimChildResult::Claimed(pid), ClaimChildResult::Held(holder))
-            | (ClaimChildResult::Held(holder), ClaimChildResult::Claimed(pid)) => (pid, holder),
-            _ => panic!(
+        let ((ClaimChildResult::Claimed(claimed), ClaimChildResult::Held(held))
+        | (ClaimChildResult::Held(held), ClaimChildResult::Claimed(claimed))) =
+            (parse_claim_result(&body_a), parse_claim_result(&body_b))
+        else {
+            panic!(
                 "exactly one coordinator must win the claim; {body_a:?} (pid {}) and {body_b:?} (pid {})",
                 child_a.0.id(),
                 child_b.0.id(),
-            ),
+            )
         };
         assert_eq!(held, claimed, "the loser must name the winner");
         assert!(
@@ -462,13 +463,13 @@ mod tests {
     fn wait_for_file(path: &Path, budget: Duration) -> String {
         let started = Instant::now();
         loop {
-            if let Ok(body) = fs::read_to_string(path) {
-                if !body.is_empty() {
-                    return body;
-                }
+            if let Ok(body) = fs::read_to_string(path)
+                && !body.is_empty()
+            {
+                return body;
             }
             assert!(started.elapsed() < budget, "timed out waiting for {}", path.display());
-            std::thread::sleep(Duration::from_millis(5));
+            thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -485,7 +486,7 @@ mod tests {
 
     fn hold_until_killed() -> ! {
         loop {
-            std::thread::sleep(Duration::from_secs(60));
+            thread::sleep(Duration::from_mins(1));
         }
     }
 
