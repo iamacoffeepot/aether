@@ -25,8 +25,7 @@ fn sealed() -> (Snapshot, BloomId, WorkpieceId, Digest) {
     let bloom = spec.id();
     let workpiece = spec.members()[0].workpiece.clone();
     let scope_revision = spec.members()[0].scope_revision;
-    let (snapshot, _) =
-        step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", Fact::Seal(spec)));
     (snapshot, bloom, workpiece, scope_revision)
 }
 
@@ -180,10 +179,8 @@ fn a_rejected_integrate_leaves_surface_holds_and_file_leases() {
     let snapshot = observe_write(&snapshot, bloom, &workpiece);
     let parked = request_surface(&snapshot, bloom, &workpiece, scope_revision);
 
-    let (after, decided) = step(
-        &parked,
-        &event("integrate", Fact::Integrate { bloom, claim: unbound_claim(&workpiece, scope_revision) }),
-    );
+    let (after, decided) =
+        step(&parked, &event("integrate", Fact::Integrate { bloom, claim: unbound_claim(&workpiece, scope_revision) }));
 
     assert!(
         matches!(decided.outcome, Outcome::IntegrateRejected(IntegrateError::EvidenceNotBound)),
@@ -237,8 +234,7 @@ fn an_integration_still_clears_surface_holds_and_file_leases() {
     let snapshot = observe_write(&snapshot, bloom, &workpiece);
     let parked = request_surface(&snapshot, bloom, &workpiece, scope_revision);
 
-    let (after, decided) =
-        step(&parked, &event("integrate", Fact::Integrate { bloom, claim: claim("wp", 1, 51) }));
+    let (after, decided) = step(&parked, &event("integrate", Fact::Integrate { bloom, claim: claim("wp", 1, 51) }));
 
     assert!(
         matches!(decided.outcome, Outcome::Integrated { .. }),
