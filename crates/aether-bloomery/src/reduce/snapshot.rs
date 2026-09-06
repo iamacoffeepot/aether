@@ -6,6 +6,7 @@
 //! (ADR-0190) — the split that keeps the decision pure, the evolution
 //! mechanical, and history immune to rule changes.
 
+use alloc::collections::btree_map::Entry;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -145,9 +146,14 @@ pub struct Snapshot {
     /// anywhere, so this table is the only durable record of what a repair was
     /// allowed to edit — which is why it is folded rather than recomputed: a
     /// later re-scope of either parent would otherwise silently rewrite the
-    /// history of a bound that had already been used. Folded from
-    /// [`Fact::CompositionNarrowed`] the way a surface request is folded from
-    /// its own fact, so no new [`Decision`] enters the frozen graph.
+    /// history of a bound that had already been used. Pending waiters are
+    /// folded the same way, including a same-tree dedup, so replay remembers
+    /// every Verify that attributed the composition still in flight. An
+    /// accepted repair completion retires that pending set — the members it
+    /// dispatched are no longer waiting, and a later attribution over the same
+    /// parents starts fresh. Folded from [`Fact::CompositionNarrowed`] and
+    /// [`Fact::AttemptCompleted`] the way a surface request is folded from its
+    /// own fact, so no new [`Decision`] enters the frozen graph.
     /// `#[serde(default)]` is the `surface_requests` precedent.
     #[serde(default)]
     pub narrowed_compositions: BTreeMap<BloomId, BTreeMap<WorkpieceId, NarrowedComposition>>,
@@ -736,19 +742,33 @@ pub struct AwaitingSurface {
 }
 
 /// One narrowed composition as the snapshot holds it (ADR-0210): the parents it
-/// is over, and the member whose verdict minted it.
+/// is over, and every member still waiting on the repair in flight.
 ///
-/// The verified member is kept because its verdict judged a tree it does not
-/// own: once the repair exists, that member has to be put back on the line
-/// against the repaired tree rather than left holding a refusal about work that
-/// has been redone.
+/// Two independent Verify failures can name the same parent set. Each waiter
+/// judged a tree it does not own, so once the repair exists every still-eligible
+/// waiter has to be put back on the line against the repaired tree rather than
+/// left holding a refusal about work that has been redone. Admission order is
+/// preserved and a member already waiting is not recorded twice. The pending
+/// set is retired when that repair completion is applied, so a later
+/// attribution over the same parents cannot reset a member already resumed.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct NarrowedComposition {
     /// The parents, the diagnostic paths, and the derived bound.
     pub parents: CompositionParents,
-    /// The member whose Verify produced the verdict, and which owes nothing for
-    /// it.
-    pub verified: WorkpieceId,
+    /// Members whose Verify attributed this composition and who are still
+    /// waiting on the repair in flight, in journal order. Empty after that
+    /// repair completes. Each owes nothing for the collision; the composition
+    /// repairs it.
+    pub waiters: Vec<WorkpieceId>,
+}
+
+impl NarrowedComposition {
+    /// Record `waiter` if it is not already waiting.
+    fn remember_waiter(&mut self, waiter: WorkpieceId) {
+        if !self.waiters.iter().any(|existing| existing == &waiter) {
+            self.waiters.push(waiter);
+        }
+    }
 }
 
 /// One member's exclusive write lease on one repository path (ADR-0204).
@@ -1065,6 +1085,7 @@ impl Snapshot {
         next.record_refusals(decisions);
         next.record_surface_request(event, decisions);
         next.record_narrowed_composition(event, decisions);
+        next.retire_composition_waiters(event, decisions);
         next.record_file_leases(event, decisions);
         next.record_suppression_disposition(event, decisions);
         next
@@ -1341,28 +1362,63 @@ impl Snapshot {
         }
     }
 
-    /// Record a minted conflict workpiece's parents and bound (ADR-0210).
+    /// Record a minted conflict workpiece's parents, bound, and waiters
+    /// (ADR-0210).
     ///
-    /// Gated on [`Outcome::CompositionNarrowed`] so a refused attribution cannot
-    /// plant a subject the reducer rejected, and keyed by the minted workpiece
-    /// so a bloom holding two collisions at once keeps them apart. A later
-    /// attribution of the same pair replaces the entry: the parents are the
-    /// same by construction, and the bound and paths are the newest reading of
-    /// what the repair is answering.
+    /// Gated on an accepted attribution so a refused one cannot plant a subject
+    /// the reducer rejected, and keyed by the minted workpiece so a bloom
+    /// holding two collisions at once keeps them apart. A later mint of the
+    /// same pair updates the bound and paths to the newest reading of what the
+    /// repair is answering. Same-tree dedup and a later wedge still remember
+    /// the new waiter: two Verifies can attribute one composition, and losing
+    /// either strands that member after the repair completes.
     fn record_narrowed_composition(&mut self, event: &Event, decisions: &Decisions) {
-        let Fact::CompositionNarrowed { bloom, attribution, .. } = &event.fact else {
+        let Fact::CompositionNarrowed { bloom, verified, attribution, .. } = &event.fact else {
             return;
         };
-        let Outcome::CompositionNarrowed { workpiece, .. } = &decisions.outcome else {
+        let (workpiece, replace_parents) = match &decisions.outcome {
+            Outcome::CompositionNarrowed { workpiece, .. } | Outcome::NarrowCompositionWedged { workpiece, .. } => {
+                (workpiece, true)
+            }
+            Outcome::CompositionRepairAlreadyInFlight { workpiece, .. } => (workpiece, false),
+            _ => return,
+        };
+        match self.narrowed_compositions.entry(*bloom).or_default().entry(workpiece.clone()) {
+            Entry::Occupied(mut occupied) => {
+                let existing = occupied.get_mut();
+                if replace_parents {
+                    existing.parents.clone_from(attribution);
+                }
+                existing.remember_waiter(verified.clone());
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(NarrowedComposition {
+                    parents: attribution.clone(),
+                    waiters: alloc::vec![verified.clone()],
+                });
+            }
+        }
+    }
+
+    /// Drop the pending waiter set after an accepted narrowed-composition
+    /// repair (ADR-0210).
+    ///
+    /// Gated on [`Outcome::CompositionRepaired`] so a rejected or duplicate
+    /// completion cannot retire waiters the reducer did not resume. Reduce
+    /// already emitted this completion's re-verify dispatches against the
+    /// pending set; apply folds those effects first, then clears the set so a
+    /// later attribution over the same parents starts fresh rather than
+    /// resetting members already resumed onto their own repaired candidate.
+    fn retire_composition_waiters(&mut self, event: &Event, decisions: &Decisions) {
+        if !matches!(decisions.outcome, Outcome::CompositionRepaired { .. }) {
+            return;
+        }
+        let Fact::AttemptCompleted { bloom, workpiece, .. } = &event.fact else {
             return;
         };
-        let Fact::CompositionNarrowed { verified, .. } = &event.fact else {
-            return;
-        };
-        self.narrowed_compositions.entry(*bloom).or_default().insert(
-            workpiece.clone(),
-            NarrowedComposition { parents: attribution.clone(), verified: verified.clone() },
-        );
+        if let Some(narrowed) = self.narrowed_compositions.get_mut(bloom).and_then(|by_id| by_id.get_mut(workpiece)) {
+            narrowed.waiters.clear();
+        }
     }
 
     /// The collisions `bloom` has minted a subject for, in minted-subject
