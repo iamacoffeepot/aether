@@ -94,7 +94,12 @@ pub fn run<I: IntoIterator<Item = String>>(args: I, worktree: &Path) -> Result<i
     // harness bug that loses the file should surface as a scenario assertion
     // rather than as every lane refusing to run.
     let script = LaneScript::read_from(script_dir).unwrap_or_default();
-    let mode = script.mode_for(&args.command, script::occurrence_of(script_dir, &args.command)?);
+    let workpiece = args.task.as_deref().and_then(script::workpiece_from_task).map(str::to_owned);
+    let mode = script.mode_for_workpiece(
+        &args.command,
+        workpiece.as_deref(),
+        script::occurrence_of_workpiece(script_dir, &args.command, workpiece.as_deref())?,
+    );
 
     // Recorded before the run acts, so a mode that never exits still leaves
     // proof it was dispatched — which is exactly what the "every dispatched
@@ -103,6 +108,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I, worktree: &Path) -> Result<i
         script_dir,
         &LaneRun {
             command: args.command.clone(),
+            workpiece: workpiece.clone(),
             nonce: args.nonce.clone(),
             mode,
             subject: args.subject.clone(),
@@ -155,7 +161,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use aether_bloomery::{CONSTRUCT_IMPLEMENT_COMMAND, VERIFY_CHECK_COMMAND};
+    use aether_bloomery::{CONSTRUCT_IMPLEMENT_COMMAND, VERIFY_CHECK_COMMAND, pin_workpiece_description};
 
     use super::evidence::CANDIDATE_FILE;
     use super::script::{LaneMode, LaneScript, read_ledger};
@@ -243,5 +249,42 @@ mod tests {
         // scenario would silently run the default mode and the scripts would
         // become decoration.
         assert_eq!(script_dir(Path::new("/runs/n-1-evidence")), Path::new("/runs"));
+    }
+
+    #[test]
+    fn a_later_members_script_does_not_replace_the_first_members_fault() {
+        // Tripwire: each script_lane call used to overwrite one global script.
+        // Configuring A to Decline and then B to Pass made both members take
+        // passing behaviour, in dispatch order, because selection keyed only
+        // on command occurrence.
+        let base = tempfile::tempdir().unwrap();
+        LaneScript::all_passing()
+            .then_for("wp-a", CONSTRUCT_IMPLEMENT_COMMAND, LaneMode::Declines)
+            .then_for("wp-b", CONSTRUCT_IMPLEMENT_COMMAND, LaneMode::Pass)
+            .write_to(base.path())
+            .unwrap();
+
+        let run_for = |nonce: &str, workpiece: &str| {
+            let worktree = base.path().join(nonce);
+            let out = base.path().join(format!("{nonce}-evidence"));
+            fs::create_dir_all(&worktree).unwrap();
+            run(
+                vec![
+                    CONSTRUCT_IMPLEMENT_COMMAND.to_owned(),
+                    "--out".to_owned(),
+                    out.to_string_lossy().into_owned(),
+                    "--nonce".to_owned(),
+                    nonce.to_owned(),
+                    "--task".to_owned(),
+                    pin_workpiece_description(workpiece, "the sealed order"),
+                ],
+                &worktree,
+            )
+            .unwrap();
+            read_ledger(base.path()).unwrap().last().unwrap().mode
+        };
+
+        assert_eq!(run_for("n-b", "wp-b"), LaneMode::Pass, "B may dispatch first without stealing A's decline");
+        assert_eq!(run_for("n-a", "wp-a"), LaneMode::Declines);
     }
 }

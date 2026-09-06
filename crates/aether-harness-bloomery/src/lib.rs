@@ -24,6 +24,7 @@ pub mod cells;
 pub mod harness;
 pub mod oracle;
 pub mod scenario;
+mod script;
 pub mod support;
 
 pub use cells::{FixtureHarness, LaneHarness};

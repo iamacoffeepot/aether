@@ -2,17 +2,22 @@
 //!
 //! A scenario needs the same lane program to behave differently on successive
 //! dispatches — a member that fails verification twice and then passes is three
-//! runs of one binary. The nonce cannot select that: the coordinator mints it,
-//! so a test cannot name it in advance. The selection is therefore a **script**
-//! the harness writes beside the run directories: an ordered list of steps, each
-//! naming a lane command and the mode that command's *next* run takes.
+//! runs of one binary — and differently across members of one bloom. The nonce
+//! cannot select that: the coordinator mints it, so a test cannot name it in
+//! advance. The selection is therefore a **script** the harness writes beside
+//! the run directories: an ordered list of steps, each naming a lane command,
+//! optionally a workpiece, and the mode that command's *next* run of that
+//! member takes.
 //!
 //! Consumption has to survive process exit, because every run is a fresh
 //! process. So each run appends a line to a ledger next to the script and counts
-//! the prior lines for its own command to find its index — the (n+1)-th run of
-//! `verify.check` takes the (n+1)-th `verify.check` step. Past the last matching
-//! step the script's `default` mode repeats, so an unbounded retry loop keeps
-//! failing rather than falling off the end.
+//! the prior lines for its own command (and workpiece, when one is known) to
+//! find its index — the (n+1)-th run of `verify.check` for member A takes the
+//! (n+1)-th `verify.check` step keyed to A. Past the last matching step the
+//! script's `default` mode repeats, so an unbounded retry loop keeps failing
+//! rather than falling off the end. Unkeyed steps still match any member of
+//! that command, which is the LaneHarness shape that scripts one command
+//! sequence for the whole bloom.
 //!
 //! The ledger is also the harness's record of what actually ran. It is the only
 //! place a test can see that a review lane was handed `--diff-base`, or that a
@@ -22,6 +27,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
+use aether_bloomery::{LANE_WORKPIECE_HEADER, split_lane_identity};
 use serde::{Deserialize, Serialize};
 
 /// The file name the harness writes its script under, and the mock reads it
@@ -104,7 +110,7 @@ impl fmt::Display for LaneMode {
     }
 }
 
-/// One scripted run: the next run of `command` takes `mode`.
+/// One scripted run: the next run of `command` for `workpiece` takes `mode`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneStep {
     /// The transform command id this step applies to (`verify.check`,
@@ -112,13 +118,34 @@ pub struct LaneStep {
     pub command: String,
     /// What that run does.
     pub mode: LaneMode,
+    /// The member this step is keyed to. `None` matches any member of
+    /// [`Self::command`] — the LaneHarness shape that scripts one sequence for
+    /// the whole bloom. Absent from older scripts on disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workpiece: Option<String>,
 }
 
 impl LaneStep {
-    /// A step naming `mode` for the next run of `command`.
+    /// A step naming `mode` for the next run of `command`, any member.
     #[must_use]
     pub fn new(command: impl Into<String>, mode: LaneMode) -> Self {
-        Self { command: command.into(), mode }
+        Self { command: command.into(), mode, workpiece: None }
+    }
+
+    /// A step naming `mode` for the next run of `command` on `workpiece`.
+    #[must_use]
+    pub fn for_workpiece(workpiece: impl Into<String>, command: impl Into<String>, mode: LaneMode) -> Self {
+        Self { command: command.into(), mode, workpiece: Some(workpiece.into()) }
+    }
+
+    fn matches(&self, command: &str, workpiece: Option<&str>) -> bool {
+        if self.command != command {
+            return false;
+        }
+        match (self.workpiece.as_deref(), workpiece) {
+            (None, _) | (Some(_), None) => true,
+            (Some(scripted), Some(actual)) => scripted == actual,
+        }
     }
 }
 
@@ -155,17 +182,40 @@ impl LaneScript {
         self
     }
 
-    /// Append a step for the next run of `command`.
+    /// Append a step for the next run of `command`, any member.
     #[must_use]
     pub fn then(mut self, command: impl Into<String>, mode: LaneMode) -> Self {
         self.steps.push(LaneStep::new(command, mode));
         self
     }
 
-    /// The mode the `occurrence`-th (zero-based) run of `command` takes.
+    /// Append a step for the next run of `command` on `workpiece`.
+    #[must_use]
+    pub fn then_for(mut self, workpiece: impl Into<String>, command: impl Into<String>, mode: LaneMode) -> Self {
+        self.steps.push(LaneStep::for_workpiece(workpiece, command, mode));
+        self
+    }
+
+    /// The mode the `occurrence`-th (zero-based) run of `command` takes, any member.
     #[must_use]
     pub fn mode_for(&self, command: &str, occurrence: usize) -> LaneMode {
-        self.steps.iter().filter(|step| step.command == command).nth(occurrence).map_or(self.default, |step| step.mode)
+        self.mode_for_workpiece(command, None, occurrence)
+    }
+
+    /// The mode the `occurrence`-th (zero-based) run of `command` for
+    /// `workpiece` takes.
+    ///
+    /// A keyed step matches only that member. An unkeyed step, or a run whose
+    /// workpiece is not yet known (no `Workpiece:` pin on `--task`), still
+    /// walks the command's steps in order so a single-member bare-digest
+    /// scenario keeps the script it wrote.
+    #[must_use]
+    pub fn mode_for_workpiece(&self, command: &str, workpiece: Option<&str>, occurrence: usize) -> LaneMode {
+        self.steps
+            .iter()
+            .filter(|step| step.matches(command, workpiece))
+            .nth(occurrence)
+            .map_or(self.default, |step| step.mode)
     }
 
     /// Write the script to `dir` under [`SCRIPT_FILE`].
@@ -196,6 +246,9 @@ impl LaneScript {
 pub struct LaneRun {
     /// The transform command id.
     pub command: String,
+    /// The member this run belonged to, when the dispatch pinned one on `--task`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workpiece: Option<String>,
     /// The idempotency nonce the coordinator minted.
     pub nonce: String,
     /// What this run did.
@@ -267,13 +320,50 @@ pub fn read_ledger(dir: &Path) -> io::Result<Vec<LaneRun>> {
 /// # Errors
 /// The ledger exists but could not be read.
 pub fn occurrence_of(dir: &Path, command: &str) -> io::Result<usize> {
-    Ok(read_ledger(dir)?.iter().filter(|run| run.command == command).count())
+    occurrence_of_workpiece(dir, command, None)
+}
+
+/// How many runs of `command` for `workpiece` the ledger in `dir` already holds.
+///
+/// `None` counts every run of `command`, which is the unkeyed LaneHarness
+/// index. A named member counts only that member's runs of the command so
+/// sibling construct scripts do not consume each other's steps.
+///
+/// # Errors
+/// The ledger exists but could not be read.
+pub fn occurrence_of_workpiece(dir: &Path, command: &str, workpiece: Option<&str>) -> io::Result<usize> {
+    Ok(read_ledger(dir)?
+        .iter()
+        .filter(|run| {
+            run.command == command
+                && match workpiece {
+                    None => true,
+                    Some(workpiece) => run.workpiece.as_deref() == Some(workpiece),
+                }
+        })
+        .count())
+}
+
+/// The workpiece a construct-lane `--task` pins, when the chassis wrote the
+/// identity header.
+#[must_use]
+pub fn workpiece_from_task(task: &str) -> Option<&str> {
+    split_lane_identity(task)
+        .1
+        .and_then(|header| header.strip_prefix(LANE_WORKPIECE_HEADER))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "a fixture that cannot set up its files reports it by panicking")]
 mod tests {
-    use super::{LaneMode, LaneRun, LaneScript, append_run, occurrence_of, read_ledger};
+    use aether_bloomery::pin_workpiece_description;
+
+    use super::{
+        LaneMode, LaneRun, LaneScript, append_run, occurrence_of, occurrence_of_workpiece, read_ledger,
+        workpiece_from_task,
+    };
 
     #[test]
     fn successive_runs_of_one_command_walk_its_steps_in_order() {
@@ -309,6 +399,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let run = |command: &str, nonce: &str| LaneRun {
             command: command.to_owned(),
+            workpiece: None,
             nonce: nonce.to_owned(),
             mode: LaneMode::Pass,
             subject: None,
@@ -335,5 +426,63 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         assert_eq!(occurrence_of(dir.path(), "verify.check").unwrap(), 0);
+    }
+
+    #[test]
+    fn a_keyed_step_is_not_consumed_by_a_sibling_members_run() {
+        // Tripwire: script_lane used to rebuild one global script, so member
+        // B's Construct Candidate replaced member A's Construct Decline and
+        // both members took passing behaviour.
+        let script = LaneScript::all_passing()
+            .then_for("wp-a", "construct.implement", LaneMode::Declines)
+            .then_for("wp-b", "construct.implement", LaneMode::Pass)
+            .then_for("wp-a", "verify.member", LaneMode::Fail);
+
+        assert_eq!(script.mode_for_workpiece("construct.implement", Some("wp-a"), 0), LaneMode::Declines);
+        assert_eq!(script.mode_for_workpiece("construct.implement", Some("wp-b"), 0), LaneMode::Pass);
+        assert_eq!(
+            script.mode_for_workpiece("verify.member", Some("wp-a"), 0),
+            LaneMode::Fail,
+            "a later stage's step must not erase an earlier stage's fault",
+        );
+        assert_eq!(
+            script.mode_for_workpiece("verify.member", Some("wp-b"), 0),
+            LaneMode::Pass,
+            "a sibling does not inherit a stage it was never scripted for",
+        );
+    }
+
+    #[test]
+    fn the_ledger_counts_each_members_runs_of_one_command_separately() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |workpiece: &str, nonce: &str| LaneRun {
+            command: "construct.implement".to_owned(),
+            workpiece: Some(workpiece.to_owned()),
+            nonce: nonce.to_owned(),
+            mode: LaneMode::Pass,
+            subject: None,
+            diff_base: None,
+            task: None,
+            worktree: None,
+            env: Vec::new(),
+        };
+
+        append_run(dir.path(), &run("wp-a", "n-1")).unwrap();
+        append_run(dir.path(), &run("wp-b", "n-2")).unwrap();
+        append_run(dir.path(), &run("wp-a", "n-3")).unwrap();
+
+        assert_eq!(occurrence_of_workpiece(dir.path(), "construct.implement", Some("wp-a")).unwrap(), 2);
+        assert_eq!(occurrence_of_workpiece(dir.path(), "construct.implement", Some("wp-b")).unwrap(), 1);
+        assert_eq!(
+            occurrence_of(dir.path(), "construct.implement").unwrap(),
+            3,
+            "the unkeyed count still sees every run of the command",
+        );
+    }
+
+    #[test]
+    fn a_pinned_task_header_names_the_member_the_mock_selects_on() {
+        assert_eq!(workpiece_from_task(&pin_workpiece_description("wp-a", "the sealed order")), Some("wp-a"));
+        assert_eq!(workpiece_from_task("the sealed order"), None, "a subject-only prompt has no member pin");
     }
 }

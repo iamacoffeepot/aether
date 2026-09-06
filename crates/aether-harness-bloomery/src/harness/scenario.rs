@@ -18,7 +18,7 @@ use aether_bloomery::{
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex};
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, GetResult};
-use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, LaneScript as MockLaneScript, read_ledger};
+use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, read_ledger};
 use aether_chassis_bloomery::bloomery::{
     BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, DoctorReactorCapability, DoctorReport,
     DoctorTick, ExecutorReactorCapability, GithubConnectionConfig, IntegrateReactorCapability, IntegrateTick,
@@ -265,18 +265,22 @@ impl ScenarioHarness {
 
     /// Write `scripts` for `workpiece`'s `stage` as a mock-lane script.
     ///
+    /// Steps accumulate across calls, keyed by workpiece, stage, and
+    /// occurrence, so configuring a second member or stage keeps the earlier
+    /// fault. An empty workpiece is bloom-less (`BaseVerify`, aggregate
+    /// verify): those steps stay unkeyed, matching the reserved empty member
+    /// axis the order already carries.
+    ///
     /// # Panics
     /// The mock-lane script could not be written.
     pub fn script_lane(&self, workpiece: &WorkpieceId, stage: StageId, scripts: &[LaneScript]) {
-        let command = stage_command(stage);
-        let mut script = MockLaneScript::all_passing();
-        for item in scripts {
-            script = script.then(command, lower_lane_script(item));
-        }
-        // BaseVerify is bloom-less: the reserved empty workpiece is the order's
-        // member axis, same as aggregate verify.
-        let _ = workpiece;
-        script.write_to(Path::new(&self.worktree_base)).expect("the mock-lane script writes");
+        crate::script::write_lane_scripts(
+            Path::new(&self.worktree_base),
+            &workpiece.0,
+            stage_command(stage),
+            scripts.iter().map(lower_lane_script),
+        )
+        .expect("the mock-lane script writes");
     }
 
     /// The served red-base alert, when one is holding the day.
