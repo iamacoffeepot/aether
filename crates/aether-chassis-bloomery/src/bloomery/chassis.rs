@@ -660,6 +660,7 @@ impl BootableChassis for BloomeryChassis {
         let approval_policy_file = coordinator.approval_policy_file.clone();
         let worktree_base = coordinator.local_worktree_base.clone();
         let artifacts_root = coordinator.artifacts_root.clone();
+        let lane_repository = coordinator.lane_repository();
         let http_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), http_port);
         // The component host serves on-demand `aether.component.load` over RPC (the
         // MCP harness / fleet load components at runtime). Built from the same
@@ -763,6 +764,7 @@ impl BootableChassis for BloomeryChassis {
                 correspondence: Some(setups.correspondence),
                 pusher: Some(setups.pusher),
                 worktree_base,
+                lane_repository,
                 archive_base: coordinator.archive_base.clone(),
                 artifacts_root,
                 control_token: coordinator.http_control_token,
@@ -777,6 +779,7 @@ impl BootableChassis for BloomeryChassis {
         let approval_policy_file = coordinator.approval_policy_file.clone();
         let worktree_base = coordinator.local_worktree_base.clone();
         let artifacts_root = coordinator.artifacts_root.clone();
+        let lane_repository = coordinator.lane_repository();
         let http_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), http_port);
         let component_host = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
@@ -813,6 +816,7 @@ impl BootableChassis for BloomeryChassis {
             .with_actor::<BloomeryApiCapability>(ApiParams {
                 approval_policy_file,
                 worktree_base,
+                lane_repository,
                 archive_base: coordinator.archive_base.clone(),
                 artifacts_root,
                 control_token: coordinator.http_control_token,

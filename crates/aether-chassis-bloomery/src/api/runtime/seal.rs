@@ -16,8 +16,8 @@ use serde::de::DeserializeOwned;
 use aether_actor::Manual;
 use aether_bloomery::{
     Admit, ApprovalPolicy, AuthorityDoor, BloomDraft, BloomId, BloomSpec, CommissionStatus, ConfigScopes,
-    DependencyError, Digest, Event, Fact, IdempotencyKey, MemberDependency, Membership, ScopeRevision, SpendCeiling,
-    Statement, SurfacePattern, WorkpieceId, resolve_member_dependencies, surface_intersection,
+    Correspondence, DependencyError, Digest, Event, Fact, IdempotencyKey, MemberDependency, Membership, ScopeRevision,
+    SpendCeiling, Statement, SurfacePattern, WorkpieceId, resolve_member_dependencies, surface_intersection,
 };
 use aether_data::wire::to_vec;
 use aether_http::HttpServerResponse;
@@ -225,6 +225,7 @@ impl ApiCapabilityState {
         loaded: &mut BTreeMap<String, LoadCommissionResult>,
     ) -> Routed {
         let resolution = seal_dependency_resolution(&draft, loaded);
+        let maturity = self.sealed_adr_catalog(draft.base);
         let mut projections = Vec::with_capacity(draft.proposals.len());
         let mut descriptions = BTreeMap::new();
         for proposal in &draft.proposals {
@@ -234,7 +235,7 @@ impl ApiCapabilityState {
                     &format!("commission load for {} was not joined", proposal.workpiece.0),
                 ));
             };
-            match admit_member(proposal.scope_revision, result, &TreeAdrs::working_tree(), &resolution) {
+            match admit_member(proposal.scope_revision, result, &maturity, &resolution) {
                 Ok(admitted) => {
                     descriptions.insert(admitted.workpiece.id.0.clone(), admitted.description);
                     edges.extend(admitted.edges);
@@ -244,6 +245,24 @@ impl ApiCapabilityState {
             }
         }
         self.gate_and_admit(ctx, draft, predecessor, &projections, descriptions, idempotency_key, &edges)
+    }
+
+    /// ADR catalog at `base` in the configured lane repository.
+    ///
+    /// Unresolved correspondence or a blob that cannot be read is uncertain
+    /// and keeps the Human hard gate; it is never classified Proposed.
+    fn sealed_adr_catalog(&self, base: Digest) -> TreeAdrs {
+        let correspondence: Option<&dyn Correspondence> = {
+            #[cfg(feature = "github")]
+            {
+                self.correspondence.as_deref().map(|correspondence| correspondence as &dyn Correspondence)
+            }
+            #[cfg(not(feature = "github"))]
+            {
+                None
+            }
+        };
+        TreeAdrs::resolve(&self.lane_repository, correspondence, base)
     }
 
     /// The gate-then-admit core both doors share (#4638): resolve every
