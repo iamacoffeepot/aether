@@ -125,8 +125,9 @@ impl ProcessIdentity {
 /// The live-child teardown path names the group by the head pid
 /// (`process_group(0)` at spawn), even when that head is already a zombie and
 /// cannot be observed. A pid-only kill would leave harness grandchildren in
-/// the group, reparented to init. Group 0 and a pgid that does not fit a
-/// signed pid are refused rather than signalled.
+/// the group, reparented to init. Group 0, group 1 (the `-1` broadcast
+/// operand), and a pgid that does not fit a signed pid are refused before
+/// `kill` runs.
 pub fn terminate_pgid(pgid: u32) -> Result<(), LocalExecutorError> {
     signal_group(pgid, "TERM")?;
     if wait_until_pgid_gone(pgid) {
@@ -251,21 +252,22 @@ impl StatFields {
 
 /// A process-group id `kill` can name as `-{pgid}`.
 ///
-/// Group 0 is this process's group. A `u32` that does not fit `i32` cannot be a
-/// signed kill target either — formatting it as `-{pgid}` would not be a pid.
-fn signed_pgid(pgid: u32) -> Result<i32, LocalExecutorError> {
-    if pgid == 0 {
-        return Err(unterminated("refusing to signal process group 0"));
+/// Group 0 is this process's group. Group 1 becomes the `-1` operand, which is
+/// broadcast rather than a private lane group. A `u32` that does not fit `i32`
+/// cannot be a signed kill target. All three are refused before `kill` runs.
+pub(super) fn signed_pgid(pgid: u32) -> Result<i32, LocalExecutorError> {
+    if pgid <= 1 {
+        return Err(unterminated(format!("refusing to signal process group {pgid}")));
     }
     i32::try_from(pgid).map_err(|_| unterminated(format!("process group {pgid} does not fit a signed pid")))
 }
 
-/// `kill` argv that delivers `signal` to process group `pgid`.
+/// `kill` argv that names process group `pgid` with POSIX `-s`.
 ///
-/// POSIX `-s` is the signal. Linux getopt-style `kill` (procps-ng, util-linux)
-/// then needs `--` so `-{pgid}` is a target, not clustered short options; BSD
-/// `kill` treats `--` as pid 0 — this process's group — so macOS must omit it.
-fn kill_group_args(signal: &str, pgid: i32) -> Vec<String> {
+/// Linux uses `-s SIGNAL -- -PGID` so the negative group is a separate operand
+/// after options. macOS keeps `-s SIGNAL -PGID`, the form that already cancelled
+/// groups there. `pgid` must already have passed [`signed_pgid`].
+pub(super) fn kill_group_args(signal: &str, pgid: i32) -> Vec<String> {
     if cfg!(target_os = "linux") {
         vec!["-s".to_owned(), signal.to_owned(), "--".to_owned(), format!("-{pgid}")]
     } else {
@@ -573,9 +575,8 @@ mod tests {
 
     #[test]
     fn group_kill_argv_is_platform_unambiguous() {
-        // Tripwire (#5646): Linux getopt-style `kill` and BSD `kill` do not share
-        // a shorthand for "signal this process group". `kill -TERM -{pgid}` is a
-        // usage error on procps-ng; `kill -- -{pgid}` is pid 0 on BSD.
+        // Construction pin for the chosen `-s` forms. Delivery is the live
+        // child/grandchild tests and Linux CI, not this argv list.
         let term = kill_group_args("TERM", 42);
         let kill = kill_group_args("KILL", 42);
         let probe = kill_group_args("0", 42);
@@ -595,20 +596,16 @@ mod tests {
 
     #[test]
     fn terminate_pgid_refuses_unsafe_or_unrepresentable_group_targets() {
-        // Tripwire: group 0 is this process's group. A pgid that does not fit a
-        // signed pid cannot be named as `-{pgid}` either. Both must fail before
-        // `kill` runs — a usage error used to be swallowed as "already gone".
-        match terminate_pgid(0) {
-            Err(LocalExecutorError::Unterminated(detail)) => {
-                assert!(detail.contains("process group 0"), "{detail}");
+        // Tripwire: 0 is this process's group, 1 is the `-1` broadcast operand,
+        // and a pgid that does not fit a signed pid cannot be named as `-{pgid}`.
+        // Refused through terminate_pgid before `kill` runs — do not send `-1`.
+        for pgid in [0, 1, u32::MAX] {
+            match terminate_pgid(pgid) {
+                Err(LocalExecutorError::Unterminated(detail)) => {
+                    assert!(detail.contains(&pgid.to_string()), "{detail}");
+                }
+                other => panic!("process group {pgid} must be refused, got {other:?}"),
             }
-            other => panic!("group 0 must be refused, got {other:?}"),
-        }
-        match terminate_pgid(u32::MAX) {
-            Err(LocalExecutorError::Unterminated(detail)) => {
-                assert!(detail.contains(&u32::MAX.to_string()), "{detail}");
-            }
-            other => panic!("an unrepresentable pgid must be refused, got {other:?}"),
         }
     }
 
@@ -648,6 +645,7 @@ mod tests {
             .spawn()
             .expect("the test child forks");
         let pgid = child.id();
+        assert!(pgid > 1, "a spawned child must own a private group, not a broadcast target");
         (child, pgid)
     }
 
