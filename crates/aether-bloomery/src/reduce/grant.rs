@@ -134,7 +134,10 @@ pub(super) fn reduce_grant_attempts(
             seen_verify_failures: cursor.seen_verify_failures,
             fold_checkpoint: cursor.fold_checkpoint,
             fold_conflict_evidence: cursor.fold_conflict_evidence,
-            reconcile_assembles_base: false,
+            // Same-stage grant: this Reconcile lap is still in flight, so the
+            // assembly bit travels with the cursor the way a retry already does
+            // (#5558 / ADR-0196).
+            reconcile_assembles_base: cursor.reconcile_assembles_base,
         }
     };
     let mut effects = move_effects_with_checkpoint(

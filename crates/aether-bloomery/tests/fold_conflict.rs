@@ -4,7 +4,9 @@
 
 mod common;
 
-use aether_bloomery::{CandidateRef, Decision, Evidence, EvidenceKind, Fact, Outcome, Snapshot, StageId};
+use aether_bloomery::{
+    BloomId, CandidateRef, Decision, Event, Evidence, EvidenceKind, Fact, Outcome, Snapshot, StageId,
+};
 use common::{claim, digest, draft, event, membership, step, workpiece};
 
 fn conflict_evidence(checkpoint: u8, detail: u8) -> Evidence {
@@ -18,7 +20,7 @@ fn attempt_evidence() -> Evidence {
 /// Two members have verified claims and a captured candidate on the cursor.
 /// The later one collides on the fold. Construct runs first so Reconcile
 /// can tell a fold-time collision (has a candidate) from base assembly.
-fn two_member_with_claims() -> (Snapshot, aether_bloomery::BloomId) {
+fn two_member_with_claims() -> (Snapshot, BloomId) {
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (mut snapshot, _) =
@@ -46,6 +48,49 @@ fn two_member_with_claims() -> (Snapshot, aether_bloomery::BloomId) {
         .0;
     }
     (snapshot, bloom)
+}
+
+fn fail_reconcile(bloom: BloomId, name: &str, key: &str) -> Event {
+    event(
+        key,
+        Fact::AttemptCompleted {
+            bloom,
+            workpiece: workpiece(name),
+            stage: StageId::Reconcile,
+            passed: false,
+            evidence: attempt_evidence(),
+            candidate: None,
+        },
+    )
+}
+
+fn pass_reconcile(bloom: BloomId, name: &str, key: &str, captured: CandidateRef) -> Event {
+    event(
+        key,
+        Fact::AttemptCompleted {
+            bloom,
+            workpiece: workpiece(name),
+            stage: StageId::Reconcile,
+            passed: true,
+            evidence: attempt_evidence(),
+            candidate: Some(captured),
+        },
+    )
+}
+
+fn grant_reconcile(bloom: BloomId, name: &str, attempts: u32) -> Event {
+    event(
+        "grant",
+        Fact::GrantAttempts { bloom, workpiece: workpiece(name), stage: StageId::Reconcile, attempts },
+    )
+}
+
+fn exhaust_reconcile(snapshot: Snapshot, bloom: BloomId, name: &str) -> Snapshot {
+    let (retried, decided) = step(&snapshot, &fail_reconcile(bloom, name, "reconcile-fail-1"));
+    assert!(matches!(decided.outcome, Outcome::AttemptRetried { stage: StageId::Reconcile, attempt: 2, .. }));
+    let (wedged, decided) = step(&retried, &fail_reconcile(bloom, name, "reconcile-fail-2"));
+    assert!(matches!(decided.outcome, Outcome::AttemptWedged { stage: StageId::Reconcile, .. }));
+    wedged
 }
 
 // ADR-0189 — a FoldConflict revokes the later member's claim, moves it to
@@ -395,4 +440,95 @@ fn a_passing_base_assembly_reconcile_returns_to_construct() {
         Some(digest(31)),
         "the collision head stays so a standing re-collision still wedges",
     );
+}
+
+// #5558 — granting more Reconcile attempts after a dependent's base-assembly
+// budget is spent must not drop the assembly bit. The plausible bug: the grant
+// writes `reconcile_assembles_base: false`, so the next pass routes to Verify
+// and skips the dependent's Construct.
+#[test]
+fn a_grant_after_exhausted_base_assembly_still_returns_to_construct() {
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "splice-conflict-beta",
+            Fact::FoldConflict {
+                bloom,
+                workpiece: workpiece("beta"),
+                checkpoint: digest(30),
+                head: digest(31),
+                evidence: conflict_evidence(30, 90),
+            },
+        ),
+    );
+    let snapshot = exhaust_reconcile(snapshot, bloom, "beta");
+
+    let (granted, decided) = step(&snapshot, &grant_reconcile(bloom, "beta", 2));
+    assert!(
+        matches!(&decided.outcome, Outcome::AttemptsGranted { resumes_at: StageId::Reconcile, attempts: 2, .. }),
+        "the grant resumes the Reconcile lap: {:?}",
+        decided.outcome,
+    );
+
+    let captured = CandidateRef { tree: digest(41), checkout: digest(42) };
+    let (_, decided) = step(&granted, &pass_reconcile(bloom, "beta", "reconcile-pass", captured));
+    match decided.outcome {
+        Outcome::AttemptAdvanced { from, to, .. } => {
+            assert_eq!(from, StageId::Reconcile);
+            assert_eq!(to, StageId::Construct);
+        }
+        other => panic!("expected AttemptAdvanced onto Construct after the grant, got {other:?}"),
+    }
+    let dispatch = decided.effects.iter().find_map(|effect| match effect {
+        Decision::DispatchAttempt { stage, transformation, .. } => Some((*stage, transformation.checkout)),
+        _ => None,
+    });
+    assert_eq!(
+        dispatch,
+        Some((StageId::Construct, captured.checkout)),
+        "Construct checks out the assembled capture after the grant",
+    );
+}
+
+// #5558 — the grant must copy the cursor bit, not force assembly mode on every
+// Reconcile resume. A fold-time Reconcile that already had a candidate still
+// rejoins Verify after a grant; forcing the bit true would send it back through
+// Construct and re-implement work it already authored.
+#[test]
+fn a_grant_after_exhausted_fold_reconcile_still_returns_to_verify() {
+    let (snapshot, bloom) = two_member_with_claims();
+    let (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "fold-conflict-beta",
+            Fact::FoldConflict {
+                bloom,
+                workpiece: workpiece("beta"),
+                checkpoint: digest(30),
+                head: digest(31),
+                evidence: conflict_evidence(30, 90),
+            },
+        ),
+    );
+    let snapshot = exhaust_reconcile(snapshot, bloom, "beta");
+
+    let (granted, decided) = step(&snapshot, &grant_reconcile(bloom, "beta", 2));
+    assert!(
+        matches!(&decided.outcome, Outcome::AttemptsGranted { resumes_at: StageId::Reconcile, attempts: 2, .. }),
+        "the grant resumes the Reconcile lap: {:?}",
+        decided.outcome,
+    );
+
+    let captured = CandidateRef { tree: digest(41), checkout: digest(42) };
+    let (_, decided) = step(&granted, &pass_reconcile(bloom, "beta", "reconcile-pass", captured));
+    match decided.outcome {
+        Outcome::AttemptAdvanced { from, to, .. } => {
+            assert_eq!(from, StageId::Reconcile);
+            assert_eq!(to, StageId::Verify);
+        }
+        other => panic!("expected AttemptAdvanced onto Verify after the grant, got {other:?}"),
+    }
 }
