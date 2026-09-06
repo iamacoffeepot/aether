@@ -93,6 +93,7 @@ pub(super) fn member_construct_base(record: &BloomRecord, member: &WorkpieceId) 
 /// is the digest-pinned identity of the splice. Workpieces absent from
 /// `members` are not walked, even when `edges` or `checkout_of` still name
 /// them — an ejected predecessor must not contribute to a survivor's base.
+#[cfg(test)]
 pub(super) fn splice_lineage<F: Fn(&WorkpieceId) -> Option<Digest>>(
     members: &[WorkpieceId],
     edges: &[MemberDependency],
