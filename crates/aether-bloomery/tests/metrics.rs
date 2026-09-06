@@ -12,10 +12,11 @@ use aether_data::wire::to_vec;
 
 use aether_bloomery::{
     AgentSelection, BloomId, BloomStatus, CandidateRef, Decision, Decisions, Event, Evidence, EvidenceKind, Fact,
-    Harness, MetricDispatch, MetricsLedger, ModelOverride, ReasoningEffort, ResolvedConfigs, Snapshot, SpendWindow,
-    StageId, StageOverride, StudyCost, StudyRecord, reduce,
+    Harness, MemberDependency, MetricBloom, MetricDispatch, MetricsLedger, ModelOverride, Outcome, ReasoningEffort,
+    ResolvedConfigs, SealError, Snapshot, SpendWindow, StageId, StageOverride, StudyCost, StudyRecord, SupersedeError,
+    reduce,
 };
-use common::{digest, draft_with_member_override, event, membership, workpiece};
+use common::{digest, draft, draft_with_member_override, event, membership, workpiece};
 
 const MEMBER: &str = "wp-a";
 const REVISION: u8 = 10;
@@ -30,6 +31,16 @@ struct Journal {
 }
 
 impl Journal {
+    fn fresh() -> Self {
+        Self {
+            snapshot: Snapshot::new(digest(1)).with_green_base(digest(1)),
+            ledger: MetricsLedger::default(),
+            configs: ResolvedConfigs::default(),
+            bloom: BloomId(digest(0)),
+            next_sequence: 1,
+        }
+    }
+
     fn sealed(override_: &ModelOverride) -> Self {
         let (draft, configs) = draft_with_member_override(1, membership(MEMBER, REVISION), override_);
         let spec = draft.seal();
@@ -364,4 +375,165 @@ fn a_day_carries_its_priced_dollars_landings_wedges_and_cycle_mean() {
         0,
         "an unpriced record is unresolved, never averaged in as free"
     );
+}
+
+fn edge(member: &str, depends_on: &str) -> MemberDependency {
+    MemberDependency { member: workpiece(member), depends_on: workpiece(depends_on) }
+}
+
+fn bloom_row(ledger: &MetricsLedger, bloom: BloomId) -> MetricBloom {
+    ledger
+        .bloom_rows()
+        .into_iter()
+        .find(|row| row.bloom == bloom)
+        .unwrap_or_else(|| panic!("expected a rollup for {bloom:?}, got {:?}", ledger.bloom_rows()))
+}
+
+/// The plausible bug: observe matches only `Fact::Seal`, so a real graph bloom
+/// (and a graph successor) land in the rollup via dispatch with members=0 and
+/// seal_sequence=0.
+#[test]
+fn a_graph_seal_and_its_graph_successor_carry_members_and_seal_sequence() {
+    let predecessor_spec = draft(1, vec![membership("wp-a", 10), membership("wp-b", 11)]).seal();
+    let successor_spec = draft(1, vec![membership("wp-a", 10), membership("wp-b", 11), membership("wp-c", 12)]).seal();
+    let successor = successor_spec.id();
+    let seal = event(
+        "graph-seal",
+        Fact::GraphSeal { predecessor: None, spec: predecessor_spec, edges: vec![edge("wp-b", "wp-a")] },
+    );
+    let mut journal = Journal::fresh();
+    let sealed = journal.admit(&seal, Some(1_000));
+    let Outcome::Sealed(predecessor) = sealed.outcome else {
+        panic!("a declared graph admits: {sealed:?}");
+    };
+    let superseded = journal.admit(
+        &event(
+            "graph-sup",
+            Fact::GraphSeal {
+                predecessor: Some(predecessor),
+                spec: successor_spec,
+                edges: vec![edge("wp-b", "wp-a"), edge("wp-c", "wp-a")],
+            },
+        ),
+        Some(2_000),
+    );
+    assert!(
+        matches!(superseded.outcome, Outcome::Superseded { successor: id, .. } if id == successor),
+        "a graph successor admits: {superseded:?}"
+    );
+
+    let first = bloom_row(&journal.ledger, predecessor);
+    assert_eq!(first.members, 2, "the graph bloom's membership is the admitted spec, not the dispatch default: {first:?}");
+    assert_eq!(first.seal_sequence, 1, "the graph bloom's sequence is the admitting row: {first:?}");
+
+    let successor_row = bloom_row(&journal.ledger, successor);
+    assert_eq!(
+        successor_row.members, 3,
+        "the graph successor's membership is the admitted spec, not members=0: {successor_row:?}"
+    );
+    assert_eq!(
+        successor_row.seal_sequence, 2,
+        "the graph successor's sequence is the admitting row: {successor_row:?}"
+    );
+
+    let replayed = journal.admit(&seal, Some(3_000));
+    assert!(matches!(replayed.outcome, Outcome::Duplicate), "the same graph-seal key is a duplicate: {replayed:?}");
+    assert_eq!(
+        bloom_row(&journal.ledger, predecessor).seal_sequence,
+        1,
+        "a duplicate graph seal must not overwrite the admitting sequence"
+    );
+}
+
+/// The plausible bug: observe never matches `Fact::Supersede`, so a successor
+/// bloom reports members=0 and seal_sequence=0 (or is missing until a dispatch
+/// creates the default row).
+#[test]
+fn a_supersede_records_the_successor_members_and_seal_sequence() {
+    let predecessor_spec = draft(1, vec![membership("wp-a", 10)]).seal();
+    let successor_spec = draft(1, vec![membership("wp-a", 10), membership("wp-b", 11)]).seal();
+    let successor = successor_spec.id();
+    let mut journal = Journal::fresh();
+    let sealed = journal.admit(&event("seal", Fact::Seal(predecessor_spec)), Some(1_000));
+    let Outcome::Sealed(predecessor) = sealed.outcome else {
+        panic!("the predecessor admits: {sealed:?}");
+    };
+    let superseded = journal.admit(
+        &event("sup", Fact::Supersede { predecessor, successor: successor_spec }),
+        Some(2_000),
+    );
+    assert!(
+        matches!(superseded.outcome, Outcome::Superseded { successor: id, .. } if id == successor),
+        "the successor admits: {superseded:?}"
+    );
+
+    let first = bloom_row(&journal.ledger, predecessor);
+    assert_eq!(first.members, 1, "the predecessor keeps its admitted membership: {first:?}");
+    assert_eq!(first.seal_sequence, 1, "the predecessor keeps its admitting sequence: {first:?}");
+
+    let successor_row = bloom_row(&journal.ledger, successor);
+    assert_eq!(successor_row.members, 2, "the successor's membership is the admitted spec: {successor_row:?}");
+    assert_eq!(successor_row.seal_sequence, 2, "the successor's sequence is the admitting row: {successor_row:?}");
+}
+
+/// The plausible bug: observe keys off the Seal fact, so a refused empty seal
+/// mints a ghost rollup and a duplicate Seal overwrites the real sequence.
+#[test]
+fn a_refused_or_duplicate_seal_does_not_mint_or_overwrite_a_bloom_rollup() {
+    let spec = draft(1, vec![membership(MEMBER, REVISION)]).seal();
+    let seal = event("seal", Fact::Seal(spec));
+    let mut journal = Journal::fresh();
+    let sealed = journal.admit(&seal, Some(1_000));
+    let Outcome::Sealed(bloom) = sealed.outcome else {
+        panic!("a valid seal admits: {sealed:?}");
+    };
+    assert_eq!(bloom_row(&journal.ledger, bloom).seal_sequence, 1);
+    assert_eq!(journal.ledger.bloom_rows().len(), 1);
+
+    let duplicate = journal.admit(&seal, Some(2_000));
+    assert!(matches!(duplicate.outcome, Outcome::Duplicate), "the same key is a duplicate: {duplicate:?}");
+    assert_eq!(
+        bloom_row(&journal.ledger, bloom).seal_sequence,
+        1,
+        "a duplicate must not overwrite the admitting sequence"
+    );
+    assert_eq!(journal.ledger.through_sequence(), 2, "the journal cursor still consumes the duplicate row");
+    assert_eq!(journal.ledger.bloom_rows().len(), 1, "a duplicate must not mint a second rollup");
+
+    let empty = draft(1, vec![]).seal();
+    let refused = journal.admit(&event("empty", Fact::Seal(empty.clone())), Some(3_000));
+    assert!(
+        matches!(refused.outcome, Outcome::SealRejected(SealError::EmptyMembership)),
+        "an empty seal is refused: {refused:?}"
+    );
+    assert_eq!(
+        journal.ledger.bloom_rows().len(),
+        1,
+        "a refused seal must not mint a ghost rollup: {:?}",
+        journal.ledger.bloom_rows()
+    );
+    assert_eq!(
+        journal.ledger.summary(0, |_| None).blooms,
+        1,
+        "the summary must not count a refused seal as a bloom"
+    );
+
+    let refused_sup = journal.admit(
+        &event("empty-sup", Fact::Supersede { predecessor: bloom, successor: empty }),
+        Some(4_000),
+    );
+    assert!(
+        matches!(
+            refused_sup.outcome,
+            Outcome::SupersedeRejected(SupersedeError::InvalidMember(SealError::EmptyMembership))
+        ),
+        "an empty successor is refused: {refused_sup:?}"
+    );
+    assert_eq!(
+        journal.ledger.bloom_rows().len(),
+        1,
+        "a refused supersede must not mint a successor rollup: {:?}",
+        journal.ledger.bloom_rows()
+    );
+    assert_eq!(bloom_row(&journal.ledger, bloom).seal_sequence, 1);
 }
