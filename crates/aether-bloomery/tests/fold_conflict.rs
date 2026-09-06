@@ -544,9 +544,9 @@ fn collision_subject() -> WorkpieceId {
     WorkpieceId::composition_of(&[workpiece("alpha"), workpiece("beta")])
 }
 
-fn construct_to_verify(snapshot: Snapshot, bloom: BloomId, name: &str, tree: u8, checkout: u8) -> Snapshot {
+fn construct_to_verify(snapshot: &Snapshot, bloom: BloomId, name: &str, tree: u8, checkout: u8) -> Snapshot {
     step(
-        &snapshot,
+        snapshot,
         &event(
             &format!("construct-{name}"),
             Fact::AttemptCompleted {
@@ -563,8 +563,17 @@ fn construct_to_verify(snapshot: Snapshot, bloom: BloomId, name: &str, tree: u8,
 }
 
 fn members_at_verify(names: &[&str]) -> (Snapshot, BloomId) {
-    let spec =
-        draft(1, names.iter().enumerate().map(|(index, name)| membership(name, 10 + index as u8)).collect()).seal();
+    let spec = draft(
+        1,
+        names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                membership(name, u8::try_from(10 + index).expect("fixture membership count fits in a u8 seed"))
+            })
+            .collect(),
+    )
+    .seal();
     let bloom = spec.id();
     let (mut snapshot, _) =
         step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
@@ -572,8 +581,8 @@ fn members_at_verify(names: &[&str]) -> (Snapshot, BloomId) {
         if *name == "alpha" || *name == "beta" {
             continue;
         }
-        let tree = 20 + offset as u8;
-        snapshot = construct_to_verify(snapshot, bloom, name, tree, tree.wrapping_add(10));
+        let tree = u8::try_from(20 + offset).expect("fixture member offset fits in a u8 tree seed");
+        snapshot = construct_to_verify(&snapshot, bloom, name, tree, tree.wrapping_add(10));
     }
     (snapshot, bloom)
 }
@@ -655,7 +664,7 @@ fn two_same_tree_waiters_both_reverify_after_repair() {
         second.outcome,
     );
     let (snapshot, again) = narrow(&snapshot, bloom, "narrow-gamma-again", "gamma", 40, 41);
-    assert!(matches!(again.outcome, Outcome::CompositionRepairAlreadyInFlight { .. }), "{:?}", again.outcome,);
+    assert!(matches!(again.outcome, Outcome::CompositionRepairAlreadyInFlight { .. }), "{:?}", again.outcome);
     assert_eq!(
         recorded_waiters(&snapshot, &bloom),
         vec![workpiece("gamma"), workpiece("delta")],
@@ -715,7 +724,7 @@ fn two_different_tree_waiters_both_reverify_after_replacement() {
         "both waiters resume after the replacement repair: {:?}",
         decided.effects,
     );
-    assert!(recorded_waiters(&after, &bloom).is_empty(), "the accepted replacement repair retires the pending set",);
+    assert!(recorded_waiters(&after, &bloom).is_empty(), "the accepted replacement repair retires the pending set");
 }
 
 // Journal replay is apply-only: waiter capture has to survive without
@@ -773,7 +782,7 @@ fn a_replayed_journal_reproduces_two_composition_waiters() {
     }
 
     assert_eq!(live, replayed, "apply-only replay rebuilds the live snapshot, waiters included");
-    assert!(recorded_waiters(&live, &bloom).is_empty(), "replay retires the pending set after the accepted repair",);
+    assert!(recorded_waiters(&live, &bloom).is_empty(), "replay retires the pending set after the accepted repair");
     assert!(
         matches!(recorded[1].1.outcome, Outcome::CompositionRepairAlreadyInFlight { .. }),
         "the replayed journal includes the dedup outcome: {:?}",
@@ -858,7 +867,7 @@ fn stale_composition_waiters_are_not_resumed() {
         "only the still-waiting Verify member resumes: {:?}",
         decided.effects,
     );
-    assert!(recorded_waiters(&after, &bloom).is_empty(), "skipped waiters are retired with the settled pending set",);
+    assert!(recorded_waiters(&after, &bloom).is_empty(), "skipped waiters are retired with the settled pending set");
     let record = after.blooms.get(&bloom).expect("the sealed bloom is still in the snapshot");
     assert!(record.withdrawn.contains_key(&workpiece("gamma")), "the withdrawn waiter stays withdrawn");
     assert!(record.claims.contains_key(&workpiece("delta")), "the resolved waiter keeps its claim");
