@@ -230,7 +230,7 @@ impl GitSourceReplica {
     ///
     /// # Errors
     /// [`ReplicaTokenSource::token`] failed. The error must not contain the token.
-    pub fn push_invocation_args(&self, specs: &[PublishedRefspec]) -> Result<Vec<String>, ReplicaError> {
+    fn push_invocation_args(&self, specs: &[PublishedRefspec]) -> Result<Vec<String>, ReplicaError> {
         let token = self.token.token()?;
         let mut args = Vec::new();
         if !token.is_empty() {

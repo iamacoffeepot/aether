@@ -939,8 +939,10 @@ mod tests {
         assert!(github.token.is_empty(), "this case is App-only");
         assert!(github.missing_connection_knobs().is_empty(), "complete App credentials are configured");
         assert!(coordinator.source_replica_enabled(&github), "App-only must enable replication");
-        replica_shell(&github, &coordinator)
-            .expect_err("App-only replica construction must read the key, not freeze an empty PAT");
+        assert!(
+            replica_shell(&github, &coordinator).is_err(),
+            "App-only replica construction must read the key, not freeze an empty PAT"
+        );
 
         let pat = GithubConnectionConfig {
             token: "t".into(),

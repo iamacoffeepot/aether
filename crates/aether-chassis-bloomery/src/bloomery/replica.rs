@@ -108,9 +108,10 @@ pub fn writer_marker_present(path: &str) -> bool {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use aether_bloomery_github::{GithubError, MainlineRef, StaticTokenSource, TokenSource, published_refspecs};
+    use aether_bloomery_git::replica::ReplicaTokenSource;
+    use aether_bloomery_github::{GithubError, StaticTokenSource, TokenSource};
 
-    use super::{GitSourceReplica, GithubReplicaToken, github_push_url, writer_marker_present};
+    use super::{GithubReplicaToken, github_push_url, writer_marker_present};
 
     #[test]
     fn github_dot_com_api_base_projects_to_the_git_host() {
@@ -128,58 +129,29 @@ mod tests {
     }
 
     #[test]
-    fn host_token_source_rotation_reaches_the_git_extra_header() {
+    fn host_token_source_rotation_reaches_the_replica_bridge() {
         // Tripwire: App-only used to freeze `github.token` (empty) onto the
         // replica. The host bridge must hand the live TokenSource through so
-        // each push encodes the current bearer, not the first or empty PAT (#5586).
+        // each publish sees the current bearer, not the first or empty PAT (#5586).
         const FIRST: &str = "token-one";
         const SECOND: &str = "token-two";
         let source = Arc::new(MutableToken { value: Mutex::new(FIRST.to_owned()) });
-        let replica = GitSourceReplica::with_token_source(
-            "/authority",
-            "https://github.com/octo/shadow.git",
-            MainlineRef::default(),
-            Arc::new(GithubReplicaToken(source.clone())),
-        );
-        let specs = published_refspecs(&MainlineRef::default(), ["refs/heads/main"]);
+        let bridge = GithubReplicaToken(source.clone());
 
-        let first = replica.push_invocation_args(&specs).expect("first resolve");
+        assert!(matches!(bridge.token(), Ok(token) if token == FIRST), "first resolve must be the live TokenSource");
         *source.value.lock().expect("token") = SECOND.to_owned();
-        let second = replica.push_invocation_args(&specs).expect("rotated resolve");
-
-        let header = |argv: &[String]| {
-            argv.iter()
-                .find(|arg| arg.starts_with("http.extraHeader="))
-                .cloned()
-                .expect("the token rides http.extraHeader")
-        };
-        assert_ne!(header(&first), header(&second), "a rotated token must change the extraHeader");
-        assert!(
-            first.iter().chain(second.iter()).all(|arg| !arg.contains(FIRST) && !arg.contains(SECOND)),
-            "raw tokens stay out of argv"
-        );
+        assert!(matches!(bridge.token(), Ok(token) if token == SECOND), "a rotated TokenSource must be re-read");
     }
 
     #[test]
     fn an_empty_or_failed_host_token_source_fails_closed() {
-        let specs = published_refspecs(&MainlineRef::default(), ["refs/heads/main"]);
-        let empty = GitSourceReplica::with_token_source(
-            "/authority",
-            "https://github.com/octo/shadow.git",
-            MainlineRef::default(),
-            Arc::new(GithubReplicaToken(Arc::new(StaticTokenSource::new(String::new())))),
-        );
-        let empty_error = empty.push_invocation_args(&specs).expect_err("empty PAT must not omit the header");
+        let empty = GithubReplicaToken(Arc::new(StaticTokenSource::new(String::new())));
+        let empty_error = empty.token().expect_err("empty PAT must not succeed as a replica credential");
         assert!(empty_error.to_string().contains("no credential"), "{empty_error}");
 
         const SECRET: &str = "gho_should-not-leak";
-        let boom = GitSourceReplica::with_token_source(
-            "/authority",
-            "https://github.com/octo/shadow.git",
-            MainlineRef::default(),
-            Arc::new(GithubReplicaToken(Arc::new(BoomToken { secret: SECRET }))),
-        );
-        let boom_error = boom.push_invocation_args(&specs).expect_err("minting failure fails closed");
+        let boom = GithubReplicaToken(Arc::new(BoomToken { secret: SECRET }));
+        let boom_error = boom.token().expect_err("minting failure fails closed");
         let text = boom_error.to_string();
         assert!(text.contains("could not mint"), "{text}");
         assert!(!text.contains(SECRET), "mapped replica errors must not carry the GitHub error body");

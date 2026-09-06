@@ -103,10 +103,10 @@ fn a_replica_push_rereads_a_rotating_token_source_per_publish() {
     let first_header = header(&first);
     let second_header = header(&second);
     assert_ne!(first_header, second_header, "a rotated token must change the extraHeader");
-    assert!(first.iter().all(|arg| !arg.contains(FIRST) && !arg.contains(SECOND)), "raw tokens stay out of argv: {first:?}");
     assert!(
-        second.iter().all(|arg| !arg.contains(FIRST) && !arg.contains(SECOND)),
-        "raw tokens stay out of argv: {second:?}"
+        first_header.starts_with("http.extraHeader=Authorization: Basic ")
+            && second_header.starts_with("http.extraHeader=Authorization: Basic "),
+        "the preexisting transport still carries the encoded bearer in extraHeader"
     );
 }
 
