@@ -510,12 +510,21 @@ fn drain_and_land_emitting(
     Ok((admits, ack_through))
 }
 
-/// Close each member's canonical source issue after the land is observed.
+/// Close each resolved member's canonical source issue after the land is observed.
 ///
 /// A day-branch merge does not fire GitHub's `Closes #N` keywords, so this
 /// is the close. A workpiece that names no object is skipped; a per-issue
 /// refusal is warned and dropped so one unreachable issue cannot cost the
 /// others their close, or the land its admit.
+///
+/// The sealed membership is not the landed set. A member an operator withdrew
+/// while the bloom walked (#5327) produced no resolution claim and contributed
+/// no candidate to the fold, so nothing of it is in the head being landed —
+/// while it is still named in the spec and still has a `dispatch_description`
+/// row. Closing its canonical issue posts a false completion receipt over work
+/// that never reached mainline. The resolution — not the membership — decides,
+/// matching [`mark_member_commissions_landed`]; an unreadable answer closes
+/// nothing.
 fn close_member_source_issues(
     store: &mut SqliteStore,
     source: &dyn LandingSource,
@@ -530,6 +539,17 @@ fn close_member_source_issues(
                 target: "aether_chassis_bloomery::land",
                 %error,
                 "could not list members to close source issues; the landing itself stands",
+            );
+            return;
+        }
+    };
+    let resolved = match membership::resolved_members(store, bloom) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::land",
+                %error,
+                "could not read which members resolved; closing no source issues, the landing itself stands",
             );
             return;
         }
@@ -549,13 +569,22 @@ fn close_member_source_issues(
         )
     });
     for (workpiece, _) in members {
-        let Some(number) = canonical_issue_number(&workpiece) else {
+        let workpiece = WorkpieceId(workpiece);
+        if !resolved.contains(&workpiece) {
+            tracing::info!(
+                target: "aether_chassis_bloomery::land",
+                workpiece = workpiece.0.as_str(),
+                "member did not resolve into the landed head; leaving its source issue open",
+            );
+            continue;
+        }
+        let Some(number) = canonical_issue_number(&workpiece.0) else {
             continue;
         };
         if let Err(error) = source.close_issue(number, &key, &comment) {
             tracing::warn!(
                 target: "aether_chassis_bloomery::land",
-                workpiece = workpiece.as_str(),
+                workpiece = workpiece.0.as_str(),
                 number,
                 %error,
                 "failed to close the member source issue; the landing itself stands",
