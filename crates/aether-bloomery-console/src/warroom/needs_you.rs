@@ -1,7 +1,7 @@
 //! One needs-you row per subject: the interrupt set, coloured by alerts.
 
 use super::{Alert, AlertKind, Focus, Interrupt, InterruptKind, alerts, interrupts};
-use crate::dto::ViewDocument;
+use crate::dto::{BloomView, DigestHex, ViewDocument};
 
 /// How loudly the row should paint. Colour only; never sort.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,12 +18,15 @@ pub struct NeedsYouRow {
     pub happened: String,
     pub action: String,
     pub severity: Severity,
+    /// Underlying question, hold, base, or evidence identity. Not painted.
+    source: String = String::new(),
 }
 
 /// Subject plus a digest of the row's source facts.
 ///
-/// A dismissal survives a poll but not a change of facts. It is process-local
-/// because the coordinator has no ack route.
+/// A dismissal survives a poll but not a change of facts. Question, hold,
+/// base, and evidence identities are facts; generic kind/stage/action text is
+/// not enough. It is process-local because the coordinator has no ack route.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DismissKey {
     focus: Focus,
@@ -33,7 +36,10 @@ pub struct DismissKey {
 impl NeedsYouRow {
     #[must_use]
     pub fn dismiss_key(&self) -> DismissKey {
-        DismissKey { focus: self.focus.clone(), facts: format!("{}|{}", self.happened, self.action) }
+        DismissKey {
+            focus: self.focus.clone(),
+            facts: format!("{}|{}|{}", self.happened, self.action, self.source),
+        }
     }
 }
 
@@ -41,7 +47,10 @@ impl NeedsYouRow {
 #[must_use]
 pub fn rows(view: &ViewDocument) -> Vec<NeedsYouRow> {
     let alerts = alerts(view);
-    group_by_focus(interrupts(view)).into_iter().filter_map(|(focus, group)| fold_row(focus, &group, &alerts)).collect()
+    group_by_focus(interrupts(view))
+        .into_iter()
+        .filter_map(|(focus, group)| fold_row(view, focus, &group, &alerts))
+        .collect()
 }
 
 fn group_by_focus(interrupts: Vec<Interrupt>) -> Vec<(Focus, Vec<Interrupt>)> {
@@ -55,11 +64,12 @@ fn group_by_focus(interrupts: Vec<Interrupt>) -> Vec<(Focus, Vec<Interrupt>)> {
     groups
 }
 
-fn fold_row(focus: Focus, group: &[Interrupt], alerts: &[Alert]) -> Option<NeedsYouRow> {
+fn fold_row(view: &ViewDocument, focus: Focus, group: &[Interrupt], alerts: &[Alert]) -> Option<NeedsYouRow> {
     let representative = group.iter().find(|entry| interrupt_is_loud(entry.kind)).or_else(|| group.first())?;
     let subject = focus.subject();
     let loud = group.iter().any(|entry| interrupt_is_loud(entry.kind))
         || alerts.iter().any(|alert| alert.focus == focus && alert_is_loud(alert.kind));
+    let source = obligation_facts(view, &focus, group);
     Some(NeedsYouRow {
         focus,
         subject,
@@ -70,7 +80,91 @@ fn fold_row(focus: Focus, group: &[Interrupt], alerts: &[Alert]) -> Option<Needs
         } else {
             Severity::Attention
         },
+        source,
     })
+}
+
+fn obligation_facts(view: &ViewDocument, focus: &Focus, group: &[Interrupt]) -> String {
+    group
+        .iter()
+        .filter_map(|interrupt| obligation_fact(view, focus, interrupt.kind))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn obligation_fact(view: &ViewDocument, focus: &Focus, kind: InterruptKind) -> Option<String> {
+    match kind {
+        InterruptKind::Decision => pending_question(view, focus),
+        InterruptKind::Park => park_question(view, focus),
+        InterruptKind::Hold => hold_identity(view, focus),
+        InterruptKind::BaseRed => base_identity(view),
+        InterruptKind::Findings => findings_identity(view, focus),
+        InterruptKind::Wedge => wedge_evidence(view, focus),
+        InterruptKind::Surface | InterruptKind::Terminal | InterruptKind::Landing | InterruptKind::Quiesce => None,
+    }
+}
+
+fn pending_question(view: &ViewDocument, focus: &Focus) -> Option<String> {
+    let Focus::Member { bloom, workpiece } = focus else {
+        return None;
+    };
+    bloom_view(view, *bloom)
+        .and_then(|bloom| bloom.members.iter().find(|member| member.workpiece == *workpiece))
+        .and_then(|member| member.pending_decision.as_ref())
+        .map(|pending| format!("question:{}", pending.question))
+}
+
+fn park_question(view: &ViewDocument, focus: &Focus) -> Option<String> {
+    let Focus::Bloom { id } = focus else {
+        return None;
+    };
+    bloom_view(view, *id)
+        .and_then(|bloom| bloom.review_park.as_ref())
+        .map(|park| format!("question:{}", park.question))
+}
+
+fn hold_identity(view: &ViewDocument, focus: &Focus) -> Option<String> {
+    let Focus::Bloom { id } = focus else {
+        return None;
+    };
+    bloom_view(view, *id)
+        .and_then(|bloom| bloom.operator_hold.as_ref())
+        .map(|hold| format!("hold:{}:{}", hold.operator, hold.reason))
+}
+
+fn base_identity(view: &ViewDocument) -> Option<String> {
+    view.base_alert.as_ref().map(|alert| format!("base:{}:{}", alert.base, alert.evidence))
+}
+
+fn findings_identity(view: &ViewDocument, focus: &Focus) -> Option<String> {
+    let Focus::Composition { bloom } = focus else {
+        return None;
+    };
+    bloom_view(view, *bloom)
+        .and_then(|bloom| bloom.composition.as_ref())
+        .map(|composition| {
+            composition
+                .findings
+                .iter()
+                .map(|finding| format!("{}:{}", finding.subject, finding.detail))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .filter(|facts| !facts.is_empty())
+}
+
+fn wedge_evidence(view: &ViewDocument, focus: &Focus) -> Option<String> {
+    let Focus::Composition { bloom } = focus else {
+        return None;
+    };
+    bloom_view(view, *bloom)
+        .and_then(|bloom| bloom.composition.as_ref())
+        .and_then(|composition| composition.wedge.as_ref())
+        .map(|wedge| format!("evidence:{}", wedge.evidence))
+}
+
+fn bloom_view(view: &ViewDocument, id: DigestHex) -> Option<&BloomView> {
+    view.blooms.iter().find(|bloom| bloom.id == id)
 }
 
 fn compose_happened(interrupt: &Interrupt) -> String {
@@ -108,11 +202,11 @@ fn alert_is_loud(kind: AlertKind) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Severity, rows};
+    use super::{NeedsYouRow, Severity, rows};
     use crate::dto::{
-        BaseAlertView, BloomView, CompositionFinding, CompositionView, DigestHex, ExecutorFaultView, HostFaultView,
-        LandingBlock, MemberView, OperatorHoldView, PendingDecisionView, Present, ReviewParkView, SpendQuiesce,
-        StageId, ViewDocument, WedgeCause,
+        BaseAlertView, BloomView, CompositionFinding, CompositionView, CompositionWedge, DigestHex, ExecutorFaultView,
+        HostFaultView, LandingBlock, MemberView, OperatorHoldView, PendingDecisionView, Present, ReviewParkView,
+        SpendQuiesce, StageId, ViewDocument, WedgeCause,
     };
     use crate::warroom::{Focus, InterruptKind};
 
@@ -224,6 +318,108 @@ mod tests {
             ..ViewDocument::default()
         };
         assert_ne!(first, rows(&wedged)[0].dismiss_key());
+    }
+
+    #[test]
+    fn a_replaced_obligation_mints_a_different_dismiss_key() {
+        // The plausible bug: keying on focus plus generic kind/stage/action
+        // text, so answering question A and receiving question B at the same
+        // member and stage between polls keeps the dismissal and hides B.
+        let first = decision_row(digest(10), "which approach?");
+        let replaced = decision_row(digest(11), "which approach?");
+        let restated = decision_row(digest(10), "restated?");
+        assert_replaced_obligation(&first, &replaced);
+        assert_eq!(first.dismiss_key(), restated.dismiss_key());
+
+        assert_replaced_obligation(&park_row(digest(10)), &park_row(digest(11)));
+        assert_replaced_obligation(&hold_row("wait"), &hold_row("later"));
+        assert_replaced_obligation(&base_row(digest(10)), &base_row(digest(11)));
+        assert_replaced_obligation(&findings_row(digest(10)), &findings_row(digest(11)));
+        assert_replaced_obligation(&wedge_row(digest(10)), &wedge_row(digest(11)));
+    }
+
+    fn assert_replaced_obligation(before: &NeedsYouRow, after: &NeedsYouRow) {
+        assert_eq!(before.focus, after.focus);
+        assert_eq!(before.happened, after.happened);
+        assert_eq!(before.action, after.action);
+        assert_ne!(before.dismiss_key(), after.dismiss_key());
+    }
+
+    fn first_row(view: ViewDocument) -> NeedsYouRow {
+        rows(&view).into_iter().next().expect("needs-you row")
+    }
+
+    fn bloom_row(bloom: BloomView) -> NeedsYouRow {
+        first_row(ViewDocument { blooms: vec![bloom], ..ViewDocument::default() })
+    }
+
+    fn decision_row(question: DigestHex, prompt: &str) -> NeedsYouRow {
+        bloom_row(BloomView {
+            id: digest(1),
+            members: vec![MemberView {
+                pending_decision: Some(PendingDecisionView {
+                    question,
+                    stage: Some(StageId::Construct),
+                    prompt: prompt.to_owned(),
+                    ..PendingDecisionView::default()
+                }),
+                ..member("issue-1")
+            }],
+            ..BloomView::default()
+        })
+    }
+
+    fn park_row(question: DigestHex) -> NeedsYouRow {
+        bloom_row(BloomView {
+            id: digest(1),
+            review_park: Some(ReviewParkView {
+                question,
+                stage: Some(StageId::AggregateReview),
+                ..ReviewParkView::default()
+            }),
+            ..BloomView::default()
+        })
+    }
+
+    fn hold_row(reason: &str) -> NeedsYouRow {
+        bloom_row(BloomView {
+            id: digest(1),
+            operator_hold: Some(OperatorHoldView { reason: reason.to_owned(), operator: "owner".to_owned() }),
+            ..BloomView::default()
+        })
+    }
+
+    fn base_row(evidence: DigestHex) -> NeedsYouRow {
+        first_row(ViewDocument {
+            base_alert: Some(BaseAlertView {
+                failed: vec!["verify.docs".to_owned()],
+                evidence,
+                ..BaseAlertView::default()
+            }),
+            ..ViewDocument::default()
+        })
+    }
+
+    fn findings_row(detail: DigestHex) -> NeedsYouRow {
+        bloom_row(BloomView {
+            id: digest(1),
+            composition: Some(CompositionView {
+                findings: vec![CompositionFinding { detail, ..CompositionFinding::default() }],
+                ..CompositionView::default()
+            }),
+            ..BloomView::default()
+        })
+    }
+
+    fn wedge_row(evidence: DigestHex) -> NeedsYouRow {
+        bloom_row(BloomView {
+            id: digest(1),
+            composition: Some(CompositionView {
+                wedge: Some(CompositionWedge { evidence, ..CompositionWedge::default() }),
+                ..CompositionView::default()
+            }),
+            ..BloomView::default()
+        })
     }
 
     #[test]
