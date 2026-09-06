@@ -20,10 +20,7 @@ fn empty() -> core::iter::Empty<&'static str> {
 }
 
 fn required(builder: &mut WorkpieceBuilder) -> &mut WorkpieceBuilder {
-    builder
-        .problem("the problem")
-        .plan_step(["do the work"])
-        .declared_surface(["crates/aether-bloomery/src/lib.rs"])
+    builder.problem("the problem").plan_step(["do the work"]).declared_surface(["crates/aether-bloomery/src/lib.rs"])
 }
 
 #[test]
