@@ -117,10 +117,7 @@ pub(super) fn spliced_base<F: Fn(&WorkpieceId) -> Option<Digest>>(
     }
     let tips = maxima(&ancestors, edges);
     match tips.as_slice() {
-        [_] => {
-            let lineage = splice_lineage(members, edges, member, checkout_of);
-            SplicedBase::Ready(lineage.last().copied().unwrap_or(bloom_base))
-        }
+        [_] => SplicedBase::Ready(ancestors.iter().filter_map(|id| checkout_of(id)).last().unwrap_or(bloom_base)),
         [] => SplicedBase::Ready(bloom_base),
         _ => SplicedBase::Join { tips },
     }
@@ -487,6 +484,39 @@ mod tests {
             splice_lineage(&members, &edges, &wp("wp-b"), &checkout_of),
             vec![digest(10), digest(30)],
             "the lineage still names both parents, in sealed order",
+        );
+    }
+
+    // The plausible bug: the unique maximum has no checkout, so the splice
+    // names the bloom base and drops every available ancestor capture.
+    #[test]
+    fn a_missing_tip_checkout_falls_back_to_the_last_available_ancestor() {
+        let members = ids(&["wp-a", "wp-b", "wp-c"]);
+        let edges = vec![edge("wp-b", "wp-a"), edge("wp-c", "wp-b")];
+        let checkout_of = |id: &WorkpieceId| match id.0.as_str() {
+            "wp-a" => Some(digest(10)),
+            _ => None,
+        };
+
+        assert_eq!(
+            spliced_base(digest(0), &members, &edges, &wp("wp-c"), &checkout_of),
+            SplicedBase::Ready(digest(10)),
+            "B is the unique maximum but has no checkout; A's capture is the last available",
+        );
+    }
+
+    // The plausible bug: no ancestor names a checkout, so the splice panics
+    // or invents a digest instead of standing on the bloom base.
+    #[test]
+    fn an_empty_checkout_lookup_falls_back_to_the_bloom_base() {
+        let members = ids(&["wp-a", "wp-b"]);
+        let edges = vec![edge("wp-b", "wp-a")];
+        let checkout_of = |_id: &WorkpieceId| None;
+
+        assert_eq!(
+            spliced_base(digest(0), &members, &edges, &wp("wp-b"), &checkout_of),
+            SplicedBase::Ready(digest(0)),
+            "a unique maximum with no available checkout still constructs on the bloom base",
         );
     }
 
