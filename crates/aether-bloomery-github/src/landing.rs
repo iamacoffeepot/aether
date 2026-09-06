@@ -5,6 +5,7 @@
 //! alone. This module is the pull-request and issue face the land reactor drives
 //! — it does not move mainline.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -273,13 +274,15 @@ pub trait LandingSource: Send + Sync {
     fn close_issue(&self, number: u64, key: &str, comment: &str) -> Result<(), SourceError>;
 }
 
-/// The head [`GithubLanding::land_proposal`] last offered for a bloom. The
-/// poll signature does not carry it, and the watch takes [`LandProposal::Landed`]
-/// as already accepted, so the adapter remembers the proven candidate the same
-/// way the local face does — otherwise a force-push merged onto the configured
-/// mainline would mint a receipt for work this bloom never proved.
+/// The head [`GithubLanding::land_proposal`] offered for one bloom. The poll
+/// signature does not carry it, and the watch takes [`LandProposal::Landed`] as
+/// already accepted, so the adapter remembers the proven candidate per bloom —
+/// otherwise a force-push merged onto the configured mainline would mint a
+/// receipt for work this bloom never proved, and a second bloom's propose would
+/// erase the first. A missing entry is not a skip: poll refuses to mint a
+/// receipt until [`LandingSource::land_proposal`] rehydrates from the caller's
+/// persisted payload.
 struct IssuedLand {
-    bloom: BloomId,
     expected_base: Digest,
     new_head: Digest,
     number: u64,
@@ -288,7 +291,7 @@ struct IssuedLand {
 /// GitHub landing over a repository-backed [`GitSource`].
 pub struct GithubLanding<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> {
     source: Arc<GitSource<C>>,
-    issued: Arc<Mutex<Option<IssuedLand>>>,
+    issued: Arc<Mutex<HashMap<BloomId, IssuedLand>>>,
 }
 
 impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> Clone for GithubLanding<C> {
@@ -301,13 +304,13 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GithubLanding<C
     /// Wrap a git-data [`GitSource`] as the GitHub landing face.
     #[must_use]
     pub fn new(source: GitSource<C>) -> Self {
-        Self { source: Arc::new(source), issued: Arc::new(Mutex::new(None)) }
+        Self { source: Arc::new(source), issued: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     /// Share an existing repository backend as the GitHub landing face.
     #[must_use]
     pub fn from_arc(source: Arc<GitSource<C>>) -> Self {
-        Self { source, issued: Arc::new(Mutex::new(None)) }
+        Self { source, issued: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     /// Borrow the underlying repository backend.
@@ -329,7 +332,7 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GithubLanding<C
     }
 
     /// Whether `pull` still proposes this bloom's landing onto the configured
-    /// mainline, and — when `proven_head` is given — still offers that head.
+    /// mainline and still offers `proven_head`.
     ///
     /// A merged proposal is not exempt: GitHub will merge a retargeted or
     /// force-pushed landing, and the watch treats [`LandProposal::Landed`] as
@@ -339,7 +342,7 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GithubLanding<C
         &self,
         pull: &PullRequest,
         bloom: &BloomId,
-        proven_head: Option<&Digest>,
+        proven_head: &Digest,
         number: u64,
     ) -> Result<Option<String>, SourceError> {
         let branch = landing_branch(bloom);
@@ -353,9 +356,6 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GithubLanding<C
         if strip_heads(&pull.base) != mainline {
             return Ok(Some(format!("proposal #{number} aims at `{}`, not `{mainline}`", pull.base)));
         }
-        let Some(proven_head) = proven_head else {
-            return Ok(None);
-        };
         let proven = self.source.resolve_git_sha(proven_head, "landing acceptance head digest")?;
         if pull.head_sha == proven {
             return Ok(None);
@@ -364,15 +364,16 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GithubLanding<C
     }
 
     fn remember_issued(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest, number: u64) {
-        *self.issued.lock().unwrap_or_else(PoisonError::into_inner) =
-            Some(IssuedLand { bloom: *bloom, expected_base: *expected_base, new_head: *new_head, number });
+        self.issued.lock().unwrap_or_else(PoisonError::into_inner).insert(
+            *bloom,
+            IssuedLand { expected_base: *expected_base, new_head: *new_head, number },
+        );
     }
 
     fn issued_head(&self, bloom: &BloomId, expected_base: &Digest, number: u64) -> Option<Digest> {
-        self.issued.lock().unwrap_or_else(PoisonError::into_inner).as_ref().and_then(|issued| {
-            (issued.bloom == *bloom && issued.expected_base == *expected_base && issued.number == number)
-                .then_some(issued.new_head)
-        })
+        let issued = self.issued.lock().unwrap_or_else(PoisonError::into_inner);
+        let issued = issued.get(bloom)?;
+        (issued.expected_base == *expected_base && issued.number == number).then_some(issued.new_head)
     }
 }
 
@@ -463,7 +464,7 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi + Send + Sync> L
         let Some(pull) = self.source.client().get_pull_request(number)? else {
             return Ok(refused_drift(format!("proposal #{number} is gone")));
         };
-        if let Some(detail) = self.proposal_drift(&pull, bloom, Some(new_head), number)? {
+        if let Some(detail) = self.proposal_drift(&pull, bloom, new_head, number)? {
             return Ok(refused_drift(detail));
         }
         if pull.merged {
@@ -490,22 +491,25 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi + Send + Sync> L
         let Some(pull) = self.source.client().get_pull_request(number)? else {
             return Ok(LandProposal::Declined);
         };
-        let Some(merge_commit) = pull.merge_commit_sha else {
+        let Some(merge_commit) = pull.merge_commit_sha.as_deref() else {
             if pull.state != PullRequestState::Open {
                 return Ok(LandProposal::Declined);
             }
             return Ok(LandProposal::Open);
         };
-        // A merge is this bloom's land only when the proposal still offers the
-        // bloom's landing branch at the configured mainline. An external
-        // retarget-and-merge would otherwise mint a receipt for a commit the
-        // mainline never received; the watch takes Landed as already accepted.
-        let proven_head = self.issued_head(bloom, expected_base, number);
-        if self.proposal_drift(&pull, bloom, proven_head.as_ref(), number)?.is_some() {
+        // A merge is this bloom's land only when this adapter still holds the
+        // proven head it issued and the proposal still offers that head on this
+        // bloom's landing branch at the configured mainline. Missing memory is
+        // not a skip: a fresh adapter must re-drive land_proposal so the
+        // caller's persisted payload rehydrates it before a receipt is minted.
+        let Some(proven_head) = self.issued_head(bloom, expected_base, number) else {
+            return Ok(LandProposal::Declined);
+        };
+        if self.proposal_drift(&pull, bloom, &proven_head, number)?.is_some() {
             return Ok(LandProposal::Declined);
         }
 
-        let new_head = self.source.record_landed_commit(&merge_commit)?;
+        let new_head = self.source.record_landed_commit(merge_commit)?;
         Ok(LandProposal::Landed(LandingReceipt { bloom: *bloom, previous_base: *expected_base, new_head }))
     }
 }
@@ -927,6 +931,12 @@ mod tests {
         fake.merge_pull_request(number, &"5c".repeat(20));
 
         let source = landing_on(&fake, true, day.clone());
+        let ProposalOutcome::Proposed { number: adopted } =
+            source.land_proposal(&bloom, &base, &new_head, None).expect("the landing fixture")
+        else {
+            panic!("a restart re-drives land_proposal so the persisted payload rehydrates provenance");
+        };
+        assert_eq!(adopted, number, "the day-configured face adopts the already-merged proposal");
         assert_eq!(
             source.poll_land(&bloom, &base, number).expect("the landing fixture"),
             LandProposal::Declined,
@@ -985,6 +995,75 @@ mod tests {
             LandProposal::Declined,
             "the watch must not take a force-pushed merge as this bloom's land",
         );
+        assert_eq!(
+            landing(&fake, true).poll_land(&bloom(), &base, number).expect("the landing fixture"),
+            LandProposal::Declined,
+            "a fresh adapter must not mint a receipt without trusted expected-head data",
+        );
+    }
+
+    #[test]
+    fn redriving_land_proposal_restores_provenance_so_a_valid_merge_lands() {
+        let fake = FakeGithub::new();
+        let (base, new_head) = (digest(10), digest(90));
+        let (_, number, _) = proposed(&fake, &base, &new_head);
+        fake.merge_pull_request(number, &"5c".repeat(20));
+
+        let restarted = landing(&fake, true);
+        assert_eq!(
+            restarted.poll_land(&bloom(), &base, number).expect("the landing fixture"),
+            LandProposal::Declined,
+            "a restarted adapter has no trusted head until land_proposal rehydrates it",
+        );
+        assert_eq!(
+            restarted.land_proposal(&bloom(), &base, &new_head, None).expect("the landing fixture"),
+            ProposalOutcome::Proposed { number },
+            "the persisted payload re-adopts the already-merged proposal",
+        );
+        let LandProposal::Landed(receipt) = restarted.poll_land(&bloom(), &base, number).expect("the landing fixture")
+        else {
+            panic!("rehydrated provenance lets a valid merge read as landed");
+        };
+        assert_eq!(receipt.previous_base, base);
+        assert_ne!(receipt.new_head, new_head);
+    }
+
+    #[test]
+    fn two_issued_proposals_keep_their_own_proven_heads() {
+        let fake = FakeGithub::new();
+        let base = digest(10);
+        fake.seed_ref("heads/main", &"a1".repeat(20));
+        fake.seed_correspondence(&base, &"a1".repeat(20));
+        let bloom_a = BloomId(digest(1));
+        let bloom_b = BloomId(digest(2));
+        let head_a = digest(90);
+        let head_b = digest(91);
+        fake.seed_git_object(&head_a);
+        fake.seed_git_object(&head_b);
+        let source = landing(&fake, true);
+
+        let ProposalOutcome::Proposed { number: number_a } =
+            source.land_proposal(&bloom_a, &base, &head_a, None).expect("the landing fixture")
+        else {
+            panic!("the first bloom opens a proposal");
+        };
+        let ProposalOutcome::Proposed { number: number_b } =
+            source.land_proposal(&bloom_b, &base, &head_b, None).expect("the landing fixture")
+        else {
+            panic!("the second bloom opens a proposal");
+        };
+        fake.merge_pull_request(number_a, &"5c".repeat(20));
+        fake.merge_pull_request(number_b, &"5d".repeat(20));
+
+        let LandProposal::Landed(receipt_a) = source.poll_land(&bloom_a, &base, number_a).expect("the landing fixture")
+        else {
+            panic!("the first bloom's merge is still its land after a second propose");
+        };
+        let LandProposal::Landed(receipt_b) = source.poll_land(&bloom_b, &base, number_b).expect("the landing fixture")
+        else {
+            panic!("the second bloom's merge is its own land");
+        };
+        assert_ne!(receipt_a.new_head, receipt_b.new_head, "each bloom records the merge it actually observed");
     }
 
     #[test]
