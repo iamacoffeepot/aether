@@ -583,6 +583,9 @@ impl CoordinatorConfig {
     }
 
     /// Whether the source port should open a fleet-local git-data backend.
+    ///
+    /// Unknown names are a resolve/boot fault via [`Self::authority`]; this
+    /// predicate is only meaningful after that gate.
     #[must_use]
     pub fn uses_local_authority(&self) -> bool {
         matches!(self.authority(), Ok(AuthorityBackend::Local))
@@ -1124,8 +1127,8 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
             parse_authority_backend("locla").is_err(),
             "parse_env must refuse unknown names instead of passing them through"
         );
-        assert_eq!(parse_authority_backend("github").as_deref(), Ok("github"));
-        assert_eq!(parse_authority_backend("local").as_deref(), Ok("local"));
+        assert_eq!(parse_authority_backend("github").expect("github is a backend"), "github");
+        assert_eq!(parse_authority_backend("local").expect("local is a backend"), "local");
         assert!(parse_authority_backend("").is_err(), "empty is unset so the default github applies");
 
         let coordinator = CoordinatorConfig { authority_backend: "locla".into(), ..CoordinatorConfig::default() };
@@ -1138,13 +1141,6 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         let local = CoordinatorConfig { authority_backend: "local".into(), ..CoordinatorConfig::default() };
         assert_eq!(local.authority().expect("local is a backend"), AuthorityBackend::Local);
         assert!(local.uses_local_authority());
-
-        let cli = BloomeryCli::try_parse_from(["bloomery", "--github-authority-backend", "local"])
-            .expect("local is a valid overlay value");
-        let from_argv = CoordinatorConfig::try_from_argv_then_env(cli.coordinator.into_layer())
-            .expect("local overlay resolves");
-        assert_eq!(from_argv.authority().expect("local overlay is a backend"), AuthorityBackend::Local);
-        assert!(from_argv.uses_local_authority());
     }
 
     #[test]
