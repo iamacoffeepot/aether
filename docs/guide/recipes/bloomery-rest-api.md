@@ -44,6 +44,13 @@ empty is not a live GitHub authority. Do not set
 localhost ports. Read the HTTP port this **owned** process logged; do not
 assume `8910` and do not take `COORDINATOR` from ambient.
 
+The subscriber (`tsfmt::Layer` on stderr) styles every field name even when
+that stream is a file: italic SGR around `port` (`ESC[3m…ESC[0m`) and dim
+SGR around `=` (`ESC[2m=ESC[0m`), so the four bytes `port=` never appear.
+There is no production knob that turns that styling off. Strip SGR
+(`ESC[` + digits + `m`) first, then the existing `port=` sed matches the
+same announcement the harness already parses after CSI strip.
+
 ```bash
 set -euo pipefail
 REPO=$(git rev-parse --show-toplevel)
@@ -76,16 +83,25 @@ env -i \
   AETHER_BLOOMERY_AUTHORITY_BACKEND=github \
   "$BIN" >>"$TRIAL/bloomery.stderr" 2>&1 &
 pid=$!
-echo "$pid" > "$TRIAL/pid"
+
+stop_owned() {
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
 
 http_port=
 for _ in $(seq 1 50); do
   if ! kill -0 "$pid" 2>/dev/null; then
     echo "coordinator exited before it bound HTTP; last log:" >&2
     tail -n 24 "$TRIAL/bloomery.stderr" >&2
+    stop_owned
     exit 1
   fi
-  http_port=$(sed -n 's/.*http server bound.*port=\([0-9][0-9]*\).*/\1/p' "$TRIAL/bloomery.stderr" | tail -n 1)
+  http_port=$(
+    sed $'s/\x1b\\[[0-9;]*m//g' "$TRIAL/bloomery.stderr" \
+      | sed -n 's/.*http server bound.*port=\([0-9][0-9]*\).*/\1/p' \
+      | tail -n 1
+  )
   if [ -n "$http_port" ]; then
     break
   fi
@@ -94,6 +110,7 @@ done
 if [ -z "$http_port" ]; then
   echo "coordinator never announced an HTTP port (bind collision or boot hang); last log:" >&2
   tail -n 24 "$TRIAL/bloomery.stderr" >&2
+  stop_owned
   exit 1
 fi
 
@@ -103,10 +120,11 @@ for _ in $(seq 1 50); do
   if ! kill -0 "$pid" 2>/dev/null; then
     echo "coordinator exited before /drafts and /view answered; last log:" >&2
     tail -n 24 "$TRIAL/bloomery.stderr" >&2
+    stop_owned
     exit 1
   fi
-  if curl -fsS "$COORDINATOR/drafts" >/dev/null \
-    && curl -fsS "$COORDINATOR/view" >/dev/null; then
+  if curl -fsS --connect-timeout 1 --max-time 2 "$COORDINATOR/drafts" >/dev/null \
+    && curl -fsS --connect-timeout 1 --max-time 2 "$COORDINATOR/view" >/dev/null; then
     ready=1
     break
   fi
@@ -115,6 +133,7 @@ done
 if [ "$ready" != 1 ]; then
   echo "boot failed or address collision on $COORDINATOR; last log:" >&2
   tail -n 24 "$TRIAL/bloomery.stderr" >&2
+  stop_owned
   exit 1
 fi
 
@@ -137,15 +156,16 @@ A second terminal must source the **same** trial file — not ambient
 ```bash
 set -euo pipefail
 # TRIAL is the directory the boot terminal printed.
-# shellcheck disable=SC1090
 . "$TRIAL/curl.env"
 : "${COORDINATOR:?}" "${TOKEN:?}"
 ```
 
 Do not delete the trial directory or its `target/` from the recipe. After
-you are done, stop **this** owned process (`kill "$(cat "$TRIAL/pid")"`),
-then remove `$TRIAL` yourself if you no longer need the journal, artifacts,
-or build tree.
+you are done, stop the process from the **same boot shell** that still holds
+`$pid` (`kill "$pid"; wait "$pid" || true`). Do not kill a number reread from
+a pid file — that slot may already belong to someone else. Then remove
+`$TRIAL` yourself if you no longer need the journal, artifacts, or build
+tree.
 
 ## The route table
 
@@ -214,10 +234,11 @@ description, and approval from the store.
 ## A curl walkthrough
 
 This is a minimal Auto-tier `docs/guide/**` seal on the trial coordinator
-above. `curl -fsS` fails the script on HTTP errors. Capture returned ids with
-`jq -er` so a missing or null field is a failure. Do not invent placeholder
-digests, assume the first draft is `"1"`, or default `COORDINATOR` from
-ambient.
+above. `curl -fsS` fails the script on HTTP errors. `--connect-timeout` and
+`--max-time` bound a hung TCP connect so retries cannot wait forever.
+Capture returned ids with `jq -er` so a missing or null field is a failure.
+Do not invent placeholder digests, assume the first draft is `"1"`, or
+default `COORDINATOR` from ambient.
 
 ```bash
 set -euo pipefail
@@ -225,7 +246,7 @@ set -euo pipefail
 : "${TOKEN:?same local-only token the trial coordinator booted with}"
 WP=wp-guide
 
-base=$(curl -fsS "$COORDINATOR/view" | jq -er '.mainline')
+base=$(curl -fsS --connect-timeout 2 --max-time 10 "$COORDINATOR/view" | jq -er '.mainline')
 ```
 
 `base` is this trial coordinator's `GET /view` mainline. On the fresh trial
@@ -245,7 +266,7 @@ created=$(
       provenance: {ObservationAttestation: {source: "rest-walkthrough-local"}},
       parents: []
     }
-  }' | curl -fsS -X POST "$COORDINATOR/commissions" \
+  }' | curl -fsS --connect-timeout 2 --max-time 10 -X POST "$COORDINATOR/commissions" \
     -H "Authorization: Bearer $TOKEN" \
     -H 'content-type: application/json' \
     --data-binary @-
@@ -281,7 +302,7 @@ written=$(
       declared_crates: [],
       declared_reads: []
     }
-  }' | curl -fsS -X POST "$COORDINATOR/commissions/$WP/revisions" \
+  }' | curl -fsS --connect-timeout 2 --max-time 10 -X POST "$COORDINATOR/commissions/$WP/revisions" \
     -H "Authorization: Bearer $TOKEN" \
     -H 'content-type: application/json' \
     --data-binary @-
@@ -300,7 +321,7 @@ that resolves above `auto` is `422` naming the tier it found.
 
 ```bash
 approved=$(
-  curl -fsS -X POST "$COORDINATOR/commissions/$WP/approvals/auto" \
+  curl -fsS --connect-timeout 2 --max-time 10 -X POST "$COORDINATOR/commissions/$WP/approvals/auto" \
     -H "Authorization: Bearer $TOKEN"
 )
 echo "$approved" | jq .
@@ -310,7 +331,7 @@ approval=$(echo "$approved" | jq -er '.digest')
 Open a draft and read the handle it mints:
 
 ```bash
-opened=$(curl -fsS -X POST "$COORDINATOR/drafts")
+opened=$(curl -fsS --connect-timeout 2 --max-time 10 -X POST "$COORDINATOR/drafts")
 echo "$opened" | jq .
 draft_id=$(echo "$opened" | jq -er '.draft_id')
 ```
@@ -335,7 +356,7 @@ jq -n --arg wp "$WP" --arg revision "$revision" --arg base "$base" '{
     }
   ],
   base: $base
-}' | curl -fsS -X PATCH "$COORDINATOR/drafts/$draft_id" \
+}' | curl -fsS --connect-timeout 2 --max-time 10 -X PATCH "$COORDINATOR/drafts/$draft_id" \
   -H 'content-type: application/json' \
   --data-binary @- | jq .
 ```
@@ -346,7 +367,7 @@ completeness, description, and approval. A body that still carries
 
 ```bash
 sealed=$(
-  curl -fsS -X POST "$COORDINATOR/drafts/$draft_id/seal" \
+  curl -fsS --connect-timeout 2 --max-time 10 -X POST "$COORDINATOR/drafts/$draft_id/seal" \
     -H 'content-type: application/json' \
     -d '{}'
 )
@@ -388,8 +409,8 @@ Read the sealed bloom back — the whole view document, then one bloom by the
 hex id the seal returned:
 
 ```bash
-curl -fsS "$COORDINATOR/view" | jq .
-curl -fsS "$COORDINATOR/blooms/$bloom_id" | jq .
+curl -fsS --connect-timeout 2 --max-time 10 "$COORDINATOR/view" | jq .
+curl -fsS --connect-timeout 2 --max-time 10 "$COORDINATOR/blooms/$bloom_id" | jq .
 ```
 
 ### Optional: authoring configuration
@@ -417,7 +438,7 @@ unordered; resolution is most-restrictive-wins over the declared surface.
 
 ```bash
 policy=$(
-  curl -fsS -X POST "$COORDINATOR/configs" \
+  curl -fsS --connect-timeout 2 --max-time 10 -X POST "$COORDINATOR/configs" \
     -H 'content-type: application/json' \
     -d '{"kind":"aether.bloomery.approval_policy","value":{"default":"Judge","rules":[{"glob":"docs/guide/**","tier":"Auto"}]}}' \
     | jq -er '.digest'
@@ -425,7 +446,7 @@ policy=$(
 
 jq -n --arg digest "$policy" \
   '{"configs":{"entries":{"aether.bloomery.approval_policy":$digest}}}' \
-  | curl -fsS -X PATCH "$COORDINATOR/drafts/$draft_id" \
+  | curl -fsS --connect-timeout 2 --max-time 10 -X PATCH "$COORDINATOR/drafts/$draft_id" \
     -H 'content-type: application/json' \
     --data-binary @-
 ```
@@ -476,8 +497,8 @@ Read the journal (the seal is now a durable record) and fetch a referenced
 artifact by its digest:
 
 ```bash
-curl -fsS "$COORDINATOR/journal" | jq .   # → {"records":[{"sequence":1,"idempotency_key":"…","event":{…}}]}
-curl -fsS "$COORDINATOR/artifacts/<digest>"   # → the raw bytes, or 404
+curl -fsS --connect-timeout 2 --max-time 10 "$COORDINATOR/journal" | jq .   # → {"records":[{"sequence":1,"idempotency_key":"…","event":{…}}]}
+curl -fsS --connect-timeout 2 --max-time 10 "$COORDINATOR/artifacts/<digest>"   # → the raw bytes, or 404
 ```
 
 To supersede, seal the successor draft in the same call — the predecessor is
