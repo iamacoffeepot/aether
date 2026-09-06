@@ -65,7 +65,9 @@ fn a_second_member_script_does_not_erase_the_first_members_fault() {
 #[test]
 fn two_members_verify_keep_distinct_faults_without_a_task_header() {
     // Distinct environment-vs-judged Verify outcomes so a global script
-    // overwrite collapses their modes.
+    // overwrite collapses their modes. Judged Fail dispatches Refine; that
+    // member's Refine is declined so the stop is named rather than walking
+    // into a sibling wait with no excuse.
     let mut harness = BloomeryHarness::start();
     harness.script_lane(&WorkpieceId("wp-a".into()), StageId::Verify, &[LaneScript::Die]);
     harness.script_lane(
@@ -73,18 +75,27 @@ fn two_members_verify_keep_distinct_faults_without_a_task_header() {
         StageId::Verify,
         &[LaneScript::VerifyFail(VerifyFailureSet::EMPTY)],
     );
-    let _bloom = harness.seal_members(&[("wp-a", digest(0x51)), ("wp-b", digest(0x52))]);
+    harness.script_lane(&WorkpieceId("wp-b".into()), StageId::Refine, &[LaneScript::Decline]);
+    let bloom = harness.seal_members(&[("wp-a", digest(0x51)), ("wp-b", digest(0x52))]);
     harness.run_until(
         |harness| {
             let ledger = harness.ledger();
-            verify_mode(&ledger, "wp-a").is_some() && verify_mode(&ledger, "wp-b").is_some()
+            let view = harness.bloom(bloom);
+            verify_mode(&ledger, "wp-a") == Some(LaneMode::ExitsNonZero)
+                && verify_mode(&ledger, "wp-b") == Some(LaneMode::Fail)
+                && view.members.iter().any(|member| {
+                    member.workpiece.0 == "wp-a" && (member.host_fault.is_some() || member.wedge.is_some())
+                })
+                && view.members.iter().any(|member| member.workpiece.0 == "wp-b" && member.park.is_some())
         },
         80,
     );
 
     let ledger = harness.ledger();
     assert_eq!(verify_mode(&ledger, "wp-a"), Some(LaneMode::ExitsNonZero), "A's verify Die survived B's later script");
-    assert_eq!(verify_mode(&ledger, "wp-b"), Some(LaneMode::Fail), "B's verify Fail was not consumed by A's Die",);
+    assert_eq!(verify_mode(&ledger, "wp-b"), Some(LaneMode::Fail), "B's verify Fail was not consumed by A's Die");
+    Oracle::check(&harness.view(), harness.doctor().as_ref(), &harness.outstanding())
+        .unwrap_or_else(|violation| panic!("{violation}"));
 }
 
 #[test]

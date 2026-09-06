@@ -44,6 +44,7 @@ use super::drive::{member, passed};
 use super::{BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, Lane, POLL};
 use crate::oracle::{Oracle, is_answerable, liveness};
 use crate::scenario::{LaneScript, Scenario};
+use crate::script::write_lane_scripts;
 use crate::support::Coordinator;
 use crate::support::client::spawn_and_connect;
 use crate::support::repo::Repo;
@@ -275,13 +276,8 @@ impl ScenarioHarness {
     /// # Panics
     /// The mock-lane script could not be written.
     pub fn script_lane(&self, workpiece: &WorkpieceId, stage: StageId, scripts: &[LaneScript]) {
-        crate::script::write_lane_scripts(
-            Path::new(&self.worktree_base),
-            &workpiece.0,
-            stage,
-            scripts.iter().map(lower_lane_script),
-        )
-        .expect("the mock-lane script writes");
+        write_lane_scripts(Path::new(&self.worktree_base), &workpiece.0, stage, scripts.iter().map(lower_lane_script))
+            .expect("the mock-lane script writes");
     }
 
     /// The served red-base alert, when one is holding the day.
