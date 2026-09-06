@@ -286,16 +286,18 @@ fn wait_until_pgid_gone(pgid: u32) -> bool {
 /// unknown, not gone: unknown is live so cancellation escalates instead of
 /// returning success into an unbounded `child.wait`.
 fn any_process_in_group(pgid: u32) -> bool {
-    proc_group_is_live(pgid)
-        .or_else(|| ps_group_is_live(pgid))
-        .or_else(|| group_responds_to_signal_zero(pgid))
-        .unwrap_or(true)
+    group_is_live(proc_group_is_live(pgid), || ps_group_is_live(pgid), || group_responds_to_signal_zero(pgid))
 }
 
-/// First probe that could observe wins. If every probe is unknown, the group
-/// is live: a timeout-and-error is honest, a false "gone" is not.
-fn group_is_live(proc: Option<bool>, ps: Option<bool>, signal_zero: Option<bool>) -> bool {
-    proc.or(ps).or(signal_zero).unwrap_or(true)
+/// First probe that could observe wins. Later probes are closures so `ps` and
+/// `kill -0` do not run once `/proc` answered. If every probe is unknown, the
+/// group is live: a timeout-and-error is honest, a false "gone" is not.
+fn group_is_live(
+    proc: Option<bool>,
+    ps: impl FnOnce() -> Option<bool>,
+    signal_zero: impl FnOnce() -> Option<bool>,
+) -> bool {
+    proc.or_else(ps).or_else(signal_zero).unwrap_or(true)
 }
 
 fn proc_group_is_live(pgid: u32) -> Option<bool> {
@@ -516,21 +518,55 @@ mod tests {
         );
         assert_eq!(signal_zero_observation(Ok(true)), Some(true), "a successful kill -0 is a live group");
         assert!(
-            group_is_live(None, None, signal_zero_observation(Ok(false))),
+            group_is_live(None, || None, || signal_zero_observation(Ok(false))),
             "ambiguous kill -0 after failed proc and ps is live",
         );
         assert!(
             group_is_live(
                 None,
-                None,
-                signal_zero_observation(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "kill"))),
+                || None,
+                || signal_zero_observation(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "kill"))),
             ),
             "every probe unavailable is live, not an empty group",
         );
-        assert!(group_is_live(None, None, None), "three unknown probes are live");
-        assert!(group_is_live(None, None, Some(true)), "kill -0 success still confirms live");
-        assert!(!group_is_live(None, Some(false), None), "a successful empty ps listing is gone");
-        assert!(!group_is_live(Some(false), None, None), "a successful empty proc scan is gone");
+        assert!(group_is_live(None, || None, || None), "three unknown probes are live");
+        assert!(group_is_live(None, || None, || Some(true)), "kill -0 success still confirms live");
+        assert!(
+            !group_is_live(None, || Some(false), || panic!("kill -0 must not run after ps observes")),
+            "a successful empty ps listing is gone",
+        );
+        assert!(
+            !group_is_live(
+                Some(false),
+                || panic!("ps must not run when /proc observed"),
+                || panic!("kill -0 must not run when /proc observed"),
+            ),
+            "a successful empty proc scan is gone",
+        );
+    }
+
+    #[test]
+    fn a_proc_observation_does_not_invoke_fallback_probes() {
+        // Tripwire: eager Option::or evaluates ps and kill even after /proc
+        // answered. The production helper must skip those closures.
+        let mut ps_calls = 0;
+        let mut kill_calls = 0;
+        assert!(
+            group_is_live(
+                Some(true),
+                || {
+                    ps_calls += 1;
+                    Some(false)
+                },
+                || {
+                    kill_calls += 1;
+                    Some(false)
+                },
+            ),
+            "a live /proc reading is the answer",
+        );
+        assert_eq!(ps_calls, 0, "ps is not spawned when /proc observed");
+        assert_eq!(kill_calls, 0, "kill -0 is not spawned when /proc observed");
     }
 
     #[cfg(unix)]
