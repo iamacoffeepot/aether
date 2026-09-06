@@ -112,11 +112,7 @@ fn menu_bar_config() -> MenuBarConfig {
 }
 
 fn tooltip_config() -> TooltipConfig {
-    TooltipConfig {
-        sections: vec![TooltipSection::new(["Hint"])],
-        theme: Theme::DEFAULT,
-        ..TooltipConfig::default()
-    }
+    TooltipConfig { sections: vec![TooltipSection::new(["Hint"])], theme: Theme::DEFAULT, ..TooltipConfig::default() }
 }
 
 fn toast_config() -> ToastConfig {
@@ -152,10 +148,7 @@ fn encoded_config_for(export: &str) -> Vec<u8> {
         "aether.kit.widget.splitter" => splitter_config().encode_into_bytes(),
         other => panic!("named-load table is missing a Config for {other}"),
     };
-    assert!(
-        !bytes.is_empty(),
-        "{export}: encoded Config must be a typed payload, not empty raw bytes"
-    );
+    assert!(!bytes.is_empty(), "{export}: encoded Config must be a typed payload, not empty raw bytes");
     bytes
 }
 
