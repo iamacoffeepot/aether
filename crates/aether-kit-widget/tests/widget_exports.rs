@@ -31,6 +31,7 @@ use aether_kinds::{
     Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, ReplaceComponent,
     ReplaceResult, Tick, WindowId,
 };
+use aether_kit_widget::set::{DialogConfig, SplitterAxis, SplitterConfig, ToastConfig, TooltipConfig, TooltipSection};
 use aether_kit_widget::{
     DropdownConfig, Menu, MenuBarConfig, MenuItem, PanelConfig, TabStripConfig, Theme, WidgetChildSpec,
     WidgetControlState, WidgetFrame, WidgetKind,
@@ -79,6 +80,85 @@ fn release(x: f32, y: f32) -> MouseButtonRelease {
     MouseButtonRelease { window: TEST_WINDOW_ID, button: LEFT, x, y }
 }
 
+fn dropdown_config() -> DropdownConfig {
+    DropdownConfig {
+        options: vec!["Alpha".into(), "Beta".into()],
+        initial_selected_index: Some(0),
+        placeholder: String::new(),
+        open_row_count: 4,
+        theme: Theme::DEFAULT,
+        state: WidgetControlState::default(),
+    }
+}
+
+fn tab_strip_config() -> TabStripConfig {
+    TabStripConfig {
+        labels: vec!["One".to_owned(), "Two".to_owned()],
+        initial_index: 0,
+        theme: Theme::DEFAULT,
+        ..TabStripConfig::default()
+    }
+}
+
+fn menu_bar_config() -> MenuBarConfig {
+    MenuBarConfig {
+        menus: vec![Menu {
+            title: "File".to_owned(),
+            items: vec![MenuItem { label: "Open".to_owned(), ..MenuItem::default() }],
+        }],
+        theme: Theme::DEFAULT,
+        state: WidgetControlState::default(),
+    }
+}
+
+fn tooltip_config() -> TooltipConfig {
+    TooltipConfig {
+        sections: vec![TooltipSection::new(["Hint"])],
+        theme: Theme::DEFAULT,
+        ..TooltipConfig::default()
+    }
+}
+
+fn toast_config() -> ToastConfig {
+    ToastConfig { theme: Theme::DEFAULT, ..ToastConfig::default() }
+}
+
+fn dialog_config() -> DialogConfig {
+    DialogConfig { title: "Confirm".to_owned(), theme: Theme::DEFAULT, ..DialogConfig::default() }
+}
+
+fn splitter_config() -> SplitterConfig {
+    SplitterConfig {
+        axis: SplitterAxis::Horizontal,
+        min_pixels: 40.0,
+        max_pixels: 400.0,
+        position_pixels: 120.0,
+        theme: Theme::DEFAULT,
+        ..SplitterConfig::default()
+    }
+}
+
+/// Typed `Config` bytes for one of the seven named exports. Empty raw payload
+/// is not a typed-config guest's init (ADR-0090): the host decodes
+/// `Self::Config` from these bytes.
+fn encoded_config_for(export: &str) -> Vec<u8> {
+    let bytes = match export {
+        "aether.kit.widget.dropdown" => dropdown_config().encode_into_bytes(),
+        "aether.kit.widget.tab_strip" => tab_strip_config().encode_into_bytes(),
+        "aether.kit.widget.menu_bar" => menu_bar_config().encode_into_bytes(),
+        "aether.kit.widget.tooltip" => tooltip_config().encode_into_bytes(),
+        "aether.kit.widget.toast" => toast_config().encode_into_bytes(),
+        "aether.kit.widget.dialog" => dialog_config().encode_into_bytes(),
+        "aether.kit.widget.splitter" => splitter_config().encode_into_bytes(),
+        other => panic!("named-load table is missing a Config for {other}"),
+    };
+    assert!(
+        !bytes.is_empty(),
+        "{export}: encoded Config must be a typed payload, not empty raw bytes"
+    );
+    bytes
+}
+
 fn panel_config() -> PanelConfig {
     PanelConfig {
         x: 10.0,
@@ -93,43 +173,21 @@ fn panel_config() -> PanelConfig {
                 kind: WidgetKind::Dropdown,
                 origin: [0.0, 0.0],
                 clip: None,
-                config: DropdownConfig {
-                    options: vec!["Alpha".into(), "Beta".into()],
-                    initial_selected_index: Some(0),
-                    placeholder: String::new(),
-                    open_row_count: 4,
-                    theme: Theme::DEFAULT,
-                    state: WidgetControlState::default(),
-                }
-                .encode_into_bytes(),
+                config: dropdown_config().encode_into_bytes(),
             },
             WidgetChildSpec {
                 subname: "tabs".to_owned(),
                 kind: WidgetKind::TabStrip,
                 origin: [0.0, 0.0],
                 clip: None,
-                config: TabStripConfig {
-                    labels: vec!["One".to_owned(), "Two".to_owned()],
-                    initial_index: 0,
-                    theme: Theme::DEFAULT,
-                    ..TabStripConfig::default()
-                }
-                .encode_into_bytes(),
+                config: tab_strip_config().encode_into_bytes(),
             },
             WidgetChildSpec {
                 subname: "menu".to_owned(),
                 kind: WidgetKind::MenuBar,
                 origin: [0.0, 0.0],
                 clip: None,
-                config: MenuBarConfig {
-                    menus: vec![Menu {
-                        title: "File".to_owned(),
-                        items: vec![MenuItem { label: "Open".to_owned(), ..MenuItem::default() }],
-                    }],
-                    theme: Theme::DEFAULT,
-                    state: WidgetControlState::default(),
-                }
-                .encode_into_bytes(),
+                config: menu_bar_config().encode_into_bytes(),
             },
         ],
         owns_input: true,
@@ -177,7 +235,7 @@ fn assert_selectors(wasm: &[u8], stem: &str) {
                     &LoadComponent {
                         wasm: wasm.to_vec(),
                         name: None,
-                        config: Vec::new(),
+                        config: encoded_config_for(export),
                         export: Some(export.to_owned()),
                     },
                 ),
