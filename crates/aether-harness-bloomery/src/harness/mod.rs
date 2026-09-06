@@ -281,6 +281,8 @@ impl HarnessBuilder {
     }
 
     /// Observer / reactor poll cadence, in seconds.
+    ///
+    /// Forked coordinators receive this as `AETHER_GITHUB_POLL_INTERVAL_SECS`.
     #[must_use]
     pub const fn poll_interval_secs(mut self, secs: u64) -> Self {
         self.poll_interval_secs = secs;
@@ -289,6 +291,9 @@ impl HarnessBuilder {
 
     /// Compare-and-swap land gate. Off so a scenario can observe `Resolved`
     /// before the land reactor consumes it.
+    ///
+    /// Forked coordinators receive this as `AETHER_GITHUB_CAS_LAND_ENABLED`,
+    /// the production key both landing backends resolve.
     #[must_use]
     pub const fn cas_land(mut self, enabled: bool) -> Self {
         self.cas_land_enabled = enabled;
