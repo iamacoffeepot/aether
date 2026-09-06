@@ -56,8 +56,10 @@ impl GpuFrameHook {
     /// The shape batches (ADR-0213) that survived the most recently
     /// committed frame's record, in submission order — the shape companion
     /// of [`Self::committed_overlay_snapshot`].
-    #[allow(clippy::redundant_closure_for_method_calls)]
-    // aether-suppression-request: the pumped state type is pub inside a private module of aether-render and unnameable here, so the method reference the lint suggests would not compile — the same closure form `committed_overlay_snapshot` carries
+    // The pumped state type is `pub` inside a private module of aether-render,
+    // so it is unnameable here and the closure form is required (as for
+    // `committed_overlay_snapshot` above).
+    #[allow(clippy::redundant_closure_for_method_calls)] // aether-suppression-request: state type unnameable here
     #[must_use]
     pub fn committed_shape_snapshot(&self) -> Vec<DrawShapes> {
         self.slot.read_state(|state| state.committed_shape_snapshot()).unwrap_or_default()
