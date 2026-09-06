@@ -3,7 +3,7 @@
 //! Wraps a [`SourceReplica`] so the mirror reactor can push allowlisted refs
 //! without naming the git crate at every call site. Credentials stay on this
 //! process: each push resolves a bearer from a
-//! [`TokenSource`](aether_bloomery_github::TokenSource) and the git backend
+//! [`TokenSource`] and the git backend
 //! applies it as an HTTP header.
 
 use std::path::Path;
