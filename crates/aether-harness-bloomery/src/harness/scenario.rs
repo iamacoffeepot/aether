@@ -75,7 +75,7 @@ pub const OPERATOR_SEED: [u8; 32] = [0x0A; 32];
 /// wire connection that drives and observes it.
 pub struct ScenarioHarness {
     _chassis: Option<BuiltChassis<BloomeryChassis>>,
-    _coordinator: Option<Coordinator>,
+    coordinator: Option<Coordinator>,
     _state: Option<TempDir>,
     _runs: Option<TempDir>,
     wire: Wire,
@@ -165,7 +165,7 @@ impl ScenarioHarness {
 
         let mut harness = Self {
             _chassis: chassis,
-            _coordinator: coordinator,
+            coordinator,
             _state: owned_state,
             _runs: owned_runs,
             wire,
@@ -638,9 +638,12 @@ impl ScenarioHarness {
 
     /// The bounded stderr tail of a forked coordinator, when this harness owns
     /// one. In-process cells have none. Snapshot only — does not wait or drain.
+    ///
+    /// # Panics
+    /// The boot-log lock is poisoned.
     #[must_use]
     pub fn coordinator_boot_log_tail(&self) -> Option<Vec<String>> {
-        self._coordinator.as_ref().map(Coordinator::boot_log_tail)
+        self.coordinator.as_ref().map(Coordinator::boot_log_tail)
     }
 
     /// The nonces the store still holds as outstanding orders.

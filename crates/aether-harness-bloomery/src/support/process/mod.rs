@@ -126,6 +126,9 @@ impl Coordinator {
 
     /// The bounded stderr tail the boot reader already keeps — a snapshot, not a
     /// further drain. Empty when the child has logged nothing yet.
+    ///
+    /// # Panics
+    /// The boot-log lock is poisoned.
     #[must_use]
     pub fn boot_log_tail(&self) -> Vec<String> {
         self.boot.tail()

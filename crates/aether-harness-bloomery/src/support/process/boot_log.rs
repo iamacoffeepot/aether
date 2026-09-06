@@ -162,6 +162,9 @@ impl BootLog {
     ///
     /// At most 24 lines, oldest dropped first. Empty when the child has logged
     /// nothing yet. Does not wait, drain further, or grow.
+    ///
+    /// # Panics
+    /// The boot-log lock is poisoned.
     #[must_use]
     pub fn tail(&self) -> Vec<String> {
         let (announced, _) = &*self.announced;

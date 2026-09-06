@@ -27,7 +27,7 @@ use aether_bloomery::{
     VerifyFailureSet,
 };
 use aether_chassis_bloomery::bloomery::admits_lane_key;
-use aether_chassis_bloomery::bloomery::mock_lane::{FOREIGN_SESSION_ID, LaneMode, LaneScript};
+use aether_chassis_bloomery::bloomery::mock_lane::{FOREIGN_SESSION_ID, LaneMode, LaneRun, LaneScript};
 use aether_chassis_bloomery::store::{SqliteStore, StoreBackend};
 use aether_harness_bloomery::{HarnessBuilder, HarnessRoots, LaneHarness, while_pumping};
 
@@ -607,13 +607,14 @@ fn a_lane_beating_only_its_heartbeat_is_not_silence() {
     harness.wait_for_runs(1);
     let nonces = harness.evidence_nonces();
     let captured_outstanding = harness.outstanding();
+    let pump = Mutex::new(PumpWrites::default());
     for nonce in &nonces {
         harness.write_transcript(nonce, "{}\n");
         harness.touch_heartbeat(nonce);
+        pump.lock().expect("the pump trace lock is held only by this test thread").record_seed();
     }
     let runs = harness.runs_dir();
     let pumped = nonces.clone();
-    let pump = Mutex::new(PumpWrites::default());
     while_pumping(
         || {
             let mut pump = pump.lock().expect("the pump trace lock is held only by the helper thread");
@@ -621,7 +622,7 @@ fn a_lane_beating_only_its_heartbeat_is_not_silence() {
                 let dir = runs.join(format!("{nonce}-evidence"));
                 let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis());
                 match fs::create_dir_all(&dir).and_then(|()| fs::write(dir.join("heartbeat"), stamp.to_string())) {
-                    Ok(()) => pump.record_ok(),
+                    Ok(()) => pump.record_pump(),
                     Err(error) => pump.last_error = Some(format!("{nonce}: {error}")),
                 }
             }
@@ -630,9 +631,21 @@ fn a_lane_beating_only_its_heartbeat_is_not_silence() {
     );
 
     let outstanding = harness.outstanding();
+    let observed_at = Instant::now();
+    let observed_unix_millis = unix_millis();
     let lost = nonces.iter().any(|nonce| !outstanding.contains(nonce));
-    let diag =
-        lost.then(|| heartbeat_loss_report(&harness, &runs, &nonces, &captured_outstanding, &outstanding, &pump));
+    let diag = lost.then(|| {
+        heartbeat_loss_report(
+            &harness,
+            &runs,
+            &nonces,
+            &captured_outstanding,
+            &outstanding,
+            observed_at,
+            observed_unix_millis,
+            &pump,
+        )
+    });
     for nonce in &nonces {
         assert!(
             outstanding.contains(nonce),
@@ -644,30 +657,44 @@ fn a_lane_beating_only_its_heartbeat_is_not_silence() {
 
 #[derive(Default)]
 struct PumpWrites {
-    first: Option<Instant>,
-    last: Option<Instant>,
+    last_ok: Option<Instant>,
+    last_pump: Option<Instant>,
     first_unix_millis: Option<u128>,
     last_unix_millis: Option<u128>,
-    max_gap: Option<Duration>,
-    ok: u32,
+    initial_gap: Option<Duration>,
+    max_pump_gap: Option<Duration>,
+    seed_ok: u32,
+    pump_ok: u32,
     last_error: Option<String>,
 }
 
 impl PumpWrites {
-    fn record_ok(&mut self) {
+    fn record_seed(&mut self) {
         let now = Instant::now();
-        let wall = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis());
-        if let Some(last) = self.last {
-            let gap = now.saturating_duration_since(last);
-            self.max_gap = Some(self.max_gap.map_or(gap, |kept| kept.max(gap)));
-        }
-        if self.first.is_none() {
-            self.first = Some(now);
+        let wall = unix_millis();
+        if self.first_unix_millis.is_none() {
             self.first_unix_millis = Some(wall);
         }
-        self.last = Some(now);
+        self.last_ok = Some(now);
         self.last_unix_millis = Some(wall);
-        self.ok = self.ok.saturating_add(1);
+        self.seed_ok = self.seed_ok.saturating_add(1);
+    }
+
+    fn record_pump(&mut self) {
+        let now = Instant::now();
+        let wall = unix_millis();
+        if self.pump_ok == 0 {
+            if let Some(seed) = self.last_ok {
+                self.initial_gap = Some(now.saturating_duration_since(seed));
+            }
+        } else if let Some(last_pump) = self.last_pump {
+            let gap = now.saturating_duration_since(last_pump);
+            self.max_pump_gap = Some(self.max_pump_gap.map_or(gap, |kept| kept.max(gap)));
+        }
+        self.last_pump = Some(now);
+        self.last_ok = Some(now);
+        self.last_unix_millis = Some(wall);
+        self.pump_ok = self.pump_ok.saturating_add(1);
     }
 }
 
@@ -677,15 +704,16 @@ fn heartbeat_loss_report(
     original: &[String],
     captured_outstanding: &[String],
     final_outstanding: &[String],
+    observed_at: Instant,
+    observed_unix_millis: u128,
     pump: &Mutex<PumpWrites>,
 ) -> String {
     let pump = pump.lock().expect("the pump trace lock is held only after the helper thread stops");
-    let ledger = harness
-        .ledger()
-        .into_iter()
-        .map(|run| format!("{}:{}:{:?}", run.nonce, run.command, run.mode))
-        .collect::<Vec<_>>()
-        .join("; ");
+    let final_gap = pump
+        .last_ok
+        .map(|last| format!("{:?}", observed_at.saturating_duration_since(last)))
+        .unwrap_or_else(|| "n/a".to_owned());
+    let ledger = bounded_ledger_summary(&harness.ledger());
     let files = original
         .iter()
         .map(|nonce| {
@@ -700,7 +728,8 @@ fn heartbeat_loss_report(
         .join("; ");
     let first = pump.first_unix_millis.map(|millis| format!("{millis} millis")).unwrap_or_else(|| "none".to_owned());
     let last = pump.last_unix_millis.map(|millis| format!("{millis} millis")).unwrap_or_else(|| "none".to_owned());
-    let max_gap = pump.max_gap.map(|gap| format!("{gap:?}")).unwrap_or_else(|| "n/a".to_owned());
+    let initial_gap = pump.initial_gap.map(|gap| format!("{gap:?}")).unwrap_or_else(|| "n/a".to_owned());
+    let max_pump_gap = pump.max_pump_gap.map(|gap| format!("{gap:?}")).unwrap_or_else(|| "n/a".to_owned());
     let write_error = pump.last_error.as_deref().unwrap_or("none");
     let tail = match harness.coordinator_boot_log_tail() {
         None => "no forked coordinator".to_owned(),
@@ -719,9 +748,26 @@ fn heartbeat_loss_report(
         }
     };
     format!(
-        "\ncapture outstanding={captured_outstanding:?}\nledger=[{ledger}]\nfiles={files}\npump ok={} first={first} last={last} max_gap={max_gap} write_error={write_error}\nfinal outstanding={final_outstanding:?}\nboot-log tail: {tail}",
-        pump.ok,
+        "\ncapture outstanding={captured_outstanding:?}\nledger={ledger}\nfiles={files}\nseed_ok={} pump_ok={} first={first} last={last} observed={observed_unix_millis} millis initial_gap={initial_gap} max_pump_gap={max_pump_gap} final_gap={final_gap} write_error={write_error}\nfinal outstanding={final_outstanding:?}\nboot-log tail: {tail}",
+        pump.seed_ok, pump.pump_ok,
     )
+}
+
+fn bounded_ledger_summary(runs: &[LaneRun]) -> String {
+    const LAST: usize = 24;
+    let total = runs.len();
+    let shown = if total > LAST {
+        &runs[total - LAST..]
+    } else {
+        runs
+    };
+    let body =
+        shown.iter().map(|run| format!("{}:{}:{:?}", run.nonce, run.command, run.mode)).collect::<Vec<_>>().join("; ");
+    format!("total={total} last={LAST} [{body}]")
+}
+
+fn unix_millis() -> u128 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis())
 }
 
 fn file_mtime_millis(path: &Path) -> String {
