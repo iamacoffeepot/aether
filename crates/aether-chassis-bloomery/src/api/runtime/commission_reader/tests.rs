@@ -1,13 +1,17 @@
 //! Fail-closed admission refusals. Each named reason has its own message so a
 //! caller cannot mistake one closed door for another.
 
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
 use aether_bloomery::{
-    CommissionStatus, Digest, MemberDependency, Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision,
-    ScopeRouting, Statement, WorkpieceId, digest_of,
+    ApprovalRule, CommissionStatus, Digest, MemberDependency, Observation, Provenance, SCOPE_REVISION_SCHEMA,
+    ScopeRevision, ScopeRouting, Statement, WorkpieceId, digest_of,
 };
 use aether_data::wire::to_vec;
 
-use super::adr_touch::{AbsentAdrs, AdrMaturity, SealedAdrStatus};
+use super::adr_touch::{AbsentAdrs, AdrMaturity, SealedAdrStatus, TreeAdrs};
 use super::{
     AdmissionRefusal, AdmitError, AdmittedMember, DependencyResolution, admit_member, workpiece_from_listed,
     workpieces_from_list,
@@ -407,6 +411,59 @@ fn a_proposed_adr_path_stays_proposed_only() {
         matches!(decision, Decision::AutoApproved(_)),
         "a still-Proposed touch defers to the auto policy, got {decision:?}"
     );
+}
+
+#[test]
+fn an_established_base_blob_keeps_the_human_gate_when_cwd_is_stale_proposed() {
+    // Policy names the exact ADR at Judge so file-granular admission is legal.
+    // Pre-fix, cwd Proposed classified ProposedOnly and the Judge rule ran
+    // instead of the Human hard gate an Accepted-at-base ADR requires.
+    let path = "docs/adr/0999-sealed-base.md";
+    let repo = tempfile::tempdir().expect("a temp dir for the fixture creates");
+    git(repo.path(), &["init", "--object-format=sha1", "--quiet"]);
+    git(repo.path(), &["config", "user.name", "adr-touch"]);
+    git(repo.path(), &["config", "user.email", "adr-touch@test"]);
+    git(repo.path(), &["config", "commit.gpgsign", "false"]);
+    let adr = repo.path().join(path);
+    fs::create_dir_all(adr.parent().expect("ADR path has a parent")).expect("docs/adr creates");
+    fs::write(&adr, "- **Status:** Accepted\n").expect("the sealed-base ADR writes");
+    git(repo.path(), &["add", "-A"]);
+    git(repo.path(), &["commit", "--quiet", "--message", "accepted at base"]);
+    let base = git_head(repo.path());
+    fs::write(&adr, "- **Status:** Proposed\n").expect("the stale working-tree rewrite writes");
+
+    let mut revision = revision("wp-1", "problem");
+    revision.declared_surface = vec![path.to_owned()];
+    let digest = digest_of(&revision);
+    let admitted = admit_member(
+        digest,
+        loaded("wp-1", &revision, vec![auto_approval(digest)]),
+        &TreeAdrs::at(repo.path(), Some(&base)),
+        &DependencyResolution::default(),
+    )
+    .expect("admitted");
+
+    assert_eq!(admitted.projection.adr_touch, AdrTouch::NewOrEstablished);
+    let policy = ApprovalPolicy {
+        default: Tier::Auto,
+        rules: vec![ApprovalRule { glob: path.to_owned(), tier: Tier::Judge }],
+    };
+    assert_eq!(
+        Gate::new(&policy).evaluate(&gate_request(&admitted, false)),
+        Decision::RequiresStatement(Tier::Human),
+        "an established-at-base ADR must not take the Judge rule a stale Proposed file would have used",
+    );
+}
+
+fn git(root: &Path, args: &[&str]) {
+    let output = Command::new("git").current_dir(root).args(args).output().expect("git starts");
+    assert!(output.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&output.stderr));
+}
+
+fn git_head(root: &Path) -> String {
+    let output = Command::new("git").current_dir(root).args(["rev-parse", "HEAD"]).output().expect("git starts");
+    assert!(output.status.success(), "git rev-parse HEAD failed");
+    String::from_utf8(output.stdout).expect("HEAD is utf-8").trim().to_owned()
 }
 
 fn admit_depending(dep: &WorkpieceId, resolution: &DependencyResolution) -> AdmittedMember {

@@ -2,12 +2,15 @@
 //!
 //! A glob matches paths, not maturity, so admission cannot classify a
 //! `docs/adr` surface as still-Proposed from shape alone. The sealed base's
-//! `Status:` line (or absence of the file) is the authority.
+//! `Status:` line (or absence of the file) is the authority. The blob is the
+//! git object at that base, never the process working tree: a stale local
+//! `Proposed` must not waive the Human hard gate on an established-at-base
+//! ADR, and a stale local `Accepted` must not refuse a still-Proposed one.
 
-use std::fs;
 use std::path::Path;
 
-use aether_bloomery::SurfacePattern;
+use aether_bloomery::{Correspondence, Digest, SurfacePattern};
+use aether_bloomery_git::{GitObjectId, command};
 
 use crate::bloomery::AdrTouch;
 
@@ -37,24 +40,44 @@ impl AdrMaturity for AbsentAdrs {
     }
 }
 
-/// Markdown files under `root`, keyed by repository-relative path.
+/// ADR markdown as of one git commit in `repo`.
+///
+/// `commit` is a real git object name from correspondence, never a Bloomery
+/// digest hex-pun. [`None`] means the sealed base could not be resolved, so
+/// every path is absent (a new ADR) rather than falling back to cwd.
 pub struct TreeAdrs<'a> {
-    pub root: &'a Path,
+    repo: &'a Path,
+    commit: Option<&'a str>,
 }
 
 impl AdrMaturity for TreeAdrs<'_> {
     fn status(&self, path: &str) -> Option<SealedAdrStatus> {
-        let text = fs::read_to_string(self.root.join(path)).ok()?;
-        Some(status_from_markdown(&text))
+        blob_markdown(self.repo, self.commit?, path).map(|text| status_from_markdown(&text))
     }
 }
 
-impl TreeAdrs<'static> {
-    /// The process working tree — the cheap stand-in for the sealed base while
-    /// admission has no git blob reader. A missing file still classifies as new.
-    pub fn working_tree() -> Self {
-        Self { root: Path::new(".") }
+impl<'a> TreeAdrs<'a> {
+    /// Git blobs at `commit` in `repo`. A missing path at that commit is new.
+    pub fn at(repo: &'a Path, commit: Option<&'a str>) -> Self {
+        Self { repo, commit }
     }
+}
+
+/// The git object name correspondence recorded for `base`, or [`None`] when
+/// the digest has no git object (including a default-zero draft base).
+///
+/// A Bloomery [`Digest`] is never a git sha. Reading `{digest-hex}:{path}`
+/// would miss the sealed blob on today's sha1 repositories and is the hex-pun
+/// ADR-0150 forbids.
+pub(super) fn sealed_commit_hex(correspondence: &dyn Correspondence, base: Digest) -> Option<String> {
+    let object = correspondence.resolve_backend_object(&base).ok()??;
+    GitObjectId::try_from(object).ok().map(|id| id.to_hex())
+}
+
+fn blob_markdown(repo: &Path, commit: &str, path: &str) -> Option<String> {
+    let spec = format!("{commit}:{path}");
+    let output = command::run(repo, &["cat-file", "-p", &spec]).ok()?;
+    output.status.success().then_some(output.stdout).and_then(|bytes| String::from_utf8(bytes).ok())
 }
 
 /// Derive [`AdrTouch`] from a declared surface and the sealed-base catalog.
@@ -126,7 +149,15 @@ fn status_token(text: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AdrMaturity, SealedAdrStatus, adr_touch, status_from_markdown};
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    use aether_bloomery::{BackendObjectId, Correspondence, CorrespondenceError, Digest};
+    use aether_bloomery_git::GitObjectId;
+    use tempfile::TempDir;
+
+    use super::{AdrMaturity, SealedAdrStatus, TreeAdrs, adr_touch, sealed_commit_hex, status_from_markdown};
     use crate::bloomery::AdrTouch;
 
     struct Markdown<'a>(&'a [(&'a str, &'a str)]);
@@ -134,6 +165,25 @@ mod tests {
     impl AdrMaturity for Markdown<'_> {
         fn status(&self, path: &str) -> Option<SealedAdrStatus> {
             self.0.iter().find(|(candidate, _)| *candidate == path).map(|(_, text)| status_from_markdown(text))
+        }
+    }
+
+    struct OnePair {
+        digest: Digest,
+        object: BackendObjectId,
+    }
+
+    impl Correspondence for OnePair {
+        fn record(&self, _: &Digest, _: &BackendObjectId) -> Result<(), CorrespondenceError> {
+            Ok(())
+        }
+
+        fn resolve_backend_object(&self, digest: &Digest) -> Result<Option<BackendObjectId>, CorrespondenceError> {
+            Ok((*digest == self.digest).then(|| self.object.clone()))
+        }
+
+        fn resolve_digest(&self, object: &BackendObjectId) -> Result<Option<Digest>, CorrespondenceError> {
+            Ok((object == &self.object).then_some(self.digest))
         }
     }
 
@@ -160,5 +210,84 @@ mod tests {
         assert_eq!(status_from_markdown("- **Status:** Accepted (shipped)\n"), SealedAdrStatus::Established);
         assert_eq!(status_from_markdown("- **Status:** Superseded by ADR-0038\n"), SealedAdrStatus::Established);
         assert_eq!(status_from_markdown("# no status line\n"), SealedAdrStatus::Established);
+    }
+
+    #[test]
+    fn maturity_is_the_blob_at_the_commit_not_the_working_tree() {
+        // Pre-fix, TreeAdrs joined cwd, so a stale local Proposed classified
+        // an Accepted-at-base ADR as ProposedOnly and skipped the Human hard
+        // gate. The inverse (local Accepted, base Proposed) refused valid work.
+        let path = "docs/adr/0999-sealed-base.md";
+        let repo = adr_repo();
+        write_adr(repo.path(), path, "Accepted");
+        let accepted = commit(repo.path(), "accepted at base");
+        write_adr(repo.path(), path, "Proposed");
+        assert_eq!(
+            adr_touch(&[path.to_owned()], &TreeAdrs::at(repo.path(), Some(&accepted))),
+            AdrTouch::NewOrEstablished,
+            "cwd Proposed must not reclassify an Accepted blob at the sealed commit",
+        );
+
+        let proposed = commit(repo.path(), "later proposed rewrite");
+        write_adr(repo.path(), path, "Accepted");
+        assert_eq!(
+            adr_touch(&[path.to_owned()], &TreeAdrs::at(repo.path(), Some(&proposed))),
+            AdrTouch::ProposedOnly,
+            "cwd Accepted must not reclassify a still-Proposed blob at the named commit",
+        );
+        assert_eq!(
+            adr_touch(&[path.to_owned()], &TreeAdrs::at(repo.path(), None)),
+            AdrTouch::NewOrEstablished,
+            "an unresolved base must not read cwd; absence is a new ADR",
+        );
+    }
+
+    #[test]
+    fn sealed_commit_hex_is_the_git_object_not_the_digest() {
+        // Tripwire: a Digest is sha256 over aether-wire bytes and is never a
+        // git sha. Hex-punning it as `{digest}:{path}` misses the blob on a
+        // sha1 repository and is the correspondence split ADR-0150 records.
+        let sha = "3a3f8c0b9e1d2a4f6b8c0e2d4a6f8b0c1e3d5a7f";
+        let base = Digest::from_bytes([7; 32]);
+        let correspondence = OnePair {
+            digest: base,
+            object: BackendObjectId::from(GitObjectId::from_hex(sha).expect("40-hex sha1")),
+        };
+
+        let resolved = sealed_commit_hex(&correspondence, base).expect("the recorded pair resolves");
+        assert_eq!(resolved, sha);
+        assert_ne!(resolved, base.to_hex(), "the git object name is not the digest hex");
+        assert_eq!(sealed_commit_hex(&correspondence, Digest::from_bytes([1; 32])), None);
+    }
+
+    fn adr_repo() -> TempDir {
+        let dir = tempfile::tempdir().expect("a temp dir for the fixture creates");
+        git(dir.path(), &["init", "--object-format=sha1", "--quiet"]);
+        git(dir.path(), &["config", "user.name", "adr-touch"]);
+        git(dir.path(), &["config", "user.email", "adr-touch@test"]);
+        git(dir.path(), &["config", "commit.gpgsign", "false"]);
+        git(dir.path(), &["config", "core.autocrlf", "false"]);
+        dir
+    }
+
+    fn write_adr(root: &Path, relative: &str, status: &str) {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("the ADR parent dir creates");
+        }
+        fs::write(&path, format!("- **Status:** {status}\n")).expect("the ADR file writes");
+    }
+
+    fn commit(root: &Path, message: &str) -> String {
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "--quiet", "--message", message]);
+        let output = Command::new("git").current_dir(root).args(["rev-parse", "HEAD"]).output().expect("git starts");
+        assert!(output.status.success(), "git rev-parse HEAD failed");
+        String::from_utf8(output.stdout).expect("HEAD is utf-8").trim().to_owned()
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = Command::new("git").current_dir(root).args(args).output().expect("git starts");
+        assert!(output.status.success(), "git {args:?} failed: {}", String::from_utf8(output.stderr));
     }
 }

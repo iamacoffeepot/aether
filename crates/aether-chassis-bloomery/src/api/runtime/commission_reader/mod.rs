@@ -22,7 +22,7 @@ use crate::store::{ListCommissionsResult, ListedCommission, LoadCommissionResult
 
 mod adr_touch;
 use adr_touch::adr_touch;
-pub(super) use adr_touch::{AdrMaturity, TreeAdrs};
+pub(super) use adr_touch::{AdrMaturity, TreeAdrs, sealed_commit_hex};
 
 #[cfg(test)]
 mod tests;
