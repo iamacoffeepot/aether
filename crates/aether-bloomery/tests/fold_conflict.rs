@@ -5,8 +5,9 @@
 mod common;
 
 use aether_bloomery::{
-    BloomId, CandidateRef, CompositionParents, Decision, Decisions, Event, Evidence, EvidenceKind, Fact, Outcome,
-    Snapshot, StageId, VerifyFailure, VerifyFailureSet, Withdrawal, WithdrawalCause, WorkpieceId,
+    AttemptCompletedError, BloomId, CandidateRef, CompositionParents, Decision, Decisions, Event, Evidence,
+    EvidenceKind, Fact, Outcome, Snapshot, StageId, VerifyFailure, VerifyFailureSet, Withdrawal, WithdrawalCause,
+    WorkpieceId,
 };
 use common::{claim, digest, draft, event, membership, step, workpiece};
 
@@ -598,11 +599,11 @@ fn narrow(snapshot: &Snapshot, bloom: BloomId, key: &str, verified: &str, tree: 
     )
 }
 
-fn pass_narrowed_repair(snapshot: &Snapshot, bloom: BloomId, tree: u8, head: u8) -> (Snapshot, Decisions) {
+fn pass_narrowed_repair(snapshot: &Snapshot, bloom: BloomId, key: &str, tree: u8, head: u8) -> (Snapshot, Decisions) {
     step(
         snapshot,
         &event(
-            "weave",
+            key,
             Fact::AttemptCompleted {
                 bloom,
                 workpiece: collision_subject(),
@@ -661,7 +662,7 @@ fn two_same_tree_waiters_both_reverify_after_repair() {
         "dedup keeps both waiters and does not record gamma twice",
     );
 
-    let (after, decided) = pass_narrowed_repair(&snapshot, bloom, 44, 45);
+    let (after, decided) = pass_narrowed_repair(&snapshot, bloom, "weave", 44, 45);
     assert!(matches!(decided.outcome, Outcome::CompositionRepaired { tree, .. } if tree == digest(44)));
     assert_eq!(
         verify_targets(&decided),
@@ -672,6 +673,11 @@ fn two_same_tree_waiters_both_reverify_after_repair() {
     assert!(
         !verify_targets(&decided).iter().any(WorkpieceId::is_composition),
         "the composition itself is not re-dispatched",
+    );
+    assert!(
+        recorded_waiters(&after, &bloom).is_empty(),
+        "the accepted repair retires the pending set: {:?}",
+        recorded_waiters(&after, &bloom),
     );
     let record = after.blooms.get(&bloom).expect("the sealed bloom is still in the snapshot");
     assert_eq!(
@@ -701,7 +707,7 @@ fn two_different_tree_waiters_both_reverify_after_replacement() {
         "replacement keeps the first waiter and records the second",
     );
 
-    let (_, decided) = pass_narrowed_repair(&snapshot, bloom, 44, 45);
+    let (after, decided) = pass_narrowed_repair(&snapshot, bloom, "weave", 44, 45);
     assert!(matches!(decided.outcome, Outcome::CompositionRepaired { tree, .. } if tree == digest(44)));
     assert_eq!(
         verify_targets(&decided),
@@ -709,6 +715,7 @@ fn two_different_tree_waiters_both_reverify_after_replacement() {
         "both waiters resume after the replacement repair: {:?}",
         decided.effects,
     );
+    assert!(recorded_waiters(&after, &bloom).is_empty(), "the accepted replacement repair retires the pending set",);
 }
 
 // Journal replay is apply-only: waiter capture has to survive without
@@ -766,7 +773,7 @@ fn a_replayed_journal_reproduces_two_composition_waiters() {
     }
 
     assert_eq!(live, replayed, "apply-only replay rebuilds the live snapshot, waiters included");
-    assert_eq!(recorded_waiters(&live, &bloom), vec![workpiece("gamma"), workpiece("delta")]);
+    assert!(recorded_waiters(&live, &bloom).is_empty(), "replay retires the pending set after the accepted repair",);
     assert!(
         matches!(recorded[1].1.outcome, Outcome::CompositionRepairAlreadyInFlight { .. }),
         "the replayed journal includes the dedup outcome: {:?}",
@@ -780,9 +787,9 @@ fn a_replayed_journal_reproduces_two_composition_waiters() {
 }
 
 // Tripwire: a waiter that has left Verify, been withdrawn, or already
-// integrated must not be sent back onto the repaired tree. The row still
-// names them — that is history — but resume skips work that is no longer
-// waiting.
+// integrated must not be sent back onto the repaired tree. Resume skips
+// work that is no longer waiting; the accepted completion then retires
+// the whole pending set.
 #[test]
 fn stale_composition_waiters_are_not_resumed() {
     let (snapshot, bloom) = members_at_verify(&["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]);
@@ -843,7 +850,7 @@ fn stale_composition_waiters_are_not_resumed() {
         failed.outcome,
     );
 
-    let (after, decided) = pass_narrowed_repair(&snapshot, bloom, 44, 45);
+    let (after, decided) = pass_narrowed_repair(&snapshot, bloom, "weave", 44, 45);
     assert!(matches!(decided.outcome, Outcome::CompositionRepaired { tree, .. } if tree == digest(44)));
     assert_eq!(
         verify_targets(&decided),
@@ -851,6 +858,7 @@ fn stale_composition_waiters_are_not_resumed() {
         "only the still-waiting Verify member resumes: {:?}",
         decided.effects,
     );
+    assert!(recorded_waiters(&after, &bloom).is_empty(), "skipped waiters are retired with the settled pending set",);
     let record = after.blooms.get(&bloom).expect("the sealed bloom is still in the snapshot");
     assert!(record.withdrawn.contains_key(&workpiece("gamma")), "the withdrawn waiter stays withdrawn");
     assert!(record.claims.contains_key(&workpiece("delta")), "the resolved waiter keeps its claim");
@@ -863,4 +871,111 @@ fn stale_composition_waiters_are_not_resumed() {
         record.progress.get(&workpiece("zeta")).map(|progress| progress.candidate),
         Some(Some(CandidateRef { tree: digest(44), checkout: digest(45) })),
     );
+}
+
+// Tripwire: waiters that a successful repair already resumed must not stay
+// pending. A later attribution over the same parents would otherwise reset
+// those members onto a tree they are no longer waiting for, clobbering the
+// candidate the first repair put them on.
+#[test]
+fn a_later_repair_over_the_same_parents_resumes_only_the_new_waiter() {
+    let (snapshot, bloom) = members_at_verify(&["alpha", "beta", "gamma", "delta"]);
+    let (snapshot, _) = narrow(&snapshot, bloom, "narrow-gamma", "gamma", 40, 41);
+    let (snapshot, first) = pass_narrowed_repair(&snapshot, bloom, "weave-gamma", 44, 45);
+    assert!(matches!(first.outcome, Outcome::CompositionRepaired { tree, .. } if tree == digest(44)));
+    assert_eq!(verify_targets(&first), vec![workpiece("gamma")]);
+    assert!(recorded_waiters(&snapshot, &bloom).is_empty(), "gamma is no longer pending after its repair");
+    assert_eq!(
+        snapshot
+            .blooms
+            .get(&bloom)
+            .expect("the sealed bloom is still in the snapshot")
+            .progress
+            .get(&workpiece("gamma"))
+            .and_then(|progress| progress.candidate),
+        Some(CandidateRef { tree: digest(44), checkout: digest(45) }),
+        "gamma stays on the candidate the first repair gave it",
+    );
+
+    let (snapshot, second_attr) = narrow(&snapshot, bloom, "narrow-delta", "delta", 50, 51);
+    assert!(
+        matches!(second_attr.outcome, Outcome::CompositionNarrowed { attempt: 2, .. }),
+        "a later tree over the same parents buys a new repair lap: {:?}",
+        second_attr.outcome,
+    );
+    assert_eq!(
+        recorded_waiters(&snapshot, &bloom),
+        vec![workpiece("delta")],
+        "the new pending set is only the member that attributed this repair",
+    );
+
+    let (after, decided) = pass_narrowed_repair(&snapshot, bloom, "weave-delta", 54, 55);
+    assert!(matches!(decided.outcome, Outcome::CompositionRepaired { tree, .. } if tree == digest(54)));
+    assert_eq!(
+        verify_targets(&decided),
+        vec![workpiece("delta")],
+        "the later repair must not reset gamma: {:?}",
+        decided.effects,
+    );
+    let record = after.blooms.get(&bloom).expect("the sealed bloom is still in the snapshot");
+    assert_eq!(
+        record.progress.get(&workpiece("gamma")).and_then(|progress| progress.candidate),
+        Some(CandidateRef { tree: digest(44), checkout: digest(45) }),
+        "gamma keeps the first repair's candidate",
+    );
+    assert_eq!(
+        record.progress.get(&workpiece("delta")).and_then(|progress| progress.candidate),
+        Some(CandidateRef { tree: digest(54), checkout: digest(55) }),
+    );
+    assert!(recorded_waiters(&after, &bloom).is_empty());
+}
+
+// Tripwire: a completion the reducer refused, or a duplicate of one, must not
+// retire waiters a real repair has not yet resumed. Apply still sees the
+// event; only CompositionRepaired may clear the pending set.
+#[test]
+fn a_rejected_or_duplicate_completion_does_not_retire_pending_waiters() {
+    let (snapshot, bloom) = members_at_verify(&["alpha", "beta", "gamma", "delta"]);
+    let (snapshot, _) = narrow(&snapshot, bloom, "narrow-gamma", "gamma", 40, 41);
+    let (snapshot, _) = narrow(&snapshot, bloom, "narrow-delta", "delta", 40, 41);
+    assert_eq!(recorded_waiters(&snapshot, &bloom), vec![workpiece("gamma"), workpiece("delta")]);
+
+    let rejected = event(
+        "weave-wrong-stage",
+        Fact::AttemptCompleted {
+            bloom,
+            workpiece: collision_subject(),
+            stage: StageId::Construct,
+            passed: true,
+            evidence: Evidence { subject: digest(44), kind: EvidenceKind::VerificationResult, detail: digest(57) },
+            candidate: Some(CandidateRef { tree: digest(44), checkout: digest(45) }),
+        },
+    );
+    let (snapshot, refused) = step(&snapshot, &rejected);
+    assert!(
+        matches!(
+            refused.outcome,
+            Outcome::AttemptCompletedRejected(AttemptCompletedError::StageMismatch { expected: StageId::Refine, .. })
+        ),
+        "the composition is still at Refine: {:?}",
+        refused.outcome,
+    );
+    assert_eq!(
+        recorded_waiters(&snapshot, &bloom),
+        vec![workpiece("gamma"), workpiece("delta")],
+        "a refused completion leaves the pending set standing",
+    );
+
+    let (snapshot, duplicate) = step(&snapshot, &rejected);
+    assert!(matches!(duplicate.outcome, Outcome::Duplicate), "{:?}", duplicate.outcome);
+    assert_eq!(
+        recorded_waiters(&snapshot, &bloom),
+        vec![workpiece("gamma"), workpiece("delta")],
+        "a duplicate of the refusal still leaves the pending set standing",
+    );
+
+    let (after, decided) = pass_narrowed_repair(&snapshot, bloom, "weave", 44, 45);
+    assert!(matches!(decided.outcome, Outcome::CompositionRepaired { tree, .. } if tree == digest(44)));
+    assert_eq!(verify_targets(&decided), vec![workpiece("gamma"), workpiece("delta")]);
+    assert!(recorded_waiters(&after, &bloom).is_empty());
 }

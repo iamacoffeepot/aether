@@ -146,11 +146,14 @@ pub struct Snapshot {
     /// anywhere, so this table is the only durable record of what a repair was
     /// allowed to edit — which is why it is folded rather than recomputed: a
     /// later re-scope of either parent would otherwise silently rewrite the
-    /// history of a bound that had already been used. The waiters are folded
-    /// the same way, including a same-tree dedup, so replay remembers every
-    /// Verify that attributed the composition. Folded from
-    /// [`Fact::CompositionNarrowed`] the way a surface request is folded from
-    /// its own fact, so no new [`Decision`] enters the frozen graph.
+    /// history of a bound that had already been used. Pending waiters are
+    /// folded the same way, including a same-tree dedup, so replay remembers
+    /// every Verify that attributed the composition still in flight. An
+    /// accepted repair completion retires that pending set — the members it
+    /// dispatched are no longer waiting, and a later attribution over the same
+    /// parents starts fresh. Folded from [`Fact::CompositionNarrowed`] and
+    /// [`Fact::AttemptCompleted`] the way a surface request is folded from its
+    /// own fact, so no new [`Decision`] enters the frozen graph.
     /// `#[serde(default)]` is the `surface_requests` precedent.
     #[serde(default)]
     pub narrowed_compositions: BTreeMap<BloomId, BTreeMap<WorkpieceId, NarrowedComposition>>,
@@ -739,19 +742,23 @@ pub struct AwaitingSurface {
 }
 
 /// One narrowed composition as the snapshot holds it (ADR-0210): the parents it
-/// is over, and every member whose Verify attributed it.
+/// is over, and every member still waiting on the repair in flight.
 ///
 /// Two independent Verify failures can name the same parent set. Each waiter
 /// judged a tree it does not own, so once the repair exists every still-eligible
 /// waiter has to be put back on the line against the repaired tree rather than
 /// left holding a refusal about work that has been redone. Admission order is
-/// preserved and a member already waiting is not recorded twice.
+/// preserved and a member already waiting is not recorded twice. The pending
+/// set is retired when that repair completion is applied, so a later
+/// attribution over the same parents cannot reset a member already resumed.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct NarrowedComposition {
     /// The parents, the diagnostic paths, and the derived bound.
     pub parents: CompositionParents,
-    /// Members whose Verify attributed this composition, in journal order.
-    /// Each owes nothing for the collision; the composition repairs it.
+    /// Members whose Verify attributed this composition and who are still
+    /// waiting on the repair in flight, in journal order. Empty after that
+    /// repair completes. Each owes nothing for the collision; the composition
+    /// repairs it.
     pub waiters: Vec<WorkpieceId>,
 }
 
@@ -1078,6 +1085,7 @@ impl Snapshot {
         next.record_refusals(decisions);
         next.record_surface_request(event, decisions);
         next.record_narrowed_composition(event, decisions);
+        next.retire_composition_waiters(event, decisions);
         next.record_file_leases(event, decisions);
         next.record_suppression_disposition(event, decisions);
         next
@@ -1389,6 +1397,27 @@ impl Snapshot {
                     waiters: alloc::vec![verified.clone()],
                 });
             }
+        }
+    }
+
+    /// Drop the pending waiter set after an accepted narrowed-composition
+    /// repair (ADR-0210).
+    ///
+    /// Gated on [`Outcome::CompositionRepaired`] so a rejected or duplicate
+    /// completion cannot retire waiters the reducer did not resume. Reduce
+    /// already emitted this completion's re-verify dispatches against the
+    /// pending set; apply folds those effects first, then clears the set so a
+    /// later attribution over the same parents starts fresh rather than
+    /// resetting members already resumed onto their own repaired candidate.
+    fn retire_composition_waiters(&mut self, event: &Event, decisions: &Decisions) {
+        if !matches!(decisions.outcome, Outcome::CompositionRepaired { .. }) {
+            return;
+        }
+        let Fact::AttemptCompleted { bloom, workpiece, .. } = &event.fact else {
+            return;
+        };
+        if let Some(narrowed) = self.narrowed_compositions.get_mut(bloom).and_then(|by_id| by_id.get_mut(workpiece)) {
+            narrowed.waiters.clear();
         }
     }
 

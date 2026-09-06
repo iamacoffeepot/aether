@@ -202,7 +202,9 @@ pub(super) fn reweave(record: &BloomRecord, bloom: &BloomId, refusal: &Refusal<'
 /// that has since been withdrawn, already carries a resolution claim, left
 /// Verify, or is no longer a member is skipped — each of those has already
 /// moved, and re-entering it would overwrite a cursor somebody else set. A
-/// member recorded twice is dispatched once.
+/// member recorded twice is dispatched once. Apply retires the pending set
+/// after this completion, so a later repair over the same parents cannot
+/// reset a member this lap already resumed.
 fn reverify_after_repair(
     snapshot: &Snapshot,
     record: &BloomRecord,
