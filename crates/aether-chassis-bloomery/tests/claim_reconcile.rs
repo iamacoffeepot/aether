@@ -42,9 +42,9 @@ use aether_bloomery::control::{
 };
 use aether_bloomery::testing::{digest, draft, event, membership, step, workpiece};
 use aether_bloomery::{
-    BloomId, BloomSpec, ClaimRefKind, ClaimRefState, ClaimSeal, Decisions, EnumerateClaimsResult, Evidence,
-    EvidenceKind, Fact, Membership, ReleaseSeal, ResolutionClaim, SealConflict, SealError, Snapshot, SupersedeError,
-    TransferSeal,
+    BloomId, BloomSpec, ClaimHolder, ClaimRefKind, ClaimRefState, ClaimSeal, Decisions, EnumerateClaimsResult,
+    Evidence, EvidenceKind, Fact, Membership, ReleaseSeal, ResolutionClaim, SealConflict, SealError, Snapshot,
+    SupersedeError, TransferSeal,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitSource, MainlineRef};
@@ -266,19 +266,26 @@ fn a_supersession_transfers_carried_refs_frees_dropped_ones_and_keeps_the_admiss
 fn a_supersede_retry_resumes_a_claim_transfer_that_failed_after_k_of_n_refs() {
     // Live class (issue 5135): transfer moved k of n refs onto the
     // deterministic successor, then a GitHub 503 aborted the op before the
-    // successor bloom was committed. Retry mints the same successor id and
-    // used to refuse MembershipConflict { held_by: successor } on the first
-    // already-moved ref. The successor is deliberately not reduced into the
+    // successor bloom was committed. Retry of the same successor spec mints
+    // the same successor id and used to refuse MembershipConflict { held_by:
+    // successor } on the first already-moved ref. The successor revises
+    // membership scope on the same workpiece names so its content-addressed
+    // id is not the predecessor's, and is deliberately not reduced into the
     // snapshot — that is the uncommitted state the retry sees.
     let (state, fake) = claim_state();
     let predecessor = spec(1, vec![membership("w1", 11), membership("w2", 12), membership("w3", 13)]);
     let snapshot = seal(&predecessor, 1);
     assert_eq!(drive_seal(&state, &seal_claim_mail(&predecessor.id(), &predecessor).unwrap()), ClaimResult::Acquired);
 
-    let successor = spec(1, vec![membership("w1", 11), membership("w2", 12), membership("w3", 13)]);
+    let successor = spec(1, vec![membership("w1", 21), membership("w2", 22), membership("w3", 23)]);
+    assert_ne!(predecessor.id(), successor.id());
+    assert!(!snapshot.blooms.contains_key(&successor.id()), "the uncommitted successor is absent from the journal");
     // k=2 of n=4 (w1, w2, w3, admission): the first two members transferred.
     stage_hold_at(&fake, &claim_ref("w1"), &successor.id());
     stage_hold_at(&fake, &claim_ref("w2"), &successor.id());
+    assert_eq!(enumerated_holder(&state, ClaimRefKind::Workpiece(workpiece("w1"))), successor.id());
+    assert_eq!(enumerated_holder(&state, ClaimRefKind::Workpiece(workpiece("w2"))), successor.id());
+    assert_eq!(enumerated_holder(&state, ClaimRefKind::Workpiece(workpiece("w3"))), predecessor.id());
 
     let reply = drive_transfer(&state, &transfer_seal_mail(&snapshot, &predecessor.id(), &successor).unwrap());
 
@@ -425,6 +432,16 @@ fn drive_enumerate(state: &SourceCapabilityState) -> Vec<ClaimRefState> {
     states.iter().map(|bytes| from_bytes(bytes).unwrap()).collect()
 }
 
+/// The bloom currently holding `kind` on the production enumeration — the same
+/// surface [`plan_heals`] folds. A missing or tombstoned ref is a fixture error:
+/// this is a holder oracle, not a presence check.
+fn enumerated_holder(state: &SourceCapabilityState, kind: ClaimRefKind) -> BloomId {
+    match drive_enumerate(state).into_iter().find(|row| row.ref_kind == kind) {
+        Some(ClaimRefState { holder: ClaimHolder::Held(holder), .. }) => holder,
+        other => panic!("expected a live hold on {kind:?}, got {other:?}"),
+    }
+}
+
 /// Run the boot-reconcile deep-heal walk: enumerate, fold through `plan_heals`
 /// against the replay-rebuilt `snapshot`, and drive each planned heal through the
 /// capability — exactly what [`ControlCore`]'s `on_enumerate_claims_result` does.
@@ -488,6 +505,7 @@ fn boot_reconcile_completes_a_half_transferred_supersede() {
     let predecessor = spec(1, vec![membership("w1", 11), membership("w2", 12)]);
     let snapshot = seal(&predecessor, 1);
     let successor = spec(1, vec![membership("w2", 12), membership("w3", 13)]);
+    assert_ne!(predecessor.id(), successor.id());
     let (snapshot, decisions) = step(
         &snapshot,
         &event("supersede", Fact::Supersede { predecessor: predecessor.id(), successor: successor.clone() }),
@@ -521,23 +539,48 @@ fn boot_reconcile_restores_refs_held_by_a_bloom_the_journal_never_sealed() {
     // Restart sees a Sealed predecessor and a ref held by an id the journal
     // never sealed. The deep heal restores it to the predecessor — the
     // restart lever an operator reaches for first.
+    //
+    // The successor revises membership scope on the same workpiece names so
+    // its content-addressed id is distinct; identical members would collapse
+    // the staged hold onto the journal owner and the restore would never run.
     let (state, fake) = claim_state();
     let predecessor = spec(1, vec![membership("w1", 11), membership("w2", 12)]);
     let snapshot = seal(&predecessor, 1);
     assert_eq!(drive_seal(&state, &seal_claim_mail(&predecessor.id(), &predecessor).unwrap()), ClaimResult::Acquired);
 
-    let successor = spec(1, vec![membership("w1", 11), membership("w2", 12)]);
+    let successor = spec(1, vec![membership("w1", 21), membership("w2", 22)]);
+    assert_ne!(predecessor.id(), successor.id());
+    assert!(!snapshot.blooms.contains_key(&successor.id()), "the uncommitted successor is absent from the journal");
+    assert_eq!(snapshot.active.get(&workpiece("w1")), Some(&predecessor.id()));
+    assert_eq!(snapshot.active.get(&workpiece("w2")), Some(&predecessor.id()));
+
     stage_hold_at(&fake, &claim_ref("w1"), &successor.id());
+    assert_eq!(
+        enumerated_holder(&state, ClaimRefKind::Workpiece(workpiece("w1"))),
+        successor.id(),
+        "the interrupted transfer left w1 on the uncommitted successor",
+    );
 
     drive_heals(&state, &snapshot);
 
     let contender = spec(1, vec![membership("w1", 31)]);
     let (ref_kind, held_by) = decode_held(&drive_seal(&state, &seal_claim_mail(&contender.id(), &contender).unwrap()));
     assert_eq!((ref_kind, held_by), (ClaimRefKind::Workpiece(workpiece("w1")), predecessor.id()));
-    // The still-predecessor-held sibling is untouched; a second boot re-drives
-    // to no effect.
+    assert_eq!(
+        enumerated_holder(&state, ClaimRefKind::Workpiece(workpiece("w2"))),
+        predecessor.id(),
+        "an already-predecessor-held sibling is not released",
+    );
+    assert_eq!(
+        enumerated_holder(&state, ClaimRefKind::MainlineAdmission),
+        predecessor.id(),
+        "admission stays with the still-sealed predecessor",
+    );
+    // Idempotent: a second boot over the restored holding re-drives to no effect.
     drive_heals(&state, &snapshot);
-    assert!(fake.ref_exists(&claim_ref("w2")), "an already-predecessor-held sibling is not released");
+    assert_eq!(enumerated_holder(&state, ClaimRefKind::Workpiece(workpiece("w1"))), predecessor.id());
+    assert_eq!(enumerated_holder(&state, ClaimRefKind::Workpiece(workpiece("w2"))), predecessor.id());
+    assert_eq!(enumerated_holder(&state, ClaimRefKind::MainlineAdmission), predecessor.id());
 }
 
 #[test]
