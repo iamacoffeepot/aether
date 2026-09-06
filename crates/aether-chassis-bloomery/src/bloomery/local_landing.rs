@@ -100,8 +100,7 @@ impl LandingSource for LocalLanding {
         // as the CAS having succeeded and skips accept_land, so any other tip than
         // the head this bloom proposed is someone else's write: stay Open so the
         // accept path can refuse BaseMoved rather than close issues on a foreign tip.
-        let proposed = self.proposed.lock().unwrap_or_else(PoisonError::into_inner);
-        if proposed.as_ref().is_some_and(|proposal| {
+        if self.proposed.lock().unwrap_or_else(PoisonError::into_inner).as_ref().is_some_and(|proposal| {
             proposal.bloom == *bloom && proposal.expected_base == *expected_base && proposal.new_head == actual
         }) {
             return Ok(LandProposal::Landed(LandingReceipt {
