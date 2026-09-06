@@ -231,11 +231,23 @@ mod tests {
         dir.path().join("bloomery.db").to_str().expect("a temp path is utf-8").to_owned()
     }
 
+    /// A WAL journal with no holder row — the production file after `connect`
+    /// and before `claim`. `open_as_holder` sets WAL before the busy timeout,
+    /// so two processes converting a rollback file race `database is locked`
+    /// and never reach the claim.
+    fn journal_with_wal(dir: &TempDir) -> String {
+        let path = journal_path(dir);
+        let conn = Connection::open(&path).expect("the journal opens");
+        conn.pragma_update(None, "journal_mode", "WAL").expect("WAL is set");
+        conn.pragma_update(None, "synchronous", "NORMAL").expect("synchronous is set");
+        path
+    }
+
     /// A journal file holding nothing but a claim on `pid` — the state a
     /// second coordinator finds when the first one is already running, with
     /// none of the schema a migration would have written.
     fn journal_claimed_by(dir: &TempDir, pid: u32) -> String {
-        let path = journal_path(dir);
+        let path = journal_with_wal(dir);
         let conn = Connection::open(&path).expect("the journal opens");
         conn.execute_batch(HOLDER_TABLE).expect("the claim table is created");
         write_claim(&conn, pid).expect("the claim is written");
@@ -330,17 +342,18 @@ mod tests {
 
     #[test]
     fn two_live_coordinators_cannot_both_claim_an_absent_holder() {
-        // Two coordinator processes overlapping `open_as_holder` on an empty
-        // journal. The start barrier raises the chance they contend; it does
-        // not pin both inside a read-then-write window, so this is the
-        // exclusivity invariant under overlap, not a deterministic repro of
-        // the old autocommit race.
+        // Two coordinator processes overlapping `open_as_holder` on a WAL
+        // journal that has no holder row. The file is converted to WAL before
+        // the start barrier so the overlap is the claim, not `journal_mode`.
+        // The barrier raises the chance they contend; it does not pin both
+        // inside a read-then-write window, so this is the exclusivity
+        // invariant under overlap, not a deterministic repro of the old
+        // autocommit race.
         if run_as_claim_child() {
             return;
         }
         let dir = tempfile::tempdir().expect("a temp dir");
-        let path = journal_path(&dir);
-        drop(Connection::open(&path).expect("the journal file is created"));
+        let path = journal_with_wal(&dir);
         race_two_holders(&dir, &path);
     }
 
