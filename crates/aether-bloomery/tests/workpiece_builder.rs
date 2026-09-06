@@ -5,6 +5,8 @@
 //! if an empty replacement leaves the previous edges, evidence, plan steps, or
 //! declared-surface globs in the scope revision.
 
+use core::iter::{self, Empty};
+
 use aether_bloomery::{ScopeRouting, WorkpieceBuilder, WorkpieceId, WorkpieceRefusal};
 
 fn workpiece() -> WorkpieceId {
@@ -15,8 +17,8 @@ fn routing() -> ScopeRouting {
     ScopeRouting { size: String::from("l"), model: String::from("grok-4.6") }
 }
 
-fn empty() -> core::iter::Empty<&'static str> {
-    core::iter::empty()
+fn empty() -> Empty<&'static str> {
+    iter::empty()
 }
 
 fn required(builder: &mut WorkpieceBuilder) -> &mut WorkpieceBuilder {
