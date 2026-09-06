@@ -19,7 +19,7 @@ pub struct NeedsYouRow {
     pub action: String,
     pub severity: Severity,
     /// Underlying question, hold, base, or evidence identity. Not painted.
-    source: String = String::new(),
+    pub source: String,
 }
 
 /// Subject plus a digest of the row's source facts.
@@ -38,7 +38,7 @@ impl NeedsYouRow {
     pub fn dismiss_key(&self) -> DismissKey {
         DismissKey {
             focus: self.focus.clone(),
-            facts: format!("{}|{}|{}", self.happened, self.action, self.source),
+            facts: tagged("dismiss", [&self.happened, &self.action, &self.source]),
         }
     }
 }
@@ -85,11 +85,12 @@ fn fold_row(view: &ViewDocument, focus: Focus, group: &[Interrupt], alerts: &[Al
 }
 
 fn obligation_facts(view: &ViewDocument, focus: &Focus, group: &[Interrupt]) -> String {
-    group
-        .iter()
-        .filter_map(|interrupt| obligation_fact(view, focus, interrupt.kind))
-        .collect::<Vec<_>>()
-        .join("|")
+    let parts: Vec<_> = group.iter().filter_map(|interrupt| obligation_fact(view, focus, interrupt.kind)).collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        tagged("source", parts)
+    }
 }
 
 fn obligation_fact(view: &ViewDocument, focus: &Focus, kind: InterruptKind) -> Option<String> {
@@ -111,7 +112,7 @@ fn pending_question(view: &ViewDocument, focus: &Focus) -> Option<String> {
     bloom_view(view, *bloom)
         .and_then(|bloom| bloom.members.iter().find(|member| member.workpiece == *workpiece))
         .and_then(|member| member.pending_decision.as_ref())
-        .map(|pending| format!("question:{}", pending.question))
+        .map(|pending| tagged("question", [pending.question.as_hex()]))
 }
 
 fn park_question(view: &ViewDocument, focus: &Focus) -> Option<String> {
@@ -120,7 +121,7 @@ fn park_question(view: &ViewDocument, focus: &Focus) -> Option<String> {
     };
     bloom_view(view, *id)
         .and_then(|bloom| bloom.review_park.as_ref())
-        .map(|park| format!("question:{}", park.question))
+        .map(|park| tagged("question", [park.question.as_hex()]))
 }
 
 fn hold_identity(view: &ViewDocument, focus: &Focus) -> Option<String> {
@@ -129,11 +130,11 @@ fn hold_identity(view: &ViewDocument, focus: &Focus) -> Option<String> {
     };
     bloom_view(view, *id)
         .and_then(|bloom| bloom.operator_hold.as_ref())
-        .map(|hold| format!("hold:{}:{}", hold.operator, hold.reason))
+        .map(|hold| tagged("hold", [&hold.operator, &hold.reason]))
 }
 
 fn base_identity(view: &ViewDocument) -> Option<String> {
-    view.base_alert.as_ref().map(|alert| format!("base:{}:{}", alert.base, alert.evidence))
+    view.base_alert.as_ref().map(|alert| tagged("base", [alert.base.as_hex(), alert.evidence.as_hex()]))
 }
 
 fn findings_identity(view: &ViewDocument, focus: &Focus) -> Option<String> {
@@ -142,15 +143,13 @@ fn findings_identity(view: &ViewDocument, focus: &Focus) -> Option<String> {
     };
     bloom_view(view, *bloom)
         .and_then(|bloom| bloom.composition.as_ref())
+        .filter(|composition| !composition.findings.is_empty())
         .map(|composition| {
-            composition
-                .findings
-                .iter()
-                .map(|finding| format!("{}:{}", finding.subject, finding.detail))
-                .collect::<Vec<_>>()
-                .join(",")
+            tagged(
+                "findings",
+                composition.findings.iter().flat_map(|finding| [finding.subject.as_hex(), finding.detail.as_hex()]),
+            )
         })
-        .filter(|facts| !facts.is_empty())
 }
 
 fn wedge_evidence(view: &ViewDocument, focus: &Focus) -> Option<String> {
@@ -160,7 +159,19 @@ fn wedge_evidence(view: &ViewDocument, focus: &Focus) -> Option<String> {
     bloom_view(view, *bloom)
         .and_then(|bloom| bloom.composition.as_ref())
         .and_then(|composition| composition.wedge.as_ref())
-        .map(|wedge| format!("evidence:{}", wedge.evidence))
+        .map(|wedge| tagged("evidence", [wedge.evidence.as_hex()]))
+}
+
+fn tagged(tag: &str, parts: impl IntoIterator<Item = impl AsRef<str>>) -> String {
+    let mut out = tag.to_owned();
+    for part in parts {
+        let part = part.as_ref();
+        out.push(':');
+        out.push_str(&part.len().to_string());
+        out.push(':');
+        out.push_str(part);
+    }
+    out
 }
 
 fn bloom_view(view: &ViewDocument, id: DigestHex) -> Option<&BloomView> {
@@ -327,12 +338,15 @@ mod tests {
         // member and stage between polls keeps the dismissal and hides B.
         let first = decision_row(digest(10), "which approach?");
         let replaced = decision_row(digest(11), "which approach?");
+        let again = decision_row(digest(10), "which approach?");
         let restated = decision_row(digest(10), "restated?");
         assert_replaced_obligation(&first, &replaced);
+        assert_eq!(first.dismiss_key(), again.dismiss_key());
         assert_eq!(first.dismiss_key(), restated.dismiss_key());
 
         assert_replaced_obligation(&park_row(digest(10)), &park_row(digest(11)));
-        assert_replaced_obligation(&hold_row("wait"), &hold_row("later"));
+        assert_replaced_obligation(&hold_row("owner", "wait"), &hold_row("owner", "later"));
+        assert_replaced_obligation(&hold_row("a", "b:c"), &hold_row("a:b", "c"));
         assert_replaced_obligation(&base_row(digest(10)), &base_row(digest(11)));
         assert_replaced_obligation(&findings_row(digest(10)), &findings_row(digest(11)));
         assert_replaced_obligation(&wedge_row(digest(10)), &wedge_row(digest(11)));
@@ -381,10 +395,10 @@ mod tests {
         })
     }
 
-    fn hold_row(reason: &str) -> NeedsYouRow {
+    fn hold_row(operator: &str, reason: &str) -> NeedsYouRow {
         bloom_row(BloomView {
             id: digest(1),
-            operator_hold: Some(OperatorHoldView { reason: reason.to_owned(), operator: "owner".to_owned() }),
+            operator_hold: Some(OperatorHoldView { reason: reason.to_owned(), operator: operator.to_owned() }),
             ..BloomView::default()
         })
     }
