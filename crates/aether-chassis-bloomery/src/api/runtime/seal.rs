@@ -255,7 +255,7 @@ impl ApiCapabilityState {
         let correspondence: Option<&dyn Correspondence> = {
             #[cfg(feature = "github")]
             {
-                self.correspondence.as_deref()
+                self.correspondence.as_deref().map(|correspondence| correspondence as &dyn Correspondence)
             }
             #[cfg(not(feature = "github"))]
             {
