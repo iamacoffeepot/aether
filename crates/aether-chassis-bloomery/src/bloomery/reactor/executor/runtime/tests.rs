@@ -38,7 +38,8 @@ use super::{
     Stores, TickClock, TrackedHandle, backoff_delay, candidate_push_at, default_candidate_push, dispatch_origin,
     drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_dispatch_scope, drain_and_redispatch,
     fold_drain_backoff, is_disabled_mount, is_silent, is_stale, next_backoff, observe_heartbeat, pull_and_admit,
-    push_admitted_candidates, seed_dispatches, seed_tracked, select_stale_handles, silence_from, timeout_verdict,
+    pull_and_admit_with, push_admitted_candidates, seed_dispatches, seed_tracked, select_stale_handles, silence_from,
+    timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -3210,6 +3211,7 @@ struct HeartbeatBackend {
     progress: Mutex<HashMap<String, Option<u64>>>,
     cancelled: Mutex<Vec<String>>,
     completed: Mutex<HashMap<String, Vec<EvidenceRef>>>,
+    inspects: Mutex<u32>,
 }
 
 impl HeartbeatBackend {
@@ -3218,6 +3220,7 @@ impl HeartbeatBackend {
             progress: Mutex::new(HashMap::new()),
             cancelled: Mutex::new(Vec::new()),
             completed: Mutex::new(HashMap::new()),
+            inspects: Mutex::new(0),
         })
     }
 
@@ -3232,6 +3235,10 @@ impl HeartbeatBackend {
     fn cancelled(&self) -> Vec<String> {
         self.cancelled.lock().unwrap().clone()
     }
+
+    fn inspect_count(&self) -> u32 {
+        *self.inspects.lock().unwrap()
+    }
 }
 
 impl ExecutorBackend for HeartbeatBackend {
@@ -3242,6 +3249,7 @@ impl ExecutorBackend for HeartbeatBackend {
     }
 
     fn inspect(&self, handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+        *self.inspects.lock().unwrap() += 1;
         if self.completed.lock().unwrap().contains_key(&handle.nonce.0) {
             return Ok(ExecutionStatus::Completed { conclusion: Conclusion::Success });
         }
@@ -3477,4 +3485,42 @@ fn a_silence_fault_is_the_same_host_fault_a_timeout_is() {
         "silence retries the same host-fault path a timeout would",
     );
     assert_eq!(backend.cancelled(), vec![nonce]);
+}
+
+#[test]
+fn a_heartbeat_after_tick_start_is_not_refused_as_future() {
+    // Dispatch origin T0. A later tick starts at the silence threshold, inspects
+    // a still-Running lane, and sees a progress stamp strictly between that
+    // tick-start now and a later post-intake sample. Judging the stamp against
+    // tick-start now refuses it as future, falls back to origin, and
+    // false-silences a live lane. The expiry callback is that later sample.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-mid-tick");
+    let nonce = tracked[0].handle.nonce.0.clone();
+    let outstanding = store.list_outstanding_nonces().unwrap();
+
+    let tick_start = NOW_UNIX_MILLIS + SILENCE_MILLIS;
+    let progress = tick_start + 1;
+    let expiry = progress + 1;
+    backend.set_progress(&nonce, Some(progress));
+
+    let admits = pull_and_admit_with(
+        Stores { store: &mut store, artifacts: None },
+        &shell,
+        NameEvidenceClaims,
+        &mut tracked,
+        &tick_clock_silent(tick_start, SILENCE_MILLIS),
+        None,
+        &NopPush,
+        || {
+            assert!(backend.inspect_count() > 0, "expiry is sampled after inspect has observed the running stamp",);
+            expiry
+        },
+    );
+
+    assert!(admits.is_empty(), "no synthetic silence admission");
+    assert!(backend.cancelled().is_empty(), "a live stamp after tick start is not cancelled");
+    assert_eq!(store.list_outstanding_nonces().unwrap(), outstanding, "original outstanding retained");
 }

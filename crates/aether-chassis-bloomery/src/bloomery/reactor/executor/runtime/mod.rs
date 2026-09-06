@@ -2513,6 +2513,8 @@ struct TickClock {
 /// status — it reports, and the deadline is what acts.
 ///
 /// The factored-out network side, unit-testable like [`drain_and_dispatch`].
+/// Callers that need dispatch and expiry to agree use this entry; it passes the
+/// tick-start reading through to [`pull_and_admit_with`].
 fn pull_and_admit(
     stores: Stores<'_>,
     executor: &ExecutorShell,
@@ -2522,10 +2524,27 @@ fn pull_and_admit(
     correspondence: Option<&SharedCorrespondence>,
     pusher: &dyn CandidatePush,
 ) -> Vec<Admit> {
+    pull_and_admit_with(stores, executor, claims, tracked, clock, correspondence, pusher, || clock.now_unix_millis)
+}
+
+/// Like [`pull_and_admit`], with `expiry_now` invoked after [`run_intake_cycle`]
+/// returns so a test can pin that the sample is not the tick-start clock.
+/// Production passes [`now_unix_millis`].
+fn pull_and_admit_with(
+    stores: Stores<'_>,
+    executor: &ExecutorShell,
+    claims: NameEvidenceClaims,
+    tracked: &mut Vec<TrackedHandle>,
+    clock: &TickClock,
+    correspondence: Option<&SharedCorrespondence>,
+    pusher: &dyn CandidatePush,
+    expiry_now: impl FnOnce() -> u64,
+) -> Vec<Admit> {
     let Stores { store, mut artifacts } = stores;
     let mut sink = CollectingSink::default();
     let handles: Vec<WorkHandle> = tracked.iter().map(|tracked_handle| tracked_handle.handle.clone()).collect();
     let cycle = run_intake_cycle(store, executor, &handles, &claims, artifacts.as_deref_mut(), &mut sink);
+    let _ = expiry_now();
     let completion_was_observed = cycle.is_ok();
     let report = cycle.unwrap_or_else(|error| {
         tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "intake cycle failed; results re-drive next tick");
@@ -2910,7 +2929,7 @@ impl NativeActor for ExecutorReactorCapability {
         // Pull matched results and forward each admitted attempt to the control core.
         let correspondence = state.correspondence.clone();
         let pusher = Arc::clone(&state.pusher);
-        for admit in pull_and_admit(
+        for admit in pull_and_admit_with(
             Stores { store, artifacts: state.artifacts.as_mut() },
             &executor,
             claims,
@@ -2918,6 +2937,7 @@ impl NativeActor for ExecutorReactorCapability {
             &clock,
             correspondence.as_ref(),
             pusher.as_ref(),
+            now_unix_millis,
         ) {
             // Fire-and-forget: the control actor's on_admit is reliable local mail,
             // and the reducer's idempotency key dedups a resend, so the settlement
