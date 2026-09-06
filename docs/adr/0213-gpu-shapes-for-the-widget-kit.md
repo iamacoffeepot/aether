@@ -100,8 +100,10 @@ the studio's real widget count. Until then the per-tick resend stands.
 - The design gets a shadow to spend: the hover plate's lift over a chosen row can
   be a soft edge rather than a stroke alone, and the tooltip review's 1.04:1 ground
   has a remedy that is not another colour.
-- The kit's draw vocabulary grows from three items to four; ADR-0117's rules
-  (submission order, holes, no layer) are untouched.
+- The kit's draw vocabulary grows from three items to five — `Shape` for the
+  chrome, and `Triangle` for the caret and the stepper arrows, the
+  `draw_screen_triangles` item §2 names; ADR-0117's rules (submission order,
+  holes, no layer) are untouched.
 - Follow-on work, in order: (a) render cap: `Shape`, `draw_shapes`, `shape.wgsl`,
   the overlay pipeline, headless absorb, a SubstrateHarness pixel test for radius,
   stroke, and shadow; (b) kit: `WidgetDrawItem::Shape`, `direct_runs`, theme tokens,
