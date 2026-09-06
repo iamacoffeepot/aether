@@ -13,7 +13,7 @@
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -252,8 +252,13 @@ impl StatFields {
 }
 
 fn signal_group(pgid: u32, signal: &str) -> Result<(), LocalExecutorError> {
-    let status =
-        Command::new("kill").args([signal, "--", &format!("-{pgid}")]).status().map_err(LocalExecutorError::Io)?;
+    // No `--`: BSD `kill` (macOS) treats it as a pid, and `-{pgid}` is already numeric.
+    let status = Command::new("kill")
+        .args([signal, &format!("-{pgid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(LocalExecutorError::Io)?;
     // `kill` exits non-zero when every member is already gone, which is the
     // success the waiter below is about to observe — not a reason to stop.
     let _ = status;
@@ -273,16 +278,73 @@ fn wait_until_pgid_gone(pgid: u32) -> bool {
     }
 }
 
+/// Whether any live (non-zombie) process is in `pgid`.
+///
+/// `/proc` is the precise reading where it exists. A missing `/proc` is not an
+/// empty group — that skipped SIGKILL on macOS — so the next probes are `ps`
+/// (state-aware) and `kill -0` on the group.
 fn any_process_in_group(pgid: u32) -> bool {
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
+    if let Some(alive) = proc_group_is_live(pgid) {
+        return alive;
+    }
+    if let Some(alive) = ps_group_is_live(pgid) {
+        return alive;
+    }
+    group_responds_to_signal_zero(pgid)
+}
+
+fn proc_group_is_live(pgid: u32) -> Option<bool> {
+    proc_listing_is_live(fs::read_dir("/proc"), pgid)
+}
+
+/// `None` means the listing could not be read — not that the group is empty.
+fn proc_listing_is_live(listing: io::Result<fs::ReadDir>, pgid: u32) -> Option<bool> {
+    let entries = listing.ok()?;
+    Some(entries.flatten().any(|entry| {
         let Some(member) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
             return false;
         };
         ProcessIdentity::observe(member).is_some_and(|live| live.pgid == pgid)
+    }))
+}
+
+fn ps_group_is_live(pgid: u32) -> Option<bool> {
+    let output = Command::new("ps")
+        .args(["-A", "-o", "pgid=", "-o", "state="])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(ps_listing_has_live_member(&String::from_utf8_lossy(&output.stdout), pgid))
+}
+
+/// Whether `listing` from `ps -A -o pgid= -o state=` contains a non-zombie
+/// member of `pgid`. Zombies are already dead: counting them as live waits out
+/// the SIGKILL budget and reports [`LocalExecutorError::Unterminated`] for a
+/// child this process is about to reap.
+fn ps_listing_has_live_member(listing: &str, pgid: u32) -> bool {
+    listing.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        let Some(member_pgid) = fields.next().and_then(|field| field.parse::<u32>().ok()) else {
+            return false;
+        };
+        let Some(state) = fields.next() else {
+            return false;
+        };
+        member_pgid == pgid && !state.starts_with('Z')
     })
+}
+
+fn group_responds_to_signal_zero(pgid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &format!("-{pgid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn unterminated(detail: impl Into<String>) -> LocalExecutorError {
@@ -302,8 +364,16 @@ fn write_json_record(evidence_dir: &Path, name: &str, value: &impl Serialize) ->
 #[cfg(test)]
 mod tests {
     use std::iter::repeat_n;
+    #[cfg(unix)]
+    use std::process::{Command, Stdio};
+    #[cfg(unix)]
+    use std::thread;
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
 
-    use super::{ProcessIdentity, StatFields};
+    use super::{ProcessIdentity, StatFields, proc_listing_is_live, ps_listing_has_live_member};
+    #[cfg(unix)]
+    use super::{any_process_in_group, terminate_pgid};
 
     fn stat_line(comm: &str, pgid: u32, starttime: u64) -> String {
         stat_line_state('S', comm, pgid, starttime)
@@ -374,5 +444,124 @@ mod tests {
             ProcessIdentity::from_stat(9, &stat_line("sleep", 9, 1), "boot").is_some(),
             "the same line with a running state still attaches",
         );
+    }
+
+    #[test]
+    fn a_failed_proc_listing_is_unknown_not_an_empty_group() {
+        // Tripwire: the macOS bug was mapping read_dir("/proc") failure to "no
+        // members", which skipped SIGKILL. An IO error must be unknown so
+        // any_process_in_group falls through to ps / kill -0. A readable empty
+        // table is the opposite: the group is gone.
+        assert_eq!(
+            proc_listing_is_live(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no /proc")), 1),
+            None,
+            "a missing proc filesystem is not proof the group is gone",
+        );
+        let empty = tempfile::tempdir().expect("an empty stand-in for a readable /proc");
+        assert_eq!(
+            proc_listing_is_live(std::fs::read_dir(empty.path()), 1),
+            Some(false),
+            "a readable proc table with no members is an empty group",
+        );
+    }
+
+    #[test]
+    fn ps_listing_treats_zombies_as_gone_and_live_members_as_present() {
+        // Tripwire: the portable fallback must not treat a zombie as live (that
+        // waits out the SIGKILL budget and reports Unterminated for a child
+        // this process is about to reap) and must not miss a live member in the
+        // group (that skips SIGKILL on a host without /proc).
+        let listing = "\
+    10 S
+    10 Z+
+    99 R
+";
+        assert!(ps_listing_has_live_member(listing, 10), "a running member keeps the group live");
+        assert!(
+            !ps_listing_has_live_member("    10 Z+\n    99 R\n", 10),
+            "a zombie is gone, even when other groups still have runners",
+        );
+        assert!(!ps_listing_has_live_member(listing, 7), "a live process in another group is not this group");
+        assert!(!ps_listing_has_live_member("", 10), "an empty table is an empty group");
+        assert!(!ps_listing_has_live_member("not a ps line\n", 10), "garbage lines do not invent members");
+    }
+
+    #[cfg(unix)]
+    fn spawn_group(program: &str, args: &[&str]) -> (std::process::Child, u32) {
+        use std::os::unix::process::CommandExt as _;
+        let child = Command::new(program)
+            .args(args)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the test child forks");
+        let pgid = child.id();
+        (child, pgid)
+    }
+
+    #[cfg(unix)]
+    struct GroupGuard(u32);
+
+    #[cfg(unix)]
+    impl Drop for GroupGuard {
+        fn drop(&mut self) {
+            let _ = Command::new("kill")
+                .args(["-KILL", &format!("-{}", self.0)])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_live_process_group_is_observed_without_proc() {
+        // Tripwire: read_dir("/proc") fails on macOS. Treating that IO error as
+        // "no members" makes wait_until_pgid_gone return immediately, skip
+        // SIGKILL, and leave the child for an unbounded wait().
+        let (mut child, pgid) = spawn_group("sleep", &["60"]);
+        let _guard = GroupGuard(pgid);
+        assert!(any_process_in_group(pgid), "a just-spawned group must still look live when /proc is missing");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_pgid_does_not_treat_a_reaped_or_zombie_child_as_live() {
+        // Tripwire: kill -0 still succeeds for a zombie. After SIGTERM the
+        // child is dead but unreaped; counting that as live waits out the
+        // SIGKILL budget and returns Unterminated for a group that is gone.
+        let (mut child, pgid) = spawn_group("sleep", &["60"]);
+        let _guard = GroupGuard(pgid);
+        terminate_pgid(pgid).expect("a TERM-honoring group is gone, including as a zombie");
+        child.wait().expect("the head is reaped");
+        assert!(!any_process_in_group(pgid), "no live member remains after a successful terminate");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_pgid_sigkills_a_term_ignoring_grandchild() {
+        // Tripwire: a missing /proc used to report the group gone after SIGTERM,
+        // skip SIGKILL, and leave a TERM-ignoring grandchild reparented to init.
+        let (mut child, pgid) = spawn_group("sh", &["-c", "trap '' TERM; sleep 60 & exit 0"]);
+        let _guard = GroupGuard(pgid);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut head_gone_with_grandchild = false;
+        while Instant::now() < deadline {
+            if child.try_wait().ok().flatten().is_some() && any_process_in_group(pgid) {
+                head_gone_with_grandchild = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            head_gone_with_grandchild,
+            "the head must exit leaving a TERM-ignoring grandchild in its group",
+        );
+        terminate_pgid(pgid).expect("SIGKILL must finish a group that ignored SIGTERM");
+        assert!(!any_process_in_group(pgid), "no member of the lane group survives teardown");
     }
 }
