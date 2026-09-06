@@ -2456,8 +2456,8 @@ mod tests {
 
         let views: Vec<_> = commit.outbox.iter().filter(|row| row.topic == Topic::ViewDocument.as_str()).collect();
         assert_eq!(views.len(), 1, "the commit carries exactly one view-document row");
-        let document =
-            decode_row(&views[0].payload, views[0].payload_schema.as_deref()).expect("the view payload decodes");
+        let document = decode_row::<ViewDocument>(&views[0].payload, views[0].payload_schema.as_deref())
+            .expect("the view payload decodes");
         assert!(
             document.blooms.iter().any(|bloom| bloom.members.iter().any(|member| member.workpiece.0 == "issue-5381")),
             "the published document names the sealed member: {document:?}",
