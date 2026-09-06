@@ -2,7 +2,10 @@
 //! silence, swept-nonce honesty, and coordinator-log clamp/filter/page.
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
+#[cfg(windows)]
+use std::os::windows::process::ExitStatusExt;
 use std::process::{ExitStatus, Output};
 use std::time::{Duration, SystemTime};
 
@@ -202,14 +205,20 @@ fn coordinator_jsonl() -> &'static str {
     )
 }
 
+#[cfg(unix)]
+fn exit_status(code: i32) -> ExitStatus {
+    ExitStatus::from_raw(code << 8)
+}
+
+#[cfg(windows)]
+fn exit_status(code: i32) -> ExitStatus {
+    ExitStatus::from_raw(code as u32)
+}
+
 fn journalctl_output(code: i32, stdout: &str, stderr: &str) -> Output {
-    // Unix wait status stores the exit code in the high byte. Built here so the
-    // suite never spawns journalctl or depends on a live systemd host.
-    Output {
-        status: ExitStatus::from_raw(code << 8),
-        stdout: stdout.as_bytes().to_vec(),
-        stderr: stderr.as_bytes().to_vec(),
-    }
+    // Built here so the suite never spawns journalctl. Unix wait status stores
+    // the exit code in the high byte; Windows uses the code directly.
+    Output { status: exit_status(code), stdout: stdout.as_bytes().to_vec(), stderr: stderr.as_bytes().to_vec() }
 }
 
 fn logs_ok(query: &str, stdout: &str) -> CoordinatorLogsView {
