@@ -362,11 +362,11 @@ mod tests {
         let JournalHolderError::Sqlite(sqlite) = &error else {
             panic!("connect must surface the rusqlite error, not Held: {error}");
         };
-        let direct = Connection::open(path).err().expect("a directory does not open");
+        let direct = Connection::open(path).expect_err("a directory does not open");
         assert_eq!(format!("{sqlite}"), format!("{direct}"), "the returned sqlite error is unchanged");
         assert_eq!(error.to_string(), format!("journal holder claim: {sqlite}"));
 
-        let captured = events.0.lock().expect("recorded open failures are not poisoned");
+        let captured = events.0.lock().expect("recorded open failures are not poisoned").clone();
         assert_eq!(captured.len(), 1, "one production diagnostic: {captured:?}");
         let event = &captured[0];
         assert_eq!(event.phase.as_deref(), Some("connect"), "{event:?}");
@@ -544,16 +544,17 @@ mod tests {
             bound -= 1;
         }
         debug.truncate(bound);
-        let captured = events.0.lock().expect("recorded open failures are not poisoned");
-        match captured.last() {
-            Some(event) => format!(
-                " phase={} extended_code={} elapsed_millis={} debug={debug}",
-                event.phase.as_deref().unwrap_or("?"),
-                event.extended_code.map(|code| code.to_string()).unwrap_or_else(|| "?".to_owned()),
-                event.elapsed_millis.map(|millis| millis.to_string()).unwrap_or_else(|| "?".to_owned()),
-            ),
-            None => format!(" debug={debug}"),
-        }
+        events.0.lock().expect("recorded open failures are not poisoned").last().cloned().map_or_else(
+            || format!(" debug={debug}"),
+            |event| {
+                format!(
+                    " phase={} extended_code={} elapsed_millis={} debug={debug}",
+                    event.phase.as_deref().unwrap_or("?"),
+                    event.extended_code.map_or_else(|| "?".to_owned(), |code| code.to_string()),
+                    event.elapsed_millis.map_or_else(|| "?".to_owned(), |millis| millis.to_string()),
+                )
+            },
+        )
     }
 
     #[derive(Clone, Debug, Default)]
