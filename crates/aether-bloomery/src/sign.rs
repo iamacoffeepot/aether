@@ -664,8 +664,8 @@ mod tests {
                 .unwrap_or_else(|error| panic!("set mode: {error}"));
         }
 
-        let error = OperatorKey::load(KeyId("operator".into()), &path)
-            .expect_err("a unicode seed of hex length is not a seed");
+        let error =
+            OperatorKey::load(KeyId("operator".into()), &path).expect_err("a unicode seed of hex length is not a seed");
         assert!(
             matches!(error, OperatorKeyError::InvalidSeed { .. }),
             "malformed unicode is InvalidSeed, not a panic or another refusal: {error}"
