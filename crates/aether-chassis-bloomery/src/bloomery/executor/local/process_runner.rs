@@ -1717,8 +1717,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     impl Drop for GroupGuard {
         fn drop(&mut self) {
+            let Ok(pid) = super::super::identity::signed_pgid(self.0) else {
+                return;
+            };
             let _ = Command::new("kill")
-                .args(["-KILL", "--", &format!("-{}", self.0)])
+                .args(super::super::identity::kill_group_args("KILL", pid))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();

@@ -1873,6 +1873,9 @@ fn spawn_isolated_sleep() -> (Child, ProcessIdentity) {
     use std::os::unix::process::CommandExt;
     let child = Command::new("sleep").arg("60").process_group(0).spawn().unwrap();
     let identity = ProcessIdentity::observe(child.id()).expect("the child is live long enough to observe");
+    assert_eq!(identity.pid, child.id());
+    assert_eq!(identity.pgid, child.id(), "process_group(0) makes the child its own group leader");
+    assert!(identity.pgid > 1, "a spawned child must own a private group, not a broadcast target");
     (child, identity)
 }
 
@@ -1980,6 +1983,9 @@ fn restart_readopt_cancel_terminates_an_attached_child() {
 
     let report = exec.reconcile(&[outstanding(digest(5), &nonce)]);
     assert_eq!(report.readopted, vec![Nonce(nonce.clone())], "the live order is re-adopted");
+
+    assert_eq!(identity.pgid, child.id(), "cancel must target this child's own group, not a stranger");
+    assert!(identity.pgid > 1, "cancel must not aim a broadcast operand at a live child");
 
     let handle = WorkHandle::new(Nonce(nonce));
     exec.cancel(&handle).expect("a re-attached kill reports success only after the group is gone");
