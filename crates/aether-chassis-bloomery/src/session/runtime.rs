@@ -983,7 +983,16 @@ CREATE TABLE sessions (
         pub fn unblock() {
             let mut gate = lock();
             gate.unblock = true;
+            drop(gate);
             CV.notify_all();
+        }
+
+        pub struct UnblockOnDrop;
+
+        impl Drop for UnblockOnDrop {
+            fn drop(&mut self) {
+                unblock();
+            }
         }
     }
 
@@ -997,6 +1006,7 @@ CREATE TABLE sessions (
         // free, so it sees Y. Lives here because it must install a busy_handler
         // and hold Immediate on the real pool connections.
         use std::sync::atomic::Ordering;
+        use std::thread;
 
         use rusqlite::TransactionBehavior;
 
@@ -1022,16 +1032,9 @@ CREATE TABLE sessions (
             LEASE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
         let y_expiry = now.saturating_add(LEASE_SECS);
-        let x_lease = x.lease.clone();
+        let x_lease = x.lease;
 
-        struct UnblockOnDrop;
-        impl Drop for UnblockOnDrop {
-            fn drop(&mut self) {
-                stale_deposit_busy::unblock();
-            }
-        }
-
-        let outcome = std::thread::scope(|scope| {
+        let outcome = thread::scope(|scope| {
             // Immediate must be taken before spawn so the deposit thread blocks,
             // and it must be a scope local so a panic drops the reservation
             // (and UnblockOnDrop) before `scope` joins that thread.
@@ -1039,7 +1042,7 @@ CREATE TABLE sessions (
                 .conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .expect("writer reservation");
-            let _unblock = UnblockOnDrop;
+            let _unblock = stale_deposit_busy::UnblockOnDrop;
             let release = scope.spawn(|| {
                 stale.release(&key, Some(&x_lease), "digest-STALE", &manifest("head-A", 1000, 1002))
             });
