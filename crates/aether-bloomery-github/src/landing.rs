@@ -364,16 +364,16 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GithubLanding<C
     }
 
     fn remember_issued(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest, number: u64) {
-        self.issued.lock().unwrap_or_else(PoisonError::into_inner).insert(
-            *bloom,
-            IssuedLand { expected_base: *expected_base, new_head: *new_head, number },
-        );
+        self.issued
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(*bloom, IssuedLand { expected_base: *expected_base, new_head: *new_head, number });
     }
 
     fn issued_head(&self, bloom: &BloomId, expected_base: &Digest, number: u64) -> Option<Digest> {
-        let issued = self.issued.lock().unwrap_or_else(PoisonError::into_inner);
-        let issued = issued.get(bloom)?;
-        (issued.expected_base == *expected_base && issued.number == number).then_some(issued.new_head)
+        self.issued.lock().unwrap_or_else(PoisonError::into_inner).get(bloom).and_then(|issued| {
+            (issued.expected_base == *expected_base && issued.number == number).then_some(issued.new_head)
+        })
     }
 }
 
