@@ -622,6 +622,78 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
     );
 }
 
+/// A focused three-option radio must move on actual panel-routed Up/Down and
+/// stay put at the ends. The unit `step` helper already clamps; this scenario
+/// is the production path those helper tests cannot see: Tick/Tab, then Up at
+/// index 0, Down to 1, Down to 2, Down at 2, Up to 1, Up to 0, Up at 0.
+/// Endpoint keys must not log a selection, and the ordered events must be
+/// exactly `[1, 2, 1, 0]`.
+#[test]
+fn radio_up_down_clamps_at_the_ends_without_endpoint_events() {
+    let Some(wasm_path) = require_wasm("aether_kit_widget") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut harness = SubstrateHarness::builder().size(240, 100).with_component_host().build().expect("boot");
+    load_panel_with(&mut harness, &wasm, vec![radio_spec("choice", WidgetControlState::default())]);
+
+    let panel = panel_address();
+    let choice_selections = |harness: &mut SubstrateHarness| -> (Vec<u32>, String) {
+        let log = panel_log_messages(harness);
+        let joined = log.join("\n");
+        let selections = log
+            .iter()
+            .filter(|message| message.contains("widget radio selected") && message.contains("widget=choice"))
+            .map(|message| radio_selected_index(message).expect("radio log line carries an index"))
+            .collect();
+        (selections, joined)
+    };
+
+    harness
+        .execute(vec![
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            ("focus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("up_at_top", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+        ])
+        .expect("radio focus and top-end Up");
+
+    let (selections, joined) = choice_selections(&mut harness);
+    assert!(
+        selections.is_empty(),
+        "Up at the first option must emit no selection event; log was:\n{joined}",
+    );
+
+    harness
+        .execute(vec![
+            ("down_to_1", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("down_to_2", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("down_at_bottom", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+        ])
+        .expect("radio Down through the last option");
+
+    let (selections, joined) = choice_selections(&mut harness);
+    assert_eq!(
+        selections,
+        vec![1, 2],
+        "Down must select 1 then 2 and emit nothing at the last option; log was:\n{joined}",
+    );
+
+    harness
+        .execute(vec![
+            ("up_to_1", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("up_to_0", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("up_at_top", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+        ])
+        .expect("radio Up through the first option");
+
+    let (selections, joined) = choice_selections(&mut harness);
+    assert_eq!(
+        selections,
+        vec![1, 2, 1, 0],
+        "Up must select 1 then 0 and emit nothing at the first option; log was:\n{joined}",
+    );
+}
+
 /// Arm, disable, and re-enable Button before its decisive stale release.
 fn drive_button_cancellation_session(harness: &mut SubstrateHarness) {
     let run = child_address("run");
