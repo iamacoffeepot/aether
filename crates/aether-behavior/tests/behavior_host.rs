@@ -406,10 +406,7 @@ fn behavior_host_converts_radio_wrap_and_passthroughs_nested_state() {
     // from the focus ring; re-enable restores availability but not focus.
     harness
         .execute(vec![
-            (
-                "enable",
-                HarnessOp::send_and_settle(&wrapped, &SetWidgetState { state: WidgetControlState::default() }),
-            ),
+            ("enable", HarnessOp::send_and_settle(&wrapped, &SetWidgetState { state: WidgetControlState::default() })),
             ("refocus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
             ("down", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
         ])
