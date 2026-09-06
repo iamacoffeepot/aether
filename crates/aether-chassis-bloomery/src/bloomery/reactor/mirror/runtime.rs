@@ -1034,7 +1034,7 @@ mod tests {
             assert!(acks.is_empty(), "a failed push is not acked");
         }
 
-        let captured = events.0.lock().unwrap();
+        let captured = events.0.lock().unwrap().clone();
         match case.diagnostic {
             Some(expected) => {
                 assert_eq!(captured.len(), 1, "one production diagnostic: {captured:?}");
