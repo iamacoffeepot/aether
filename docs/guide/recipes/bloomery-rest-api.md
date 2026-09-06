@@ -14,54 +14,138 @@ is still **Proposed**: that store and these routes exist in this binary, but
 the fleet-wide source cutover is not accepted policy, and default boot still
 selects the GitHub authority backend.
 
-**Do not run this sealing tutorial against a live fleet coordinator.** Use an
-isolated local process and a local-only token. A seal admits work into that
-process's journal.
+**Do not run this sealing tutorial against a live fleet coordinator.** A
+warning is not isolation: `bloomery.db` at the repo root, default artifact
+roots, and ambient `GITHUB_TOKEN` / `AETHER_GITHUB_*` / authority / local-lane
+knobs can reuse live state. The launch below builds into a fresh trial
+directory and starts that binary with `env -i` so only `PATH` and explicit
+local-only knobs are visible. A seal admits work into that process's journal
+only. This is a local REST seal demonstration, not a functioning source
+pipeline.
 
 ## Booting the coordinator with the API
 
-The HTTP ingress binds `AETHER_HTTP_PORT` (default `8910`) on localhost. The
-write and live-read routes need the control-core reducer, which is a native
-capability the chassis boots for you. Commission authoring is fail-closed
-without a bearer: `AETHER_HTTP_CONTROL_TOKEN` empty (the default) refuses
-every `/commissions` request with `401`. Other host-local lifecycle routes
-stay unauthenticated on this bind.
+Commission authoring is fail-closed without a bearer: `AETHER_HTTP_CONTROL_TOKEN`
+empty (the default) refuses every `/commissions` request with `401`. Other
+host-local lifecycle routes stay unauthenticated on this bind.
 
-Launch from the repository root so the fallback tier file resolves. The
-example token is local-only; substitute a token you set yourself, and never
-paste a fleet secret into this page:
+The trial copies the shipped `approval-policy.toml` (it admits `docs/guide/**`
+at `auto`) and points every store root at the trial directory. Local lanes
+are off (`AETHER_GITHUB_LOCAL_LANE_ENABLED=false`) so nothing dispatches a
+model. CAS landing is off (`AETHER_GITHUB_CAS_LAND_ENABLED=false`). GitHub
+owner / repo / `GITHUB_TOKEN` are omitted, so the connection stays
+unconfigured: remote reactors mount disabled, and `SourceCapability::seal_op`
+is an offline no-op (`claims_enabled` is false; acquire/release never reach
+the network). `AETHER_BLOOMERY_AUTHORITY_BACKEND=github` with those knobs
+empty is not a live GitHub authority. Do not set
+`AETHER_BLOOMERY_AUTHORITY_REPO`.
+
+`AETHER_HTTP_PORT=0` and `AETHER_RPC_PORT=0` bind unused OS-assigned
+localhost ports. Read the HTTP port this **owned** process logged; do not
+assume `8910` and do not take `COORDINATOR` from ambient.
 
 ```bash
-# Isolated local process. Do not point these knobs at a live fleet.
-export AETHER_HTTP_CONTROL_TOKEN="${AETHER_HTTP_CONTROL_TOKEN:-local-only-example-token}"
-AETHER_HTTP_PORT=8910 \
-AETHER_STORE_PATH=bloomery.db \
-AETHER_HTTP_CONTROL_TOKEN="$AETHER_HTTP_CONTROL_TOKEN" \
-AETHER_APPROVAL_POLICY_FILE=approval-policy.toml \
-  cargo run -p aether-chassis-bloomery --bin bloomery
+set -euo pipefail
+REPO=$(git rev-parse --show-toplevel)
+cd "$REPO"
+TRIAL=$(mktemp -d "${TMPDIR:-/tmp}/bloomery-rest-seal.XXXXXX")
+echo "trial directory: $TRIAL"
+cp "$REPO/approval-policy.toml" "$TRIAL/approval-policy.toml"
+mkdir -p "$TRIAL/worktrees" "$TRIAL/artifacts" "$TRIAL/archive"
+
+CARGO_TARGET_DIR="$TRIAL/target" cargo build -p aether-chassis-bloomery --bin bloomery
+BIN="$TRIAL/target/debug/bloomery"
+test -x "$BIN"
+
+TOKEN=local-only-example-token
+: > "$TRIAL/bloomery.stderr"
+env -i \
+  PATH="$PATH" \
+  AETHER_LOG_FILTER=info \
+  AETHER_HTTP_PORT=0 \
+  AETHER_RPC_PORT=0 \
+  AETHER_STORE_PATH="$TRIAL/journal.sqlite" \
+  AETHER_ARTIFACTS_ROOT="$TRIAL/artifacts" \
+  AETHER_SESSION_DB_PATH="$TRIAL/sessions.sqlite" \
+  AETHER_GITHUB_LOCAL_WORKTREE_BASE="$TRIAL/worktrees" \
+  AETHER_BLOOMERY_ARCHIVE_BASE="$TRIAL/archive" \
+  AETHER_APPROVAL_POLICY_FILE="$TRIAL/approval-policy.toml" \
+  AETHER_HTTP_CONTROL_TOKEN="$TOKEN" \
+  AETHER_GITHUB_LOCAL_LANE_ENABLED=false \
+  AETHER_GITHUB_CAS_LAND_ENABLED=false \
+  AETHER_BLOOMERY_AUTHORITY_BACKEND=github \
+  "$BIN" >>"$TRIAL/bloomery.stderr" 2>&1 &
+pid=$!
+echo "$pid" > "$TRIAL/pid"
+
+http_port=
+for _ in $(seq 1 50); do
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "coordinator exited before it bound HTTP; last log:" >&2
+    tail -n 24 "$TRIAL/bloomery.stderr" >&2
+    exit 1
+  fi
+  http_port=$(sed -n 's/.*http server bound.*port=\([0-9][0-9]*\).*/\1/p' "$TRIAL/bloomery.stderr" | tail -n 1)
+  if [ -n "$http_port" ]; then
+    break
+  fi
+  sleep 0.2
+done
+if [ -z "$http_port" ]; then
+  echo "coordinator never announced an HTTP port (bind collision or boot hang); last log:" >&2
+  tail -n 24 "$TRIAL/bloomery.stderr" >&2
+  exit 1
+fi
+
+COORDINATOR="http://127.0.0.1:$http_port"
+ready=0
+for _ in $(seq 1 50); do
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "coordinator exited before /drafts and /view answered; last log:" >&2
+    tail -n 24 "$TRIAL/bloomery.stderr" >&2
+    exit 1
+  fi
+  if curl -fsS "$COORDINATOR/drafts" >/dev/null \
+    && curl -fsS "$COORDINATOR/view" >/dev/null; then
+    ready=1
+    break
+  fi
+  sleep 0.2
+done
+if [ "$ready" != 1 ]; then
+  echo "boot failed or address collision on $COORDINATOR; last log:" >&2
+  tail -n 24 "$TRIAL/bloomery.stderr" >&2
+  exit 1
+fi
+
+printf 'COORDINATOR=%s\nTOKEN=%s\n' "$COORDINATOR" "$TOKEN" > "$TRIAL/curl.env"
+echo "owned pid $pid on $COORDINATOR"
 ```
 
-`AETHER_STORE_PATH` defaults to `:memory:` when unset. A file path keeps the
-journal across a restart of this same isolated process.
+The startup line `bloomery REST control api mounted policy_loaded=true` in
+`$TRIAL/bloomery.stderr` confirms the auto-approval door and a draft that
+seals no policy of its own have a fallback. Without it both refuse
+`approval policy unavailable; … fails closed`.
 
-The startup line `bloomery REST control api mounted policy_loaded=true`
-confirms the pre-seal gate loaded
-`AETHER_APPROVAL_POLICY_FILE` (`approval-policy.toml` by default, against the
-working directory). Without that fallback, a draft that seals no policy of
-its own is refused with `approval policy unavailable; seal fails closed`, and
-`POST /commissions/{id}/approvals/auto` is refused the same way. The shipped
-file admits `docs/guide/**` at `auto`.
+`GET /view` always carries a `mainline` digest. On this fresh trial journal
+that is the genesis all-zero sentinel the control core starts from. Capture
+the returned value. This process has no usable git tree.
 
-Default boot does **not** give this process a usable git tree. The authority
-backend defaults to `github`; empty GitHub connection knobs still boot, and
-they do not populate a live source head. `GET /view` always carries a
-`mainline` digest — on a fresh journal that is the genesis all-zero sentinel
-the control core starts from, unless this coordinator has already observed a
-source head. Capture that returned value. Do not assume
-`AETHER_BLOOMERY_AUTHORITY_REPO` or a GitHub repository is configured.
+A second terminal must source the **same** trial file — not ambient
+`COORDINATOR` / `AETHER_HTTP_CONTROL_TOKEN`, which may point at a fleet:
 
-Wait until both `/drafts` (router) and `/view` (control core) answer `200`
-before writing.
+```bash
+set -euo pipefail
+# TRIAL is the directory the boot terminal printed.
+# shellcheck disable=SC1090
+. "$TRIAL/curl.env"
+: "${COORDINATOR:?}" "${TOKEN:?}"
+```
+
+Do not delete the trial directory or its `target/` from the recipe. After
+you are done, stop **this** owned process (`kill "$(cat "$TRIAL/pid")"`),
+then remove `$TRIAL` yourself if you no longer need the journal, artifacts,
+or build tree.
 
 ## The route table
 
@@ -129,29 +213,24 @@ description, and approval from the store.
 
 ## A curl walkthrough
 
-This is a minimal Auto-tier `docs/guide/**` seal on an isolated coordinator.
-`curl -fsS` fails the script on HTTP errors. Capture returned ids with `jq`;
-do not invent placeholder digests or assume the first draft is `"1"`.
+This is a minimal Auto-tier `docs/guide/**` seal on the trial coordinator
+above. `curl -fsS` fails the script on HTTP errors. Capture returned ids with
+`jq -er` so a missing or null field is a failure. Do not invent placeholder
+digests, assume the first draft is `"1"`, or default `COORDINATOR` from
+ambient.
 
 ```bash
 set -euo pipefail
-COORDINATOR="${COORDINATOR:-http://127.0.0.1:8910}"
-TOKEN="${AETHER_HTTP_CONTROL_TOKEN:-local-only-example-token}"
+: "${COORDINATOR:?source $TRIAL/curl.env from the boot terminal}"
+: "${TOKEN:?same local-only token the trial coordinator booted with}"
 WP=wp-guide
 
-until curl -fsS "$COORDINATOR/drafts" >/dev/null \
-  && curl -fsS "$COORDINATOR/view" >/dev/null; do
-  sleep 0.2
-done
-
-base=$(curl -fsS "$COORDINATOR/view" | jq -r '.mainline')
-test -n "$base" && test "$base" != "null"
+base=$(curl -fsS "$COORDINATOR/view" | jq -er '.mainline')
 ```
 
-`base` is this coordinator's current `GET /view` mainline. On a fresh
-isolated journal it is the genesis sentinel; on a coordinator that has
-already observed a source head it is that head. Either way it is the digest
-the process returned, not a value this page invented.
+`base` is this trial coordinator's `GET /view` mainline. On the fresh trial
+journal that is the genesis sentinel. Capture the returned value; do not
+invent a git sha.
 
 Create the commission. The intent is a `Statement`: `words` are UTF-8 bytes,
 `provenance` is an observation (create does not verify a signature), and
@@ -172,7 +251,7 @@ created=$(
     --data-binary @-
 )
 echo "$created" | jq .
-intent=$(echo "$created" | jq -r '.intent')
+intent=$(echo "$created" | jq -er '.intent')
 ```
 
 Write a complete version-1 `ScopeRevision`. `schema` is `1`. `routing` is the
@@ -208,7 +287,7 @@ written=$(
     --data-binary @-
 )
 echo "$written" | jq .
-revision=$(echo "$written" | jq -r '.digest')
+revision=$(echo "$written" | jq -er '.digest')
 ```
 
 The `201` `{digest}` is the stored revision's content address — the value the
@@ -225,6 +304,7 @@ approved=$(
     -H "Authorization: Bearer $TOKEN"
 )
 echo "$approved" | jq .
+approval=$(echo "$approved" | jq -er '.digest')
 ```
 
 Open a draft and read the handle it mints:
@@ -232,7 +312,7 @@ Open a draft and read the handle it mints:
 ```bash
 opened=$(curl -fsS -X POST "$COORDINATOR/drafts")
 echo "$opened" | jq .
-draft_id=$(echo "$opened" | jq -r '.draft_id')
+draft_id=$(echo "$opened" | jq -er '.draft_id')
 ```
 
 Shape the draft from the returned ids. The membership's `approval` is a
@@ -271,7 +351,8 @@ sealed=$(
     -d '{}'
 )
 echo "$sealed" | jq .
-bloom_id=$(echo "$sealed" | jq -r '.outcome.Sealed')
+bloom_id=$(echo "$sealed" | jq -er '.outcome.Sealed')
+# A 200 SealRejected body is not a sealed id; jq -er fails on null.
 ```
 
 The outcome names the sealed bloom as hex:
@@ -339,7 +420,7 @@ policy=$(
   curl -fsS -X POST "$COORDINATOR/configs" \
     -H 'content-type: application/json' \
     -d '{"kind":"aether.bloomery.approval_policy","value":{"default":"Judge","rules":[{"glob":"docs/guide/**","tier":"Auto"}]}}' \
-    | jq -r '.digest'
+    | jq -er '.digest'
 )
 
 jq -n --arg digest "$policy" \
