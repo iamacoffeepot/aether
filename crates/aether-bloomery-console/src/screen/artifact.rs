@@ -87,10 +87,8 @@ impl Artifact {
                 }
             }
         }
-        let line_count = lines.len();
-        let offset = self.offset.min(line_count.saturating_sub(1));
-        self.offset = offset;
-        let offset = u16::try_from(offset).unwrap_or(u16::MAX);
+        self.offset = super::json::clamp_wrapped_scroll(self.offset, &lines, area.width);
+        let offset = u16::try_from(self.offset).unwrap_or(u16::MAX);
         frame.render_widget(
             Paragraph::new(lines).style(palette::body()).wrap(Wrap { trim: false }).scroll((offset, 0)),
             area,
@@ -166,7 +164,7 @@ mod tests {
     use crate::shell::Shell;
     use crate::store::Store;
     use crate::warroom::Focus;
-    use crossterm::event::KeyEvent;
+    use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use serde_json::json;
@@ -188,6 +186,37 @@ mod tests {
         assert!(dump.contains(".A") || dump.contains('.'), "{dump}");
     }
 
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area().height {
+            let mut row = String::new();
+            for x in 0..buffer.area().width {
+                row.push_str(buffer[(x, y)].symbol());
+            }
+            text.push_str(row.trim_end());
+        }
+        text
+    }
+
+    fn draw(artifact: &mut Artifact, store: &Store, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");
+        terminal.draw(|frame| artifact.render(frame, frame.area(), store)).expect("draw");
+        buffer_text(&terminal)
+    }
+
+    fn scroll_until_visible(artifact: &mut Artifact, store: &Store, width: u16, height: u16, needle: &str) -> String {
+        let mut text = String::new();
+        for _ in 0..512 {
+            artifact.handle_key(KeyEvent::from(KeyCode::Char('j')), store);
+            text = draw(artifact, store, width, height);
+            if text.contains(needle) {
+                return text;
+            }
+        }
+        text
+    }
+
     #[test]
     fn a_wide_value_is_wrapped_not_cut() {
         // The plausible bug: List cuts at the pane edge, so a 200-character
@@ -201,16 +230,58 @@ mod tests {
             Ok(DecodedArtifact { value: Some(json!({ "body": payload })), ..DecodedArtifact::default() }),
         );
         let mut artifact = Artifact::new(digest);
-        let mut terminal = Terminal::new(TestBackend::new(40, 20)).expect("test backend");
-        terminal.draw(|frame| artifact.render(frame, frame.area(), &store)).expect("draw");
-        let buffer = terminal.backend().buffer();
-        let mut text = String::new();
-        for y in 0..buffer.area().height {
-            for x in 0..buffer.area().width {
-                text.push_str(buffer[(x, y)].symbol());
-            }
-        }
+        let text = draw(&mut artifact, &store, 40, 20);
         assert!(text.contains(tail), "{text}");
+    }
+
+    #[test]
+    fn a_long_string_tail_is_reachable_by_wrapped_scroll() {
+        // The plausible bug: clamp uses logical JSON lines, so a 400-character
+        // string in a 20-column pane wraps to many screen rows whose tail j/k
+        // can never reach.
+        let digest = DigestHex::from_bytes([1; 32]);
+        let tail = "TAILTOKEN";
+        let payload = format!("{}{tail}", "x".repeat(400));
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_artifact(
+            digest,
+            Ok(DecodedArtifact { value: Some(json!({ "body": payload })), ..DecodedArtifact::default() }),
+        );
+        let mut artifact = Artifact::new(digest);
+        let start = draw(&mut artifact, &store, 20, 6);
+        assert!(!start.contains(tail), "narrow first page must not already show the tail:\n{start}");
+
+        let found = scroll_until_visible(&mut artifact, &store, 20, 6, tail);
+        assert!(found.contains(tail), "wrapped-row scroll must reach the tail:\n{found}");
+
+        for _ in 0..512 {
+            artifact.handle_key(KeyEvent::from(KeyCode::Char('j')), &store);
+        }
+        let wide = draw(&mut artifact, &store, 80, 6);
+        assert!(
+            wide.chars().any(|ch| !ch.is_whitespace()),
+            "widening must reclamp so the pane is not a blank overscroll:\n{wide}"
+        );
+    }
+
+    #[test]
+    fn a_wide_unicode_string_tail_is_reachable_by_wrapped_scroll() {
+        // The plausible bug: wrap math counts chars, so a string of fullwidth
+        // あ (two columns each) looks short enough that clamp stops before the
+        // tail row.
+        let digest = DigestHex::from_bytes([2; 32]);
+        let tail = "TAILTOKEN";
+        let payload = format!("{}{tail}", "あ".repeat(200));
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_artifact(
+            digest,
+            Ok(DecodedArtifact { value: Some(json!({ "body": payload })), ..DecodedArtifact::default() }),
+        );
+        let mut artifact = Artifact::new(digest);
+        let start = draw(&mut artifact, &store, 20, 6);
+        assert!(!start.contains(tail), "narrow first page must not already show the tail:\n{start}");
+        let found = scroll_until_visible(&mut artifact, &store, 20, 6, tail);
+        assert!(found.contains(tail), "unicode column wrap must reach the tail:\n{found}");
     }
 
     #[test]

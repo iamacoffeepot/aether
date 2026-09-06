@@ -2,6 +2,9 @@
 //!
 //! The walk is iterative with a depth cap because the value is served data.
 
+use std::collections::VecDeque;
+
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 
@@ -153,6 +156,92 @@ fn with_indent(indent: usize, mut spans: Vec<Span<'static>>) -> Vec<Span<'static
 
 fn styled(text: impl Into<String>, role: Role) -> Span<'static> {
     Span::styled(text.into(), palette::paint(role))
+}
+
+/// Clamp a paragraph scroll offset to the last wrapped screen row at `width`.
+///
+/// Matches `Paragraph` with `Wrap { trim: false }`. Ratatui's `line_count` is
+/// feature-gated; this walks the same public grapheme widths the widget paints.
+#[must_use]
+pub fn clamp_wrapped_scroll(offset: usize, lines: &[Line<'_>], width: u16) -> usize {
+    offset.min(wrapped_row_count(lines, width).saturating_sub(1))
+}
+
+fn wrapped_row_count(lines: &[Line<'_>], width: u16) -> usize {
+    if width < 1 {
+        return 0;
+    }
+    lines.iter().map(|line| wrapped_rows_in_line(line, width)).sum()
+}
+
+fn wrapped_rows_in_line(line: &Line<'_>, max_width: u16) -> usize {
+    let max_width = usize::from(max_width);
+    let mut rows = 0;
+    let mut line_width = 0;
+    let mut line_len = 0;
+    let mut word_width = 0;
+    let mut word_len = 0;
+    let mut ws_width = 0;
+    let mut ws: VecDeque<usize> = VecDeque::new();
+    let mut prev_non_ws = false;
+
+    for grapheme in line.styled_graphemes(Style::default()) {
+        let symbol = grapheme.symbol;
+        let is_ws = symbol == "\u{200b}" || (symbol.chars().all(char::is_whitespace) && symbol != "\u{00a0}");
+        let symbol_width = Span::raw(symbol).width();
+        if symbol_width > max_width {
+            continue;
+        }
+
+        let word_found = prev_non_ws && is_ws;
+        let untrimmed_overflow = line_len == 0 && word_width + ws_width + symbol_width > max_width;
+        if word_found || untrimmed_overflow {
+            line_len += ws.len() + word_len;
+            line_width += ws_width + word_width;
+            ws.clear();
+            ws_width = 0;
+            word_width = 0;
+            word_len = 0;
+        }
+
+        let line_full = line_width >= max_width;
+        let pending_word_overflow = symbol_width > 0 && line_width + ws_width + word_width >= max_width;
+        if line_full || pending_word_overflow {
+            rows += 1;
+            let mut remaining = max_width.saturating_sub(line_width);
+            line_width = 0;
+            line_len = 0;
+            while let Some(&front) = ws.front() {
+                if front > remaining {
+                    break;
+                }
+                ws_width -= front;
+                remaining -= front;
+                ws.pop_front();
+            }
+            if is_ws && ws.is_empty() {
+                continue;
+            }
+        }
+
+        if is_ws {
+            ws_width += symbol_width;
+            ws.push_back(symbol_width);
+        } else {
+            word_width += symbol_width;
+            word_len += 1;
+        }
+        prev_non_ws = !is_ws;
+    }
+
+    if line_len == 0 && word_len == 0 && !ws.is_empty() {
+        rows += 1;
+    }
+    line_len += ws.len() + word_len;
+    if line_len > 0 {
+        rows += 1;
+    }
+    rows.max(1)
 }
 
 #[cfg(test)]
