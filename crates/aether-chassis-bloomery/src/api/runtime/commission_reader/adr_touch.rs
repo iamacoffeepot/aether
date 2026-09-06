@@ -25,8 +25,8 @@ pub enum SealedAdrStatus {
 
 /// Look up an ADR path at the sealed base.
 ///
-/// [`Some(SealedAdrStatus::Proposed)`] is the only confirmed still-Proposed
-/// blob. [`Some(SealedAdrStatus::Established)`] is a confirmed non-Proposed status. [`None`]
+/// `Some(SealedAdrStatus::Proposed)` is the only confirmed still-Proposed
+/// blob. `Some(SealedAdrStatus::Established)` is a confirmed non-Proposed status. [`None`]
 /// is everything else: a missing path, unresolved correspondence, a missing
 /// git object, or a spawn/decode failure. None of those are confirmed
 /// Proposed, so the Human hard gate stays armed. [`None`] is not a confirmed
