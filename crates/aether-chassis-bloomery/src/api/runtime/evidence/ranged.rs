@@ -78,7 +78,15 @@ pub fn read_ranged(path: &Path, cursor: Option<u64>, limit: u64) -> Result<Dispa
     let got = file.read(&mut buf).map_err(RangedError::Io)?;
     buf.truncate(got);
 
-    let (lines, consumed) = page_lines(&buf, start + u64::try_from(got).unwrap_or(u64::MAX) >= length);
+    let at_eof = start + u64::try_from(got).unwrap_or(u64::MAX) >= length;
+    let (mut lines, mut consumed) = page_lines(&buf, at_eof);
+    if consumed == 0 && !at_eof && got > 0 {
+        // No newline in the page window and the file continues: this line is
+        // larger than the budget. Emit a capped prefix and skip the rest so
+        // next_cursor lands on a line boundary rather than repeating `start`.
+        lines.push(cap_line(&buf));
+        consumed = skip_oversized_line(&mut file, got).map_err(RangedError::Io)?;
+    }
     let end = start.saturating_add(consumed);
     let next_cursor = (end < length).then_some(end);
     Ok(DispatchFilePage { lines, cursor: start, next_cursor, length, notice: None })
@@ -117,7 +125,8 @@ fn snap_start(file: &mut File, offset: u64, length: u64) -> io::Result<u64> {
 
 /// Split `buf` into complete lines. The last incomplete line is dropped unless
 /// `at_eof` (the file ended without a trailing newline — still a complete
-/// record for a finished prompt, not a live JSONL event).
+/// record for a finished prompt, not a live JSONL event). A non-EOF window
+/// with no newline consumes zero; the caller skips that oversized line.
 fn page_lines(buf: &[u8], at_eof: bool) -> (Vec<String>, u64) {
     let mut lines = Vec::new();
     let mut consumed = 0_u64;
@@ -137,6 +146,27 @@ fn page_lines(buf: &[u8], at_eof: bool) -> (Vec<String>, u64) {
         consumed = consumed.saturating_add(u64::try_from(raw.len()).unwrap_or(0));
     }
     (lines, consumed)
+}
+
+/// Skip the unread remainder of a line that did not fit in the page window.
+///
+/// `already_read` is the window that contained no newline. Returns the total
+/// byte count from the page start through the terminating newline, or through
+/// EOF when the file has no further newline. Reads are chunked so the line is
+/// never loaded whole.
+fn skip_oversized_line(file: &mut File, already_read: usize) -> io::Result<u64> {
+    let mut consumed = u64::try_from(already_read).unwrap_or(u64::MAX);
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            return Ok(consumed);
+        }
+        if let Some(index) = chunk[..n].iter().position(|&byte| byte == b'\n') {
+            return Ok(consumed.saturating_add(u64::try_from(index.saturating_add(1)).unwrap_or(0)));
+        }
+        consumed = consumed.saturating_add(u64::try_from(n).unwrap_or(0));
+    }
 }
 
 fn cap_line(raw: &[u8]) -> String {

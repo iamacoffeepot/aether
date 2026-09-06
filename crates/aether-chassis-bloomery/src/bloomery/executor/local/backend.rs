@@ -322,8 +322,12 @@ struct PendingRun {
     subject: Digest,
     gates: LaneGates,
     // The member this dispatch belongs to, when the order row names one.
-    // `None` for an aggregate lane or a store-less backend.
+    // `None` for an aggregate lane or a store-less backend. Empty workpiece
+    // with a stage is the bloom-less axis.
     workpiece: Option<String>,
+    // The line stage the order row named. `None` when the backend has no
+    // order row. Distinct from `command`: Construct and Refine share one.
+    stage: Option<StageId>,
     // The session this dispatch works in — the checkout's key, minted before
     // the launch and resolved from the member's own row or from the predecessor
     // whose conversation it inherits. `None` alongside a `None` workpiece.
@@ -362,6 +366,8 @@ impl PendingRun {
             effort: self.profile.as_ref().map(|resolved| resolved.effort.as_str()),
             task: self.task.as_deref(),
             resume,
+            workpiece: self.workpiece.as_deref(),
+            stage: self.stage,
         }
     }
 }
@@ -892,7 +898,9 @@ impl LocalExecutor {
                     .and_then(|order| self.session_slug(&nonce, &order.bloom, &order.workpiece))
             })
             .flatten();
-        let workpiece = identity.map(|order| order.workpiece).filter(|workpiece| !workpiece.is_empty());
+        let stage = identity.as_ref().map(|order| order.stage);
+        let workpiece =
+            identity.as_ref().map(|order| order.workpiece.clone()).filter(|workpiece| !workpiece.is_empty());
         let preferred = workpiece.as_deref().and_then(|workpiece| self.preferred_slot_of(workpiece));
         // The stage's resolved agent profile, overlaid onto the order by the
         // dispatching host (ADR-0149 §The line) — never a backend-local config
@@ -918,6 +926,7 @@ impl LocalExecutor {
             subject: evidence_subject(&order.transformation),
             gates,
             workpiece,
+            stage,
             slug,
             preferred,
             priority,

@@ -209,6 +209,25 @@ fn projection_shell(github: &GithubConnectionConfig, configured: bool) -> Result
     configured.then(|| ProjectionShell::connect(github)).transpose().map_err(|error| BootError::Other(Box::new(error)))
 }
 
+/// Mount the source replica when local authority has a fully-configured GitHub
+/// connection. App-only credentials resolve a rotating token source per push
+/// rather than freezing the empty PAT field.
+#[cfg(feature = "github")]
+fn replica_shell(
+    github: &GithubConnectionConfig,
+    coordinator: &CoordinatorConfig,
+) -> Result<Option<SourceReplicaShell>, BootError> {
+    if !coordinator.source_replica_enabled(github) {
+        return Ok(None);
+    }
+    Ok(Some(SourceReplicaShell::connect_with_token_source(
+        &coordinator.authority_repo,
+        &github_push_url(&github.api_base, &github.owner, &github.repo),
+        coordinator.mainline(),
+        github.token_source().map_err(|error| BootError::Other(Box::new(error)))?,
+    )))
+}
+
 /// The cadence every reactor that reaches the GitHub API runs at (#5412): the
 /// configured interval, floored by what the hourly REST allowance affords.
 ///
@@ -324,6 +343,9 @@ fn actor_setups(
     session: &SessionConfig,
     notify: &NotifyConfig,
 ) -> Result<BloomeryActorSetups, BootError> {
+    // Direct test construction and compose skip `BloomeryEnv::resolve`. Refuse
+    // here so an unknown name cannot select a source factory or connection.
+    coordinator.authority()?;
     let configured = github.uses_fixture() || github.missing_connection_knobs().is_empty();
     let source_configured = configured || coordinator.uses_local_authority();
     let replica_enabled = coordinator.source_replica_enabled(github);
@@ -347,14 +369,7 @@ fn actor_setups(
         mirror: MirrorReactorSetup {
             projection: projection_shell(github, configured)?,
             source: configured.then(|| source.clone()),
-            replica: replica_enabled.then(|| {
-                SourceReplicaShell::connect(
-                    &coordinator.authority_repo,
-                    &github_push_url(&github.api_base, &github.owner, &github.repo),
-                    coordinator.mainline(),
-                    &github.token,
-                )
-            }),
+            replica: replica_shell(github, coordinator)?,
             poll_interval_secs: github_poll_interval_secs,
             repository: repository.clone(),
         },
@@ -482,8 +497,9 @@ impl BloomeryEnv {
     /// # Errors
     ///
     /// Returns [`ConfigError`] when a known env value (or argv overlay value)
-    /// fails its parser, or when `--store-path` and `--github-store-path` name
-    /// different files.
+    /// fails its parser, when `AETHER_BLOOMERY_AUTHORITY_BACKEND` / the matching
+    /// overlay is not `github` or `local`, or when `--store-path` and
+    /// `--github-store-path` name different files.
     pub fn resolve(cli: &BloomeryCli) -> Result<Self, ConfigError> {
         let rpc_port = RpcPortConfig::try_from_argv_then_env(cli.rpc.clone().into_layer())?.port;
         let http_port = HttpPortConfig::try_from_argv_then_env(cli.http.clone().into_layer())?.port;
@@ -494,6 +510,9 @@ impl BloomeryEnv {
         #[cfg(feature = "github")]
         let notify = NotifyConfig::try_from_argv_then_env(cli.notify.clone().into_layer())?;
         let mut coordinator = CoordinatorConfig::try_from_argv_then_env(cli.coordinator.clone().into_layer())?;
+        // Argv and file overlays store this knob as String and bypass parse_env.
+        // Refuse unknown names here so every ingress fails closed before boot.
+        coordinator.authority()?;
         let mut session = SessionConfig::try_from_argv_then_env(cli.session.clone().into_layer())?;
         let signing = SigningConfig::try_from_argv_then_env(cli.signing.clone().into_layer())?;
 
@@ -626,6 +645,7 @@ impl BootableChassis for BloomeryChassis {
     /// move the same `boot` into the driver afterward.
     #[cfg(feature = "github")]
     fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Result<Builder<Self>, BootError> {
+        env.coordinator.authority()?;
         // The production lane program is the one that inherits the kit. A
         // mock-lane coordinator must not probe it here: each `--version` is a
         // process, and a loaded lane-boundary suite boots many coordinators at
@@ -640,6 +660,7 @@ impl BootableChassis for BloomeryChassis {
         let approval_policy_file = coordinator.approval_policy_file.clone();
         let worktree_base = coordinator.local_worktree_base.clone();
         let artifacts_root = coordinator.artifacts_root.clone();
+        let lane_repository = coordinator.lane_repository();
         let http_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), http_port);
         // The component host serves on-demand `aether.component.load` over RPC (the
         // MCP harness / fleet load components at runtime). Built from the same
@@ -743,6 +764,7 @@ impl BootableChassis for BloomeryChassis {
                 correspondence: Some(setups.correspondence),
                 pusher: Some(setups.pusher),
                 worktree_base,
+                lane_repository,
                 archive_base: coordinator.archive_base.clone(),
                 artifacts_root,
                 control_token: coordinator.http_control_token,
@@ -751,11 +773,13 @@ impl BootableChassis for BloomeryChassis {
     }
     #[cfg(not(feature = "github"))]
     fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Result<Builder<Self>, BootError> {
+        env.coordinator.authority()?;
         KitReport::inspect().log_at_boot();
         let BloomeryEnv { rpc_port, http_port, store, artifacts, coordinator, session, signing } = env;
         let approval_policy_file = coordinator.approval_policy_file.clone();
         let worktree_base = coordinator.local_worktree_base.clone();
         let artifacts_root = coordinator.artifacts_root.clone();
+        let lane_repository = coordinator.lane_repository();
         let http_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), http_port);
         let component_host = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
@@ -792,6 +816,7 @@ impl BootableChassis for BloomeryChassis {
             .with_actor::<BloomeryApiCapability>(ApiParams {
                 approval_policy_file,
                 worktree_base,
+                lane_repository,
                 archive_base: coordinator.archive_base.clone(),
                 artifacts_root,
                 control_token: coordinator.http_control_token,
@@ -806,11 +831,13 @@ mod tests {
 
     use aether_bloomery::SharedCorrespondence;
     use aether_bloomery_github::testing::FakeGithub;
+    use clap::Parser as _;
 
     use super::{
         ArtifactsConfig, BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, GithubConnectionConfig,
-        NotifyConfig, SessionConfig, actor_setups, mounted_correspondence,
+        NotifyConfig, SessionConfig, actor_setups, mounted_correspondence, replica_shell,
     };
+    use crate::bloomery::BloomeryCli;
     use crate::signing::SigningConfig;
     use crate::store::StoreConfig;
 
@@ -902,5 +929,154 @@ mod tests {
         assert_eq!(BloomeryChassis::PROFILE, "bloomery");
         // Dropped without `run()` — teardown, no signal wait.
         drop(chassis);
+    }
+
+    #[test]
+    fn app_only_replica_wiring_reads_the_token_source_not_the_empty_pat() {
+        // Tripwire: complete App credentials now count as configured, which
+        // enables source replication. Passing `github.token` (empty on App-only)
+        // would construct a replica that pushes with no credential. replica_shell
+        // must go through token_source, so an App key path that does not exist is
+        // a boot fault rather than a silent empty PAT (#5586).
+        let github = GithubConnectionConfig {
+            owner: "octo".into(),
+            repo: "shadow".into(),
+            app_id: 12345,
+            app_private_key_path: "/nonexistent/does-not-exist.pem".into(),
+            app_installation_id: 42,
+            ..GithubConnectionConfig::default()
+        };
+        let coordinator = CoordinatorConfig {
+            authority_backend: "local".into(),
+            authority_repo: "/tmp/authority.git".into(),
+            ..CoordinatorConfig::default()
+        };
+        assert!(github.token.is_empty(), "this case is App-only");
+        assert!(github.missing_connection_knobs().is_empty(), "complete App credentials are configured");
+        assert!(coordinator.source_replica_enabled(&github), "App-only must enable replication");
+        assert!(
+            replica_shell(&github, &coordinator).is_err(),
+            "App-only replica construction must read the key, not freeze an empty PAT"
+        );
+
+        let pat = GithubConnectionConfig {
+            token: "t".into(),
+            owner: "octo".into(),
+            repo: "shadow".into(),
+            ..GithubConnectionConfig::default()
+        };
+        assert!(replica_shell(&pat, &coordinator).expect("PAT replica constructs").is_some());
+        assert!(
+            replica_shell(&GithubConnectionConfig::default(), &CoordinatorConfig::default())
+                .expect("unconfigured")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn actor_setups_refuses_an_unknown_authority_before_selecting_a_source() {
+        // The plausible bug: locla made uses_local_authority false, so this
+        // factory connected GitHub. App-only credentials with a missing key
+        // error only if connect_client runs — that message must not appear.
+        let github = GithubConnectionConfig {
+            owner: "octo".into(),
+            repo: "shadow".into(),
+            app_id: 12345,
+            app_private_key_path: "/nonexistent/does-not-exist.pem".into(),
+            app_installation_id: 42,
+            ..GithubConnectionConfig::default()
+        };
+        let coordinator = CoordinatorConfig {
+            authority_backend: "locla".into(),
+            authority_repo: "/tmp/authority.git".into(),
+            ..CoordinatorConfig::default()
+        };
+        let error = actor_setups(&github, &coordinator, &SessionConfig::default(), &NotifyConfig::default())
+            .err()
+            .expect("unknown authority must not select a source");
+        let message = error.to_string();
+        assert!(message.contains("AETHER_BLOOMERY_AUTHORITY_BACKEND"), "{message}");
+        assert!(message.contains("locla"), "{message}");
+        assert!(
+            !message.contains("private key") && !message.contains("does-not-exist"),
+            "must not reach GitHub client construction: {message}"
+        );
+    }
+
+    #[test]
+    fn actor_setups_accepts_the_named_github_authority() {
+        let coordinator = CoordinatorConfig { authority_backend: "github".into(), ..CoordinatorConfig::default() };
+        actor_setups(
+            &GithubConnectionConfig::default(),
+            &coordinator,
+            &SessionConfig::default(),
+            &NotifyConfig::default(),
+        )
+        .expect("github is a valid authority");
+    }
+
+    #[test]
+    fn resolve_refuses_locla_even_when_github_credentials_are_present() {
+        let cli = BloomeryCli::try_parse_from([
+            "bloomery",
+            "--github-authority-backend",
+            "locla",
+            "--github-authority-repo",
+            "/tmp/authority.git",
+            "--github-owner",
+            "octo",
+            "--github-repo",
+            "shadow",
+        ])
+        .expect("clap accepts the string overlay");
+        let error = BloomeryEnv::resolve(&cli).expect_err("locla with github knobs must not resolve");
+        let message = error.to_string();
+        assert!(message.contains("AETHER_BLOOMERY_AUTHORITY_BACKEND"), "{message}");
+        assert!(message.contains("locla"), "{message}");
+        assert!(message.contains("github or local"), "{message}");
+    }
+}
+
+#[cfg(test)]
+mod authority_backend_resolution {
+    use clap::Parser as _;
+
+    use super::BloomeryEnv;
+    use crate::bloomery::BloomeryCli;
+
+    #[test]
+    fn an_unknown_authority_backend_is_refused_at_resolution() {
+        let cli = BloomeryCli::try_parse_from(["bloomery", "--github-authority-backend", "locla"])
+            .expect("clap accepts the string overlay");
+        let error = BloomeryEnv::resolve(&cli).expect_err("locla must not resolve");
+        let message = error.to_string();
+        assert!(message.contains("AETHER_BLOOMERY_AUTHORITY_BACKEND"), "{message}");
+        assert!(message.contains("locla"), "{message}");
+        assert!(message.contains("github or local"), "{message}");
+
+        let mut cli = BloomeryCli::default();
+        cli.coordinator.authority_backend = Some("locla".into());
+        cli.coordinator.authority_repo = Some("/tmp/authority.git".into());
+        let error = BloomeryEnv::resolve(&cli).expect_err("partial overlay locla must not resolve");
+        let message = error.to_string();
+        assert!(message.contains("AETHER_BLOOMERY_AUTHORITY_BACKEND"), "{message}");
+        assert!(message.contains("locla"), "{message}");
+    }
+
+    #[test]
+    fn github_local_and_default_authority_backends_resolve() {
+        let default = BloomeryEnv::resolve(&BloomeryCli::default()).expect("default resolves");
+        assert_eq!(default.coordinator.authority_backend, "github");
+        assert!(!default.coordinator.uses_local_authority());
+
+        let github = BloomeryCli::try_parse_from(["bloomery", "--github-authority-backend", "github"])
+            .expect("github flag parses");
+        let github = BloomeryEnv::resolve(&github).expect("github resolves");
+        assert!(!github.coordinator.uses_local_authority());
+
+        let local = BloomeryCli::try_parse_from(["bloomery", "--github-authority-backend", "local"])
+            .expect("local flag parses");
+        let local = BloomeryEnv::resolve(&local).expect("local resolves");
+        assert!(local.coordinator.uses_local_authority());
     }
 }

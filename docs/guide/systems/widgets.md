@@ -252,15 +252,22 @@ let lines = wrap_to_width(hint, reveal_wrap_width(size_pixels), measure);
 It breaks only between words. A word wider than the measure keeps its own line,
 unsplit and over budget — the measure is a reading preference and cutting a
 word in half to honour it reads far worse than one long line. A `\n` in the
-source is the author's own break and always survives, so a longer hint can be
-divided into paragraphs deliberately.
+source is the author's own break and survives, blank lines included, so a
+longer hint can be divided into paragraphs deliberately — with one exception: a
+blank at the very start or the very end is dropped, because a break wants
+content on both sides of it and an empty row against the plate's edge only pads
+the box.
 
 Selection is a state, not an affordance, and every widget that has a current
 item draws it the same way: the chosen row of a virtual list, the chosen bucket
 of a segmented control, and the marker of a radio group's chosen option fill
-with `theme.selection`, and the text on them inks with `theme.selection_text`.
-A radio group's unselected markers stay on `surface_raised` and so read as
-empty slots beside the lit one. None of these use `accent`, which means the
+with `theme.selection`. `theme.selection_text` is the ink for text drawn *on*
+one of those fills, so the list row and the segmented bucket — which plate the
+whole cell their label sits in — take it. A radio group plates only its marker,
+never the row, so its labels are drawn on the panel's own `surface` and stay
+`text_primary` whether chosen or not; its unselected markers stay on
+`surface_raised` and so read as empty slots beside the lit one. None of these
+use `accent`, which means the
 primary action and the focus ring and nothing else — so a chosen row never
 reads as a button waiting to be pressed.
 
@@ -378,10 +385,14 @@ A host that wants `⌘` in a label ships a face that has it, or writes
 empty_text, ruled, scroll_bar_gap_units, host_scroll_strip, theme, state }`
 retains the complete row vector while
 realizing the rows the viewport reaches. The panel fixes the slot height at
-`theme.row_height * visible_row_count` — at the summed height of the first
-`visible_row_count` rows once any of them carries a height of its own
-([below](#a-row-that-is-a-table-entry)) — and clips the slot to that viewport;
-an empty item vector or zero-row viewport is not pointer- or focus-eligible.
+`theme.row_height * visible_row_count` for every list, table or not — it has no
+font metrics and reads no child reply, so a uniform pitch is the only height it
+can compute — and clips the slot to that viewport; an empty item vector or
+zero-row viewport is not pointer- or focus-eligible. A list whose rows carry
+heights of their own ([below](#a-row-that-is-a-table-entry)) therefore needs a
+host that sizes the slot itself, from the list's reported
+`WidgetDrawList::intrinsic` (below); the widget draws whatever rows the frame it
+was given reaches.
 This bounded realization is the intended path for hundreds or thousands of
 uniform-height choices.
 
@@ -480,7 +491,10 @@ so a host reserving the column copies no kit constant, and it answers before
 any draw list arrives — which is when a layout needs it. The clip matters: a
 slot clipped to the list's own frame erases a track drawn outside it, and a
 press in the strip reaches the list only if the host's hit test reaches across
-it too. A
+it too. The reference `WidgetPanel` does exactly this for a
+`WidgetKind::VirtualList` child that sets the flag: it takes the strip out of
+the `WidgetFrame` it hands the list and keeps clipping and hit-testing the slot
+by the whole row rectangle it assigned. A
 virtual list joins the same wheel-only hit table a `ScrollWidget` does (see
 [Scroll containers and wheel ownership](#scroll-containers-and-wheel-ownership)),
 so a root that forks the reference panel routes `MouseWheel` to it by
@@ -488,7 +502,12 @@ so a root that forks the reference panel routes `MouseWheel` to it by
 
 Those metrics also give the list its `WidgetDrawList::intrinsic`: `[widest row
 in the whole item vector + 2 × pad + the scroll bar's gutter when the vector
-overflows, theme.row_height × visible_row_count]`. It
+overflows, the viewport's height]`. That height is
+`theme.row_height × visible_row_count` while every row is one pitch tall, and
+the summed height of the first `visible_row_count` rows once some row carries a
+height of its own ([below](#a-row-that-is-a-table-entry)) — the offset table's
+`visible_row_count`th sum, or its last one when the vector is shorter than the
+viewport. It
 measures the items, not the realized window, so the width does not change as
 the reader scrolls — and because that is the one thing here that touches every
 item, it is measured once and re-measured only when the items, the font, or the
@@ -497,9 +516,14 @@ no rows.
 
 `WidgetDrawList::content_height` is the other half of that, and the one a host
 draws a **container** from: the whole item vector's height in pixels, which is
-the scroll extent said in the host's own unit — the offset table's last sum
-once rows carry heights of their own, and `theme.row_height × items.len()`
-while they are all one height. The intrinsic's height is the *viewport*; this
+everything the list scrolls through said in the host's own unit — the offset
+table's last sum
+once rows carry heights of their own, and the pitch the rows are drawn at
+(`frame.height ÷ visible_row_count`) × `items.len()` while they are all one
+height. The drawn pitch rather than `theme.row_height`, because a slot that is
+not `theme.row_height × visible_row_count` tall draws its rows to the frame it
+was given, and a plate sized from the theme number would be cut short of the
+rows it holds. The intrinsic's height is the *viewport*; this
 is everything the list scrolls through, so a plate drawn to it is as tall as
 what it holds rather than a tall empty box (§4). Only the widget can answer it
 — the wrapping is the widget's because the font metrics are — and a host that
@@ -1268,7 +1292,12 @@ Left/Right movement clamps at the first and last option. Empty option lists
 have no hit buckets. `SegmentedSelected { index }` reports only actual changes.
 The selected bucket fills with `theme.selection` over `theme.selection_text`;
 hovered, pressed, disabled, validation, and focus presentation use the common
-theme/state contract.
+theme/state contract. Each option's label is elided with the kit's ellipsis to
+what its own bucket holds less one `pad` either side, measured against the
+theme font's resolved metrics — a label wider than its bucket would otherwise
+be overpainted by the next segment's fill, cut mid-glyph with nothing saying
+so. Until those metrics land the labels draw whole and left-padded, the same
+interim the tab strip has.
 
 `WidgetKind::TabStrip` spawns `TabStripWidget` from `TabStripConfig { labels,
 initial_index, style, theme, state }` — one row of tabs over parallel content
@@ -1389,9 +1418,12 @@ text starts one `pad` in and every part of it the reader can see — glyphs,
 selection band, IME underline, caret — carries a clip that ends one `pad` short
 of the hairline. So a value that fits has the same space at each end, and one
 that does not is cut at that margin rather than printing across the seam and
-under the arrows (round-4 note 6). A control with no gutter — a plain text
-field — has no seam to be held off and carries no clip; its slot is already its
-own frame. Nothing in
+under the arrows (round-4 note 6). That margin is also what the hover reveal
+measures against, so a value the clip cuts is a value hovering offers back
+whole — measured against the box instead, a run between the two edges would be
+truncated on screen with the reveal calling it a fit. A control with no gutter —
+a plain text field — has no seam to be held off and carries no clip; its slot is
+already its own frame. Nothing in
 `NumericConfig` changed: steppers are what a numeric *is*, not something to opt
 into.
 
@@ -1400,9 +1432,12 @@ Once the theme font's metrics resolve, a numeric reports its
 height]` — so a consumer sizes the field to the range it configured instead of
 guessing at it. The widest value is whichever *bound* renders longer, formatted
 exactly the way the field formats a committed value (`-100 .. 20` is widest at
-its minimum: the sign is a character like any other), capped at the edit
-buffer's own 32-character bound so an effectively unbounded range asks for a
-field rather than a wall. The endpoints, and only the endpoints, because the
+its minimum: the sign is a character like any other). A committed value is
+written in exponent form when its plain decimal does not fit the edit buffer's
+own 32-character cap — `f32::to_string` never reaches for one, so `3e38` would
+otherwise render as thirty-nine digits, and a buffer installed past the cap
+refuses every later insert whole — which is also what keeps an effectively
+unbounded range asking for a field rather than a wall. The endpoints, and only the endpoints, because the
 number has to be stable: a width that also weighed the value on screen would
 resize the slot on every keystroke, so a fractional `step` that renders an
 interior value longer than either bound (`0 .. 100` by `0.5` holds `"12.5"`) is
@@ -1418,7 +1453,13 @@ Numeric keeps the visible buffer separate from its last committed number.
 Empty, `-`, `.`, and other invalid or non-finite intermediates remain visible
 and emit nothing. A finite edit is clamped and snapped for a
 `NumericChanged { committed: false }` preview without rewriting what the user
-typed. Enter or focus loss canonicalizes a valid value and emits
+typed. The grid it snaps to is the **multiples of `step`**, anchored at zero
+rather than at `min`, and `min` and `max` are reached by the clamp rather than
+by the grid: an anchor at the far end of the range would reconstruct the value
+as `min + k * step` and multiply the step's own `f32` error by the step count,
+so `-100_000 .. 100_000` by `0.01` would commit a typed `12.34` as `12.337765`
+and an unbounded range (whose `min` falls back to `f32::MIN`) would snap every
+value to the anchor. Enter or focus loss canonicalizes a valid value and emits
 `committed: true`; an invalid buffer reverts to the last canonical value
 without an event. Up/Down and the steppers step from the current valid value,
 falling back to the committed value, and immediately canonicalize and commit.
@@ -1461,9 +1502,16 @@ while a key is armed, so a held Enter fires one click, not a hundred — and the
 two rules must not be confused: repeat suppression belongs to activation, never
 to editing.
 
-`mutable` gates only the destructive half. A read-only or disabled control
-still selects, copies, and moves its caret; it just cannot delete, cut, or
-paste. A read-only field a person cannot copy out of is worse than useless.
+`mutable` gates only the destructive half. A read-only control still selects,
+copies, and moves its caret; it just cannot delete, cut, or paste. A read-only
+field a person cannot copy out of is worse than useless.
+
+Disabled is the harder gate and a different one. Every text control returns on
+`!is_available()` — `visible && enabled` — before it reaches the shared
+vocabulary at all, and `gain_focus` refuses focus on the same predicate, so a
+disabled control takes no key and no pointer selection: there is nothing to copy
+out of it because it never holds the caret. A host with text it wants a reader
+to copy leaves the control enabled and sets `read_only`.
 
 ## Root-owned focus and input
 
@@ -1583,12 +1631,21 @@ in its group.
 
 A *root* reaches the same lane two ways, for the plate that hosts other
 children rather than escaping its own slot. `Composite::extend_overlay(items)`
-is the overlay's counterpart to `extend_chrome` — the node's own draws, laid
-down before any slot's — and `Composite::set_slot_overlay(child, true)` moves
-one registered slot's ordinary `items` into the overlay, keeping its origin,
-its slot clip, and its place in registration order. Together they make a
-**group**: a popover's plate through `extend_overlay`, its children through
-`set_slot_overlay` while it is open, flattened plate-first in layout order.
+is the overlay's counterpart to `extend_chrome` — the node's own draws — and
+`Composite::set_slot_overlay(child, true)` moves one registered slot's ordinary
+`items` into the overlay, keeping its origin, its slot clip, and its place in
+registration order. Together they make a **group**: a popover's plate through
+`extend_overlay`, its children through `set_slot_overlay` while it is open,
+flattened plate-first in layout order.
+
+The plate is laid at the **head of that group** — just before the first raised
+slot, and at the end of the lane when the node raised none — because chrome has
+no slot of its own to place it by. So it stands over everything the root laid
+before the group, an ordinary sibling's escaped overlay included: a background
+label's hover-reveal plate, or a dropdown still open behind a modal, goes down
+where its own slot sits and the plate covers it. The escape hatch above
+("register such a control last in its group") is for two *slots*; it does not
+apply to chrome, which is why the plate carries the rule instead.
 
 That grouping is what the clip subtraction reads, and the rule it reads it by
 is **positional**: a glyph run's holes are the fills authored *after* it. Text
@@ -1634,6 +1691,14 @@ every way a list or a menu can close, including focus loss. Without the grab a
 press that lands outside the widget's own rect would go to whatever is under
 it, and the open list would have no way to learn it should close.
 
+A holder that goes hidden or disabled loses the grab in that same breath:
+`Focus::update_availability` drops it alongside the hover and the drag capture.
+The widget does report its close edge, but it reports its state change first,
+so the root's `open: false` handshake arrives to find a holder it can no longer
+route to — and a grab merely filtered out of `grabbed()` is still stored, ready
+to re-arm the instant the widget is enabled again and swallow every press on
+the panel.
+
 A focused Button activates once on Enter press (repeat presses are suppressed
 until release) and once on Space release after a matching Space press. Focus
 loss or unavailability cancels the keyboard arm. Its label sits centered in the
@@ -1650,13 +1715,20 @@ elision mark rather than on a glyph the root's slot clip sliced in half.
 TextField and TextArea share the same UTF-8-safe edit, selection, and IME
 state. Once the configured font resolves, pointer placement, caret motion,
 selection fills, preedit cursor bands, and preedit underlines all use its exact
-glyph advances. `TextAreaConfig { initial, max_chars, rows, theme, state }`
+glyph advances. Before it resolves — and for as long as it never does, when the
+theme names a font the host never loaded — both controls fall back to the
+per-character approximation rather than stop answering: a press still places a
+caret and arms a drag, and Up/Down still move. `TextAreaConfig { initial, max_chars, rows, theme, state }`
 adds a fixed whole-line viewport: `rows` is the number of visible theme rows
 (`0` means one), vertical motion preserves the caret's preferred measured x
 across shorter lines, and the viewport scrolls by complete lines to keep the
 caret visible. Plain Enter inserts a newline; Ctrl+Enter sends
 `TextCommitted` without changing the value. A multiline selection can cross
-newlines and renders one measured band in each covered visible row.
+newlines and renders one measured band in each covered visible row. `\n` is the
+only line break either buffer holds: an insert drops carriage returns whatever
+the control, so a CRLF paste from the clipboard becomes plain newlines instead
+of leaving a `\r` inside the line for layout to charge an advance and the text
+cap to draw a missing-glyph box for.
 
 ## Scroll containers and wheel ownership
 
@@ -1720,7 +1792,16 @@ not fall through to a covered region.
 
 The first accepted pointer press owns pointer motion and releases across region
 boundaries until the matching button is released. Wheel uses the position in
-its own event. Keyboard, committed text, IME preedit, and modifiers route only
+its own event.
+
+A motion that changes which region it routes to also goes to the region it
+left, once, at the position the pointer has now. Each panel derives hover only
+from a motion it receives, so a region that merely stopped being the target
+would keep the child it lit lit — a hover wash under a pointer that is in
+another pane, in the gap between two region rects, or off the window. The
+abandoned region hit-tests the new position against its own table, finds
+nothing under it, and sends that child its `HoverLost`. A region that holds the
+press owns motion outright, so a drag over a peer exits nobody. Keyboard, committed text, IME preedit, and modifiers route only
 to the focused region. An exact activation chord can focus a region (for
 example, the console's backquote chord). Ctrl+Tab cycles editor regions,
 Ctrl+Shift+Tab cycles backward, and both the reserved press and matching
@@ -1780,10 +1861,10 @@ right — deliberately, because equal thirds size a control to its container,
 which stretches "OK" to a third of the pane and clips "Regenerate terrain" in
 the same row.
 
-Degenerate input clamps rather than propagating: a negative or NaN length
-becomes zero and a NaN position becomes zero, so a layout computed before the
-window size is known collapses to empty rectangles instead of poisoning every
-frame downstream with NaN.
+Degenerate input clamps rather than propagating: a negative, NaN or infinite
+length becomes zero and a NaN or infinite position becomes zero, so a layout
+computed before the window size is known collapses to empty rectangles instead
+of poisoning every frame downstream with NaN.
 
 ## The reference panel
 

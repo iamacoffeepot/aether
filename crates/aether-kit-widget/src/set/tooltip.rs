@@ -1,5 +1,5 @@
 // `#[handler]` methods take their decoded mail by value per the ADR-0033
-// dispatch ABI (see `widget/mod.rs`).
+// dispatch ABI (the full rationale is on the same allow in `lib.rs`).
 #![allow(clippy::needless_pass_by_value)]
 // A tooltip holds a handful of lines; the `usize as f32` for a line's pixel
 // offset cannot lose precision at any plate a reader would tolerate.

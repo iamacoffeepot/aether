@@ -147,18 +147,26 @@ impl LocalGitData {
 impl GitDataApi for LocalGitData {
     fn get_ref(&self, name: &str) -> Result<Option<GitRef>, GitDataError> {
         let qualified = Self::qualified(name);
-        let output = command::run(&self.repo, &["for-each-ref", "--format=%(objectname)", &qualified])?;
+        // A glob-free for-each-ref pattern is a prefix (trailing `/` implied).
+        // Object names alone would turn an absent parent into a descendant SHA,
+        // or several descendants joined by a newline.
+        let output = command::run(&self.repo, &["for-each-ref", "--format=%(refname) %(objectname)", &qualified])?;
         if !output.status.success() {
             return Err(GitDataError::Command(format!(
                 "git for-each-ref {qualified}: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
-        let sha = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if sha.is_empty() {
-            return Ok(None);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let Some((full, sha)) = line.rsplit_once(' ') else {
+                continue;
+            };
+            if full == qualified {
+                return Ok(Some(GitRef { name: name.to_owned(), sha: sha.to_owned() }));
+            }
         }
-        Ok(Some(GitRef { name: name.to_owned(), sha }))
+        Ok(None)
     }
 
     fn create_ref(&self, name: &str, sha: &str) -> Result<GitRef, GitDataError> {

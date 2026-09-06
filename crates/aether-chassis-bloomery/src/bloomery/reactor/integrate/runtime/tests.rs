@@ -237,13 +237,19 @@ fn an_inherited_member_with_no_predecessor_ref_refuses_rather_than_folding_a_par
 
 // A bloom superseded twice still has the inherited candidate under the
 // grandparent. Looking only at the parent refuses a set that has the work.
+// The claim transfers A→B→C are the provenance that names A as an ancestor;
+// a fabricated grandparent candidate without that chain is not.
 #[test]
 fn a_twice_superseded_bloom_adopts_the_grandparent_candidate_ref() {
     let candidate = digest(0xAB);
     let (fake, base) = seeded(&candidate);
     let (grandparent, parent, successor) = (BloomId(digest(1)), BloomId(digest(2)), BloomId(digest(3)));
-    seed_candidate_branch(&fake, &grandparent, "wp-0", "tree-a");
     let source = shell(fake.clone());
+    let member = [WorkpieceId("wp-0".into())];
+    source.claim_seal(&grandparent, &member).expect("grandparent acquires the workpiece claim");
+    source.transfer_seal(&grandparent, &parent, &member, &[], &[]).expect("A→B transfer records the predecessor");
+    source.transfer_seal(&parent, &successor, &member, &[], &[]).expect("B→C transfer records the grandparent lineage");
+    seed_candidate_branch(&fake, &grandparent, "wp-0", "tree-a");
     let mut store = SqliteStore::open(":memory:").unwrap();
     let sequence = enqueue_integration_adopting(&mut store, successor, base, vec![candidate], Some(parent.0));
 

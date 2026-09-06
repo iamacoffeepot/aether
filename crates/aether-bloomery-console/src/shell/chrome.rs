@@ -306,6 +306,7 @@ mod tests {
             happened: "park".to_owned(),
             action: "accept or defer".to_owned(),
             severity: Severity::Attention,
+            source: String::new(),
         }
     }
 

@@ -125,6 +125,10 @@ pub struct ApiCapabilityState {
     pub(super) pusher: Option<Arc<dyn CandidatePush>>,
     /// Scratch-worktree base the evidence directories live under.
     pub(super) worktree_base: PathBuf,
+    /// Git repository whose object database holds sealed-base ADR blobs.
+    /// Captured at boot from the coordinator lane repository: a local
+    /// authority's bare repo, or the process cwd at boot. Seal never re-reads cwd.
+    pub(super) lane_repository: PathBuf,
     /// Archive-tier root. Evidence that has left the working root is read here.
     pub(super) archive_base: PathBuf,
     /// Optional artifacts handle for resolving study cost on the dispatch list.

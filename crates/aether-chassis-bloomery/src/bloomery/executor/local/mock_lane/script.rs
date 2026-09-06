@@ -2,17 +2,25 @@
 //!
 //! A scenario needs the same lane program to behave differently on successive
 //! dispatches — a member that fails verification twice and then passes is three
-//! runs of one binary. The nonce cannot select that: the coordinator mints it,
-//! so a test cannot name it in advance. The selection is therefore a **script**
-//! the harness writes beside the run directories: an ordered list of steps, each
-//! naming a lane command and the mode that command's *next* run takes.
+//! runs of one binary — and differently across members and stages of one bloom.
+//! The nonce cannot select that: the coordinator mints it, so a test cannot
+//! name it in advance. The selection is therefore a **script** the harness
+//! writes beside the run directories: an ordered list of steps. Unkeyed steps
+//! name a lane command and the mode that command's *next* run takes, globally.
+//! Keyed steps name a workpiece and a [`StageId`], so Construct and Refine
+//! (which share `construct.implement`) keep distinct sequences, and so two
+//! members' Verify faults cannot consume each other.
+//!
+//! The dispatch identity a keyed step matches is executor-owned metadata the
+//! spawn seam writes into `--out`, not prompt text and not transform CLI.
+//! A keyed script whose run has no identity refuses rather than guessing.
 //!
 //! Consumption has to survive process exit, because every run is a fresh
 //! process. So each run appends a line to a ledger next to the script and counts
-//! the prior lines for its own command to find its index — the (n+1)-th run of
-//! `verify.check` takes the (n+1)-th `verify.check` step. Past the last matching
-//! step the script's `default` mode repeats, so an unbounded retry loop keeps
-//! failing rather than falling off the end.
+//! the prior lines for its own key: unkeyed scripts count by command, keyed
+//! scripts by workpiece and stage. Past the last matching step the script's
+//! `default` mode repeats, so an unbounded retry loop keeps failing rather than
+//! falling off the end.
 //!
 //! The ledger is also the harness's record of what actually ran. It is the only
 //! place a test can see that a review lane was handed `--diff-base`, or that a
@@ -20,8 +28,9 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::{fs, io};
+use std::{error, fs, io};
 
+use aether_bloomery::StageId;
 use serde::{Deserialize, Serialize};
 
 /// The file name the harness writes its script under, and the mock reads it
@@ -31,6 +40,10 @@ pub const SCRIPT_FILE: &str = "mock-lane-script.json";
 
 /// The file name each run appends its record to, beside the script.
 pub const LEDGER_FILE: &str = "mock-lane-ledger.jsonl";
+
+/// The file the spawn seam writes into `--out` so the mock can select a keyed
+/// script from the journaled order rather than from prompt text.
+pub const DISPATCH_AXIS_FILE: &str = "mock-lane-axis.json";
 
 /// What one mock lane run does — its evidence, its exit status, and what it
 /// leaves in the scratch worktree.
@@ -104,21 +117,44 @@ impl fmt::Display for LaneMode {
     }
 }
 
-/// One scripted run: the next run of `command` takes `mode`.
+/// One scripted run: the next run of `command`, or of a keyed workpiece and
+/// stage, takes `mode`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneStep {
-    /// The transform command id this step applies to (`verify.check`,
-    /// `construct.implement`, `review.critic`).
+    /// The transform command id this step applies to when unkeyed
+    /// (`verify.check`, `construct.implement`, `review.critic`). Empty on a
+    /// keyed step, whose match is workpiece and stage.
+    #[serde(default)]
     pub command: String,
     /// What that run does.
     pub mode: LaneMode,
+    /// The member this step is keyed to. `None` is the unkeyed `LaneHarness`
+    /// shape that scripts one command sequence for the whole bloom. An empty
+    /// string is the bloom-less axis (`BaseVerify`, aggregate verify).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workpiece: Option<String>,
+    /// The line stage this step is keyed to. `None` is unkeyed. Distinct from
+    /// [`Self::command`]: Construct and Refine share a command and must not
+    /// share a sequence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<StageId>,
 }
 
 impl LaneStep {
-    /// A step naming `mode` for the next run of `command`.
+    /// A step naming `mode` for the next run of `command`, any member or stage.
     #[must_use]
     pub fn new(command: impl Into<String>, mode: LaneMode) -> Self {
-        Self { command: command.into(), mode }
+        Self { command: command.into(), mode, workpiece: None, stage: None }
+    }
+
+    /// A step naming `mode` for the next run of `stage` on `workpiece`.
+    #[must_use]
+    pub fn for_axis(workpiece: impl Into<String>, stage: StageId, mode: LaneMode) -> Self {
+        Self { command: String::new(), mode, workpiece: Some(workpiece.into()), stage: Some(stage) }
+    }
+
+    fn is_keyed(&self) -> bool {
+        self.workpiece.is_some() || self.stage.is_some()
     }
 }
 
@@ -155,17 +191,44 @@ impl LaneScript {
         self
     }
 
-    /// Append a step for the next run of `command`.
+    /// Append a step for the next run of `command`, any member.
     #[must_use]
     pub fn then(mut self, command: impl Into<String>, mode: LaneMode) -> Self {
         self.steps.push(LaneStep::new(command, mode));
         self
     }
 
-    /// The mode the `occurrence`-th (zero-based) run of `command` takes.
+    /// Append a step for the next run of `stage` on `workpiece`.
+    #[must_use]
+    pub fn then_for(mut self, workpiece: impl Into<String>, stage: StageId, mode: LaneMode) -> Self {
+        self.steps.push(LaneStep::for_axis(workpiece, stage, mode));
+        self
+    }
+
+    /// Whether any step is keyed to a workpiece or stage.
+    #[must_use]
+    pub fn is_keyed(&self) -> bool {
+        self.steps.iter().any(LaneStep::is_keyed)
+    }
+
+    /// The mode the `occurrence`-th (zero-based) run of `command` takes, globally.
     #[must_use]
     pub fn mode_for(&self, command: &str, occurrence: usize) -> LaneMode {
-        self.steps.iter().filter(|step| step.command == command).nth(occurrence).map_or(self.default, |step| step.mode)
+        self.steps
+            .iter()
+            .filter(|step| !step.is_keyed() && step.command == command)
+            .nth(occurrence)
+            .map_or(self.default, |step| step.mode)
+    }
+
+    /// The mode the `occurrence`-th (zero-based) run of `stage` for `workpiece` takes.
+    #[must_use]
+    pub fn mode_for_axis(&self, workpiece: &str, stage: StageId, occurrence: usize) -> LaneMode {
+        self.steps
+            .iter()
+            .filter(|step| step.stage == Some(stage) && step.workpiece.as_deref() == Some(workpiece))
+            .nth(occurrence)
+            .map_or(self.default, |step| step.mode)
     }
 
     /// Write the script to `dir` under [`SCRIPT_FILE`].
@@ -196,6 +259,12 @@ impl LaneScript {
 pub struct LaneRun {
     /// The transform command id.
     pub command: String,
+    /// The member this run belonged to, when the spawn seam recorded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workpiece: Option<String>,
+    /// The line stage this run belonged to, when the spawn seam recorded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<StageId>,
     /// The idempotency nonce the coordinator minted.
     pub nonce: String,
     /// What this run did.
@@ -262,7 +331,8 @@ pub fn read_ledger(dir: &Path) -> io::Result<Vec<LaneRun>> {
 }
 
 /// How many runs of `command` the ledger in `dir` already holds — this run's
-/// zero-based occurrence index.
+/// zero-based occurrence index. Global: every member and stage that ran the
+/// command counts, which is the unkeyed `LaneHarness` contract.
 ///
 /// # Errors
 /// The ledger exists but could not be read.
@@ -270,10 +340,128 @@ pub fn occurrence_of(dir: &Path, command: &str) -> io::Result<usize> {
     Ok(read_ledger(dir)?.iter().filter(|run| run.command == command).count())
 }
 
+/// How many runs of `workpiece` at `stage` the ledger in `dir` already holds.
+///
+/// # Errors
+/// The ledger exists but could not be read.
+pub fn occurrence_of_axis(dir: &Path, workpiece: &str, stage: StageId) -> io::Result<usize> {
+    Ok(read_ledger(dir)?
+        .iter()
+        .filter(|run| run.stage == Some(stage) && run.workpiece.as_deref() == Some(workpiece))
+        .count())
+}
+
+/// The journaled member and stage the spawn seam recorded for one dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispatchIdentity {
+    /// The order's workpiece. Empty is bloom-less (`BaseVerify`, aggregate).
+    pub workpiece: String,
+    /// The order's line stage.
+    pub stage: StageId,
+}
+
+impl DispatchIdentity {
+    /// Persist this identity under [`DISPATCH_AXIS_FILE`] in `dir`.
+    ///
+    /// # Errors
+    /// The directory could not be created or the file could not be written.
+    pub fn write_to(&self, dir: &Path) -> io::Result<()> {
+        fs::create_dir_all(dir)?;
+        fs::write(dir.join(DISPATCH_AXIS_FILE), serde_json::to_vec_pretty(self).map_err(io::Error::other)?)
+    }
+
+    /// Read the identity `dir` holds. Absence is `None`, not an error.
+    ///
+    /// # Errors
+    /// The file exists but could not be read.
+    pub fn read_from(dir: &Path) -> io::Result<Option<Self>> {
+        match fs::read(dir.join(DISPATCH_AXIS_FILE)) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes).ok()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// Why a keyed script could not choose a mode.
+#[derive(Debug)]
+pub enum ScriptSelectError {
+    /// The script is keyed but the spawn seam recorded no workpiece and stage.
+    MissingIdentity,
+    /// The ledger exists but could not be read.
+    Io(io::Error),
+}
+
+impl fmt::Display for ScriptSelectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingIdentity => f.write_str(
+                "keyed mock-lane script requires executor dispatch identity (workpiece and stage); refusing rather than guessing a member or stage",
+            ),
+            Self::Io(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl error::Error for ScriptSelectError {}
+
+impl From<io::Error> for ScriptSelectError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// Choose the mode this run takes.
+///
+/// An unkeyed script walks its command sequence globally, even when the spawn
+/// seam recorded a member — that is the `LaneHarness` contract. A keyed script
+/// matches workpiece and stage and refuses when that identity is missing.
+///
+/// # Errors
+/// The script is keyed but `identity` is `None`, or the ledger could not be read.
+pub fn selected_mode(
+    script: &LaneScript,
+    command: &str,
+    identity: Option<&DispatchIdentity>,
+    dir: &Path,
+) -> Result<LaneMode, ScriptSelectError> {
+    if !script.is_keyed() {
+        return Ok(script.mode_for(command, occurrence_of(dir, command)?));
+    }
+    let Some(identity) = identity else {
+        return Err(ScriptSelectError::MissingIdentity);
+    };
+    Ok(script.mode_for_axis(
+        &identity.workpiece,
+        identity.stage,
+        occurrence_of_axis(dir, &identity.workpiece, identity.stage)?,
+    ))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "a fixture that cannot set up its files reports it by panicking")]
 mod tests {
-    use super::{LaneMode, LaneRun, LaneScript, append_run, occurrence_of, read_ledger};
+    use aether_bloomery::StageId;
+
+    use super::{
+        DispatchIdentity, LaneMode, LaneRun, LaneScript, ScriptSelectError, append_run, occurrence_of,
+        occurrence_of_axis, read_ledger, selected_mode,
+    };
+
+    fn run(command: &str, nonce: &str) -> LaneRun {
+        LaneRun {
+            command: command.to_owned(),
+            workpiece: None,
+            stage: None,
+            nonce: nonce.to_owned(),
+            mode: LaneMode::Pass,
+            subject: None,
+            diff_base: None,
+            task: None,
+            worktree: None,
+            env: Vec::new(),
+        }
+    }
 
     #[test]
     fn successive_runs_of_one_command_walk_its_steps_in_order() {
@@ -307,17 +495,6 @@ mod tests {
     #[test]
     fn the_ledger_counts_each_commands_runs_separately() {
         let dir = tempfile::tempdir().unwrap();
-        let run = |command: &str, nonce: &str| LaneRun {
-            command: command.to_owned(),
-            nonce: nonce.to_owned(),
-            mode: LaneMode::Pass,
-            subject: None,
-            diff_base: None,
-            task: None,
-            worktree: None,
-            env: Vec::new(),
-        };
-
         append_run(dir.path(), &run("verify.check", "n-1")).unwrap();
         append_run(dir.path(), &run("construct.implement", "n-2")).unwrap();
         append_run(dir.path(), &run("verify.check", "n-3")).unwrap();
@@ -335,5 +512,117 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         assert_eq!(occurrence_of(dir.path(), "verify.check").unwrap(), 0);
+    }
+
+    #[test]
+    fn a_keyed_step_is_not_consumed_by_a_sibling_members_run() {
+        // Tripwire: script_lane used to rebuild one global script, so member
+        // B's Construct Candidate replaced member A's Construct Decline and
+        // both members took passing behaviour.
+        let script = LaneScript::all_passing()
+            .then_for("wp-a", StageId::Construct, LaneMode::Declines)
+            .then_for("wp-b", StageId::Construct, LaneMode::Pass)
+            .then_for("wp-a", StageId::Verify, LaneMode::Fail);
+
+        assert_eq!(script.mode_for_axis("wp-a", StageId::Construct, 0), LaneMode::Declines);
+        assert_eq!(script.mode_for_axis("wp-b", StageId::Construct, 0), LaneMode::Pass);
+        assert_eq!(
+            script.mode_for_axis("wp-a", StageId::Verify, 0),
+            LaneMode::Fail,
+            "a later stage's step must not erase an earlier stage's fault",
+        );
+        assert_eq!(
+            script.mode_for_axis("wp-b", StageId::Verify, 0),
+            LaneMode::Pass,
+            "a sibling does not inherit a stage it was never scripted for",
+        );
+    }
+
+    #[test]
+    fn construct_and_refine_keep_distinct_sequences_on_the_shared_command() {
+        let script = LaneScript::all_passing().then_for("wp", StageId::Construct, LaneMode::Pass).then_for(
+            "wp",
+            StageId::Refine,
+            LaneMode::Declines,
+        );
+
+        assert_eq!(script.mode_for_axis("wp", StageId::Construct, 0), LaneMode::Pass);
+        assert_eq!(script.mode_for_axis("wp", StageId::Refine, 0), LaneMode::Declines);
+    }
+
+    #[test]
+    fn the_ledger_counts_each_axis_separately_and_unkeyed_counts_stay_global() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |workpiece: &str, stage: StageId, nonce: &str| LaneRun {
+            command: "construct.implement".to_owned(),
+            workpiece: Some(workpiece.to_owned()),
+            stage: Some(stage),
+            nonce: nonce.to_owned(),
+            mode: LaneMode::Pass,
+            subject: None,
+            diff_base: None,
+            task: None,
+            worktree: None,
+            env: Vec::new(),
+        };
+
+        append_run(dir.path(), &run("wp-a", StageId::Construct, "n-1")).unwrap();
+        append_run(dir.path(), &run("wp-b", StageId::Construct, "n-2")).unwrap();
+        append_run(dir.path(), &run("wp-a", StageId::Refine, "n-3")).unwrap();
+        append_run(dir.path(), &run("wp-a", StageId::Construct, "n-4")).unwrap();
+
+        assert_eq!(occurrence_of_axis(dir.path(), "wp-a", StageId::Construct).unwrap(), 2);
+        assert_eq!(occurrence_of_axis(dir.path(), "wp-a", StageId::Refine).unwrap(), 1);
+        assert_eq!(occurrence_of_axis(dir.path(), "wp-b", StageId::Construct).unwrap(), 1);
+        assert_eq!(
+            occurrence_of(dir.path(), "construct.implement").unwrap(),
+            4,
+            "the unkeyed count still sees every run of the command",
+        );
+    }
+
+    #[test]
+    fn a_keyed_script_without_dispatch_identity_refuses_rather_than_passing() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = LaneScript::all_passing().then_for("wp-a", StageId::Verify, LaneMode::Fail);
+
+        match selected_mode(&script, "verify.member", None, dir.path()) {
+            Err(ScriptSelectError::MissingIdentity) => {}
+            other => panic!("keyed selection without identity must refuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unkeyed_script_keeps_global_command_occurrence_when_identity_is_present() {
+        // Tripwire: recording a workpiece on the run must not split a
+        // LaneHarness command sequence into per-member counters.
+        let dir = tempfile::tempdir().unwrap();
+        let script =
+            LaneScript::all_passing().then("verify.member", LaneMode::Fail).then("verify.member", LaneMode::Pass);
+        let first = DispatchIdentity { workpiece: "wp-a".to_owned(), stage: StageId::Verify };
+        let second = DispatchIdentity { workpiece: "wp-b".to_owned(), stage: StageId::Verify };
+
+        assert_eq!(selected_mode(&script, "verify.member", Some(&first), dir.path()).unwrap(), LaneMode::Fail);
+        append_run(
+            dir.path(),
+            &LaneRun {
+                command: "verify.member".to_owned(),
+                workpiece: Some("wp-a".to_owned()),
+                stage: Some(StageId::Verify),
+                nonce: "n-1".to_owned(),
+                mode: LaneMode::Fail,
+                subject: None,
+                diff_base: None,
+                task: None,
+                worktree: None,
+                env: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            selected_mode(&script, "verify.member", Some(&second), dir.path()).unwrap(),
+            LaneMode::Pass,
+            "wp-b must consume the second global verify step, not restart at Fail",
+        );
     }
 }

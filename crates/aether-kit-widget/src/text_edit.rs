@@ -23,12 +23,12 @@ use alloc::vec::Vec;
 
 use aether_kinds::CachedFontMetrics;
 
-/// How an insert is filtered and capped before it lands. A single-line control
-/// drops line breaks; `max_chars` bounds the committed character count (`0` =
-/// uncapped).
+/// How an insert is filtered and capped before it lands. Carriage returns are
+/// dropped whatever the policy and a single-line control drops newlines too;
+/// `max_chars` bounds the committed character count (`0` = uncapped).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EditPolicy {
-    /// Strip `\n` / `\r` from inserted text, so a paste or a stray newline
+    /// Strip `\n` from inserted text as well, so a paste or a stray newline
     /// cannot break the single-line invariant.
     pub single_line: bool,
     /// Maximum committed character count; `0` leaves the field uncapped. A whole
@@ -231,14 +231,20 @@ impl TextEditState {
         }
     }
 
-    /// The filtered form of `s` under `policy` — line breaks dropped for a
-    /// single-line control. Returns `s` unchanged when nothing is filtered.
+    /// The filtered form of `s` under `policy` — carriage returns dropped
+    /// whatever the policy, newlines dropped as well for a single-line
+    /// control. Returns `s` unchanged when nothing is filtered.
+    ///
+    /// The carriage return goes under *every* policy because a multiline
+    /// buffer holds only `\n` as a break: a CRLF paste — the ordinary Windows
+    /// clipboard form — would otherwise leave the `\r` inside the line, where
+    /// layout charges it an advance and the text cap draws a missing-glyph box
+    /// for it, and hand it on to the host in the committed text.
     fn filtered(policy: EditPolicy, s: &str) -> String {
-        if policy.single_line && s.contains(['\n', '\r']) {
-            s.chars().filter(|c| *c != '\n' && *c != '\r').collect()
-        } else {
-            String::from(s)
+        if !s.contains(['\n', '\r']) {
+            return String::from(s);
         }
+        s.chars().filter(|c| *c != '\r' && !(policy.single_line && *c == '\n')).collect()
     }
 
     /// Replace the active selection with `s` under `policy`, moving the caret
@@ -818,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn single_line_policy_filters_line_breaks() {
+    fn line_endings_are_filtered_under_every_policy() {
         let policy = EditPolicy { single_line: true, max_chars: 0 };
         let mut s = state("");
         assert!(s.insert("a\nb\r\nc", policy));
@@ -828,6 +834,17 @@ mod tests {
         let mut m = state("");
         assert!(m.insert("a\nb", multiline));
         assert_eq!(m.value(), "a\nb");
+
+        // A CRLF paste is the ordinary Windows clipboard form, and a `\r` that
+        // survives into a multiline buffer is a drawn character: line layout
+        // splits on `\n` alone, so the caret x, the selection band, and the
+        // hit test are all one advance too wide and the text cap rasterizes a
+        // missing-glyph box at the end of the line. It also rides out to the
+        // host in `TextCommitted`.
+        let mut pasted = state("");
+        assert!(pasted.insert("alpha\r\nbeta", multiline));
+        assert_eq!(pasted.value(), "alpha\nbeta");
+        assert!(!pasted.insert("\r", multiline), "a lone carriage return is nothing to insert");
     }
 
     #[test]

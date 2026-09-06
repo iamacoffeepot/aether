@@ -14,7 +14,9 @@
 //! cannot name one in advance, and the child's environment is constructed from
 //! an allow list (`lane_env`) that admits no coordinator knob a harness could
 //! plant one in. The script's location is derived from `--out`, which is the one
-//! channel that survives both.
+//! channel that survives both. Keyed selection also reads executor-owned
+//! workpiece and stage metadata from `--out` (`mock-lane-axis.json`), written
+//! by the spawn seam from the journaled order — not from `--task`.
 //!
 //!
 //! [`LaneProgram`]: super::LaneProgram
@@ -29,7 +31,7 @@ pub mod script;
 
 pub use argv::{ArgvError, LaneArgs};
 pub use evidence::{CANDIDATE_FILE, FOREIGN_SESSION_ID, REQUESTED_PATH};
-pub use script::{LaneMode, LaneRun, LaneScript, LaneStep, read_ledger};
+pub use script::{DispatchIdentity, LaneMode, LaneRun, LaneScript, LaneStep, ScriptSelectError, read_ledger};
 
 /// Why a mock run could not do its job. Distinct from a lane *failing*, which is
 /// an outcome the script asked for and the evidence records.
@@ -39,6 +41,8 @@ pub enum MockLaneError {
     Argv(ArgvError),
     /// The script could not be read, or the evidence could not be written.
     Io(io::Error),
+    /// A keyed script ran without executor dispatch identity.
+    MissingIdentity,
 }
 
 impl fmt::Display for MockLaneError {
@@ -46,6 +50,7 @@ impl fmt::Display for MockLaneError {
         match self {
             Self::Argv(error) => write!(f, "mock lane argv: {error}"),
             Self::Io(error) => write!(f, "mock lane io: {error}"),
+            Self::MissingIdentity => write!(f, "mock lane: {}", ScriptSelectError::MissingIdentity),
         }
     }
 }
@@ -61,6 +66,15 @@ impl From<ArgvError> for MockLaneError {
 impl From<io::Error> for MockLaneError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+impl From<ScriptSelectError> for MockLaneError {
+    fn from(error: ScriptSelectError) -> Self {
+        match error {
+            ScriptSelectError::MissingIdentity => Self::MissingIdentity,
+            ScriptSelectError::Io(error) => Self::Io(error),
+        }
     }
 }
 
@@ -94,7 +108,8 @@ pub fn run<I: IntoIterator<Item = String>>(args: I, worktree: &Path) -> Result<i
     // harness bug that loses the file should surface as a scenario assertion
     // rather than as every lane refusing to run.
     let script = LaneScript::read_from(script_dir).unwrap_or_default();
-    let mode = script.mode_for(&args.command, script::occurrence_of(script_dir, &args.command)?);
+    let identity = DispatchIdentity::read_from(&args.out)?;
+    let mode = script::selected_mode(&script, &args.command, identity.as_ref(), script_dir)?;
 
     // Recorded before the run acts, so a mode that never exits still leaves
     // proof it was dispatched — which is exactly what the "every dispatched
@@ -103,6 +118,8 @@ pub fn run<I: IntoIterator<Item = String>>(args: I, worktree: &Path) -> Result<i
         script_dir,
         &LaneRun {
             command: args.command.clone(),
+            workpiece: identity.as_ref().map(|identity| identity.workpiece.clone()),
+            stage: identity.as_ref().map(|identity| identity.stage),
             nonce: args.nonce.clone(),
             mode,
             subject: args.subject.clone(),
@@ -155,11 +172,11 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use aether_bloomery::{CONSTRUCT_IMPLEMENT_COMMAND, VERIFY_CHECK_COMMAND};
+    use aether_bloomery::{CONSTRUCT_IMPLEMENT_COMMAND, StageId, VERIFY_CHECK_COMMAND, VERIFY_MEMBER_COMMAND};
 
     use super::evidence::CANDIDATE_FILE;
-    use super::script::{LaneMode, LaneScript, read_ledger};
-    use super::{run, script_dir};
+    use super::script::{DispatchIdentity, LaneMode, LaneScript, read_ledger};
+    use super::{MockLaneError, run, script_dir};
 
     // One dispatch's argv, laid out the way the backend lays a run out: the
     // worktree and the evidence dir as siblings under a shared base.
@@ -243,5 +260,130 @@ mod tests {
         // scenario would silently run the default mode and the scripts would
         // become decoration.
         assert_eq!(script_dir(Path::new("/runs/n-1-evidence")), Path::new("/runs"));
+    }
+
+    fn run_axis(
+        base: &Path,
+        command: &str,
+        nonce: &str,
+        workpiece: &str,
+        stage: StageId,
+    ) -> Result<LaneMode, MockLaneError> {
+        let worktree = base.join(nonce);
+        let out = base.join(format!("{nonce}-evidence"));
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(&out).unwrap();
+        DispatchIdentity { workpiece: workpiece.to_owned(), stage }.write_to(&out).unwrap();
+        run(
+            vec![
+                command.to_owned(),
+                "--out".to_owned(),
+                out.to_string_lossy().into_owned(),
+                "--nonce".to_owned(),
+                nonce.to_owned(),
+            ],
+            &worktree,
+        )?;
+        Ok(read_ledger(base).unwrap().last().unwrap().mode)
+    }
+
+    #[test]
+    fn a_later_members_script_does_not_replace_the_first_members_fault() {
+        // Tripwire: each script_lane call used to overwrite one global script.
+        // Configuring A to Decline and then B to Pass made both members take
+        // passing behaviour, in dispatch order, because selection keyed only
+        // on command occurrence.
+        let base = tempfile::tempdir().unwrap();
+        LaneScript::all_passing()
+            .then_for("wp-a", StageId::Construct, LaneMode::Declines)
+            .then_for("wp-b", StageId::Construct, LaneMode::Pass)
+            .write_to(base.path())
+            .unwrap();
+
+        assert_eq!(
+            run_axis(base.path(), CONSTRUCT_IMPLEMENT_COMMAND, "n-b", "wp-b", StageId::Construct).unwrap(),
+            LaneMode::Pass,
+            "B may dispatch first without stealing A's decline",
+        );
+        assert_eq!(
+            run_axis(base.path(), CONSTRUCT_IMPLEMENT_COMMAND, "n-a", "wp-a", StageId::Construct).unwrap(),
+            LaneMode::Declines,
+        );
+    }
+
+    #[test]
+    fn two_members_verify_keep_distinct_faults_without_a_task_header() {
+        let base = tempfile::tempdir().unwrap();
+        LaneScript::all_passing()
+            .then_for("wp-a", StageId::Verify, LaneMode::Fail)
+            .then_for("wp-b", StageId::Verify, LaneMode::ExitsNonZero)
+            .write_to(base.path())
+            .unwrap();
+
+        assert_eq!(
+            run_axis(base.path(), VERIFY_MEMBER_COMMAND, "n-b", "wp-b", StageId::Verify).unwrap(),
+            LaneMode::ExitsNonZero,
+        );
+        assert_eq!(
+            run_axis(base.path(), VERIFY_MEMBER_COMMAND, "n-a", "wp-a", StageId::Verify).unwrap(),
+            LaneMode::Fail,
+        );
+    }
+
+    #[test]
+    fn construct_and_refine_do_not_consume_each_other_on_the_shared_command() {
+        let base = tempfile::tempdir().unwrap();
+        LaneScript::all_passing()
+            .then_for("wp", StageId::Construct, LaneMode::Pass)
+            .then_for("wp", StageId::Refine, LaneMode::Declines)
+            .write_to(base.path())
+            .unwrap();
+
+        assert_eq!(
+            run_axis(base.path(), CONSTRUCT_IMPLEMENT_COMMAND, "n-refine", "wp", StageId::Refine).unwrap(),
+            LaneMode::Declines,
+        );
+        assert_eq!(
+            run_axis(base.path(), CONSTRUCT_IMPLEMENT_COMMAND, "n-construct", "wp", StageId::Construct).unwrap(),
+            LaneMode::Pass,
+        );
+    }
+
+    #[test]
+    fn unkeyed_command_occurrence_stays_global_when_axis_identity_is_present() {
+        // Tripwire: a LaneHarness command sequence must not split into
+        // per-member counters just because the spawn seam now records a
+        // workpiece.
+        let base = tempfile::tempdir().unwrap();
+        LaneScript::all_passing()
+            .then(VERIFY_MEMBER_COMMAND, LaneMode::Fail)
+            .then(VERIFY_MEMBER_COMMAND, LaneMode::Pass)
+            .write_to(base.path())
+            .unwrap();
+
+        assert_eq!(
+            run_axis(base.path(), VERIFY_MEMBER_COMMAND, "n-a", "wp-a", StageId::Verify).unwrap(),
+            LaneMode::Fail,
+        );
+        assert_eq!(
+            run_axis(base.path(), VERIFY_MEMBER_COMMAND, "n-b", "wp-b", StageId::Verify).unwrap(),
+            LaneMode::Pass,
+            "wp-b must consume the second global verify step, not restart at Fail",
+        );
+    }
+
+    #[test]
+    fn a_keyed_script_without_axis_identity_refuses() {
+        let base = tempfile::tempdir().unwrap();
+        LaneScript::all_passing()
+            .then_for("wp-a", StageId::Construct, LaneMode::Declines)
+            .write_to(base.path())
+            .unwrap();
+        let (args, worktree) = dispatch(base.path(), CONSTRUCT_IMPLEMENT_COMMAND, "n-1");
+
+        match run(args, &worktree) {
+            Err(MockLaneError::MissingIdentity) => {}
+            other => panic!("keyed selection without identity must refuse, got {other:?}"),
+        }
     }
 }

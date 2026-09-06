@@ -196,6 +196,14 @@ impl ProcessTransformRunner {
 impl TransformRunner for ProcessTransformRunner {
     fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
         fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
+        // Executor-owned member/stage axis for the mock lane. Not transform CLI:
+        // the sealed subject's xtask has never heard of these fields, and prompt
+        // text is absent on verify and on a bare-digest construct.
+        if let Some(stage) = spec.stage {
+            super::mock_lane::script::DispatchIdentity { workpiece: spec.workpiece.unwrap_or("").to_owned(), stage }
+                .write_to(spec.evidence_dir)
+                .map_err(LocalExecutorError::Io)?;
+        }
         // Both sealed identities can exist only on the remote (#5057): the
         // checkout fetch does not pull an unrelated comparison base, and
         // `commitish_for` sees the local object database only. Fetch each
@@ -1068,6 +1076,8 @@ mod tests {
             effort: None,
             task: None,
             resume: None,
+            workpiece: None,
+            stage: None,
         }
     }
 

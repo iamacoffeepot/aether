@@ -150,6 +150,33 @@ fn create_get_list_and_delete_refs() {
 }
 
 #[test]
+fn get_ref_does_not_resolve_an_absent_parent_to_a_descendant() {
+    // Tripwire: `git for-each-ref` prefix-matches a glob-free pattern, so a
+    // missing `heads/topic` used to return a descendant's SHA — or two of them
+    // joined by a newline — under the requested name. `ensure_ref` and mainline
+    // resolution then treated the descendant as the parent.
+    let (_root, local) = open_temp();
+    let child = local.create_commit("child", EMPTY_TREE, &[]).expect("child");
+    let other = local.create_commit("other", EMPTY_TREE, &[]).expect("other");
+    local.create_ref("heads/topic/child", &child.sha).expect("child ref");
+    local.create_ref("heads/topic/other", &other.sha).expect("other ref");
+
+    match local.get_ref("heads/topic") {
+        Ok(None) => {}
+        other => panic!("an absent parent must not resolve to a descendant, got {other:?}"),
+    }
+    assert_eq!(ref_sha(&local, "heads/topic/child"), child.sha);
+    assert_eq!(ref_sha(&local, "heads/topic/other"), other.sha);
+
+    match local.update_ref("heads/topic", &child.sha, false) {
+        Err(GitDataError::MissingObject(detail)) => {
+            assert!(detail.contains("heads/topic"), "{detail}");
+        }
+        other => panic!("non-force update of an absent parent is MissingObject, got {other:?}"),
+    }
+}
+
+#[test]
 fn compare_and_swap_is_expected_value_not_fast_forward() {
     let (_root, local) = open_temp();
     let a = local.create_commit("a", EMPTY_TREE, &[]).expect("a");

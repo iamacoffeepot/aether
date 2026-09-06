@@ -6,10 +6,12 @@
 //! Each `ScrollWidget` owns one fixed viewport, one fixed content extent, and
 //! one retained offset. Its content draws in local space at
 //! `content_origin - offset`; the slot clip is always viewport-local. Input
-//! uses absolute `WidgetFrame` coordinates instead: a nested scroll child gets
-//! an absolute frame and a wheel-only hit rectangle intersected with this
-//! viewport. Keeping those conversions side by side prevents painting and hit
-//! testing from drifting under non-zero panel origins or ancestor offsets.
+//! uses absolute `WidgetFrame` coordinates instead: a content root that scrolls
+//! itself — a nested scroll viewport, or a virtual list — gets an absolute
+//! frame and a wheel-only hit rectangle intersected with this viewport, so the
+//! wheel over it is its own. Keeping those conversions side by side prevents
+//! painting and hit testing from drifting under non-zero panel origins or
+//! ancestor offsets.
 
 use aether_actor::{ActorInitError, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::MailboxId;
@@ -18,7 +20,7 @@ use aether_math::Vec2;
 
 use crate::composite::Composite;
 use crate::focus::{Focus, FocusEligibility, FocusRect};
-use crate::panel::{ChildLayout, spawn_widget_child};
+use crate::panel::{ChildLayout, SpawnedChild, spawn_widget_child};
 use crate::theme::SetTheme;
 use crate::{
     Collect, ScrollConfig, ScrollDelta, ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, WidgetChildSpec,
@@ -28,7 +30,23 @@ use crate::{FrameDischarge, accept_open_child_list, flush_membership};
 
 struct ScrollContent {
     id: MailboxId,
+    /// The content is itself a scroll container, so its `ScrollOutcome` and
+    /// `ScrollResidual` are the ones this container relays and applies.
     is_scroll: bool,
+    /// The content scrolls *itself* on the wheel — a nested scroll viewport,
+    /// or a virtual list, which owns the row window it realizes. The wider
+    /// sense: a virtual list owns the wheel without relaying scroll outcomes.
+    owns_wheel: bool,
+}
+
+impl ScrollContent {
+    fn new(spawned: &SpawnedChild) -> Self {
+        Self {
+            id: spawned.id,
+            is_scroll: spawned.scroll_viewport.is_some(),
+            owns_wheel: spawned.scroll_viewport.is_some() || spawned.wheel_eligible,
+        }
+    }
 }
 
 /// A dedicated stateful scroll actor. It owns one content root and is itself a
@@ -193,7 +211,7 @@ impl ScrollWidget {
             &self.content_spec.subname,
             spawned.type_namespace,
         );
-        self.content = Some(ScrollContent { id: spawned.id, is_scroll: spawned.scroll_viewport.is_some() });
+        self.content = Some(ScrollContent::new(&spawned));
         self.sync_layout(ctx);
     }
 
@@ -216,7 +234,6 @@ impl ScrollWidget {
             return;
         };
         let content_id = content.id;
-        let is_scroll = content.is_scroll;
         let content_frame = self.content_frame();
         self.composite.update_slot_layout(
             content_id,
@@ -225,8 +242,18 @@ impl ScrollWidget {
         );
         ctx.send_to(content_id, &content_frame);
 
+        self.rebuild_wheel_focus(&content_frame);
+    }
+
+    /// Rebuild the wheel-only hit table over the one content root, clipped to
+    /// this viewport. The content joins it when it scrolls *itself*.
+    fn rebuild_wheel_focus(&mut self, content_frame: &WidgetFrame) {
         self.scroll_focus.clear();
-        if is_scroll && let Some(rect) = clipped_focus_rect(&self.frame, &content_frame) {
+        let Some((content_id, owns_wheel)) = self.content.as_ref().map(|content| (content.id, content.owns_wheel))
+        else {
+            return;
+        };
+        if owns_wheel && let Some(rect) = clipped_focus_rect(&self.frame, content_frame) {
             self.scroll_focus.register(
                 content_id,
                 rect,
@@ -390,6 +417,49 @@ mod tests {
     const VIEWPORT: ScrollExtent = ScrollExtent { width_pixels: 40.0, height_pixels: 30.0 };
     const CONTENT: ScrollExtent = ScrollExtent { width_pixels: 70.0, height_pixels: 80.0 };
 
+    /// A container at (100, 200) 40×30 whose 70×80 content sits at origin
+    /// (7, 9) scrolled by (3, 5) — so the content frame is (104, 204) 70×80
+    /// and its visible part is (104, 204) 36×26.
+    fn widget_over(content: Option<ScrollContent>) -> ScrollWidget {
+        let spawned = content.is_some();
+        ScrollWidget {
+            viewport_extent: VIEWPORT,
+            content_extent: CONTENT,
+            content_spec: WidgetChildSpec {
+                subname: "content".into(),
+                kind: WidgetKind::Composite,
+                origin: [0.0, 0.0],
+                clip: None,
+                config: Vec::new(),
+            },
+            content_origin: Vec2::new(7.0, 9.0),
+            offset: ScrollOffset { x_pixels: 3.0, y_pixels: 5.0 },
+            frame: WidgetFrame { x: 100.0, y: 200.0, width: 40.0, height: 30.0 },
+            composite: Composite::new(),
+            frame_discharge: FrameDischarge::default(),
+            scroll_focus: Focus::new(),
+            content,
+            spawned,
+        }
+    }
+
+    /// What `spawn_virtual_list_child` hands back: a child that scrolls itself
+    /// on the wheel without being a scroll viewport.
+    fn spawned_virtual_list(id: MailboxId) -> SpawnedChild {
+        SpawnedChild {
+            id,
+            width_pixels: None,
+            height_pixels: CONTENT.height_pixels,
+            pointer_eligible: true,
+            focusable: true,
+            state: WidgetControlState::default(),
+            type_namespace: "aether.kit.widget.virtual_list",
+            scroll_viewport: None,
+            wheel_eligible: true,
+            host_scroll_strip_units: None,
+        }
+    }
+
     fn assert_axis_invariant(requested: f32, consumed: f32, residual: f32) {
         assert!(
             (requested - (consumed + residual)).abs() <= f32::EPSILON * requested.abs().max(1.0),
@@ -510,25 +580,7 @@ mod tests {
 
     #[test]
     fn local_draw_and_absolute_input_transforms_share_the_same_offsets() {
-        let widget = ScrollWidget {
-            viewport_extent: VIEWPORT,
-            content_extent: CONTENT,
-            content_spec: WidgetChildSpec {
-                subname: "content".into(),
-                kind: WidgetKind::Composite,
-                origin: [0.0, 0.0],
-                clip: None,
-                config: Vec::new(),
-            },
-            content_origin: Vec2::new(7.0, 9.0),
-            offset: ScrollOffset { x_pixels: 3.0, y_pixels: 5.0 },
-            frame: WidgetFrame { x: 100.0, y: 200.0, width: 40.0, height: 30.0 },
-            composite: Composite::new(),
-            frame_discharge: FrameDischarge::default(),
-            scroll_focus: Focus::new(),
-            content: None,
-            spawned: false,
-        };
+        let widget = widget_over(None);
         assert_eq!(widget.local_content_origin(), Vec2::new(4.0, 4.0));
         let child = widget.content_frame();
         assert_eq!(child.x, 104.0);
@@ -564,6 +616,21 @@ mod tests {
         assert_eq!(ordinary.captured(), Some(MailboxId(1)));
         assert_eq!(wheel.hit_test(7.0, 7.0), Some(MailboxId(3)));
         assert_eq!(wheel.hit_test(30.0, 30.0), None);
+    }
+
+    #[test]
+    fn a_virtual_list_as_content_owns_the_wheel_over_the_rows_it_realizes() {
+        // Tripwire: the wheel-only table was built from `scroll_viewport`
+        // alone, so a virtual list nested in a scroll container never joined
+        // it and this container ate a wheel the list owns — the whole content
+        // plate slid under the clip while the realized row window stood still.
+        let mut widget = widget_over(Some(ScrollContent::new(&spawned_virtual_list(MailboxId(11)))));
+        let content_frame = widget.content_frame();
+        widget.rebuild_wheel_focus(&content_frame);
+
+        assert_eq!(widget.scroll_focus.hit_test(110.0, 210.0), Some(MailboxId(11)), "a wheel over a row is the list's");
+        assert_eq!(widget.scroll_focus.hit_test(180.0, 210.0), None, "and one outside this viewport is nobody's");
+        assert!(!widget.nested_source(Some(MailboxId(11))), "but the list is not a scroll container to relay for");
     }
 
     #[test]

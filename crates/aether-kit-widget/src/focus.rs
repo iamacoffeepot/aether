@@ -196,8 +196,22 @@ impl Focus {
     }
 
     /// Clear capture and recompute hover at the release position.
+    ///
+    /// Not while a modal grab holds: the overlay the grab belongs to is not in
+    /// this table, so the recompute would resolve to whatever ordinary child
+    /// the overlay is drawn over and light it *underneath* the open plate —
+    /// and it would stay lit, because every motion after that is hover-
+    /// suppressed for the same reason until the overlay closes. The grab is
+    /// the one gesture that can outlive a release (a press on a disabled item
+    /// in an open menu leaves the menu open), so this is reachable. Hover is
+    /// left exactly as the grab found it and the next motion after the overlay
+    /// closes re-derives it, which is what [`Self::end_grab`] already relies
+    /// on.
     pub fn release_capture(&mut self, x: f32, y: f32) -> Option<HoverTransition> {
         self.capture = None;
+        if self.grabbed().is_some() {
+            return None;
+        }
         self.update_hover(x, y)
     }
 
@@ -274,8 +288,13 @@ impl Focus {
         Some(HoverTransition { previous, next })
     }
 
-    /// Apply a source-attributed state change. If the child becomes unavailable,
-    /// move focus forward and clear live hover/capture paths immediately.
+    /// Apply a source-attributed state change. If the child becomes
+    /// unavailable, move focus forward and drop every pointer path it held —
+    /// hover, the drag capture, and the modal grab. The grab is dropped rather
+    /// than merely filtered out of [`Self::grabbed`] because a filtered grab is
+    /// still stored: the widget's own close handshake (`grabbed() == source`)
+    /// misses while the child is away, and the grab re-arms the moment the
+    /// child comes back, swallowing every press on the panel.
     pub fn update_availability(&mut self, child: MailboxId, state: &WidgetControlState) -> AvailabilityEffects {
         let Some(index) = self.entries.iter().position(|entry| entry.child == child) else {
             return AvailabilityEffects::default();
@@ -299,6 +318,9 @@ impl Focus {
         if self.capture == Some(child) {
             self.capture = None;
             effects.cleared_capture = Some(child);
+        }
+        if self.grab == Some(child) {
+            self.grab = None;
         }
         effects
     }
@@ -458,6 +480,33 @@ mod tests {
     }
 
     #[test]
+    fn a_release_under_a_grab_ends_the_capture_without_lighting_what_the_overlay_covers() {
+        // Tripwire: an open menu or dropdown holds the grab, and its plate is
+        // not in this table — it is drawn over the ordinary children, not
+        // registered beside them. A release that recomputed hover therefore
+        // resolved to whatever ordinary child the plate stands over and lit it
+        // *under* the open plate, where it stayed: every motion after that is
+        // hover-suppressed by the same grab. The release is reachable with the
+        // grab still held, because a press on a disabled item leaves the menu
+        // open (`MenuBarWidget::press_while_open`).
+        let mut focus = focus_with_three();
+        focus.begin_capture(MailboxId(1));
+        focus.update_hover(5.0, 5.0);
+        focus.begin_grab(MailboxId(3));
+
+        assert_eq!(focus.release_capture(5.0, 45.0), None, "nothing under the overlay lights up on the release");
+        assert_eq!(focus.captured(), None, "and the capture ends all the same");
+
+        focus.end_grab();
+        assert_eq!(
+            focus.update_hover(5.0, 45.0),
+            Some(HoverTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) }),
+            "the first motion after the overlay closes re-derives hover, and the child that was lit is \
+             still told it lost it",
+        );
+    }
+
+    #[test]
     fn a_grab_is_refused_for_a_child_that_is_not_live_for_the_pointer() {
         let mut focus = focus_with_three();
         focus.begin_grab(MailboxId(2));
@@ -515,6 +564,27 @@ mod tests {
 
         focus.end_grab();
         assert_eq!(focus.pointer_target(5.0, 5.0), None, "and nothing is registered where the captor used to be");
+    }
+
+    #[test]
+    fn an_unavailable_grab_holder_drops_the_grab_instead_of_re_arming_when_it_returns() {
+        // Tripwire: a dropdown disabled while its list is open emits its
+        // `WidgetStateChanged` before its `DropdownOpenChanged { open: false }`,
+        // so the panel's `grabbed() == Some(source)` close handshake compares
+        // against an already-filtered `None` and never calls `end_grab`. A grab
+        // still stored re-activates the moment the child is re-enabled, and
+        // every press on the panel then falls into a closed dropdown.
+        let mut focus = focus_with_three();
+        focus.begin_grab(MailboxId(3));
+
+        let mut disabled = available();
+        disabled.enabled = false;
+        focus.update_availability(MailboxId(3), &disabled);
+        assert_eq!(focus.grabbed(), None, "an unavailable holder routes nothing while it is away");
+
+        focus.update_availability(MailboxId(3), &available());
+        assert_eq!(focus.grabbed(), None, "and the grab does not come back with the child");
+        assert_eq!(focus.pointer_target(5.0, 5.0), Some(MailboxId(1)), "so its siblings are reachable again");
     }
 
     #[test]

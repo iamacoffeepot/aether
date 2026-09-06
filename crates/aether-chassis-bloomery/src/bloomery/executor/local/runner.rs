@@ -9,7 +9,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
-use aether_bloomery::BackendObjectId;
+use aether_bloomery::{BackendObjectId, StageId};
 
 use super::error::LocalExecutorError;
 
@@ -86,6 +86,14 @@ pub struct RunSpec<'a> {
     /// session pool leased one. `None` launches cold. The claude arm of
     /// `cargo xtask transform` threads this to `claude --resume`.
     pub resume: Option<&'a str>,
+    /// The journaled member this dispatch belongs to. `None` when the backend
+    /// has no order row; empty is the bloom-less axis. Executor-owned, not a
+    /// transform CLI flag and not prompt text.
+    pub workpiece: Option<&'a str>,
+    /// The journaled line stage this dispatch is running. `None` when the
+    /// backend has no order row. Distinct from [`Self::command`]: Construct
+    /// and Refine share a command.
+    pub stage: Option<StageId>,
 }
 
 /// A running (or finished) transform child — the lifecycle the backend maps onto

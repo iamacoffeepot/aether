@@ -11,6 +11,12 @@
 //! The claim is one row in the journal itself, in a table this module creates
 //! and reads *before* the schema migrations run: a refused open must not
 //! migrate and must not write, so the guard cannot sit behind a migration step.
+//! Taking the row is one `BEGIN IMMEDIATE` transaction: the write lock is
+//! acquired before the read, so a second process waits and then decides against
+//! the committed claim (live holder → `Held`, stale → takeover). Wrapping the
+//! same steps in a deferred transaction is not enough — both connections can
+//! still read a stale snapshot, and the loser's read-to-write upgrade reports
+//! `BUSY` / `BUSY_SNAPSHOT` rather than a current ownership decision.
 //!
 //! A bare pid is not an identity — the kernel recycles them — so the row also
 //! carries the machine's boot token, which makes every claim written before a
@@ -26,7 +32,7 @@ use std::fs;
 use std::process::{Command, Stdio};
 use std::{fmt, process};
 
-use rusqlite::{Connection, OptionalExtension as _};
+use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior};
 
 use super::runtime::now_unix_millis;
 
@@ -110,10 +116,18 @@ impl Claim {
 ///
 /// Runs before the schema migrations: a refusal leaves the database exactly as
 /// it was found, which is what makes the guard safe to put in front of a
-/// migration that is otherwise unconditional.
+/// migration that is otherwise unconditional. Immediate acquisition serializes
+/// the read/check/write so a waiting process decides against current ownership
+/// instead of failing a stale snapshot's write upgrade with `BUSY` /
+/// `BUSY_SNAPSHOT`.
 pub(super) fn claim(conn: &Connection, path: &str) -> Result<(), JournalHolderError> {
-    conn.execute_batch(HOLDER_TABLE)?;
-    if let Some(recorded) = read_claim(conn)? {
+    // `new_unchecked` keeps the existing `&Connection` surface on a fresh open.
+    // Immediate takes the write lock before the read so the waiter sees the
+    // committed claim. Deferred would still let both read a stale snapshot;
+    // the losing write then reports BUSY/BUSY_SNAPSHOT rather than Held.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    tx.execute_batch(HOLDER_TABLE)?;
+    if let Some(recorded) = read_claim(&tx)? {
         // This process reclaiming its own journal is a re-open, not an
         // overlap: the reactors that open their own connections, and a boot
         // that follows a torn-down one inside a single test process, are both
@@ -133,7 +147,8 @@ pub(super) fn claim(conn: &Connection, path: &str) -> Result<(), JournalHolderEr
             "journal holder claim is stale; taking it over",
         );
     }
-    write_claim(conn, process::id())?;
+    write_claim(&tx, process::id())?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -201,7 +216,10 @@ fn signal_zero(pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+    use std::{env, fs, process, thread};
 
     use rusqlite::Connection;
     use tempfile::TempDir;
@@ -209,11 +227,27 @@ mod tests {
     use super::{HOLDER_TABLE, JournalHolderError, claim, read_claim, release, write_claim};
     use crate::store::SqliteStore;
 
+    fn journal_path(dir: &TempDir) -> String {
+        dir.path().join("bloomery.db").to_str().expect("a temp path is utf-8").to_owned()
+    }
+
+    /// A WAL journal with no holder row — the production file after `connect`
+    /// and before `claim`. `open_as_holder` sets WAL before the busy timeout,
+    /// so two processes converting a rollback file race `database is locked`
+    /// and never reach the claim.
+    fn journal_with_wal(dir: &TempDir) -> String {
+        let path = journal_path(dir);
+        let conn = Connection::open(&path).expect("the journal opens");
+        conn.pragma_update(None, "journal_mode", "WAL").expect("WAL is set");
+        conn.pragma_update(None, "synchronous", "NORMAL").expect("synchronous is set");
+        path
+    }
+
     /// A journal file holding nothing but a claim on `pid` — the state a
     /// second coordinator finds when the first one is already running, with
     /// none of the schema a migration would have written.
     fn journal_claimed_by(dir: &TempDir, pid: u32) -> String {
-        let path = dir.path().join("bloomery.db").to_str().expect("a temp path is utf-8").to_owned();
+        let path = journal_with_wal(dir);
         let conn = Connection::open(&path).expect("the journal opens");
         conn.execute_batch(HOLDER_TABLE).expect("the claim table is created");
         write_claim(&conn, pid).expect("the claim is written");
@@ -291,7 +325,7 @@ mod tests {
         // that never claimed must not delete the holder's row out from under
         // it.
         let dir = tempfile::tempdir().expect("a temp dir");
-        let path = dir.path().join("bloomery.db").to_str().expect("a temp path is utf-8").to_owned();
+        let path = journal_path(&dir);
 
         drop(SqliteStore::open_as_holder(&path).expect("an unclaimed journal is claimed"));
         let conn = Connection::open(&path).expect("the journal opens");
@@ -304,5 +338,183 @@ mod tests {
             "a non-holding handle must not release someone else's claim",
         );
         release(&conn);
+    }
+
+    #[test]
+    fn two_live_coordinators_cannot_both_claim_an_absent_holder() {
+        // Two coordinator processes overlapping `open_as_holder` on a WAL
+        // journal that has no holder row. The file is converted to WAL before
+        // the start barrier so the overlap is the claim, not `journal_mode`.
+        // The barrier raises the chance they contend; it does not pin both
+        // inside a read-then-write window, so this is the exclusivity
+        // invariant under overlap, not a deterministic repro of the old
+        // autocommit race.
+        if run_as_claim_child() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = journal_with_wal(&dir);
+        race_two_holders(&dir, &path);
+    }
+
+    #[test]
+    fn two_live_coordinators_cannot_both_take_over_a_stale_holder() {
+        // Same exclusivity check from the other starting state: a dead pid's
+        // leftover row. Overlapping starts, not a deterministic stale-snapshot
+        // reproducer.
+        if run_as_claim_child() {
+            return;
+        }
+        let mut holder = other_process();
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = journal_claimed_by(&dir, holder.id());
+        holder.kill().expect("the stand-in holder is killed");
+        holder.wait().expect("the stand-in holder is reaped");
+        race_two_holders(&dir, &path);
+    }
+
+    fn test_env(name: &str) -> Option<String> {
+        env::vars_os()
+            .find_map(|(key, value)| (key == name).then_some(value))
+            .and_then(|value| value.into_string().ok())
+    }
+
+    /// When the parent re-execs this test with the handshake env, become one
+    /// of the two overlapping coordinators. Returns `true` when this process was
+    /// a child so the parent body does not run again.
+    fn run_as_claim_child() -> bool {
+        let Some(path) = test_env("AETHER_TEST_JOURNAL_HOLDER_PATH") else {
+            return false;
+        };
+        let go = test_env("AETHER_TEST_JOURNAL_HOLDER_GO").expect("the go path is set");
+        let ready = test_env("AETHER_TEST_JOURNAL_HOLDER_READY").expect("the ready path is set");
+        let result = test_env("AETHER_TEST_JOURNAL_HOLDER_RESULT").expect("the result path is set");
+        publish_file(Path::new(&ready), b"ready");
+        wait_for_file(Path::new(&go), Duration::from_secs(30));
+        match SqliteStore::open_as_holder(&path) {
+            Ok(_store) => {
+                publish_file(Path::new(&result), format!("claimed {}", process::id()));
+                hold_until_killed();
+            }
+            Err(JournalHolderError::Held { pid, .. }) => {
+                publish_file(Path::new(&result), format!("held {pid}"));
+            }
+            Err(error) => {
+                publish_file(Path::new(&result), format!("error {error}"));
+                panic!("claim child failed: {error}");
+            }
+        }
+        true
+    }
+
+    fn race_two_holders(dir: &TempDir, path: &str) {
+        let exe = env::current_exe().expect("the test executable");
+        let test_thread = thread::current();
+        let test_name = test_thread.name().expect("libtest names the test thread");
+        let go = dir.path().join("go");
+        let ready_a = dir.path().join("ready-a");
+        let ready_b = dir.path().join("ready-b");
+        let result_a = dir.path().join("result-a");
+        let result_b = dir.path().join("result-b");
+
+        let child_a = KillOnDrop(spawn_holder_child(&exe, test_name, path, &go, &ready_a, &result_a));
+        let child_b = KillOnDrop(spawn_holder_child(&exe, test_name, path, &go, &ready_b, &result_b));
+        wait_for_file(&ready_a, Duration::from_secs(30));
+        wait_for_file(&ready_b, Duration::from_secs(30));
+        publish_file(&go, b"go");
+
+        let body_a = wait_for_file(&result_a, Duration::from_secs(30));
+        let body_b = wait_for_file(&result_b, Duration::from_secs(30));
+        let ((ClaimChildResult::Claimed(claimed), ClaimChildResult::Held(held))
+        | (ClaimChildResult::Held(held), ClaimChildResult::Claimed(claimed))) =
+            (parse_claim_result(&body_a), parse_claim_result(&body_b))
+        else {
+            panic!(
+                "exactly one coordinator must win the claim; {body_a:?} (pid {}) and {body_b:?} (pid {})",
+                child_a.0.id(),
+                child_b.0.id(),
+            )
+        };
+        assert_eq!(held, claimed, "the loser must name the winner");
+        assert!(
+            claimed == child_a.0.id() || claimed == child_b.0.id(),
+            "the durable winner must be one of the two coordinators",
+        );
+        assert_eq!(
+            read_claim(&Connection::open(path).expect("the journal opens"))
+                .expect("the claim table is readable")
+                .expect("the winner wrote a claim")
+                .pid,
+            claimed,
+            "the durable claim names the surviving coordinator",
+        );
+    }
+
+    fn spawn_holder_child(exe: &Path, test_name: &str, journal: &str, go: &Path, ready: &Path, result: &Path) -> Child {
+        Command::new(exe)
+            .arg(test_name)
+            .arg("--exact")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .env("AETHER_TEST_JOURNAL_HOLDER_PATH", journal)
+            .env("AETHER_TEST_JOURNAL_HOLDER_GO", go)
+            .env("AETHER_TEST_JOURNAL_HOLDER_READY", ready)
+            .env("AETHER_TEST_JOURNAL_HOLDER_RESULT", result)
+            .spawn()
+            .expect("a claim child forks")
+    }
+
+    /// Publish `contents` under `path` by writing a sibling and renaming onto
+    /// it. `fs::write` can make a nonempty prefix visible before the rest of
+    /// the line lands; a same-directory rename is the complete file or nothing.
+    fn publish_file(path: &Path, contents: impl AsRef<[u8]>) {
+        let staging = path.with_extension("part");
+        fs::write(&staging, contents).expect("the handshake file writes");
+        fs::rename(&staging, path).expect("the handshake file publishes");
+    }
+
+    fn wait_for_file(path: &Path, budget: Duration) -> String {
+        let started = Instant::now();
+        loop {
+            if let Ok(body) = fs::read_to_string(path)
+                && !body.is_empty()
+            {
+                return body;
+            }
+            assert!(started.elapsed() < budget, "timed out waiting for {}", path.display());
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn parse_claim_result(body: &str) -> ClaimChildResult {
+        let body = body.trim();
+        if let Some(pid) = body.strip_prefix("claimed ") {
+            return ClaimChildResult::Claimed(pid.parse().expect("a claimed pid"));
+        }
+        if let Some(pid) = body.strip_prefix("held ") {
+            return ClaimChildResult::Held(pid.parse().expect("a held pid"));
+        }
+        panic!("unrecognised claim child result: {body}");
+    }
+
+    fn hold_until_killed() -> ! {
+        loop {
+            thread::sleep(Duration::from_mins(1));
+        }
+    }
+
+    struct KillOnDrop(Child);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    enum ClaimChildResult {
+        Claimed(u32),
+        Held(u32),
     }
 }

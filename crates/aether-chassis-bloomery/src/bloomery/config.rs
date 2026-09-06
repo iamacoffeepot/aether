@@ -17,7 +17,9 @@ use aether_bloomery::Digest;
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 use aether_bloomery::SharedCorrespondence;
 #[cfg(feature = "github")]
-use aether_bloomery_github::{AppTokenSource, GithubConfig, GithubError, MainlineRef, ReqwestGithub};
+use aether_bloomery_github::{
+    AppTokenSource, GithubConfig, GithubError, MainlineRef, ReqwestGithub, StaticTokenSource, TokenSource,
+};
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 use aether_bloomery_github::{GitSource, GithubLanding, testing::FakeGithub};
 use aether_substrate::config::ConfigError;
@@ -30,8 +32,9 @@ use super::source::SourceShell;
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_GITHUB", cli_prefix = "github")]
 pub struct GithubConnectionConfig {
-    /// The bearer token the mirror authenticates with. Pinned to the
-    /// conventional unprefixed `GITHUB_TOKEN`; empty means unconfigured.
+    /// The bearer token the static-PAT path authenticates with. Pinned to the
+    /// conventional unprefixed `GITHUB_TOKEN`. Empty is unused when App-auth is
+    /// configured ([`Self::app_auth_configured`]).
     #[config(env = "GITHUB_TOKEN", default = "")]
     pub token: String,
     /// The repository owner (user or org) the projections live under.
@@ -394,10 +397,14 @@ pub struct CoordinatorConfig {
     /// the GitHub REST adapter remains authoritative) or `local` (an absolute
     /// bare-repository path via [`authority_repo`](Self::authority_repo)).
     ///
+    /// Those two names are the whole vocabulary. An unknown value is a boot
+    /// fault rather than a silent GitHub selection: a typo such as `locla`
+    /// would otherwise point mutations at the wrong authority.
+    ///
     /// Named `AETHER_BLOOMERY_AUTHORITY_BACKEND` rather than under this
     /// struct's `AETHER_GITHUB` prefix: which store owns the refs is how the
     /// coordinator is being operated, not a GitHub-connection property.
-    #[config(env = "AETHER_BLOOMERY_AUTHORITY_BACKEND", default = "github")]
+    #[config(env = "AETHER_BLOOMERY_AUTHORITY_BACKEND", default = "github", parse = parse_authority_backend)]
     pub authority_backend: String,
     /// Absolute filesystem path to the bare repository used when
     /// [`authority_backend`](Self::authority_backend) is `local`. Empty (the
@@ -525,6 +532,39 @@ const GITHUB_REQUESTS_PER_TICK: u32 = 6;
 /// inspects on the shared client.
 pub const JANITOR_REF_PRUNES_PER_TICK: usize = 1;
 
+/// Closed git-data backends [`CoordinatorConfig::authority_backend`] may name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthorityBackend {
+    /// GitHub REST adapter; the default.
+    Github,
+    /// Fleet-local bare repository at [`CoordinatorConfig::authority_repo`].
+    Local,
+}
+
+impl AuthorityBackend {
+    fn parse(name: &str) -> Result<Self, UnknownAuthorityBackend> {
+        match name.trim() {
+            "github" => Ok(Self::Github),
+            "local" => Ok(Self::Local),
+            _ => Err(UnknownAuthorityBackend),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Github => "github",
+            Self::Local => "local",
+        }
+    }
+}
+
+/// Confique `parse_env` for [`CoordinatorConfig::authority_backend`]: only
+/// `github` and `local` resolve; empty is unset (the default); any other
+/// name is a hard error rather than GitHub.
+fn parse_authority_backend(s: &str) -> Result<String, UnknownAuthorityBackend> {
+    AuthorityBackend::parse(s).map(|backend| backend.as_str().to_owned())
+}
+
 impl CoordinatorConfig {
     /// The resolved mainline ref, normalized into the forms the source port
     /// addresses it by (ADR-0186).
@@ -534,10 +574,21 @@ impl CoordinatorConfig {
         MainlineRef::new(&self.mainline_ref)
     }
 
+    /// The resolved git-data backend, or a boot fault when the name is not
+    /// `github` or `local`.
+    pub fn authority(&self) -> Result<AuthorityBackend, ConfigError> {
+        AuthorityBackend::parse(&self.authority_backend).map_err(|error| {
+            ConfigError::unparseable("AETHER_BLOOMERY_AUTHORITY_BACKEND", &self.authority_backend, error)
+        })
+    }
+
     /// Whether the source port should open a fleet-local git-data backend.
+    ///
+    /// Unknown names are a resolve/boot fault via [`Self::authority`]; this
+    /// predicate is only meaningful after that gate.
     #[must_use]
     pub fn uses_local_authority(&self) -> bool {
-        self.authority_backend == "local"
+        matches!(self.authority(), Ok(AuthorityBackend::Local))
     }
 
     /// The git repository the transform runner materializes worktrees from.
@@ -638,6 +689,11 @@ impl CoordinatorConfig {
 #[derive(Debug)]
 struct HeartbeatSilenceZero;
 
+/// Why an authority-backend name outside `{github, local}` is refused rather
+/// than treated as GitHub.
+#[derive(Debug)]
+struct UnknownAuthorityBackend;
+
 /// Why a source-replica boot without the single-writer marker is refused.
 #[derive(Debug)]
 pub struct MissingWriterMarker {
@@ -652,6 +708,14 @@ impl fmt::Display for HeartbeatSilenceZero {
 }
 
 impl Error for HeartbeatSilenceZero {}
+
+impl fmt::Display for UnknownAuthorityBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("must be github or local")
+    }
+}
+
+impl Error for UnknownAuthorityBackend {}
 
 impl fmt::Display for MissingWriterMarker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -684,17 +748,50 @@ impl GithubConnectionConfig {
         }
     }
 
+    /// Connection knobs still empty after resolving PAT-or-App authentication.
+    ///
+    /// Owner and repo are always required. Authentication is a nonempty
+    /// `GITHUB_TOKEN` *or* complete App credentials, matching
+    /// [`Self::connect_client`].
     #[must_use]
     pub fn missing_connection_knobs(&self) -> Vec<&'static str> {
-        [("GITHUB_TOKEN", &self.token), ("AETHER_GITHUB_OWNER", &self.owner), ("AETHER_GITHUB_REPO", &self.repo)]
-            .into_iter()
-            .filter_map(|(name, value)| value.is_empty().then_some(name))
-            .collect()
+        [
+            (self.token.is_empty() && !self.app_auth_configured(), "GITHUB_TOKEN"),
+            (self.owner.is_empty(), "AETHER_GITHUB_OWNER"),
+            (self.repo.is_empty(), "AETHER_GITHUB_REPO"),
+        ]
+        .into_iter()
+        .filter_map(|(missing, name)| missing.then_some(name))
+        .collect()
     }
 
     #[must_use]
     pub fn app_auth_configured(&self) -> bool {
         self.app_id != 0 && !self.app_private_key_path.is_empty() && self.app_installation_id != 0
+    }
+
+    /// The credential source REST clients and the source replica resolve a
+    /// bearer from per request. App-auth mints an installation token; otherwise
+    /// the static PAT. A missing or malformed App key is a boot fault, never a
+    /// silent fallback to an empty PAT.
+    pub fn token_source(&self) -> Result<Arc<dyn TokenSource>, GithubError> {
+        if self.app_auth_configured() {
+            let pem = fs::read(&self.app_private_key_path).map_err(|error| {
+                GithubError::Transport(format!(
+                    "reading GitHub App private key '{}': {error}",
+                    self.app_private_key_path
+                ))
+            })?;
+            Ok(Arc::new(AppTokenSource::new(
+                self.app_id,
+                self.app_installation_id,
+                &pem,
+                self.app_token_skew_secs,
+                self.api_base.clone(),
+            )?))
+        } else {
+            Ok(Arc::new(StaticTokenSource::new(self.token.clone())))
+        }
     }
 
     /// Build the client the port shells authenticate with: a minted
@@ -707,24 +804,11 @@ impl GithubConnectionConfig {
     /// minter. A missing or malformed key is a boot fault, never a silent
     /// fallback to the ambient static token.
     pub fn connect_client(&self) -> Result<ReqwestGithub, GithubError> {
-        if self.app_auth_configured() {
-            let pem = fs::read(&self.app_private_key_path).map_err(|error| {
-                GithubError::Transport(format!(
-                    "reading GitHub App private key '{}': {error}",
-                    self.app_private_key_path
-                ))
-            })?;
-            let source = Arc::new(AppTokenSource::new(
-                self.app_id,
-                self.app_installation_id,
-                &pem,
-                self.app_token_skew_secs,
-                self.api_base.clone(),
-            )?);
-            ReqwestGithub::with_token_source(source, self.api_base.clone(), self.to_github_config().repo_path())
-        } else {
-            ReqwestGithub::new(&self.to_github_config())
-        }
+        ReqwestGithub::with_token_source(
+            self.token_source()?,
+            self.api_base.clone(),
+            self.to_github_config().repo_path(),
+        )
     }
 
     #[cfg(all(feature = "github", any(test, feature = "testing")))]
@@ -795,7 +879,7 @@ impl GithubConnectionConfig {
 mod tests {
     use clap::Parser as _;
 
-    use super::{CoordinatorConfig, GithubConnectionConfig};
+    use super::{AuthorityBackend, CoordinatorConfig, GithubConnectionConfig, parse_authority_backend};
     use crate::bloomery::BloomeryCli;
 
     // A throwaway 2048-bit RSA keypair (never a real credential) — the fixture
@@ -850,6 +934,56 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
     }
 
     #[test]
+    fn complete_app_credentials_do_not_require_a_pat() {
+        // Tripwire: `connect_client` takes the App branch without `GITHUB_TOKEN`,
+        // but `missing_connection_knobs` used to treat an empty PAT as unconfigured
+        // and disable GitHub-backed setup/replication before that path ran (#5586).
+        let github = GithubConnectionConfig {
+            owner: "octo".into(),
+            repo: "shadow".into(),
+            ..configured(12345, "/keys/app.pem", 42)
+        };
+
+        assert!(github.token.is_empty(), "this case is App-only");
+        assert!(
+            github.missing_connection_knobs().is_empty(),
+            "complete App credentials plus owner/repo are a configured connection"
+        );
+
+        let local = CoordinatorConfig {
+            authority_backend: "local".into(),
+            authority_repo: "/tmp/authority.git".into(),
+            ..CoordinatorConfig::default()
+        };
+        assert!(local.source_replica_enabled(&github), "App-only credentials must not disable source replication");
+    }
+
+    #[test]
+    fn incomplete_app_credentials_still_name_a_missing_pat() {
+        // Partial App knobs never silently half-enable auth. Owner and repo
+        // without a PAT and without all three App knobs is still unconfigured.
+        let github = GithubConnectionConfig {
+            owner: "octo".into(),
+            repo: "shadow".into(),
+            ..configured(12345, "/keys/app.pem", 0)
+        };
+
+        assert_eq!(github.missing_connection_knobs(), ["GITHUB_TOKEN"]);
+    }
+
+    #[test]
+    fn app_auth_does_not_excuse_a_missing_repository() {
+        // Auth and repository are independent: complete App credentials satisfy
+        // `GITHUB_TOKEN`, not owner/repo. A predicate that collapsed "has App
+        // auth" into "configured" would drop the repository from the missing
+        // list and mount a connection with nowhere to talk.
+        assert_eq!(
+            configured(12345, "/keys/app.pem", 42).missing_connection_knobs(),
+            ["AETHER_GITHUB_OWNER", "AETHER_GITHUB_REPO"]
+        );
+    }
+
+    #[test]
     fn connect_client_takes_the_app_branch_when_configured_and_the_static_branch_otherwise() {
         // The host wiring under test: `connect_client` branches on
         // `app_auth_configured`. The App branch reads the host-local key and builds a
@@ -877,6 +1011,12 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         let path = key_file.path().to_str().expect("the temp path is UTF-8").to_owned();
         let with_key = configured(12345, &path, 42);
         assert!(with_key.connect_client().is_ok(), "App path builds a client from a present key");
+
+        // The replica shares this construction: App-only must not fall through
+        // to an empty static PAT (#5586).
+        assert!(GithubConnectionConfig::default().token_source().is_ok(), "static-PAT path builds a token source");
+        assert!(missing.token_source().is_err(), "App path reads the key for the replica too");
+        assert!(with_key.token_source().is_ok(), "App path builds a token source from a present key");
     }
 
     // Tripwire: the GitHub poll cadence is computed from the hourly allowance,
@@ -936,6 +1076,7 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         assert_eq!(coordinator.batch_restart_young_secs, 60);
         assert_eq!(coordinator.batch_restart_addition, 24);
         assert_eq!(coordinator.authority_backend, "github");
+        assert_eq!(coordinator.authority().expect("the default is github"), AuthorityBackend::Github);
         assert!(!coordinator.uses_local_authority());
         assert!(coordinator.single_writer_marker.is_empty());
     }
@@ -974,6 +1115,32 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
             CoordinatorConfig::default().require_single_writer_marker(&GithubConnectionConfig::default()).is_ok(),
             "a GitHub-authority boot does not need the marker",
         );
+    }
+
+    #[test]
+    fn an_unknown_authority_backend_is_refused_rather_than_selecting_github() {
+        // The plausible bug: `AETHER_BLOOMERY_AUTHORITY_BACKEND=locla` parsed as
+        // a free String and `uses_local_authority` compared only against
+        // "local", so every other value — including a typo for local — took the
+        // GitHub branch and pointed mutations at the wrong authority (#5585).
+        assert!(
+            parse_authority_backend("locla").is_err(),
+            "parse_env must refuse unknown names instead of passing them through"
+        );
+        assert_eq!(parse_authority_backend("github").expect("github is a backend"), "github");
+        assert_eq!(parse_authority_backend("local").expect("local is a backend"), "local");
+        assert!(parse_authority_backend("").is_err(), "empty is unset so the default github applies");
+
+        let coordinator = CoordinatorConfig { authority_backend: "locla".into(), ..CoordinatorConfig::default() };
+        let error = coordinator.authority().expect_err("unknown must not resolve");
+        let message = error.to_string();
+        assert!(message.contains("AETHER_BLOOMERY_AUTHORITY_BACKEND"), "{message}");
+        assert!(message.contains("locla"), "{message}");
+        assert!(message.contains("github or local"), "{message}");
+
+        let local = CoordinatorConfig { authority_backend: "local".into(), ..CoordinatorConfig::default() };
+        assert_eq!(local.authority().expect("local is a backend"), AuthorityBackend::Local);
+        assert!(local.uses_local_authority());
     }
 
     #[test]

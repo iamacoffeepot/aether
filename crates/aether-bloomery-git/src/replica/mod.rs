@@ -2,16 +2,16 @@
 //! to a configured GitHub URL (ADR-0199).
 //!
 //! Never `git push --mirror` — that would publish claim, attempt, candidate,
-//! and checkpoint refs. Credentials stay on the caller: a token is passed
-//! in-process as an `http.extraHeader` (`Authorization: Basic` of
-//! `x-access-token:<token>`) and is never written to disk or to a remote URL.
+//! and checkpoint refs. Credentials stay on the caller: each push resolves a
+//! bearer in-process as an `http.extraHeader` (`Authorization: Basic` of
+//! `x-access-token:<token>`) and never writes it to disk or to a remote URL.
 
 use std::error::Error;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::command::{self, GitCommandError};
 use crate::mainline::MainlineRef;
@@ -74,19 +74,42 @@ struct TransientRedrive {
     count: usize,
 }
 
+/// Resolves the bearer used for one git-over-HTTPS push.
+///
+/// Called per publish so a rotating credential is picked up without
+/// reconstructing the replica (redrive state lives on [`GitSourceReplica`]).
+/// An `Err` fails the push rather than sending an unauthenticated request.
+pub trait ReplicaTokenSource: Send + Sync {
+    /// The current bearer token.
+    ///
+    /// # Errors
+    /// The token could not be produced — minting failed or the source has no
+    /// credential. The error must not contain the token.
+    fn token(&self) -> Result<String, ReplicaError>;
+}
+
+struct StaticReplicaToken(String);
+
+impl ReplicaTokenSource for StaticReplicaToken {
+    fn token(&self) -> Result<String, ReplicaError> {
+        Ok(self.0.clone())
+    }
+}
+
 /// Publish allowlisted refs from a local authority to a git remote URL.
 pub struct GitSourceReplica {
     authority: PathBuf,
     remote: String,
     mainline: MainlineRef,
-    token: String,
+    token: Arc<dyn ReplicaTokenSource>,
     transient_redrive_limit: usize,
     transient_redrives: Mutex<Option<TransientRedrive>>,
 }
 
 impl GitSourceReplica {
-    /// Push from `authority` to `remote`. `token` stays in this process and is
-    /// applied as an HTTP header; it is never interpolated into `remote`.
+    /// Push from `authority` to `remote` with a static bearer. `token` stays in
+    /// this process and is applied as an HTTP header; it is never interpolated
+    /// into `remote`. An empty token omits the header (local remotes).
     #[must_use]
     pub fn new(
         authority: impl Into<PathBuf>,
@@ -94,11 +117,23 @@ impl GitSourceReplica {
         mainline: MainlineRef,
         token: impl Into<String>,
     ) -> Self {
+        Self::with_token_source(authority, remote, mainline, Arc::new(StaticReplicaToken(token.into())))
+    }
+
+    /// Push from `authority` to `remote`, resolving a bearer from `token` on
+    /// every publish so App installation-token rotation stays valid.
+    #[must_use]
+    pub fn with_token_source(
+        authority: impl Into<PathBuf>,
+        remote: impl Into<String>,
+        mainline: MainlineRef,
+        token: Arc<dyn ReplicaTokenSource>,
+    ) -> Self {
         Self {
             authority: authority.into(),
             remote: remote.into(),
             mainline,
-            token: token.into(),
+            token,
             transient_redrive_limit: DEFAULT_TRANSIENT_REDRIVE_LIMIT,
             transient_redrives: Mutex::new(None),
         }
@@ -189,18 +224,25 @@ impl GitSourceReplica {
         }
     }
 
-    fn push_invocation_args(&self, specs: &[PublishedRefspec]) -> Vec<String> {
+    /// The `git -c http.extraHeader=… push …` argv after `git -C <authority>`.
+    /// Resolves the current bearer; a minting failure is returned rather than
+    /// omitting the header.
+    ///
+    /// # Errors
+    /// [`ReplicaTokenSource::token`] failed. The error must not contain the token.
+    fn push_invocation_args(&self, specs: &[PublishedRefspec]) -> Result<Vec<String>, ReplicaError> {
+        let token = self.token.token()?;
         let mut args = Vec::new();
-        if !self.token.is_empty() {
+        if !token.is_empty() {
             args.push("-c".into());
-            args.push(authorization_extra_header(&self.token));
+            args.push(authorization_extra_header(&token));
         }
         args.extend(Self::push_args(&self.remote, specs));
-        args
+        Ok(args)
     }
 
     fn git_push(&self, specs: &[PublishedRefspec]) -> Result<Output, ReplicaError> {
-        let args = self.push_invocation_args(specs);
+        let args = self.push_invocation_args(specs)?;
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
         command::run_env(&self.authority, &borrowed, &[("GIT_TERMINAL_PROMPT", "0")]).map_err(Into::into)
     }

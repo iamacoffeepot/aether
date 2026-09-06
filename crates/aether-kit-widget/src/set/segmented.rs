@@ -1,5 +1,5 @@
 // `#[handler]` methods take their decoded mail by value per the ADR-0033
-// dispatch ABI (see `widget/mod.rs`).
+// dispatch ABI (the full rationale is on the same allow in `lib.rs`).
 #![allow(clippy::needless_pass_by_value, clippy::cast_precision_loss)]
 
 //! Horizontal exclusive segmented control (issue 2926).
@@ -15,11 +15,16 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::keycode::{KEY_LEFT, KEY_RIGHT};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
+use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
-use crate::set::{clamp_option_index, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y};
+use crate::set::{
+    accept_font_metrics_result, apply_text_theme, clamp_option_index, elide_to_width, measured_text_width,
+    pump_text_font_metrics, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y,
+};
 use crate::state::{InteractionState, emit_state_changed};
-use crate::theme::{Theme, ThemeState};
+use crate::text_edit::FontMetricsAdapter;
+use crate::theme::{SetTheme, Theme, ThemeState};
 use crate::{
     Collect, HoverLost, SegmentedConfig, SegmentedSelected, SetWidgetState, WidgetControlState, WidgetDrawItem,
     WidgetDrawList, WidgetFrame,
@@ -40,6 +45,9 @@ pub struct SegmentedWidget {
     state: InteractionState,
     pressed_segment: Option<usize>,
     hovered_segment: Option<usize>,
+    /// Single-flight exact metrics for the active theme font: what each
+    /// option's label is elided against so it stays inside its own bucket.
+    font_metrics: FontMetricsAdapter,
 }
 
 impl SegmentedWidget {
@@ -117,6 +125,96 @@ impl SegmentedWidget {
             parent.send(&SegmentedSelected { index });
         }
     }
+
+    /// The run one option shows, cut to what its own bucket holds.
+    ///
+    /// The buckets are a fixed `width / options.len()` and the draw pushes
+    /// segment `i`'s fill, then its label, then segment `i + 1`'s fill — so a
+    /// label wider than its bucket was **overpainted** by the next segment's
+    /// plate, and a three-option row in a 240-pixel pane showed `Raise terr`
+    /// with no mark saying it had been cut. Every other single-line control in
+    /// the kit cuts with [`elide_to_width`] for exactly this reason (the
+    /// label, the button ladder, the tab strip, the list rows); this is the
+    /// same rule in the last fixed-bucket place it was missing.
+    ///
+    /// The budget is the bucket less one `pad` either side, so a run that fits
+    /// keeps its own margins. An unmeasured run draws whole and left-padded
+    /// for the frame or two before the theme font's metrics land, exactly as
+    /// the tab strip's does — there is no width to cut against yet, and
+    /// guessing one would visibly re-cut when the real metrics arrive. An
+    /// empty run — nothing to say, or a bucket too narrow for even the
+    /// ellipsis — draws nothing.
+    fn option_run(&self, option: &str, segment_width: f32) -> String {
+        let size = self.theme.label_size_pixels;
+        self.font_metrics.resolved().map_or_else(
+            || String::from(option),
+            |metrics| {
+                elide_to_width(option, self.theme.pad.mul_add(-2.0, segment_width), |run| {
+                    measured_text_width(metrics, run, size)
+                })
+            },
+        )
+    }
+
+    /// The control's local draw: one fill per bucket, a hairline between
+    /// adjacent buckets, each option's run inside its own bucket, and the
+    /// shared control outlines.
+    fn draw_items(&self) -> Vec<WidgetDrawItem> {
+        let width = self.frame.width;
+        let height = self.frame.height;
+        let size = self.theme.label_size_pixels;
+
+        let mut items = Vec::new();
+        if !self.options.is_empty() {
+            let segment_width = width / self.options.len() as f32;
+            for (index, option) in self.options.iter().enumerate() {
+                let x = index as f32 * segment_width;
+                let selected = index == self.selected;
+                let base = if selected {
+                    self.theme.selection
+                } else {
+                    self.theme.surface_raised
+                };
+                let theme_state = if self.pressed_segment == Some(index) {
+                    ThemeState::Pressed
+                } else if self.hovered_segment == Some(index) {
+                    ThemeState::Hover
+                } else if !self.state.control().enabled {
+                    ThemeState::Disabled
+                } else {
+                    ThemeState::Normal
+                };
+
+                items.push(quad(x, 0.0, segment_width, height, self.theme.fill(base, theme_state)));
+                if index > 0 {
+                    items.push(quad(x, 0.0, 1.0, height, self.theme.fill(self.theme.outline, theme_state)));
+                }
+
+                let run = self.option_run(option, segment_width);
+                if !run.is_empty() {
+                    items.push(WidgetDrawItem::Text {
+                        x: x + self.theme.pad,
+                        y: text_origin_y(0.0, height, size),
+                        font_id: self.theme.font_id,
+                        text: run,
+                        size_pixels: size,
+                        color: self.theme.fill(
+                            if selected {
+                                self.theme.selection_text
+                            } else {
+                                self.theme.text_primary
+                            },
+                            theme_state,
+                        ),
+                        clip: None,
+                    });
+                }
+            }
+        }
+
+        push_control_outlines(&mut items, width, height, &self.state, &self.theme);
+        items
+    }
 }
 
 impl WidgetDefaults for SegmentedWidget {
@@ -146,6 +244,7 @@ impl WasmActor for SegmentedWidget {
 
     fn init(config: SegmentedConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         let selected = clamp_option_index(config.initial_index, config.options.len());
+        let desired_font_id = config.theme.font_id;
         Ok(Self {
             options: config.options,
             selected,
@@ -154,22 +253,44 @@ impl WasmActor for SegmentedWidget {
             state: InteractionState::new(config.state),
             pressed_segment: None,
             hovered_segment: None,
+            font_metrics: FontMetricsAdapter::new(desired_font_id),
         })
+    }
+
+    /// Kick off the font-metrics request for the initial theme font; the
+    /// per-bucket elision depends on it.
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+        pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: SegmentedConfig) {
         self.selected = clamp_option_index(config.initial_index, config.options.len());
         self.options = config.options;
+        self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
         self.pressed_segment = None;
         self.hovered_segment = None;
         self.apply_control_state(ctx, config.state);
+        pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
+    }
+
+    /// Restyle: adopt the fanned theme and request metrics for its font.
+    #[handler::single]
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
+    }
+
+    /// Install a font-metrics reply; the next `Collect` cuts each label
+    /// against its real width.
+    #[handler::single]
+    fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
+        accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
 
     #[handler::single]
@@ -216,56 +337,13 @@ impl WasmActor for SegmentedWidget {
         if reply_if_hidden(ctx, &self.state) {
             return;
         }
-        let width = self.frame.width;
-        let height = self.frame.height;
-        let mut items = Vec::new();
-        if !self.options.is_empty() {
-            let segment_width = width / self.options.len() as f32;
-            for (index, option) in self.options.iter().enumerate() {
-                let x = index as f32 * segment_width;
-                let selected = index == self.selected;
-                let base = if selected {
-                    self.theme.selection
-                } else {
-                    self.theme.surface_raised
-                };
-                let theme_state = if self.pressed_segment == Some(index) {
-                    ThemeState::Pressed
-                } else if self.hovered_segment == Some(index) {
-                    ThemeState::Hover
-                } else if !self.state.control().enabled {
-                    ThemeState::Disabled
-                } else {
-                    ThemeState::Normal
-                };
-                items.push(quad(x, 0.0, segment_width, height, self.theme.fill(base, theme_state)));
-                if index > 0 {
-                    items.push(quad(x, 0.0, 1.0, height, self.theme.fill(self.theme.outline, theme_state)));
-                }
-                if !option.is_empty() {
-                    let size = self.theme.label_size_pixels;
-                    items.push(WidgetDrawItem::Text {
-                        x: x + self.theme.pad,
-                        y: text_origin_y(0.0, height, size),
-                        font_id: self.theme.font_id,
-                        text: option.clone(),
-                        size_pixels: size,
-                        color: self.theme.fill(
-                            if selected {
-                                self.theme.selection_text
-                            } else {
-                                self.theme.text_primary
-                            },
-                            theme_state,
-                        ),
-                        clip: None,
-                    });
-                }
-            }
-        }
-        push_control_outlines(&mut items, width, height, &self.state, &self.theme);
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { content_height: None, intrinsic: None, items, overlay: Vec::new() });
+            parent.send(&WidgetDrawList {
+                content_height: None,
+                intrinsic: None,
+                items: self.draw_items(),
+                overlay: Vec::new(),
+            });
         }
     }
 }
@@ -273,6 +351,25 @@ impl WasmActor for SegmentedWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use aether_kinds::{CachedFontMetrics, FontMetrics};
+    use alloc::vec;
+
+    use crate::set::ELLIPSIS;
+
+    /// A fixed-advance table: every glyph is half a 1000-unit em, so at the
+    /// theme's 14-pixel label size each character is exactly 7 pixels. What
+    /// fits a bucket is then a character count a reader can check by hand.
+    fn uniform_metrics() -> CachedFontMetrics {
+        CachedFontMetrics::new(&FontMetrics {
+            units_per_em: 1000.0,
+            ascent: 800.0,
+            descent: -200.0,
+            line_gap: 0.0,
+            default_advance: 500.0,
+            advances: vec![],
+        })
+    }
 
     fn segmented(options: usize, selected: usize) -> SegmentedWidget {
         SegmentedWidget {
@@ -283,7 +380,81 @@ mod tests {
             state: InteractionState::new(WidgetControlState::default()),
             pressed_segment: None,
             hovered_segment: None,
+            font_metrics: FontMetricsAdapter::new(Theme::DEFAULT.font_id),
         }
+    }
+
+    /// A control whose theme font's metrics have already resolved, framed at
+    /// `width` — the state every frame after the first one or two is in.
+    fn measured(options: &[&str], width: f32) -> SegmentedWidget {
+        let mut font_metrics = FontMetricsAdapter::new(Theme::DEFAULT.font_id);
+        assert_eq!(
+            font_metrics.take_pending_request(),
+            Some(Theme::DEFAULT.font_id),
+            "the control asks for its theme font once",
+        );
+        assert!(!font_metrics.accept_reply(Some(uniform_metrics())));
+        SegmentedWidget {
+            options: options.iter().map(|option| String::from(*option)).collect(),
+            selected: 0,
+            theme: Theme::DEFAULT,
+            frame: WidgetFrame { x: 0.0, y: 0.0, width, height: 24.0 },
+            state: InteractionState::new(WidgetControlState::default()),
+            pressed_segment: None,
+            hovered_segment: None,
+            font_metrics,
+        }
+    }
+
+    /// Each drawn run paired with its left and right edge in local pixels —
+    /// what the reader is looking at when they judge whether a label stayed in
+    /// its own bucket.
+    fn drawn_runs(control: &SegmentedWidget) -> Vec<(String, f32, f32)> {
+        let metrics = control.font_metrics.resolved().expect("measured");
+        control
+            .draw_items()
+            .iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Text { x, text, size_pixels, .. } => {
+                    Some((text.clone(), *x, x + measured_text_width(metrics, text, *size_pixels)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Tripwire: the buckets are a fixed `width / options.len()`, and the draw
+    // pushes segment i's fill, then its label, then segment i + 1's fill — so
+    // a label wider than its bucket is overpainted at the boundary rather than
+    // merely overlapping, and the reader sees `Raise terr` with nothing saying
+    // it was cut. Pins every run inside its own bucket's padded box, and pins
+    // that an over-long one carries the kit's ellipsis.
+    #[test]
+    fn an_option_label_is_elided_into_its_own_bucket() {
+        let control = measured(&["Raise terrain", "Lower terrain", "Smooth"], 240.0);
+        let pad = control.theme.pad;
+        let segment_width = 240.0 / 3.0;
+
+        let runs = drawn_runs(&control);
+        assert_eq!(runs.len(), 3, "every option draws a run");
+        for (index, (run, left, right)) in runs.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)] // test options are three small buckets
+            let bucket_left = index as f32 * segment_width;
+            assert!(*left >= bucket_left + pad, "run {index} starts inside its own bucket");
+            assert!(
+                *right <= bucket_left + segment_width - pad,
+                "run {index} ({run}) runs to {right}, past its bucket's padded right edge",
+            );
+        }
+        assert!(runs[0].0.ends_with(ELLIPSIS), "a label that did not fit is marked as cut, not silently sliced");
+        assert!(runs[1].0.ends_with(ELLIPSIS));
+        assert_eq!(runs[2].0, "Smooth", "a label that fits keeps every character");
+    }
+
+    #[test]
+    fn an_unmeasured_control_draws_its_labels_whole() {
+        let control = segmented(3, 0);
+        assert_eq!(control.option_run("option-0", 30.0), "option-0", "no metrics is no width to cut against");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 // `#[handler]` methods take their decoded mail by value per the ADR-0033
-// dispatch ABI (see `widget/mod.rs`).
+// dispatch ABI (the full rationale is on the same allow in `lib.rs`).
 #![allow(clippy::needless_pass_by_value)]
 
 //! The radio group (issue 2660).
@@ -10,9 +10,16 @@
 //! index reports up as [`RadioSelected`].
 //!
 //! The chosen option is a state, not an affordance: its marker fills with the
-//! theme's selection role and its label inks with `selection_text`, so an
-//! unselected marker reads as an empty slot and the accent goes on meaning
-//! "the primary action" and nothing else.
+//! theme's selection role, so an unselected marker reads as an empty slot and
+//! the accent goes on meaning "the primary action" and nothing else.
+//!
+//! Only the marker is filled — a row is never plated — so every label, chosen
+//! or not, is drawn on the panel's own `surface` and takes `text_primary`.
+//! `selection_text` is defined as the ink that reads *on* a `selection` fill
+//! ([`SegmentedWidget`](super::segmented) is the case that has one), and a
+//! label on an unfilled row is not that; borrowing it here inverted the
+//! chosen row's ink under any theme that pairs a light selection with dark
+//! ink on it, the way this theme already pairs `accent` / `accent_text`.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -30,6 +37,13 @@ use crate::{
     Collect, RadioConfig, RadioSelected, SetWidgetState, WidgetControlState, WidgetDrawItem, WidgetDrawList,
     WidgetFrame,
 };
+
+/// Which way an arrow key moves the selection.
+#[derive(Debug, Clone, Copy)]
+enum RadioDirection {
+    Previous,
+    Next,
+}
 
 /// A radio group. Holds the option labels, the selected index, and the cached
 /// theme / frame / focus.
@@ -71,6 +85,66 @@ impl RadioGroupWidget {
             }
             emit_state_changed(ctx, &self.state);
         }
+    }
+
+    /// Move the selection one row, returning the row it moved to — or `None`
+    /// when it moved nothing, which is what the ends clamp to. Mirrors
+    /// `SegmentedWidget::step`, the other exclusive-choice control, so the
+    /// clamp is a function a test can call rather than arithmetic inlined in
+    /// a handler.
+    fn step(&mut self, direction: RadioDirection) -> Option<usize> {
+        if self.options.is_empty() || !self.state.can_mutate() {
+            return None;
+        }
+        let next = match direction {
+            RadioDirection::Previous => self.selected.saturating_sub(1),
+            RadioDirection::Next => (self.selected + 1).min(self.options.len() - 1),
+        };
+        if next == self.selected {
+            return None;
+        }
+        self.selected = next;
+        Some(next)
+    }
+
+    /// The group's local draw: one marker + label per option row, the
+    /// selected row's marker filled, plus the shared control outlines.
+    fn draw_items(&self) -> Vec<WidgetDrawItem> {
+        let row_height = self.theme.row_height.max(1.0);
+        let marker = (row_height * 0.5).max(4.0);
+        let pad = self.theme.pad;
+        let size = self.theme.label_size_pixels;
+
+        let mut items: Vec<WidgetDrawItem> = Vec::new();
+        for (i, option) in self.options.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)] // an option index is a handful of rows
+            let row_y = i as f32 * row_height;
+            let marker_y = (row_height - marker).mul_add(0.5, row_y);
+            let selected = i == self.selected;
+            let base = if selected {
+                self.theme.selection
+            } else {
+                self.theme.surface_raised
+            };
+            let marker_state = if selected {
+                self.state.theme_state(self.pressed)
+            } else {
+                self.state.supporting_theme_state(false)
+            };
+            items.push(quad(pad, marker_y, marker, marker, self.theme.fill(base, marker_state)));
+            items.push(WidgetDrawItem::Text {
+                x: pad.mul_add(2.0, marker),
+                y: text_origin_y(row_y, row_height, size),
+                font_id: self.theme.font_id,
+                text: option.clone(),
+                size_pixels: size,
+                color: self.theme.fill(self.theme.text_primary, self.state.supporting_theme_state(false)),
+                clip: None,
+            });
+        }
+
+        push_control_outlines(&mut items, self.frame.width, self.frame.height, &self.state, &self.theme);
+        items
     }
 }
 
@@ -152,16 +226,12 @@ impl WasmActor for RadioGroupWidget {
     /// Up / Down move the selection while focused (clamped at the ends).
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
-        if self.options.is_empty() || !self.state.can_mutate() {
-            return;
-        }
-        let next = match key.code {
-            KEY_UP => self.selected.saturating_sub(1),
-            KEY_DOWN => (self.selected + 1).min(self.options.len() - 1),
+        let direction = match key.code {
+            KEY_UP => RadioDirection::Previous,
+            KEY_DOWN => RadioDirection::Next,
             _ => return,
         };
-        if next != self.selected {
-            self.selected = next;
+        if self.step(direction).is_some() {
             self.emit(ctx);
         }
     }
@@ -176,45 +246,13 @@ impl WasmActor for RadioGroupWidget {
         if reply_if_hidden(ctx, &self.state) {
             return;
         }
-        let row_height = self.theme.row_height.max(1.0);
-        let marker = (row_height * 0.5).max(4.0);
-        let pad = self.theme.pad;
-        let size = self.theme.label_size_pixels;
-        let mut items: Vec<WidgetDrawItem> = Vec::new();
-        for (i, option) in self.options.iter().enumerate() {
-            #[allow(clippy::cast_precision_loss)]
-            let row_y = i as f32 * row_height;
-            let marker_y = (row_height - marker).mul_add(0.5, row_y);
-            let selected = i == self.selected;
-            let base = if selected {
-                self.theme.selection
-            } else {
-                self.theme.surface_raised
-            };
-            let marker_state = if selected {
-                self.state.theme_state(self.pressed)
-            } else {
-                self.state.supporting_theme_state(false)
-            };
-            let ink = if selected {
-                self.theme.selection_text
-            } else {
-                self.theme.text_primary
-            };
-            items.push(quad(pad, marker_y, marker, marker, self.theme.fill(base, marker_state)));
-            items.push(WidgetDrawItem::Text {
-                x: pad.mul_add(2.0, marker),
-                y: text_origin_y(row_y, row_height, size),
-                font_id: self.theme.font_id,
-                text: option.clone(),
-                size_pixels: size,
-                color: self.theme.fill(ink, self.state.supporting_theme_state(false)),
-                clip: None,
-            });
-        }
-        push_control_outlines(&mut items, self.frame.width, self.frame.height, &self.state, &self.theme);
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { content_height: None, intrinsic: None, items, overlay: Vec::new() });
+            parent.send(&WidgetDrawList {
+                content_height: None,
+                intrinsic: None,
+                items: self.draw_items(),
+                overlay: Vec::new(),
+            });
         }
     }
 }
@@ -222,8 +260,9 @@ impl WasmActor for RadioGroupWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_math::Rgba;
+
     use crate::WidgetControlState;
-    use alloc::vec;
 
     fn group(options: &[&str], selected: usize) -> RadioGroupWidget {
         RadioGroupWidget {
@@ -255,14 +294,20 @@ mod tests {
 
     #[test]
     fn up_down_selection_clamps_at_the_ends() {
-        // Exercise the clamp arithmetic the key handler uses.
-        let g = group(&["a", "b", "c"], 0);
-        assert_eq!(g.selected.saturating_sub(1), 0, "up at the top stays");
-        let g = group(&["a", "b", "c"], 2);
-        assert_eq!((g.selected + 1).min(g.options.len() - 1), 2, "down at the bottom stays");
-        let g = group(&["a", "b", "c"], 1);
-        assert_eq!((g.selected + 1).min(g.options.len() - 1), 2);
-        assert_eq!(g.selected.saturating_sub(1), 0);
+        let mut g = group(&["a", "b", "c"], 0);
+        assert_eq!(g.step(RadioDirection::Previous), None, "up at the top stays");
+        assert_eq!(g.step(RadioDirection::Next), Some(1));
+        assert_eq!(g.step(RadioDirection::Next), Some(2));
+        assert_eq!(g.step(RadioDirection::Next), None, "down at the bottom stays");
+        assert_eq!(g.selected, 2);
+
+        let mut empty = group(&[], 0);
+        assert_eq!(empty.step(RadioDirection::Next), None, "an empty group has nothing to move to");
+
+        let mut read_only = group(&["a", "b"], 0);
+        assert!(read_only.state.replace(WidgetControlState { read_only: true, ..WidgetControlState::default() }));
+        assert_eq!(read_only.step(RadioDirection::Next), None, "a read-only group does not move");
+        assert_eq!(read_only.selected, 0);
     }
 
     #[test]
@@ -271,10 +316,37 @@ mod tests {
         assert_eq!(g.row_at_local_y(0.0), None);
     }
 
+    /// The ink of every label the group draws, in row order.
+    fn label_inks(g: &RadioGroupWidget) -> Vec<Rgba> {
+        g.draw_items()
+            .iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Text { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Tripwire: `selection_text` is defined as the ink drawn *on* a
+    // `selection`-filled row, and a radio group fills only the small marker —
+    // every label sits on the panel's own `surface`. The default theme hides
+    // the misuse (its `selection_text` is `text_primary`), so this pins it
+    // with a themed palette that pairs a light selection with dark ink on it,
+    // exactly how `accent` / `accent_text` are already paired: under it the
+    // chosen row was near-black text on the dark panel, the one unreadable
+    // row in the group.
     #[test]
-    fn options_survive_construction() {
-        let g = group(&["x", "y"], 1);
-        assert_eq!(g.options, vec![String::from("x"), String::from("y")]);
-        assert_eq!(g.selected, 1);
+    fn a_selected_label_inks_for_the_surface_it_is_actually_drawn_on() {
+        let mut g = group(&["a", "b"], 0);
+        g.theme = Theme {
+            selection: Rgba::from_srgb8(0xa8, 0xc9, 0x7a, 0xff),
+            selection_text: Rgba::from_srgb8(0x19, 0x1b, 0x15, 0xff),
+            ..Theme::DEFAULT
+        };
+
+        for (row, ink) in label_inks(&g).into_iter().enumerate() {
+            let ratio = Theme::contrast_ratio(ink, g.theme.surface);
+            assert!(ratio >= 4.5, "row {row}'s label is body text and reads at only {ratio} on the panel under it");
+        }
     }
 }

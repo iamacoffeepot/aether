@@ -18,7 +18,7 @@ use aether_bloomery::{
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex};
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, GetResult};
-use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, LaneScript as MockLaneScript, read_ledger};
+use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, read_ledger};
 use aether_chassis_bloomery::bloomery::{
     BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, DoctorReactorCapability, DoctorReport,
     DoctorTick, ExecutorReactorCapability, GithubConnectionConfig, IntegrateReactorCapability, IntegrateTick,
@@ -44,6 +44,7 @@ use super::drive::{member, passed};
 use super::{BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, Lane, POLL};
 use crate::oracle::{Oracle, is_answerable, liveness};
 use crate::scenario::{LaneScript, Scenario};
+use crate::script::write_lane_scripts;
 use crate::support::Coordinator;
 use crate::support::client::spawn_and_connect;
 use crate::support::repo::Repo;
@@ -265,18 +266,18 @@ impl ScenarioHarness {
 
     /// Write `scripts` for `workpiece`'s `stage` as a mock-lane script.
     ///
+    /// Steps accumulate across calls, keyed by workpiece, [`StageId`], and
+    /// occurrence, so configuring a second member or stage keeps the earlier
+    /// fault. Construct and Refine share a transform command and still keep
+    /// distinct sequences. An empty workpiece is bloom-less (`BaseVerify`,
+    /// aggregate verify): those steps are keyed on the reserved empty member
+    /// axis together with the stage.
+    ///
     /// # Panics
     /// The mock-lane script could not be written.
     pub fn script_lane(&self, workpiece: &WorkpieceId, stage: StageId, scripts: &[LaneScript]) {
-        let command = stage_command(stage);
-        let mut script = MockLaneScript::all_passing();
-        for item in scripts {
-            script = script.then(command, lower_lane_script(item));
-        }
-        // BaseVerify is bloom-less: the reserved empty workpiece is the order's
-        // member axis, same as aggregate verify.
-        let _ = workpiece;
-        script.write_to(Path::new(&self.worktree_base)).expect("the mock-lane script writes");
+        write_lane_scripts(Path::new(&self.worktree_base), &workpiece.0, stage, scripts.iter().map(lower_lane_script))
+            .expect("the mock-lane script writes");
     }
 
     /// The served red-base alert, when one is holding the day.
@@ -1301,16 +1302,6 @@ impl ScenarioHarness {
 
 fn nonces(orders: &[OutstandingOrder]) -> Vec<&str> {
     orders.iter().map(|order| order.nonce.as_str()).collect()
-}
-
-fn stage_command(stage: StageId) -> &'static str {
-    match stage {
-        StageId::Verify => aether_bloomery::VERIFY_MEMBER_COMMAND,
-        StageId::AggregateVerify => aether_bloomery::VERIFY_CHECK_COMMAND,
-        StageId::BaseVerify => aether_bloomery::VERIFY_BASE_COMMAND,
-        StageId::AggregateReview => aether_bloomery::REVIEW_CRITIC_COMMAND,
-        _ => aether_bloomery::CONSTRUCT_IMPLEMENT_COMMAND,
-    }
 }
 
 fn lower_lane_script(script: &LaneScript) -> LaneMode {

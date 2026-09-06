@@ -130,6 +130,12 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
                 ObservedEditorInput::PointerMotion { x_pixels: 140.0, y_pixels: 25.0 },
                 ObservedEditorInput::PointerRelease { button: 1, x_pixels: 140.0, y_pixels: 25.0 },
                 ObservedEditorInput::PointerRelease { button: 0, x_pixels: 140.0, y_pixels: 25.0 },
+                // `move-b` routes to region-b, so region-a is handed the same
+                // motion as the region the pointer left: it re-derives its own
+                // hover against a position outside itself and lets go of the
+                // child it had lit. Without it that child stays hovered for as
+                // long as the pointer is in the other pane.
+                ObservedEditorInput::PointerMotion { x_pixels: 150.0, y_pixels: 30.0 },
             ],
         },
     );
