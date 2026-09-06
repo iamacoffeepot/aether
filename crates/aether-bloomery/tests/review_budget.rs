@@ -7,8 +7,8 @@
 mod common;
 
 use aether_bloomery::{
-    BloomId, CandidateRef, Decision, Event, Evidence, EvidenceKind, Fact, Outcome, ResolvedConfigs, Snapshot,
-    SpendWindow, StageCatalog, StageId, WorkpieceId, reduce,
+    BloomId, CandidateRef, Decision, Event, Evidence, EvidenceKind, Fact, Outcome, Snapshot, SpendWindow, StageCatalog,
+    StageId, WorkpieceId, reduce,
 };
 use common::{claim, digest, draft_with_catalog, event, membership, step};
 
