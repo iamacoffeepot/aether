@@ -14,7 +14,7 @@ aether-bloomery = { path = "../aether-bloomery", default-features = false }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 crossterm = { workspace = true }
-ratatui = { workspace = true }
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true }
 
