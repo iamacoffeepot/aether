@@ -419,6 +419,7 @@ mod tests {
     use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
+    use core::iter;
 
     use super::{
         FIELD_ENTRY_SCHEMA, FieldEntry, FieldKind, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting,
@@ -505,7 +506,7 @@ mod tests {
     fn empty_list_replacement_does_not_resurrect_the_previous_generation() {
         let mut builder = WorkpieceBuilder::new(workpiece());
         builder.edge(["issue-1", "issue-2"]);
-        builder.edge(core::iter::empty::<&str>());
+        builder.edge(iter::empty::<&str>());
 
         assert!(resolved_texts(&builder, FieldKind::Edge).is_empty());
         assert!(builder.resolved(FieldKind::Edge).expect("authored empty is present").is_empty());
@@ -518,7 +519,7 @@ mod tests {
     fn restating_after_an_empty_list_resolves_to_the_later_write() {
         let mut builder = WorkpieceBuilder::new(workpiece());
         builder.declared_surface(["crates/a/**", "crates/b/**"]);
-        builder.declared_surface(core::iter::empty::<&str>());
+        builder.declared_surface(iter::empty::<&str>());
         builder.declared_surface(["crates/c/**"]);
 
         assert_eq!(resolved_texts(&builder, FieldKind::DeclaredSurface), ["crates/c/**"]);
@@ -654,7 +655,7 @@ mod tests {
     fn empty_list_write_is_present_and_empty() {
         let mut builder = WorkpieceBuilder::new(workpiece());
         assert!(builder.resolved(FieldKind::Edge).is_none());
-        builder.edge(core::iter::empty::<&str>());
+        builder.edge(iter::empty::<&str>());
         let resolved = builder.resolved(FieldKind::Edge).expect("empty list is present");
         assert!(resolved.is_empty());
     }
