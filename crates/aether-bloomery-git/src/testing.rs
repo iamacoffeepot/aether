@@ -168,6 +168,10 @@ struct State {
     unread_creates: HashSet<String>,
     next_get_ref_fault: Option<String>,
     next_create_ref_fault: Option<String>,
+    // When set, the next correspondence `record` of a commit object faults once
+    // — a durable store failing after a merge has already published the
+    // integration ref (#5554). Tree records are not commits and pass.
+    next_commit_correspondence_fault: Option<String>,
     // When set, each `create_issue` hides that number from the next
     // `find_issue` once — GitHub's search index lags a just-created replica
     // (#5215). `seed_issue` is not a create.
@@ -474,6 +478,13 @@ impl FakeGithub {
         self.lock().next_create_ref_fault = Some(detail.into());
     }
 
+    /// The next correspondence `record` of a commit object faults once. Tree
+    /// records still succeed, so a merge can publish its ref and name its tree
+    /// before the head write fails — the interrupted-merge state #5554 recovers.
+    pub fn fail_next_commit_correspondence_record(&self, detail: impl Into<String>) {
+        self.lock().next_commit_correspondence_fault = Some(detail.into());
+    }
+
     /// The head sha of pull request `number` — what a landing watch reads its
     /// checks against.
     #[must_use]
@@ -599,6 +610,22 @@ impl FakeGithub {
                 parents: parent_sha.map(|parent| vec![parent.to_owned()]).unwrap_or_default(),
             },
         );
+    }
+
+    // Consume the one-shot commit-record fault when `object` is a commit this
+    // fake minted. Tree objects never sit in `commits`, so a merge can still
+    // name its tree before the head write fails.
+    fn take_commit_correspondence_fault(&self, object: &BackendObjectId) -> Option<String> {
+        let Ok(git) = GitObjectId::try_from(object) else {
+            return None;
+        };
+        let hex = git.to_hex();
+        let mut state = self.lock();
+        if state.commits.contains_key(&hex) {
+            state.next_commit_correspondence_fault.take()
+        } else {
+            None
+        }
     }
 
     // Keep the fake faithful to the durable store's two-axis uniqueness: a new
@@ -1121,6 +1148,9 @@ fn merged_tree(base: &str, head: &str) -> String {
 
 impl Correspondence for FakeGithub {
     fn record(&self, digest: &Digest, object: &BackendObjectId) -> Result<(), CorrespondenceError> {
+        if let Some(detail) = self.take_commit_correspondence_fault(object) {
+            return Err(CorrespondenceError::new(detail));
+        }
         self.record_correspondence(digest, object.clone());
         Ok(())
     }
