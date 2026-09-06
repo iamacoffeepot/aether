@@ -537,9 +537,13 @@ mod tests {
         None
     }
 
-    fn captured_open_failure(events: &Arc<RecordedOpenFailures>, error: &JournalHolderError) -> String {
+    fn captured_open_failure(events: &RecordedOpenFailures, error: &JournalHolderError) -> String {
         let mut debug = format!("{error:?}");
-        debug.truncate(512);
+        let mut bound = debug.len().min(512);
+        while bound > 0 && !debug.is_char_boundary(bound) {
+            bound -= 1;
+        }
+        debug.truncate(bound);
         let captured = events.0.lock().expect("recorded open failures are not poisoned");
         match captured.last() {
             Some(event) => format!(
