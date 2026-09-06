@@ -282,15 +282,17 @@ fn wait_until_pgid_gone(pgid: u32) -> bool {
 ///
 /// `/proc` is the precise reading where it exists. A missing `/proc` is not an
 /// empty group — that skipped SIGKILL on macOS — so the next probes are `ps`
-/// (state-aware) and `kill -0` on the group.
+/// (state-aware) and `kill -0` on the group. A probe that cannot observe is
+/// unknown, not gone: unknown is live so cancellation escalates instead of
+/// returning success into an unbounded `child.wait`.
 fn any_process_in_group(pgid: u32) -> bool {
-    if let Some(alive) = proc_group_is_live(pgid) {
-        return alive;
-    }
-    if let Some(alive) = ps_group_is_live(pgid) {
-        return alive;
-    }
-    group_responds_to_signal_zero(pgid)
+    group_is_live(proc_group_is_live(pgid), ps_group_is_live(pgid), group_responds_to_signal_zero(pgid))
+}
+
+/// First probe that could observe wins. If every probe is unknown, the group
+/// is live: a timeout-and-error is honest, a false "gone" is not.
+fn group_is_live(proc: Option<bool>, ps: Option<bool>, signal_zero: Option<bool>) -> bool {
+    proc.or(ps).or(signal_zero).unwrap_or(true)
 }
 
 fn proc_group_is_live(pgid: u32) -> Option<bool> {
@@ -338,13 +340,22 @@ fn ps_listing_has_live_member(listing: &str, pgid: u32) -> bool {
     })
 }
 
-fn group_responds_to_signal_zero(pgid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &format!("-{pgid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+fn group_responds_to_signal_zero(pgid: u32) -> Option<bool> {
+    signal_zero_observation(
+        Command::new("kill")
+            .args(["-0", &format!("-{pgid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success()),
+    )
+}
+
+/// `kill -0` can confirm a live group. A spawn fault or nonzero exit cannot
+/// confirm exit: ESRCH and EPERM are the same command status, and a missing
+/// `kill` is not an empty group.
+fn signal_zero_observation(result: io::Result<bool>) -> Option<bool> {
+    result.ok().filter(|&alive| alive)
 }
 
 fn unterminated(detail: impl Into<String>) -> LocalExecutorError {
@@ -371,7 +382,10 @@ mod tests {
     #[cfg(unix)]
     use std::time::{Duration, Instant};
 
-    use super::{ProcessIdentity, StatFields, proc_listing_is_live, ps_listing_has_live_member};
+    use super::{
+        ProcessIdentity, StatFields, group_is_live, proc_listing_is_live, ps_listing_has_live_member,
+        signal_zero_observation,
+    };
     #[cfg(unix)]
     use super::{any_process_in_group, terminate_pgid};
 
@@ -450,8 +464,7 @@ mod tests {
     fn a_failed_proc_listing_is_unknown_not_an_empty_group() {
         // Tripwire: the macOS bug was mapping read_dir("/proc") failure to "no
         // members", which skipped SIGKILL. An IO error must be unknown so
-        // any_process_in_group falls through to ps / kill -0. A readable empty
-        // table is the opposite: the group is gone.
+        // any_process_in_group falls through; a readable empty table is gone.
         assert_eq!(
             proc_listing_is_live(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no /proc")), 1),
             None,
@@ -484,6 +497,41 @@ mod tests {
         assert!(!ps_listing_has_live_member(listing, 7), "a live process in another group is not this group");
         assert!(!ps_listing_has_live_member("", 10), "an empty table is an empty group");
         assert!(!ps_listing_has_live_member("not a ps line\n", 10), "garbage lines do not invent members");
+    }
+
+    #[test]
+    fn unavailable_probes_are_live_not_gone() {
+        // Tripwire: if ps cannot run and kill -0 cannot run or returns EPERM,
+        // mapping that to "no members" is the same false exit as a missing
+        // /proc. Injected unknown probes must stay live so terminate_pgid
+        // escalates and times out rather than succeeding into child.wait.
+        assert_eq!(
+            signal_zero_observation(Ok(false)),
+            None,
+            "a nonzero kill -0 is ESRCH or EPERM, not confirmed exit",
+        );
+        assert_eq!(
+            signal_zero_observation(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "kill"))),
+            None,
+            "a kill that cannot be spawned is unknown, not an empty group",
+        );
+        assert_eq!(signal_zero_observation(Ok(true)), Some(true), "a successful kill -0 is a live group");
+        assert!(
+            group_is_live(None, None, signal_zero_observation(Ok(false))),
+            "ambiguous kill -0 after failed proc and ps is live",
+        );
+        assert!(
+            group_is_live(
+                None,
+                None,
+                signal_zero_observation(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "kill"))),
+            ),
+            "every probe unavailable is live, not an empty group",
+        );
+        assert!(group_is_live(None, None, None), "three unknown probes are live");
+        assert!(group_is_live(None, None, Some(true)), "kill -0 success still confirms live");
+        assert!(!group_is_live(None, Some(false), None), "a successful empty ps listing is gone");
+        assert!(!group_is_live(Some(false), None, None), "a successful empty proc scan is gone");
     }
 
     #[cfg(unix)]
