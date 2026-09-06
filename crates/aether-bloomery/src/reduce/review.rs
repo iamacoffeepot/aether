@@ -35,13 +35,13 @@ fn held_fold_under_review<'a>(
     snapshot: &'a Snapshot,
     bloom: &BloomId,
     evidence: &Evidence,
-) -> Result<(&'a BloomRecord, FoldedIntegration), AggregateReviewError> {
+) -> Result<(&'a BloomRecord, &'a FoldedIntegration), AggregateReviewError> {
     let record = snapshot
         .blooms
         .get(bloom)
         .filter(|record| record.status == BloomStatus::Sealed)
         .ok_or(AggregateReviewError::UnknownOrInactiveBloom)?;
-    let integration = record.integration.clone().ok_or(AggregateReviewError::NoPendingIntegration)?;
+    let integration = record.integration.as_ref().ok_or(AggregateReviewError::NoPendingIntegration)?;
     if !evidence.validates(&integration.tree) {
         return Err(AggregateReviewError::SubjectMismatch { expected: integration.tree, got: evidence.subject });
     }
@@ -161,7 +161,7 @@ pub(super) fn reduce_aggregate_review_completed(
             return Decisions { outcome: Outcome::AggregateReviewPassed { bloom: *bloom, rolls }, effects };
         }
 
-        let (resolved, resolution) = resolution_effects(record, *bloom, &integration);
+        let (resolved, resolution) = resolution_effects(record, *bloom, integration);
         effects.extend(resolution);
         return Decisions { outcome: Outcome::Resolved(resolved), effects };
     }
