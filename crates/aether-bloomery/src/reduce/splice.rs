@@ -117,7 +117,7 @@ pub(super) fn spliced_base<F: Fn(&WorkpieceId) -> Option<Digest>>(
     }
     let tips = maxima(&ancestors, edges);
     match tips.as_slice() {
-        [_] => SplicedBase::Ready(ancestors.iter().filter_map(|id| checkout_of(id)).last().unwrap_or(bloom_base)),
+        [_] => SplicedBase::Ready(ancestors.iter().filter_map(checkout_of).fold(bloom_base, |_, checkout| checkout)),
         [] => SplicedBase::Ready(bloom_base),
         _ => SplicedBase::Join { tips },
     }
