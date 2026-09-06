@@ -179,17 +179,18 @@ impl TrackedHandle {
     }
 }
 
-/// The current wall clock in Unix milliseconds — the reading one tick compares
-/// every persisted deadline against and stamps every order it records with
-/// (ADR-0177).
+/// The current wall clock in Unix milliseconds (ADR-0177).
 ///
-/// Taken once per tick rather than per order, so the dispatches and expiries of
-/// a single tick share one instant and cannot disagree about what "now" was. A
-/// clock before the epoch is not a reading any deadline arithmetic can use, so
-/// it reads as `0` — which defers every expiry rather than terminating anything
-/// on a number that means nothing: `0` is behind every deadline a dispatch under
-/// the same clock would have stamped. Deadlines stop enforcing until the host's
-/// clock is usable again, and no order is cancelled on a fiction in the meantime.
+/// A dispatch tick samples this at the start to stamp recorded-order deadlines
+/// and to observe live-lane leases. After intake has observed completions it
+/// samples again for deadline and silence sweeps and heartbeat future checks, so
+/// a stamp written during that work is not refused as future of the tick-start
+/// reading. A clock before the epoch is not a reading any deadline arithmetic
+/// can use, so it reads as `0` — which defers every expiry rather than
+/// terminating anything on a number that means nothing: `0` is behind every
+/// deadline a dispatch under the same clock would have stamped. Deadlines stop
+/// enforcing until the host's clock is usable again, and no order is cancelled
+/// on a fiction in the meantime.
 fn now_unix_millis() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
@@ -2483,11 +2484,14 @@ struct Stores<'a> {
     artifacts: Option<&'a mut ArtifactsCapabilityState>,
 }
 
-/// The clock readings one tick works from, taken once so its dispatches,
-/// expiries, and staleness warns all agree about when the tick was.
+/// The tick-start clock readings: dispatch deadline computation, lease
+/// observation, and the default expiry reading when a caller does not sample
+/// later.
 struct TickClock {
-    /// Unix milliseconds — what a recorded order's deadline is computed from and
-    /// what every persisted deadline is tested against (ADR-0177).
+    /// Unix milliseconds at tick start — what a recorded order's deadline is
+    /// computed from and what lease observations use (ADR-0177). Deadline and
+    /// silence sweeps, and heartbeat future checks, sample separately after
+    /// intake.
     now_unix_millis: u64,
     /// How long a tracked handle may stay unresolved before the advisory warn
     /// (#3635); `None` when the sweep is disabled. Advisory only: it warns, and
@@ -2505,12 +2509,12 @@ struct TickClock {
 /// Three passes, in an order ADR-0177 fixes. Completion first, so evidence that
 /// arrived at the deadline boundary is admitted normally rather than losing to a
 /// clock that has just crossed. Then the deadline sweep, which terminates every
-/// order still pending past its persisted deadline — and which runs only when
-/// the completion pass actually completed, because a faulted cycle has not
-/// looked at every handle and its "still pending" is unearned. Then the advisory
-/// staleness sweep (#3635), which is left exactly as it was: a handle past
-/// `stale_warn_after` warns once, naming its nonce, age, and last observed
-/// status — it reports, and the deadline is what acts.
+/// order still pending past its persisted deadline as of the post-intake sample
+/// — and which runs only when the completion pass actually completed, because a
+/// faulted cycle has not looked at every handle and its "still pending" is
+/// unearned. Then the advisory staleness sweep (#3635), which is left exactly as
+/// it was: a handle past `stale_warn_after` warns once, naming its nonce, age,
+/// and last observed status — it reports, and the deadline is what acts.
 ///
 /// The factored-out network side, unit-testable like [`drain_and_dispatch`].
 /// Callers that need dispatch and expiry to agree use this entry; it passes the
@@ -2528,8 +2532,9 @@ fn pull_and_admit(
 }
 
 /// Like [`pull_and_admit`], with `expiry_now` invoked after [`run_intake_cycle`]
-/// returns so a test can pin that the sample is not the tick-start clock.
-/// Production passes [`now_unix_millis`].
+/// returns. That sample is the now used for deadline and silence sweeps and for
+/// heartbeat future checks. Production passes [`now_unix_millis`]; tests that
+/// keep dispatch and expiry equal pass the tick-start reading.
 fn pull_and_admit_with(
     stores: Stores<'_>,
     executor: &ExecutorShell,
@@ -2544,7 +2549,7 @@ fn pull_and_admit_with(
     let mut sink = CollectingSink::default();
     let handles: Vec<WorkHandle> = tracked.iter().map(|tracked_handle| tracked_handle.handle.clone()).collect();
     let cycle = run_intake_cycle(store, executor, &handles, &claims, artifacts.as_deref_mut(), &mut sink);
-    let _ = expiry_now();
+    let expiry_unix_millis = expiry_now();
     let completion_was_observed = cycle.is_ok();
     let report = cycle.unwrap_or_else(|error| {
         tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "intake cycle failed; results re-drive next tick");
@@ -2589,7 +2594,7 @@ fn pull_and_admit_with(
             executor,
             tracked,
             &report.unobserved,
-            clock.now_unix_millis,
+            expiry_unix_millis,
         )
     } else {
         Vec::new()
@@ -2597,7 +2602,9 @@ fn pull_and_admit_with(
     // Silence after the deadline sweep: a finishing lane has already been
     // consumed, and an overdue one has already been charged as a deadline.
     // A faulted cycle has not looked at every handle, so its "silent" is as
-    // unearned as its "still pending".
+    // unearned as its "still pending". Heartbeat future-checks use this same
+    // post-intake sample so a stamp written during the tick's work is not
+    // refused as future of the tick-start clock.
     let silenced = if completion_was_observed {
         expire_silent_orders(
             Stores { store, artifacts },
@@ -2605,7 +2612,7 @@ fn pull_and_admit_with(
             tracked,
             &report.pending,
             &report.unobserved,
-            clock.now_unix_millis,
+            expiry_unix_millis,
             clock.heartbeat_silence_millis,
         )
     } else {
@@ -2892,10 +2899,10 @@ impl NativeActor for ExecutorReactorCapability {
             return;
         };
 
-        // One clock reading for the whole tick: every order this tick records
-        // takes its deadline from it, and every persisted deadline is tested
-        // against it, so a dispatch and an expiry in the same tick cannot
-        // disagree about when the tick was.
+        // Tick-start clock: every order this tick records takes its deadline
+        // from it, and lease observations use the same instant. Deadline and
+        // silence sweeps sample again after intake so a heartbeat written during
+        // that work is judged against a now that is not behind it.
         let clock = TickClock {
             now_unix_millis: now_unix_millis(),
             stale_warn_after: state.stale_warn_after,
