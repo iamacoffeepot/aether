@@ -657,7 +657,7 @@ mod tests {
                 return;
             };
             let _ = Command::new("kill")
-                .args(super::kill_group_args("KILL", pid))
+                .args(kill_group_args("KILL", pid))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
