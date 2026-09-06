@@ -34,12 +34,11 @@ use aether_substrate::mail::registry::Registry;
 
 use super::strand::readopt_stranded_dispatches;
 use super::{
-    BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, ExecutorReactorState, GitCandidatePush, NameEvidenceClaims,
-    Stores, TickClock, TrackedHandle, backoff_delay, candidate_push_at, default_candidate_push, dispatch_origin,
-    drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_dispatch_scope, drain_and_redispatch,
-    fold_drain_backoff, is_disabled_mount, is_silent, is_stale, next_backoff, observe_heartbeat, pull_and_admit,
-    pull_and_admit_with, push_admitted_candidates, seed_dispatches, seed_tracked, select_stale_handles, silence_from,
-    timeout_verdict,
+    BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState, GitCandidatePush,
+    NameEvidenceClaims, Stores, TickClock, TrackedHandle, backoff_delay, candidate_push_at, default_candidate_push,
+    dispatch_origin, drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_dispatch_scope, drain_and_redispatch,
+    fold_drain_backoff, is_disabled_mount, is_silent, is_stale, next_backoff, observe_heartbeat,
+    push_admitted_candidates, seed_dispatches, seed_tracked, select_stale_handles, silence_from, timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -202,6 +201,27 @@ fn tick_clock_at(now_unix_millis: u64) -> TickClock {
 
 fn tick_clock_silent(now_unix_millis: u64, heartbeat_silence_millis: u64) -> TickClock {
     TickClock { now_unix_millis, stale_warn_after: None, heartbeat_silence_millis }
+}
+
+/// Production pull with tick-start now as the expiry sample.
+fn pull_and_admit(
+    stores: Stores<'_>,
+    executor: &ExecutorShell,
+    claims: NameEvidenceClaims,
+    tracked: &mut Vec<TrackedHandle>,
+    clock: &TickClock,
+    correspondence: Option<&SharedCorrespondence>,
+    pusher: &dyn CandidatePush,
+) -> Vec<Admit> {
+    super::pull_and_admit(
+        stores,
+        executor,
+        claims,
+        tracked,
+        Clocks { tick: clock, expiry_now: || clock.now_unix_millis },
+        correspondence,
+        pusher,
+    )
 }
 
 // Enqueue one per-member Construct dispatch on the dispatch topic (the bytes the
@@ -3506,18 +3526,25 @@ fn a_heartbeat_after_tick_start_is_not_refused_as_future() {
     let expiry = progress + 1;
     backend.set_progress(&nonce, Some(progress));
 
-    let admits = pull_and_admit_with(
+    let clock = tick_clock_silent(tick_start, SILENCE_MILLIS);
+    let inspects_before = backend.inspect_count();
+    let admits = super::pull_and_admit(
         Stores { store: &mut store, artifacts: None },
         &shell,
         NameEvidenceClaims,
         &mut tracked,
-        &tick_clock_silent(tick_start, SILENCE_MILLIS),
+        Clocks {
+            tick: &clock,
+            expiry_now: || {
+                assert!(
+                    backend.inspect_count() > inspects_before,
+                    "expiry is sampled after this call's inspect, not an earlier fixture one",
+                );
+                expiry
+            },
+        },
         None,
         &NopPush,
-        || {
-            assert!(backend.inspect_count() > 0, "expiry is sampled after inspect has observed the running stamp",);
-            expiry
-        },
     );
 
     assert!(admits.is_empty(), "no synthetic silence admission");

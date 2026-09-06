@@ -2484,9 +2484,9 @@ struct Stores<'a> {
     artifacts: Option<&'a mut ArtifactsCapabilityState>,
 }
 
-/// The tick-start clock readings: dispatch deadline computation, lease
-/// observation, and the default expiry reading when a caller does not sample
-/// later.
+/// The tick-start clock readings: dispatch deadline computation and lease
+/// observation. Deadline and silence sweeps sample expiry separately after
+/// intake.
 struct TickClock {
     /// Unix milliseconds at tick start — what a recorded order's deadline is
     /// computed from and what lease observations use (ADR-0177). Deadline and
@@ -2500,6 +2500,13 @@ struct TickClock {
     /// How long a known-heartbeat local lane may stay silent before this tick
     /// cancels it. Always nonzero at boot; tests inject the allowance they need.
     heartbeat_silence_millis: u64,
+}
+
+/// Tick-start [`TickClock`] plus the callback that samples expiry now after
+/// [`run_intake_cycle`]. Production passes [`now_unix_millis`] as that callback.
+struct Clocks<'a, ExpiryNow> {
+    tick: &'a TickClock,
+    expiry_now: ExpiryNow,
 }
 
 /// Pull matched attempt results for the tracked handles and return the [`Admit`]s
@@ -2516,35 +2523,21 @@ struct TickClock {
 /// it was: a handle past `stale_warn_after` warns once, naming its nonce, age,
 /// and last observed status — it reports, and the deadline is what acts.
 ///
+/// `clocks.expiry_now` is invoked after [`run_intake_cycle`] returns. That sample
+/// is the now used for deadline and silence sweeps and heartbeat future checks.
+/// Production passes [`now_unix_millis`].
+///
 /// The factored-out network side, unit-testable like [`drain_and_dispatch`].
-/// Callers that need dispatch and expiry to agree use this entry; it passes the
-/// tick-start reading through to [`pull_and_admit_with`].
-fn pull_and_admit(
+fn pull_and_admit<ExpiryNow: FnOnce() -> u64>(
     stores: Stores<'_>,
     executor: &ExecutorShell,
     claims: NameEvidenceClaims,
     tracked: &mut Vec<TrackedHandle>,
-    clock: &TickClock,
+    clocks: Clocks<'_, ExpiryNow>,
     correspondence: Option<&SharedCorrespondence>,
     pusher: &dyn CandidatePush,
 ) -> Vec<Admit> {
-    pull_and_admit_with(stores, executor, claims, tracked, clock, correspondence, pusher, || clock.now_unix_millis)
-}
-
-/// Like [`pull_and_admit`], with `expiry_now` invoked after [`run_intake_cycle`]
-/// returns. That sample is the now used for deadline and silence sweeps and for
-/// heartbeat future checks. Production passes [`now_unix_millis`]; tests that
-/// keep dispatch and expiry equal pass the tick-start reading.
-fn pull_and_admit_with(
-    stores: Stores<'_>,
-    executor: &ExecutorShell,
-    claims: NameEvidenceClaims,
-    tracked: &mut Vec<TrackedHandle>,
-    clock: &TickClock,
-    correspondence: Option<&SharedCorrespondence>,
-    pusher: &dyn CandidatePush,
-    expiry_now: impl FnOnce() -> u64,
-) -> Vec<Admit> {
+    let Clocks { tick: clock, expiry_now } = clocks;
     let Stores { store, mut artifacts } = stores;
     let mut sink = CollectingSink::default();
     let handles: Vec<WorkHandle> = tracked.iter().map(|tracked_handle| tracked_handle.handle.clone()).collect();
@@ -2936,15 +2929,14 @@ impl NativeActor for ExecutorReactorCapability {
         // Pull matched results and forward each admitted attempt to the control core.
         let correspondence = state.correspondence.clone();
         let pusher = Arc::clone(&state.pusher);
-        for admit in pull_and_admit_with(
+        for admit in pull_and_admit(
             Stores { store, artifacts: state.artifacts.as_mut() },
             &executor,
             claims,
             &mut state.tracked,
-            &clock,
+            Clocks { tick: &clock, expiry_now: now_unix_millis },
             correspondence.as_ref(),
             pusher.as_ref(),
-            now_unix_millis,
         ) {
             // Fire-and-forget: the control actor's on_admit is reliable local mail,
             // and the reducer's idempotency key dedups a resend, so the settlement
