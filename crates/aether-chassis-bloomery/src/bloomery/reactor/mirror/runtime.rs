@@ -506,6 +506,7 @@ mod tests {
     //! the timer / `spawn_detached` are the thin glue the chassis-boot test and
     //! compilation cover; this pins the behavior that actually mirrors and acks.
 
+    use std::fmt::{Debug, Write as _};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::Receiver;
     use std::sync::{Arc, Mutex};
@@ -527,6 +528,10 @@ mod tests {
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::testing::test_mailer_and_rx;
     use serde::de::DeserializeOwned;
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::subscriber::with_default;
+    use tracing::{Event as TracingEvent, Metadata, Subscriber};
 
     use super::{
         AckOutbox, DrainOutbox, DrainOutboxResult, DrainTick, Kind, MirrorReactorCapability, MirrorReactorState,
@@ -823,48 +828,23 @@ mod tests {
         reject_force: bool,
         refuse: bool,
         publishes: AtomicUsize,
-        alerts: Mutex<Vec<String>>,
     }
 
     impl FakeReplica {
         fn ok() -> Arc<Self> {
-            Arc::new(Self {
-                fail: false,
-                reject_force: false,
-                refuse: false,
-                publishes: AtomicUsize::new(0),
-                alerts: Mutex::new(Vec::new()),
-            })
+            Arc::new(Self { fail: false, reject_force: false, refuse: false, publishes: AtomicUsize::new(0) })
         }
 
         fn failing() -> Arc<Self> {
-            Arc::new(Self {
-                fail: true,
-                reject_force: false,
-                refuse: false,
-                publishes: AtomicUsize::new(0),
-                alerts: Mutex::new(Vec::new()),
-            })
+            Arc::new(Self { fail: true, reject_force: false, refuse: false, publishes: AtomicUsize::new(0) })
         }
 
         fn rejecting() -> Arc<Self> {
-            Arc::new(Self {
-                fail: false,
-                reject_force: true,
-                refuse: false,
-                publishes: AtomicUsize::new(0),
-                alerts: Mutex::new(Vec::new()),
-            })
+            Arc::new(Self { fail: false, reject_force: true, refuse: false, publishes: AtomicUsize::new(0) })
         }
 
         fn refusing() -> Arc<Self> {
-            Arc::new(Self {
-                fail: false,
-                reject_force: false,
-                refuse: true,
-                publishes: AtomicUsize::new(0),
-                alerts: Mutex::new(Vec::new()),
-            })
+            Arc::new(Self { fail: false, reject_force: false, refuse: true, publishes: AtomicUsize::new(0) })
         }
 
         fn count(&self) -> usize {
@@ -876,14 +856,10 @@ mod tests {
         fn publish(&self) -> Result<(), ReplicaError> {
             self.publishes.fetch_add(1, Ordering::SeqCst);
             if self.reject_force {
-                let detail = "protected branch hook declined".to_owned();
-                self.alerts.lock().unwrap().push(detail.clone());
-                return Err(ReplicaError::ForceRejected(detail));
+                return Err(ReplicaError::ForceRejected("protected branch hook declined".to_owned()));
             }
             if self.refuse {
-                let detail = "invalid credentials".to_owned();
-                self.alerts.lock().unwrap().push(detail.clone());
-                return Err(ReplicaError::Deterministic(detail));
+                return Err(ReplicaError::Deterministic("invalid credentials".to_owned()));
             }
             if self.fail {
                 return Err(ReplicaError::Transient("github unreachable".into()));
@@ -919,30 +895,155 @@ mod tests {
         assert!(store.drain_topic(Topic::LandingReceipt).unwrap().is_empty(), "the land receipt topic is untouched");
     }
 
-    #[test]
-    fn a_rejected_force_surfaces_an_operator_visible_alert() {
-        let fake = FakeReplica::rejecting();
-        let shell = SourceReplicaShell::new(fake.clone());
-        let acks = publish_replica_batch(&shell, &[replica_entry(3)]);
-        assert!(acks.is_empty(), "a rejected force is not silently acked away");
-        assert_eq!(
-            fake.alerts.lock().unwrap().as_slice(),
-            ["protected branch hook declined"],
-            "the rejected force is raised as an operator-visible alert rather than retried silently",
-        );
+    #[derive(Debug)]
+    struct CapturedEvent {
+        level: String,
+        target: String,
+        fields: String,
+    }
+
+    #[derive(Default)]
+    struct RecordedEvents(Mutex<Vec<CapturedEvent>>);
+
+    struct EventRecorder(Arc<RecordedEvents>);
+
+    struct RenderedEvent(String);
+
+    impl Visit for RenderedEvent {
+        fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+            let _ = write!(self.0, " {}={value:?}", field.name());
+        }
+    }
+
+    impl Subscriber for EventRecorder {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _attributes: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &TracingEvent<'_>) {
+            let mut fields = RenderedEvent(String::new());
+            event.record(&mut fields);
+            self.0.0.lock().unwrap().push(CapturedEvent {
+                level: event.metadata().level().to_string(),
+                target: event.metadata().target().to_owned(),
+                fields: fields.0,
+            });
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
     }
 
     #[test]
-    fn a_deterministic_refusal_surfaces_an_operator_visible_alert() {
-        let fake = FakeReplica::refusing();
-        let shell = SourceReplicaShell::new(fake.clone());
-        let acks = publish_replica_batch(&shell, &[replica_entry(3)]);
-        assert!(acks.is_empty(), "a deterministic refusal is not silently acked away");
-        assert_eq!(
-            fake.alerts.lock().unwrap().as_slice(),
-            ["invalid credentials"],
-            "a deterministic refusal is raised as an operator-visible alert rather than retried silently",
-        );
+    fn publish_replica_batch_emits_production_diagnostics() {
+        // Tripwire: FakeReplica used to manufacture its own alerts vector, so
+        // deleting production tracing::error still left these tests green.
+        // Capture the thread-local subscriber events publish_replica_batch emits.
+        struct ExpectedDiagnostic {
+            level: &'static str,
+            target: &'static str,
+            error: &'static str,
+            message: &'static str,
+        }
+        struct Case {
+            replica: Arc<FakeReplica>,
+            sequence: u64,
+            acks: bool,
+            diagnostic: Option<ExpectedDiagnostic>,
+        }
+
+        let cases = [
+            Case {
+                replica: FakeReplica::rejecting(),
+                sequence: 3,
+                acks: false,
+                diagnostic: Some(ExpectedDiagnostic {
+                    level: "ERROR",
+                    target: "aether_chassis_bloomery::mirror::alert",
+                    error: "protected branch hook declined",
+                    message: "source replica force-push was rejected; GitHub was not updated",
+                }),
+            },
+            Case {
+                replica: FakeReplica::refusing(),
+                sequence: 11,
+                acks: false,
+                diagnostic: Some(ExpectedDiagnostic {
+                    level: "ERROR",
+                    target: "aether_chassis_bloomery::mirror::alert",
+                    error: "invalid credentials",
+                    message: "source replica push was refused; GitHub was not updated",
+                }),
+            },
+            Case {
+                replica: FakeReplica::failing(),
+                sequence: 17,
+                acks: false,
+                diagnostic: Some(ExpectedDiagnostic {
+                    level: "WARN",
+                    target: "aether_chassis_bloomery::mirror",
+                    error: "github unreachable",
+                    message: "source replica push failed; leaving it undelivered to re-drive",
+                }),
+            },
+            Case { replica: FakeReplica::ok(), sequence: 23, acks: true, diagnostic: None },
+        ];
+
+        for case in cases {
+            let events = Arc::new(RecordedEvents::default());
+            let shell = SourceReplicaShell::new(Arc::clone(&case.replica));
+            let acks = with_default(EventRecorder(Arc::clone(&events)), || {
+                publish_replica_batch(&shell, &[replica_entry(case.sequence)])
+            });
+            assert_eq!(case.replica.count(), 1, "the fake only records the publish it was asked for");
+            if case.acks {
+                assert_eq!(acks.len(), 1, "success acks the replica topic");
+                assert!(
+                    acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::SourceReplica),
+                    "the ack covers the replica topic",
+                );
+                assert_eq!(acks[0].through_sequence, case.sequence, "success acks through the published sequence");
+            } else {
+                assert!(acks.is_empty(), "a failed push is not acked");
+            }
+
+            let captured = events.0.lock().unwrap();
+            match case.diagnostic {
+                Some(expected) => {
+                    assert_eq!(captured.len(), 1, "one production diagnostic: {captured:?}");
+                    assert_eq!(captured[0].level, expected.level, "{captured:?}");
+                    assert_eq!(captured[0].target, expected.target, "{captured:?}");
+                    assert!(
+                        captured[0].fields.contains(&format!("sequence={}", case.sequence)),
+                        "sequence {} missing from {}",
+                        case.sequence,
+                        captured[0].fields,
+                    );
+                    assert!(
+                        captured[0].fields.contains(expected.error),
+                        "error detail missing from {}",
+                        captured[0].fields,
+                    );
+                    assert!(
+                        captured[0].fields.contains(expected.message),
+                        "distinguishing message missing from {}",
+                        captured[0].fields,
+                    );
+                }
+                None => {
+                    assert!(captured.is_empty(), "success must not raise an operator alert: {captured:?}");
+                }
+            }
+        }
     }
 
     #[test]
