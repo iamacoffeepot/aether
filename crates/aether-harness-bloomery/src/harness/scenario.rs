@@ -265,11 +265,12 @@ impl ScenarioHarness {
 
     /// Write `scripts` for `workpiece`'s `stage` as a mock-lane script.
     ///
-    /// Steps accumulate across calls, keyed by workpiece, stage, and
+    /// Steps accumulate across calls, keyed by workpiece, [`StageId`], and
     /// occurrence, so configuring a second member or stage keeps the earlier
-    /// fault. An empty workpiece is bloom-less (`BaseVerify`, aggregate
-    /// verify): those steps stay unkeyed, matching the reserved empty member
-    /// axis the order already carries.
+    /// fault. Construct and Refine share a transform command and still keep
+    /// distinct sequences. An empty workpiece is bloom-less (`BaseVerify`,
+    /// aggregate verify): those steps are keyed on the reserved empty member
+    /// axis together with the stage.
     ///
     /// # Panics
     /// The mock-lane script could not be written.
@@ -277,7 +278,7 @@ impl ScenarioHarness {
         crate::script::write_lane_scripts(
             Path::new(&self.worktree_base),
             &workpiece.0,
-            stage_command(stage),
+            stage,
             scripts.iter().map(lower_lane_script),
         )
         .expect("the mock-lane script writes");
@@ -1305,16 +1306,6 @@ impl ScenarioHarness {
 
 fn nonces(orders: &[OutstandingOrder]) -> Vec<&str> {
     orders.iter().map(|order| order.nonce.as_str()).collect()
-}
-
-fn stage_command(stage: StageId) -> &'static str {
-    match stage {
-        StageId::Verify => aether_bloomery::VERIFY_MEMBER_COMMAND,
-        StageId::AggregateVerify => aether_bloomery::VERIFY_CHECK_COMMAND,
-        StageId::BaseVerify => aether_bloomery::VERIFY_BASE_COMMAND,
-        StageId::AggregateReview => aether_bloomery::REVIEW_CRITIC_COMMAND,
-        _ => aether_bloomery::CONSTRUCT_IMPLEMENT_COMMAND,
-    }
 }
 
 fn lower_lane_script(script: &LaneScript) -> LaneMode {
