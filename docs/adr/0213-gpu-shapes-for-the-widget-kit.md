@@ -1,6 +1,6 @@
 # ADR-0213: GPU shapes for the widget kit
 
-- **Status:** Proposed
+- **Status:** Accepted (ratified by owner 2026-09-06)
 - **Date:** 2026-09-05
 
 ## Context
