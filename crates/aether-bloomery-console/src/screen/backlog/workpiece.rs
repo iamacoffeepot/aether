@@ -30,6 +30,8 @@ pub enum RowKey {
     Identity,
     Digest(DigestHex),
     Bloom(DigestHex),
+    Surface(u16),
+    Approval(u16),
     Other(u16),
 }
 
@@ -202,7 +204,7 @@ fn workpiece_lines(id: &str, store: &Store) -> Vec<Line> {
             lines.push(label(RowKey::Other(3), format!("  {line}")));
         }
         for (index, glob) in current.declared_surface.iter().enumerate() {
-            lines.push(label(RowKey::Other(10 + u16::try_from(index).unwrap_or(u16::MAX)), format!("surface  {glob}")));
+            lines.push(label(RowKey::Surface(u16::try_from(index).unwrap_or(u16::MAX)), format!("surface  {glob}")));
         }
     }
 
@@ -210,7 +212,7 @@ fn workpiece_lines(id: &str, store: &Store) -> Vec<Line> {
         lines.push(label(RowKey::Other(4), "standing  none".to_owned()));
     } else {
         for (index, approval) in show.approvals.iter().enumerate() {
-            lines.push(label(RowKey::Other(20 + u16::try_from(index).unwrap_or(u16::MAX)), standing_line(approval)));
+            lines.push(label(RowKey::Approval(u16::try_from(index).unwrap_or(u16::MAX)), standing_line(approval)));
         }
     }
 
@@ -254,12 +256,20 @@ fn digest_line(key: RowKey, title: &str, digest: DigestHex) -> Line {
 
 #[cfg(test)]
 mod tests {
-    use super::Workpiece;
+    use super::{RowKey, Workpiece};
+    use crate::dto::{BloomView, CommissionShowView, DigestHex, MemberView, ScopeRevisionView, ViewDocument};
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
     use crate::shell::Shell;
+    use crate::store::Store;
     use crate::warroom::Focus;
-    use crossterm::event::KeyEvent;
+    use crossterm::event::{KeyCode, KeyEvent};
+    use serde_json::json;
+    use std::time::Duration;
+
+    fn digest(byte: u8) -> DigestHex {
+        DigestHex::from_bytes([byte; 32])
+    }
 
     #[test]
     fn workpiece_footer_keys_are_handled() {
@@ -267,5 +277,60 @@ mod tests {
         assert_footer_honest(Workpiece::key_hints(), |code| {
             Shell::probe(nav.clone()).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
+    }
+
+    #[test]
+    fn eleven_surfaces_do_not_trap_keyboard_on_the_first_approval() {
+        // The plausible bug: surface index 10 and approval index 0 both use
+        // Other(20), so Cursor::select_next finds the last surface again and
+        // never reaches standing or sealed-into.
+        let bloom = digest(0xbb);
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_commission(
+            "wp-wide".to_owned(),
+            Ok(CommissionShowView {
+                id: "wp-wide".to_owned(),
+                intent: digest(1),
+                status: "open".to_owned(),
+                current: Some(ScopeRevisionView {
+                    workpiece: "wp-wide".to_owned(),
+                    declared_surface: (0..11).map(|index| format!("crates/aether-{index}/**")).collect(),
+                    ..ScopeRevisionView::default()
+                }),
+                approvals: vec![json!({"AuthorSignature": {"signer": "owner"}})],
+                ..CommissionShowView::default()
+            }),
+        );
+        store.apply_view(Ok(ViewDocument {
+            blooms: vec![BloomView {
+                id: bloom,
+                members: vec![MemberView { workpiece: "wp-wide".to_owned(), ..MemberView::default() }],
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        }));
+
+        let mut workpiece = Workpiece::new("wp-wide");
+        workpiece.reseat(&store);
+
+        let mut keys = Vec::new();
+        for _ in 0..64 {
+            let Some(key) = workpiece.selected_key().cloned() else {
+                break;
+            };
+            if keys.last() == Some(&key) {
+                break;
+            }
+            keys.push(key);
+            assert_eq!(workpiece.handle_key(KeyEvent::from(KeyCode::Char('j')), &store), Outcome::Handled);
+        }
+
+        assert_eq!(keys.iter().filter(|key| matches!(key, RowKey::Surface(_))).count(), 11, "{keys:?}");
+        assert_eq!(keys.iter().filter(|key| matches!(key, RowKey::Approval(_))).count(), 1, "{keys:?}");
+        assert!(keys.iter().any(|key| matches!(key, RowKey::Bloom(id) if *id == bloom)), "{keys:?}");
+        assert_eq!(
+            workpiece.handle_key(KeyEvent::from(KeyCode::Enter), &store),
+            Outcome::Push(Nav::focus(Focus::bloom(bloom)))
+        );
     }
 }
