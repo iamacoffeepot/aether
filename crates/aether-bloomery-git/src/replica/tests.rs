@@ -7,11 +7,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use tempfile::TempDir;
 
-use super::{GitSourceReplica, ReplicaError, SourceReplica, published_refspecs};
+use super::{GitSourceReplica, ReplicaError, ReplicaTokenSource, SourceReplica, published_refspecs};
 use crate::command::GitCommandError;
 use crate::mainline::MainlineRef;
 
@@ -65,12 +66,68 @@ fn a_replica_push_sends_basic_x_access_token_and_keeps_the_token_out_of_argv() {
     const TOKEN: &str = "secret-token";
     let replica =
         GitSourceReplica::new("/authority", "https://github.com/octo/shadow.git", MainlineRef::default(), TOKEN);
-    let argv = replica.push_invocation_args(&published_refspecs(&MainlineRef::default(), ["refs/heads/main"]));
+    let argv = replica
+        .push_invocation_args(&published_refspecs(&MainlineRef::default(), ["refs/heads/main"]))
+        .expect("a static PAT resolves");
 
     assert!(argv.iter().all(|arg| !arg.contains(TOKEN)), "the raw token must stay out of argv: {argv:?}");
     let header =
         argv.iter().find(|arg| arg.starts_with("http.extraHeader=")).expect("the token rides http.extraHeader");
     assert_eq!(header, "http.extraHeader=Authorization: Basic eC1hY2Nlc3MtdG9rZW46c2VjcmV0LXRva2Vu");
+}
+
+#[test]
+fn a_replica_push_rereads_a_rotating_token_source_per_publish() {
+    // Tripwire: App installation tokens expire. Freezing the bearer at
+    // construction would keep sending the first (or empty) value after rotation.
+    // The replica must resolve the current token on every push without being
+    // rebuilt, so redrive state survives (#5586).
+    const FIRST: &str = "token-one";
+    const SECOND: &str = "token-two";
+    let source = Arc::new(MutableReplicaToken { value: Mutex::new(FIRST.to_owned()) });
+    let replica = GitSourceReplica::with_token_source(
+        "/authority",
+        "https://github.com/octo/shadow.git",
+        MainlineRef::default(),
+        source.clone(),
+    );
+    let specs = published_refspecs(&MainlineRef::default(), ["refs/heads/main"]);
+
+    let first = replica.push_invocation_args(&specs).expect("first resolve");
+    *source.value.lock().expect("token") = SECOND.to_owned();
+    let second = replica.push_invocation_args(&specs).expect("rotated resolve");
+
+    let header = |argv: &[String]| {
+        argv.iter().find(|arg| arg.starts_with("http.extraHeader=")).cloned().expect("the token rides http.extraHeader")
+    };
+    let first_header = header(&first);
+    let second_header = header(&second);
+    assert_ne!(first_header, second_header, "a rotated token must change the extraHeader");
+    assert!(first.iter().all(|arg| !arg.contains(FIRST) && !arg.contains(SECOND)), "raw tokens stay out of argv: {first:?}");
+    assert!(
+        second.iter().all(|arg| !arg.contains(FIRST) && !arg.contains(SECOND)),
+        "raw tokens stay out of argv: {second:?}"
+    );
+}
+
+#[test]
+fn a_token_source_failure_fails_closed_without_an_unauthenticated_push() {
+    // Minting failed: do not omit the header and push anyway, and do not put a
+    // planted secret into the error.
+    const SECRET: &str = "gho_should-not-leak";
+    let replica = GitSourceReplica::with_token_source(
+        "/authority",
+        "https://github.com/octo/shadow.git",
+        MainlineRef::default(),
+        Arc::new(FailingReplicaToken),
+    );
+    let error = replica
+        .push_invocation_args(&published_refspecs(&MainlineRef::default(), ["refs/heads/main"]))
+        .expect_err("a minting failure must not assemble an unauthenticated push");
+    assert!(matches!(error, ReplicaError::Deterministic(_)), "auth minting fails closed, got {error}");
+    let text = error.to_string();
+    assert!(!text.contains(SECRET), "the error must not carry a token: {text}");
+    assert!(text.contains("mint"), "{text}");
 }
 
 #[test]
@@ -336,4 +393,22 @@ fn git_stdout(repo: &Path, args: &[&str]) -> String {
     let output = Command::new("git").current_dir(repo).args(args).output().expect("git");
     assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+struct MutableReplicaToken {
+    value: Mutex<String>,
+}
+
+impl ReplicaTokenSource for MutableReplicaToken {
+    fn token(&self) -> Result<String, ReplicaError> {
+        Ok(self.value.lock().expect("token").clone())
+    }
+}
+
+struct FailingReplicaToken;
+
+impl ReplicaTokenSource for FailingReplicaToken {
+    fn token(&self) -> Result<String, ReplicaError> {
+        Err(ReplicaError::Deterministic("source replica token mint failed".into()))
+    }
 }

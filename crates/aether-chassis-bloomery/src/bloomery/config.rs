@@ -17,7 +17,9 @@ use aether_bloomery::Digest;
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 use aether_bloomery::SharedCorrespondence;
 #[cfg(feature = "github")]
-use aether_bloomery_github::{AppTokenSource, GithubConfig, GithubError, MainlineRef, ReqwestGithub};
+use aether_bloomery_github::{
+    AppTokenSource, GithubConfig, GithubError, MainlineRef, ReqwestGithub, StaticTokenSource, TokenSource,
+};
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 use aether_bloomery_github::{GitSource, GithubLanding, testing::FakeGithub};
 use aether_substrate::config::ConfigError;
@@ -707,6 +709,30 @@ impl GithubConnectionConfig {
         self.app_id != 0 && !self.app_private_key_path.is_empty() && self.app_installation_id != 0
     }
 
+    /// The credential source REST clients and the source replica resolve a
+    /// bearer from per request. App-auth mints an installation token; otherwise
+    /// the static PAT. A missing or malformed App key is a boot fault, never a
+    /// silent fallback to an empty PAT.
+    pub fn token_source(&self) -> Result<Arc<dyn TokenSource>, GithubError> {
+        if self.app_auth_configured() {
+            let pem = fs::read(&self.app_private_key_path).map_err(|error| {
+                GithubError::Transport(format!(
+                    "reading GitHub App private key '{}': {error}",
+                    self.app_private_key_path
+                ))
+            })?;
+            Ok(Arc::new(AppTokenSource::new(
+                self.app_id,
+                self.app_installation_id,
+                &pem,
+                self.app_token_skew_secs,
+                self.api_base.clone(),
+            )?))
+        } else {
+            Ok(Arc::new(StaticTokenSource::new(self.token.clone())))
+        }
+    }
+
     /// Build the client the port shells authenticate with: a minted
     /// installation-token client when App-auth is configured, else the
     /// backward-compatible static-PAT one.
@@ -717,24 +743,11 @@ impl GithubConnectionConfig {
     /// minter. A missing or malformed key is a boot fault, never a silent
     /// fallback to the ambient static token.
     pub fn connect_client(&self) -> Result<ReqwestGithub, GithubError> {
-        if self.app_auth_configured() {
-            let pem = fs::read(&self.app_private_key_path).map_err(|error| {
-                GithubError::Transport(format!(
-                    "reading GitHub App private key '{}': {error}",
-                    self.app_private_key_path
-                ))
-            })?;
-            let source = Arc::new(AppTokenSource::new(
-                self.app_id,
-                self.app_installation_id,
-                &pem,
-                self.app_token_skew_secs,
-                self.api_base.clone(),
-            )?);
-            ReqwestGithub::with_token_source(source, self.api_base.clone(), self.to_github_config().repo_path())
-        } else {
-            ReqwestGithub::new(&self.to_github_config())
-        }
+        ReqwestGithub::with_token_source(
+            self.token_source()?,
+            self.api_base.clone(),
+            self.to_github_config().repo_path(),
+        )
     }
 
     #[cfg(all(feature = "github", any(test, feature = "testing")))]
@@ -937,6 +950,12 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         let path = key_file.path().to_str().expect("the temp path is UTF-8").to_owned();
         let with_key = configured(12345, &path, 42);
         assert!(with_key.connect_client().is_ok(), "App path builds a client from a present key");
+
+        // The replica shares this construction: App-only must not fall through
+        // to an empty static PAT (#5586).
+        assert!(GithubConnectionConfig::default().token_source().is_ok(), "static-PAT path builds a token source");
+        assert!(missing.token_source().is_err(), "App path reads the key for the replica too");
+        assert!(with_key.token_source().is_ok(), "App path builds a token source from a present key");
     }
 
     // Tripwire: the GitHub poll cadence is computed from the hourly allowance,
