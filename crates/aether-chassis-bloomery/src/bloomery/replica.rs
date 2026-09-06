@@ -145,11 +145,11 @@ mod tests {
 
     #[test]
     fn an_empty_or_failed_host_token_source_fails_closed() {
+        const SECRET: &str = "gho_should-not-leak";
         let empty = GithubReplicaToken(Arc::new(StaticTokenSource::new(String::new())));
         let empty_error = empty.token().expect_err("empty PAT must not succeed as a replica credential");
         assert!(empty_error.to_string().contains("no credential"), "{empty_error}");
 
-        const SECRET: &str = "gho_should-not-leak";
         let boom = GithubReplicaToken(Arc::new(BoomToken { secret: SECRET }));
         let boom_error = boom.token().expect_err("minting failure fails closed");
         let text = boom_error.to_string();
