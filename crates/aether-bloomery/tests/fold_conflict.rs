@@ -79,14 +79,11 @@ fn pass_reconcile(bloom: BloomId, name: &str, key: &str, captured: CandidateRef)
 }
 
 fn grant_reconcile(bloom: BloomId, name: &str, attempts: u32) -> Event {
-    event(
-        "grant",
-        Fact::GrantAttempts { bloom, workpiece: workpiece(name), stage: StageId::Reconcile, attempts },
-    )
+    event("grant", Fact::GrantAttempts { bloom, workpiece: workpiece(name), stage: StageId::Reconcile, attempts })
 }
 
-fn exhaust_reconcile(snapshot: Snapshot, bloom: BloomId, name: &str) -> Snapshot {
-    let (retried, decided) = step(&snapshot, &fail_reconcile(bloom, name, "reconcile-fail-1"));
+fn exhaust_reconcile(snapshot: &Snapshot, bloom: BloomId, name: &str) -> Snapshot {
+    let (retried, decided) = step(snapshot, &fail_reconcile(bloom, name, "reconcile-fail-1"));
     assert!(matches!(decided.outcome, Outcome::AttemptRetried { stage: StageId::Reconcile, attempt: 2, .. }));
     let (wedged, decided) = step(&retried, &fail_reconcile(bloom, name, "reconcile-fail-2"));
     assert!(matches!(decided.outcome, Outcome::AttemptWedged { stage: StageId::Reconcile, .. }));
@@ -464,7 +461,7 @@ fn a_grant_after_exhausted_base_assembly_still_returns_to_construct() {
             },
         ),
     );
-    let snapshot = exhaust_reconcile(snapshot, bloom, "beta");
+    let snapshot = exhaust_reconcile(&snapshot, bloom, "beta");
 
     let (granted, decided) = step(&snapshot, &grant_reconcile(bloom, "beta", 2));
     assert!(
@@ -513,7 +510,7 @@ fn a_grant_after_exhausted_fold_reconcile_still_returns_to_verify() {
             },
         ),
     );
-    let snapshot = exhaust_reconcile(snapshot, bloom, "beta");
+    let snapshot = exhaust_reconcile(&snapshot, bloom, "beta");
 
     let (granted, decided) = step(&snapshot, &grant_reconcile(bloom, "beta", 2));
     assert!(
