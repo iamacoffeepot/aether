@@ -9,17 +9,18 @@ use std::sync::{Arc, Mutex};
 use aether_kinds::{QuadScale, QuadSpace};
 use aether_substrate::render::{
     CompositeBlend, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw, MaterialPassDraw,
-    MaterialPassRecord, MaterialPipelines, OverlayDraw, Pipeline, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE,
-    QUAD_VERTICES_PER_QUAD, QUAD_VERTICES_PER_TRIANGLE, QuadPipeline, Targets, TextureBindings, build_main_pipeline,
-    build_material_pipelines, build_quad_pipeline, build_texture_bindings, push_coverage_params,
-    push_material_rect_vertices, push_screen_quad_vertices, push_screen_triangle_vertices, push_textured_params,
-    push_world_quad_vertices, record_material_pass, record_quad_overlay_pass,
+    MaterialPassRecord, MaterialPipelines, OverlayDraw, OverlaySource, Pipeline, QUAD_VERTEX_BUFFER_BYTES,
+    QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD, QUAD_VERTICES_PER_TRIANGLE, QuadPipeline, SHAPE_VERTEX_STRIDE,
+    SHAPE_VERTICES_PER_SHAPE, ShapeParams, Targets, TextureBindings, build_main_pipeline, build_material_pipelines,
+    build_quad_pipeline, build_texture_bindings, push_coverage_params, push_material_rect_vertices,
+    push_screen_quad_vertices, push_screen_shape_vertices, push_screen_triangle_vertices, push_textured_params,
+    push_world_quad_vertices, push_world_shape_vertices, record_material_pass, record_quad_overlay_pass,
 };
 
 use super::material::{MaterialBatch, accepts_coverage_texture};
 use super::quad::{OverlayGeometry, QuadBatch};
 use super::texture::TextureRegistry;
-use crate::{DrawTexturedQuads, QuadBlend};
+use crate::{DrawTexturedQuads, QuadBlend, Shape};
 
 /// The mail vocabulary's blend, as the record layer's selector. Two
 /// enums rather than one because the substrate's render module owns no
@@ -28,6 +29,33 @@ fn composite_blend(blend: QuadBlend) -> CompositeBlend {
     match blend {
         QuadBlend::Straight => CompositeBlend::Straight,
         QuadBlend::Premultiplied => CompositeBlend::Premultiplied,
+    }
+}
+
+/// The world quad path's scale factor for a `QuadSpace::World` batch:
+/// `k < 0` selects Pixels mode (the shader uses `clip.w` for constant
+/// on-screen size); `k > 0` is the Distance-mode reference distance
+/// (the label shrinks with depth, holding its size at that distance).
+fn world_scale_factor(scale: &QuadScale) -> f32 {
+    match scale {
+        QuadScale::Pixels => -1.0_f32,
+        QuadScale::Distance { reference_distance } => *reference_distance,
+    }
+}
+
+/// A mail-vocabulary [`Shape`] as the vertex writer's parameters: each
+/// absent part becomes a zero-alpha colour with a zero width, which the
+/// fragment stage composes nothing for.
+fn shape_params(shape: &Shape) -> ShapeParams {
+    ShapeParams {
+        rect: [shape.x, shape.y, shape.width, shape.height],
+        corner_radius: shape.corner_radius,
+        fill: shape.fill.map_or([0.0; 4], aether_math::Rgba::to_array),
+        stroke_width: shape.stroke.as_ref().map_or(0.0, |stroke| stroke.width_pixels),
+        stroke: shape.stroke.as_ref().map_or([0.0; 4], |stroke| stroke.color.to_array()),
+        shadow_blur: shape.shadow.as_ref().map_or(0.0, |shadow| shadow.blur_pixels),
+        shadow_offset: shape.shadow.as_ref().map_or([0.0; 2], |shadow| shadow.offset),
+        shadow: shape.shadow.as_ref().map_or([0.0; 4], |shadow| shadow.color.to_array()),
     }
 }
 
@@ -82,8 +110,11 @@ pub(super) fn record_overlay_batches(
 
     // First pass: realize / re-upload every texture the frame
     // references (Screen and World batches share the same atlas),
-    // mutably borrowing the registry.
+    // mutably borrowing the registry. A shape batch samples nothing.
     for batch in batches {
+        if matches!(batch.geometry, OverlayGeometry::Shapes { .. }) {
+            continue;
+        }
         if let Some(entry) = registry.entries.get_mut(&batch.texture_id) {
             entry.ensure_realized(&gpu.device, &gpu.queue, &gpu.texture_bindings);
         } else {
@@ -97,9 +128,36 @@ pub(super) fn record_overlay_batches(
 
     // Second pass: expand quads into vertices and build the draw
     // list, immutably borrowing each realized texture's bind group.
+    // Shapes expand into their own buffer (ADR-0213) but take their draw
+    // position in the one list, so painter order interleaves the two.
     let mut vertex_bytes = Vec::new();
+    let mut shape_vertex_bytes = Vec::new();
     let mut draws: Vec<OverlayDraw<'_>> = Vec::new();
     for batch in batches {
+        let clip = batch.clip.as_ref().map(|clip| [clip.x, clip.y, clip.width, clip.height]);
+        if let OverlayGeometry::Shapes { space, shapes } = &batch.geometry {
+            #[allow(clippy::cast_possible_truncation)]
+            let first_vertex = (shape_vertex_bytes.len() / SHAPE_VERTEX_STRIDE as usize) as u32;
+            match space {
+                QuadSpace::Screen => {
+                    for shape in shapes {
+                        push_screen_shape_vertices(&mut shape_vertex_bytes, &shape_params(shape));
+                    }
+                }
+                QuadSpace::World { anchor, scale } => {
+                    let k = world_scale_factor(scale);
+                    for shape in shapes {
+                        push_world_shape_vertices(&mut shape_vertex_bytes, *anchor, &shape_params(shape), k);
+                    }
+                }
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let vertex_count = (shapes.len() * SHAPE_VERTICES_PER_SHAPE) as u32;
+            if vertex_count > 0 {
+                draws.push(OverlayDraw { source: OverlaySource::Shapes, first_vertex, vertex_count, clip });
+            }
+            continue;
+        }
         let Some(entry) = registry.entries.get(&batch.texture_id) else {
             continue;
         };
@@ -133,14 +191,7 @@ pub(super) fn record_overlay_batches(
                 quads.len() * QUAD_VERTICES_PER_QUAD
             }
             OverlayGeometry::Quads { space: QuadSpace::World { anchor, scale }, quads } => {
-                // k < 0 => Pixels mode (shader uses clip.w for
-                // constant on-screen size). k > 0 => Distance mode
-                // (constant k, label shrinks with depth; holds its
-                // size at reference_distance).
-                let k = match scale {
-                    QuadScale::Pixels => -1.0_f32,
-                    QuadScale::Distance { reference_distance } => *reference_distance,
-                };
+                let k = world_scale_factor(scale);
                 for quad in quads {
                     push_world_quad_vertices(
                         &mut vertex_bytes,
@@ -164,6 +215,7 @@ pub(super) fn record_overlay_batches(
                 }
                 triangles.len() * QUAD_VERTICES_PER_TRIANGLE
             }
+            OverlayGeometry::Shapes { .. } => unreachable!("shape batches are expanded above"),
         };
         #[allow(clippy::cast_possible_truncation)]
         let vertex_count = vertices as u32;
@@ -171,11 +223,10 @@ pub(super) fn record_overlay_batches(
             continue;
         }
         draws.push(OverlayDraw {
-            blend: composite_blend(batch.blend),
-            bind_group: realized.bind_group(),
+            source: OverlaySource::Textured { bind_group: realized.bind_group(), blend: composite_blend(batch.blend) },
             first_vertex,
             vertex_count,
-            clip: batch.clip.as_ref().map(|clip| [clip.x, clip.y, clip.width, clip.height]),
+            clip,
         });
     }
 
@@ -185,6 +236,7 @@ pub(super) fn record_overlay_batches(
         &gpu.quad_pipeline,
         targets,
         &vertex_bytes,
+        &shape_vertex_bytes,
         &draws,
         viewport,
         view_proj,
@@ -195,10 +247,10 @@ pub(super) fn record_overlay_batches(
         if vertex_bytes.len() <= QUAD_VERTEX_BUFFER_BYTES {
             for batch in batches {
                 // The sink's element is `DrawTexturedQuads`, so a
-                // screen-triangle batch has no shape to report here — it
-                // carries neither a quad list nor a projection. The
-                // snapshot is a quad-batch view of the committed overlay,
-                // and the pixels are what a triangle scenario asserts on.
+                // screen-triangle or shape batch has no quad list to
+                // report here. The snapshot is a quad-batch view of the
+                // committed overlay, and the pixels are what a triangle or
+                // shape scenario asserts on.
                 let OverlayGeometry::Quads { space, quads } = &batch.geometry else {
                     continue;
                 };

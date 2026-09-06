@@ -121,9 +121,10 @@ pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
 
 use super::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyGeometry,
-    DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawSolidQuads, DrawTexturedQuads,
-    DrawTriangle, Frame, Occluded, PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult,
-    ProgramTimings, ProgramTimingsResult, RenderCapability, UpdateGeometry, UpdateTexture, ViewProjection,
+    DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawShapes, DrawSolidQuads,
+    DrawTexturedQuads, DrawTriangle, Frame, Occluded, PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister,
+    ProgramRegisterResult, ProgramTimings, ProgramTimingsResult, RenderCapability, UpdateGeometry, UpdateTexture,
+    ViewProjection,
 };
 
 /// Wedge-to-`Err` cap for a parked capture (ADR-0161): if a capture's
@@ -996,6 +997,18 @@ impl NativeActor for RenderCapability {
         state.quad_frame.push(batch);
     }
 
+    /// `DrawShapes` (ADR-0213), on the owned `quad_frame` — rounded,
+    /// stroked, shadowed boxes evaluated as a distance field on the overlay
+    /// pass, at the same painter position as the quad batches.
+    #[handler::single]
+    fn on_draw_shapes(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawShapes) {
+        state.observe(<DrawShapes as Kind>::ID);
+        if state.warn_drop_if_unusable("draw_shapes") {
+            return;
+        }
+        state.quad_frame.push(QuadBatch::shapes(mail));
+    }
+
     /// `DrawMaterialTextured` (ADR-0140), on the owned material stream.
     #[handler::single]
     fn on_draw_material_textured(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialTextured) {
@@ -1262,7 +1275,7 @@ impl NativeActor for RenderCapability {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{SolidQuad, TextureFormat, TextureSampling, TextureUsage};
+    use super::super::{Shape, SolidQuad, TextureFormat, TextureSampling, TextureUsage};
     use super::quad::OverlayGeometry;
     use super::texture::StagedTexture;
     use super::*;
@@ -1703,5 +1716,52 @@ mod tests {
         let white =
             state.textures.entries.get(&WHITE_TEXTURE_ID).expect("white texture must be lazily inserted on first send");
         assert_eq!(white.format, TextureFormat::Rgba8, "white texture must remain RGBA8");
+    }
+
+    /// ADR-0213: `draw_shapes` accumulates into `quad_frame` as shape
+    /// geometry — the one accumulator, so painter order interleaves with
+    /// the quad batches — and records its kind name in `observed_kinds`,
+    /// which is what a harness's `count_observed` reads. Without a GPU.
+    #[test]
+    fn draw_shapes_accumulates_in_painter_order_and_observed() {
+        let (mailer, _rx) = test_mailer_and_rx();
+        let observed = Arc::new(Mutex::new(Vec::<KindId>::new()));
+        let mut state = headless_state(&mailer);
+        state.observed_kinds = Some(Arc::clone(&observed));
+        let binding = ctx_binding(&mailer);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let quad = SolidQuad { x: 0.0, y: 0.0, width: 8.0, height: 8.0, color: Rgba::WHITE };
+        let shape = Shape {
+            x: 10.0,
+            y: 20.0,
+            width: 30.0,
+            height: 40.0,
+            corner_radius: 4.0,
+            fill: Some(Rgba::WHITE),
+            stroke: None,
+            shadow: None,
+        };
+
+        RenderCapability::on_draw_solid_quads(
+            &mut state,
+            &mut ctx,
+            DrawSolidQuads { space: QuadSpace::Screen, clip: None, quads: vec![quad] },
+        );
+        RenderCapability::on_draw_shapes(
+            &mut state,
+            &mut ctx,
+            DrawShapes { space: QuadSpace::Screen, clip: None, shapes: vec![shape.clone()] },
+        );
+
+        let seen = observed.lock().expect("observed_kinds mutex is not poisoned").clone();
+        assert!(
+            seen.contains(&<DrawShapes as Kind>::ID),
+            "draw_shapes handler should push its kind; observed: {seen:?}"
+        );
+        assert_eq!(state.quad_frame.len(), 2, "both batches share the one overlay accumulator");
+        let OverlayGeometry::Shapes { shapes, .. } = &state.quad_frame[1].geometry else {
+            panic!("a shape submission must accumulate as shape geometry, after the quad sent before it");
+        };
+        assert_eq!(shapes.as_slice(), &[shape]);
     }
 }
