@@ -26,8 +26,10 @@ use serde::{Deserialize, Serialize};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId};
 use crate::ledger::{SeatDispatch, priced_micro_usd};
-use crate::reduce::{Decision, Decisions, Event, Fact};
-use crate::values::{DispatchKey, EvidenceKind, ReasoningEffort, ResolvedConfigs, ResolvedModel, StudyRecord};
+use crate::reduce::{Decision, Decisions, Event, Fact, Outcome};
+use crate::values::{
+    BloomSpec, DispatchKey, EvidenceKind, ReasoningEffort, ResolvedConfigs, ResolvedModel, StudyRecord,
+};
 
 /// How many timeline spans one bloom read returns before it truncates.
 pub const TIMELINE_SPAN_CAP: u64 = 256;
@@ -241,6 +243,12 @@ impl MetricsLedger {
     /// (`recorded_unix_millis`); `None` is a pre-column row and is marked
     /// reconstructed rather than given an invented time.
     ///
+    /// Bloom rollups initialize only from an admitted [`Fact::Seal`],
+    /// [`Fact::GraphSeal`], or [`Fact::Supersede`] — the same set
+    /// [`Snapshot::apply`](crate::reduce::Snapshot::apply) registers. A refused
+    /// or duplicate seal must not mint a ghost row or overwrite the sequence
+    /// that actually admitted the bloom.
+    ///
     /// The seat is recomputed from the sealed catalog profile with the member's
     /// override resolved over it.
     pub fn observe(
@@ -254,12 +262,10 @@ impl MetricsLedger {
         if sequence > self.through_sequence {
             self.through_sequence = sequence;
         }
-        if let Fact::Seal(spec) = &event.fact {
-            let bloom = spec.id();
-            let members = u64::try_from(spec.members().len()).unwrap_or(u64::MAX);
+        if let Some((spec, bloom)) = admitted_bloom(&event.fact, &decisions.outcome) {
             let acc = self.blooms.entry(bloom).or_default();
             acc.seal_sequence = sequence;
-            acc.members = members;
+            acc.members = u64::try_from(spec.members().len()).unwrap_or(u64::MAX);
         }
         for effect in &decisions.effects {
             self.observe_effect(sequence, effect, configs, envelope);
@@ -549,6 +555,23 @@ struct SeatKey {
 impl SeatKey {
     fn of(agent: &ResolvedModel, stage: StageId) -> Self {
         Self { harness: agent.harness.as_str(), model: agent.model.clone(), effort: agent.effort, stage }
+    }
+}
+
+/// The spec a successful seal or supersede just admitted, so a graph or
+/// successor bloom is counted with its members and journal sequence.
+///
+/// Refused and duplicate outcomes are `None`: they still advance
+/// [`MetricsLedger::through_sequence`] because the row was journaled, but they
+/// must not mint or clobber a bloom rollup.
+fn admitted_bloom<'a>(fact: &'a Fact, outcome: &Outcome) -> Option<(&'a BloomSpec, BloomId)> {
+    match (fact, outcome) {
+        (Fact::Seal(spec), Outcome::Sealed(id)) => Some((spec, *id)),
+        (Fact::Supersede { successor, .. }, Outcome::Superseded { successor: id, .. }) => Some((successor, *id)),
+        (Fact::GraphSeal { spec, .. }, Outcome::Sealed(id) | Outcome::Superseded { successor: id, .. }) => {
+            Some((spec, *id))
+        }
+        _ => None,
     }
 }
 
