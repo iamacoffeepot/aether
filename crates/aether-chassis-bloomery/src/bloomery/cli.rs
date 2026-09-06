@@ -40,6 +40,8 @@ pub struct BloomeryCli {
 
     /// `--artifacts-root` shadows `AETHER_ARTIFACTS_ROOT` — the eviction-free
     /// artifacts content-store root (unset → the computed data-dir default).
+    /// `--github-artifacts-root` is the same knob; both spellings resolve to
+    /// one root.
     #[command(flatten)]
     pub artifacts: ArtifactsOverlay,
 
@@ -116,5 +118,28 @@ mod tests {
         };
         assert!(!cli.describe, "a bare invocation must not be --describe");
         assert!(!cli.doctor, "a bare invocation must not be --doctor");
+    }
+
+    #[test]
+    fn artifacts_root_spellings_fill_separate_overlays() {
+        // Resolve collapses these onto one root. The flags must keep filling
+        // distinct overlays, or a future clap alias would hide a split that
+        // `BloomeryEnv::resolve` is what unifies.
+        let artifacts = match BloomeryCli::try_parse_from(["bloomery", "--artifacts-root", "/from-artifacts"]) {
+            Ok(cli) => cli,
+            Err(error) => panic!("--artifacts-root must parse: {error}"),
+        };
+        assert_eq!(artifacts.artifacts.root.as_deref(), Some("/from-artifacts"));
+        assert!(
+            artifacts.coordinator.artifacts_root.is_none(),
+            "--artifacts-root must not also fill the coordinator overlay"
+        );
+
+        let github = match BloomeryCli::try_parse_from(["bloomery", "--github-artifacts-root", "/from-github"]) {
+            Ok(cli) => cli,
+            Err(error) => panic!("--github-artifacts-root must parse: {error}"),
+        };
+        assert_eq!(github.coordinator.artifacts_root.as_deref(), Some("/from-github"));
+        assert!(github.artifacts.root.is_none(), "--github-artifacts-root must not also fill the artifacts overlay");
     }
 }
