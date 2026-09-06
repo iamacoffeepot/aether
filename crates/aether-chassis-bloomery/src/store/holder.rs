@@ -216,13 +216,19 @@ fn signal_zero(pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
     use std::path::Path;
     use std::process::{Child, Command, Stdio};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use std::{env, fs, process, thread};
 
     use rusqlite::Connection;
     use tempfile::TempDir;
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::subscriber::with_default;
+    use tracing::{Event as TracingEvent, Metadata, Subscriber};
 
     use super::{HOLDER_TABLE, JournalHolderError, claim, read_claim, release, write_claim};
     use crate::store::SqliteStore;
@@ -232,9 +238,10 @@ mod tests {
     }
 
     /// A WAL journal with no holder row — the production file after `connect`
-    /// and before `claim`. `open_as_holder` sets WAL before the busy timeout,
-    /// so two processes converting a rollback file race `database is locked`
-    /// and never reach the claim.
+    /// and before `claim`. Preconfigures WAL so overlapping `open_as_holder`
+    /// calls are not converting a rollback journal. rusqlite already installs a
+    /// busy timeout on `Connection::open`; this helper does not identify which
+    /// open phase can return `database is locked`.
     fn journal_with_wal(dir: &TempDir) -> String {
         let path = journal_path(dir);
         let conn = Connection::open(&path).expect("the journal opens");
@@ -341,6 +348,37 @@ mod tests {
     }
 
     #[test]
+    fn a_connect_fault_keeps_the_sqlite_error_and_names_its_phase() {
+        // Tripwire: connect, claim, and migrate used to share one Sqlite Display,
+        // so a failed open could not name the phase. An unopenable path must fail
+        // in connect, keep the original rusqlite error, and emit phase,
+        // extended_code, and elapsed_millis.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().to_str().expect("a temp path is utf-8");
+        let events = Arc::new(RecordedOpenFailures::default());
+        let error = with_default(OpenFailureRecorder(Arc::clone(&events)), || {
+            SqliteStore::open_as_holder(path).err().expect("a directory is not a journal")
+        });
+        let JournalHolderError::Sqlite(sqlite) = &error else {
+            panic!("connect must surface the rusqlite error, not Held: {error}");
+        };
+        let direct = Connection::open(path).err().expect("a directory does not open");
+        assert_eq!(format!("{sqlite}"), format!("{direct}"), "the returned sqlite error is unchanged");
+        assert_eq!(error.to_string(), format!("journal holder claim: {sqlite}"));
+
+        let captured = events.0.lock().expect("recorded open failures are not poisoned");
+        assert_eq!(captured.len(), 1, "one production diagnostic: {captured:?}");
+        let event = &captured[0];
+        assert_eq!(event.phase.as_deref(), Some("connect"), "{event:?}");
+        assert_eq!(
+            event.extended_code,
+            Some(i64::from(sqlite.sqlite_error().map_or(0, |failure| failure.extended_code))),
+            "{event:?}"
+        );
+        assert!(event.elapsed_millis.is_some(), "elapsed_millis is recorded: {event:?}");
+    }
+
+    #[test]
     fn two_live_coordinators_cannot_both_claim_an_absent_holder() {
         // Two coordinator processes overlapping `open_as_holder` on a WAL
         // journal that has no holder row. The file is converted to WAL before
@@ -391,7 +429,8 @@ mod tests {
         let result = test_env("AETHER_TEST_JOURNAL_HOLDER_RESULT").expect("the result path is set");
         publish_file(Path::new(&ready), b"ready");
         wait_for_file(Path::new(&go), Duration::from_secs(30));
-        match SqliteStore::open_as_holder(&path) {
+        let events = Arc::new(RecordedOpenFailures::default());
+        match with_default(OpenFailureRecorder(Arc::clone(&events)), || SqliteStore::open_as_holder(&path)) {
             Ok(_store) => {
                 publish_file(Path::new(&result), format!("claimed {}", process::id()));
                 hold_until_killed();
@@ -400,7 +439,7 @@ mod tests {
                 publish_file(Path::new(&result), format!("held {pid}"));
             }
             Err(error) => {
-                publish_file(Path::new(&result), format!("error {error}"));
+                publish_file(Path::new(&result), format!("error {}{}", error, captured_open_failure(&events, &error)));
                 panic!("claim child failed: {error}");
             }
         }
@@ -425,8 +464,8 @@ mod tests {
 
         let body_a = wait_for_file(&result_a, Duration::from_secs(30));
         let body_b = wait_for_file(&result_b, Duration::from_secs(30));
-        let ((ClaimChildResult::Claimed(claimed), ClaimChildResult::Held(held))
-        | (ClaimChildResult::Held(held), ClaimChildResult::Claimed(claimed))) =
+        let ((Some(ClaimChildResult::Claimed(claimed)), Some(ClaimChildResult::Held(held)))
+        | (Some(ClaimChildResult::Held(held)), Some(ClaimChildResult::Claimed(claimed)))) =
             (parse_claim_result(&body_a), parse_claim_result(&body_b))
         else {
             panic!(
@@ -487,15 +526,99 @@ mod tests {
         }
     }
 
-    fn parse_claim_result(body: &str) -> ClaimChildResult {
+    fn parse_claim_result(body: &str) -> Option<ClaimChildResult> {
         let body = body.trim();
         if let Some(pid) = body.strip_prefix("claimed ") {
-            return ClaimChildResult::Claimed(pid.parse().expect("a claimed pid"));
+            return pid.parse().ok().map(ClaimChildResult::Claimed);
         }
         if let Some(pid) = body.strip_prefix("held ") {
-            return ClaimChildResult::Held(pid.parse().expect("a held pid"));
+            return pid.parse().ok().map(ClaimChildResult::Held);
         }
-        panic!("unrecognised claim child result: {body}");
+        None
+    }
+
+    fn captured_open_failure(events: &Arc<RecordedOpenFailures>, error: &JournalHolderError) -> String {
+        let mut debug = format!("{error:?}");
+        debug.truncate(512);
+        let captured = events.0.lock().expect("recorded open failures are not poisoned");
+        match captured.last() {
+            Some(event) => format!(
+                " phase={} extended_code={} elapsed_millis={} debug={debug}",
+                event.phase.as_deref().unwrap_or("?"),
+                event.extended_code.map(|code| code.to_string()).unwrap_or_else(|| "?".to_owned()),
+                event.elapsed_millis.map(|millis| millis.to_string()).unwrap_or_else(|| "?".to_owned()),
+            ),
+            None => format!(" debug={debug}"),
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct CapturedOpenFailure {
+        phase: Option<String>,
+        extended_code: Option<i64>,
+        elapsed_millis: Option<u64>,
+    }
+
+    impl Visit for CapturedOpenFailure {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "phase" {
+                self.phase = Some(value.to_owned());
+            }
+        }
+
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            match field.name() {
+                "extended_code" => self.extended_code = Some(value),
+                "elapsed_millis" => self.elapsed_millis = Some(u64::try_from(value).unwrap_or(0)),
+                _ => {}
+            }
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            if field.name() == "elapsed_millis" {
+                self.elapsed_millis = Some(value);
+            }
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+            if field.name() == "phase" {
+                self.phase = Some(format!("{value:?}"));
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordedOpenFailures(Mutex<Vec<CapturedOpenFailure>>);
+
+    struct OpenFailureRecorder(Arc<RecordedOpenFailures>);
+
+    impl Subscriber for OpenFailureRecorder {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _attributes: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &TracingEvent<'_>) {
+            if *event.metadata().level() != tracing::Level::ERROR
+                || event.metadata().target() != "aether_chassis_bloomery::store"
+            {
+                return;
+            }
+            let mut captured = CapturedOpenFailure::default();
+            event.record(&mut captured);
+            self.0.0.lock().expect("recorded open failures are not poisoned").push(captured);
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
     }
 
     fn hold_until_killed() -> ! {

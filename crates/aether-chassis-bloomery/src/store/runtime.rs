@@ -39,7 +39,7 @@ use aether_bloomery::{
 use aether_data::wire::{from_bytes, to_vec};
 use aether_kinds::descriptors;
 use std::iter::repeat_n;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::bloomery::{ScopeRunRefusal, open_scope_run};
 
@@ -827,11 +827,29 @@ impl SqliteStore {
     /// A live holder already claimed the journal, or the claim could not be
     /// read or written.
     pub fn open_as_holder(path: &str) -> Result<Self, JournalHolderError> {
-        let mut conn = connect(path)?;
-        holder::claim(&conn, path)?;
-        migrate(&mut conn)?;
+        let started = Instant::now();
+        let mut conn = connect(path).inspect_err(|error| log_holder_open_sqlite_failure("connect", started, error))?;
+        holder::claim(&conn, path).inspect_err(|error| {
+            if let JournalHolderError::Sqlite(sqlite) = error {
+                log_holder_open_sqlite_failure("claim", started, sqlite);
+            }
+        })?;
+        migrate(&mut conn).inspect_err(|error| log_holder_open_sqlite_failure("migrate", started, error))?;
         Ok(Self { conn, holds_journal: true })
     }
+}
+
+/// Failure-only diagnostic for [`SqliteStore::open_as_holder`]: which step returned
+/// `SQLITE_*`, the extended code, and how long the open had been running. The
+/// returned error is unchanged — this is evidence, not a new API.
+fn log_holder_open_sqlite_failure(phase: &'static str, started: Instant, error: &rusqlite::Error) {
+    tracing::error!(
+        target: "aether_chassis_bloomery::store",
+        phase,
+        extended_code = error.sqlite_error().map_or(0, |sqlite| sqlite.extended_code),
+        elapsed_millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "journal holder open failed",
+    );
 }
 
 impl Drop for SqliteStore {
