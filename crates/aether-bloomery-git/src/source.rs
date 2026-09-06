@@ -54,6 +54,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::iter::once;
 use std::slice::from_ref;
 use std::sync::Arc;
 
@@ -651,8 +652,8 @@ impl<C: GitDataApi> GitSource<C> {
             ClaimHolder::Tombstoned => return Ok(Vec::new()),
         };
         let lineage = parse_bloom_lineage(&message)?;
-        let linked = holder == *predecessor
-            || (holder == *successor && lineage.iter().any(|bloom| bloom == predecessor));
+        let linked =
+            holder == *predecessor || (holder == *successor && lineage.iter().any(|bloom| bloom == predecessor));
         if !linked {
             return Ok(Vec::new());
         }
@@ -668,7 +669,7 @@ impl<C: GitDataApi> GitSource<C> {
         predecessor: &BloomId,
         predecessor_sha: &str,
     ) -> Result<Vec<BloomId>, SourceError> {
-        Ok(std::iter::once(*predecessor)
+        Ok(once(*predecessor)
             .chain(parse_bloom_lineage(&self.client.get_commit(predecessor_sha)?.message)?)
             .take(LINEAGE_CAP)
             .collect())
