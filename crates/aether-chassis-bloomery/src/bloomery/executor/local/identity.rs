@@ -276,9 +276,8 @@ pub(super) fn kill_group_args(signal: &str, pgid: i32) -> Vec<String> {
 }
 
 fn signal_group(pgid: u32, signal: &str) -> Result<(), LocalExecutorError> {
-    let pid = signed_pgid(pgid)?;
     let output = Command::new("kill")
-        .args(kill_group_args(signal, pid))
+        .args(kill_group_args(signal, signed_pgid(pgid)?))
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
@@ -375,10 +374,9 @@ fn ps_listing_has_live_member(listing: &str, pgid: u32) -> bool {
 }
 
 fn group_responds_to_signal_zero(pgid: u32) -> Option<bool> {
-    let pid = signed_pgid(pgid).ok()?;
     signal_zero_observation(
         Command::new("kill")
-            .args(kill_group_args("0", pid))
+            .args(kill_group_args("0", signed_pgid(pgid).ok()?))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
