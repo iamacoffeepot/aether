@@ -231,9 +231,10 @@ pub trait IssueStateApi {
 /// stay comments-only, and title/body writes live here so they can address
 /// only numbers this trait itself created. The bound holds by construction —
 /// a projection may write an issue's title or body only through a number it
-/// recorded from [`create_issue`](Self::create_issue), or found by its own
-/// marker after a crash between create and persist. An issue that arrived
-/// any other way is unaddressable by that path.
+/// recorded from [`create_issue`](Self::create_issue). [`find_issue`](Self::find_issue)
+/// is observation: a matching marker, a Bot creator, or the same authenticated
+/// identity is not a creation receipt. An issue that arrived any other way is
+/// unaddressable by the title/body/close path.
 pub trait CommissionProjectionApi {
     /// Open a new issue whose title and body Bloomery fully owns.
     ///
@@ -241,16 +242,20 @@ pub trait CommissionProjectionApi {
     /// The surface is unreachable or returned an error status.
     fn create_issue(&self, new: &NewIssue) -> Result<ProjectedIssue, GithubError>;
 
-    /// Find the issue whose marker carries `key`, if any. The projector's
-    /// idempotency lookup when no issue number has been recorded yet.
+    /// Find the issue whose marker carries `key`, if any.
+    ///
+    /// Observation only. A match is not ownership and must not be used to
+    /// update or close the issue: a copied marker on a human issue, an
+    /// unrelated Bot issue, or an issue later edited to carry the marker can
+    /// all satisfy this lookup. Durable ownership is the number recorded from
+    /// [`create_issue`](Self::create_issue).
     ///
     /// # Errors
     /// The surface is unreachable or returned an error status.
     fn find_issue(&self, key: &str) -> Result<Option<ProjectedIssue>, GithubError>;
 
     /// Overwrite the title and body of issue `number`. Callers may pass only
-    /// a number recorded from [`create_issue`](Self::create_issue) or returned
-    /// by [`find_issue`](Self::find_issue) for this projector's marker.
+    /// a number recorded from [`create_issue`](Self::create_issue).
     ///
     /// # Errors
     /// The surface is unreachable, the issue is absent, or the write was refused.
