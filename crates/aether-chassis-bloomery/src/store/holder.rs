@@ -373,9 +373,10 @@ mod tests {
         race_two_holders(&dir, &path);
     }
 
-    #[allow(clippy::disallowed_methods, reason = "test child handshake, not capability configuration")]
     fn test_env(name: &str) -> Option<String> {
-        env::var(name).ok()
+        env::vars_os()
+            .find_map(|(key, value)| (key == name).then_some(value))
+            .and_then(|value| value.into_string().ok())
     }
 
     /// When the parent re-execs this test with the handshake env, become one
