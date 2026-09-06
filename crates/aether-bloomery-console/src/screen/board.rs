@@ -384,6 +384,54 @@ mod tests {
         }
     }
 
+    fn dispatch(bloom: DigestHex, workpiece: &str, recorded_unix_millis: Option<u64>, sequence: u64) -> MetricDispatch {
+        MetricDispatch {
+            bloom,
+            workpiece: workpiece.to_owned(),
+            recorded_unix_millis,
+            sequence,
+            ..MetricDispatch::default()
+        }
+    }
+
+    /// Live sealed bloom plus a landed history bloom with independent dispatch stamps.
+    fn ages_document() -> (ViewDocument, [MetricDispatch; 8]) {
+        let live = digest(1);
+        let landed = digest(2);
+        let view = ViewDocument {
+            blooms: vec![
+                BloomView {
+                    id: live,
+                    status: Some(BloomStatus::Sealed),
+                    members: vec![
+                        in_flight_construct("wp-run"),
+                        in_flight_construct("wp-gap"),
+                        MemberView { resolution: Some(Present {}), ..member("wp-done") },
+                    ],
+                    ..BloomView::default()
+                },
+                BloomView {
+                    id: landed,
+                    status: Some(BloomStatus::Landed),
+                    members: vec![MemberView { resolution: Some(Present {}), ..member("wp-landed") }],
+                    ..BloomView::default()
+                },
+            ],
+            ..ViewDocument::default()
+        };
+        let dispatches = [
+            dispatch(live, "wp-run", Some(1_000), 1),
+            dispatch(live, "wp-run", Some(3_000), 2),
+            dispatch(live, "wp-done", Some(2_000), 3),
+            dispatch(live, "wp-done", Some(9_000), 4),
+            dispatch(live, "wp-gap", Some(5_000), 5),
+            dispatch(live, "wp-gap", None, 6),
+            dispatch(landed, "wp-landed", Some(10_000), 7),
+            dispatch(landed, "wp-landed", Some(7_210_000), 8),
+        ];
+        (view, dispatches)
+    }
+
     #[test]
     fn member_status_state_matches_the_operator_script() {
         // The plausible bug: a dependent carrying blocked_by paints as idle
@@ -555,87 +603,9 @@ mod tests {
         // The plausible bug: AGE still walks every retained member and
         // landed bloom, so a live header absorbs a history span, a walking
         // member loses its own stamps, or a missing timestamp paints a duration.
+        let (view, dispatches) = ages_document();
         let live = digest(1);
         let landed = digest(2);
-        let view = ViewDocument {
-            blooms: vec![
-                BloomView {
-                    id: live,
-                    status: Some(BloomStatus::Sealed),
-                    members: vec![
-                        in_flight_construct("wp-run"),
-                        in_flight_construct("wp-gap"),
-                        MemberView { resolution: Some(Present {}), ..member("wp-done") },
-                    ],
-                    ..BloomView::default()
-                },
-                BloomView {
-                    id: landed,
-                    status: Some(BloomStatus::Landed),
-                    members: vec![MemberView { resolution: Some(Present {}), ..member("wp-landed") }],
-                    ..BloomView::default()
-                },
-            ],
-            ..ViewDocument::default()
-        };
-        let dispatches = [
-            MetricDispatch {
-                bloom: live,
-                workpiece: "wp-run".to_owned(),
-                recorded_unix_millis: Some(1_000),
-                sequence: 1,
-                ..MetricDispatch::default()
-            },
-            MetricDispatch {
-                bloom: live,
-                workpiece: "wp-run".to_owned(),
-                recorded_unix_millis: Some(3_000),
-                sequence: 2,
-                ..MetricDispatch::default()
-            },
-            MetricDispatch {
-                bloom: live,
-                workpiece: "wp-done".to_owned(),
-                recorded_unix_millis: Some(2_000),
-                sequence: 3,
-                ..MetricDispatch::default()
-            },
-            MetricDispatch {
-                bloom: live,
-                workpiece: "wp-done".to_owned(),
-                recorded_unix_millis: Some(9_000),
-                sequence: 4,
-                ..MetricDispatch::default()
-            },
-            MetricDispatch {
-                bloom: live,
-                workpiece: "wp-gap".to_owned(),
-                recorded_unix_millis: Some(5_000),
-                sequence: 5,
-                ..MetricDispatch::default()
-            },
-            MetricDispatch {
-                bloom: live,
-                workpiece: "wp-gap".to_owned(),
-                recorded_unix_millis: None,
-                sequence: 6,
-                ..MetricDispatch::default()
-            },
-            MetricDispatch {
-                bloom: landed,
-                workpiece: "wp-landed".to_owned(),
-                recorded_unix_millis: Some(10_000),
-                sequence: 7,
-                ..MetricDispatch::default()
-            },
-            MetricDispatch {
-                bloom: landed,
-                workpiece: "wp-landed".to_owned(),
-                recorded_unix_millis: Some(7_210_000),
-                sequence: 8,
-                ..MetricDispatch::default()
-            },
-        ];
         let live_rows = rows_of(&view, BoardLane::Live, &dispatches);
         assert_eq!(live_rows.len(), 3);
         let BoardRow::Bloom(bloom) = &live_rows[0] else {
@@ -670,7 +640,13 @@ mod tests {
         };
         assert_eq!(landed_member.workpiece, "wp-landed");
         assert_eq!(landed_member.age, "2h");
+    }
 
+    #[test]
+    fn live_board_paint_keeps_history_age_off_the_age_column() {
+        // The plausible bug: live paint still rescans undisplayed history, so
+        // a landed bloom's span appears in the AGE column of the live table.
+        let (view, dispatches) = ages_document();
         let mut store = Store::new(Duration::from_secs(1));
         store.apply_view(Ok(view));
         store.apply_dispatches(Ok(dispatches.to_vec()));
