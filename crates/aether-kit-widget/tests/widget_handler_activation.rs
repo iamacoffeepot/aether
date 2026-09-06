@@ -73,8 +73,15 @@ fn exported_adopters() -> [NamedLoad; 6] {
         NamedLoad {
             export: "aether.kit.widget.numeric",
             name: "numeric",
-            config: NumericConfig { min: 0.0, max: 100.0, step: 1.0, initial: 0.0, theme: Theme::DEFAULT, ..NumericConfig::default() }
-                .encode_into_bytes(),
+            config: NumericConfig {
+                min: 0.0,
+                max: 100.0,
+                step: 1.0,
+                initial: 0.0,
+                theme: Theme::DEFAULT,
+                ..NumericConfig::default()
+            }
+            .encode_into_bytes(),
         },
         NamedLoad {
             export: "aether.kit.widget.segmented",
@@ -254,12 +261,7 @@ fn numeric_focus_lost_commits_the_typed_buffer() {
         let after = panel_log_messages(&mut harness);
         let after_numeric: Vec<&String> =
             after.iter().filter(|message| message.contains("widget numeric changed")).collect();
-        assert_eq!(
-            after_numeric.len(),
-            2,
-            "{stem}: FocusLost must append the commit; log was:\n{}",
-            after.join("\n"),
-        );
+        assert_eq!(after_numeric.len(), 2, "{stem}: FocusLost must append the commit; log was:\n{}", after.join("\n"),);
         assert_eq!(field(after_numeric[1], "widget"), Some("numeric"));
         assert_eq!(numeric_value(after_numeric[1]), Some(7.0));
         assert_eq!(field(after_numeric[1], "committed"), Some("true"));
@@ -323,12 +325,7 @@ fn virtual_list_hover_lost_clears_the_hovered_row() {
         let after = panel_log_messages(&mut harness);
         let after_hover: Vec<&String> =
             after.iter().filter(|message| message.contains("widget virtual list hover")).collect();
-        assert_eq!(
-            after_hover.len(),
-            2,
-            "{stem}: HoverLost must append the leave; log was:\n{}",
-            after.join("\n"),
-        );
+        assert_eq!(after_hover.len(), 2, "{stem}: HoverLost must append the leave; log was:\n{}", after.join("\n"),);
         assert_eq!(field(after_hover[1], "widget"), Some("inventory"));
         assert_eq!(field(after_hover[1], "row"), Some("None"));
     }
