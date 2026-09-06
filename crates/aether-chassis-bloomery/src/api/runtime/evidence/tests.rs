@@ -206,16 +206,16 @@ fn coordinator_jsonl() -> &'static str {
 }
 
 #[cfg(unix)]
-fn exit_status(code: i32) -> ExitStatus {
-    ExitStatus::from_raw(code << 8)
+fn exit_status(code: u8) -> ExitStatus {
+    ExitStatus::from_raw(i32::from(code) << 8)
 }
 
 #[cfg(windows)]
-fn exit_status(code: i32) -> ExitStatus {
-    ExitStatus::from_raw(code as u32)
+fn exit_status(code: u8) -> ExitStatus {
+    ExitStatus::from_raw(u32::from(code))
 }
 
-fn journalctl_output(code: i32, stdout: &str, stderr: &str) -> Output {
+fn journalctl_output(code: u8, stdout: &str, stderr: &str) -> Output {
     // Built here so the suite never spawns journalctl. Unix wait status stores
     // the exit code in the high byte; Windows uses the code directly.
     Output { status: exit_status(code), stdout: stdout.as_bytes().to_vec(), stderr: stderr.as_bytes().to_vec() }
