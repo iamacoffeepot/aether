@@ -2,6 +2,8 @@
 //! silence, swept-nonce honesty, and coordinator-log clamp/filter/page.
 
 use std::fs;
+use std::os::unix::process::ExitStatusExt;
+use std::process::{ExitStatus, Output};
 use std::time::{Duration, SystemTime};
 
 use aether_bloomery::{BloomId, Digest, Harness, MetricDispatch, ReasoningEffort, ResolvedModel, StageId};
@@ -9,9 +11,10 @@ use aether_data::wire::to_vec;
 
 use super::header::{ASSISTANT_TEXT_CAP, read as read_header};
 use super::list::assemble;
-use super::logs::{COORDINATOR_LOG_MAX, LogQuery, page_entries};
+use super::logs::{COORDINATOR_LOG_MAX, LogError, LogQuery, read_with};
 use super::ranged::{FileQuery, TRANSCRIPT_DEFAULT_LIMIT, TRANSCRIPT_LINE_CAP, TRANSCRIPT_MAX_LIMIT, read_ranged};
 use super::{SWEPT_NOTICE, evidence_dir};
+use crate::api::dto::CoordinatorLogsView;
 use crate::store::{BloomDispatchLive, BloomDispatchRollup};
 
 #[test]
@@ -179,17 +182,16 @@ fn percent_decode_is_utf8_over_the_whole_byte_string() {
     assert_eq!(query.contains.as_deref(), Some("é"));
 }
 
-#[test]
-fn coordinator_logs_clamp_filter_and_page() {
-    let query = LogQuery::parse(&format!("limit={}&contains=keep&level=info", COORDINATOR_LOG_MAX + 50))
-        .expect("a numeric over-cap limit parses");
-    assert_eq!(query.limit, COORDINATOR_LOG_MAX);
-    assert!(query.notice.as_deref().is_some_and(|notice| notice.contains("clamped")));
-
-    let jsonl = concat!(
+fn coordinator_jsonl() -> &'static str {
+    concat!(
         r#"{"PRIORITY":"6","MESSAGE":"keep-one","__CURSOR":"c1","__REALTIME_TIMESTAMP":"1"}"#,
         "\n",
+        "not-json\n",
+        r#"{"PRIORITY":"7","MESSAGE":"keep-debug","__CURSOR":"c-debug","__REALTIME_TIMESTAMP":"9"}"#,
+        "\n",
         r#"{"PRIORITY":"3","MESSAGE":"keep-err","__CURSOR":"c2","__REALTIME_TIMESTAMP":"2"}"#,
+        "\n",
+        r#"{"MESSAGE":"keep-missing-cursor"}"#,
         "\n",
         r#"{"PRIORITY":"6","MESSAGE":"drop-me","__CURSOR":"c3","__REALTIME_TIMESTAMP":"3"}"#,
         "\n",
@@ -197,14 +199,109 @@ fn coordinator_logs_clamp_filter_and_page() {
         "\n",
         r#"{"PRIORITY":"6","MESSAGE":"keep-three","__CURSOR":"c5","__REALTIME_TIMESTAMP":"5"}"#,
         "\n",
+    )
+}
+
+fn journalctl_output(code: i32, stdout: &str, stderr: &str) -> Output {
+    // Unix wait status stores the exit code in the high byte. Built here so the
+    // suite never spawns journalctl or depends on a live systemd host.
+    Output {
+        status: ExitStatus::from_raw(code << 8),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: stderr.as_bytes().to_vec(),
+    }
+}
+
+fn logs_ok(query: &str, stdout: &str) -> CoordinatorLogsView {
+    read_with(query, || true, |_| Ok(journalctl_output(0, stdout, "")))
+        .expect("a present host with a successful runner answers")
+}
+
+#[test]
+fn coordinator_logs_clamp_filter_and_page() {
+    // Filter then page on the production path: debug rows drop at info, contains
+    // drops non-matches, malformed JSONL is skipped, and the cursor names the
+    // last kept row rather than a raw journalctl line.
+    let jsonl = coordinator_jsonl();
+    let mut argv = None;
+    let paged = read_with(
+        "limit=2&contains=keep&level=info",
+        || true,
+        |got| {
+            argv = Some(got.to_vec());
+            Ok(journalctl_output(0, jsonl, ""))
+        },
+    )
+    .expect("a present host answers");
+    let argv = argv.expect("a successful host gate invokes the runner");
+    assert!(
+        argv.windows(2).any(|pair| pair[0] == "-n" && pair[1] == COORDINATOR_LOG_MAX.to_string()),
+        "journalctl fetches the ceiling; the query limit pages after filter: {argv:?}"
     );
-    let paged = page_entries(&LogQuery { limit: 2, ..query }, jsonl);
+    assert!(argv.iter().any(|flag| flag == "--output=json"), "entries are parsed as journalctl JSONL: {argv:?}");
     assert_eq!(paged.entries.len(), 2);
     assert_eq!(paged.entries[0].message, "keep-one");
     assert_eq!(paged.entries[1].message, "keep-err");
     assert!(paged.truncated);
     assert_eq!(paged.next_cursor.as_deref(), Some("c2"));
     assert!(paged.entries.iter().all(|entry| entry.message.contains("keep")));
+    assert!(!paged.entries.iter().any(|entry| entry.message == "keep-debug"));
+    assert!(!paged.entries.iter().any(|entry| entry.message == "keep-missing-cursor"));
+    assert!(paged.notice.is_none());
+
+    let debug = logs_ok("contains=keep&level=debug", jsonl);
+    assert!(debug.entries.iter().any(|entry| entry.message == "keep-debug"));
+    assert!(!debug.truncated);
+    assert_eq!(debug.next_cursor, None);
+
+    let clamped = logs_ok(&format!("limit={}&contains=keep&level=info", COORDINATOR_LOG_MAX + 50), jsonl);
+    assert_eq!(
+        clamped.entries.iter().map(|entry| entry.message.as_str()).collect::<Vec<_>>(),
+        ["keep-one", "keep-err", "keep-two", "keep-three"]
+    );
+    assert!(!clamped.truncated);
+    assert_eq!(clamped.next_cursor, None);
+    assert!(clamped.notice.as_deref().is_some_and(|notice| notice.contains("clamped")));
+}
+
+#[test]
+fn coordinator_logs_refuse_a_bad_query_before_the_host_gate() {
+    // An unknown level is a 400. Probing systemd or invoking journalctl would
+    // turn a bad query into a host-dependent 501/500.
+    let error = read_with(
+        "level=fatal",
+        || panic!("host gate must not run on a bad query"),
+        |_| panic!("runner must not run on a bad query"),
+    )
+    .expect_err("an unknown level is a query refusal");
+    match error {
+        LogError::BadQuery(message) => assert!(message.contains("fatal"), "{message}"),
+        other => panic!("expected BadQuery, got {other:?}"),
+    }
+}
+
+#[test]
+fn coordinator_logs_are_unavailable_without_systemd() {
+    // Without journald the route fails closed rather than spawning journalctl.
+    let error = read_with("", || false, |_| panic!("runner must not run when systemd is absent"))
+        .expect_err("a host without systemd cannot answer");
+    match error {
+        LogError::Unavailable { reason } => {
+            assert!(reason.contains("systemd"), "{reason}");
+        }
+        other => panic!("expected Unavailable, got {other:?}"),
+    }
+}
+
+#[test]
+fn coordinator_logs_surface_a_failed_journalctl_status() {
+    // A non-zero journalctl is an IO error; stderr must reach the caller.
+    let error = read_with("", || true, |_| Ok(journalctl_output(1, "", "unit not found")))
+        .expect_err("a non-zero journalctl is an IO error");
+    match error {
+        LogError::Io(message) => assert!(message.contains("unit not found"), "{message}"),
+        other => panic!("expected Io, got {other:?}"),
+    }
 }
 
 #[test]
