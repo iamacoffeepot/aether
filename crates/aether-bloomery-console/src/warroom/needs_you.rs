@@ -356,12 +356,12 @@ mod tests {
         assert_ne!(before.dismiss_key(), after.dismiss_key());
     }
 
-    fn first_row(view: ViewDocument) -> NeedsYouRow {
-        rows(&view).into_iter().next().expect("needs-you row")
+    fn first_row(view: &ViewDocument) -> NeedsYouRow {
+        rows(view).into_iter().next().expect("needs-you row")
     }
 
     fn bloom_row(bloom: BloomView) -> NeedsYouRow {
-        first_row(ViewDocument { blooms: vec![bloom], ..ViewDocument::default() })
+        first_row(&ViewDocument { blooms: vec![bloom], ..ViewDocument::default() })
     }
 
     fn decision_row(question: DigestHex, prompt: &str) -> NeedsYouRow {
@@ -401,7 +401,7 @@ mod tests {
     }
 
     fn base_row(evidence: DigestHex) -> NeedsYouRow {
-        first_row(ViewDocument {
+        first_row(&ViewDocument {
             base_alert: Some(BaseAlertView {
                 failed: vec!["verify.docs".to_owned()],
                 evidence,
