@@ -124,6 +124,13 @@ impl Coordinator {
         self.boot.await_port(ingress, deadline)
     }
 
+    /// The bounded stderr tail the boot reader already keeps — a snapshot, not a
+    /// further drain. Empty when the child has logged nothing yet.
+    #[must_use]
+    pub fn boot_log_tail(&self) -> Vec<String> {
+        self.boot.tail()
+    }
+
     /// SIGKILL the coordinator now and reap it (`Child::kill` is SIGKILL on
     /// unix) — the deliberate crash the restart tests simulate, as opposed to
     /// the drop-path safety net. Consumes the guard, so the process cannot be

@@ -18,6 +18,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs, thread};
 
@@ -605,30 +606,131 @@ fn a_lane_beating_only_its_heartbeat_is_not_silence() {
 
     harness.wait_for_runs(1);
     let nonces = harness.evidence_nonces();
+    let captured_outstanding = harness.outstanding();
     for nonce in &nonces {
         harness.write_transcript(nonce, "{}\n");
         harness.touch_heartbeat(nonce);
     }
     let runs = harness.runs_dir();
     let pumped = nonces.clone();
+    let pump = Mutex::new(PumpWrites::default());
     while_pumping(
         || {
+            let mut pump = pump.lock().expect("the pump trace lock is held only by the helper thread");
             for nonce in &pumped {
                 let dir = runs.join(format!("{nonce}-evidence"));
-                let _ = fs::create_dir_all(&dir);
                 let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis());
-                let _ = fs::write(dir.join("heartbeat"), stamp.to_string());
+                match fs::create_dir_all(&dir).and_then(|()| fs::write(dir.join("heartbeat"), stamp.to_string())) {
+                    Ok(()) => pump.record_ok(),
+                    Err(error) => pump.last_error = Some(format!("{nonce}: {error}")),
+                }
             }
         },
         || thread::sleep(Duration::from_secs(12)),
     );
 
     let outstanding = harness.outstanding();
+    let lost = nonces.iter().any(|nonce| !outstanding.contains(nonce));
+    let diag =
+        lost.then(|| heartbeat_loss_report(&harness, &runs, &nonces, &captured_outstanding, &outstanding, &pump));
     for nonce in &nonces {
         assert!(
             outstanding.contains(nonce),
-            "a lane beating its heartbeat must keep its original nonce, not be cancelled and redispatched; outstanding={outstanding:?} original={nonces:?}"
+            "a lane beating its heartbeat must keep its original nonce, not be cancelled and redispatched; outstanding={outstanding:?} original={nonces:?}{}",
+            diag.as_deref().unwrap_or("")
         );
+    }
+}
+
+#[derive(Default)]
+struct PumpWrites {
+    first: Option<Instant>,
+    last: Option<Instant>,
+    first_unix_millis: Option<u128>,
+    last_unix_millis: Option<u128>,
+    max_gap: Option<Duration>,
+    ok: u32,
+    last_error: Option<String>,
+}
+
+impl PumpWrites {
+    fn record_ok(&mut self) {
+        let now = Instant::now();
+        let wall = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis());
+        if let Some(last) = self.last {
+            let gap = now.saturating_duration_since(last);
+            self.max_gap = Some(self.max_gap.map_or(gap, |kept| kept.max(gap)));
+        }
+        if self.first.is_none() {
+            self.first = Some(now);
+            self.first_unix_millis = Some(wall);
+        }
+        self.last = Some(now);
+        self.last_unix_millis = Some(wall);
+        self.ok = self.ok.saturating_add(1);
+    }
+}
+
+fn heartbeat_loss_report(
+    harness: &LaneHarness,
+    runs: &Path,
+    original: &[String],
+    captured_outstanding: &[String],
+    final_outstanding: &[String],
+    pump: &Mutex<PumpWrites>,
+) -> String {
+    let pump = pump.lock().expect("the pump trace lock is held only after the helper thread stops");
+    let ledger = harness
+        .ledger()
+        .into_iter()
+        .map(|run| format!("{}:{}:{:?}", run.nonce, run.command, run.mode))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let files = original
+        .iter()
+        .map(|nonce| {
+            let dir = runs.join(format!("{nonce}-evidence"));
+            format!(
+                "{nonce} transcript={} heartbeat={}",
+                file_mtime_millis(&dir.join("transcript.jsonl")),
+                file_mtime_millis(&dir.join("heartbeat")),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let first = pump.first_unix_millis.map(|millis| format!("{millis} millis")).unwrap_or_else(|| "none".to_owned());
+    let last = pump.last_unix_millis.map(|millis| format!("{millis} millis")).unwrap_or_else(|| "none".to_owned());
+    let max_gap = pump.max_gap.map(|gap| format!("{gap:?}")).unwrap_or_else(|| "n/a".to_owned());
+    let write_error = pump.last_error.as_deref().unwrap_or("none");
+    let tail = match harness.coordinator_boot_log_tail() {
+        None => "no forked coordinator".to_owned(),
+        Some(lines) if lines.is_empty() => "empty; no cancellation reason in the bounded stderr window".to_owned(),
+        Some(lines) => {
+            let joined = lines.join("\n  ");
+            if lines.iter().any(|line| {
+                line.contains("silent past the host heartbeat")
+                    || line.contains("outlived its sealed execution limit")
+                    || line.contains("host fault")
+            }) {
+                joined
+            } else {
+                format!("no cancellation reason in the bounded stderr window:\n  {joined}")
+            }
+        }
+    };
+    format!(
+        "\ncapture outstanding={captured_outstanding:?}\nledger=[{ledger}]\nfiles={files}\npump ok={} first={first} last={last} max_gap={max_gap} write_error={write_error}\nfinal outstanding={final_outstanding:?}\nboot-log tail: {tail}",
+        pump.ok,
+    )
+}
+
+fn file_mtime_millis(path: &Path) -> String {
+    match fs::metadata(path).and_then(|meta| meta.modified()) {
+        Ok(modified) => match modified.duration_since(UNIX_EPOCH) {
+            Ok(since) => format!("{} millis", since.as_millis()),
+            Err(_) => String::from("before-epoch"),
+        },
+        Err(error) => format!("unreadable ({error})"),
     }
 }
 

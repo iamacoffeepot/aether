@@ -636,6 +636,13 @@ impl ScenarioHarness {
         read_ledger(Path::new(&self.worktree_base)).expect("the mock ledger reads")
     }
 
+    /// The bounded stderr tail of a forked coordinator, when this harness owns
+    /// one. In-process cells have none. Snapshot only — does not wait or drain.
+    #[must_use]
+    pub fn coordinator_boot_log_tail(&self) -> Option<Vec<String>> {
+        self._coordinator.as_ref().map(Coordinator::boot_log_tail)
+    }
+
     /// The nonces the store still holds as outstanding orders.
     ///
     /// # Panics
