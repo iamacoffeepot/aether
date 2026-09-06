@@ -11,7 +11,7 @@
 #![allow(clippy::unwrap_used)]
 
 use aether_bloomery::testing::digest;
-use aether_bloomery::{MemberView, StageId, WorkpieceId};
+use aether_bloomery::{MemberView, StageId, VerifyFailureSet, WorkpieceId};
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun};
 use aether_harness_bloomery::{BloomeryHarness, LaneScript, Oracle};
 
@@ -64,9 +64,19 @@ fn a_second_member_script_does_not_erase_the_first_members_fault() {
 
 #[test]
 fn two_members_verify_keep_distinct_faults_without_a_task_header() {
+    // WrongSubject at Verify is the Construct intake contract (DigestMismatch
+    // recovered as a machinery fault) and does not leave a named excuse or a
+    // follow-up dispatch: with a sibling still walking, liveness sees wp-b
+    // sealed with nothing in flight. Die vs VerifyFail are distinct verify
+    // outcomes the coordinator actually re-enters — environment vs judged
+    // failure — so a global overwrite still collapses them to one mode.
     let mut harness = BloomeryHarness::start();
     harness.script_lane(&WorkpieceId("wp-a".into()), StageId::Verify, &[LaneScript::Die]);
-    harness.script_lane(&WorkpieceId("wp-b".into()), StageId::Verify, &[LaneScript::WrongSubject]);
+    harness.script_lane(
+        &WorkpieceId("wp-b".into()),
+        StageId::Verify,
+        &[LaneScript::VerifyFail(VerifyFailureSet::EMPTY)],
+    );
     let _bloom = harness.seal_members(&[("wp-a", digest(0x51)), ("wp-b", digest(0x52))]);
     harness.run_until(
         |harness| {
@@ -78,11 +88,7 @@ fn two_members_verify_keep_distinct_faults_without_a_task_header() {
 
     let ledger = harness.ledger();
     assert_eq!(verify_mode(&ledger, "wp-a"), Some(LaneMode::ExitsNonZero), "A's verify Die survived B's later script");
-    assert_eq!(
-        verify_mode(&ledger, "wp-b"),
-        Some(LaneMode::WrongSubject),
-        "B's verify WrongSubject was not consumed by A's Die",
-    );
+    assert_eq!(verify_mode(&ledger, "wp-b"), Some(LaneMode::Fail), "B's verify Fail was not consumed by A's Die",);
 }
 
 #[test]

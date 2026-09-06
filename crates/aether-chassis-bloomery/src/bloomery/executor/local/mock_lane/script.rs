@@ -28,7 +28,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::{fs, io};
+use std::{error, fs, io};
 
 use aether_bloomery::StageId;
 use serde::{Deserialize, Serialize};
@@ -128,7 +128,7 @@ pub struct LaneStep {
     pub command: String,
     /// What that run does.
     pub mode: LaneMode,
-    /// The member this step is keyed to. `None` is the unkeyed LaneHarness
+    /// The member this step is keyed to. `None` is the unkeyed `LaneHarness`
     /// shape that scripts one command sequence for the whole bloom. An empty
     /// string is the bloom-less axis (`BaseVerify`, aggregate verify).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -332,7 +332,7 @@ pub fn read_ledger(dir: &Path) -> io::Result<Vec<LaneRun>> {
 
 /// How many runs of `command` the ledger in `dir` already holds — this run's
 /// zero-based occurrence index. Global: every member and stage that ran the
-/// command counts, which is the unkeyed LaneHarness contract.
+/// command counts, which is the unkeyed `LaneHarness` contract.
 ///
 /// # Errors
 /// The ledger exists but could not be read.
@@ -403,7 +403,7 @@ impl fmt::Display for ScriptSelectError {
     }
 }
 
-impl std::error::Error for ScriptSelectError {}
+impl error::Error for ScriptSelectError {}
 
 impl From<io::Error> for ScriptSelectError {
     fn from(error: io::Error) -> Self {
@@ -414,7 +414,7 @@ impl From<io::Error> for ScriptSelectError {
 /// Choose the mode this run takes.
 ///
 /// An unkeyed script walks its command sequence globally, even when the spawn
-/// seam recorded a member — that is the LaneHarness contract. A keyed script
+/// seam recorded a member — that is the `LaneHarness` contract. A keyed script
 /// matches workpiece and stage and refuses when that identity is missing.
 ///
 /// # Errors

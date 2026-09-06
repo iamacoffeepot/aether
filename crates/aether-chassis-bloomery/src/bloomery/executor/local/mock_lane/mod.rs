@@ -50,9 +50,7 @@ impl fmt::Display for MockLaneError {
         match self {
             Self::Argv(error) => write!(f, "mock lane argv: {error}"),
             Self::Io(error) => write!(f, "mock lane io: {error}"),
-            Self::MissingIdentity => {
-                write!(f, "mock lane: {}", script::ScriptSelectError::MissingIdentity)
-            }
+            Self::MissingIdentity => write!(f, "mock lane: {}", ScriptSelectError::MissingIdentity),
         }
     }
 }
@@ -71,11 +69,11 @@ impl From<io::Error> for MockLaneError {
     }
 }
 
-impl From<script::ScriptSelectError> for MockLaneError {
-    fn from(error: script::ScriptSelectError) -> Self {
+impl From<ScriptSelectError> for MockLaneError {
+    fn from(error: ScriptSelectError) -> Self {
         match error {
-            script::ScriptSelectError::MissingIdentity => Self::MissingIdentity,
-            script::ScriptSelectError::Io(error) => Self::Io(error),
+            ScriptSelectError::MissingIdentity => Self::MissingIdentity,
+            ScriptSelectError::Io(error) => Self::Io(error),
         }
     }
 }
@@ -110,7 +108,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I, worktree: &Path) -> Result<i
     // harness bug that loses the file should surface as a scenario assertion
     // rather than as every lane refusing to run.
     let script = LaneScript::read_from(script_dir).unwrap_or_default();
-    let identity = script::DispatchIdentity::read_from(&args.out)?;
+    let identity = DispatchIdentity::read_from(&args.out)?;
     let mode = script::selected_mode(&script, &args.command, identity.as_ref(), script_dir)?;
 
     // Recorded before the run acts, so a mode that never exits still leaves
