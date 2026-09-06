@@ -4,12 +4,9 @@
 //! in-process `SubstrateHarness` capture. Skipped when no wgpu adapter is
 //! available; `AETHER_REQUIRE_RUNTIME=1` (CI) makes that skip a panic.
 
-// Integration-test skip diagnostic: emit via stderr so `cargo test`
-// surfaces "skipping: ..." alongside `test ... ok` (issue 891).
 #![allow(clippy::print_stderr)]
-// Test reads the AETHER_REQUIRE_RUNTIME CI skip toggle — a test-harness
-// knob, not cap config.
-#![allow(clippy::disallowed_methods)]
+// aether-suppression-request: the integration-test skip diagnostic goes to stderr so `cargo test` surfaces "skipping: ..." beside `test ... ok` (issue 891), as `render_scenario.rs` does
+#![allow(clippy::disallowed_methods)] // aether-suppression-request: the test reads the AETHER_REQUIRE_RUNTIME CI skip toggle, a test-harness knob rather than cap config, as `render_scenario.rs` does
 
 use std::env;
 

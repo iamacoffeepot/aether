@@ -11,11 +11,10 @@ use aether_substrate::render::{
     CompositeBlend, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw, MaterialPassDraw,
     MaterialPassRecord, MaterialPipelines, OverlayDraw, OverlaySource, Pipeline, QUAD_VERTEX_BUFFER_BYTES,
     QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD, QUAD_VERTICES_PER_TRIANGLE, QuadPipeline, SHAPE_VERTEX_BUFFER_BYTES,
-    SHAPE_VERTEX_STRIDE, SHAPE_VERTICES_PER_SHAPE, ShapeParams, Targets, TextureBindings, build_main_pipeline,
-    build_material_pipelines, build_quad_pipeline, build_texture_bindings, push_coverage_params,
-    push_material_rect_vertices, push_screen_quad_vertices, push_screen_shape_vertices, push_screen_triangle_vertices,
-    push_textured_params, push_world_quad_vertices, push_world_shape_vertices, record_material_pass,
-    record_quad_overlay_pass,
+    SHAPE_VERTEX_STRIDE, ShapeParams, Targets, TextureBindings, build_main_pipeline, build_material_pipelines,
+    build_quad_pipeline, build_texture_bindings, push_coverage_params, push_material_rect_vertices,
+    push_screen_quad_vertices, push_screen_shape_vertices, push_screen_triangle_vertices, push_textured_params,
+    push_world_quad_vertices, push_world_shape_vertices, record_material_pass, record_quad_overlay_pass,
 };
 
 use super::material::{MaterialBatch, accepts_coverage_texture};
@@ -66,6 +65,14 @@ fn shape_params(shape: &Shape) -> ShapeParams {
 pub(super) struct OverlayObservation<'a> {
     pub quads: &'a Mutex<Vec<DrawTexturedQuads>>,
     pub shapes: &'a Mutex<Vec<DrawShapes>>,
+}
+
+/// The vertex index `bytes` into the shape vertex buffer names. The buffer
+/// is capped at [`SHAPE_VERTEX_BUFFER_BYTES`], so the count fits a draw
+/// range's `u32` with room.
+fn shape_vertex_index(bytes: usize) -> u32 {
+    let stride = usize::try_from(SHAPE_VERTEX_STRIDE).expect("the shape vertex stride is a small constant");
+    u32::try_from(bytes / stride).expect("shape vertex bytes are capped well under u32::MAX vertices")
 }
 
 /// Mirror the low-level overlay pass's scissor rejection without moving that
@@ -147,8 +154,7 @@ pub(super) fn record_overlay_batches(
     for batch in batches {
         let clip = batch.clip.as_ref().map(|clip| [clip.x, clip.y, clip.width, clip.height]);
         if let OverlayGeometry::Shapes { space, shapes } = &batch.geometry {
-            #[allow(clippy::cast_possible_truncation)]
-            let first_vertex = (shape_vertex_bytes.len() / SHAPE_VERTEX_STRIDE as usize) as u32;
+            let first_vertex = shape_vertex_index(shape_vertex_bytes.len());
             match space {
                 QuadSpace::Screen => {
                     for shape in shapes {
@@ -162,8 +168,7 @@ pub(super) fn record_overlay_batches(
                     }
                 }
             }
-            #[allow(clippy::cast_possible_truncation)]
-            let vertex_count = (shapes.len() * SHAPE_VERTICES_PER_SHAPE) as u32;
+            let vertex_count = shape_vertex_index(shape_vertex_bytes.len()) - first_vertex;
             if vertex_count > 0 {
                 draws.push(OverlayDraw { source: OverlaySource::Shapes, first_vertex, vertex_count, clip });
             }
