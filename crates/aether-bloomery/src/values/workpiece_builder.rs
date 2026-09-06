@@ -33,6 +33,13 @@ use crate::ids::WorkpieceId;
 /// The schema number a version-1 [`FieldEntry`] writes into its first field.
 pub const FIELD_ENTRY_SCHEMA: u32 = 1;
 
+/// Slot an empty list replacement writes so its generation exists in records.
+///
+/// Real list items occupy `0..` in declaration order. Resolution ignores this
+/// slot, so an empty replacement wins over earlier contents instead of
+/// resurrecting them.
+const EMPTY_LIST_GENERATION_SLOT: u32 = u32::MAX;
+
 /// One content-addressed field-record payload (ADR-0208).
 ///
 /// The generation lives here rather than on [`WorkpieceFact`]: that struct is
@@ -46,7 +53,9 @@ pub struct FieldEntry {
     /// One setter call is one generation. Resolution keeps the highest.
     pub generation: u32,
     /// Position within that generation. A singular field writes slot 0; a
-    /// repeated field writes one record per element in slot order.
+    /// repeated field writes one record per element in slot order. An empty
+    /// list replacement writes slot `u32::MAX` so the generation is durable
+    /// and resolves to no elements.
     pub slot: u32,
     /// The field's authored text.
     pub text: String,
@@ -273,18 +282,29 @@ impl WorkpieceBuilder {
             self.append(kind, generation, slot, item.into());
             slot = slot.saturating_add(1);
         }
+        if slot == 0 {
+            // Resolution keeps the highest generation that exists in records.
+            // A bump with no append would leave the previous generation in place.
+            self.append(kind, generation, EMPTY_LIST_GENERATION_SLOT, String::new());
+        }
         self
     }
 
     /// Winning generation of `kind`, in slot order.
     ///
     /// Groups the append-ordered record vector by kind, takes the maximum
-    /// generation, and yields that generation's entries without sorting the
-    /// records or reading a clock. [`None`] is absent — unwritten, distinct
-    /// from a kind written with empty text.
+    /// generation, and yields that generation's list elements without sorting
+    /// the records or reading a clock. An empty list replacement records that
+    /// generation with no elements, so it wins over earlier contents. [`None`]
+    /// is absent — unwritten, distinct from a kind written with empty text and
+    /// from a repeated kind replaced with no elements.
     fn resolved(&self, kind: FieldKind) -> Option<Vec<&FieldEntry>> {
         let generation = self.entries_of(kind).map(|entry| entry.generation).max()?;
-        Some(self.entries_of(kind).filter(|entry| entry.generation == generation).collect())
+        Some(
+            self.entries_of(kind)
+                .filter(|entry| entry.generation == generation && entry.slot != EMPTY_LIST_GENERATION_SLOT)
+                .collect(),
+        )
     }
 
     fn entries_of(&self, kind: FieldKind) -> impl Iterator<Item = &FieldEntry> {
@@ -296,11 +316,11 @@ impl WorkpieceBuilder {
     }
 
     fn refusal(&self) -> Option<WorkpieceRefusal> {
-        if self.resolved(FieldKind::PlanStep).is_none() {
+        if self.resolved(FieldKind::PlanStep).is_none_or(|steps| steps.is_empty()) {
             return Some(WorkpieceRefusal::NoPlanStep { slot: 0, text: String::new() });
         }
 
-        let Some(surface) = self.resolved(FieldKind::DeclaredSurface) else {
+        let Some(surface) = self.resolved(FieldKind::DeclaredSurface).filter(|entries| !entries.is_empty()) else {
             return Some(WorkpieceRefusal::EmptyDeclaredSurface { slot: 0, text: String::new() });
         };
         if let Some(entry) = surface.iter().find(|entry| SurfacePattern::parse(&entry.text).is_none()) {
@@ -482,6 +502,30 @@ mod tests {
     }
 
     #[test]
+    fn empty_list_replacement_does_not_resurrect_the_previous_generation() {
+        let mut builder = WorkpieceBuilder::new(workpiece());
+        builder.edge(["issue-1", "issue-2"]);
+        builder.edge(core::iter::empty::<&str>());
+
+        assert!(resolved_texts(&builder, FieldKind::Edge).is_empty());
+        assert!(builder.resolved(FieldKind::Edge).expect("authored empty is present").is_empty());
+        assert_eq!(generations_of(&builder, FieldKind::Edge), [0, 0, 1]);
+        assert_eq!(builder.records().len(), 3);
+        assert_eq!(builder.fields().records(FieldKind::Edge).count(), 3);
+    }
+
+    #[test]
+    fn restating_after_an_empty_list_resolves_to_the_later_write() {
+        let mut builder = WorkpieceBuilder::new(workpiece());
+        builder.declared_surface(["crates/a/**", "crates/b/**"]);
+        builder.declared_surface(core::iter::empty::<&str>());
+        builder.declared_surface(["crates/c/**"]);
+
+        assert_eq!(resolved_texts(&builder, FieldKind::DeclaredSurface), ["crates/c/**"]);
+        assert_eq!(generations_of(&builder, FieldKind::DeclaredSurface), [0, 0, 1, 2]);
+    }
+
+    #[test]
     fn ten_setter_calls_across_five_kinds_project_to_five_fields() {
         let mut builder = WorkpieceBuilder::new(workpiece());
         builder
@@ -604,5 +648,14 @@ mod tests {
         let resolved = builder.resolved(FieldKind::Problem).expect("empty text is present");
         assert_eq!(resolved.len(), 1);
         assert!(resolved[0].text.is_empty());
+    }
+
+    #[test]
+    fn empty_list_write_is_present_and_empty() {
+        let mut builder = WorkpieceBuilder::new(workpiece());
+        assert!(builder.resolved(FieldKind::Edge).is_none());
+        builder.edge(core::iter::empty::<&str>());
+        let resolved = builder.resolved(FieldKind::Edge).expect("empty list is present");
+        assert!(resolved.is_empty());
     }
 }
