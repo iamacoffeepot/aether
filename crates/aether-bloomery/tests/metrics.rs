@@ -391,7 +391,7 @@ fn bloom_row(ledger: &MetricsLedger, bloom: BloomId) -> MetricBloom {
 
 /// The plausible bug: observe matches only `Fact::Seal`, so a real graph bloom
 /// (and a graph successor) land in the rollup via dispatch with members=0 and
-/// seal_sequence=0.
+/// `seal_sequence=0`.
 #[test]
 fn a_graph_seal_and_its_graph_successor_carry_members_and_seal_sequence() {
     let predecessor_spec = draft(1, vec![membership("wp-a", 10), membership("wp-b", 11)]).seal();
@@ -423,7 +423,10 @@ fn a_graph_seal_and_its_graph_successor_carry_members_and_seal_sequence() {
     );
 
     let first = bloom_row(&journal.ledger, predecessor);
-    assert_eq!(first.members, 2, "the graph bloom's membership is the admitted spec, not the dispatch default: {first:?}");
+    assert_eq!(
+        first.members, 2,
+        "the graph bloom's membership is the admitted spec, not the dispatch default: {first:?}"
+    );
     assert_eq!(first.seal_sequence, 1, "the graph bloom's sequence is the admitting row: {first:?}");
 
     let successor_row = bloom_row(&journal.ledger, successor);
@@ -446,7 +449,7 @@ fn a_graph_seal_and_its_graph_successor_carry_members_and_seal_sequence() {
 }
 
 /// The plausible bug: observe never matches `Fact::Supersede`, so a successor
-/// bloom reports members=0 and seal_sequence=0 (or is missing until a dispatch
+/// bloom reports members=0 and `seal_sequence=0` (or is missing until a dispatch
 /// creates the default row).
 #[test]
 fn a_supersede_records_the_successor_members_and_seal_sequence() {
@@ -458,10 +461,8 @@ fn a_supersede_records_the_successor_members_and_seal_sequence() {
     let Outcome::Sealed(predecessor) = sealed.outcome else {
         panic!("the predecessor admits: {sealed:?}");
     };
-    let superseded = journal.admit(
-        &event("sup", Fact::Supersede { predecessor, successor: successor_spec }),
-        Some(2_000),
-    );
+    let superseded =
+        journal.admit(&event("sup", Fact::Supersede { predecessor, successor: successor_spec }), Some(2_000));
     assert!(
         matches!(superseded.outcome, Outcome::Superseded { successor: id, .. } if id == successor),
         "the successor admits: {superseded:?}"
@@ -512,16 +513,10 @@ fn a_refused_or_duplicate_seal_does_not_mint_or_overwrite_a_bloom_rollup() {
         "a refused seal must not mint a ghost rollup: {:?}",
         journal.ledger.bloom_rows()
     );
-    assert_eq!(
-        journal.ledger.summary(0, |_| None).blooms,
-        1,
-        "the summary must not count a refused seal as a bloom"
-    );
+    assert_eq!(journal.ledger.summary(0, |_| None).blooms, 1, "the summary must not count a refused seal as a bloom");
 
-    let refused_sup = journal.admit(
-        &event("empty-sup", Fact::Supersede { predecessor: bloom, successor: empty }),
-        Some(4_000),
-    );
+    let refused_sup =
+        journal.admit(&event("empty-sup", Fact::Supersede { predecessor: bloom, successor: empty }), Some(4_000));
     assert!(
         matches!(
             refused_sup.outcome,
