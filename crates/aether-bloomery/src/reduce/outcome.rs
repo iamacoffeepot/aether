@@ -756,7 +756,8 @@ pub enum Outcome {
         attempt: u32,
     },
     /// A second verdict refused a fold a narrowed composition is already
-    /// repairing. The verdict is filed; no second lane is bought.
+    /// repairing. The verdict is filed and the verifying member is remembered
+    /// as a waiter; no second lane is bought.
     CompositionRepairAlreadyInFlight {
         /// The bloom.
         bloom: BloomId,
