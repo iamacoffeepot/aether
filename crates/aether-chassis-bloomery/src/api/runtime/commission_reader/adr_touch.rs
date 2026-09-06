@@ -247,7 +247,7 @@ mod tests {
         let accepted = commit(repo.path(), "accepted at base");
         write_adr(repo.path(), path, "Proposed");
         assert_eq!(
-            adr_touch(&[path.to_owned()], &TreeAdrs::at(repo.path(), Some(accepted.clone()))),
+            adr_touch(&[path.to_owned()], &TreeAdrs::at(repo.path(), Some(accepted))),
             AdrTouch::NewOrEstablished,
             "cwd Proposed must not reclassify an Accepted blob at the sealed commit",
         );
@@ -361,6 +361,6 @@ mod tests {
 
     fn git(root: &Path, args: &[&str]) {
         let output = Command::new("git").current_dir(root).args(args).output().expect("git starts");
-        assert!(output.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&output.stderr),);
+        assert!(output.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&output.stderr));
     }
 }
