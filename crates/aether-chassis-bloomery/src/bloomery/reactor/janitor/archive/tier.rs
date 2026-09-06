@@ -403,10 +403,7 @@ mod tests {
             message.contains("destination left in place"),
             "the error reports the destination as retained: {message}"
         );
-        assert!(
-            message.contains("source cleanup failed"),
-            "the error reports leftover source cleanup debt: {message}"
-        );
+        assert!(message.contains("source cleanup failed"), "the error reports leftover source cleanup debt: {message}");
     }
 
     fn unlink_one_source_record_then_fail(source: &Path) -> io::Result<()> {
