@@ -259,8 +259,8 @@ mod tests {
         }
         let wide = draw(&mut artifact, &store, 80, 6);
         assert!(
-            wide.chars().any(|ch| !ch.is_whitespace()),
-            "widening must reclamp so the pane is not a blank overscroll:\n{wide}"
+            wide.contains('}'),
+            "widening must reclamp onto JSON content, not a blank pane or the artifact header:\n{wide}"
         );
     }
 

@@ -914,6 +914,9 @@ mod tests {
             view.handle_key(KeyEvent::from(KeyCode::Char('j')), &store);
         }
         let wide = drawn_at(&mut view, &store, 80, 6);
-        assert!(wide.contains('}'), "widening must reclamp so the expanded pane is not a blank overscroll:\n{wide}");
+        assert!(
+            wide.contains('}'),
+            "widening must reclamp onto JSON content, not a blank pane or the status line:\n{wide}"
+        );
     }
 }
