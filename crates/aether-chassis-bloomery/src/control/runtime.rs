@@ -2053,7 +2053,7 @@ mod tests {
     use aether_substrate::actor::native::ctx::NativeCtx;
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::testing::{manual_dispatch_ctx, test_mailer_and_rx};
-    use aether_substrate::{NativeActor, NativeBinding};
+    use aether_substrate::{Dispatch, NativeBinding};
 
     use std::collections::BTreeMap;
     use std::sync::Arc;
