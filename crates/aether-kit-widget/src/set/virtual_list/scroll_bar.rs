@@ -22,8 +22,8 @@ const MIN_THUMB_RATIO: f32 = 1.5;
 /// frame's right edge, and the thumb standing in it.
 ///
 /// The thumb's `height` is the visible share of the whole item vector and its
-/// `top` is where the reader is, which is the pair of facts round-4 note 3
-/// asked for. Both are derived from `first_index` every frame — the bar holds
+/// `top` is where the reader is — the two facts a scroll bar exists to say.
+/// Both are derived from `first_index` every frame — the bar holds
 /// no scroll state of its own, so a wheel, a drag, and a keyboard reveal all
 /// move it by moving the one window the list already had.
 #[derive(Debug, Clone, Copy, PartialEq)]

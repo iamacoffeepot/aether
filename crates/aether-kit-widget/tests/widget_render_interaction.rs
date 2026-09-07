@@ -506,7 +506,7 @@ fn virtual_list_child(subname: &str, state: WidgetControlState) -> WidgetChildSp
         clip: None,
         config: VirtualListConfig {
             items: (0..200).map(|index| VirtualListRow::from(format!("{index:03}"))).collect(),
-            initial_selected_index: Some(0),
+            initial: Some(0),
             empty_text: String::new(),
             ruled: false,
             visible_row_count: 5,
@@ -559,7 +559,7 @@ fn toggle_child(subname: &str, label: &str, initial: bool, state: WidgetControlS
     }
 }
 
-fn segmented_child(subname: &str, options: &[&str], initial_index: u32, state: WidgetControlState) -> WidgetChildSpec {
+fn segmented_child(subname: &str, options: &[&str], initial: u32, state: WidgetControlState) -> WidgetChildSpec {
     WidgetChildSpec {
         subname: subname.to_owned(),
         kind: WidgetKind::Segmented,
@@ -567,7 +567,7 @@ fn segmented_child(subname: &str, options: &[&str], initial_index: u32, state: W
         clip: None,
         config: SegmentedConfig {
             options: options.iter().map(|option| (*option).to_owned()).collect(),
-            initial_index,
+            initial,
             theme: Theme::DEFAULT,
             state,
         }
@@ -1494,7 +1494,7 @@ fn button_press_renders_pressed_state_and_reports_click() {
     let log = panel_log_messages(&mut harness);
     let joined = log.join("\n");
     assert!(
-        log.iter().any(|m| m.contains("widget button clicked")),
+        log.iter().any(|m| m.contains("widget button activated")),
         "a press then release inside the button should fire a click; log was:\n{joined}",
     );
 }

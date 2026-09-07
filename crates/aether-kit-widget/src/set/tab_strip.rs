@@ -25,10 +25,9 @@
 //!
 //! Those chips are one of the two shapes a strip takes
 //! ([`TabStripConfig::style`]). The other is [`TabStripStyle::Filled`] —
-//! Material 3's primary tabs, and the owner's round-8 note 14: "the tab
-//! buttons are good but they don't feel like typical tabs … like they aren't
-//! small buttons in the section but buttons that take the space and feel more
-//! dominant." A filled strip divides its whole frame between its tabs with
+//! Material 3's primary tabs, for a strip that should read as the top edge of
+//! the section it switches rather than as small buttons placed on it. A
+//! filled strip divides its whole frame between its tabs with
 //! nothing between them — each keeping its own label plus its pads and the
 //! leftover shared equally, so a row with room for every word cuts none of
 //! them and the widest tab is the first to give width up when the room runs
@@ -69,8 +68,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, Theme, ThemeState};
 use crate::{
-    Collect, HoverLost, SetSelection, SetWidgetState, TabSelected, TabStripConfig, TabStripStyle, WidgetControlState,
-    WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, HoverLost, SetSelection, SetWidgetState, TabStripConfig, TabStripSelected, TabStripStyle,
+    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 /// Thickness, in pixels, of the selected tab's bottom-edge underline — the
@@ -140,8 +139,8 @@ impl TabStripWidget {
     /// strip's own frame, so padding a label off its tab's left edge *is*
     /// centering it and no tab is laid out past the frame's right edge.
     ///
-    /// The fit is what the owner's note was about. A strip narrower than its
-    /// tabs used to lay them out at their natural widths regardless, which
+    /// The fit is the point. A strip narrower than its tabs used to lay them
+    /// out at their natural widths regardless, which
     /// does not widen the strip — it runs the last tab off the right edge for
     /// the root's slot clip to slice, so `Search` alone lost the padding to
     /// the right of its run while every tab before it looked right.
@@ -274,7 +273,7 @@ impl TabStripWidget {
         if let Some(parent) = ctx.parent() {
             #[allow(clippy::cast_possible_truncation)]
             let index = selected as u32;
-            parent.send(&TabSelected { index });
+            parent.send(&TabStripSelected { index });
         }
     }
 }
@@ -309,7 +308,7 @@ impl WidgetDefaults for TabStripWidget {
 }
 
 /// A tab strip. Spawned inline by a panel root with a [`TabStripConfig`];
-/// reports [`TabSelected`] on a change of tab.
+/// reports [`TabStripSelected`] on a change of tab.
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send
@@ -323,7 +322,7 @@ impl WasmActor for TabStripWidget {
     fn init(config: TabStripConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         let desired_font_id = config.theme.font_id;
         Ok(TabStripWidget {
-            selected_index: clamp_option_index(config.initial_index, config.labels.len()),
+            selected_index: clamp_option_index(config.initial, config.labels.len()),
             labels: config.labels,
             style: config.style,
             theme: config.theme,
@@ -344,7 +343,7 @@ impl WasmActor for TabStripWidget {
     /// Replace the labels / selection / theme in place from a re-sent config,
     /// and request metrics for the new theme font.
     /// Replace the labels / style / theme in place, re-clamping the selection
-    /// into the new vector. `initial_index` seeds the strip only at `init`;
+    /// into the new vector. `initial` seeds the strip only at `init`;
     /// [`SetSelection`] moves the tab.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: TabStripConfig) {
@@ -366,7 +365,7 @@ impl WasmActor for TabStripWidget {
     }
 
     /// Push the current tab from the host, clamped into the labels. Silent —
-    /// no [`TabSelected`]. A `None` index is ignored: a strip of tabs always
+    /// no [`TabStripSelected`]. A `None` index is ignored: a strip of tabs always
     /// has one selected.
     #[handler::single]
     fn on_set_selection(&mut self, _ctx: &mut WasmCtx<'_>, set: SetSelection) {
@@ -996,7 +995,7 @@ mod tests {
     fn re_selecting_the_pressed_tab_reports_nothing_but_still_presses_it() {
         // Frame x is 10 and the pre-metrics split is even, so local 5 is tab 0.
         let mut strip = strip(3, 0);
-        assert_eq!(strip.select_at(15.0), None, "no change, no TabSelected");
+        assert_eq!(strip.select_at(15.0), None, "no change, no TabStripSelected");
         assert_eq!(strip.pressed_tab, Some(0));
     }
 

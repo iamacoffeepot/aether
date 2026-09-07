@@ -227,7 +227,7 @@ fn load_result_lineage_reaches_builtin_button_state_externally() {
     };
     let clicks = log
         .iter()
-        .filter(|entry| entry.message.contains("widget button clicked") && entry.message.contains("widget=button"))
+        .filter(|entry| entry.message.contains("widget button activated") && entry.message.contains("widget=button"))
         .count();
     assert_eq!(clicks, 1, "lineage-addressed disable blocks the first click and re-enable permits the second");
 }
@@ -268,7 +268,7 @@ fn radio_spec(subname: &str, state: WidgetControlState) -> WidgetChildSpec {
         clip: None,
         config: RadioConfig {
             options: vec!["First".to_owned(), "Second".to_owned(), "Third".to_owned()],
-            initial_index: 0,
+            initial: 0,
             theme: Theme::DEFAULT,
             state,
         }
@@ -349,7 +349,7 @@ fn virtual_list_spec(subname: &str, state: WidgetControlState) -> WidgetChildSpe
         clip: None,
         config: VirtualListConfig {
             items: (0..200).map(|index| VirtualListRow::from(format!("Row {index:03}"))).collect(),
-            initial_selected_index: Some(0),
+            initial: Some(0),
             empty_text: String::new(),
             ruled: false,
             visible_row_count: 5,
@@ -365,14 +365,10 @@ fn populated_rows() -> Vec<VirtualListRow> {
     vec![VirtualListRow::from("Alpha"), VirtualListRow::from("Beta"), VirtualListRow::from("Gamma")]
 }
 
-fn live_list_config(
-    items: Vec<VirtualListRow>,
-    initial_selected_index: Option<u32>,
-    state: WidgetControlState,
-) -> VirtualListConfig {
+fn live_list_config(items: Vec<VirtualListRow>, initial: Option<u32>, state: WidgetControlState) -> VirtualListConfig {
     VirtualListConfig {
         items,
-        initial_selected_index,
+        initial,
         visible_row_count: 5,
         theme: Theme::DEFAULT,
         state,
@@ -383,7 +379,7 @@ fn live_list_config(
 fn live_list_spec(
     subname: &str,
     items: Vec<VirtualListRow>,
-    initial_selected_index: Option<u32>,
+    initial: Option<u32>,
     state: WidgetControlState,
 ) -> WidgetChildSpec {
     WidgetChildSpec {
@@ -391,14 +387,14 @@ fn live_list_spec(
         kind: WidgetKind::VirtualList,
         origin: [0.0, 0.0],
         clip: None,
-        config: live_list_config(items, initial_selected_index, state).encode_into_bytes(),
+        config: live_list_config(items, initial, state).encode_into_bytes(),
     }
 }
 
 fn behavior_host_list_spec(
     subname: &str,
     items: Vec<VirtualListRow>,
-    initial_selected_index: Option<u32>,
+    initial: Option<u32>,
     state: WidgetControlState,
 ) -> WidgetChildSpec {
     WidgetChildSpec {
@@ -408,7 +404,7 @@ fn behavior_host_list_spec(
         clip: None,
         config: BehaviorHostSpec {
             wrapped: WidgetKind::VirtualList,
-            wrapped_config: live_list_config(items, initial_selected_index, state).encode_into_bytes(),
+            wrapped_config: live_list_config(items, initial, state).encode_into_bytes(),
             script: ScriptRef::None,
             fuel_per_call: 0,
             disable_after_traps: 0,
@@ -440,7 +436,7 @@ fn virtual_list_selections(log: &[String]) -> Vec<(Option<&str>, u32)> {
 
 fn button_click_widgets(log: &[String]) -> Vec<&str> {
     log.iter()
-        .filter(|message| message.contains("widget button clicked"))
+        .filter(|message| message.contains("widget button activated"))
         .filter_map(|message| field(message, "widget"))
         .collect()
 }
@@ -663,7 +659,7 @@ fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
     );
     let clicks = log
         .iter()
-        .filter(|message| message.contains("widget button clicked") && message.contains("widget=run"))
+        .filter(|message| message.contains("widget button activated") && message.contains("widget=run"))
         .count();
     assert_eq!(clicks, 2, "Space release and the first Enter press click exactly once each; log was:\n{joined}");
 }
@@ -860,7 +856,7 @@ fn live_state_changes_cancel_button_arm_and_slider_drag() {
     let joined = log.join("\n");
     let clicks = log
         .iter()
-        .filter(|message| message.contains("widget button clicked") && message.contains("widget=run"))
+        .filter(|message| message.contains("widget button activated") && message.contains("widget=run"))
         .count();
     assert_eq!(
         clicks, 1,
@@ -1116,8 +1112,8 @@ fn empty_list_config() -> VirtualListConfig {
     live_list_config(Vec::new(), None, WidgetControlState::default())
 }
 
-fn populated_list_config(initial_selected_index: Option<u32>) -> VirtualListConfig {
-    live_list_config(populated_rows(), initial_selected_index, WidgetControlState::default())
+fn populated_list_config(initial: Option<u32>) -> VirtualListConfig {
+    live_list_config(populated_rows(), initial, WidgetControlState::default())
 }
 
 fn assert_list_phase(

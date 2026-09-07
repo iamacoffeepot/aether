@@ -179,9 +179,9 @@ pub(super) fn drawn_runs(widget: &VirtualListWidget) -> Vec<(f32, String)> {
         .collect()
 }
 
-/// A measured list whose every row carries the owner's pair of verbs —
-/// `[Change] [x]`, the second destructive — on a frame wide enough to hold
-/// a name beside them.
+/// A measured list whose every row carries a pair of verbs — `[Change] [×]`,
+/// the second destructive — on a frame wide enough to hold a name beside
+/// them.
 pub(super) fn actioned_list(item_count: usize, frame_width: f32) -> VirtualListWidget {
     let mut widget = measured_list(item_count, 5);
     widget.frame.width = frame_width;

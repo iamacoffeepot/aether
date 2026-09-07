@@ -8,25 +8,22 @@
 //! The tooltip: an anchored plate that says what the thing under the pointer
 //! *is*.
 //!
-//! It exists for the owner's round-1 note 21 — "no tooltips on hovering stats
-//! for left panel like what is health, what is each stat, etc. Where does it
-//! come from?" — and it is shaped by the two notes that followed it: round-2
-//! note 13, "tooltip text breaks up weirdly instead of fitting into a neat
-//! box", and note 24, "tooltips should probably be formatted to divide text
-//! better based upon UI principles (like dividers)". So the plate is
-//! **measured**: every line wraps at one reading width, the box is exactly as
-//! wide as its longest wrapped line and exactly as tall as the lines it
-//! holds, and a section boundary is a rule rather than a blank line. Round-2
-//! note 1 — "too much vertical padding above the text" — is why the padding
-//! is one spacing unit and the lines are placed by
+//! It exists so a screen can answer "what is this, and where does it come
+//! from" about the thing under the pointer without the reader leaving what
+//! they are doing. Two rules shape it. A plate that breaks its text up
+//! arbitrarily is not a box, so the plate is **measured**: every line wraps at
+//! one reading width, the box is exactly as wide as its longest wrapped line
+//! and exactly as tall as the lines it holds. And a plate divides its blocks
+//! by ordinary typographic means, so a section boundary is a **rule** rather
+//! than a blank line. Padding follows the same discipline — one spacing unit,
+//! with the lines placed by
 //! [`text_origin_y`] rather than by an em added at
 //! the draw site.
 //!
 //! The plate draws in the **overlay** ([`WidgetDrawList::overlay`]) so it
 //! stands over the rows under it, and the root's clip subtraction keeps their
-//! glyphs from printing through it — the answer to round-1 note 16, "pop ups
-//! have tree text overlay where they should take priority", with no draw
-//! layer anywhere.
+//! glyphs from printing through it: a plate over content takes priority over
+//! that content, and it does so with no draw layer anywhere.
 //!
 //! # Who decides it is showing
 //!
@@ -51,7 +48,7 @@
 //! # What a hover card needs on top of that
 //!
 //! A card over a canvas is a tooltip with four more demands, and each is one
-//! field (the studio's gap 18). [`TooltipLine::ink`] distinguishes a line
+//! field. [`crate::TooltipLine::ink`] distinguishes a line
 //! *within* its role — the line a search matched, the stat that is not being
 //! counted — which inking by role alone cannot do. [`TooltipConfig::avoid`]
 //! names the rectangles the plate should keep off, the first outranking the
@@ -62,7 +59,7 @@
 //! [`TooltipConfig::hanging_indent_pixels`] insets the continuation rows of a
 //! wrapped line, so a two-row stat reads as one stat.
 //!
-//! [`TooltipLine::icon`] is the fifth: a mark drawn **before** the line's
+//! [`crate::TooltipLine::icon`] is the fifth: a mark drawn **before** the line's
 //! words, because some things are recognized by their colour and shape before
 //! they are read — an instilled gem is its icon first and its name second. The
 //! host registers the image through `aether.render.create_texture` and hands
@@ -82,13 +79,13 @@
 //!   [`TooltipConfig::hanging_indent_pixels`] at `0` — because a wrapped
 //!   sentence indented in the middle reads as a new item beginning.
 //! - A **new paragraph** is a new thought, and takes a blank row. A
-//!   [`TooltipLine`] with no words in it is exactly that blank row, and so is
+//!   [`crate::TooltipLine`] with no words in it is exactly that blank row,
+//!   and so is
 //!   a blank line inside one line's own text: `"first\n\nsecond"` is two
 //!   paragraphs with one empty row between them.
 //!
-//! Neither is a section: a [`TooltipSection`] boundary is a **rule**, which is
-//! round-2 note 24's answer and stays. A blank row divides two paragraphs of
-//! one block; a rule divides two blocks.
+//! Neither is a section: a [`TooltipSection`] boundary is a **rule**. A blank
+//! row divides two paragraphs of one block; a rule divides two blocks.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -96,7 +93,6 @@ use alloc::vec::Vec;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_math::Rgba;
 use aether_text::FontMetricsResult;
-use serde::{Deserialize, Serialize};
 
 use crate::set::placement::{PlacementBounds, PlacementSide, place_plate_avoiding};
 use crate::set::{
@@ -107,34 +103,10 @@ use crate::set::{
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, TextRole, Theme};
-use crate::{Collect, SetWidgetState, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
-
-/// A mark drawn inline at the head of a [`TooltipLine`], before its words.
-///
-/// It exists because some things are recognized by their colour and shape
-/// before they are read at all — an instilled gem, a rarity, a damage type —
-/// and a card that names them in words makes the reader translate back. The
-/// host owns the texture: it registers the image once through
-/// `aether.render.create_texture` and hands the tooltip the session id it got
-/// back, along with the texture's **own** pixel size, which is what the plate
-/// preserves the aspect of. The widget draws it and nothing else — it never
-/// creates, updates, or destroys a texture.
-///
-/// The drawn size is not `width_pixels` × `height_pixels`: the icon is scaled
-/// to the line's own cap band ([`text_cap_height`]) with its aspect kept, so a
-/// 64-pixel icon and a 16-pixel one both stand exactly as tall as the capitals
-/// beside them. Schema-only; nested in [`TooltipLine`].
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
-pub struct TooltipIcon {
-    /// The session-scoped texture id `aether.render.create_texture` replied
-    /// with. Non-owning: the host that made it keeps it alive.
-    pub texture_id: u32,
-    /// The texture's own width in pixels — the numerator of the aspect the
-    /// scaled icon keeps, not the width it is drawn at.
-    pub width_pixels: f32,
-    /// The texture's own height in pixels.
-    pub height_pixels: f32,
-}
+use crate::{
+    Collect, SetWidgetState, TooltipConfig, TooltipIcon, TooltipSection, TooltipShed, WidgetDrawItem, WidgetDrawList,
+    WidgetFrame,
+};
 
 /// The `[width, height]` `icon` is drawn at on a line set at `size_pixels`:
 /// the line's cap band tall, aspect preserved. `None` for an icon whose
@@ -155,164 +127,6 @@ fn scaled_icon(icon: TooltipIcon, size_pixels: f32) -> Option<[f32; 2]> {
 /// so a line without one is measured exactly as it was.
 fn icon_footprint(icon: Option<TooltipIcon>, size_pixels: f32, gap: f32) -> f32 {
     icon.and_then(|icon| scaled_icon(icon, size_pixels)).map_or(0.0, |[width, _]| width + gap)
-}
-
-/// One line of a tooltip section, as the host wrote it: the words, the icon
-/// that stands before them, and the two presentation escapes a hover card
-/// needs (the studio's gap 18).
-///
-/// Every option is `None` by default, which is the kit's own rule — the
-/// plate's first line is the name and is set at [`TextRole::Body`] in the
-/// primary ink, every line after it at [`TextRole::Caption`] in the muted
-/// one. A host overrides `ink` for the lines it needs to *distinguish*: which
-/// line of a card the reader's search matched, or which stat is not being
-/// counted. Inking by role alone collapses both distinctions, because a role
-/// carries one ink. Schema-only; nested in [`TooltipSection`].
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
-pub struct TooltipLine {
-    pub text: String,
-    /// The type step this line is set at, or `None` for the kit's rule.
-    #[serde(default)]
-    pub role: Option<TextRole>,
-    /// The ink this line is drawn in, or `None` for the role's own ink.
-    #[serde(default)]
-    pub ink: Option<Rgba>,
-    /// The mark drawn at the head of this line, before its words: the icon of
-    /// the thing the line is about, when the thing is recognized by its colour
-    /// and shape faster than by its name.
-    ///
-    /// It takes the line's first row only — a wrapped line is one thought, and
-    /// one thought has one icon — and the words start one spacing unit after
-    /// it. The line's measure shrinks by that footprint, so an icon makes a
-    /// line wrap earlier rather than run past the plate, and the continuation
-    /// rows are inset to the words' own start, so a wrapped line reads as one
-    /// entry indented under its icon. An icon on a line with **no words** is a
-    /// paragraph break and draws nothing: a break is a break.
-    #[serde(default)]
-    pub icon: Option<TooltipIcon>,
-}
-
-impl From<String> for TooltipLine {
-    fn from(text: String) -> Self {
-        Self { text, role: None, ink: None, icon: None }
-    }
-}
-
-impl From<&str> for TooltipLine {
-    fn from(text: &str) -> Self {
-        Self::from(String::from(text))
-    }
-}
-
-/// One block of a tooltip's text, drawn with a rule between it and the next.
-/// Sections are how a tooltip divides what it is saying — the name, the
-/// sentence, where the number came from — instead of running three unrelated
-/// facts together as one paragraph. Schema-only; nested in [`TooltipConfig`].
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
-pub struct TooltipSection {
-    /// The section's lines as the host wrote them. Each is wrapped to the
-    /// plate's measure, so a line is a thought rather than a row of pixels;
-    /// an empty section draws nothing at all, rule included. A whole line is
-    /// also the unit the shed ladder drops
-    /// ([`TooltipConfig::max_height_pixels`]), so a plate out of room never
-    /// ends a sentence halfway.
-    ///
-    /// A line with **no words in it is a paragraph break** and draws one empty
-    /// row (round-4 note 19), so a section whose lines are paragraphs is
-    /// written with the blanks in it:
-    /// `TooltipSection::new(["First.", "", "Second."])`. A blank at the very
-    /// top or bottom of the plate is dropped, the same rule
-    /// [`wrap_to_width_hanging`] applies
-    /// inside one line — a break needs something on both sides of it to be
-    /// a break.
-    pub lines: Vec<TooltipLine>,
-}
-
-impl TooltipSection {
-    /// A section from anything a line can be written as — plain strings for
-    /// the common case, [`TooltipLine`]s where a line needs its own ink.
-    ///
-    /// ```ignore
-    /// TooltipSection::new(["Life", "Your health pool."])
-    /// ```
-    #[must_use]
-    pub fn new<I, L>(lines: I) -> Self
-    where
-        I: IntoIterator<Item = L>,
-        L: Into<TooltipLine>,
-    {
-        Self { lines: lines.into_iter().map(Into::into).collect() }
-    }
-}
-
-/// `aether.kit.widget.tooltip.shed` — how many whole entries the plate had to
-/// drop to fit [`TooltipConfig::max_height_pixels`], reported up to the host
-/// on every change (`0` when a plate that was shedding fits again).
-///
-/// The host is the one that can do something about it: it knows what the
-/// dropped entries said, so it is the one that can word the tail — "+3 more"
-/// — or re-send a shorter card. The widget only reports the number, because
-/// choosing the words is exactly the host's knowledge the tooltip deliberately
-/// does not hold.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.tooltip.shed")]
-pub struct TooltipShed {
-    pub dropped: u32,
-}
-
-/// `aether.kit.widget.tooltip.config` — an anchored plate explaining the
-/// thing the pointer is on. `sections` are drawn in order with a rule between
-/// them, wrapped at `max_width_pixels` (`0` takes the kit's reading measure,
-/// [`reveal_wrap_width`]); `side` is the side of the anchor the plate prefers
-/// and `bounds` is the region it must stay inside, which it flips across the
-/// anchor to honour. The widget's assigned
-/// [`WidgetFrame`] is the anchor.
-///
-/// Hidden (`state.visible = false`) or sectionless, it draws nothing — which
-/// is how a host says the pointer has moved on.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.tooltip.config")]
-pub struct TooltipConfig {
-    pub sections: Vec<TooltipSection>,
-    /// The widest the text may run before it wraps. `0` (the default) takes
-    /// [`reveal_wrap_width`] at the caption size — the same reading measure
-    /// the hover reveal plate uses, so the two look like one kit.
-    #[serde(default)]
-    pub max_width_pixels: f32,
-    /// The tallest the plate may stand. `0` (the default) is no budget at
-    /// all. Over it, the plate **sheds**: it drops trailing whole entries —
-    /// never part of one — until it fits, and reports how many went as
-    /// [`TooltipShed`] so the host can word the tail.
-    #[serde(default)]
-    pub max_height_pixels: f32,
-    /// How far the continuation rows of a wrapped line are inset. `0` — the
-    /// default, and what the kit's own plates use — is a **flush** block: a
-    /// sentence that wrapped stays aligned with the row it started on, which
-    /// is what round-4 note 19 asked for. A hanging indent is the opt-in for
-    /// the one case that wants it: a list of stats, where an inset
-    /// continuation makes a two-row stat read as one stat rather than as two
-    /// lines that happen to be adjacent.
-    #[serde(default)]
-    pub hanging_indent_pixels: f32,
-    /// The side of the anchor the plate prefers.
-    #[serde(default)]
-    pub side: PlacementSide,
-    /// Rectangles the plate would rather not cover, in the same window pixels
-    /// the anchor frame is assigned in — the thing being explained, its
-    /// neighbours, the standing plates around it. **The first entry outranks
-    /// the rest**: the plate gets clear of it before it considers any other,
-    /// which is what keeps a hover card attached to its own subject. Empty
-    /// (the default) places by the flip-and-clamp rule alone.
-    #[serde(default)]
-    pub avoid: Vec<PlacementBounds>,
-    /// The region the plate must stay inside, in the same window pixels the
-    /// anchor frame is assigned in. A widget cannot ask the window how big it
-    /// is, so the host that owns the region names it here.
-    #[serde(default)]
-    pub bounds: PlacementBounds,
-    pub theme: Theme,
-    #[serde(default)]
-    pub state: WidgetControlState,
 }
 
 /// One wrapped row of the plate: the type role it is set at, the indent it
@@ -379,8 +193,8 @@ fn section_breaks(entries: &[PlateEntry]) -> usize {
 }
 
 /// The plate's padding, in spacing units — its whole inset, every edge alike.
-/// One unit, because the round-2 note about the first tooltip was that there
-/// was too much space above the text and none of it meant anything.
+/// One unit, because a plate padded any further stands the text off its own
+/// edge by a distance that means nothing.
 const PAD_UNITS: u8 = 1;
 
 /// How tall one line's box is, as a multiple of its own type size.
@@ -440,8 +254,8 @@ impl TooltipWidget {
     /// deliberately not used: that is the size a *screen's* one title is set
     /// at, and a 22-pixel line on a hover plate is a headline, not a name.
     ///
-    /// A source line with no words in it is a **paragraph break** (round-4
-    /// note 19): it becomes one empty row, at the caption line box, rather
+    /// A source line with no words in it is a **paragraph break**: it becomes
+    /// one empty row, at the caption line box, rather
     /// than vanishing. It is not the title even when it comes first, and a
     /// break at either end of the plate is dropped — a break needs something
     /// on both sides of it to be one.
@@ -758,6 +572,8 @@ impl WasmActor for TooltipWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TooltipLine;
+    use crate::WidgetControlState;
     use alloc::vec;
 
     fn tooltip(sections: Vec<TooltipSection>) -> TooltipWidget {

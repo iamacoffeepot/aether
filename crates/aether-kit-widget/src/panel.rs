@@ -33,11 +33,11 @@
 //!   up — and emits the whole panel as contiguous equal-clip solid batches
 //!   (plus text) from one root render sender.
 //! - **Value.** Each value-up event (`SliderChanged` / `TextCommitted` /
-//!   `RadioSelected` / `VirtualListSelected` / `VirtualListAction` /
+//!   `RadioSelected` / `VirtualListSelected` / `VirtualListActivated` /
 //!   `VirtualListHover` / `DropdownHover` /
-//!   `ButtonClicked` / `ToggleChanged` /
+//!   `ButtonActivated` / `ToggleChanged` /
 //!   `SegmentedSelected` / `NumericChanged` / `DropdownSelected` /
-//!   `TabSelected`), attributed by
+//!   `TabStripSelected`), attributed by
 //!   `ctx.source_mailbox()`, is the seam a real editor translates into
 //!   world-knob driver mail; the reference logs it.
 //! - **Grab.** `DropdownOpenChanged` is the one events-up kind the root
@@ -73,13 +73,13 @@ use crate::set::{
 };
 use crate::theme::{SetTheme, TextRole, Theme};
 use crate::{
-    ButtonClicked, ButtonConfig, Collect, DropdownConfig, DropdownHover, DropdownOpenChanged, DropdownSelected,
-    FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig, MenuBarConfig, MenuItemActivated,
-    MenuOpenChanged, NumericChanged, NumericConfig, PanelConfig, RadioConfig, RadioSelected, ScrollConfig,
+    ButtonActivated, ButtonConfig, Collect, DropdownConfig, DropdownHover, DropdownOpenChanged, DropdownSelected,
+    FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig, MenuBarActivated, MenuBarConfig,
+    MenuBarOpenChanged, NumericChanged, NumericConfig, PanelConfig, RadioConfig, RadioSelected, ScrollConfig,
     ScrollExtent, ScrollOutcome, ScrollResidual, ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged,
-    SliderConfig, TabSelected, TabStripConfig, TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig,
-    ToggleChanged, ToggleConfig, VirtualListAction, VirtualListConfig, VirtualListHover, VirtualListSelected, Widget,
-    WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetEligibilityChanged, WidgetFrame,
+    SliderConfig, TabStripConfig, TabStripSelected, TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig,
+    ToggleChanged, ToggleConfig, VirtualListActivated, VirtualListConfig, VirtualListHover, VirtualListSelected,
+    Widget, WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetEligibilityChanged, WidgetFrame,
     WidgetKind, WidgetStateChanged,
 };
 use crate::{FrameDischarge, decode_nested_widget_config};
@@ -100,7 +100,7 @@ pub enum ChildLayout {
 }
 
 impl ChildLayout {
-    fn row_height_pixels(self) -> f32 {
+    pub(crate) fn row_height_pixels(self) -> f32 {
         match self {
             Self::Panel { row_height_pixels } => row_height_pixels,
             Self::Content { assigned_extent } => assigned_extent.height_pixels,
@@ -550,7 +550,8 @@ fn host_scroll_strip_units(config: &VirtualListConfig) -> Option<u8> {
 /// column stays inside the panel and the track drawn in it is neither clipped
 /// away nor unreachable by a press. A strip that is not a positive, finite
 /// number, or one wider than the assignment, reserves nothing.
-fn content_frame(assigned: &WidgetFrame, strip_pixels: f32) -> WidgetFrame {
+#[must_use]
+pub fn content_frame(assigned: &WidgetFrame, strip_pixels: f32) -> WidgetFrame {
     let strip = if strip_pixels.is_finite() && (0.0..=assigned.width).contains(&strip_pixels) {
         strip_pixels
     } else {
@@ -810,7 +811,7 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
             WidgetKind::Radio,
             RadioConfig {
                 options: vec![String::from("Low"), String::from("Medium"), String::from("High")],
-                initial_index: 0,
+                initial: 0,
                 theme: theme.clone(),
                 state: WidgetControlState::default(),
             }
@@ -922,10 +923,10 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         MenuBarConfig::ID.0,
         SliderChanged::ID.0,
         TextCommitted::ID.0,
-        ButtonClicked::ID.0,
+        ButtonActivated::ID.0,
         RadioSelected::ID.0,
         VirtualListSelected::ID.0,
-        VirtualListAction::ID.0,
+        VirtualListActivated::ID.0,
         VirtualListHover::ID.0,
         ToggleChanged::ID.0,
         SegmentedSelected::ID.0,
@@ -933,9 +934,9 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         DropdownSelected::ID.0,
         DropdownOpenChanged::ID.0,
         DropdownHover::ID.0,
-        TabSelected::ID.0,
-        MenuItemActivated::ID.0,
-        MenuOpenChanged::ID.0,
+        TabStripSelected::ID.0,
+        MenuBarActivated::ID.0,
+        MenuBarOpenChanged::ID.0,
         FocusGained::ID.0,
         FocusLost::ID.0,
         HoverGained::ID.0,
@@ -1467,7 +1468,7 @@ impl WasmActor for WidgetPanel {
         tracing::info!(
             target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
-            selected_index = selected.selected_index,
+            index = selected.index,
             "widget virtual list selected",
         );
     }
@@ -1480,13 +1481,13 @@ impl WasmActor for WidgetPanel {
     /// # Agent
     /// A child's reply; not useful to send manually.
     #[handler::manual]
-    fn on_virtual_list_action(&mut self, ctx: &mut WasmCtx<'_, Manual>, action: VirtualListAction) {
+    fn on_virtual_list_activated(&mut self, ctx: &mut WasmCtx<'_, Manual>, action: VirtualListActivated) {
         tracing::info!(
             target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
-            row_index = action.row_index,
-            action_index = action.action_index,
-            "widget virtual list action",
+            index = action.index,
+            action = action.action,
+            "widget virtual list activated",
         );
     }
 
@@ -1502,7 +1503,7 @@ impl WasmActor for WidgetPanel {
         tracing::info!(
             target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
-            row = hover.row,
+            index = hover.index,
             "widget virtual list hover",
         );
     }
@@ -1521,7 +1522,7 @@ impl WasmActor for WidgetPanel {
         tracing::info!(
             target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
-            option = hover.option,
+            index = hover.index,
             "widget dropdown hover",
         );
     }
@@ -1531,11 +1532,11 @@ impl WasmActor for WidgetPanel {
     /// # Agent
     /// A child's reply; not useful to send manually.
     #[handler::manual]
-    fn on_button_clicked(&mut self, ctx: &mut WasmCtx<'_, Manual>, _clicked: ButtonClicked) {
+    fn on_button_activated(&mut self, ctx: &mut WasmCtx<'_, Manual>, _clicked: ButtonActivated) {
         tracing::info!(
             target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
-            "widget button clicked",
+            "widget button activated",
         );
     }
 
@@ -1591,7 +1592,7 @@ impl WasmActor for WidgetPanel {
     /// A menu bar opened a menu or closed every menu — the same grab handshake
     /// as a dropdown's list.
     #[handler::manual]
-    fn on_menu_open_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: MenuOpenChanged) {
+    fn on_menu_bar_open_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: MenuBarOpenChanged) {
         let Some(source) = ctx.source_mailbox() else {
             return;
         };
@@ -1604,24 +1605,24 @@ impl WasmActor for WidgetPanel {
 
     /// A menu item's activation. The map-editor seam; the reference logs it.
     #[handler::manual]
-    fn on_menu_item_activated(&mut self, ctx: &mut WasmCtx<'_, Manual>, activated: MenuItemActivated) {
+    fn on_menu_bar_activated(&mut self, ctx: &mut WasmCtx<'_, Manual>, activated: MenuBarActivated) {
         tracing::info!(
             target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
             menu = activated.menu,
             item = activated.item,
-            "widget menu item activated",
+            "widget menu bar activated",
         );
     }
 
     /// A tab strip's selection. The map-editor seam; the reference logs it.
     #[handler::manual]
-    fn on_tab_selected(&mut self, ctx: &mut WasmCtx<'_, Manual>, selected: TabSelected) {
+    fn on_tab_strip_selected(&mut self, ctx: &mut WasmCtx<'_, Manual>, selected: TabStripSelected) {
         tracing::info!(
             target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
             index = selected.index,
-            "widget tab selected",
+            "widget tab strip selected",
         );
     }
 

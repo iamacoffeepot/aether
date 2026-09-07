@@ -254,7 +254,7 @@ impl WasmActor for SegmentedWidget {
     const NAMESPACE: &'static str = "aether.kit.widget.segmented";
 
     fn init(config: SegmentedConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        let selected = clamp_option_index(config.initial_index, config.options.len());
+        let selected = clamp_option_index(config.initial, config.options.len());
         let desired_font_id = config.theme.font_id;
         Ok(Self {
             options: config.options,
@@ -275,7 +275,7 @@ impl WasmActor for SegmentedWidget {
     }
 
     /// Replace the options / theme in place, re-clamping the selection into
-    /// the new vector. `initial_index` seeds the control only at `init`;
+    /// the new vector. `initial` seeds the control only at `init`;
     /// [`SetSelection`] moves the choice.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: SegmentedConfig) {

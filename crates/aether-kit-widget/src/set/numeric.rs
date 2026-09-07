@@ -637,9 +637,9 @@ impl WasmActor for NumericWidget {
     /// through the set's shared vocabulary, so the numeric buffer honours the
     /// same select-all / copy / cut / paste, Delete, Home/End, and word-motion
     /// chords a text field does — Cmd as well as Ctrl. A repeated press is
-    /// another edit, never a suppressed repeat: round-4 note 14 wants a held
-    /// arrow to keep stepping, and the platform's key repeat is exactly a
-    /// stream of presses ([`NumericWidget::key_step`]).
+    /// another edit, never a suppressed repeat: a held arrow keeps stepping,
+    /// and the platform's key repeat is exactly a stream of presses
+    /// ([`NumericWidget::key_step`]).
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if !self.state.is_available() {

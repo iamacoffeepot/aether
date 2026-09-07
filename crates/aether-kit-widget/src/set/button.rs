@@ -5,7 +5,7 @@
 //! The momentary push button (issue 2660).
 //!
 //! A left press inside the button arms it (the root holds the pointer
-//! capture); the matching release fires [`ButtonClicked`] only if it lands
+//! capture); the matching release fires [`ButtonActivated`] only if it lands
 //! back inside — a press-then-release-inside, so a press that drags off and
 //! releases elsewhere cancels. The armed state draws the pressed overlay.
 //!
@@ -54,7 +54,7 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, Theme};
 use crate::{
-    ButtonClicked, ButtonConfig, ButtonEmphasis, ButtonTone, Collect, SetWidgetState, WidgetControlState,
+    ButtonActivated, ButtonConfig, ButtonEmphasis, ButtonTone, Collect, SetWidgetState, WidgetControlState,
     WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
@@ -102,7 +102,7 @@ impl ButtonWidget {
 
     fn emit_click(ctx: &WasmCtx<'_>) {
         if let Some(parent) = ctx.parent() {
-            parent.send(&ButtonClicked);
+            parent.send(&ButtonActivated);
         }
     }
 
@@ -141,7 +141,7 @@ impl WidgetDefaults for ButtonWidget {
 }
 
 /// A push-button widget. Spawned inline by a panel root with a
-/// [`ButtonConfig`]; reports [`ButtonClicked`] up on a completed click.
+/// [`ButtonConfig`]; reports [`ButtonActivated`] up on a completed click.
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it

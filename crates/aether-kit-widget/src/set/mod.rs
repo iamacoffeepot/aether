@@ -76,7 +76,7 @@ pub mod virtual_list;
 
 pub use button::ButtonWidget;
 pub use defaults::WidgetDefaults;
-pub use dialog::{DialogConfig, DialogPlaced, DialogWidget};
+pub use dialog::DialogWidget;
 pub use dropdown::DropdownWidget;
 pub use image::ImageWidget;
 pub use label::LabelWidget;
@@ -87,13 +87,13 @@ pub use popover::Popover;
 pub use radio::RadioGroupWidget;
 pub use segmented::SegmentedWidget;
 pub use slider::SliderWidget;
-pub use splitter::{SplitterAxis, SplitterConfig, SplitterHover, SplitterMoved, SplitterWidget};
+pub use splitter::SplitterWidget;
 pub use tab_strip::TabStripWidget;
 pub use text_area::TextAreaWidget;
 pub use text_field::TextFieldWidget;
-pub use toast::{ToastConfig, ToastNotice, ToastRegionChanged, ToastSeverity, ToastWidget};
+pub use toast::ToastWidget;
 pub use toggle::ToggleWidget;
-pub use tooltip::{TooltipConfig, TooltipIcon, TooltipLine, TooltipSection, TooltipShed, TooltipWidget};
+pub use tooltip::TooltipWidget;
 pub use virtual_list::VirtualListWidget;
 
 use alloc::string::String;
@@ -223,9 +223,9 @@ pub(super) enum EditCommand {
 /// Whether the platform's editing-chord modifier is held. Both `ctrl` and
 /// `meta` count, always: Cmd is the chord on macOS and Ctrl everywhere else,
 /// and a widget cannot ask which platform its window is on — the substrate
-/// reports the physical modifiers and nothing more. Accepting either is what
-/// the owner's Cmd+A note asks for, and it costs nothing, because no control in
-/// the set binds the two modifiers to different meanings.
+/// reports the physical modifiers and nothing more. Accepting either is what a
+/// reader on either platform expects, and it costs nothing, because no control
+/// in the set binds the two modifiers to different meanings.
 fn edit_chord(modifiers: Modifiers) -> bool {
     modifiers.ctrl || modifiers.meta
 }
@@ -469,9 +469,9 @@ fn measured_text_width(metrics: &CachedFontMetrics, text: &str, size_pixels: f32
 /// `width`-wide frame, never left of the frame's own left edge.
 ///
 /// Centering is the whole rule: the margins either side are equal at every
-/// width, which is what a reader checks first and what the owner's
-/// asymmetric-Remove-button note was about. Clamping the origin to `pad` — the
-/// earlier rule — looked harmless but broke exactly that, because a frame
+/// width, which is the first thing a reader checks on a label in a button.
+/// Clamping the origin to `pad` — the earlier rule — looked harmless but broke
+/// exactly that, because a frame
 /// narrower than `text_width + 2 * pad` got a full pad on the left and
 /// whatever was left over on the right. `pad` is therefore what the button's
 /// *intrinsic width* reserves ([`ButtonWidget`]'s
@@ -641,18 +641,18 @@ pub(crate) struct ButtonInk {
 /// a filled verb is a saturated plate, a tonal one a quiet plate at a fixed
 /// contrast step off the surface ([`Theme::tonal`]), an outlined one no plate
 /// and a stroke that clears the same step ([`Theme::edge`]), and a text one
-/// neither. Two ranks that resolve to the same face are the owner's round-11
-/// note 4 — a `Change gem` and a `×` on one row that read alike — so the ranks
-/// are separated by *structure* (plate / stroke / nothing) before colour, and
+/// neither. Two ranks that resolve to the same face defeat the ladder — two
+/// verbs on one row at different emphases that read alike — so the ranks are
+/// separated by *structure* (plate / stroke / nothing) before colour, and
 /// the two that carry colour are separated from their background by measured
 /// contrast rather than by a fixed mix.
 ///
 /// The one rule worth stating: on the quiet emphases a *neutral* verb reads in
 /// the primary ink, not in the accent. The accent is the primary action's token
 /// (`designing-a-screen.md` §6), and a screen whose four secondary verbs are
-/// all lettered in it has spent the token again — which is the owner's "a
-/// single yellow button for everything" in a thinner form. A danger verb keeps
-/// its colour at every rank, because what it destroys does not get quieter.
+/// all lettered in it has spent the token again — one accent for everything,
+/// in a thinner form. A danger verb keeps its colour at every rank, because
+/// what it destroys does not get quieter.
 pub(crate) fn button_ink(theme: &Theme, emphasis: ButtonEmphasis, tone: ButtonTone) -> ButtonInk {
     let role = match tone {
         ButtonTone::Neutral => theme.accent,
@@ -1183,8 +1183,8 @@ pub fn text_origin_y(row_top: f32, row_height: f32, size_pixels: f32) -> f32 {
 /// How wide the kit lets a hover reveal or a tooltip run before it wraps, in
 /// body characters. A reading measure, not a limit the content chose: past
 /// roughly this the eye loses the line it is on coming back from the right
-/// edge, and a plate that is one enormously long line is exactly the "breaks
-/// up weirdly" the owner saw.
+/// edge, and a plate that is one enormously long line reads as text that broke
+/// up rather than as a box.
 pub const REVEAL_WRAP_CHARS: usize = 40;
 
 /// The pixel width [`REVEAL_WRAP_CHARS`] comes to at `size_pixels`, by the
@@ -1282,8 +1282,7 @@ pub struct WrappedLine {
 /// starts at the margin and every continuation is inset by `indent_pixels`,
 /// wrapping that much earlier so the right edge stays where it was. A wrapped
 /// entry then reads as one entry rather than as two — which is what a stat
-/// line on a hover card needs, and is ordinary typography (the studio's
-/// gap 18).
+/// line on a hover card needs, and is ordinary typography.
 ///
 /// `0.0` is exactly [`wrap_to_width`]. A `\n` starts a new paragraph, so the
 /// line after an author's own break is a first line again, not a continuation.
@@ -1468,10 +1467,10 @@ fn even_split_widths(count: usize, width: f32, gap: f32) -> Vec<f32> {
 /// This is the sizing a row of cells that owns its whole frame wants: a
 /// filled tab strip divides the bar between its tabs, so there is no width
 /// left over to leave blank, but dividing it *evenly* ignores what is in each
-/// cell. At the studio's own pane that put `Build` in a share three times
-/// wider than the word and elided `Equipment` to `Equipm…` in the share
-/// beside it — a row with room for every label cutting one of them, which is
-/// the one thing §5 of the screen-design method forbids outright.
+/// cell. An even split puts a short label in a share three times wider than
+/// the word and elides a long one to `Equipm…` in the share beside it — a row
+/// with room for every label cutting one of them, which is the one thing §5 of
+/// the screen-design method forbids outright.
 ///
 /// So content comes first and the slack is the only thing shared: each cell
 /// gets its measured run plus its pads, and every cell then takes an equal

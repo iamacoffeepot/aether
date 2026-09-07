@@ -85,8 +85,8 @@ pub struct Theme {
     pub selection: Rgba,
     /// Text/iconography drawn on top of a `selection`-filled row.
     pub selection_text: Rgba,
-    /// The four rungs of the **rarity ladder** — the ink a name is written in
-    /// when the thing it names carries a tier. `rarity_common` is the plain
+    /// The four rungs of the **tier ladder** — the ink a name is written in
+    /// when the thing it names carries a rank. `tier_1` is the plain
     /// ink; the three above it are a cool blue, a yellow and a warm gold, the
     /// register a reader of loot lists already knows.
     ///
@@ -96,19 +96,19 @@ pub struct Theme {
     /// 3.0 against every fill a row can draw under it — the hover wash and the
     /// selection included — so the ladder survives the row it lands on being
     /// chosen or pointed at ([`TextInk`]).
-    pub rarity_common: Rgba,
-    /// One step up the rarity ladder — a cool blue.
-    pub rarity_uncommon: Rgba,
-    /// Two steps up the rarity ladder — a yellow.
-    pub rarity_rare: Rgba,
-    /// The top of the rarity ladder — a warm gold.
-    pub rarity_legendary: Rgba,
+    pub tier_1: Rgba,
+    /// One step up the tier ladder — a cool blue.
+    pub tier_2: Rgba,
+    /// Two steps up the tier ladder — a yellow.
+    pub tier_3: Rgba,
+    /// The top of the tier ladder — a warm gold.
+    pub tier_4: Rgba,
     /// The five inks of the **hue set** — the palette a vocabulary told apart
     /// by colour rather than by rank writes its names in: a damage type, a
     /// faction, a category tag. `hue_plain` is the neutral member, and the four
     /// beside it are a warm, a cool, a bright and a violet.
     ///
-    /// A **set**, not a ladder: the rarity rungs are ordered and these are not,
+    /// A **set**, not a ladder: the tier rungs are ordered and these are not,
     /// so a host maps its own vocabulary onto them in one function and nothing
     /// here claims a warm tag outranks a cool one. Like the ladder they are
     /// inks and never fills, and each is chosen to clear 4.5 against the raised
@@ -186,15 +186,16 @@ pub enum TextRole {
 /// It exists because a row is more than one run. A list row's name and its
 /// trailing amount, a dropdown option and the row it stands in — before this,
 /// one ink covered the whole row, so "this run muted, that one in the tag's
-/// colour" could not be said at all and a name could not carry its own tier
-/// (the studio's gaps 27 and 31). `Inherited` is the default and is what every
+/// colour" could not be said at all and a name could not carry its own tier.
+/// `Inherited` is the default and is what every
 /// run drew before the field existed.
 ///
-/// The rarity rungs are a **generic four-step ladder**, not a game's
-/// vocabulary: anything with a tier — a drop, a tier list, a plan — writes its
-/// names in them. What the four rungs *mean* belongs to the host; what they
-/// look like, and that each stays legible on every fill a row draws under it,
-/// belongs to the theme.
+/// The tier rungs are a **generic four-step ladder**, numbered rather than
+/// named because the kit does not know what they rank: anything ordered — a
+/// drop's rarity, a tier list, a plan's confidence — writes its names in them.
+/// What the four rungs *mean* belongs to the host, which maps its own
+/// vocabulary onto them in one function; what they look like, and that each
+/// stays legible on every fill a row draws under it, belongs to the theme.
 ///
 /// There is deliberately **no `Warning` or `Error` ink** here. The obvious
 /// pair — the `warning` and `error` roles written as a run — was measured
@@ -223,14 +224,14 @@ pub enum TextInk {
     /// but one lettered run — a tag, a match, a live value — is the token used
     /// once and read once.
     Accent,
-    /// The plain rung of the rarity ladder.
-    RarityCommon,
-    /// One step up the rarity ladder.
-    RarityUncommon,
-    /// Two steps up the rarity ladder.
-    RarityRare,
-    /// The top of the rarity ladder.
-    RarityLegendary,
+    /// The plain rung of the tier ladder.
+    Tier1,
+    /// One step up the tier ladder.
+    Tier2,
+    /// Two steps up the tier ladder.
+    Tier3,
+    /// The top of the tier ladder.
+    Tier4,
     /// The warm member of the hue set.
     HueWarm,
     /// The cool member of the hue set.
@@ -283,7 +284,7 @@ impl Theme {
     /// run is set at. A widget that inks a run differently again — a selected
     /// list row in `selection_text` — layers that over an `Inherited` run and
     /// leaves a named ink alone, because the reason a name is written in a
-    /// rarity colour does not stop applying when its row is chosen.
+    /// tier colour does not stop applying when its row is chosen.
     #[must_use]
     pub fn text_ink(&self, ink: TextInk, role: TextRole) -> Rgba {
         match ink {
@@ -293,10 +294,10 @@ impl Theme {
             },
             TextInk::Muted => self.text_muted,
             TextInk::Accent => self.accent,
-            TextInk::RarityCommon => self.rarity_common,
-            TextInk::RarityUncommon => self.rarity_uncommon,
-            TextInk::RarityRare => self.rarity_rare,
-            TextInk::RarityLegendary => self.rarity_legendary,
+            TextInk::Tier1 => self.tier_1,
+            TextInk::Tier2 => self.tier_2,
+            TextInk::Tier3 => self.tier_3,
+            TextInk::Tier4 => self.tier_4,
             TextInk::HueWarm => self.hue_warm,
             TextInk::HueCool => self.hue_cool,
             TextInk::HueBright => self.hue_bright,
@@ -382,8 +383,8 @@ impl Theme {
     /// carried before, the neutral tonal plate cleared 2.67 against the raised
     /// surface and the danger one 1.79 — and a dialog draws its plate in
     /// `surface_raised`, the very surface this is derived from, so a tonal
-    /// `Cancel` on one read as lettering on the plate rather than as a button
-    /// (the owner's round-11 note 10). Deriving the mix fixes the *ratio*
+    /// `Cancel` on one read as lettering on the plate rather than as a button.
+    /// Deriving the mix fixes the *ratio*
     /// instead, so both tones and any restyled role land on one visible step.
     ///
     /// It is deliberately **not** `selection`. A chosen row and a secondary
@@ -403,9 +404,9 @@ impl Theme {
     /// list rows, the rule under a dialog's title — and a divider is meant to
     /// be nearly invisible: this theme's clears 1.29 against the raised
     /// surface. Borrowed unchanged as a button's border it made the outlined
-    /// rung and the text rung one face at a glance, which is half of the
-    /// owner's round-11 note 4 — two row verbs at different emphases that read
-    /// alike. A control's edge and a content divider are two meanings, so they
+    /// rung and the text rung one face at a glance — two row verbs at
+    /// different emphases that read alike, which defeats the ladder. A
+    /// control's edge and a content divider are two meanings, so they
     /// are two tokens; this one is still *derived* from `outline`, so a
     /// restyled divider still carries the edge with it.
     #[must_use]
@@ -481,16 +482,16 @@ impl Theme {
         selection: Rgba::from_srgb8(0x3b, 0x43, 0x30, 0xff),
         // Ink on a selected row stays the primary text.
         selection_text: Rgba::from_srgb8(0xe6, 0xe4, 0xd6, 0xff),
-        // The rarity ladder. `common` is the primary ink — an untiered name is
+        // The tier ladder. `tier_1` is the primary ink — an unranked name is
         // written exactly as any other name is — and the three above it are
         // lifted well past their "natural" saturation on purpose: each has to
         // stay legible on the *brightest* fill a row draws, which is a
         // selected row under the pointer, so a deep gold that reads on the
         // plate would vanish there.
-        rarity_common: Rgba::from_srgb8(0xe6, 0xe4, 0xd6, 0xff),
-        rarity_uncommon: Rgba::from_srgb8(0x9f, 0xc0, 0xff, 0xff),
-        rarity_rare: Rgba::from_srgb8(0xf2, 0xd7, 0x5c, 0xff),
-        rarity_legendary: Rgba::from_srgb8(0xe5, 0xb3, 0x71, 0xff),
+        tier_1: Rgba::from_srgb8(0xe6, 0xe4, 0xd6, 0xff),
+        tier_2: Rgba::from_srgb8(0x9f, 0xc0, 0xff, 0xff),
+        tier_3: Rgba::from_srgb8(0xf2, 0xd7, 0x5c, 0xff),
+        tier_4: Rgba::from_srgb8(0xe5, 0xb3, 0x71, 0xff),
         // The hue set, measured against the four fills a row draws (raised,
         // raised + hover, selection, selection + hover) — the worst of the four
         // is a chosen row under the pointer, and each of these clears 3.0 there
@@ -613,19 +614,14 @@ mod tests {
     }
 
     #[test]
-    fn every_rarity_ink_reads_on_every_fill_a_row_can_draw_under_it() {
-        // Tripwire: a rarity ink is chosen for its hue, and a hue picked on a
+    fn every_tier_ink_reads_on_every_fill_a_row_can_draw_under_it() {
+        // Tripwire: a tier ink is chosen for its hue, and a hue picked on a
         // white page or against the plate alone goes illegible the moment its
         // row is pointed at or chosen — the two fills a list row spends most
         // of its life on. A deep gold-brown, the obvious choice for the top
         // rung, measures 2.4 on a selected row under the pointer. This is what
         // stops the next palette edit from shipping one.
-        assert_every_ink_reads_on_every_row_fill(&[
-            TextInk::RarityCommon,
-            TextInk::RarityUncommon,
-            TextInk::RarityRare,
-            TextInk::RarityLegendary,
-        ]);
+        assert_every_ink_reads_on_every_row_fill(&[TextInk::Tier1, TextInk::Tier2, TextInk::Tier3, TextInk::Tier4]);
     }
 
     #[test]

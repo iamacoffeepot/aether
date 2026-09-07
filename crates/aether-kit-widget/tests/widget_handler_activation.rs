@@ -88,7 +88,7 @@ fn exported_adopters() -> [NamedLoad; 6] {
             name: "segmented",
             config: SegmentedConfig {
                 options: vec!["Raise".to_owned(), "Lower".to_owned()],
-                initial_index: 0,
+                initial: 0,
                 theme: Theme::DEFAULT,
                 ..SegmentedConfig::default()
             }
@@ -99,7 +99,7 @@ fn exported_adopters() -> [NamedLoad; 6] {
             name: "virtual_list",
             config: VirtualListConfig {
                 items: vec![VirtualListRow::from("Row 0"), VirtualListRow::from("Row 1")],
-                initial_selected_index: Some(0),
+                initial: Some(0),
                 visible_row_count: 2,
                 theme: Theme::DEFAULT,
                 ..VirtualListConfig::default()
@@ -289,7 +289,7 @@ fn virtual_list_hover_lost_clears_the_hovered_row() {
                 clip: None,
                 config: VirtualListConfig {
                     items: vec![VirtualListRow::from("Row 0"), VirtualListRow::from("Row 1")],
-                    initial_selected_index: Some(0),
+                    initial: Some(0),
                     visible_row_count: 2,
                     theme: Theme::DEFAULT,
                     ..VirtualListConfig::default()
