@@ -36,7 +36,7 @@ const CHILD_ADDRESS: &str = "test.wasm.sends_host/test.wasm.sends_child";
 ///
 /// Every recipient here is a cluster member, so each send routes in place and
 /// enqueues locally — no host call. A `()` payload encodes to empty bytes.
-#[allow(clippy::disallowed_methods)] // test scaffolding — the fixture registers the child under its own rendered address
+#[allow(clippy::disallowed_methods)] // aether-suppression-request: fixture registers the child by rendered address
 #[test]
 fn sends_view_routes_and_stamps_like_the_ctx_it_came_from() {
     let registry = Registry::new();
@@ -77,7 +77,7 @@ fn drain_to_members(registry: &Registry, leg: &'static str) {
 /// the ctx. `Embedded` seeds from the *logical parent*, so a view that seeded
 /// from its own mailbox instead — the easy transcription slip — resolves a
 /// different id here while the ctx still resolves the right one.
-#[allow(clippy::disallowed_methods)] // test scaffolding — synthetic lineage IDs exercise parent-scoped routing
+#[allow(clippy::disallowed_methods)] // aether-suppression-request: fixture builds synthetic lineage ids
 #[test]
 fn sends_view_resolves_typed_peers_through_the_same_caller_scope() {
     let registry = Registry::new();
