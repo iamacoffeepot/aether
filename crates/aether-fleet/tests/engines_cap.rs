@@ -584,10 +584,7 @@ mod tests {
         assert!(error.starts_with(&prefix), "detail must retain phase and hash: {error}");
         let category = error.strip_prefix(&prefix).expect("prefix checked");
         assert!(!category.is_empty(), "detail must retain an IO category: {error}");
-        assert!(
-            !category.contains('/') && !category.contains('\\'),
-            "IO category must not embed a host path: {error}",
-        );
+        assert!(!category.contains('/') && !category.contains('\\'), "IO category must not embed a host path: {error}",);
         let sentinel_root = sentinel_root.to_string_lossy();
         assert!(!error.contains(sentinel_root.as_ref()), "detail must not leak the sentinel root: {error}");
         assert!(!error.contains(SENTINEL_HOST_PATH), "detail must not leak the sentinel path component: {error}");
