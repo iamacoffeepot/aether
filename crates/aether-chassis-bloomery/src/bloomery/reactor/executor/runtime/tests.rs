@@ -1172,13 +1172,20 @@ fn a_restart_neither_extends_nor_resets_a_deadline() {
     // before a restart is already overdue after one.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bloomery.db").to_str().unwrap().to_owned();
-    let shell = shell(FakeGithub::new());
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
 
-    {
+    let (original_nonce, original_deadline) = {
         let mut store = SqliteStore::open(&path).unwrap();
-        dispatch_one(&mut store, &shell, "wp-hung");
+        let nonce = dispatch_one(&mut store, &shell, "wp-hung")[0].handle.nonce.0.clone();
+        let deadline = store
+            .lookup_order(&nonce)
+            .unwrap()
+            .expect("the dispatched order is recorded before the process stops")
+            .deadline_unix_millis;
         // The process stops here, with the order dispatched and unresolved.
-    }
+        (nonce, deadline)
+    };
 
     let mut store = SqliteStore::open(&path).unwrap();
     let mut tracked: Vec<TrackedHandle> = seed_tracked(&mut store)
@@ -1187,17 +1194,51 @@ fn a_restart_neither_extends_nor_resets_a_deadline() {
         .map(|handle| TrackedHandle::new(handle, Instant::now()))
         .collect();
 
+    assert_eq!(
+        store.lookup_order(&original_nonce).unwrap().expect("the order survived the restart").deadline_unix_millis,
+        original_deadline,
+        "a restart reads the same deadline back and never replaces it",
+    );
+
     assert!(
         tick(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + 60_000).is_empty(),
         "a restart inside the allowance does not bring the deadline forward",
     );
-    let admits = tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE);
-    assert_eq!(
-        timeout_verdict(StageId::Construct),
-        Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
-        "expiry after restart still classifies as a host fault on the original deadline",
+    assert!(backend.cancelled().is_empty(), "the still-live run is not cancelled before its original deadline");
+    assert!(
+        store.lookup_order(&original_nonce).unwrap().is_some(),
+        "the original order is still outstanding before its deadline",
     );
-    let _ = admits;
+    assert_eq!(
+        tracked.iter().map(|tracked_handle| tracked_handle.handle.nonce.0.clone()).collect::<Vec<_>>(),
+        vec![original_nonce.clone()],
+        "the original order is still tracked before its deadline",
+    );
+
+    let admits = tick(&mut store, &shell, &mut tracked, original_deadline);
+    assert_eq!(
+        backend.cancelled(),
+        vec![original_nonce.clone()],
+        "the hung run is reclaimed once at the original deadline",
+    );
+    assert!(store.lookup_order(&original_nonce).unwrap().is_none(), "the original order is consumed");
+    assert!(tracked.is_empty(), "the consumed order is no longer tracked");
+    assert_eq!(admits.len(), 1, "the expired order admits a host fault rather than deferring");
+    match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
+        Fact::MemberExecutorFault { bloom, workpiece, stage, evidence } => {
+            assert_eq!(bloom, BloomId(digest(1)));
+            assert_eq!(workpiece.0, "wp-hung");
+            assert_eq!(stage, StageId::Construct);
+            assert_eq!(evidence.kind, aether_bloomery::EvidenceKind::ExecutorFault);
+        }
+        other => panic!("expected a Fact::MemberExecutorFault, got {other:?}"),
+    }
+
+    assert!(
+        tick(&mut store, &shell, &mut tracked, original_deadline + 60_000).is_empty(),
+        "the consumed order cannot expire a second time",
+    );
+    assert_eq!(backend.cancelled(), vec![original_nonce], "a later tick does not cancel the same nonce again");
 }
 
 #[test]
