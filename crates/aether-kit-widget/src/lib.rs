@@ -336,14 +336,14 @@ enum DirectRun {
     Textured { texture_id: u32, clip: PreparedClip, quads: Vec<RenderTexturedQuad> },
 }
 
-/// Plan the filtered non-text subsequence in one pass. Adjacent solids
-/// coalesce by effective clip; adjacent textured items coalesce by texture id
-/// and effective clip. A kind, texture, or clip transition flushes without
-/// globally regrouping repeated keys, preserving painter order. Invalid
-/// explicit clips omit their items.
-fn direct_runs(list: &WidgetDrawList) -> Vec<DirectRun> {
+/// Plan the filtered non-text subsequence of one emit lane in one pass.
+/// Adjacent solids coalesce by effective clip; adjacent textured items
+/// coalesce by texture id and effective clip. A kind, texture, or clip
+/// transition flushes without globally regrouping repeated keys, preserving
+/// painter order. Invalid explicit clips omit their items.
+fn direct_runs(items: &[WidgetDrawItem]) -> Vec<DirectRun> {
     let mut runs: Vec<DirectRun> = Vec::new();
-    for item in &list.items {
+    for item in items {
         match item {
             WidgetDrawItem::Quad { x, y, width, height, color, .. } => {
                 let Some(clip) = PreparedClip::for_item(item) else {
@@ -488,9 +488,11 @@ fn glyph_box(x: f32, y: f32, text: &str, size_pixels: f32) -> WidgetClipRect {
     }
 }
 
-/// Collect the filtered text subsequence into authored-order text items.
-/// Invalid clips omit their items before the root converts the remaining clips
-/// into framebuffer coordinates.
+/// Collect the filtered text subsequence of one emit lane into authored-order
+/// text items. `items` is the lane; `later_overlay` seeds the hole set with
+/// fills that land after every item in it — the cluster overlay for the
+/// ordinary lane, empty for the overlay lane. Invalid clips omit their items
+/// before the root converts the remaining clips into framebuffer coordinates.
 ///
 /// Text reaches the render cap one hop after the quads a cluster sends
 /// directly, so no fill can cover the glyphs authored before it by draw order
@@ -520,13 +522,13 @@ fn glyph_box(x: f32, y: f32, text: &str, size_pixels: f32) -> WidgetClipRect {
 /// `Composite::flatten` never stamps a slot clip onto an escaped overlay, so
 /// skipping it here would let the reveal plate's words print through the list
 /// opened over them.
-fn text_items(list: &WidgetDrawList) -> Vec<DrawText> {
+fn text_items(items: &[WidgetDrawItem], later_overlay: &[WidgetDrawItem]) -> Vec<DrawText> {
     let mut later = LaterFills::default();
-    for rect in list.overlay.iter().filter_map(WidgetDrawItem::covered_rect) {
+    for rect in later_overlay.iter().filter_map(WidgetDrawItem::covered_rect) {
         later.push(rect);
     }
-    let mut items: Vec<DrawText> = Vec::new();
-    for item in list.items.iter().rev() {
+    let mut texts: Vec<DrawText> = Vec::new();
+    for item in items.iter().rev() {
         let WidgetDrawItem::Text { x, y, font_id, text, size_pixels, color, .. } = item else {
             if let Some(rect) = item.covered_rect() {
                 later.push(rect);
@@ -549,7 +551,7 @@ fn text_items(list: &WidgetDrawList) -> Vec<DrawText> {
         let hairline = size_pixels * HAIRLINE_RATIO;
         match clip {
             PreparedClip::Finite { rect } => {
-                items.extend(later.cut(rect, run, hairline).into_iter().map(|part| draw(Some(framebuffer_clip(part)))));
+                texts.extend(later.cut(rect, run, hairline).into_iter().map(|part| draw(Some(framebuffer_clip(part)))));
             }
             PreparedClip::Unbounded => {
                 // Cut the run against its own box, and keep the unbounded
@@ -558,15 +560,15 @@ fn text_items(list: &WidgetDrawList) -> Vec<DrawText> {
                 // and the wrong thing to hand the render cap as a bound.
                 let parts = later.cut(run, run, hairline);
                 if !later.any_over(run) || parts == [run] {
-                    items.push(draw(None));
+                    texts.push(draw(None));
                 } else {
-                    items.extend(parts.into_iter().map(|part| draw(Some(framebuffer_clip(part)))));
+                    texts.extend(parts.into_iter().map(|part| draw(Some(framebuffer_clip(part)))));
                 }
             }
         }
     }
-    items.reverse();
-    items
+    texts.reverse();
+    texts
 }
 
 /// Emit a flattened subtree as the cluster's single render + text sender.
@@ -576,21 +578,19 @@ fn text_items(list: &WidgetDrawList) -> Vec<DrawText> {
 /// peer compositor in another crate (the terrain workbench panel) reuses the
 /// same single-sender flush for its own composite.
 pub fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
-    emit_layer(ctx, list);
+    emit_layer(ctx, &list.items, &list.overlay);
     if !list.overlay.is_empty() {
-        emit_layer(
-            ctx,
-            &WidgetDrawList { content_height: None, intrinsic: None, items: list.overlay.clone(), overlay: Vec::new() },
-        );
+        emit_layer(ctx, &list.overlay, &[]);
     }
 }
 
-/// One layer of a flattened list — its `items` — as solid / textured runs
-/// then one text batch. Called for the ordinary items and again for the
-/// overlay, so an overlay's quads and glyphs are submitted after every
-/// ordinary quad and glyph respectively.
-fn emit_layer(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
-    for run in direct_runs(list) {
+/// One layer of a flattened list — `items` — as solid / textured runs then
+/// one text batch. `later_overlay` seeds that lane's later-fill set: the
+/// cluster overlay for the ordinary lane, empty for the overlay lane. Called
+/// for the ordinary items and again for the overlay, so an overlay's quads
+/// and glyphs are submitted after every ordinary quad and glyph respectively.
+fn emit_layer(ctx: &mut WasmCtx<'_, Manual>, items: &[WidgetDrawItem], later_overlay: &[WidgetDrawItem]) {
+    for run in direct_runs(items) {
         match run {
             DirectRun::Solid { clip, quads } => {
                 ctx.actor::<RenderCapability>().send(&DrawSolidQuads {
@@ -610,9 +610,9 @@ fn emit_layer(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
             }
         }
     }
-    let items = text_items(list);
-    if !items.is_empty() {
-        ctx.actor::<TextCapability>().send(&DrawTextBatch { items });
+    let texts = text_items(items, later_overlay);
+    if !texts.is_empty() {
+        ctx.actor::<TextCapability>().send(&DrawTextBatch { items: texts });
     }
 }
 
@@ -690,7 +690,7 @@ mod tests {
                 quad(7.0, Some(b)),
             ],
         };
-        let runs = direct_runs(&list);
+        let runs = direct_runs(&list.items);
         assert_eq!(runs.len(), 6);
         assert!(matches!(
             &runs[0],
@@ -757,13 +757,82 @@ mod tests {
             items: vec![quad(1.0, None), quad(2.0, Some(invalid)), quad(3.0, None)],
             overlay: Vec::new(),
         };
-        let runs = direct_runs(&list);
+        let runs = direct_runs(&list.items);
         assert_eq!(runs.len(), 1);
         assert!(matches!(
             &runs[0],
             DirectRun::Solid { clip: PreparedClip::Unbounded, quads }
                 if quads.iter().map(|quad| quad.x).eq([1.0, 3.0])
         ));
+    }
+
+    #[test]
+    fn overlay_lane_plans_direct_runs_from_its_own_slice() {
+        // Tripwire: emit plans each lane from that lane's items. Concatenating
+        // ordinary and overlay into one pass would coalesce across the lane
+        // boundary; planning overlay from a cloned WidgetDrawList whose overlay
+        // seed was emptied is the same FIFO grouping, without the clone.
+        let a = WidgetClipRect { x: 1.0, y: 2.0, width: 3.0, height: 4.0 };
+        let b = WidgetClipRect { x: 5.0, y: 6.0, width: 7.0, height: 8.0 };
+        let list = WidgetDrawList {
+            content_height: None,
+            intrinsic: None,
+            items: vec![quad(0.0, Some(a)), textured(7, 1.0, Some(a)), quad(2.0, Some(a))],
+            overlay: vec![
+                quad(10.0, Some(b)),
+                textured(7, 11.0, Some(b)),
+                textured(7, 12.0, Some(b)),
+                textured(7, 13.0, Some(a)),
+            ],
+        };
+
+        let ordinary = direct_runs(&list.items);
+        assert_eq!(ordinary.len(), 3);
+        assert!(matches!(
+            &ordinary[0],
+            DirectRun::Solid { clip, quads }
+                if *clip == PreparedClip::Finite { rect: a }
+                    && quads.iter().map(|quad| quad.x).eq([0.0])
+        ));
+        assert!(matches!(
+            &ordinary[1],
+            DirectRun::Textured { texture_id: 7, clip, quads }
+                if *clip == PreparedClip::Finite { rect: a }
+                    && quads.iter().map(|quad| quad.x).eq([1.0])
+        ));
+        assert!(matches!(
+            &ordinary[2],
+            DirectRun::Solid { clip, quads }
+                if *clip == PreparedClip::Finite { rect: a }
+                    && quads.iter().map(|quad| quad.x).eq([2.0])
+        ));
+
+        let overlay = direct_runs(&list.overlay);
+        assert_eq!(overlay.len(), 3);
+        assert!(matches!(
+            &overlay[0],
+            DirectRun::Solid { clip, quads }
+                if *clip == PreparedClip::Finite { rect: b }
+                    && quads.iter().map(|quad| quad.x).eq([10.0])
+        ));
+        assert!(
+            matches!(
+                &overlay[1],
+                DirectRun::Textured { texture_id: 7, clip, quads }
+                    if *clip == PreparedClip::Finite { rect: b }
+                        && quads.iter().map(|quad| quad.x).eq([11.0, 12.0])
+            ),
+            "adjacent overlay textured items that share texture and clip still coalesce"
+        );
+        assert!(
+            matches!(
+                &overlay[2],
+                DirectRun::Textured { texture_id: 7, clip, quads }
+                    if *clip == PreparedClip::Finite { rect: a }
+                        && quads.iter().map(|quad| quad.x).eq([13.0])
+            ),
+            "a clip change in the overlay lane flushes without regrouping the earlier key"
+        );
     }
 
     #[test]
@@ -786,7 +855,7 @@ mod tests {
                 clip: None,
             }],
         };
-        let items = text_items(&list);
+        let items = text_items(&list.items, &list.overlay);
         assert_eq!(items.len(), 1, "the wholly covered row sends no glyphs");
         assert_eq!(items[0].text, "half");
         let clip = items[0].clip.clone().expect("the half-covered row keeps a finite clip");
@@ -848,10 +917,8 @@ mod tests {
         );
 
         let flat = composite.flatten(None);
-        let overlay_lane =
-            WidgetDrawList { content_height: None, intrinsic: None, items: flat.overlay, overlay: Vec::new() };
         assert!(
-            text_items(&overlay_lane).iter().any(|item| item.text == "Pick a gem"),
+            text_items(&flat.overlay, &[]).iter().any(|item| item.text == "Pick a gem"),
             "the question's own title keeps its run: what a widget behind the plate raises went down \
              where its slot sits, under the plate, not over the group",
         );
@@ -883,16 +950,18 @@ mod tests {
             ],
         };
 
-        assert!(text_items(&list).is_empty(), "the content the plate stands over sends no glyphs");
-        let overlay_lane =
-            WidgetDrawList { content_height: None, intrinsic: None, items: list.overlay, overlay: Vec::new() };
         assert!(
-            text_items(&overlay_lane)
+            text_items(&list.items, &list.overlay).is_empty(),
+            "the content the plate stands over sends no glyphs: ordinary lane seeds later fills \
+             from the overlay"
+        );
+        assert!(
+            text_items(&list.overlay, &[])
                 .iter()
                 .map(|item| item.text.as_str())
                 .eq(["the picker's own row", "an option in the list"]),
-            "the plate leaves the labels drawn on it whole, its open list deletes the one it covers, \
-             and the list's own option is authored after the list's fill",
+            "overlay-local order uses later fills only: the plate leaves labels drawn after it whole, \
+             its open list deletes the one it covers, and the list's own option is authored after the fill",
         );
     }
 
@@ -915,14 +984,13 @@ mod tests {
             clip: None,
         };
         let opened_list = |x: f32| fill(WidgetClipRect { x, y: 98.0, width: 400.0, height: 30.0 });
-        let lane = |items| WidgetDrawList { content_height: None, intrinsic: None, items, overlay: Vec::new() };
 
         assert!(
-            text_items(&lane(vec![reveal(10.0), opened_list(0.0)])).is_empty(),
+            text_items(&[reveal(10.0), opened_list(0.0)], &[]).is_empty(),
             "the covered run sends no glyphs at all",
         );
 
-        let half = text_items(&lane(vec![reveal(10.0), opened_list(60.0)]));
+        let half = text_items(&[reveal(10.0), opened_list(60.0)], &[]);
         assert_eq!(half.len(), 1, "the half-covered run stays one item; got {half:?}");
         assert_eq!(
             half[0].clip.clone().map(|clip| (clip.x, clip.width)),
@@ -930,7 +998,7 @@ mod tests {
             "and is scissored to the part of its own box the list leaves",
         );
 
-        let untouched = text_items(&lane(vec![reveal(10.0), opened_list(500.0)]));
+        let untouched = text_items(&[reveal(10.0), opened_list(500.0)], &[]);
         assert_eq!(untouched.len(), 1);
         assert!(
             untouched[0].clip.is_none(),
@@ -953,7 +1021,7 @@ mod tests {
             items: vec![text(0.0, "a run that fills its whole row", Some(run)), fill(column(20.0)), fill(column(60.0))],
         };
 
-        let mut spans: Vec<(f32, f32)> = text_items(&list)
+        let mut spans: Vec<(f32, f32)> = text_items(&list.items, &list.overlay)
             .iter()
             .map(|item| {
                 let clip = item.clip.clone().expect("a cut run keeps a finite clip");
@@ -991,7 +1059,7 @@ mod tests {
             items: vec![value, fill(caret)],
         };
 
-        let items = text_items(&list);
+        let items = text_items(&list.items, &list.overlay);
         assert_eq!(items.len(), 1, "the run stays one item; got {items:?}");
         assert_eq!(
             items[0].clip.clone().map(|clip| (clip.x, clip.width)),
@@ -1025,7 +1093,7 @@ mod tests {
             ],
         };
 
-        let items = text_items(&list);
+        let items = text_items(&list.items, &list.overlay);
         assert!(items.iter().map(|item| item.text.as_str()).eq(["header"]));
         assert_eq!(
             items[0].clip.clone().map(|clip| (clip.y, clip.height)),
@@ -1050,7 +1118,7 @@ mod tests {
             ],
         };
 
-        let items = text_items(&list);
+        let items = text_items(&list.items, &list.overlay);
         assert_eq!(items.len(), 3, "three valid text items survive filtering");
         assert!(items.iter().map(|item| item.text.as_str()).eq(["first", "second", "third"]));
         assert!(items.iter().map(|item| item.origin[0]).eq([10.0, 20.0, 40.0]));
