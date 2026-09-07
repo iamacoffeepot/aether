@@ -75,7 +75,7 @@ pub const OPERATOR_SEED: [u8; 32] = [0x0A; 32];
 /// wire connection that drives and observes it.
 pub struct ScenarioHarness {
     _chassis: Option<BuiltChassis<BloomeryChassis>>,
-    _coordinator: Option<Coordinator>,
+    coordinator: Option<Coordinator>,
     _state: Option<TempDir>,
     _runs: Option<TempDir>,
     wire: Wire,
@@ -156,6 +156,8 @@ impl ScenarioHarness {
                     &store_path,
                     &artifacts_root,
                     builder.heartbeat_silence_secs,
+                    builder.poll_interval_secs,
+                    builder.cas_land_enabled,
                 );
                 (None, Some(child), Wire::from_stream(stream), None)
             }
@@ -163,7 +165,7 @@ impl ScenarioHarness {
 
         let mut harness = Self {
             _chassis: chassis,
-            _coordinator: coordinator,
+            coordinator,
             _state: owned_state,
             _runs: owned_runs,
             wire,
@@ -634,6 +636,16 @@ impl ScenarioHarness {
         read_ledger(Path::new(&self.worktree_base)).expect("the mock ledger reads")
     }
 
+    /// The bounded stderr tail of a forked coordinator, when this harness owns
+    /// one. In-process cells have none. Snapshot only — does not wait or drain.
+    ///
+    /// # Panics
+    /// The boot-log lock is poisoned.
+    #[must_use]
+    pub fn coordinator_boot_log_tail(&self) -> Option<Vec<String>> {
+        self.coordinator.as_ref().map(Coordinator::boot_log_tail)
+    }
+
     /// The nonces the store still holds as outstanding orders.
     ///
     /// # Panics
@@ -917,27 +929,73 @@ fn spawn_listening_coordinator(
     store_path: &str,
     artifacts_root: &str,
     heartbeat_silence_secs: Option<u64>,
+    poll_interval_secs: u64,
+    cas_land_enabled: bool,
 ) -> (Coordinator, TcpStream) {
-    let heartbeat = heartbeat_silence_secs.map(|secs| secs.to_string());
     let lane_program = crate::mock_lane_program();
     spawn_and_connect("lane-boundary-harness", COORDINATOR_HANDSHAKE_BUDGET, || {
-        let mut env = vec![
-            ("AETHER_STORE_PATH", store_path),
-            ("AETHER_ARTIFACTS_ROOT", artifacts_root),
-            ("AETHER_BLOOMERY_LANE_PROGRAM", lane_program.as_str()),
-            ("AETHER_GITHUB_LOCAL_WORKTREE_BASE", worktree_base),
-            ("AETHER_GITHUB_LOCAL_LANE_COMMANDS", "construct.,review.,verify."),
-            ("AETHER_GITHUB_POLL_INTERVAL_SECS", "1"),
-            ("AETHER_GITHUB_BACKEND", "fixture"),
-            ("AETHER_GITHUB_FIXTURE_BASE_SHA", repo.head()),
-            ("AETHER_BLOOMERY_OPERATOR_NAME", "lane harness"),
-            ("AETHER_BLOOMERY_OPERATOR_EMAIL", "lane-harness@example.test"),
-        ];
-        if let Some(secs) = heartbeat.as_deref() {
-            env.push(("AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS", secs));
+        let env = ForkedLaneSettings {
+            store_path,
+            artifacts_root,
+            lane_program: lane_program.as_str(),
+            worktree_base,
+            poll_interval_secs,
+            cas_land_enabled,
+            fixture_base_sha: repo.head(),
+            heartbeat_silence_secs,
         }
+        .env();
+        let env: Vec<_> = env.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect();
         Coordinator::spawn_in(0, Some(&repo.work_dir()), &env)
     })
+}
+
+/// Env a forked `bloomery` child resolves through the production Config derive.
+///
+/// Poll cadence and the landing gate are builder settings, not harness
+/// constants: in-process boots already honoured them, and a child that omits
+/// either key silently runs the derive default (#5599).
+pub struct ForkedLaneSettings<'a> {
+    /// Journal file the child opens.
+    pub store_path: &'a str,
+    /// Artifacts content-store root.
+    pub artifacts_root: &'a str,
+    /// `AETHER_BLOOMERY_LANE_PROGRAM`.
+    pub lane_program: &'a str,
+    /// Scratch-worktree base for local lanes.
+    pub worktree_base: &'a str,
+    /// `AETHER_GITHUB_POLL_INTERVAL_SECS`.
+    pub poll_interval_secs: u64,
+    /// `AETHER_GITHUB_CAS_LAND_ENABLED`.
+    pub cas_land_enabled: bool,
+    /// Commit the fixture's base digest names.
+    pub fixture_base_sha: &'a str,
+    /// Optional `AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS`.
+    pub heartbeat_silence_secs: Option<u64>,
+}
+
+impl ForkedLaneSettings<'_> {
+    /// Production env keys a forked coordinator Config derive accepts.
+    #[must_use]
+    pub fn env(&self) -> Vec<(String, String)> {
+        let mut env = vec![
+            (String::from("AETHER_STORE_PATH"), self.store_path.to_owned()),
+            (String::from("AETHER_ARTIFACTS_ROOT"), self.artifacts_root.to_owned()),
+            (String::from("AETHER_BLOOMERY_LANE_PROGRAM"), self.lane_program.to_owned()),
+            (String::from("AETHER_GITHUB_LOCAL_WORKTREE_BASE"), self.worktree_base.to_owned()),
+            (String::from("AETHER_GITHUB_LOCAL_LANE_COMMANDS"), String::from("construct.,review.,verify.")),
+            (String::from("AETHER_GITHUB_POLL_INTERVAL_SECS"), self.poll_interval_secs.to_string()),
+            (String::from("AETHER_GITHUB_CAS_LAND_ENABLED"), self.cas_land_enabled.to_string()),
+            (String::from("AETHER_GITHUB_BACKEND"), String::from("fixture")),
+            (String::from("AETHER_GITHUB_FIXTURE_BASE_SHA"), self.fixture_base_sha.to_owned()),
+            (String::from("AETHER_BLOOMERY_OPERATOR_NAME"), String::from("lane harness")),
+            (String::from("AETHER_BLOOMERY_OPERATOR_EMAIL"), String::from("lane-harness@example.test")),
+        ];
+        if let Some(secs) = self.heartbeat_silence_secs {
+            env.push((String::from("AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS"), secs.to_string()));
+        }
+        env
+    }
 }
 
 fn author_catalog(store_path: &str, wall_clock_secs: u64) -> ConfigRegistry {
