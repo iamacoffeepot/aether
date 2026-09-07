@@ -170,7 +170,7 @@ pub fn run_process() -> Result<i32, MockLaneError> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "a fixture that cannot set up its files reports it by panicking")]
 mod tests {
-    use std::fs;
+    use std::{fs, process};
     use std::path::{Path, PathBuf};
 
     use aether_bloomery::{CONSTRUCT_IMPLEMENT_COMMAND, StageId, VERIFY_CHECK_COMMAND, VERIFY_MEMBER_COMMAND};
@@ -265,7 +265,7 @@ mod tests {
 
         let ledger = read_ledger(base.path()).unwrap();
         assert_eq!(ledger.len(), 1);
-        assert_eq!(ledger[0].process_id, Some(std::process::id()), "the mock records this process's id before it acts",);
+        assert_eq!(ledger[0].process_id, Some(process::id()), "the mock records this process's id before it acts");
     }
 
     #[test]

@@ -450,6 +450,8 @@ pub fn selected_mode(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "a fixture that cannot set up its files reports it by panicking")]
 mod tests {
+    use std::fs;
+
     use aether_bloomery::StageId;
 
     use super::{
@@ -644,7 +646,7 @@ mod tests {
         // must decode, and the absence must stay None so a scenario cannot treat
         // a default or zero as reaped.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
+        fs::write(
             dir.path().join(super::LEDGER_FILE),
             r#"{"command":"verify.check","nonce":"n-1","mode":"pass","subject":null,"diff_base":null,"task":null,"worktree":null,"env":[]}
 "#,
