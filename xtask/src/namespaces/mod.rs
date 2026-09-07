@@ -9,9 +9,8 @@
 //!
 //! So this check reads the declarations out of the tree and looks for the
 //! literals that repeat one. A crate writing its own namespace is out of
-//! scope; a crate writing *another* crate's is the finding, unless
-//! [`allow`](self::allow) records why the dependency graph leaves it no const
-//! to read.
+//! scope; a crate writing *another* crate's is the finding, unless [`allow`]
+//! records why the dependency graph leaves it no const to read.
 //!
 //! Local-only. The `verify.*` members each shell out to one external program
 //! and are mirrored by a CI job of their own; adding a tenth required job for
