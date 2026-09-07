@@ -632,9 +632,11 @@ mod tests {
     }
 
     /// Tripwire: `prepare_fork`'s `Command::spawn` `map_err` used to format
-    /// `exec_path` into `SpawnFailed.detail`. Invalid executable bytes
-    /// materialize, then fail at process spawn without a live child or a
-    /// proxy-connect budget; the outward detail must keep phase, hash, and
+    /// `exec_path` into `SpawnFailed.detail`. Bare non-executable text hits
+    /// the platform ENOEXEC shell fallback and becomes a later child-exit;
+    /// a shebang whose interpreter is an absent path under this test's
+    /// private temp dir fails process creation directly (no live child, no
+    /// proxy-connect budget). The outward detail must keep phase, hash, and
     /// IO category and omit the host path (issue 5499).
     #[test]
     fn process_spawn_failure_is_id_bearing_and_path_free() {
@@ -642,7 +644,14 @@ mod tests {
         let dir = env::temp_dir().join(format!("aether-engcap-exec-{SENTINEL_HOST_PATH}-{}-{nanos}", process::id()));
         let store_dir = dir.join("store");
         let root = dir.join("engines");
-        let hash = write_inert_binary_store(&store_dir, b"aether-issue-5499-not-an-executable");
+        let interpreter = dir.join("missing");
+        assert!(
+            !interpreter.exists(),
+            "test setup: missing-interpreter path must not exist: {}",
+            interpreter.display(),
+        );
+        let bytes = format!("#!{}\n", interpreter.display());
+        let hash = write_inert_binary_store(&store_dir, bytes.as_bytes());
         let (_registry, chassis, mailer, cells) = boot(inert_store_config(&store_dir, &root));
 
         let spawn = drive(&mailer, &inert_spawn(&hash), Duration::from_secs(10), || {
