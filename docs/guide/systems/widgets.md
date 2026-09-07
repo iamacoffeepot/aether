@@ -65,7 +65,7 @@ widget sends can misreport it.
   `NumericConfig` — each embedding a
   `theme: Theme`. The
   config is both the value
-  `spawn_inline_child::<WidgetPanel, W>(subname, &config)` boots the widget with and a
+  `spawn_inline::<W>(subname, &config)` boots the widget with and a
   re-sendable mail: send a widget its config kind again to reconfigure it in
   place (a slider's range, a field's cap, a button's label).
 - **Style, down.** `SetTheme { theme }` re-fans a live restyle. A widget adopts
