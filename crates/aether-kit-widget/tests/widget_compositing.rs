@@ -100,7 +100,7 @@ fn flat_shape(x: f32, y: f32, width: f32, height: f32, color: Rgba, clip: Option
 /// The same flat rectangle as it lands in a committed `DrawShapes` batch:
 /// a radius-zero box with a fill and nothing else.
 fn flat_fill(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> Shape {
-    Shape { x, y, width, height, corner_radius: 0.0, fill: Some(color), stroke: None, shadow: None }
+    Shape { x, y, width, height, corner_radius: 0.0, fill: Some(color), stroke: None, shadow: None, texture: None }
 }
 
 #[allow(clippy::too_many_arguments)]
