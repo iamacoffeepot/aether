@@ -6,6 +6,10 @@
 //! future harness (`FleetHarness`) and the hardcoded `--bin` lists in
 //! `scripts/ensure-tunnel.sh` / `scripts/perf-compare.sh` can be derived
 //! from the same inventory instead of re-deriving it per call site.
+//!
+//! `cargo xtask bins` (`crate::bins`) is the published read of that list.
+//! `.github/workflows/release.yml` consumes it; `scripts/ensure-tunnel.sh` and
+//! `aether-harness-fleet`'s `HEADLESS_BIN` still re-spell the names.
 
 use cargo_metadata::{CrateType, Metadata, Package, TargetKind};
 
@@ -34,7 +38,14 @@ const BEHAVIOR_FEATURE_TOKEN: &str = "dep:aether-behavior";
 /// Chassis (host-target) binaries packaged into `dist/bin/`, as
 /// `(package, bin)` pairs — the by-chassis bundle split (issues
 /// #3809-#3816) spreads them over per-chassis crates. Each bin name is
-/// both the `--bin` selector and the output filename.
+/// both the `--bin` selector and the output filename. `cargo xtask bins`
+/// publishes this list (issue 5707) so a workflow or script consumes it
+/// instead of re-spelling the names and rotting on the next rename.
+///
+/// `aether-chassis-harness`'s `aether-substrate-harness` bin is deliberately
+/// absent: it is a test-evidence driver, not a shipped or forked artifact —
+/// nothing resolves it through `dist/manifest.json`, and `desktop-nightly.yml`
+/// names that crate in a `cargo test -p` list, which needs no `dist/bin/` entry.
 pub const CHASSIS_BINS: &[(&str, &str)] = &[
     ("aether-chassis-desktop", "aether-desktop"),
     ("aether-chassis-headless", "aether-headless"),
