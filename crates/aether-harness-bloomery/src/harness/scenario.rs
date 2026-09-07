@@ -4,6 +4,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -37,10 +38,10 @@ use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerHandle;
 use aether_rpc::RpcServerHandle;
 use aether_substrate::chassis::builder::BuiltChassis;
-use tempfile::TempDir;
 
 use super::digest;
 use super::drive::{member, passed};
+use super::roots::FixtureRoots;
 use super::{BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, Lane, POLL};
 use crate::oracle::{Oracle, is_answerable, liveness};
 use crate::scenario::{LaneScript, Scenario};
@@ -74,10 +75,9 @@ pub const OPERATOR_SEED: [u8; 32] = [0x0A; 32];
 /// A live scenario: a booted coordinator, the backend it runs against, and the
 /// wire connection that drives and observes it.
 pub struct ScenarioHarness {
-    _chassis: Option<BuiltChassis<BloomeryChassis>>,
+    chassis: Option<BuiltChassis<BloomeryChassis>>,
     coordinator: Option<Coordinator>,
-    _state: Option<TempDir>,
-    _runs: Option<TempDir>,
+    _roots: Arc<FixtureRoots>,
     wire: Wire,
     fake: Option<FakeGithub>,
     repo: Option<Repo>,
@@ -108,7 +108,10 @@ impl ScenarioHarness {
             );
         }
 
-        let BootRoots { owned_state, owned_runs, store_path, artifacts_root, worktree_base } = boot_roots(&builder);
+        let roots = builder.take_roots();
+        let store_path = roots.store_path();
+        let artifacts_root = roots.artifacts_root();
+        let worktree_base = roots.worktree_base();
 
         if let Some(script) = &builder.script {
             script.write_to(Path::new(&worktree_base)).expect("the mock-lane script writes");
@@ -164,10 +167,9 @@ impl ScenarioHarness {
         };
 
         let mut harness = Self {
-            _chassis: chassis,
+            chassis,
             coordinator,
-            _state: owned_state,
-            _runs: owned_runs,
+            _roots: roots,
             wire,
             fake,
             repo,
@@ -800,44 +802,10 @@ impl ScenarioHarness {
     }
 }
 
-/// Where one booting harness keeps its journal, artifacts, and lane worktrees,
-/// and which of those directories it owns.
-struct BootRoots {
-    /// The journal / artifacts tempdir, when this harness minted it. `None` on
-    /// shared roots, whose lifetime belongs to the [`HarnessRoots`] a restart
-    /// scenario holds across both coordinators.
-    ///
-    /// [`HarnessRoots`]: super::HarnessRoots
-    owned_state: Option<TempDir>,
-    /// The lane-worktree tempdir, on the same terms.
-    owned_runs: Option<TempDir>,
-    store_path: String,
-    artifacts_root: String,
-    worktree_base: String,
-}
-
-/// Fresh temporary roots, or the shared ones a restart scenario passed in.
-fn boot_roots(builder: &HarnessBuilder) -> BootRoots {
-    if let (Some(store), Some(artifacts), Some(worktree)) =
-        (&builder.shared_store, &builder.shared_artifacts, &builder.shared_worktree)
-    {
-        return BootRoots {
-            owned_state: None,
-            owned_runs: None,
-            store_path: store.clone(),
-            artifacts_root: artifacts.clone(),
-            worktree_base: worktree.clone(),
-        };
-    }
-
-    let state = tempfile::tempdir().expect("a temporary root for the journal and the artifacts store");
-    let runs = tempfile::tempdir().expect("lane worktree base");
-    BootRoots {
-        store_path: state.path().join("bloomery.db").to_string_lossy().into_owned(),
-        artifacts_root: state.path().join("artifacts").to_string_lossy().into_owned(),
-        worktree_base: runs.path().to_string_lossy().into_owned(),
-        owned_state: Some(state),
-        owned_runs: Some(runs),
+impl Drop for ScenarioHarness {
+    fn drop(&mut self) {
+        drop(self.chassis.take());
+        drop(self.coordinator.take());
     }
 }
 

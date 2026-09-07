@@ -34,22 +34,26 @@
 
 pub mod drive;
 mod operator;
+mod roots;
 mod scenario;
 
 use std::ops::{Deref, DerefMut};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use aether_chassis_bloomery::bloomery::mock_lane::LaneScript;
-use tempfile::TempDir;
+
+use roots::FixtureRoots;
 
 use crate::support::repo::Repo;
 
 #[doc(inline)]
 pub use aether_bloomery::testing::digest;
 pub use drive::{draft, passed};
+pub use roots::HarnessRoots;
 pub use scenario::{ForkedLaneSettings, ScenarioHarness};
 
 /// The promoted [`ScenarioHarness`], named to match the crate the way
@@ -75,52 +79,6 @@ const SOCKET_READ_TIMEOUT: Duration = Duration::from_mins(2);
 /// A second fixture-backend start in this process would share the first
 /// scenario's repository and mainline — the #5000 flake.
 static HARNESS_STARTED: AtomicBool = AtomicBool::new(false);
-
-/// Where the journal, artifacts, and lane worktrees live. Own one when a
-/// scenario must drop a coordinator and boot another against the same files.
-pub struct HarnessRoots {
-    state: TempDir,
-    runs: TempDir,
-}
-
-impl HarnessRoots {
-    /// Fresh temporary roots. Dropping this after the last harness is what
-    /// reclaims them on the unwind path.
-    ///
-    /// # Panics
-    /// A temporary directory could not be created.
-    #[must_use]
-    pub fn create() -> Self {
-        Self {
-            state: tempfile::tempdir().expect("journal and artifacts root"),
-            runs: tempfile::tempdir().expect("lane worktree base"),
-        }
-    }
-
-    /// The journal file the store and every reactor open.
-    #[must_use]
-    pub fn store_path(&self) -> String {
-        self.state.path().join("bloomery.db").to_string_lossy().into_owned()
-    }
-
-    /// The artifacts content-store root.
-    #[must_use]
-    pub fn artifacts_root(&self) -> String {
-        self.state.path().join("artifacts").to_string_lossy().into_owned()
-    }
-
-    /// The scratch-worktree base the local lane checks each order into.
-    #[must_use]
-    pub fn worktree_base(&self) -> String {
-        self.runs.path().to_string_lossy().into_owned()
-    }
-
-    /// The worktree base as a path, for writing a [`LaneScript`].
-    #[must_use]
-    pub fn runs_path(&self) -> &Path {
-        self.runs.path()
-    }
-}
 
 /// Backend axis: in-memory GitHub, or a real git repository.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -165,9 +123,7 @@ pub struct HarnessBuilder {
     script: Option<LaneScript>,
     repo: Option<Repo>,
     authority_path: Option<PathBuf>,
-    shared_store: Option<String>,
-    shared_artifacts: Option<String>,
-    shared_worktree: Option<String>,
+    shared_roots: Option<Arc<FixtureRoots>>,
     operator_name: String,
     operator_email: String,
     github_fixture: bool,
@@ -192,9 +148,7 @@ impl HarnessBuilder {
             script: None,
             repo: None,
             authority_path: None,
-            shared_store: None,
-            shared_artifacts: None,
-            shared_worktree: None,
+            shared_roots: None,
             operator_name: String::new(),
             operator_email: String::new(),
             github_fixture: true,
@@ -219,9 +173,7 @@ impl HarnessBuilder {
             script: Some(script.clone()),
             repo: None,
             authority_path: None,
-            shared_store: None,
-            shared_artifacts: None,
-            shared_worktree: None,
+            shared_roots: None,
             operator_name: "lane harness".to_owned(),
             operator_email: "lane-harness@example.test".to_owned(),
             github_fixture: true,
@@ -248,9 +200,7 @@ impl HarnessBuilder {
             script: Some(LaneScript::all_passing()),
             repo: None,
             authority_path: Some(repo.path().to_owned()),
-            shared_store: None,
-            shared_artifacts: None,
-            shared_worktree: None,
+            shared_roots: None,
             operator_name: "local-authority harness".to_owned(),
             operator_email: "local-authority@example.test".to_owned(),
             github_fixture: false,
@@ -331,9 +281,7 @@ impl HarnessBuilder {
     /// Reuse journal / artifacts / worktree roots across a restart.
     #[must_use]
     pub fn roots(mut self, roots: &HarnessRoots) -> Self {
-        self.shared_store = Some(roots.store_path());
-        self.shared_artifacts = Some(roots.artifacts_root());
-        self.shared_worktree = Some(roots.worktree_base());
+        self.shared_roots = Some(roots.owner());
         self
     }
 
@@ -352,6 +300,11 @@ impl HarnessBuilder {
     #[must_use]
     pub fn start(self, client_name: &str) -> ScenarioHarness {
         ScenarioHarness::boot(self, client_name)
+    }
+
+    /// Take the retained fixture-root owner, or mint one, before spawn.
+    fn take_roots(&mut self) -> Arc<FixtureRoots> {
+        self.shared_roots.take().unwrap_or_else(FixtureRoots::create_arc)
     }
 }
 

@@ -67,6 +67,8 @@ pub use executor::{
     ProcessTransformRunner, ReconcileLanes, ReconcileReport, RoutingExecutor, RunLifecycle, RunProcess, RunSpec,
     TransformRunner, UnconfiguredActionsBackend, admits_lane_key, mock_lane,
 };
+#[cfg(all(feature = "github", any(test, feature = "testing")))]
+pub use executor::{GroupAbsence, IDENTITY_RECORD, ProcessIdentity, strict_group_absence};
 #[cfg(feature = "github")]
 pub use intake::{
     Admission, AdmitDecision, AdmitSink, CycleError, CycleReport, DispatchError, DispatchRecord, EvidenceClaims,
