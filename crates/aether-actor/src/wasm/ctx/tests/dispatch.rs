@@ -2,18 +2,14 @@
 //! source, the reply correlation, the reply-mode views' layout, the multi
 //! class's emit, and the relative verbs' in-place routing.
 
-use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child};
-use crate::mail::{Mail, PriorState};
+use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child, recording_target};
 use crate::model::ctx::{Emit, Manual, Multi, Single};
 use crate::model::{Addressable, CallerScope, CallerScoped, Embedded, HandlesKind, Many, Resolve};
+use crate::wasm::WasmActorMailbox;
 use crate::wasm::inline::{RouteDecision, drain_cluster_queue};
-use crate::wasm::{ErasedWasmActor, WasmActorMailbox, WasmDropCtx};
 use aether_data::{MailboxId, Source, mailbox_id_from_path};
-use alloc::boxed::Box;
-use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::Cell;
 use core::mem::{align_of, size_of};
 
 struct EmbeddedPeer;
@@ -56,47 +52,6 @@ impl Addressable for ParentKeyedPeer {
 }
 
 impl HandlesKind<()> for ParentKeyedPeer {}
-
-struct RecordingTarget {
-    dispatches: Rc<Cell<u32>>,
-    source: Rc<Cell<Option<MailboxId>>>,
-}
-
-struct RecordingTargetProbe {
-    actor: Box<dyn ErasedWasmActor>,
-    dispatches: Rc<Cell<u32>>,
-    source: Rc<Cell<Option<MailboxId>>>,
-}
-
-impl ErasedWasmActor for RecordingTarget {
-    fn erased_namespace(&self) -> &'static str {
-        "test.wasm.recording_target"
-    }
-
-    fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
-        self.dispatches.set(self.dispatches.get() + 1);
-        self.source.set(ctx.source_mailbox());
-        0
-    }
-
-    fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
-
-    fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
-
-    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
-
-    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
-}
-
-fn recording_target() -> RecordingTargetProbe {
-    let dispatches = Rc::new(Cell::new(0));
-    let source = Rc::new(Cell::new(None));
-    RecordingTargetProbe {
-        actor: Box::new(RecordingTarget { dispatches: Rc::clone(&dispatches), source: Rc::clone(&source) }),
-        dispatches,
-        source,
-    }
-}
 
 /// Issue 2001: `source_mailbox()` is a single read of the ctx's
 /// `source` field on the top-level path — the host threads the resolved
