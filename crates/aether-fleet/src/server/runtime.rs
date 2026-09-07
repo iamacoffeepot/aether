@@ -17,13 +17,13 @@ use aether_actor::runtime;
 pub use aether_actor::{Manual, Single};
 pub use aether_data::{EngineId, Kind, MailboxId, Uuid};
 use aether_kinds::{
-    BinarySelector, ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine,
-    TerminateEngine, UploadBinary, UploadComponent,
+    BinarySelector, ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SetArtifactPinned,
+    SpawnEngine, TerminateEngine, UploadBinary, UploadComponent,
 };
 pub use aether_kinds::{
     DeadEngineDescriptor, DeathReason, EngineDescriptor, ListComponentBinariesResult, ListEngineBinariesResult,
-    ListEnginesResult, ResolveComponentResult, SpawnEngineResult, TerminateEngineResult, UploadBinaryResult,
-    UploadComponentResult,
+    ListEnginesResult, ResolveComponentResult, SetArtifactPinnedResult, SpawnEngineResult, TerminateEngineResult,
+    UploadBinaryResult, UploadComponentResult,
 };
 use aether_rpc::RouteEnvelope;
 pub use aether_substrate::Mail;
@@ -48,7 +48,7 @@ pub use std::time::{Duration, Instant};
 // runtime half.
 pub use super::artifacts::{
     bootstrap_ingest, exec_file_name, ingest_binary, ingest_component, realize_executable, resolve_component,
-    resolve_selector,
+    resolve_selector, set_artifact_pinned,
 };
 pub use super::fleet::{free_local_port, resolve_fleet_store_root, settle_err};
 
@@ -1123,18 +1123,20 @@ impl NativeActor for FleetServer {
     /// Ingest a binary into the hub's content-addressed store.
     ///
     /// # Agent
-    /// Send `UploadBinary { staged_path, name }`. The hub reads the
+    /// Send `UploadBinary { staged_path, name, pin }`. The hub reads the
     /// staged path itself (aether-mcp never reads the bytes — too
     /// large for the tool channel), sha256-hashes it, dedups against
     /// the store, forks `staged_path --describe` to capture its
     /// `BinaryManifest`, stores both, and points `name` (when set) at
-    /// the hash. Reply: `UploadBinaryResult::Ok { hash, name }`, or
+    /// the hash. `pin: true` records durable explicit protection before
+    /// eviction; `pin: false` never clears an existing pin. Reply:
+    /// `UploadBinaryResult::Ok { hash, name }`, or
     /// `Err { error }` for an unreadable path, a `--describe` that
     /// failed or didn't yield a parseable manifest, or a store write
     /// that didn't land — an `Ok` hash is always resolvable.
     #[handler::single]
     fn on_upload_binary(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UploadBinary) -> UploadBinaryResult {
-        match ingest_binary(&mut state.store, &mail.staged_path, mail.name.clone()) {
+        match ingest_binary(&mut state.store, &mail.staged_path, mail.name.clone(), mail.pin) {
             Ok(hash) => UploadBinaryResult::Ok { hash, name: mail.name },
             Err(error) => UploadBinaryResult::Err { error },
         }
@@ -1161,12 +1163,14 @@ impl NativeActor for FleetServer {
     /// (ADR-0116, issue 1956).
     ///
     /// # Agent
-    /// Send `UploadComponent { staged_path, name }`. The hub reads the
+    /// Send `UploadComponent { staged_path, name, pin }`. The hub reads the
     /// staged path itself (aether-mcp never reads the bytes — too large
     /// for the tool channel), sha256-hashes it, dedups against the
     /// store, reads the manifest straight from the wasm (no execution
     /// step), stores both, and points `name` (when set) at the hash.
-    /// Reply: `UploadComponentResult::Ok { hash, name }`, or
+    /// `pin: true` records durable explicit protection before eviction;
+    /// `pin: false` never clears an existing pin. Reply:
+    /// `UploadComponentResult::Ok { hash, name }`, or
     /// `Err { error }` for an unreadable path, an unparseable wasm, or a
     /// store write that didn't land — an `Ok` hash is always resolvable.
     #[handler::single]
@@ -1175,9 +1179,31 @@ impl NativeActor for FleetServer {
         _ctx: &mut NativeCtx<'_>,
         mail: UploadComponent,
     ) -> UploadComponentResult {
-        match ingest_component(&mut state.store, &mail.staged_path, mail.name.clone()) {
+        match ingest_component(&mut state.store, &mail.staged_path, mail.name.clone(), mail.pin) {
             Ok(hash) => UploadComponentResult::Ok { hash, name: mail.name },
             Err(error) => UploadComponentResult::Err { error },
+        }
+    }
+
+    /// Set or clear durable explicit pin protection on one stored
+    /// content hash.
+    ///
+    /// # Agent
+    /// Send `SetArtifactPinned { hash, pinned }`. `hash` is an exact
+    /// stored content hash — names are never resolved. `pinned: true`
+    /// pins; `pinned: false` unpins only the explicit flag (a name still
+    /// protects). Reply: `SetArtifactPinnedResult::Ok { hash, pinned }`
+    /// after a successful persist, or `Err { error }` for an unknown hash
+    /// or a persistence failure. A failed unpin keeps prior protection.
+    #[handler::single]
+    fn on_set_artifact_pinned(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: SetArtifactPinned,
+    ) -> SetArtifactPinnedResult {
+        match set_artifact_pinned(&mut state.store, &mail.hash, mail.pinned) {
+            Ok((hash, pinned)) => SetArtifactPinnedResult::Ok { hash, pinned },
+            Err(error) => SetArtifactPinnedResult::Err { error },
         }
     }
 

@@ -135,6 +135,12 @@ pub struct UploadBinaryArgs {
     /// protected from LRU eviction.
     #[serde(default)]
     pub name: Option<String>,
+    /// Durable explicit pin. `true` records eviction protection on the
+    /// stored hash before this upload's eviction. `false` (the JSON
+    /// default) never clears an existing pin — use `unpin_artifact` to
+    /// drop only the explicit flag. A name still protects after unpin.
+    #[serde(default)]
+    pub pin: bool,
 }
 
 /// `upload_component` arguments (ADR-0116, issue 1956).
@@ -151,6 +157,21 @@ pub struct UploadComponentArgs {
     /// LRU eviction.
     #[serde(default)]
     pub name: Option<String>,
+    /// Durable explicit pin. `true` records eviction protection on the
+    /// stored hash before this upload's eviction. `false` (the JSON
+    /// default) never clears an existing pin — use `unpin_artifact` to
+    /// drop only the explicit flag. A name still protects after unpin.
+    #[serde(default)]
+    pub pin: bool,
+}
+
+/// `pin_artifact` / `unpin_artifact` arguments. `hash` is an exact stored
+/// content hash — names are never resolved, and aether-mcp does not read
+/// files or accept an `engine_id`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ArtifactPinArgs {
+    /// Exact sha256 hex of a stored artifact. Names are not accepted.
+    pub hash: String,
 }
 
 /// `list_components` arguments (ADR-0116, issues 1956 and 3007). Attribute

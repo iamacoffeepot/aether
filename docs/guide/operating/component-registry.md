@@ -20,8 +20,10 @@ on one engine, or into several engines.
 
 | Tool | Purpose |
 |---|---|
-| `upload_component` | ingest a `.wasm` path into the hub store |
+| `upload_component` | ingest a `.wasm` path into the hub store; optional `pin: true` |
 | `list_components` | list/filter stored component artifacts |
+| `pin_artifact` | durable explicit pin by exact stored content hash |
+| `unpin_artifact` | drop only the explicit pin; a name still protects |
 | `load_component` | instantiate stored wasm in one engine |
 | `replace_component` | splice stored wasm behind one live mailbox id |
 | `describe_component` | inspect a live component's receive surface |
@@ -49,7 +51,9 @@ paths and not inline wasm bytes.
 The reliable sequence is:
 
 1. Build the wasm artifact on the same fleet host whose path the hub can read.
-2. Call `upload_component(staged_path, name?)`.
+2. Call `upload_component(staged_path, name?, pin?)`. `pin: true` records
+   durable explicit protection before this upload's eviction, including
+   unnamed uploads. `pin: false` (the default) never clears an existing pin.
 3. Record the returned content hash and optional name.
 4. Confirm its manifest with registry `list_components`; when no name was
    supplied, set `include_history: true` and locate the returned hash.
@@ -73,8 +77,9 @@ clean load error, not “first actor wins.”
 
 Names are mutable. Re-uploading under the same name repoints it. The old hash
 remains stored and, once no other name points at it, becomes unnamed history
-eligible for LRU eviction. It is not deleted by repointing. Hashes are therefore
-the correct deployment evidence.
+eligible for LRU eviction unless it still carries an explicit pin. It is not
+deleted by repointing. Hashes are therefore the correct deployment evidence.
+`unpin_artifact` removes only the explicit flag; it is not unname or delete.
 
 ## Stored registry behavior
 
@@ -85,9 +90,12 @@ unnamed hashes. Use the returned `total_matched` and an explicit `limit` when a
 complete history is actually needed.
 
 A named artifact is protected from disk-budget LRU eviction. An unnamed,
-unpinned history entry is eligible. The current MCP surface has no delete,
-unname, or pin tool, so long-term disk policy belongs to the hub operator rather
-than an individual component-driving task.
+unpinned history entry is eligible. `pin_artifact` / `unpin_artifact` (and
+`upload_component(pin: true)`) record or drop durable explicit protection on an
+exact content hash — names are never resolved. `pin: false` on upload is not
+unpin. There is still no delete or unname operation. Runtime engines do not
+hold stored component artifacts (issue 5686). Fleet and MCP must ship the same
+release: the `pin` field changes the typed upload kind schema.
 
 ## Loading into an engine
 

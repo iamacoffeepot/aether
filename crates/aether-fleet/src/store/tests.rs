@@ -4,7 +4,8 @@ use super::{
 };
 use aether_data::Kind;
 use aether_kinds::{ComponentActor, ComponentManifest, Key, Tick};
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::{env, fs, process};
 
 fn temp_root(label: &str) -> PathBuf {
@@ -465,5 +466,238 @@ fn multiple_names_share_one_row_with_the_smallest_representative() {
     let page = store.list_binaries_page(&binary_page_filter(None, false));
     assert_eq!(page.total_matched, 1, "one content hash remains one listing row");
     assert_eq!(page.binaries[0].name.as_deref(), Some("alpha"));
+    let _ = fs::remove_dir_all(&root);
+}
+
+fn sidecar_path(root: &Path, hash: &str) -> PathBuf {
+    root.join("entries").join(format!("{hash}.manifest"))
+}
+
+fn occupy_sidecar_as_dir(root: &Path, hash: &str) {
+    let path = sidecar_path(root, hash);
+    if path.is_file() {
+        fs::remove_file(&path).expect("remove the real sidecar so the path can become a directory");
+    }
+    fs::create_dir_all(&path).expect("sidecar target is a directory");
+}
+
+fn restore_writable_sidecar_path(root: &Path, hash: &str) {
+    let path = sidecar_path(root, hash);
+    if path.is_dir() {
+        fs::remove_dir_all(&path).expect("remove the sabotaged sidecar directory");
+    }
+}
+
+fn content_hash(bytes: &[u8]) -> String {
+    let scratch = temp_root("hash");
+    let hash = ArtifactStore::open(&scratch, DEFAULT_DISK_BUDGET_BYTES)
+        .expect("open scratch")
+        .upload(bytes, ArtifactKind::Binary, manifest("headless"), None)
+        .expect("hash via upload");
+    let _ = fs::remove_dir_all(&scratch);
+    hash
+}
+
+#[test]
+fn unnamed_pin_true_survives_budget_zero() {
+    let root = temp_root("pin-budget0");
+    let mut store = ArtifactStore::open(&root, 0).expect("open store");
+    let pinned = store
+        .upload_with_pin(b"pinned-body-larger-than-zero", ArtifactKind::Binary, manifest("headless"), None, true)
+        .expect("pinned upload");
+    assert!(store.contains(&pinned), "an unnamed pin:true upload survives a zero budget");
+
+    let plain = store
+        .upload_with_pin(b"plain-body-larger-than-zero", ArtifactKind::Binary, manifest("headless"), None, false)
+        .expect("unpinned upload");
+    assert!(!store.contains(&plain), "an unnamed unpinned upload is evictable under a zero budget");
+    assert!(store.contains(&pinned), "the pinned sibling is still protected after the unpinned upload");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn dedup_pin_true_upgrades_before_eviction() {
+    let root = temp_root("dedup-pin");
+    let bytes = b"shared-aa";
+    let hash = {
+        let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
+        store
+            .upload_with_pin(bytes, ArtifactKind::Binary, manifest("headless"), None, false)
+            .expect("seed without pressure")
+    };
+
+    let mut store = ArtifactStore::open(&root, 0).expect("reopen budget 0");
+    assert!(
+        store.contains(&hash),
+        "open does not evict; the unpinned seed is still indexed under a zero budget"
+    );
+    let again = store
+        .upload_with_pin(bytes, ArtifactKind::Binary, manifest("headless"), None, true)
+        .expect("dedup pin:true faces same-call zero-budget pressure");
+    assert_eq!(again, hash);
+    assert!(store.contains(&hash), "pin must persist before this upload's eviction");
+    drop(store);
+
+    let mut reopened = ArtifactStore::open(&root, 0).expect("reopen");
+    assert!(reopened.contains(&hash), "the durable pin is still indexed after reopen under a zero budget");
+    reopened
+        .upload_with_pin(b"trigger-bbbbbbbb", ArtifactKind::Binary, manifest("headless"), None, false)
+        .expect("trigger");
+    assert!(reopened.contains(&hash), "the durable pin survives another reopen and a later eviction");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn pin_false_reupload_preserves_an_existing_pin() {
+    let root = temp_root("pin-false-keep");
+    let bytes = b"keep-me-aa";
+    let hash = {
+        let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
+        let hash = store
+            .upload_with_pin(bytes, ArtifactKind::Binary, manifest("headless"), None, true)
+            .expect("pinned upload");
+        let again = store
+            .upload_with_pin(bytes, ArtifactKind::Binary, manifest("headless"), None, false)
+            .expect("pin:false reupload");
+        assert_eq!(again, hash);
+        hash
+    };
+    let mut reopened = ArtifactStore::open(&root, 0).expect("reopen");
+    assert!(reopened.contains(&hash), "pin:false must not clear an existing pin across reopen");
+    reopened
+        .upload_with_pin(b"trigger-bbbbbbbb", ArtifactKind::Binary, manifest("headless"), None, false)
+        .expect("trigger");
+    assert!(reopened.contains(&hash), "the preserved pin still protects after reopen eviction");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn try_set_pinned_unknown_hash_is_false() {
+    let root = temp_root("pin-unknown");
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
+    let result = store.try_set_pinned("not-a-stored-hash", true).expect("unknown hash is not an IO error");
+    assert!(!result, "an unknown hash returns Ok(false)");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn try_set_pinned_survives_reopen_for_pin_and_unpin() {
+    let root = temp_root("try-pin-reopen");
+    let (h_pinned, h_released) = {
+        let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
+        let h_pinned = store
+            .upload_with_pin(b"pinned-aaaa", ArtifactKind::Binary, manifest("headless"), None, false)
+            .expect("upload");
+        let h_released = store
+            .upload_with_pin(b"released-aa", ArtifactKind::Binary, manifest("headless"), None, false)
+            .expect("upload");
+        assert!(store.try_set_pinned(&h_pinned, true).expect("pin persists"));
+        assert!(store.try_set_pinned(&h_released, true).expect("pin before unpin"));
+        assert!(store.try_set_pinned(&h_released, false).expect("unpin persists"));
+        (h_pinned, h_released)
+    };
+
+    let mut reopened = ArtifactStore::open(&root, 20).expect("reopen");
+    // The released entry is unnamed and unpinned, so it is eligible. A
+    // trigger upload over a budget that cannot hold every entry evicts
+    // the oldest eligible candidate. `get` bumps recency; it does not
+    // make an entry LRU.
+    reopened.upload_with_pin(b"trigger-ccc", ArtifactKind::Binary, manifest("headless"), None, false).expect("trigger");
+    assert!(reopened.contains(&h_pinned), "a persisted pin still protects after reopen");
+    assert!(!reopened.contains(&h_released), "a persisted unpin returns the entry to the candidates");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn try_set_pinned_does_not_shortcut_equal_in_memory_state() {
+    let root = temp_root("pin-equal-state");
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
+    let hash = store
+        .upload_with_pin(b"plain-aaaa", ArtifactKind::Binary, manifest("headless"), None, false)
+        .expect("upload");
+    occupy_sidecar_as_dir(store.root(), &hash);
+
+    assert!(store.set_pinned(&hash, true), "legacy set_pinned returns true after mutating memory");
+    store
+        .try_set_pinned(&hash, true)
+        .expect_err("durable pin must still persist even when memory is already true");
+
+    restore_writable_sidecar_path(store.root(), &hash);
+    assert!(
+        store.try_set_pinned(&hash, true).expect("repair allows persist despite memory already true"),
+        "equal in-memory state still writes the sidecar"
+    );
+    drop(store);
+
+    let mut reopened = ArtifactStore::open(&root, 0).expect("reopen");
+    assert!(reopened.contains(&hash), "the equal-state persist restored the entry");
+    reopened
+        .upload_with_pin(b"trigger-bbbbbbbb", ArtifactKind::Binary, manifest("headless"), None, false)
+        .expect("trigger");
+    assert!(reopened.contains(&hash), "reopen confirms the sidecar actually recorded the pin");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn try_set_pinned_failure_leaves_in_memory_state_unchanged() {
+    let root = temp_root("pin-fail");
+    let mut store = ArtifactStore::open(&root, 20).expect("open store");
+    let hash = store
+        .upload_with_pin(b"plain-aaaa", ArtifactKind::Binary, manifest("headless"), None, false)
+        .expect("upload");
+    occupy_sidecar_as_dir(store.root(), &hash);
+
+    let err = store.try_set_pinned(&hash, true).expect_err("a directory sidecar target is a persistence failure");
+    assert!(err.raw_os_error().is_some() || err.kind() != io::ErrorKind::Other, "the failure is an IO category: {err}");
+
+    store.upload_with_pin(b"trigger-bbbbbbbb", ArtifactKind::Binary, manifest("headless"), None, false).expect("trigger");
+    assert!(!store.contains(&hash), "a failed pin must leave the entry evictable");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn try_set_unpin_failure_keeps_prior_protection() {
+    let root = temp_root("unpin-fail");
+    let mut store = ArtifactStore::open(&root, 20).expect("open store");
+    let hash = store
+        .upload_with_pin(b"pinned-aaaa", ArtifactKind::Binary, manifest("headless"), None, true)
+        .expect("pinned upload");
+    occupy_sidecar_as_dir(store.root(), &hash);
+
+    store.try_set_pinned(&hash, false).expect_err("a directory sidecar target is a persistence failure");
+    store.upload_with_pin(b"trigger-bbbbbbbb", ArtifactKind::Binary, manifest("headless"), None, false).expect("trigger");
+    assert!(store.contains(&hash), "a failed unpin must keep the in-memory pin");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn pin_true_new_upload_write_failure_does_not_return_a_hash() {
+    let root = temp_root("pin-new-fail");
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
+    let bytes = b"never-pinned";
+    let hash = content_hash(bytes);
+    occupy_sidecar_as_dir(store.root(), &hash);
+
+    let result =
+        store.upload_with_pin(bytes, ArtifactKind::Binary, manifest("headless"), Some("svc".to_owned()), true);
+    assert!(result.is_err(), "a pin:true sidecar failure must not succeed: {result:?}");
+    assert!(!store.contains(&hash), "the failed pin upload leaves the hash unindexed");
+    assert_eq!(store.get(&Selector::Name("svc".to_owned())).map(|a| a.hash), None);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn dedup_pin_true_failure_does_not_repoint_a_name() {
+    let root = temp_root("dedup-pin-fail");
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
+    let hash = store
+        .upload_with_pin(b"shared-bytes", ArtifactKind::Binary, manifest("headless"), None, false)
+        .expect("first upload");
+    occupy_sidecar_as_dir(store.root(), &hash);
+
+    let result =
+        store.upload_with_pin(b"shared-bytes", ArtifactKind::Binary, manifest("headless"), Some("svc".to_owned()), true);
+    assert!(result.is_err(), "a failed dedup pin must not succeed: {result:?}");
+    assert!(store.get(&Selector::Name("svc".to_owned())).is_none(), "a failed dedup pin must not repoint a name");
     let _ = fs::remove_dir_all(&root);
 }

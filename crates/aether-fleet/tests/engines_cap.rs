@@ -19,8 +19,10 @@ use aether_fleet::{FleetConfig, FleetProxy, FleetServer};
 use aether_kinds::descriptors;
 use aether_kinds::trace::Nanos;
 use aether_kinds::{
-    BinarySelector, DeathReason, ListEngines, ListEnginesResult, SpawnEngine, SpawnEngineResult, TerminateEngine,
-    TerminateEngineResult,
+    BinarySelector, DeathReason, ListComponentBinaries, ListComponentBinariesResult, ListEngineBinaries,
+    ListEngineBinariesResult, ListEngines, ListEnginesResult, SetArtifactPinned, SetArtifactPinnedResult, SpawnEngine,
+    SpawnEngineResult, TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent,
+    UploadComponentResult,
 };
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
@@ -49,6 +51,11 @@ pub struct ReplyCells {
     pub spawn: Arc<Mutex<Option<SpawnEngineResult>>>,
     pub spawn_correlation: Arc<Mutex<Option<u64>>>,
     pub terminate: Arc<Mutex<Option<TerminateEngineResult>>>,
+    pub upload_binary: Arc<Mutex<Option<UploadBinaryResult>>>,
+    pub upload_component: Arc<Mutex<Option<UploadComponentResult>>>,
+    pub list_binaries: Arc<Mutex<Option<ListEngineBinariesResult>>>,
+    pub list_components: Arc<Mutex<Option<ListComponentBinariesResult>>>,
+    pub set_pinned: Arc<Mutex<Option<SetArtifactPinnedResult>>>,
 }
 
 /// Test-only reply sink registered at `aether.fleet.test.reply_sink`,
@@ -91,6 +98,33 @@ impl NativeActor for ReplySink {
     #[handler::single]
     fn on_terminate_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: TerminateEngineResult) {
         *self.cells.terminate.lock().expect("test setup: terminate cell mutex is never poisoned") = Some(reply);
+    }
+
+    #[handler::single]
+    fn on_upload_binary_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: UploadBinaryResult) {
+        *self.cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned") = Some(reply);
+    }
+
+    #[handler::single]
+    fn on_upload_component_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: UploadComponentResult) {
+        *self.cells.upload_component.lock().expect("test setup: upload_component cell mutex is never poisoned") =
+            Some(reply);
+    }
+
+    #[handler::single]
+    fn on_list_engine_binaries_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: ListEngineBinariesResult) {
+        *self.cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned") = Some(reply);
+    }
+
+    #[handler::single]
+    fn on_list_component_binaries_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: ListComponentBinariesResult) {
+        *self.cells.list_components.lock().expect("test setup: list_components cell mutex is never poisoned") =
+            Some(reply);
+    }
+
+    #[handler::single]
+    fn on_set_artifact_pinned_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: SetArtifactPinnedResult) {
+        *self.cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned") = Some(reply);
     }
 }
 
@@ -159,6 +193,27 @@ fn inert_store_config(store_dir: &Path, engine_root: &Path) -> FleetConfig {
 
 fn hash_selector(hash: &str) -> BinarySelector {
     BinarySelector { query: Some(hash.to_owned()), chassis: None, caps: vec![], target: None }
+}
+
+/// Isolated store + engine-root config with an explicit disk budget and
+/// no bootstrap ingest — used by operator-pin handler tests so an unnamed
+/// `pin: true` upload is not also name-protected.
+fn pin_store_config(store_dir: &Path, engine_root: &Path, budget: u64) -> FleetConfig {
+    FleetConfig {
+        binary_store_dir: Some(store_dir.to_string_lossy().into_owned()),
+        fleet_store_root: Some(engine_root.to_string_lossy().into_owned()),
+        binary_bootstrap: HashSet::new(),
+        binary_disk_budget_bytes: budget,
+        ..FleetConfig::default()
+    }
+}
+
+fn history_binaries() -> ListEngineBinaries {
+    ListEngineBinaries { chassis: None, caps: Vec::new(), target: None, limit: None, include_history: true }
+}
+
+fn history_components() -> ListComponentBinaries {
+    ListComponentBinaries { namespace: None, handled_kind: None, limit: None, include_history: true }
 }
 
 /// Build the engines-cap config that isolates the hub binary store
@@ -998,5 +1053,253 @@ mod restart_supervision {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unnamed_pin_true_headless_survives_tiny_budget_reopen_and_false_reupload() {
+        let headless = aether_harness_fleet::headless_bin_path().to_string_lossy().into_owned();
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let store_dir = env::temp_dir().join(format!("aether-engcap-pin-bin-{}-{nanos}", process::id()));
+        let engine_root = env::temp_dir().join(format!("aether-engcap-pin-eng-{}-{nanos}", process::id()));
+        let config = pin_store_config(&store_dir, &engine_root, 1);
+
+        let hash = {
+            let (_registry, chassis, mailer, cells) = boot(config.clone());
+            let uploaded = drive(
+                &mailer,
+                &UploadBinary { staged_path: headless.clone(), name: None, pin: true },
+                Duration::from_secs(30),
+                || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
+            );
+            let hash = match uploaded {
+                UploadBinaryResult::Ok { hash, name } => {
+                    assert!(name.is_none(), "unnamed pin:true must not invent a name");
+                    hash
+                }
+                UploadBinaryResult::Err { error } => panic!("pin:true headless upload failed: {error}"),
+            };
+            let listed = drive(
+                &mailer,
+                &history_binaries(),
+                Duration::from_secs(5),
+                || cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take(),
+            );
+            assert!(
+                listed.binaries.iter().any(|entry| entry.hash == hash),
+                "list(include_history) must find the unnamed pinned hash: {listed:?}"
+            );
+
+            let again = drive(
+                &mailer,
+                &UploadBinary { staged_path: headless.clone(), name: None, pin: false },
+                Duration::from_secs(30),
+                || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
+            );
+            match again {
+                UploadBinaryResult::Ok { hash: again_hash, .. } => assert_eq!(again_hash, hash),
+                UploadBinaryResult::Err { error } => panic!("pin:false reupload failed: {error}"),
+            }
+            drop(chassis);
+            hash
+        };
+
+        let (_registry, _chassis, mailer, cells) = boot(config);
+        let listed = drive(
+            &mailer,
+            &history_binaries(),
+            Duration::from_secs(5),
+            || cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take(),
+        );
+        assert!(
+            listed.binaries.iter().any(|entry| entry.hash == hash),
+            "the durable pin must survive cap reopen under the tiny budget: {listed:?}"
+        );
+        let _ = fs::remove_dir_all(&store_dir);
+        let _ = fs::remove_dir_all(&engine_root);
+    }
+
+    #[test]
+    fn unnamed_pin_true_component_survives_tiny_budget() {
+        if !aether_harness_fleet::dist_component_available("aether_test_fixtures_bundle") {
+            return;
+        }
+        let wasm = aether_harness_fleet::component_wasm_path("aether_test_fixtures_bundle");
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let store_dir = env::temp_dir().join(format!("aether-engcap-pin-wasm-{}-{nanos}", process::id()));
+        let engine_root = env::temp_dir().join(format!("aether-engcap-pin-wasm-eng-{}-{nanos}", process::id()));
+        let (_registry, _chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
+        let uploaded = drive(
+            &mailer,
+            &UploadComponent {
+                staged_path: wasm.to_string_lossy().into_owned(),
+                name: None,
+                pin: true,
+            },
+            Duration::from_secs(15),
+            || cells.upload_component.lock().expect("test setup: upload_component cell mutex is never poisoned").take(),
+        );
+        let hash = match uploaded {
+            UploadComponentResult::Ok { hash, name } => {
+                assert!(name.is_none());
+                hash
+            }
+            UploadComponentResult::Err { error } => panic!("pin:true component upload failed: {error}"),
+        };
+        let listed = drive(
+            &mailer,
+            &history_components(),
+            Duration::from_secs(5),
+            || {
+                cells.list_components.lock().expect("test setup: list_components cell mutex is never poisoned").take()
+            },
+        );
+        assert!(
+            listed.components.iter().any(|entry| entry.hash == hash),
+            "list(include_history) must find the unnamed pinned component: {listed:?}"
+        );
+        let _ = fs::remove_dir_all(&store_dir);
+        let _ = fs::remove_dir_all(&engine_root);
+    }
+
+    #[test]
+    fn dedup_pin_true_headless_upgrades_under_tiny_budget_on_reopen() {
+        let headless = aether_harness_fleet::headless_bin_path().to_string_lossy().into_owned();
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let store_dir = env::temp_dir().join(format!("aether-engcap-pin-dedup-{}-{nanos}", process::id()));
+        let engine_root = env::temp_dir().join(format!("aether-engcap-pin-dedup-eng-{}-{nanos}", process::id()));
+
+        let hash = {
+            let (_registry, chassis, mailer, cells) =
+                boot(pin_store_config(&store_dir, &engine_root, 17_179_869_184));
+            let uploaded = drive(
+                &mailer,
+                &UploadBinary { staged_path: headless.clone(), name: None, pin: false },
+                Duration::from_secs(30),
+                || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
+            );
+            let hash = match uploaded {
+                UploadBinaryResult::Ok { hash, .. } => hash,
+                UploadBinaryResult::Err { error } => panic!("seed upload failed: {error}"),
+            };
+            drop(chassis);
+            hash
+        };
+
+        let (_registry, _chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
+        let listed = drive(
+            &mailer,
+            &history_binaries(),
+            Duration::from_secs(5),
+            || cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take(),
+        );
+        assert!(
+            listed.binaries.iter().any(|entry| entry.hash == hash),
+            "open does not evict; the unpinned seed is still listed under a tiny budget: {listed:?}"
+        );
+        let upgraded = drive(
+            &mailer,
+            &UploadBinary { staged_path: headless, name: None, pin: true },
+            Duration::from_secs(30),
+            || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
+        );
+        match upgraded {
+            UploadBinaryResult::Ok { hash: again, .. } => assert_eq!(again, hash),
+            UploadBinaryResult::Err { error } => panic!("dedup pin:true failed: {error}"),
+        }
+        let listed = drive(
+            &mailer,
+            &history_binaries(),
+            Duration::from_secs(5),
+            || cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take(),
+        );
+        assert!(
+            listed.binaries.iter().any(|entry| entry.hash == hash),
+            "dedup pin:true must persist before that upload's eviction: {listed:?}"
+        );
+        let _ = fs::remove_dir_all(&store_dir);
+        let _ = fs::remove_dir_all(&engine_root);
+    }
+
+    #[test]
+    fn set_artifact_pinned_mail_does_not_resolve_names_and_preserves_name_protection() {
+        let headless = aether_harness_fleet::headless_bin_path().to_string_lossy().into_owned();
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let store_dir = env::temp_dir().join(format!("aether-engcap-pin-mail-{}-{nanos}", process::id()));
+        let engine_root = env::temp_dir().join(format!("aether-engcap-pin-mail-eng-{}-{nanos}", process::id()));
+        let (_registry, _chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
+
+        let uploaded = drive(
+            &mailer,
+            &UploadBinary { staged_path: headless, name: Some("keep".to_owned()), pin: false },
+            Duration::from_secs(30),
+            || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
+        );
+        let hash = match uploaded {
+            UploadBinaryResult::Ok { hash, name } => {
+                assert_eq!(name.as_deref(), Some("keep"));
+                hash
+            }
+            UploadBinaryResult::Err { error } => panic!("named upload failed: {error}"),
+        };
+
+        let by_name = drive(
+            &mailer,
+            &SetArtifactPinned { hash: "keep".to_owned(), pinned: true },
+            Duration::from_secs(5),
+            || cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take(),
+        );
+        match by_name {
+            SetArtifactPinnedResult::Err { error } => {
+                assert!(error.contains("no stored artifact has hash"), "unknown hash must not resolve a name: {error}");
+                assert!(!error.contains('/'), "pin errors must stay path-free: {error}");
+            }
+            SetArtifactPinnedResult::Ok { .. } => panic!("SetArtifactPinned must not resolve names"),
+        }
+
+        let unknown = drive(
+            &mailer,
+            &SetArtifactPinned { hash: "0".repeat(64), pinned: true },
+            Duration::from_secs(5),
+            || cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take(),
+        );
+        assert!(
+            matches!(unknown, SetArtifactPinnedResult::Err { ref error } if error.contains("no stored artifact has hash")),
+            "unknown content hash must error: {unknown:?}"
+        );
+
+        let pinned = drive(
+            &mailer,
+            &SetArtifactPinned { hash: hash.clone(), pinned: true },
+            Duration::from_secs(5),
+            || cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take(),
+        );
+        assert!(
+            matches!(pinned, SetArtifactPinnedResult::Ok { pinned: true, .. }),
+            "exact hash pin must succeed: {pinned:?}"
+        );
+
+        let unpinned = drive(
+            &mailer,
+            &SetArtifactPinned { hash: hash.clone(), pinned: false },
+            Duration::from_secs(5),
+            || cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take(),
+        );
+        assert!(
+            matches!(unpinned, SetArtifactPinnedResult::Ok { pinned: false, .. }),
+            "exact hash unpin must succeed: {unpinned:?}"
+        );
+
+        let live = drive(
+            &mailer,
+            &ListEngineBinaries { chassis: None, caps: Vec::new(), target: None, limit: None, include_history: false },
+            Duration::from_secs(5),
+            || cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take(),
+        );
+        assert!(
+            live.binaries.iter().any(|entry| entry.hash == hash && entry.name.as_deref() == Some("keep")),
+            "unpin removes only the explicit flag; a name still protects: {live:?}"
+        );
+        let _ = fs::remove_dir_all(&store_dir);
+        let _ = fs::remove_dir_all(&engine_root);
     }
 }
