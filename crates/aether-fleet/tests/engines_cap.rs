@@ -1123,12 +1123,9 @@ mod operator_pins {
                 }
                 UploadBinaryResult::Err { error } => panic!("pin:true headless upload failed: {error}"),
             };
-            let listed = drive(
-                &mailer,
-                &history_binaries(),
-                Duration::from_secs(5),
-                || cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take(),
-            );
+            let listed = drive(&mailer, &history_binaries(), Duration::from_secs(5), || {
+                cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take()
+            });
             assert!(
                 listed.binaries.iter().any(|entry| entry.hash == hash),
                 "list(include_history) must find the unnamed pinned hash: {listed:?}"
@@ -1150,12 +1147,9 @@ mod operator_pins {
 
         {
             let (_registry, chassis, mailer, cells) = boot(config);
-            let listed = drive(
-                &mailer,
-                &history_binaries(),
-                Duration::from_secs(5),
-                || cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take(),
-            );
+            let listed = drive(&mailer, &history_binaries(), Duration::from_secs(5), || {
+                cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take()
+            });
             assert!(
                 listed.binaries.iter().any(|entry| entry.hash == hash),
                 "the durable pin must survive cap reopen under the tiny budget: {listed:?}"
@@ -1178,11 +1172,7 @@ mod operator_pins {
         let (_registry, chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
         let uploaded = drive(
             &mailer,
-            &UploadComponent {
-                staged_path: wasm.to_string_lossy().into_owned(),
-                name: None,
-                pin: true,
-            },
+            &UploadComponent { staged_path: wasm.to_string_lossy().into_owned(), name: None, pin: true },
             Duration::from_secs(15),
             || cells.upload_component.lock().expect("test setup: upload_component cell mutex is never poisoned").take(),
         );
@@ -1193,14 +1183,9 @@ mod operator_pins {
             }
             UploadComponentResult::Err { error } => panic!("pin:true component upload failed: {error}"),
         };
-        let listed = drive(
-            &mailer,
-            &history_components(),
-            Duration::from_secs(5),
-            || {
-                cells.list_components.lock().expect("test setup: list_components cell mutex is never poisoned").take()
-            },
-        );
+        let listed = drive(&mailer, &history_components(), Duration::from_secs(5), || {
+            cells.list_components.lock().expect("test setup: list_components cell mutex is never poisoned").take()
+        });
         assert!(
             listed.components.iter().any(|entry| entry.hash == hash),
             "list(include_history) must find the unnamed pinned component: {listed:?}"
@@ -1218,8 +1203,7 @@ mod operator_pins {
         let engine_root = env::temp_dir().join(format!("aether-engcap-pin-dedup-eng-{}-{nanos}", process::id()));
 
         let hash = {
-            let (_registry, chassis, mailer, cells) =
-                boot(pin_store_config(&store_dir, &engine_root, 17_179_869_184));
+            let (_registry, chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 17_179_869_184));
             let uploaded = drive(
                 &mailer,
                 &UploadBinary { staged_path: headless.clone(), name: None, pin: false },
@@ -1235,12 +1219,9 @@ mod operator_pins {
         };
 
         let (_registry, chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
-        let listed = drive(
-            &mailer,
-            &history_binaries(),
-            Duration::from_secs(5),
-            || cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take(),
-        );
+        let listed = drive(&mailer, &history_binaries(), Duration::from_secs(5), || {
+            cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take()
+        });
         assert!(
             listed.binaries.iter().any(|entry| entry.hash == hash),
             "open does not evict; the unpinned seed is still listed under a tiny budget: {listed:?}"
@@ -1255,12 +1236,9 @@ mod operator_pins {
             UploadBinaryResult::Ok { hash: again, .. } => assert_eq!(again, hash),
             UploadBinaryResult::Err { error } => panic!("dedup pin:true failed: {error}"),
         }
-        let listed = drive(
-            &mailer,
-            &history_binaries(),
-            Duration::from_secs(5),
-            || cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take(),
-        );
+        let listed = drive(&mailer, &history_binaries(), Duration::from_secs(5), || {
+            cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take()
+        });
         assert!(
             listed.binaries.iter().any(|entry| entry.hash == hash),
             "dedup pin:true must persist before that upload's eviction: {listed:?}"
@@ -1288,12 +1266,10 @@ mod operator_pins {
             }
             SetArtifactPinnedResult::Ok { .. } => panic!("SetArtifactPinned must not resolve names"),
         }
-        let unknown = drive(
-            &mailer,
-            &SetArtifactPinned { hash: "0".repeat(64), pinned: true },
-            Duration::from_secs(5),
-            || cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take(),
-        );
+        let unknown =
+            drive(&mailer, &SetArtifactPinned { hash: "0".repeat(64), pinned: true }, Duration::from_secs(5), || {
+                cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take()
+            });
         assert!(
             matches!(unknown, SetArtifactPinnedResult::Err { ref error } if error.contains("no stored artifact has hash")),
             "unknown content hash must error: {unknown:?}"
@@ -1341,34 +1317,28 @@ mod operator_pins {
             SetArtifactPinnedResult::Ok { .. } => panic!("SetArtifactPinned must not resolve names"),
         }
 
-        let unknown = drive(
-            &mailer,
-            &SetArtifactPinned { hash: "0".repeat(64), pinned: true },
-            Duration::from_secs(5),
-            || cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take(),
-        );
+        let unknown =
+            drive(&mailer, &SetArtifactPinned { hash: "0".repeat(64), pinned: true }, Duration::from_secs(5), || {
+                cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take()
+            });
         assert!(
             matches!(unknown, SetArtifactPinnedResult::Err { ref error } if error.contains("no stored artifact has hash")),
             "unknown content hash must error: {unknown:?}"
         );
 
-        let pinned = drive(
-            &mailer,
-            &SetArtifactPinned { hash: hash.clone(), pinned: true },
-            Duration::from_secs(5),
-            || cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take(),
-        );
+        let pinned =
+            drive(&mailer, &SetArtifactPinned { hash: hash.clone(), pinned: true }, Duration::from_secs(5), || {
+                cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take()
+            });
         match pinned {
             SetArtifactPinnedResult::Ok { hash: replied, pinned: true } => assert_eq!(replied, hash),
             other => panic!("exact hash pin must succeed: {other:?}"),
         }
 
-        let unpinned = drive(
-            &mailer,
-            &SetArtifactPinned { hash: hash.clone(), pinned: false },
-            Duration::from_secs(5),
-            || cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take(),
-        );
+        let unpinned =
+            drive(&mailer, &SetArtifactPinned { hash: hash.clone(), pinned: false }, Duration::from_secs(5), || {
+                cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take()
+            });
         match unpinned {
             SetArtifactPinnedResult::Ok { hash: replied, pinned: false } => assert_eq!(replied, hash),
             other => panic!("exact hash unpin must succeed: {other:?}"),
@@ -1377,11 +1347,7 @@ mod operator_pins {
         write_pressure_bin(&pressure, "named-pressure");
         let pressure_upload = drive(
             &mailer,
-            &UploadBinary {
-                staged_path: pressure.to_string_lossy().into_owned(),
-                name: None,
-                pin: false,
-            },
+            &UploadBinary { staged_path: pressure.to_string_lossy().into_owned(), name: None, pin: false },
             Duration::from_secs(15),
             || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
         );
@@ -1417,8 +1383,7 @@ mod operator_pins {
         let pressure_reap = env::temp_dir().join(format!("aether-engcap-pin-unnamed-reap-{}-{nanos}", process::id()));
 
         let hash = {
-            let (_registry, chassis, mailer, cells) =
-                boot(pin_store_config(&store_dir, &engine_root, 17_179_869_184));
+            let (_registry, chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 17_179_869_184));
             let uploaded = drive(
                 &mailer,
                 &UploadBinary { staged_path: headless, name: None, pin: false },
@@ -1432,12 +1397,10 @@ mod operator_pins {
                 }
                 UploadBinaryResult::Err { error } => panic!("unnamed seed upload failed: {error}"),
             };
-            let pinned = drive(
-                &mailer,
-                &SetArtifactPinned { hash: hash.clone(), pinned: true },
-                Duration::from_secs(5),
-                || cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take(),
-            );
+            let pinned =
+                drive(&mailer, &SetArtifactPinned { hash: hash.clone(), pinned: true }, Duration::from_secs(5), || {
+                    cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take()
+                });
             match pinned {
                 SetArtifactPinnedResult::Ok { hash: replied, pinned: true } => assert_eq!(replied, hash),
                 other => panic!("unnamed pin via mail must succeed: {other:?}"),
@@ -1450,32 +1413,23 @@ mod operator_pins {
         write_pressure_bin(&pressure_keep, "keep-pressure");
         let keep_upload = drive(
             &mailer,
-            &UploadBinary {
-                staged_path: pressure_keep.to_string_lossy().into_owned(),
-                name: None,
-                pin: false,
-            },
+            &UploadBinary { staged_path: pressure_keep.to_string_lossy().into_owned(), name: None, pin: false },
             Duration::from_secs(15),
             || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
         );
         assert!(matches!(keep_upload, UploadBinaryResult::Ok { .. }), "keep-pressure upload: {keep_upload:?}");
-        let listed = drive(
-            &mailer,
-            &history_binaries(),
-            Duration::from_secs(5),
-            || cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take(),
-        );
+        let listed = drive(&mailer, &history_binaries(), Duration::from_secs(5), || {
+            cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take()
+        });
         assert!(
             listed.binaries.iter().any(|entry| entry.hash == hash),
             "explicit pin via mail must retain the unnamed hash under tiny-budget pressure: {listed:?}"
         );
 
-        let unpinned = drive(
-            &mailer,
-            &SetArtifactPinned { hash: hash.clone(), pinned: false },
-            Duration::from_secs(5),
-            || cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take(),
-        );
+        let unpinned =
+            drive(&mailer, &SetArtifactPinned { hash: hash.clone(), pinned: false }, Duration::from_secs(5), || {
+                cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take()
+            });
         match unpinned {
             SetArtifactPinnedResult::Ok { hash: replied, pinned: false } => assert_eq!(replied, hash),
             other => panic!("unnamed unpin via mail must succeed: {other:?}"),
@@ -1484,21 +1438,14 @@ mod operator_pins {
         write_pressure_bin(&pressure_reap, "reap-pressure");
         let reap_upload = drive(
             &mailer,
-            &UploadBinary {
-                staged_path: pressure_reap.to_string_lossy().into_owned(),
-                name: None,
-                pin: false,
-            },
+            &UploadBinary { staged_path: pressure_reap.to_string_lossy().into_owned(), name: None, pin: false },
             Duration::from_secs(15),
             || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
         );
         assert!(matches!(reap_upload, UploadBinaryResult::Ok { .. }), "reap-pressure upload: {reap_upload:?}");
-        let listed = drive(
-            &mailer,
-            &history_binaries(),
-            Duration::from_secs(5),
-            || cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take(),
-        );
+        let listed = drive(&mailer, &history_binaries(), Duration::from_secs(5), || {
+            cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take()
+        });
         assert!(
             listed.binaries.iter().all(|entry| entry.hash != hash),
             "after unpin, pressure must reclaim the unnamed hash: {listed:?}"
@@ -1532,12 +1479,10 @@ mod operator_pins {
         };
         occupy_owned_sidecar_as_dir(&store_dir, &hash);
 
-        let failed = drive(
-            &mailer,
-            &SetArtifactPinned { hash: hash.clone(), pinned: false },
-            Duration::from_secs(5),
-            || cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take(),
-        );
+        let failed =
+            drive(&mailer, &SetArtifactPinned { hash: hash.clone(), pinned: false }, Duration::from_secs(5), || {
+                cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take()
+            });
         match failed {
             SetArtifactPinnedResult::Err { error } => {
                 assert_path_free_persist_error(&error, "unpinning artifact", &store_dir);
@@ -1548,11 +1493,7 @@ mod operator_pins {
         write_pressure_bin(&pressure, "fail-pressure");
         let pressure_upload = drive(
             &mailer,
-            &UploadBinary {
-                staged_path: pressure.to_string_lossy().into_owned(),
-                name: None,
-                pin: false,
-            },
+            &UploadBinary { staged_path: pressure.to_string_lossy().into_owned(), name: None, pin: false },
             Duration::from_secs(15),
             || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
         );
@@ -1560,12 +1501,9 @@ mod operator_pins {
             matches!(pressure_upload, UploadBinaryResult::Ok { .. }),
             "pressure upload after failed unpin: {pressure_upload:?}"
         );
-        let listed = drive(
-            &mailer,
-            &history_binaries(),
-            Duration::from_secs(5),
-            || cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take(),
-        );
+        let listed = drive(&mailer, &history_binaries(), Duration::from_secs(5), || {
+            cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take()
+        });
         assert!(
             listed.binaries.iter().any(|entry| entry.hash == hash),
             "failed unpin must keep in-memory protection under pressure: {listed:?}"
@@ -1584,8 +1522,7 @@ mod operator_pins {
         let engine_root = env::temp_dir().join(format!("aether-engcap-pin-upfail-eng-{}-{nanos}", process::id()));
 
         let hash = {
-            let (_registry, chassis, mailer, cells) =
-                boot(pin_store_config(&store_dir, &engine_root, 17_179_869_184));
+            let (_registry, chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 17_179_869_184));
             let uploaded = drive(
                 &mailer,
                 &UploadBinary { staged_path: headless.clone(), name: None, pin: false },

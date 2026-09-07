@@ -424,11 +424,9 @@ fn dedup_pin_true_upgrades_before_eviction() {
         store.upload_with_pin(bytes, meta("a"), None, false).expect("seed without pressure")
     };
 
-    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::LruBudget(0)).expect("reopen budget 0");
-    assert!(
-        store.contains(&hash),
-        "open does not evict; the unpinned seed is still indexed under a zero budget"
-    );
+    let mut store: ContentStore<Meta> =
+        ContentStore::open(&root, EvictionPolicy::LruBudget(0)).expect("reopen budget 0");
+    assert!(store.contains(&hash), "open does not evict; the unpinned seed is still indexed under a zero budget");
     let again = store
         .upload_with_pin(bytes, meta("a"), None, true)
         .expect("dedup pin:true faces same-call zero-budget pressure");
@@ -510,9 +508,7 @@ fn try_set_pinned_does_not_shortcut_equal_in_memory_state() {
     occupy_sidecar_as_dir(store.root(), &hash);
 
     assert!(store.set_pinned(&hash, true), "legacy set_pinned returns true after mutating memory");
-    store
-        .try_set_pinned(&hash, true)
-        .expect_err("durable pin must still persist even when memory is already true");
+    store.try_set_pinned(&hash, true).expect_err("durable pin must still persist even when memory is already true");
 
     restore_writable_sidecar_path(store.root(), &hash);
     assert!(

@@ -270,10 +270,9 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
             if pin {
                 match self.try_set_pinned(&hash, true) {
                     Ok(true) => Ok(()),
-                    Ok(false) => Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "content store: pinned hash missing after dedup",
-                    )),
+                    Ok(false) => {
+                        Err(io::Error::new(io::ErrorKind::NotFound, "content store: pinned hash missing after dedup"))
+                    }
                     Err(e) => Err(e),
                 }
             } else {
@@ -317,8 +316,7 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
         }
 
         let bytes_len = bytes.len() as u64;
-        self.entries
-            .insert(hash.to_owned(), Entry { metadata, bytes_len, pinned, last_access: clock, uploaded_seq });
+        self.entries.insert(hash.to_owned(), Entry { metadata, bytes_len, pinned, last_access: clock, uploaded_seq });
         self.total_bytes = self.total_bytes.saturating_add(bytes_len);
         self.next_seq = self.next_seq.saturating_add(1);
         Ok(())

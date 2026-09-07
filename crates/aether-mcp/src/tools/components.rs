@@ -396,13 +396,12 @@ pub(super) async fn upload_component(mcp: &Mcp, args: UploadComponentArgs) -> Re
 }
 
 async fn set_artifact_pinned(mcp: &Mcp, hash: String, pinned: bool) -> Result<String, McpError> {
-    let reply = mcp
-        .session
-        .call_one(local_envelope(FLEET_CAP, &SetArtifactPinned { hash, pinned }))
-        .await
-        .map_err(internal)?;
+    let reply =
+        mcp.session.call_one(local_envelope(FLEET_CAP, &SetArtifactPinned { hash, pinned })).await.map_err(internal)?;
     match SetArtifactPinnedResult::decode_from_bytes(&reply.payload) {
-        Some(SetArtifactPinnedResult::Ok { hash, pinned }) => json(&serde_json::json!({ "hash": hash, "pinned": pinned })),
+        Some(SetArtifactPinnedResult::Ok { hash, pinned }) => {
+            json(&serde_json::json!({ "hash": hash, "pinned": pinned }))
+        }
         Some(SetArtifactPinnedResult::Err { error }) => Err(internal_msg(&error)),
         None => Err(internal_msg("undecodable SetArtifactPinnedResult")),
     }

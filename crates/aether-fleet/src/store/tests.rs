@@ -527,10 +527,7 @@ fn dedup_pin_true_upgrades_before_eviction() {
     };
 
     let mut store = ArtifactStore::open(&root, 0).expect("reopen budget 0");
-    assert!(
-        store.contains(&hash),
-        "open does not evict; the unpinned seed is still indexed under a zero budget"
-    );
+    assert!(store.contains(&hash), "open does not evict; the unpinned seed is still indexed under a zero budget");
     let again = store
         .upload_with_pin(bytes, ArtifactKind::Binary, manifest("headless"), None, true)
         .expect("dedup pin:true faces same-call zero-budget pressure");
@@ -612,15 +609,12 @@ fn try_set_pinned_survives_reopen_for_pin_and_unpin() {
 fn try_set_pinned_does_not_shortcut_equal_in_memory_state() {
     let root = temp_root("pin-equal-state");
     let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
-    let hash = store
-        .upload_with_pin(b"plain-aaaa", ArtifactKind::Binary, manifest("headless"), None, false)
-        .expect("upload");
+    let hash =
+        store.upload_with_pin(b"plain-aaaa", ArtifactKind::Binary, manifest("headless"), None, false).expect("upload");
     occupy_sidecar_as_dir(store.root(), &hash);
 
     assert!(store.set_pinned(&hash, true), "legacy set_pinned returns true after mutating memory");
-    store
-        .try_set_pinned(&hash, true)
-        .expect_err("durable pin must still persist even when memory is already true");
+    store.try_set_pinned(&hash, true).expect_err("durable pin must still persist even when memory is already true");
 
     restore_writable_sidecar_path(store.root(), &hash);
     assert!(
@@ -642,15 +636,16 @@ fn try_set_pinned_does_not_shortcut_equal_in_memory_state() {
 fn try_set_pinned_failure_leaves_in_memory_state_unchanged() {
     let root = temp_root("pin-fail");
     let mut store = ArtifactStore::open(&root, 20).expect("open store");
-    let hash = store
-        .upload_with_pin(b"plain-aaaa", ArtifactKind::Binary, manifest("headless"), None, false)
-        .expect("upload");
+    let hash =
+        store.upload_with_pin(b"plain-aaaa", ArtifactKind::Binary, manifest("headless"), None, false).expect("upload");
     occupy_sidecar_as_dir(store.root(), &hash);
 
     let err = store.try_set_pinned(&hash, true).expect_err("a directory sidecar target is a persistence failure");
     assert!(err.raw_os_error().is_some() || err.kind() != io::ErrorKind::Other, "the failure is an IO category: {err}");
 
-    store.upload_with_pin(b"trigger-bbbbbbbb", ArtifactKind::Binary, manifest("headless"), None, false).expect("trigger");
+    store
+        .upload_with_pin(b"trigger-bbbbbbbb", ArtifactKind::Binary, manifest("headless"), None, false)
+        .expect("trigger");
     assert!(!store.contains(&hash), "a failed pin must leave the entry evictable");
     let _ = fs::remove_dir_all(&root);
 }
@@ -665,7 +660,9 @@ fn try_set_unpin_failure_keeps_prior_protection() {
     occupy_sidecar_as_dir(store.root(), &hash);
 
     store.try_set_pinned(&hash, false).expect_err("a directory sidecar target is a persistence failure");
-    store.upload_with_pin(b"trigger-bbbbbbbb", ArtifactKind::Binary, manifest("headless"), None, false).expect("trigger");
+    store
+        .upload_with_pin(b"trigger-bbbbbbbb", ArtifactKind::Binary, manifest("headless"), None, false)
+        .expect("trigger");
     assert!(store.contains(&hash), "a failed unpin must keep the in-memory pin");
     let _ = fs::remove_dir_all(&root);
 }
@@ -678,8 +675,7 @@ fn pin_true_new_upload_write_failure_does_not_return_a_hash() {
     let hash = content_hash(bytes);
     occupy_sidecar_as_dir(store.root(), &hash);
 
-    let result =
-        store.upload_with_pin(bytes, ArtifactKind::Binary, manifest("headless"), Some("svc".to_owned()), true);
+    let result = store.upload_with_pin(bytes, ArtifactKind::Binary, manifest("headless"), Some("svc".to_owned()), true);
     assert!(result.is_err(), "a pin:true sidecar failure must not succeed: {result:?}");
     assert!(!store.contains(&hash), "the failed pin upload leaves the hash unindexed");
     assert_eq!(store.get(&Selector::Name("svc".to_owned())).map(|a| a.hash), None);
@@ -695,8 +691,13 @@ fn dedup_pin_true_failure_does_not_repoint_a_name() {
         .expect("first upload");
     occupy_sidecar_as_dir(store.root(), &hash);
 
-    let result =
-        store.upload_with_pin(b"shared-bytes", ArtifactKind::Binary, manifest("headless"), Some("svc".to_owned()), true);
+    let result = store.upload_with_pin(
+        b"shared-bytes",
+        ArtifactKind::Binary,
+        manifest("headless"),
+        Some("svc".to_owned()),
+        true,
+    );
     assert!(result.is_err(), "a failed dedup pin must not succeed: {result:?}");
     assert!(store.get(&Selector::Name("svc".to_owned())).is_none(), "a failed dedup pin must not repoint a name");
     let _ = fs::remove_dir_all(&root);

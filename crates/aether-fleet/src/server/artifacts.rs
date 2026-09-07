@@ -149,23 +149,16 @@ pub fn persist_pin_error(operation: &str, err: &io::Error) -> String {
 /// that failed / yielded no parseable manifest, or a store write that
 /// didn't land. Idempotent — identical bytes dedup to the same hash.
 /// Bootstrap callers pass `pin: false`.
-pub fn ingest_binary(
-    store: &mut ArtifactStore,
-    path: &str,
-    name: Option<String>,
-    pin: bool,
-) -> Result<String, String> {
+pub fn ingest_binary(store: &mut ArtifactStore, path: &str, name: Option<String>, pin: bool) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| format!("reading binary path {path:?}: {e}"))?;
     let manifest = describe_binary(path)?;
-    store
-        .upload_with_pin(&bytes, ArtifactKind::Binary, StoredManifest::Binary(manifest), name, pin)
-        .map_err(|e| {
-            if pin {
-                persist_pin_error("pinning uploaded binary", &e)
-            } else {
-                format!("storing binary {path:?} in the artifact store: {e}")
-            }
-        })
+    store.upload_with_pin(&bytes, ArtifactKind::Binary, StoredManifest::Binary(manifest), name, pin).map_err(|e| {
+        if pin {
+            persist_pin_error("pinning uploaded binary", &e)
+        } else {
+            format!("storing binary {path:?} in the artifact store: {e}")
+        }
+    })
 }
 
 /// Bootstrap-ingest each chassis bin in `paths` into `store`, naming
@@ -209,15 +202,15 @@ pub fn ingest_component(
 ) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| format!("reading component path {path:?}: {e}"))?;
     let manifest = component_manifest(&bytes).map_err(|e| format!("reading component manifest from {path:?}: {e}"))?;
-    store
-        .upload_with_pin(&bytes, ArtifactKind::Component, StoredManifest::Component(manifest), name, pin)
-        .map_err(|e| {
+    store.upload_with_pin(&bytes, ArtifactKind::Component, StoredManifest::Component(manifest), name, pin).map_err(
+        |e| {
             if pin {
                 persist_pin_error("pinning uploaded component", &e)
             } else {
                 format!("storing component {path:?} in the artifact store: {e}")
             }
-        })
+        },
+    )
 }
 
 /// Persist an operator pin/unpin on an exact stored content hash.
@@ -228,7 +221,14 @@ pub fn set_artifact_pinned(store: &mut ArtifactStore, hash: &str, pinned: bool) 
     match store.try_set_pinned(hash, pinned) {
         Ok(true) => Ok((hash.to_owned(), pinned)),
         Ok(false) => Err(format!("no stored artifact has hash {hash:?}")),
-        Err(e) => Err(persist_pin_error(if pinned { "pinning artifact" } else { "unpinning artifact" }, &e)),
+        Err(e) => Err(persist_pin_error(
+            if pinned {
+                "pinning artifact"
+            } else {
+                "unpinning artifact"
+            },
+            &e,
+        )),
     }
 }
 

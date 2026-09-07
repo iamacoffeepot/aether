@@ -33,18 +33,12 @@ impl FleetLocalCells {
             binary: Arc::new(Mutex::new(Vec::new())),
             component: Arc::new(Mutex::new(Vec::new())),
             pins: Arc::new(Mutex::new(Vec::new())),
-            binary_reply: Arc::new(Mutex::new(UploadBinaryResult::Ok {
-                hash: "bin-hash".to_owned(),
-                name: None,
-            })),
+            binary_reply: Arc::new(Mutex::new(UploadBinaryResult::Ok { hash: "bin-hash".to_owned(), name: None })),
             component_reply: Arc::new(Mutex::new(UploadComponentResult::Ok {
                 hash: "cmp-hash".to_owned(),
                 name: None,
             })),
-            pin_reply: Arc::new(Mutex::new(SetArtifactPinnedResult::Ok {
-                hash: "pin-hash".to_owned(),
-                pinned: true,
-            })),
+            pin_reply: Arc::new(Mutex::new(SetArtifactPinnedResult::Ok { hash: "pin-hash".to_owned(), pinned: true })),
         }
     }
 }
@@ -76,11 +70,7 @@ impl NativeActor for FleetLocalSink {
     }
 
     #[handler::single]
-    fn on_set_artifact_pinned(
-        &mut self,
-        _ctx: &mut NativeCtx<'_>,
-        mail: SetArtifactPinned,
-    ) -> SetArtifactPinnedResult {
+    fn on_set_artifact_pinned(&mut self, _ctx: &mut NativeCtx<'_>, mail: SetArtifactPinned) -> SetArtifactPinnedResult {
         self.cells.pins.lock().expect("pin log mutex").push(mail);
         self.cells.pin_reply.lock().expect("pin reply mutex").clone()
     }
@@ -522,11 +512,7 @@ async fn upload_binary_forwards_default_and_explicit_pin_hub_local() {
     let missing = "/no-such-aether-pin-fixture.bin";
 
     let out = mcp
-        .upload_binary(Parameters(UploadBinaryArgs {
-            staged_path: missing.to_owned(),
-            name: None,
-            pin: false,
-        }))
+        .upload_binary(Parameters(UploadBinaryArgs { staged_path: missing.to_owned(), name: None, pin: false }))
         .await
         .expect("scripted upload ok");
     assert_eq!(out, r#"{"hash":"bin-hash","name":null}"#);
@@ -579,11 +565,7 @@ async fn upload_component_forwards_pin_hub_local_and_errors() {
     let missing = "/no-such-aether-pin-fixture.wasm";
 
     let out = mcp
-        .upload_component(Parameters(UploadComponentArgs {
-            staged_path: missing.to_owned(),
-            name: None,
-            pin: true,
-        }))
+        .upload_component(Parameters(UploadComponentArgs { staged_path: missing.to_owned(), name: None, pin: true }))
         .await
         .expect("scripted component upload ok");
     assert_eq!(out, r#"{"hash":"cmp-hash","name":null}"#);
@@ -591,11 +573,7 @@ async fn upload_component_forwards_pin_hub_local_and_errors() {
     *cells.component_reply.lock().expect("component reply mutex") =
         UploadComponentResult::Err { error: "unparseable wasm".to_owned() };
     let err = mcp
-        .upload_component(Parameters(UploadComponentArgs {
-            staged_path: missing.to_owned(),
-            name: None,
-            pin: false,
-        }))
+        .upload_component(Parameters(UploadComponentArgs { staged_path: missing.to_owned(), name: None, pin: false }))
         .await
         .expect_err("typed Err is a tool error");
     assert!(err.to_string().contains("unparseable wasm"), "got {err}");
@@ -616,18 +594,14 @@ async fn pin_and_unpin_artifact_forward_exact_hash_and_bit() {
     let (_chassis, port) = boot_hub_with_fleet_local_sink(cells.clone());
     let mcp = connect_mcp(port);
 
-    let pin_out = mcp
-        .pin_artifact(Parameters(ArtifactPinArgs { hash: "abc".to_owned() }))
-        .await
-        .expect("scripted pin ok");
+    let pin_out =
+        mcp.pin_artifact(Parameters(ArtifactPinArgs { hash: "abc".to_owned() })).await.expect("scripted pin ok");
     assert_eq!(pin_out, r#"{"hash":"pin-hash","pinned":true}"#);
 
     *cells.pin_reply.lock().expect("pin reply mutex") =
         SetArtifactPinnedResult::Ok { hash: "abc".to_owned(), pinned: false };
-    let unpin_out = mcp
-        .unpin_artifact(Parameters(ArtifactPinArgs { hash: "abc".to_owned() }))
-        .await
-        .expect("scripted unpin ok");
+    let unpin_out =
+        mcp.unpin_artifact(Parameters(ArtifactPinArgs { hash: "abc".to_owned() })).await.expect("scripted unpin ok");
     assert_eq!(unpin_out, r#"{"hash":"abc","pinned":false}"#);
 
     let forwarded = cells.pins.lock().expect("pin log mutex").clone();
