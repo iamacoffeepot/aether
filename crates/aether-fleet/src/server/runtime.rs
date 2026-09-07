@@ -36,6 +36,7 @@ pub use aether_substrate::mail::SourceAddr;
 pub use aether_substrate::mail::mailer::Mailer;
 pub use std::collections::HashMap;
 pub use std::collections::VecDeque;
+use std::io;
 pub use std::path::{Path, PathBuf};
 pub use std::process::{Child, Command, Stdio};
 pub use std::sync::Arc;
@@ -199,6 +200,17 @@ fn set_own_process_group(command: &mut Command) {
     }
     #[cfg(not(unix))]
     let _ = command;
+}
+
+/// Outward `prepare_fork` IO-failure detail: stage, content hash, and a path-free
+/// IO category. ADR-0115: the realized executable path must not leave the host,
+/// so this never includes `exec_source`, `exec_path`, the fleet root, or the
+/// app-name filename. `io::Error`'s Display is not used; it can embed paths.
+fn prepare_fork_io_detail(stage: &str, hash: &str, err: &io::Error) -> String {
+    err.raw_os_error().map_or_else(
+        || format!("{stage} binary {hash}: {:?}", err.kind()),
+        |code| format!("{stage} binary {hash}: {:?} (os error {code})", err.kind()),
+    )
 }
 
 /// One supervised engine in [`FleetServerState`]'s table.
@@ -478,7 +490,7 @@ impl FleetServerState {
         // `--app-name` names the file (`exec_file_name`, ADR-0212).
         let exec_path = self.fleet_store_root.join(engine_id.0.simple().to_string()).join(exec_file_name(&recipe.args));
         realize_executable(exec_source, &exec_path)
-            .map_err(|e| post(format!("materializing binary {} to {}: {e}", recipe.hash, exec_path.display())))?;
+            .map_err(|e| post(prepare_fork_io_detail("materializing", &recipe.hash, &e)))?;
 
         let mut command = Command::new(&exec_path);
         command.stdin(Stdio::null());
@@ -493,7 +505,7 @@ impl FleetServerState {
         command.args(spawn_args(recipe, rpc_port));
         set_own_process_group(&mut command);
 
-        let child = command.spawn().map_err(|e| post(format!("failed to spawn {}: {e}", exec_path.display())))?;
+        let child = command.spawn().map_err(|e| post(prepare_fork_io_detail("spawning", &recipe.hash, &e)))?;
 
         Ok(PreparedFork { engine_id, rpc_port, rpc_addr: format!("127.0.0.1:{rpc_port}"), child })
     }
