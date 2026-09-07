@@ -40,7 +40,7 @@ async fn send_mail_reports_per_item_errors() {
                     mail: EngineMailSpec {
                         recipient_name: "aether.fs".to_owned(),
                         kind_name: "aether.fs.list".to_owned(),
-                        params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
+                        params: Some(serde_json::json!({ "addr": { "namespace": "save", "path": "" } })),
                     },
                 },
             ],
@@ -99,7 +99,7 @@ async fn send_mail_fire_and_forget_rejects_unknown_engine_during_resolution() {
                 mail: EngineMailSpec {
                     recipient_name: "aether.fs".to_owned(),
                     kind_name: "aether.fs.list".to_owned(),
-                    params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
+                    params: Some(serde_json::json!({ "addr": { "namespace": "save", "path": "" } })),
                 },
             }],
             fire_and_forget: true,
@@ -134,7 +134,7 @@ async fn direct_mail_uses_the_engine_answer_and_named_mail_skips_pre_resolution(
             mail: EngineMailSpec {
                 recipient_name: supplied.to_owned(),
                 kind_name: "aether.fs.list".to_owned(),
-                params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
+                params: Some(serde_json::json!({ "addr": { "namespace": "save", "path": "" } })),
             },
         })
         .await
@@ -151,7 +151,7 @@ async fn direct_mail_uses_the_engine_answer_and_named_mail_skips_pre_resolution(
             &[EngineMailSpec {
                 recipient_name: supplied.to_owned(),
                 kind_name: "aether.fs.list".to_owned(),
-                params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
+                params: Some(serde_json::json!({ "addr": { "namespace": "save", "path": "" } })),
             }],
         )
         .await
@@ -220,7 +220,7 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
             mail: EngineMailSpec {
                 recipient_name: supplied.to_owned(),
                 kind_name: "aether.fs.list".to_owned(),
-                params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
+                params: Some(serde_json::json!({ "addr": { "namespace": "save", "path": "" } })),
             },
         },
         ReplyProjection::All,
@@ -252,7 +252,7 @@ async fn fire_and_forget_awaits_resolution_but_not_application_settlement() {
         mail: EngineMailSpec {
             recipient_name: "aether.fs".to_owned(),
             kind_name: "aether.fs.list".to_owned(),
-            params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
+            params: Some(serde_json::json!({ "addr": { "namespace": "save", "path": "" } })),
         },
     })
     .await

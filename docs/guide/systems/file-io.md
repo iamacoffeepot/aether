@@ -195,6 +195,19 @@ correlated reply, so a read is a single call: mail `aether.fs.read` to `aether.f
 and the `ReadResult` bytes come back with it — no polling. `describe_kinds`
 carries the exact param schema for each request if you need it.
 
+The address is a nested object, not two top-level fields:
+
+```jsonc
+// send_mail → aether.fs  (kind: aether.fs.read)
+{ "addr": { "namespace": "save", "path": "slot1.bin" } }
+
+// send_mail → aether.fs  (kind: aether.fs.write)
+{ "addr": { "namespace": "save", "path": "slot1.bin" }, "bytes": { "$text": "hello" } }
+
+// send_mail → aether.fs  (kind: aether.fs.list) — addr.path is the prefix
+{ "addr": { "namespace": "save", "path": "" } }
+```
+
 The move you'll reach for most is `write`: stage a file the engine will then
 load. Writing a mesh DSL to a namespace and pointing the mesh viewer at the same
 path is the canonical loop — author the bytes, then send the load — and the same
