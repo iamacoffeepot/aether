@@ -29,7 +29,7 @@ use core::marker::PhantomData;
 use core::ptr;
 
 use crate::actor::native::mailbox::NativeActorMailbox;
-use aether_data::{Kind, KindId, MailId, MailboxId, RequestId, mailbox_id_from_name};
+use aether_data::{Kind, KindId, MailId, MailboxId, RequestId, mailbox_id_from_path};
 
 use crate::actor::monitor::{MonitorHandle, notify_alias_departures, notify_departure};
 use crate::actor::native::binding::NativeBinding;
@@ -1412,10 +1412,12 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
     // Runtime-name send escape hatch (the `Resolver::send_to_named` contract):
     // the recipient name is supplied at runtime, no compile-time `R` to resolve.
     #[allow(clippy::disallowed_methods)]
+    // the runtime-name routing path itself — resolves the written name by the same
+    // ADR-0099 §4 parse → fold the registry does, so a lineage address routes
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.binding.push_envelope_buffered(
-            mailbox_id_from_name(name).0,
+            mailbox_id_from_path(name).0,
             K::ID.0,
             &bytes,
             1,
@@ -1450,9 +1452,10 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
     //noinspection DuplicatedCode
     // Runtime-name detached escape hatch — the `send_to_named` counterpart.
     #[allow(clippy::disallowed_methods)]
+    // the runtime-name routing path itself — same ADR-0099 §4 parse → fold as `send_to_named`
     fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.binding.push_envelope_buffered(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, None, None);
+        self.binding.push_envelope_buffered(mailbox_id_from_path(name).0, K::ID.0, &bytes, 1, None, None);
     }
 
     //noinspection DuplicatedCode
@@ -1817,8 +1820,8 @@ mod tests {
         use std::sync::mpsc;
 
         let (registry, mailer) = bare_substrate();
-        let parent = aether_data::mailbox_id_from_path("test.native.parent");
-        let current = aether_data::mailbox_id_from_path("test.native.parent/test.native.caller");
+        let parent = mailbox_id_from_path("test.native.parent");
+        let current = mailbox_id_from_path("test.native.parent/test.native.caller");
         let recipient = EmbeddedPeer::resolve(parent.0, ());
         let (tx, rx) = mpsc::channel::<Envelope>();
         registry
@@ -1860,8 +1863,8 @@ mod tests {
         use std::sync::mpsc;
 
         let (registry, mailer) = bare_substrate();
-        let parent = aether_data::mailbox_id_from_path("test.native.keyed_parent");
-        let current = aether_data::mailbox_id_from_path("test.native.keyed_parent/test.native.keyed_caller");
+        let parent = mailbox_id_from_path("test.native.keyed_parent");
+        let current = mailbox_id_from_path("test.native.keyed_parent/test.native.keyed_caller");
         let current_target = CurrentKeyedPeer::resolve(current.0, "current");
         let parent_target = ParentKeyedPeer::resolve(parent.0, "parent");
         let (current_tx, current_rx) = mpsc::channel::<Envelope>();

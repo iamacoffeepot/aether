@@ -370,20 +370,17 @@ pub trait Lifecycle<S> {
 /// …), since no default-named instance exists.
 ///
 /// The rendered address itself — `LoadResult.name`, e.g.
-/// `aether.component/aether.embedded:NAME` — is a path of nodes, so it
-/// belongs only to the string surfaces that parse one
-/// (`mailbox_id_from_path`: the registry's name lookup, the MCP
-/// `recipient_name` surface). Handing it to `ctx.send_to_named(name, …)`
-/// misses, because that flat escape hatch hashes its argument as one root
-/// name (`mailbox_id_from_name`): a `/` trips that hasher's debug assertion,
-/// and a release build resolves an id nothing registered, so the mail routes
-/// cleanly and drops. `ctx.resolve_actor::<R>(key)` is different: it is a
-/// typed keyed route available only to [`Instanced`] actors, and delegates
-/// the key plus the resolver-selected current / root / parent scope to
-/// `R::resolve`. The id beside a rendered name (`LoadResult.mailbox_id`) has
-/// no such ambiguity: a caller already holding one sends to it directly,
-/// through the guest's `ctx.send_to(id, &mail)` or the native
-/// `ctx.actor_at::<R>(id)`.
+/// `aether.component/aether.embedded:NAME` — is a path of nodes, and every
+/// string surface resolves one the same way (`mailbox_id_from_path`: the
+/// registry's name lookup, the MCP `recipient_name` surface, and
+/// `ctx.send_to_named(name, …)`), so handing a rendered address to the
+/// runtime-name escape hatch routes. `ctx.resolve_actor::<R>(key)` is
+/// different: it is a typed keyed route available only to [`Instanced`]
+/// actors, and delegates the key plus the resolver-selected current / root /
+/// parent scope to `R::resolve`. The id beside a rendered name
+/// (`LoadResult.mailbox_id`) skips resolution entirely: a caller already
+/// holding one sends to it directly, through the guest's
+/// `ctx.send_to(id, &mail)` or the native `ctx.actor_at::<R>(id)`.
 ///
 /// Mutually exclusive with [`Instanced`] at the type level: an actor is
 /// either one-of-a-kind within a scope (singleton) or N-instances under
