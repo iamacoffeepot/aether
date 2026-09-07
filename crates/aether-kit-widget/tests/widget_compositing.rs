@@ -46,8 +46,8 @@ use aether_kit_widget::{
 };
 use aether_math::Rgba;
 use aether_render::{
-    CreateTexture, CreateTextureResult, TextureFormat, TextureSampling, TextureUsage,
-    TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
+    CreateTexture, CreateTextureResult, Shape, TextureFormat, TextureSampling, TextureUsage,
+    TexturedQuad as RenderTexturedQuad,
 };
 
 /// Linear RGBA primaries chosen so each survives the sRGB encode as a
@@ -95,6 +95,12 @@ fn flat_shape(x: f32, y: f32, width: f32, height: f32, color: Rgba, clip: Option
         texture: None,
         clip,
     }
+}
+
+/// The same flat rectangle as it lands in a committed `DrawShapes` batch:
+/// a radius-zero box with a fill and nothing else.
+fn flat_fill(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> Shape {
+    Shape { x, y, width, height, corner_radius: 0.0, fill: Some(color), stroke: None, shadow: None }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -476,24 +482,23 @@ fn nested_local_clips_forward_exact_runs_and_contain_oversized_pixels() {
         .expect("capture clipped tree");
     let img = decode_png(captured.captured("snap").expect("snap bytes")).expect("decode clipped capture");
 
-    let solids: Vec<_> =
-        harness.committed_overlay_snapshot().into_iter().filter(|batch| batch.texture_id == WHITE_TEXTURE_ID).collect();
-    assert_eq!(solids.len(), 3, "None, root clip, and nested clip are three runs");
-    assert_eq!(solids[0].clip, None);
-    assert_eq!(solids[1].clip, Some(ClipRect { x: 12.0, y: 10.0, width: 20.0, height: 16.0 }),);
-    assert_eq!(solids[2].clip, Some(ClipRect { x: 16.0, y: 13.0, width: 10.0, height: 8.0 }),);
-    assert_eq!(solids[0].quads.len(), 1);
-    assert_eq!(solids[1].quads.len(), 1);
-    assert_eq!(solids[2].quads.len(), 1);
-    assert_eq!(solids[0].quads[0].tint, BLUE);
-    assert_eq!(solids[1].quads[0].tint, RED);
-    assert_eq!(solids[2].quads[0].tint, GREEN);
+    let fills = harness.committed_shape_snapshot();
+    assert_eq!(fills.len(), 3, "None, root clip, and nested clip are three runs");
+    assert_eq!(fills[0].clip, None);
+    assert_eq!(fills[1].clip, Some(ClipRect { x: 12.0, y: 10.0, width: 20.0, height: 16.0 }),);
+    assert_eq!(fills[2].clip, Some(ClipRect { x: 16.0, y: 13.0, width: 10.0, height: 8.0 }),);
+    assert_eq!(fills[0].shapes.len(), 1);
+    assert_eq!(fills[1].shapes.len(), 1);
+    assert_eq!(fills[2].shapes.len(), 1);
+    assert_eq!(fills[0].shapes[0].fill, Some(BLUE));
+    assert_eq!(fills[1].shapes[0].fill, Some(RED));
+    assert_eq!(fills[2].shapes[0].fill, Some(GREEN));
     assert_eq!(
-        (solids[1].quads[0].x, solids[1].quads[0].y, solids[1].quads[0].width, solids[1].quads[0].height,),
+        (fills[1].shapes[0].x, fills[1].shapes[0].y, fills[1].shapes[0].width, fills[1].shapes[0].height,),
         (10.0, 8.0, 30.0, 20.0),
     );
     assert_eq!(
-        (solids[2].quads[0].x, solids[2].quads[0].y, solids[2].quads[0].width, solids[2].quads[0].height,),
+        (fills[2].shapes[0].x, fills[2].shapes[0].y, fills[2].shapes[0].width, fills[2].shapes[0].height,),
         (14.0, 11.0, 30.0, 20.0),
     );
 
@@ -573,31 +578,24 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
 
     let child_framebuffer_clip =
         ClipRect { x: child_clip.x, y: child_clip.y, width: child_clip.width, height: child_clip.height };
+    // The five runs the authored order produces, split across the two verbs
+    // that carry them: a flat fill is a `DrawShapes` batch and a textured
+    // item a `DrawTexturedQuads` one, so the interleaving no longer shows in
+    // either list — each verb keeps its own order, and the pixel probes
+    // below prove the two composite in the authored sequence.
     let snapshot = harness.committed_overlay_snapshot();
-    assert_eq!(snapshot.len(), 5, "solid/textured transitions form five runs");
+    let fills = harness.committed_shape_snapshot();
+    assert_eq!(fills.len(), 3, "root chrome, the child's chrome, and its final fill are three shape runs");
+    assert_eq!(snapshot.len(), 2, "the root's crop and the child's pair are two textured runs");
 
-    assert_eq!(snapshot[0].texture_id, WHITE_TEXTURE_ID);
+    assert_eq!(fills[0].space, QuadSpace::Screen);
+    assert_eq!(fills[0].clip, None);
+    assert_eq!(fills[0].shapes, vec![flat_fill(0.0, 0.0, 64.0, 48.0, BLUE)]);
+
+    assert_eq!(snapshot[0].texture_id, texture_id);
     assert_eq!(snapshot[0].space, QuadSpace::Screen);
-    assert_eq!(snapshot[0].clip, None);
     assert_eq!(
-        snapshot[0].quads,
-        vec![RenderTexturedQuad {
-            x: 0.0,
-            y: 0.0,
-            width: 64.0,
-            height: 48.0,
-            u0: 0.0,
-            v0: 0.0,
-            u1: 1.0,
-            v1: 1.0,
-            tint: BLUE,
-        }],
-    );
-
-    assert_eq!(snapshot[1].texture_id, texture_id);
-    assert_eq!(snapshot[1].space, QuadSpace::Screen);
-    assert_eq!(
-        snapshot[1].clip,
+        snapshot[0].clip,
         Some(ClipRect {
             x: root_texture_clip.x,
             y: root_texture_clip.y,
@@ -606,7 +604,7 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
         }),
     );
     assert_eq!(
-        snapshot[1].quads,
+        snapshot[0].quads,
         vec![RenderTexturedQuad {
             x: 4.0,
             y: 4.0,
@@ -620,29 +618,15 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
         }],
     );
 
-    assert_eq!(snapshot[2].texture_id, WHITE_TEXTURE_ID);
-    assert_eq!(snapshot[2].space, QuadSpace::Screen);
-    assert_eq!(snapshot[2].clip, Some(child_framebuffer_clip.clone()));
-    assert_eq!(
-        snapshot[2].quads,
-        vec![RenderTexturedQuad {
-            x: 24.0,
-            y: 8.0,
-            width: 28.0,
-            height: 26.0,
-            u0: 0.0,
-            v0: 0.0,
-            u1: 1.0,
-            v1: 1.0,
-            tint: GREEN,
-        }],
-    );
+    assert_eq!(fills[1].space, QuadSpace::Screen);
+    assert_eq!(fills[1].clip, Some(child_framebuffer_clip.clone()));
+    assert_eq!(fills[1].shapes, vec![flat_fill(24.0, 8.0, 28.0, 26.0, GREEN)]);
 
-    assert_eq!(snapshot[3].texture_id, texture_id);
-    assert_eq!(snapshot[3].space, QuadSpace::Screen);
-    assert_eq!(snapshot[3].clip, Some(child_framebuffer_clip.clone()));
+    assert_eq!(snapshot[1].texture_id, texture_id);
+    assert_eq!(snapshot[1].space, QuadSpace::Screen);
+    assert_eq!(snapshot[1].clip, Some(child_framebuffer_clip.clone()));
     assert_eq!(
-        snapshot[3].quads,
+        snapshot[1].quads,
         vec![
             RenderTexturedQuad {
                 x: 24.0,
@@ -669,23 +653,9 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
         ],
     );
 
-    assert_eq!(snapshot[4].texture_id, WHITE_TEXTURE_ID);
-    assert_eq!(snapshot[4].space, QuadSpace::Screen);
-    assert_eq!(snapshot[4].clip, Some(child_framebuffer_clip));
-    assert_eq!(
-        snapshot[4].quads,
-        vec![RenderTexturedQuad {
-            x: 44.0,
-            y: 22.0,
-            width: 8.0,
-            height: 8.0,
-            u0: 0.0,
-            v0: 0.0,
-            u1: 1.0,
-            v1: 1.0,
-            tint: YELLOW,
-        }],
-    );
+    assert_eq!(fills[2].space, QuadSpace::Screen);
+    assert_eq!(fills[2].clip, Some(child_framebuffer_clip));
+    assert_eq!(fills[2].shapes, vec![flat_fill(44.0, 22.0, 8.0, 8.0, YELLOW)]);
 
     let tolerance = 20;
     let intended_region = Rect { min_x: 29, min_y: 13, max_x: 33, max_y: 17 };
@@ -751,38 +721,14 @@ fn scroll_composition_offsets_content_and_contains_pixels_on_every_viewport_edge
     let image = decode_png(captured.captured("snap").expect("scroll capture bytes")).expect("decode scroll capture");
 
     let clip = ClipRect { x: 12.0, y: 8.0, width: 24.0, height: 16.0 };
-    let snapshot = harness.committed_overlay_snapshot();
-    let content_batch = snapshot
+    let fills = harness.committed_shape_snapshot();
+    let content_batch = fills
         .iter()
         .find(|batch| batch.clip.as_ref() == Some(&clip))
-        .unwrap_or_else(|| panic!("missing scroll viewport batch {clip:?}: {snapshot:?}"));
-    assert_eq!(content_batch.texture_id, WHITE_TEXTURE_ID);
+        .unwrap_or_else(|| panic!("missing scroll viewport batch {clip:?}: {fills:?}"));
     assert_eq!(
-        content_batch.quads,
-        vec![
-            RenderTexturedQuad {
-                x: 8.0,
-                y: 1.0,
-                width: 40.0,
-                height: 32.0,
-                u0: 0.0,
-                v0: 0.0,
-                u1: 1.0,
-                v1: 1.0,
-                tint: RED,
-            },
-            RenderTexturedQuad {
-                x: 20.0,
-                y: 13.0,
-                width: 8.0,
-                height: 8.0,
-                u0: 0.0,
-                v0: 0.0,
-                u1: 1.0,
-                v1: 1.0,
-                tint: GREEN,
-            },
-        ],
+        content_batch.shapes,
+        vec![flat_fill(8.0, 1.0, 40.0, 32.0, RED), flat_fill(20.0, 13.0, 8.0, 8.0, GREEN)],
         "content_origin - initial_offset and panel placement agree exactly",
     );
     assert_eq!(

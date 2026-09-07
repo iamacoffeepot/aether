@@ -23,7 +23,7 @@ use aether_kit_widget::{
 use aether_math::Rgba;
 use aether_render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawTexturedQuads, TextureFormat, TextureSampling,
-    TextureUsage, TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
+    TextureUsage, TexturedQuad as RenderTexturedQuad,
 };
 
 const PANEL_X: f32 = 8.0;
@@ -143,10 +143,14 @@ fn image_batch(snapshot: &[DrawTexturedQuads], texture_id: u32) -> &DrawTextured
     matching[0]
 }
 
-fn assert_image_batch(snapshot: &[DrawTexturedQuads], texture_id: u32, expected_quad: RenderTexturedQuad) {
-    assert_eq!(snapshot.len(), 2, "panel background plus one image batch");
-    assert_eq!(snapshot[0].texture_id, WHITE_TEXTURE_ID);
-    let batch = image_batch(snapshot, texture_id);
+/// The image's own batch, and the panel background that must still sit under
+/// it — the background is a flat fill, so it rides the shape snapshot
+/// (ADR-0213) and the image is the only textured batch in the frame.
+fn assert_image_batch(harness: &SubstrateHarness, texture_id: u32, expected_quad: RenderTexturedQuad) {
+    let snapshot = harness.committed_overlay_snapshot();
+    assert_eq!(snapshot.len(), 1, "one image batch, and the panel background is a shape");
+    assert_eq!(harness.committed_shape_snapshot().len(), 1, "the panel background is that one shape run");
+    let batch = image_batch(&snapshot, texture_id);
     assert_eq!(batch.space, QuadSpace::Screen);
     assert_eq!(batch.clip, Some(ClipRect { x: PANEL_X, y: PANEL_Y, width: PANEL_WIDTH, height: ROW_HEIGHT }));
     assert_eq!(batch.quads, vec![expected_quad]);
@@ -170,7 +174,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
 
     let fill_pixels = capture(&mut harness, &panel);
     assert_image_batch(
-        &harness.committed_overlay_snapshot(),
+        &harness,
         first_texture_id,
         RenderTexturedQuad {
             x: PANEL_X,
@@ -225,7 +229,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
             )])
             .expect("reconfigure image fit");
         let _ = capture(&mut harness, &panel);
-        assert_image_batch(&harness.committed_overlay_snapshot(), first_texture_id, expected);
+        assert_image_batch(&harness, first_texture_id, expected);
     }
 
     let natural = ImageConfig {
@@ -239,7 +243,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         .expect("configure oversized natural image");
     let _ = capture(&mut harness, &panel);
     assert_image_batch(
-        &harness.committed_overlay_snapshot(),
+        &harness,
         first_texture_id,
         RenderTexturedQuad {
             x: PANEL_X - 10.0,
@@ -259,9 +263,8 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         .execute(vec![("hide", HarnessOp::send_and_settle(&image, &SetWidgetState { state: hidden }))])
         .expect("hide image");
     let _ = capture(&mut harness, &panel);
-    let hidden_snapshot = harness.committed_overlay_snapshot();
-    assert_eq!(hidden_snapshot.len(), 1, "hidden image leaves only panel chrome");
-    assert_eq!(hidden_snapshot[0].texture_id, WHITE_TEXTURE_ID);
+    assert!(harness.committed_overlay_snapshot().is_empty(), "a hidden image contributes no textured batch");
+    assert_eq!(harness.committed_shape_snapshot().len(), 1, "and leaves only the panel chrome behind it");
 
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
     harness
@@ -269,7 +272,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         .expect("disable image");
     let _ = capture(&mut harness, &panel);
     assert_image_batch(
-        &harness.committed_overlay_snapshot(),
+        &harness,
         first_texture_id,
         RenderTexturedQuad {
             x: PANEL_X - 10.0,
@@ -297,13 +300,12 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         .execute(vec![("replace", HarnessOp::send_and_settle(&image, &replacement))])
         .expect("replace image config in place");
     let _ = capture(&mut harness, &panel);
-    let replacement_snapshot = harness.committed_overlay_snapshot();
     assert!(
-        replacement_snapshot.iter().all(|batch| batch.texture_id != first_texture_id),
+        harness.committed_overlay_snapshot().iter().all(|batch| batch.texture_id != first_texture_id),
         "replacement frame must not retain the old texture batch",
     );
     assert_image_batch(
-        &replacement_snapshot,
+        &harness,
         second_texture_id,
         RenderTexturedQuad {
             x: PANEL_X + 10.0,
