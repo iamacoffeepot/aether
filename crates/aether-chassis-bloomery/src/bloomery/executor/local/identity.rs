@@ -4,11 +4,14 @@
 //!
 //! A bare pid is not an identity: the kernel recycles them, and signalling a
 //! recycled one kills a stranger. The identity is the pid plus the process
-//! start time from `/proc/<pid>/stat`, with the machine's boot id as a cheap
-//! outer guard. Re-attachment succeeds only when the pid is live *and* both
-//! match the record; a missing, unreadable, or mismatched record is the same
-//! unowned run that existed before this file, never a kill aimed at an
-//! unverified pid.
+//! start time and boot identity this host can observe. Linux reads
+//! `/proc/<pid>/stat` ticks-after-boot and `/proc/sys/kernel/random/boot_id`.
+//! macOS reads `proc_pidinfo(PROC_PIDTBSDINFO)` start microseconds and
+//! `kern.bootsessionuuid`. Re-attachment succeeds only when the pid is
+//! observable *and* both start and boot match the record; a missing,
+//! unreadable, or mismatched record is the same unowned run that existed
+//! before this file, never a kill aimed at an unverified pid. `observe`
+//! returning `None` is not proof the process has exited.
 
 use std::fs;
 use std::io;
@@ -16,6 +19,13 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(target_os = "macos")]
+use std::mem::MaybeUninit;
+#[cfg(target_os = "macos")]
+use std::ptr::null_mut;
+#[cfg(target_os = "macos")]
+use std::str;
 
 use serde::{Deserialize, Serialize};
 
@@ -46,31 +56,40 @@ pub struct ProcessIdentity {
     /// The child's process-group id — equal to `pid` when the child was spawned
     /// with `process_group(0)`, and the target a re-attached kill signals.
     pub pgid: u32,
-    /// Field 22 of `/proc/<pid>/stat`: clock ticks after boot. Compared as the
-    /// raw integer; converting it is how two different processes would collide.
+    /// Process start identity, compared as the raw integer. Linux: field 22 of
+    /// `/proc/<pid>/stat` (clock ticks after boot). macOS: `pbi_start_tvsec *
+    /// 1_000_000 + pbi_start_tvusec` (microseconds; usec must be `< 1_000_000`
+    /// and the multiply must not overflow). Converting either unit is how two
+    /// different processes would collide.
     pub starttime: u64,
-    /// Contents of `/proc/sys/kernel/random/boot_id`. A reboot recycles every
-    /// pid, so a mismatched boot id is a mismatched identity.
+    /// Boot identity. Linux: contents of `/proc/sys/kernel/random/boot_id`.
+    /// macOS: `kern.bootsessionuuid` (read-only UUID string). A reboot recycles
+    /// every pid, so a mismatched boot id is a mismatched identity.
     pub boot_id: String,
 }
 
 impl ProcessIdentity {
-    /// Observe the live process at `pid`, or `None` when `/proc` has no such
-    /// process, the process is a zombie, or its stat line cannot be parsed.
+    /// Observe the live process at `pid`, or `None` when this host cannot
+    /// confirm a live (non-zombie) identity.
     ///
-    /// A zombie is already dead — it cannot write, and it cannot be signalled
-    /// further. Treating it as live would make a re-attached kill wait forever
-    /// on a process whose only remaining holder is a `Child` in another
-    /// process (or this one, in a test).
+    /// Linux reads `/proc/<pid>/stat` and the boot UUID. macOS reads
+    /// `proc_pidinfo(PROC_PIDTBSDINFO)` and `kern.bootsessionuuid`. Other
+    /// platforms return `None`.
+    ///
+    /// `None` is not proof the process has exited: a missing `/proc` entry, an
+    /// unreadable `proc_pidinfo` or sysctl, a zombie, and an unsupported
+    /// platform all yield `None`. A zombie is already dead — treating it as
+    /// live would make a re-attached kill wait forever on a process whose only
+    /// remaining holder is a `Child` in another process (or this one, in a test).
     #[must_use]
     pub fn observe(pid: u32) -> Option<Self> {
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        Self::from_stat(pid, &stat, &read_boot_id()?)
+        observe_platform(pid)
     }
 
     /// Parse a `/proc/<pid>/stat` body together with a boot id. The pure core
     /// of [`observe`](Self::observe), so a test can drive the field walk
     /// without a live process. A zombie (`state == Z`) is `None`.
+    #[cfg(any(target_os = "linux", test))]
     #[must_use]
     pub fn from_stat(pid: u32, stat: &str, boot_id: &str) -> Option<Self> {
         let fields = StatFields::parse(stat)?;
@@ -164,10 +183,14 @@ impl CheckoutHead {
     }
 }
 
-/// Record the live identity of `pid` beside `evidence_dir`. A `/proc` miss or
-/// a write fault is logged rather than failing the spawn: the child is already
-/// running, and a missing record is the unowned run a restart already knows
-/// how to handle.
+/// Record the live identity of `pid` beside `evidence_dir`.
+///
+/// Observe uses this host's process identity (Linux `/proc`, macOS
+/// `proc_pidinfo` and `kern.bootsessionuuid`). A miss or a write fault is
+/// logged rather than failing the spawn: the child is already running, and a
+/// missing record is the unowned run a restart already knows how to handle. A
+/// miss is not classified: unreadable identity, a gone pid, and an unsupported
+/// host all look the same.
 pub fn record_spawned(evidence_dir: &Path, pid: u32) {
     let Some(identity) = ProcessIdentity::observe(pid) else {
         tracing::warn!(
@@ -206,14 +229,17 @@ pub fn record_checkout_head(evidence_dir: &Path, head: &str) {
     }
 }
 
-/// Whether `pid` currently names a running process. A missing `/proc` entry
-/// or a zombie is not live — the latter is the child already having exited,
-/// waiting only to be reaped.
+/// Whether `observe` returned an identity for `pid`.
+///
+/// `false` is not proof of exit: an unreadable identity and an unsupported
+/// host also fail `observe`. A zombie is gone; a missing `/proc` entry or
+/// `proc_pidinfo` miss is not distinguished from that.
 #[must_use]
 pub fn pid_is_live(pid: u32) -> bool {
     ProcessIdentity::observe(pid).is_some()
 }
 
+#[cfg(target_os = "linux")]
 fn read_boot_id() -> Option<String> {
     fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .ok()
@@ -221,13 +247,121 @@ fn read_boot_id() -> Option<String> {
         .filter(|id| !id.is_empty())
 }
 
+#[cfg(target_os = "linux")]
+fn observe_platform(pid: u32) -> Option<ProcessIdentity> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    ProcessIdentity::from_stat(pid, &stat, &read_boot_id()?)
+}
+
+#[cfg(target_os = "macos")]
+fn observe_platform(pid: u32) -> Option<ProcessIdentity> {
+    let info = read_proc_bsdinfo(pid)?;
+    from_bsdinfo(pid, &info, &read_boot_session_sysctl()?)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn observe_platform(_pid: u32) -> Option<ProcessIdentity> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn pid_as_proc_pid(pid: u32) -> Option<libc::c_int> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    (pid > 0).then_some(pid)
+}
+
+#[cfg(target_os = "macos")]
+fn pidinfo_size_matches(got: libc::c_int, expected: libc::c_int) -> bool {
+    got == expected
+}
+
+#[cfg(target_os = "macos")]
+fn macos_starttime_micros(secs: u64, micros: u64) -> Option<u64> {
+    if micros >= 1_000_000 {
+        return None;
+    }
+    secs.checked_mul(1_000_000)?.checked_add(micros)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_boot_session_uuid(bytes: &[u8]) -> Option<String> {
+    let (last, rest) = bytes.split_last()?;
+    if *last != 0 || rest.is_empty() || rest.contains(&0) {
+        return None;
+    }
+    let text = str::from_utf8(rest).ok()?;
+    if text.chars().all(char::is_whitespace) {
+        return None;
+    }
+    canonical_boot_session_uuid(text).then(|| text.to_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn canonical_boot_session_uuid(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    bytes.iter().enumerate().all(|(index, &byte)| match index {
+        8 | 13 | 18 | 23 => byte == b'-',
+        _ => byte.is_ascii_hexdigit(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn from_bsdinfo(requested_pid: u32, info: &libc::proc_bsdinfo, boot_bytes: &[u8]) -> Option<ProcessIdentity> {
+    if info.pbi_pid != requested_pid || info.pbi_status == libc::SZOMB {
+        return None;
+    }
+    let starttime = macos_starttime_micros(info.pbi_start_tvsec, info.pbi_start_tvusec)?;
+    let boot_id = parse_boot_session_uuid(boot_bytes)?;
+    Some(ProcessIdentity { pid: requested_pid, pgid: info.pbi_pgid, starttime, boot_id })
+}
+
+#[cfg(target_os = "macos")]
+fn read_proc_bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
+    let pid = pid_as_proc_pid(pid)?;
+    let expected = libc::c_int::try_from(size_of::<libc::proc_bsdinfo>()).ok()?;
+    let mut info = MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    // SAFETY: `info` is a `MaybeUninit<proc_bsdinfo>` whose size is passed as
+    // `buffersize`. `PROC_PIDTBSDINFO` writes that struct. We only
+    // `assume_init` when the kernel returned exactly `expected` bytes, so every
+    // field was written and no uninitialized byte is read.
+    let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), expected) };
+    if !pidinfo_size_matches(got, expected) {
+        return None;
+    }
+    // SAFETY: `got == expected` means the kernel filled `size_of::<proc_bsdinfo>()`.
+    Some(unsafe { info.assume_init() })
+}
+
+#[cfg(target_os = "macos")]
+fn read_boot_session_sysctl() -> Option<Vec<u8>> {
+    let mut buf = [0u8; 64];
+    let mut len = buf.len();
+    // SAFETY: `kern.bootsessionuuid` is a NUL-terminated C string. `oldp` /
+    // `oldlenp` describe the 64-byte stack buffer. `newp` is null and `newlen`
+    // is 0, so this is a read. The kernel writes at most `*oldlenp` bytes into
+    // `buf` (which starts zeroed) and then stores the written length in `len`.
+    // Only `buf[..written]` is parsed.
+    let rc = unsafe {
+        libc::sysctlbyname(c"kern.bootsessionuuid".as_ptr(), buf.as_mut_ptr().cast(), &raw mut len, null_mut(), 0)
+    };
+    if rc != 0 {
+        return None;
+    }
+    Some(buf.get(..len)?.to_vec())
+}
+
 /// The `/proc/<pid>/stat` fields a re-attachment reads.
+#[cfg(any(target_os = "linux", test))]
 struct StatFields {
     state: char,
     pgid: u32,
     starttime: u64,
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl StatFields {
     /// Walk a `/proc/<pid>/stat` line. `comm` is in parentheses and may contain
     /// spaces or further `)` characters, so the walk starts after the *last*
@@ -410,6 +544,10 @@ mod tests {
     use std::fs;
     use std::io::{Error, ErrorKind};
     use std::iter::repeat_n;
+    #[cfg(target_os = "macos")]
+    use std::mem::zeroed;
+    #[cfg(target_os = "macos")]
+    use std::process::ExitStatus;
     #[cfg(unix)]
     use std::process::{Child, Command, Stdio};
     #[cfg(unix)]
@@ -709,5 +847,162 @@ mod tests {
         assert!(head_gone_with_grandchild, "the head must exit leaving a TERM-ignoring grandchild in its group");
         terminate_pgid(pgid).expect("SIGKILL must finish a group that ignored SIGTERM");
         assert!(!any_process_in_group(pgid), "no member of the lane group survives teardown");
+    }
+
+    /// Owns one test child and reaps it on every path, including a panic before
+    /// `observe` / `record_spawned` succeed. This case has no grandchildren, so
+    /// `Child::kill` is enough — never a bare pid taken from an unowned table.
+    #[cfg(target_os = "macos")]
+    struct OwnedChild(Option<Child>);
+
+    #[cfg(target_os = "macos")]
+    impl OwnedChild {
+        fn hold(child: Child) -> Self {
+            Self(Some(child))
+        }
+
+        fn pid(&self) -> u32 {
+            self.0.as_ref().expect("the guard still owns the child").id()
+        }
+
+        fn is_running(&mut self) -> bool {
+            self.0.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+        }
+
+        fn reap(&mut self) -> Option<ExitStatus> {
+            let mut child = self.0.take()?;
+            let _ = child.kill();
+            child.wait().ok()
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            let _ = self.reap();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    const SAMPLE_BOOT_SESSION_UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+    #[cfg(target_os = "macos")]
+    fn bsdinfo(pid: u32, status: u32, group_id: u32, secs: u64, micros: u64) -> libc::proc_bsdinfo {
+        // SAFETY: `proc_bsdinfo` is a C POD of integers and byte arrays; the
+        // zero bit pattern is valid for every field.
+        let mut info: libc::proc_bsdinfo = unsafe { zeroed() };
+        info.pbi_pid = pid;
+        info.pbi_status = status;
+        info.pbi_pgid = group_id;
+        info.pbi_start_tvsec = secs;
+        info.pbi_start_tvusec = micros;
+        info
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_pid_as_proc_pid_rejects_zero_and_overflow() {
+        assert_eq!(super::pid_as_proc_pid(1), Some(1));
+        assert_eq!(super::pid_as_proc_pid(0), None, "pid 0 is not a user process");
+        assert_eq!(
+            super::pid_as_proc_pid(u32::MAX),
+            None,
+            "a pid that does not fit c_int cannot be passed to proc_pidinfo",
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_pidinfo_size_must_match_exactly() {
+        let expected = 64;
+        assert!(super::pidinfo_size_matches(expected, expected));
+        assert!(!super::pidinfo_size_matches(expected - 1, expected), "a short kernel write is unreadable");
+        assert!(!super::pidinfo_size_matches(-1, expected), "a negative proc_pidinfo return is unreadable");
+        assert!(!super::pidinfo_size_matches(expected + 1, expected), "an oversize return is unreadable");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_starttime_micros_rejects_invalid_usec_and_overflow() {
+        assert_eq!(super::macos_starttime_micros(1, 1), Some(1_000_001));
+        assert_eq!(super::macos_starttime_micros(0, 0), Some(0));
+        assert_eq!(super::macos_starttime_micros(1, 1_000_000), None, "usec must be strictly less than 1_000_000");
+        assert_eq!(super::macos_starttime_micros(u64::MAX, 0), None, "secs * 1_000_000 must not overflow");
+        assert_eq!(super::macos_starttime_micros(u64::MAX / 1_000_000 + 1, 0), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_boot_session_uuid_parser_rejects_malformed_bytes() {
+        let valid = format!("{SAMPLE_BOOT_SESSION_UUID}\0");
+        assert_eq!(super::parse_boot_session_uuid(valid.as_bytes()).as_deref(), Some(SAMPLE_BOOT_SESSION_UUID),);
+        assert_eq!(super::parse_boot_session_uuid(b""), None, "empty is not NUL-terminated");
+        assert_eq!(super::parse_boot_session_uuid(b"\0"), None, "empty body before NUL");
+        assert_eq!(super::parse_boot_session_uuid(b"   \0"), None, "whitespace-only is not a UUID");
+        assert_eq!(super::parse_boot_session_uuid(SAMPLE_BOOT_SESSION_UUID.as_bytes()), None, "missing trailing NUL");
+        assert_eq!(super::parse_boot_session_uuid(b"abc\0def\0"), None, "embedded NUL");
+        assert_eq!(super::parse_boot_session_uuid(&[0xff, 0]), None, "invalid UTF-8");
+        assert_eq!(super::parse_boot_session_uuid(b"not-a-uuid-string-at-all-nope-nope-\0"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_from_bsdinfo_rejects_mismatch_zombie_and_bad_start() {
+        let boot = format!("{SAMPLE_BOOT_SESSION_UUID}\0");
+        let live = bsdinfo(7, libc::SRUN, 9, 1, 2);
+        let identity = super::from_bsdinfo(7, &live, boot.as_bytes()).expect("a running non-leader is observable");
+        assert_eq!(identity.pid, 7);
+        assert_eq!(identity.pgid, 9, "observe records the kernel pgid, including a non-leader");
+        assert_eq!(identity.starttime, 1_000_002);
+        assert_eq!(identity.boot_id, SAMPLE_BOOT_SESSION_UUID);
+
+        assert!(super::from_bsdinfo(8, &live, boot.as_bytes()).is_none(), "pbi_pid must equal the requested pid");
+        assert!(
+            super::from_bsdinfo(7, &bsdinfo(7, libc::SZOMB, 7, 1, 0), boot.as_bytes()).is_none(),
+            "a zombie is gone"
+        );
+        assert!(super::from_bsdinfo(7, &bsdinfo(7, libc::SRUN, 7, 1, 1_000_000), boot.as_bytes()).is_none());
+        assert!(super::from_bsdinfo(7, &bsdinfo(7, libc::SRUN, 7, u64::MAX, 0), boot.as_bytes()).is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_spawn_identity_is_recorded_and_reattaches_without_proc() {
+        // Tripwire: macOS must record pid, own pgid, start microseconds, and a
+        // nonempty boot-session UUID without `/proc`, and re-attach only when
+        // those match. The `Child` is under the guard before the first observe,
+        // so a RED still reaps.
+        let (spawned, _) = spawn_group("sleep", &["60"]);
+        let mut child = OwnedChild::hold(spawned);
+        let pid = child.pid();
+        let evidence = tempfile::tempdir().expect("an evidence directory for the identity record");
+
+        super::record_spawned(evidence.path(), pid);
+        let recorded = ProcessIdentity::read(evidence.path())
+            .expect("record_spawned writes an identity beside the evidence on macOS without /proc");
+        assert_eq!(recorded.pid, pid, "the record names the spawned child");
+        assert_eq!(recorded.pgid, pid, "process_group(0) makes the child its own group leader");
+        assert!(!recorded.boot_id.is_empty(), "a macOS identity carries a nonempty boot-session token");
+
+        let attached = recorded.attach().expect("the recorded identity re-attaches to the live child");
+        assert_eq!(attached, recorded, "a second observation matches pid, pgid, starttime, and boot_id");
+        assert_eq!(
+            ProcessIdentity::observe(pid).expect("the child is still observable"),
+            recorded,
+            "observe agrees with the recorded identity",
+        );
+
+        let mut wrong_start = recorded.clone();
+        wrong_start.starttime = wrong_start.starttime.wrapping_add(1);
+        assert!(wrong_start.attach().is_none(), "a recycled pid with a different start time must not attach");
+        assert!(child.is_running(), "a starttime mismatch must not kill the child");
+
+        let mut wrong_boot = recorded;
+        wrong_boot.boot_id.push_str("-tampered");
+        assert!(wrong_boot.attach().is_none(), "a reboot-recycled pid must not attach");
+        assert!(child.is_running(), "a boot_id mismatch must not kill the child");
+
+        assert!(child.reap().is_some(), "the owned child wait succeeded");
+        assert!(ProcessIdentity::observe(pid).is_none(), "a reaped pid is not a live identity");
     }
 }
