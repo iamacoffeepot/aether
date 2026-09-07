@@ -70,8 +70,8 @@ pub use executor::{
 #[cfg(feature = "github")]
 pub use intake::{
     Admission, AdmitDecision, AdmitSink, CycleError, CycleReport, DispatchError, DispatchRecord, EvidenceClaims,
-    IntakeError, IntakeRefusal, NameEvidenceClaims, UploadedEvidence, admit_uploaded, attempt_artifact_name,
-    dispatch_and_record, record_dispatch, run_intake_cycle,
+    IntakeError, IntakeRefusal, NameEvidenceClaims, PendingObservation, UploadedEvidence, admit_uploaded,
+    attempt_artifact_name, dispatch_and_record, record_dispatch, run_intake_cycle,
 };
 #[cfg(feature = "github")]
 pub use mirror::ProjectionShell;

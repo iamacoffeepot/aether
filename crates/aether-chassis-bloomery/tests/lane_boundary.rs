@@ -26,9 +26,10 @@ use aether_bloomery::{
     VerifyFailureSet,
 };
 use aether_chassis_bloomery::bloomery::admits_lane_key;
-use aether_chassis_bloomery::bloomery::mock_lane::{FOREIGN_SESSION_ID, LaneMode, LaneScript};
+use aether_chassis_bloomery::bloomery::mock_lane::{FOREIGN_SESSION_ID, LaneMode, LaneRun, LaneScript, read_ledger};
 use aether_chassis_bloomery::store::{SqliteStore, StoreBackend};
 use aether_harness_bloomery::{HarnessBuilder, HarnessRoots, LaneHarness, while_pumping};
+use aether_substrate::pid_lock::is_pid_alive;
 
 /// Whether the bloom's single member has come to rest either way — resolved, or
 /// wedged. The predicate most scenarios wait on, because what separates them is
@@ -426,16 +427,91 @@ fn a_missing_evidence_lane_is_a_host_fault_not_a_candidate_failure() {
     );
 }
 
+/// Bound on observing absolute-deadline cancellation after the first `NeverExits`
+/// run records. Longer than the 5 s sealed wall clock plus the 1 s executor poll,
+/// and shorter than the 30 s heartbeat-silence allowance the noisy scenario uses,
+/// so a silence timeout cannot satisfy that claim.
+const ABSOLUTE_DEADLINE_OBSERVE_BUDGET: Duration = Duration::from_secs(20);
+
+fn first_never_exits_run(harness: &LaneHarness) -> LaneRun {
+    harness
+        .ledger()
+        .into_iter()
+        .find(|run| run.mode == LaneMode::NeverExits)
+        .expect("the first NeverExits dispatch recorded itself before parking")
+}
+
+fn wait_until_original_child_is_dead_and_consumed(harness: &LaneHarness, run: &LaneRun) {
+    assert!(!run.nonce.is_empty(), "the original nonce must be the exact minted identity, not empty");
+    let Some(process_id) = run.process_id.filter(|&id| id > 0) else {
+        panic!(
+            "NeverExits nonce={} must record a positive process id, not missing or zero; process_id={:?} \
+             outstanding={:?} ledger={:?}",
+            run.nonce,
+            run.process_id,
+            harness.outstanding(),
+            harness.ledger(),
+        );
+    };
+    let pid = i32::try_from(process_id).unwrap_or_else(|error| {
+        panic!(
+            "NeverExits nonce={} process_id={process_id} does not fit the substrate liveness probe ({error}); \
+             outstanding={:?} ledger={:?}",
+            run.nonce,
+            harness.outstanding(),
+            harness.ledger(),
+        )
+    });
+    let outstanding = harness.outstanding();
+    assert!(
+        is_pid_alive(pid),
+        "original child pid={pid} nonce={} must still be live before deadline observation; outstanding={outstanding:?} \
+         ledger={:?}",
+        run.nonce,
+        harness.ledger(),
+    );
+    assert!(
+        outstanding.contains(&run.nonce),
+        "original nonce {} must still be outstanding before deadline observation; pid={pid} outstanding={outstanding:?} \
+         ledger={:?}",
+        run.nonce,
+        harness.ledger(),
+    );
+
+    let deadline = Instant::now() + ABSOLUTE_DEADLINE_OBSERVE_BUDGET;
+    loop {
+        let child_alive = is_pid_alive(pid);
+        let outstanding = harness.outstanding();
+        if !child_alive && !outstanding.contains(&run.nonce) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "original child must die and nonce must leave outstanding while the harness stays up; nonce={} pid={pid} \
+             child_alive={child_alive} outstanding={outstanding:?} ledger={:?}",
+            run.nonce,
+            harness.ledger(),
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
 #[test]
 fn an_expired_real_process_lane_is_cancelled_as_a_host_fault() {
     // NeverExits writes valid evidence and then parks. Only the sealed
     // deadline can end it. The producer emits ExecutorFault for that
-    // expiry; the child must still be reclaimed (no per-order checkout).
+    // expiry; the original child must die and its nonce must leave outstanding.
     let mut harness =
         LaneHarness::start_with_wall_clock(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 5);
     harness.wait_for_runs(1);
-    thread::sleep(Duration::from_secs(7));
-    assert_scratch_checkouts_are_named_for_work(&harness, "an expired child leaves no checkout of its own");
+    let run = first_never_exits_run(&harness);
+    wait_until_original_child_is_dead_and_consumed(&harness, &run);
+    let bloom = harness.view();
+    assert!(bloom.blooms[0].members[0].resolution.is_none(), "a lane that never answered resolves nothing");
+    assert_scratch_checkouts_are_named_for_work(
+        &harness,
+        "retained session and slot checkout names are not proof the child was reaped",
+    );
 }
 
 #[test]
@@ -553,10 +629,14 @@ fn a_lane_that_never_exits_is_cancelled_as_a_host_fault() {
         LaneHarness::start_with_wall_clock(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 5);
 
     harness.wait_for_runs(1);
-    thread::sleep(Duration::from_secs(7));
+    let run = first_never_exits_run(&harness);
+    wait_until_original_child_is_dead_and_consumed(&harness, &run);
     let bloom = harness.view();
     assert!(bloom.blooms[0].members[0].resolution.is_none(), "a lane that never answered resolves nothing");
-    assert_scratch_checkouts_are_named_for_work(&harness, "a cancelled run leaves no checkout of its own behind");
+    assert_scratch_checkouts_are_named_for_work(
+        &harness,
+        "retained session and slot checkout names are not proof the child was reaped",
+    );
 }
 
 #[test]
@@ -642,29 +722,50 @@ fn a_continuously_noisy_lane_still_dies_at_its_absolute_deadline() {
     let runs = harness.runs_dir();
     while_pumping(
         || {
-            if let Ok(entries) = fs::read_dir(&runs) {
-                for entry in entries.filter_map(Result::ok) {
-                    let name = entry.file_name();
-                    let Some(nonce) = name.to_str().and_then(|name| name.strip_suffix("-evidence")) else {
-                        continue;
-                    };
-                    let path = entry.path().join("transcript.jsonl");
-                    let _ = fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut file| {
-                        use std::io::Write as _;
-                        file.write_all(nonce.as_bytes())
-                    });
-                }
+            let Ok(ledger) = read_ledger(&runs) else {
+                return;
+            };
+            let Some(run) = ledger.into_iter().find(|run| run.mode == LaneMode::NeverExits) else {
+                return;
+            };
+            if run.nonce.is_empty() {
+                return;
             }
+            let dir = runs.join(format!("{}-evidence", run.nonce));
+            fs::create_dir_all(&dir).expect("owned evidence directory creates");
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("transcript.jsonl"))
+                .and_then(|mut file| {
+                    use std::io::Write as _;
+                    file.write_all(b"{}\n")
+                })
+                .expect("owned transcript progresses");
         },
         || {
             harness.wait_for_runs(1);
-            thread::sleep(Duration::from_secs(7));
+            let run = first_never_exits_run(&harness);
+            wait_until_original_child_is_dead_and_consumed(&harness, &run);
+            let transcript = harness.runs_dir().join(format!("{}-evidence", run.nonce)).join("transcript.jsonl");
+            let bytes = fs::read(&transcript).expect("owned transcript reads after the wait");
+            assert!(
+                !bytes.is_empty(),
+                "owned transcript must have progressed during the wait; nonce={} pid={:?} outstanding={:?} ledger={:?}",
+                run.nonce,
+                run.process_id,
+                harness.outstanding(),
+                harness.ledger(),
+            );
         },
     );
 
     let bloom = harness.view();
     assert!(bloom.blooms[0].members[0].resolution.is_none(), "a noisy hung lane resolves nothing");
-    assert_scratch_checkouts_are_named_for_work(&harness, "a deadline-killed noisy run leaves no checkout of its own");
+    assert_scratch_checkouts_are_named_for_work(
+        &harness,
+        "retained session and slot checkout names are not proof the child was reaped",
+    );
 }
 
 // Every checkout git has registered under the harness's run directories.

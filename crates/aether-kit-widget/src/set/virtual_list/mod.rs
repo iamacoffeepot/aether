@@ -244,7 +244,7 @@ use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, Theme};
 use crate::{
     Collect, HoverLost, SetWidgetState, VirtualListConfig, VirtualListRow, WidgetControlState, WidgetDrawList,
-    WidgetFrame,
+    WidgetEligibilityChanged, WidgetFrame,
 };
 
 use actions::RowActionIndex;
@@ -414,6 +414,24 @@ impl WidgetDefaults for VirtualListWidget {
         self.pressed_action = None;
         self.thumb_grab_pixels = None;
     }
+
+    /// Restyle: adopt the fanned theme and request metrics for its font. The
+    /// list declares this rather than adopting the shared default, because a
+    /// new font or type size invalidates every row it measured.
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
+        self.forget_measurements();
+    }
+
+    /// The pointer left the list, so no row and no verb of it is under the
+    /// pointer any more — the widget-wide hover fact the shared handler keeps
+    /// says nothing about *which* row or verb it was over.
+    fn on_hover_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+        self.state.set_hovered(false);
+        self.hovered_action = None;
+        self.pointer_local = None;
+        self.settle_hovered_row(ctx);
+    }
 }
 
 /// A fixed-row virtual list. Spawned inline by a panel root with a
@@ -455,6 +473,7 @@ impl WasmActor for VirtualListWidget {
 
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: VirtualListConfig) {
+        let previous_eligible = content_eligible(self.items.len(), self.visible_row_count);
         self.rows_vary = rows_vary(&config.items);
         self.items = config.items;
         self.empty_text = config.empty_text;
@@ -476,18 +495,15 @@ impl WasmActor for VirtualListWidget {
         self.refresh_row_layout();
         self.reveal_selection();
         self.apply_control_state(ctx, config.state);
+        let next_eligible = content_eligible(self.items.len(), self.visible_row_count);
+        if previous_eligible != next_eligible
+            && let Some(parent) = ctx.parent()
+        {
+            parent.send(&WidgetEligibilityChanged { pointer: next_eligible, keyboard: next_eligible });
+        }
         // A fresh vector under a still pointer is a different row under it.
         self.settle_hovered_row(ctx);
         pump_text_font_metrics(ctx, &mut self.font_metrics);
-    }
-
-    /// Restyle: adopt the fanned theme and request metrics for its font. The
-    /// list declares this rather than adopting the shared default, because a
-    /// new font or type size invalidates every row it measured.
-    #[handler::single]
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
-        self.forget_measurements();
     }
 
     /// Install a font-metrics reply; the next `Collect` elides and measures
@@ -548,17 +564,6 @@ impl WasmActor for VirtualListWidget {
                 .then(|| self.action_at(moved.x - self.frame.x, moved.y - self.frame.y))
                 .flatten();
         }
-        self.settle_hovered_row(ctx);
-    }
-
-    /// The pointer left the list, so no row and no verb of it is under the
-    /// pointer any more — the widget-wide hover fact the shared handler keeps
-    /// says nothing about *which* row or verb it was over.
-    #[handler::single]
-    fn on_hover_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
-        self.state.set_hovered(false);
-        self.hovered_action = None;
-        self.pointer_local = None;
         self.settle_hovered_row(ctx);
     }
 
@@ -637,6 +642,10 @@ impl WasmActor for VirtualListWidget {
 
 fn usize_from_u32(value: u32) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+fn content_eligible(item_count: usize, visible_row_count: usize) -> bool {
+    item_count > 0 && visible_row_count > 0
 }
 
 fn initial_selection(initial_selected_index: Option<u32>, item_count: usize) -> Option<usize> {
