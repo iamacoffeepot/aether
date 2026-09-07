@@ -200,7 +200,7 @@ for _ in 0..40 {
 match harness.program_gpu_timings(program_id)? {
     ProgramTimingsResult::Ok { rows, .. } => report(rows),
     ProgramTimingsResult::Absent { reason } => eprintln!("GPU timings unavailable: {reason}"),
-    ProgramTimingsResult::Err { reason } => return Err(reason.into()),
+    ProgramTimingsResult::Err { error } => return Err(error.into()),
 }
 
 // If visual evidence is also needed, capture it only after the timing run.

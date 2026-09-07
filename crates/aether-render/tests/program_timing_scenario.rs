@@ -144,7 +144,7 @@ fn timings_after_dispatches(harness: &mut SubstrateHarness) -> (u32, ProgramTimi
     let program_id = match registered.reply::<ProgramRegisterResult>("register").expect("decode ProgramRegisterResult")
     {
         ProgramRegisterResult::Ok { program_id } => program_id,
-        ProgramRegisterResult::Err { reason } => panic!("register failed: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("register failed: {error}"),
     };
 
     let dispatch = ProgramDispatch {
@@ -196,7 +196,7 @@ fn the_timing_table_describes_the_registered_graph_or_says_why_it_cannot() {
             eprintln!("per-pass gpu timings absent on this adapter: {reason}");
             return;
         }
-        ProgramTimingsResult::Err { reason } => panic!("timings for a registered program failed: {reason}"),
+        ProgramTimingsResult::Err { error } => panic!("timings for a registered program failed: {error}"),
         ProgramTimingsResult::Ok { rows, .. } => rows,
     };
 
@@ -253,8 +253,8 @@ fn an_unknown_program_id_is_an_error_rather_than_an_absent_measurement() {
         )])
         .expect("timings sequence");
     match read.reply::<ProgramTimingsResult>("unknown").expect("decode ProgramTimingsResult") {
-        ProgramTimingsResult::Err { reason } => {
-            assert!(reason.contains("unknown program id"), "the error must name its class: {reason}");
+        ProgramTimingsResult::Err { error } => {
+            assert!(error.contains("unknown program id"), "the error must name its class: {error}");
         }
         other => panic!("an unregistered program id must be an error, got {other:?}"),
     }
