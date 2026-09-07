@@ -447,7 +447,10 @@ fn button_click_widgets(log: &[String]) -> Vec<&str> {
 
 fn take_log_delta(harness: &mut SubstrateHarness, cursor: &mut usize) -> Vec<String> {
     let log = panel_log_messages(harness);
-    let delta = log.get(*cursor..).unwrap_or(&[]).to_vec();
+    let delta = log
+        .get(*cursor..)
+        .expect("take_log_delta cursor exceeds current panel log length; history was lost")
+        .to_vec();
     *cursor = log.len();
     delta
 }
@@ -1345,14 +1348,14 @@ fn populating_disabled_or_hidden_virtual_list_stays_out_of_routing() {
             (
                 "populate_blocked",
                 HarnessOp::send_and_settle(
-                    &child_address("blocked"),
+                    child_address("blocked"),
                     &live_list_config(populated_rows(), Some(0), disabled),
                 ),
             ),
             (
                 "populate_ghost",
                 HarnessOp::send_and_settle(
-                    &child_address("ghost"),
+                    child_address("ghost"),
                     &live_list_config(populated_rows(), Some(0), hidden),
                 ),
             ),
@@ -1374,7 +1377,7 @@ fn populating_disabled_or_hidden_virtual_list_stays_out_of_routing() {
             (
                 "enable_blocked",
                 HarnessOp::send_and_settle(
-                    &child_address("blocked"),
+                    child_address("blocked"),
                     &SetWidgetState { state: WidgetControlState::default() },
                 ),
             ),
@@ -1396,7 +1399,7 @@ fn populating_disabled_or_hidden_virtual_list_stays_out_of_routing() {
             (
                 "show_ghost",
                 HarnessOp::send_and_settle(
-                    &child_address("ghost"),
+                    child_address("ghost"),
                     &SetWidgetState { state: WidgetControlState::default() },
                 ),
             ),
