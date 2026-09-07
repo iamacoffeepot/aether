@@ -1133,7 +1133,10 @@ impl NativeActor for FleetServer {
     /// `UploadBinaryResult::Ok { hash, name }`, or
     /// `Err { error }` for an unreadable path, a `--describe` that
     /// failed or didn't yield a parseable manifest, or a store write
-    /// that didn't land — an `Ok` hash is always resolvable.
+    /// that didn't land. `Ok` means this ingest succeeded; unnamed
+    /// unpinned content remains eligible for same-call or later budget
+    /// eviction. A name or `pin: true` retains the hash; unpin removes
+    /// only the explicit flag, so a remaining name still protects.
     #[handler::single]
     fn on_upload_binary(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UploadBinary) -> UploadBinaryResult {
         match ingest_binary(&mut state.store, &mail.staged_path, mail.name.clone(), mail.pin) {
@@ -1172,7 +1175,10 @@ impl NativeActor for FleetServer {
     /// `pin: false` never clears an existing pin. Reply:
     /// `UploadComponentResult::Ok { hash, name }`, or
     /// `Err { error }` for an unreadable path, an unparseable wasm, or a
-    /// store write that didn't land — an `Ok` hash is always resolvable.
+    /// store write that didn't land. `Ok` means this ingest succeeded;
+    /// unnamed unpinned content remains eligible for same-call or later
+    /// budget eviction. A name or `pin: true` retains the hash; unpin
+    /// removes only the explicit flag, so a remaining name still protects.
     #[handler::single]
     fn on_upload_component(
         state: &mut Self::State,

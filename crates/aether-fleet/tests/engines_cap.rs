@@ -1091,6 +1091,14 @@ mod restart_supervision {
 
         let _ = fs::remove_dir_all(&dir);
     }
+}
+
+/// Operator-explicit artifact pin coverage (ADR-0115). Independent of
+/// restart supervision: these drive `UploadBinary` / `UploadComponent` /
+/// `SetArtifactPinned` on an isolated store. Only tests that write a
+/// shell pressure stand-in are Unix-gated.
+mod operator_pins {
+    use super::*;
 
     #[test]
     fn unnamed_pin_true_headless_survives_tiny_budget_reopen_and_false_reupload() {
