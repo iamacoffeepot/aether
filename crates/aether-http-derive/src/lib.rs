@@ -294,6 +294,11 @@ struct ReplyRoute {
     ctx_c: Type,
     /// `#[doc]` attributes carried onto the glue.
     docs: Vec<Attribute>,
+    /// Literal `#[cfg]` attributes cloned from the user method (the actor
+    /// `handler_cfgs` contract: `path().is_ident("cfg")` only, not `cfg_attr`)
+    /// and replayed onto the generated glue so a configuration that strips the
+    /// method also strips the handler that names its reply kind (ADR-0183).
+    cfgs: Vec<Attribute>,
 }
 
 /// How a glue handler dispatches back into the retained user method:
@@ -599,8 +604,13 @@ fn take_reply(method: &mut ImplItemFn) -> syn::Result<Option<ReplyRoute>> {
         ));
     }
     let docs = method.attrs.iter().filter(|attr| attr.path().is_ident("doc")).cloned().collect();
+    // Clone literal `#[cfg]`s without removing them from the user method
+    // (only `#[http::reply]` is stripped). Replay them onto the generated
+    // handler so a configuration that strips the method also strips the
+    // glue that names its reply kind (ADR-0183 / actor `handler_cfgs`).
+    let cfgs = method.attrs.iter().filter(|attr| attr.path().is_ident("cfg")).cloned().collect();
 
-    Ok(Some(ReplyRoute { fn_name, reply_kind, first_arg, call_style, ctx_c, docs }))
+    Ok(Some(ReplyRoute { fn_name, reply_kind, first_arg, call_style, ctx_c, docs, cfgs }))
 }
 
 /// Extract the transport ctx type `C` from a `#[http::reply]` method's
@@ -973,7 +983,7 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
 /// the call) and answers the original request with `reply_to`. An unmatched
 /// reply (no stored context) is a no-op.
 fn emit_reply_glue(reply: &ReplyRoute) -> TokenStream2 {
-    let ReplyRoute { fn_name, reply_kind, first_arg, call_style, ctx_c, docs } = reply;
+    let ReplyRoute { fn_name, reply_kind, first_arg, call_style, ctx_c, docs, cfgs } = reply;
     let glue_name = format_ident!("__aether_reply_{fn_name}");
     let glue_first = match call_style {
         CallStyle::SelfReceiver => quote! { #first_arg },
@@ -984,6 +994,7 @@ fn emit_reply_glue(reply: &ReplyRoute) -> TokenStream2 {
         CallStyle::State(_) => quote! { Self::#fn_name(__aether_state, __aether_ctx, __aether_reply) },
     };
     quote! {
+        #(#cfgs)*
         #(#docs)*
         #[handler::manual]
         fn #glue_name(#glue_first, __aether_ctx: &mut #ctx_c, __aether_reply: #reply_kind) {
