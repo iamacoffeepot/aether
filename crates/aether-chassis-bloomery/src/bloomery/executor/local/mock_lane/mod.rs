@@ -170,8 +170,8 @@ pub fn run_process() -> Result<i32, MockLaneError> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "a fixture that cannot set up its files reports it by panicking")]
 mod tests {
-    use std::{fs, process};
     use std::path::{Path, PathBuf};
+    use std::{fs, process};
 
     use aether_bloomery::{CONSTRUCT_IMPLEMENT_COMMAND, StageId, VERIFY_CHECK_COMMAND, VERIFY_MEMBER_COMMAND};
 
