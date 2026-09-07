@@ -1119,7 +1119,13 @@ fn populated_list_config(initial_selected_index: Option<u32>) -> VirtualListConf
     live_list_config(populated_rows(), initial_selected_index, WidgetControlState::default())
 }
 
-fn assert_list_phase(phase: &str, delta: &[String], hovers: &[(Option<&str>, Option<&str>)], selections: &[(Option<&str>, u32)], buttons: &[&str]) {
+fn assert_list_phase(
+    phase: &str,
+    delta: &[String],
+    hovers: &[(Option<&str>, Option<&str>)],
+    selections: &[(Option<&str>, u32)],
+    buttons: &[&str],
+) {
     let joined = delta.join("\n");
     assert_eq!(virtual_list_hovers(delta), hovers, "{phase} hover; log was:\n{joined}");
     assert_eq!(virtual_list_selections(delta), selections, "{phase} selection; log was:\n{joined}");
@@ -1190,13 +1196,7 @@ fn empty_virtual_list_becomes_eligible_when_populated() {
             ("down", HarnessOp::send_and_settle(&panel, &down())),
         ])
         .expect("tab and down");
-    assert_list_phase(
-        "tab+down",
-        &take_log_delta(&mut harness, &mut cursor),
-        &[],
-        &[(Some("inventory"), 1)],
-        &[],
-    );
+    assert_list_phase("tab+down", &take_log_delta(&mut harness, &mut cursor), &[], &[(Some("inventory"), 1)], &[]);
 
     harness
         .execute(vec![
@@ -1266,16 +1266,8 @@ fn emptying_a_live_virtual_list_drops_routing_and_does_not_rearm() {
         &[],
     );
 
-    harness
-        .execute(vec![("empty", HarnessOp::send_and_settle(&list, &empty_list_config()))])
-        .expect("empty the list");
-    assert_list_phase(
-        "empty",
-        &take_log_delta(&mut harness, &mut cursor),
-        &[(Some("inventory"), None)],
-        &[],
-        &[],
-    );
+    harness.execute(vec![("empty", HarnessOp::send_and_settle(&list, &empty_list_config()))]).expect("empty the list");
+    assert_list_phase("empty", &take_log_delta(&mut harness, &mut cursor), &[(Some("inventory"), None)], &[], &[]);
 
     harness
         .execute(vec![
@@ -1416,11 +1408,7 @@ fn populating_disabled_or_hidden_virtual_list_stays_out_of_routing() {
     assert_list_phase(
         "show ghost",
         &take_log_delta(&mut harness, &mut cursor),
-        &[
-            (Some("blocked"), None),
-            (Some("ghost"), Some("0")),
-            (Some("ghost"), Some("1")),
-        ],
+        &[(Some("blocked"), None), (Some("ghost"), Some("0")), (Some("ghost"), Some("1"))],
         &[(Some("ghost"), 1)],
         &[],
     );
@@ -1489,13 +1477,7 @@ fn read_only_populated_virtual_list_hovers_and_focuses_without_mutating() {
             ("allowed_down", HarnessOp::send_and_settle(&panel, &down())),
         ])
         .expect("mutable down");
-    assert_list_phase(
-        "mutable down",
-        &take_log_delta(&mut harness, &mut cursor),
-        &[],
-        &[(Some("inventory"), 1)],
-        &[],
-    );
+    assert_list_phase("mutable down", &take_log_delta(&mut harness, &mut cursor), &[], &[(Some("inventory"), 1)], &[]);
 }
 
 /// A behavior-wrapped initially empty list must become eligible through the
@@ -1552,13 +1534,7 @@ fn behavior_host_empty_virtual_list_becomes_eligible_when_populated() {
             ("down", HarnessOp::send_and_settle(&panel, &down())),
         ])
         .expect("host tab and down");
-    assert_list_phase(
-        "host tab+down",
-        &take_log_delta(&mut harness, &mut cursor),
-        &[],
-        &[(Some("inventory"), 1)],
-        &[],
-    );
+    assert_list_phase("host tab+down", &take_log_delta(&mut harness, &mut cursor), &[], &[(Some("inventory"), 1)], &[]);
 
     harness
         .execute(vec![

@@ -1374,10 +1374,9 @@ impl WasmActor for WidgetPanel {
         let Some(source) = ctx.source_mailbox() else {
             return;
         };
-        let effects = self.focus.update_eligibility(
-            source,
-            FocusEligibility { pointer: changed.pointer, keyboard: changed.keyboard },
-        );
+        let effects = self
+            .focus
+            .update_eligibility(source, FocusEligibility { pointer: changed.pointer, keyboard: changed.keyboard });
         apply_availability(ctx, effects, self.modifiers);
     }
 

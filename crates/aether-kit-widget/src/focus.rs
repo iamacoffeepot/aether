@@ -762,10 +762,10 @@ mod tests {
             AvailabilityEffects::default(),
         );
         assert_eq!(focus.hit_test(5.0, 5.0), None);
-        assert_eq!(focus.move_focus(FocusDirection::Forward), Some(FocusTransition {
-            previous: None,
-            next: Some(MailboxId(3)),
-        }));
+        assert_eq!(
+            focus.move_focus(FocusDirection::Forward),
+            Some(FocusTransition { previous: None, next: Some(MailboxId(3)) })
+        );
 
         let mut disabled = available();
         disabled.enabled = false;
