@@ -447,10 +447,8 @@ fn button_click_widgets(log: &[String]) -> Vec<&str> {
 
 fn take_log_delta(harness: &mut SubstrateHarness, cursor: &mut usize) -> Vec<String> {
     let log = panel_log_messages(harness);
-    let delta = log
-        .get(*cursor..)
-        .expect("take_log_delta cursor exceeds current panel log length; history was lost")
-        .to_vec();
+    let delta =
+        log.get(*cursor..).expect("take_log_delta cursor exceeds current panel log length; history was lost").to_vec();
     *cursor = log.len();
     delta
 }
