@@ -507,8 +507,9 @@ placements. Replicas such as `camera-0` and `camera-1` have no default-named
 instance and are reached with `peer_named`.
 
 The explicit component-host route remains useful when code already holds that
-host mailbox: `loaded::<Camera>(load_name)` folds from the held host regardless
-of the caller's own parent. Keep `LoadResult.mailbox_id` for direct by-id
+host mailbox: `loaded_default::<Camera>()` folds `Camera::NAMESPACE` from the
+held host regardless of the caller's own parent, and `loaded::<Camera>(load_name)`
+does the same for an explicit load name. Keep `LoadResult.mailbox_id` for direct by-id
 addressing. `LoadResult.name` is the canonical rendered address for
 external/string addressing; do not pass it to `loaded`, `peer_named`,
 `resolve_actor`, or `send_to_named`.
@@ -536,18 +537,26 @@ though its implementation type is `TerraEditor`, not
 A capability can also dress up its mail surface with **extension-trait helpers** —
 typed methods on the mailbox handle that stand in for raw kind sends.
 `ctx.actor::<WindowCapability>().subscribe::<Key>(WindowSelector::All)` is one
-(from `WindowManagerMailboxExt`), and
-`ctx.actor::<ComponentHostCapability>().loaded::<Camera>("camera")` is the
-loaded-component lookup just mentioned (from `ComponentHostWasmExt` in a
-component, `ComponentHostNativeExt` in a capability). In a component,
-`ctx.peer::<Camera>()` and `ctx.peer_named::<Camera>("camera")` offer the same
-embedded-only route for default and explicit loads. They resolve from the
-component ctx's runtime parent and return the physical trampoline mailbox typed
-as `Camera`; the trampoline and its loaded guest share one mailbox, while the
-guest type supplies the compile-time mail-handling surface. By contrast,
-`ctx.actor::<ComponentHostCapability>().loaded::<Camera>("camera")` is the
-explicit root-host form and follows the declared host-to-trampoline edge from
-the handle it was called on.
+(from `WindowManagerMailboxExt`), and the loaded-component lookup just mentioned
+is another (from `ComponentHostWasmExt` in a component, `ComponentHostNativeExt`
+in a capability).
+
+In a component, reach for `ctx.peer::<Camera>()` first: it names the
+default-named instance with no string at all, and
+`ctx.peer_named::<Camera>("camera-1")` names an explicit load or a replica
+beside it. Both resolve from the component ctx's runtime parent and return the
+physical trampoline mailbox typed as `Camera`; the trampoline and its loaded
+guest share one mailbox, while the guest type supplies the compile-time
+mail-handling surface.
+
+`ctx.actor::<ComponentHostCapability>().loaded_default::<Camera>()` and its
+by-name sibling `.loaded::<Camera>("camera-1")` are the explicit root-host form,
+following the declared host-to-trampoline edge from the handle they were called
+on rather than from the caller's own parent. Pass a name to either verb only
+when the name is a runtime fact — a `const` beside the call site holding what
+`Camera::NAMESPACE` already declares is a second naming authority nothing
+checks against the first, and the nameless spellings exist so it has nothing to
+hold.
 
 ## One or many: cardinality
 
