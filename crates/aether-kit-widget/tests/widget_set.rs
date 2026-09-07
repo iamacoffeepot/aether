@@ -33,7 +33,9 @@ use aether_actor::Addressable;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_PAGE_DOWN, KEY_SPACE, KEY_TAB, KEY_UP};
+use aether_kinds::keycode::{
+    KEY_A, KEY_DOWN, KEY_ENTER, KEY_HOME, KEY_PAGE_DOWN, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
+};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
     Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove,
@@ -835,5 +837,161 @@ fn read_only_text_field_blocks_activation_until_enabled() {
         commits[0].as_str(),
         "widget=locked text=locked widget text committed",
         "blocked read-only TextInput must not alter the later committed value; log was:\n{joined}",
+    );
+}
+
+/// A field that loses focus while Shift is held must not keep that Shift after
+/// the release is delivered to another field and Tab returns. Home at caret 0,
+/// then Right + insert, must yield `axb`; a stale Shift would replace `a`.
+#[test]
+fn tab_cycle_does_not_leave_stale_shift_on_refocused_field() {
+    let Some(wasm_path) = require_wasm("aether_kit_widget") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut harness = SubstrateHarness::builder().size(240, 80).with_component_host().build().expect("boot");
+    load_panel_with(
+        &mut harness,
+        &wasm,
+        vec![
+            text_field_spec("first", "ab", WidgetControlState::default()),
+            text_field_spec("second", "", WidgetControlState::default()),
+        ],
+    );
+
+    let panel = panel_address();
+    harness
+        .execute(vec![
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            ("focus_first", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("home", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_HOME })),
+            (
+                "shift_down",
+                HarnessOp::send_and_settle(
+                    &panel,
+                    &Modifiers { window: TEST_WINDOW_ID, shift: true, ..Modifiers::default() },
+                ),
+            ),
+            ("reverse_tab", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            (
+                "shift_up",
+                HarnessOp::send_and_settle(&panel, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() }),
+            ),
+            ("refocus_first", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("right", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_RIGHT })),
+            ("type", HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "x".to_owned() })),
+            ("commit", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+        ])
+        .expect("stale-shift tab cycle session");
+
+    let log = panel_log_messages(&mut harness);
+    let joined = log.join("\n");
+    let commits: Vec<_> =
+        log.iter().filter(|message| message.contains("widget text committed")).map(String::as_str).collect();
+    assert_eq!(
+        commits,
+        ["widget=first text=axb widget text committed"],
+        "Right after refocus must insert at caret 1, not replace a Shift-selected `a`; log was:\n{joined}",
+    );
+}
+
+/// Ctrl already held on the panel must reach a never-focused field on pointer
+/// gain so Ctrl+A then a replacement insert replaces the whole prior value.
+#[test]
+fn pointer_focus_inherits_already_held_ctrl() {
+    let Some(wasm_path) = require_wasm("aether_kit_widget") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut harness = SubstrateHarness::builder().size(240, 80).with_component_host().build().expect("boot");
+    load_panel_with(&mut harness, &wasm, vec![text_field_spec("field", "prior", WidgetControlState::default())]);
+
+    let panel = panel_address();
+    harness
+        .execute(vec![
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            (
+                "ctrl_down",
+                HarnessOp::send_and_settle(
+                    &panel,
+                    &Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() },
+                ),
+            ),
+            ("focus_press", HarnessOp::send_and_settle(&panel, &press(50.0, 22.0))),
+            ("focus_release", HarnessOp::send_and_settle(&panel, &release(50.0, 22.0))),
+            ("select_all", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_A })),
+            (
+                "replace",
+                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "new".to_owned() }),
+            ),
+            ("commit", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+        ])
+        .expect("pointer-gain ctrl session");
+
+    let log = panel_log_messages(&mut harness);
+    let joined = log.join("\n");
+    let commits: Vec<_> =
+        log.iter().filter(|message| message.contains("widget text committed")).map(String::as_str).collect();
+    assert_eq!(
+        commits,
+        ["widget=field text=new widget text committed"],
+        "Ctrl held before pointer focus must SelectAll so the insert replaces `prior`; log was:\n{joined}",
+    );
+}
+
+/// Hiding the focused field while Ctrl is held must hand that chord to the
+/// next available field so `SelectAll` + replacement works without a later Tab.
+#[test]
+fn availability_focus_move_inherits_already_held_ctrl() {
+    let Some(wasm_path) = require_wasm("aether_kit_widget") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut harness = SubstrateHarness::builder().size(240, 80).with_component_host().build().expect("boot");
+    load_panel_with(
+        &mut harness,
+        &wasm,
+        vec![
+            text_field_spec("first", "gone", WidgetControlState::default()),
+            text_field_spec("second", "keep", WidgetControlState::default()),
+        ],
+    );
+
+    let panel = panel_address();
+    harness
+        .execute(vec![
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            ("focus_first", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            (
+                "ctrl_down",
+                HarnessOp::send_and_settle(
+                    &panel,
+                    &Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() },
+                ),
+            ),
+            (
+                "hide_first",
+                HarnessOp::send_and_settle(
+                    child_address("first"),
+                    &SetWidgetState { state: WidgetControlState { visible: false, ..WidgetControlState::default() } },
+                ),
+            ),
+            ("select_all", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_A })),
+            (
+                "replace",
+                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "new".to_owned() }),
+            ),
+            ("commit", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+        ])
+        .expect("availability-gain ctrl session");
+
+    let log = panel_log_messages(&mut harness);
+    let joined = log.join("\n");
+    let commits: Vec<_> =
+        log.iter().filter(|message| message.contains("widget text committed")).map(String::as_str).collect();
+    assert_eq!(
+        commits,
+        ["widget=second text=new widget text committed"],
+        "hiding the focused field must inherit Ctrl so SelectAll replaces `keep`; log was:\n{joined}",
     );
 }

@@ -1546,14 +1546,18 @@ when the press hit nothing focusable *and* when it hit the already-focused
 child, so a root that only reacts to its `Some` never clears anything and a
 pressed input stays lit forever. Ask `Focus::focus_hit_test(x, y)` for the
 focusable child under the point and hand the answer — `Some` or `None` — to
-`Focus::set_focus`, then fan the returned transition:
+`Focus::set_focus`, then fan the returned transition. Current modifiers must
+accompany the gain — Tab, a pointer press, and an availability move all use
+this helper — so a newly focused child sees already-held Ctrl/Shift and a
+child that missed a release while unfocused does not keep a stale chord:
 
 ```rust
 let focusable = self.focus.focus_hit_test(press.x, press.y);
 if let Some(transition) = self.focus.set_focus(focusable) {
-    // FocusLost to `previous`, FocusGained to `next`. `false`: this focus came
-    // from a press, so the child it lands on must not draw a ring.
-    apply_focus(ctx, transition, false);
+    // FocusLost to `previous`, then FocusGained plus the panel's cached
+    // modifiers to `next`. `false`: this focus came from a press, so the
+    // child it lands on must not draw a ring.
+    apply_focus(ctx, transition, false, self.modifiers);
 }
 ```
 
