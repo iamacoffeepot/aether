@@ -940,7 +940,7 @@ fn pointer_focus_inherits_already_held_ctrl() {
 }
 
 /// Hiding the focused field while Ctrl is held must hand that chord to the
-/// next available field so SelectAll + replacement works without a later Tab.
+/// next available field so `SelectAll` + replacement works without a later Tab.
 #[test]
 fn availability_focus_move_inherits_already_held_ctrl() {
     let Some(wasm_path) = require_wasm("aether_kit_widget") else {
