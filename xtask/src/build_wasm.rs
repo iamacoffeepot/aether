@@ -4,7 +4,7 @@
 //! The gate names this command in the failure text it panics with when
 //! the artifact is missing (issue #5724), so the command has to exist
 //! and has to build exactly what CI's `Pre-build component wasm for
-//! scenario tests` step builds. It is therefore [`dist`](crate::dist)
+//! scenario tests` step builds. It is therefore [`crate::dist`]
 //! with the chassis binaries dropped, not a second discovery path: one
 //! structural sweep (`inventory::discover_components`), one build loop,
 //! one freshness stamp. What it adds over spelling `dist --no-bins` out

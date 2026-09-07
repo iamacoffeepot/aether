@@ -159,10 +159,7 @@ const ALLOW_WASM_SKIP: &str = "AETHER_ALLOW_WASM_SKIP";
 const REQUIRE_RUNTIME: &str = "AETHER_REQUIRE_RUNTIME";
 
 /// Whether a missing wasm artifact is allowed to skip rather than fail.
-// Test-only: both names are test-harness knobs — which artifacts a test
-// run demands — not cap config, so neither belongs on a derive-`Config`
-// struct (ADR-0090).
-#[allow(clippy::disallowed_methods)]
+#[allow(clippy::disallowed_methods)] // aether-suppression-request: test-harness skip/strict knob, not cap config
 fn wasm_skip_allowed() -> bool {
     env::var(REQUIRE_RUNTIME).is_err() && env::var(ALLOW_WASM_SKIP).is_ok_and(|value| value == "1")
 }
