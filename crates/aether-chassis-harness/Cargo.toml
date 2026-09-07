@@ -52,7 +52,7 @@ tracing = { workspace = true, features = ["std", "attributes"] }
 # `clap` and `confique` are reached only through the
 # `#[derive(aether_substrate::Config)]` expansion on `RenderSizeConfig`.
 [package.metadata.cargo-machete]
-ignored = ["clap", "confique"]
+ignored = ["clap", "confique"] # aether-suppression-request: both are reached only through the `#[derive(aether_substrate::Config)]` expansion on `RenderSizeConfig`, which a source-only scan cannot see
 
 [lints]
 workspace = true

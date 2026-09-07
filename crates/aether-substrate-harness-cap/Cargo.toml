@@ -46,7 +46,7 @@ aether-substrate = { path = "../aether-substrate", optional = true }
 # ids and the name-inventory entry it emits). A false positive, so ignored here
 # rather than dropped.
 [package.metadata.cargo-machete]
-ignored = ["aether-data"]
+ignored = ["aether-data"] # aether-suppression-request: `#[actor]` emits `::aether_data::Kind` decode/ID paths plus the `name_inventory::HandlerEntry` submit; no hand-written source in this crate names it
 
 # The `#[actor]` macro emits a `cfg(not(target_family = "wasm"))`-gated
 # `inventory::submit!` HandlerEntry per handler, so native builds need
