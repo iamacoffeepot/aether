@@ -233,6 +233,16 @@ impl WidgetDefaults for SegmentedWidget {
     fn cancel_activation(&mut self) {
         self.pressed_segment = None;
     }
+
+    /// Restyle: adopt the fanned theme and request metrics for its font.
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
+    }
+
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+        self.state.set_hovered(false);
+        self.hovered_segment = None;
+    }
 }
 
 /// A segmented widget. Spawned inline by a panel root with a
@@ -280,23 +290,11 @@ impl WasmActor for SegmentedWidget {
         self.apply_control_state(ctx, set.state);
     }
 
-    /// Restyle: adopt the fanned theme and request metrics for its font.
-    #[handler::single]
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
-    }
-
     /// Install a font-metrics reply; the next `Collect` cuts each label
     /// against its real width.
     #[handler::single]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
-    }
-
-    #[handler::single]
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
-        self.state.set_hovered(false);
-        self.hovered_segment = None;
     }
 
     #[handler::single]

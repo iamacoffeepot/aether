@@ -490,21 +490,25 @@ impl BloomeryEnv {
     /// `AETHER_STORE_PATH`, each riding the derive-`Config` argv-then-env path
     /// (no naked env reads). `--github-store-path` is the same journal knob as
     /// `--store-path`: both overlays collapse onto one path so the store
-    /// capability and every reactor open the same file. Like the other chassis
-    /// it resolves off the source stack; takes `&BloomeryCli` by reference so
-    /// the bin keeps `cli` for its `--describe` branch.
+    /// capability and every reactor open the same file. `--github-artifacts-root`
+    /// is the same artifacts knob as `--artifacts-root`: both overlays collapse
+    /// onto one root so the artifacts capability and every direct reader
+    /// (control, executor, integrate, API) open the same store. Like the other
+    /// chassis it resolves off the source stack; takes `&BloomeryCli` by
+    /// reference so the bin keeps `cli` for its `--describe` branch.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError`] when a known env value (or argv overlay value)
     /// fails its parser, when `AETHER_BLOOMERY_AUTHORITY_BACKEND` / the matching
-    /// overlay is not `github` or `local`, or when `--store-path` and
-    /// `--github-store-path` name different files.
+    /// overlay is not `github` or `local`, when `--store-path` and
+    /// `--github-store-path` name different files, or when `--artifacts-root`
+    /// and `--github-artifacts-root` name different directories.
     pub fn resolve(cli: &BloomeryCli) -> Result<Self, ConfigError> {
         let rpc_port = RpcPortConfig::try_from_argv_then_env(cli.rpc.clone().into_layer())?.port;
         let http_port = HttpPortConfig::try_from_argv_then_env(cli.http.clone().into_layer())?.port;
         let mut store = StoreConfig::try_from_argv_then_env(cli.store.clone().into_layer())?;
-        let artifacts = ArtifactsConfig::try_from_argv_then_env(cli.artifacts.clone().into_layer())?;
+        let mut artifacts = ArtifactsConfig::try_from_argv_then_env(cli.artifacts.clone().into_layer())?;
         #[cfg(feature = "github")]
         let github = GithubConnectionConfig::try_from_argv_then_env(cli.github.clone().into_layer())?;
         #[cfg(feature = "github")]
@@ -527,6 +531,14 @@ impl BloomeryEnv {
         // unconfigured pool takes the journal's directory and its lifetime — a
         // restart that keeps the journal keeps the resumable sessions with it.
         session.default_beside_journal(&store.path);
+
+        artifacts.root = one_artifacts_root(
+            cli.artifacts.root.as_deref(),
+            cli.coordinator.artifacts_root.as_deref(),
+            artifacts.root.as_deref(),
+            coordinator.artifacts_root.as_deref(),
+        )?;
+        coordinator.artifacts_root.clone_from(&artifacts.root);
 
         Ok(Self {
             rpc_port,
@@ -584,6 +596,47 @@ impl fmt::Display for SplitJournalPath {
 }
 
 impl Error for SplitJournalPath {}
+
+/// `--artifacts-root` and `--github-artifacts-root` name one store. Either
+/// spelling (or the shared `AETHER_ARTIFACTS_ROOT` env) is the root both the
+/// artifacts capability and every direct reader that opens its own handle use.
+/// Distinct values are a boot fault rather than a silent split.
+fn one_artifacts_root(
+    artifacts_flag: Option<&str>,
+    github_flag: Option<&str>,
+    artifacts_resolved: Option<&str>,
+    github_resolved: Option<&str>,
+) -> Result<Option<String>, ConfigError> {
+    match (artifacts_flag, github_flag) {
+        (Some(artifacts), Some(github)) if artifacts != github => Err(ConfigError::unparseable(
+            "--artifacts-root/--github-artifacts-root",
+            format!("{artifacts} vs {github}"),
+            SplitArtifactsRoot { artifacts: artifacts.to_owned(), github: github.to_owned() },
+        )),
+        (_, Some(_)) if artifacts_flag.is_none() => Ok(github_resolved.map(str::to_owned)),
+        _ => Ok(artifacts_resolved.map(str::to_owned)),
+    }
+}
+
+/// Why two artifacts-root flags that disagree are refused rather than opening
+/// two stores.
+#[derive(Debug)]
+struct SplitArtifactsRoot {
+    artifacts: String,
+    github: String,
+}
+
+impl fmt::Display for SplitArtifactsRoot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "--artifacts-root ({}) and --github-artifacts-root ({}) name one artifacts store; pass one spelling or the same path on both",
+            self.artifacts, self.github
+        )
+    }
+}
+
+impl Error for SplitArtifactsRoot {}
 
 impl Chassis for BloomeryChassis {
     const PROFILE: &'static str = "bloomery";
@@ -1015,6 +1068,60 @@ mod tests {
         .expect("github is a valid authority");
     }
 
+    fn actor_setups_for(github: &GithubConnectionConfig, local_lane_enabled: bool) -> super::BloomeryActorSetups {
+        actor_setups(
+            github,
+            &CoordinatorConfig {
+                authority_backend: "github".into(),
+                store_path: ":memory:".into(),
+                local_lane_enabled,
+                ..CoordinatorConfig::default()
+            },
+            &SessionConfig::default(),
+            &NotifyConfig::default(),
+        )
+        .expect("actor setups resolve under github authority")
+    }
+
+    // Tripwire: compose mounts the executor through `actor_setups` (#5591). A
+    // copied boolean helper used to disagree with that factory on a selected
+    // fixture with the local lane off. These cases call the factory and inspect
+    // the assembled shell, not a mirrored predicate.
+    #[test]
+    fn actor_setups_mounts_the_executor_from_the_production_gate() {
+        let unconfigured =
+            GithubConnectionConfig { api_base: "http://127.0.0.1:1".into(), ..GithubConnectionConfig::default() };
+        let unconfigured_missing = ["GITHUB_TOKEN", "AETHER_GITHUB_OWNER", "AETHER_GITHUB_REPO"];
+
+        let local_on = actor_setups_for(&unconfigured, true);
+        assert!(local_on.executor.executor.is_some(), "unconfigured + local enabled still mounts");
+        assert!(local_on.executor.correspondence.is_some(), "a mounted executor keeps correspondence");
+        assert_eq!(local_on.executor.disabled_missing, unconfigured_missing);
+
+        let local_off = actor_setups_for(&unconfigured, false);
+        assert!(local_off.executor.executor.is_none(), "unconfigured + local disabled has nothing to mount");
+        assert!(local_off.executor.correspondence.is_none(), "an unmounted executor carries no correspondence");
+        assert_eq!(local_off.executor.disabled_missing, unconfigured_missing);
+
+        let fixture = GithubConnectionConfig { github_backend: "fixture".into(), ..GithubConnectionConfig::default() };
+        assert!(!fixture.missing_connection_knobs().is_empty(), "a fixture still names empty PAT knobs");
+        let fixture_setup = actor_setups_for(&fixture, false);
+        assert!(fixture_setup.executor.executor.is_some(), "a selected fixture mounts even with the local lane off");
+        assert!(fixture_setup.executor.correspondence.is_some(), "a mounted fixture keeps correspondence");
+
+        let configured = GithubConnectionConfig {
+            token: "t".into(),
+            owner: "octo".into(),
+            repo: "shadow".into(),
+            api_base: "http://127.0.0.1:1".into(),
+            ..GithubConnectionConfig::default()
+        };
+        let configured_setup = actor_setups_for(&configured, false);
+        assert!(configured_setup.executor.executor.is_some(), "a configured PAT mounts with the local lane off");
+        assert!(configured_setup.executor.correspondence.is_some(), "a mounted PAT keeps correspondence");
+        assert!(configured_setup.executor.disabled_missing.is_empty(), "configured PAT names no missing knobs");
+    }
+
     #[test]
     fn resolve_refuses_locla_even_when_github_credentials_are_present() {
         let cli = BloomeryCli::try_parse_from([
@@ -1078,5 +1185,104 @@ mod authority_backend_resolution {
             .expect("local flag parses");
         let local = BloomeryEnv::resolve(&local).expect("local resolves");
         assert!(local.coordinator.uses_local_authority());
+    }
+}
+
+#[cfg(test)]
+mod artifacts_root_resolution {
+    use clap::Parser as _;
+
+    use super::BloomeryEnv;
+    use crate::artifacts::{ArtifactsCapabilityState, GetResult, PutResult, resolve_root};
+    use crate::bloomery::BloomeryCli;
+
+    fn resolve(artifacts_flag: Option<&str>, github_flag: Option<&str>) -> BloomeryEnv {
+        let mut cli = BloomeryCli::default();
+        cli.artifacts.root = artifacts_flag.map(str::to_owned);
+        cli.coordinator.artifacts_root = github_flag.map(str::to_owned);
+        BloomeryEnv::resolve(&cli).unwrap_or_else(|error| panic!("artifacts root resolves: {error}"))
+    }
+
+    #[test]
+    fn either_spelling_is_the_root_both_consumers_open() {
+        // The plausible bug: `--artifacts-root` overlays only ArtifactsConfig
+        // while `--github-artifacts-root` overlays only CoordinatorConfig, so
+        // one command line can point the artifacts capability and the
+        // control/executor/integrate/API readers at different directories.
+        let default = BloomeryEnv::resolve(&BloomeryCli::default()).expect("default resolves");
+        assert_eq!(
+            default.artifacts.root, default.coordinator.artifacts_root,
+            "an unconfigured boot must not split the artifacts store"
+        );
+
+        for (artifacts_flag, github_flag, path) in [
+            (Some("from-artifacts"), None, "from-artifacts"),
+            (None, Some("from-github"), "from-github"),
+            (Some("same-root"), Some("same-root"), "same-root"),
+        ] {
+            let env = resolve(artifacts_flag, github_flag);
+            assert_eq!(
+                env.artifacts.root.as_deref(),
+                Some(path),
+                "artifacts-flag={artifacts_flag:?} github-flag={github_flag:?}"
+            );
+            assert_eq!(
+                env.coordinator.artifacts_root, env.artifacts.root,
+                "artifacts-flag={artifacts_flag:?} github-flag={github_flag:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn distinct_spellings_are_refused_rather_than_opening_two_stores() {
+        // The other half of the split: if both flags are set to different
+        // roots, picking either one silently would still hide the operator's
+        // mistake.
+        let mut cli = BloomeryCli::default();
+        cli.artifacts.root = Some("cap-root".into());
+        cli.coordinator.artifacts_root = Some("reader-root".into());
+        let error = BloomeryEnv::resolve(&cli).expect_err("split artifacts root is a boot fault");
+        let message = error.to_string();
+        assert!(message.contains("--artifacts-root"), "{message}");
+        assert!(message.contains("--github-artifacts-root"), "{message}");
+        assert!(message.contains("cap-root"), "{message}");
+        assert!(message.contains("reader-root"), "{message}");
+    }
+
+    #[test]
+    fn a_cli_root_is_the_store_the_capability_writes_and_the_readers_read() {
+        // Production path: the mounted capability writes through ArtifactsConfig
+        // and the control/executor/integrate/API readers open CoordinatorConfig
+        // independently. A CLI override that configured only one overlay used
+        // to split those handles, so a put on the cap was NotFound on the
+        // readers (F0033).
+        for flag in ["--artifacts-root", "--github-artifacts-root"] {
+            let dir = tempfile::tempdir().expect("temp artifacts root");
+            let path = dir.path().to_str().expect("utf-8 temp path");
+            let cli = BloomeryCli::try_parse_from(["bloomery", flag, path])
+                .unwrap_or_else(|error| panic!("{flag} must parse: {error}"));
+            let env = BloomeryEnv::resolve(&cli).unwrap_or_else(|error| panic!("{flag} resolves: {error}"));
+            assert_eq!(env.artifacts.root.as_deref(), Some(path), "{flag}");
+            assert_eq!(env.coordinator.artifacts_root, env.artifacts.root, "{flag}");
+
+            let mut cap = ArtifactsCapabilityState::open(&resolve_root(env.artifacts.root.as_deref()))
+                .unwrap_or_else(|error| panic!("{flag} cap store opens: {error}"));
+            let mut readers = ArtifactsCapabilityState::open(&resolve_root(env.coordinator.artifacts_root.as_deref()))
+                .unwrap_or_else(|error| panic!("{flag} reader store opens: {error}"));
+
+            let bytes = format!("study-record-via-{flag}").into_bytes();
+            let digest = match cap.put(&bytes, &["graded-attempt".to_owned()]) {
+                PutResult::Ok { digest } => digest,
+                PutResult::Err { error } => panic!("{flag} cap put failed: {error:?}"),
+            };
+            match readers.get(digest.clone()) {
+                GetResult::Ok { digest: got, bytes: got_bytes, parents } => {
+                    assert_eq!(got, digest, "{flag}");
+                    assert_eq!(got_bytes, bytes, "{flag}");
+                    assert_eq!(parents, ["graded-attempt"], "{flag}");
+                }
+                GetResult::Err { error, .. } => panic!("{flag} reader missed the cap write: {error:?}"),
+            }
+        }
     }
 }

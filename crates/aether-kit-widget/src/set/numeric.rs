@@ -540,6 +540,30 @@ impl WidgetDefaults for NumericWidget {
         self.pressed_stepper = None;
         self.edit.clear_composition();
     }
+
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
+    }
+
+    fn on_focus_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
+        if self.state.can_mutate()
+            && let Some(emission) = self.commit_buffer()
+        {
+            Self::emit(ctx, emission);
+        }
+        self.state.lose_focus();
+        self.dragging = false;
+        self.paste_pending = false;
+        self.pressed_stepper = None;
+        self.edit.clear_composition();
+    }
+
+    /// The pointer leaving the control clears the stepper hover the root's
+    /// hover fact alone cannot: hover is per-widget, the overlay per-button.
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+        self.state.set_hovered(false);
+        self.hovered_stepper = None;
+    }
 }
 
 /// A numeric editor. Spawned inline by a panel root with a [`NumericConfig`];
@@ -578,25 +602,6 @@ impl WasmActor for NumericWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
-    }
-
-    #[handler::single]
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
-    }
-
-    #[handler::single]
-    fn on_focus_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
-        if self.state.can_mutate()
-            && let Some(emission) = self.commit_buffer()
-        {
-            Self::emit(ctx, emission);
-        }
-        self.state.lose_focus();
-        self.dragging = false;
-        self.paste_pending = false;
-        self.pressed_stepper = None;
-        self.edit.clear_composition();
     }
 
     #[handler::single]
@@ -683,14 +688,6 @@ impl WasmActor for NumericWidget {
     fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         release_left(&mut self.dragging, false, release);
         release_left(&mut self.pressed_stepper, None, release);
-    }
-
-    /// The pointer leaving the control clears the stepper hover the root's
-    /// hover fact alone cannot: hover is per-widget, the overlay per-button.
-    #[handler::single]
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
-        self.state.set_hovered(false);
-        self.hovered_stepper = None;
     }
 
     #[handler::single]

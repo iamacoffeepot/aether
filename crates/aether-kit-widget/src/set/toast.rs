@@ -419,6 +419,11 @@ impl WidgetDefaults for ToastWidget {
 
     /// Nothing to cancel: a notice is read, never operated.
     fn cancel_activation(&mut self) {}
+
+    /// Restyle: adopt the fanned theme and request metrics for its font.
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
+    }
 }
 
 /// The toast region. Spawned inline by a panel root with a [`ToastConfig`];
@@ -493,12 +498,6 @@ impl WasmActor for ToastWidget {
             let changed = self.clear();
             report(ctx, changed, self.region_changed());
         }
-    }
-
-    /// Restyle: adopt the fanned theme and request metrics for its font.
-    #[handler::single]
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
     }
 
     /// Install a font-metrics reply; the next `Collect` wraps against real

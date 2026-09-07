@@ -8,3 +8,11 @@ persisted shape, oldest first. A shape change appends a line and
 registers an upcast. Regenerating this file only appends a newly current
 digest; it never drops a prior line. The remedy for a failing digest
 test is never a regen command.
+
+The first 10 lines are an independent historical baseline from
+`449d0f894c533a6a354270544becd8efb18a3753` (raw sha256
+`f5f2be01f6bfa39e41ffb51480f994fa0dd61e639a9bddec3867e36ca2ace86f`).
+The digest test pins that prefix in source; it does not compare the
+fixture to itself, to git, or to the on-disk path at runtime. Do not
+update existing pins to bless rewritten history. Later history may add
+independent checkpoints; it must not erase earlier ones.

@@ -201,7 +201,7 @@ fn escape_json_string(value: &str, out: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_CONTENT_CHARS, ReqwestWebhook, WebhookError, content_body};
+    use super::{BlockingClient, MAX_CONTENT_CHARS, ReqwestWebhook, WebhookError, WebhookSink, content_body};
 
     #[test]
     fn a_message_body_escapes_what_json_requires() {
@@ -237,16 +237,41 @@ mod tests {
         // Tripwire: the webhook URL is a credential, and the acceptance case
         // is that it appears in no log output at any level. Both channels that
         // reach a log line are checked here — the sink's own `Debug` and every
-        // `WebhookError` spelling.
-        let secret = "https://discord.example/api/webhooks/1/verysecrettoken";
+        // `WebhookError` spelling. Transport coverage goes through production
+        // `post`, not a pre-sanitized `WebhookError::Transport`.
+        const SECRET_MARKER: &str = "verysecrettoken";
+        let secret = "webhook-test:///webhooks/1/verysecrettoken?token=verysecrettoken";
         let sink = ReqwestWebhook::new(secret.to_owned()).expect("the blocking client builds");
-        assert!(!format!("{sink:?}").contains("verysecrettoken"));
+        assert!(!format!("{sink:?}").contains(SECRET_MARKER));
+        assert!(!format!("{sink:?}").contains(secret));
 
-        for error in
-            [WebhookError::Status { status: 429 }, WebhookError::Transport { detail: "could not connect".to_owned() }]
-        {
-            assert!(!format!("{error}").contains("verysecrettoken"));
-            assert!(!format!("{error:?}").contains("verysecrettoken"));
-        }
+        let status = WebhookError::Status { status: 429 };
+        assert!(!format!("{status}").contains(SECRET_MARKER));
+        assert!(!format!("{status:?}").contains(SECRET_MARKER));
+        assert!(!format!("{status}").contains(secret));
+        assert!(!format!("{status:?}").contains(secret));
+
+        // Fixture validity: this unsupported scheme fails at IntoUrl, before any
+        // network hop, and reqwest's Display attaches the URL. If a future
+        // reqwest stops carrying that URL, this assertion fails rather than
+        // leaving production redaction unobservable.
+        let raw = BlockingClient::new()
+            .post(secret)
+            .send()
+            .expect_err("unsupported scheme is rejected before any network hop");
+        assert!(
+            format!("{raw}").contains(SECRET_MARKER),
+            "raw reqwest Display must carry the synthetic path/query marker that production conversion discards; got {raw}"
+        );
+
+        let error = sink.post("ping").expect_err("unsupported scheme cannot deliver");
+        assert!(
+            matches!(error, WebhookError::Transport { .. }),
+            "production post maps a request error to Transport, got {error:?}"
+        );
+        assert!(!format!("{error}").contains(SECRET_MARKER), "Display leaked the credential: {error}");
+        assert!(!format!("{error:?}").contains(SECRET_MARKER), "Debug leaked the credential: {error:?}");
+        assert!(!format!("{error}").contains(secret), "Display leaked the credential URL: {error}");
+        assert!(!format!("{error:?}").contains(secret), "Debug leaked the credential URL: {error:?}");
     }
 }

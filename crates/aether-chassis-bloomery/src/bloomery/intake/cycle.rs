@@ -4,6 +4,8 @@
 use std::error::Error;
 use std::fmt;
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use aether_bloomery::{Admit, BackendId, ExecutionStatus, LaneObservation, Nonce, StageVerdict, WorkHandle};
 use aether_data::wire::to_vec;
 
@@ -25,6 +27,25 @@ pub trait AdmitSink {
     fn admit(&mut self, admission: Admission);
 }
 
+/// One handle this cycle inspected that was not yet [`ExecutionStatus::Completed`].
+///
+/// `observed_from_unix_millis` is sampled immediately before [`ExecutorShell::inspect`]
+/// and `observed_until_unix_millis` immediately after it returns. Heartbeat future
+/// checks use the end; silence age uses the start. An inverted window (`until` <
+/// `from`) is not a backend fault: the status stays pending so the caller's
+/// absolute-deadline sweep still sees an observed live order.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PendingObservation {
+    /// The inspected handle's nonce.
+    pub nonce: Nonce,
+    /// Status this inspect returned. Never `Completed` — those are streamed, not pending.
+    pub status: ExecutionStatus,
+    /// Unix milliseconds sampled immediately before `inspect`. Silence age uses this start.
+    pub observed_from_unix_millis: u64,
+    /// Unix milliseconds sampled immediately after `inspect` returns. Future-stamp checks use this end.
+    pub observed_until_unix_millis: u64,
+}
+
 /// What one [`run_intake_cycle`] observed.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct CycleReport {
@@ -38,14 +59,13 @@ pub struct CycleReport {
     /// reported a cost. Always at most `completed`, and below it whenever a
     /// harness reported no usage or no artifacts store was configured.
     pub studied: u32,
-    /// Handles inspected this cycle that were not yet `Completed`, paired with
-    /// their observed status (#3635) — feeds the executor reactor's staleness
-    /// sweep so a wedged dispatch's last status is visible in its warn without a
-    /// second `inspect` call, and carries a running lane's host-observed
-    /// progress timestamp so the heartbeat reaper sees the backend observation
-    /// without another `inspect`. Completed-evidence-first ordering is unchanged:
-    /// a `Completed` handle is streamed here and never appears in `pending`.
-    pub pending: Vec<(Nonce, ExecutionStatus)>,
+    /// Handles inspected this cycle that were not yet `Completed` (#3635). Each
+    /// entry carries the inspect observation window the heartbeat reaper uses:
+    /// future-stamp checks against `observed_until_unix_millis`, silence age
+    /// against `observed_from_unix_millis`. Completed-evidence-first ordering is
+    /// unchanged: a `Completed` handle is streamed here and never appears in
+    /// `pending`.
+    pub pending: Vec<PendingObservation>,
     /// Handles this cycle never resolved because the backend arm holding them
     /// faulted (#5412) — inspected-and-errored, or skipped after an earlier
     /// handle on the same arm errored.
@@ -85,6 +105,17 @@ impl Error for CycleError {
             Self::Intake(error) => Some(error),
         }
     }
+}
+
+/// The current wall clock in Unix milliseconds (ADR-0177).
+///
+/// A clock before the epoch is not a reading any deadline arithmetic can use, so
+/// it reads as `0` — which defers every expiry rather than terminating anything
+/// on a number that means nothing: `0` is behind every deadline a dispatch under
+/// the same clock would have stamped. Deadlines stop enforcing until the host's
+/// clock is usable again, and no order is cancelled on a fiction in the meantime.
+pub fn now_unix_millis() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// One intake pull cycle over the tracked handles (#3502): inspect each
@@ -128,6 +159,20 @@ pub fn run_intake_cycle(
     artifacts: Option<&mut ArtifactsCapabilityState>,
     sink: &mut dyn AdmitSink,
 ) -> Result<CycleReport, CycleError> {
+    run_intake_cycle_now(store, shell, handles, claims, artifacts, sink, now_unix_millis)
+}
+
+/// [`run_intake_cycle`] with an injected clock so a test can drive inspect
+/// observation windows without a process-global latch.
+pub fn run_intake_cycle_now<Now: FnMut() -> u64>(
+    store: &mut dyn StoreBackend,
+    shell: &ExecutorShell,
+    handles: &[WorkHandle],
+    claims: &dyn EvidenceClaims,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
+    sink: &mut dyn AdmitSink,
+    mut now: Now,
+) -> Result<CycleReport, CycleError> {
     let mut report = CycleReport::default();
     let mut artifacts = artifacts;
     let mut faulted: Vec<BackendId> = Vec::new();
@@ -137,6 +182,7 @@ pub fn run_intake_cycle(
             report.unobserved.push(handle.nonce.clone());
             continue;
         }
+        let observed_from_unix_millis = now();
         let status = match shell.inspect(handle) {
             Ok(status) => status,
             Err(error) => {
@@ -144,8 +190,14 @@ pub fn run_intake_cycle(
                 continue;
             }
         };
+        let observed_until_unix_millis = now();
         if !matches!(status, ExecutionStatus::Completed { .. }) {
-            report.pending.push((handle.nonce.clone(), status));
+            report.pending.push(PendingObservation {
+                nonce: handle.nonce.clone(),
+                status,
+                observed_from_unix_millis,
+                observed_until_unix_millis,
+            });
             continue;
         }
         report.completed += 1;

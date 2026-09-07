@@ -342,14 +342,14 @@ pub struct CoordinatorConfig {
     /// Where the executor reactor puts an admitted attempt's study record
     /// (#4679) — the artifacts content store's root.
     ///
-    /// Named by the **same** environment variable the artifacts capability
-    /// resolves its own root from, rather than a second knob of its own. The
-    /// reactor opens its own handle on that store the way it opens its own
-    /// `SqliteStore` on the shared journal, and two handles are only the same
-    /// store if they resolve the same path — a private knob would let a
-    /// deployment configure one and not the other, and the failure is silent:
-    /// study records land in a directory nothing else reads while the index
-    /// rows point at them from the journal.
+    /// The same root [`ArtifactsConfig`](crate::artifacts::ArtifactsConfig)
+    /// opens: `--github-artifacts-root` is an alias of `--artifacts-root`, and
+    /// both read `AETHER_ARTIFACTS_ROOT`. [`BloomeryEnv::resolve`](super::BloomeryEnv::resolve)
+    /// collapses the two overlays onto one path so the artifacts capability and
+    /// every direct reader cannot open different stores from one command line.
+    /// A private knob would let a deployment configure one and not the other,
+    /// and the failure is silent: study records land in a directory nothing
+    /// else reads while the index rows point at them from the journal.
     #[config(env = "AETHER_ARTIFACTS_ROOT")]
     pub artifacts_root: Option<String>,
     /// Who this coordinator runs on behalf of — the name a candidate capture is
