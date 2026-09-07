@@ -65,8 +65,6 @@ use super::ExecutorReactorCapability;
 use crate::artifacts::{ArtifactsCapabilityState, PutResult, resolve_root};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::ExecutorShell;
-#[cfg(test)]
-use crate::bloomery::GithubConnectionConfig;
 use crate::bloomery::dispatch_model;
 use crate::bloomery::executor::OutstandingDispatch;
 use crate::bloomery::intake::{
@@ -2374,31 +2372,6 @@ fn resolve_capture_commit(
             None
         }
     }
-}
-
-/// Whether the reactor has no backend to mount for this pair of configs —
-/// GitHub unconfigured *and* the local lane disabled (#4626). Unconfigured alone
-/// is not enough: the local backend needs no credential, so it still dispatches
-/// every lane routed to it.
-///
-/// A `#[cfg(test)]` **mirror** of the expression `actor_setups` mounts by, so
-/// the mount decision is assertable without building a `NativeInitCtx`. Being a
-/// copy rather than the production predicate is its standing weakness: it can
-/// drift, and it had. `actor_setups` already reads a selected fixture (#4732) as
-/// a configured backend — the in-memory double answers every dispatch and
-/// artifact call even though it names no token, owner, or repo — while this copy
-/// still consulted the missing connection knobs alone. The two therefore
-/// disagreed on exactly the configuration the in-process scenarios boot (#4711):
-/// a fixture with the local lane off.
-///
-/// Only the mirror was wrong. No binary mounts on this expression, so nothing
-/// was ever silently disabled in a shipping coordinator; what the repair fixes
-/// is a test that would have vouched for the wrong answer, and
-/// `a_selected_fixture_mounts_even_with_the_local_lane_off` pins the copy back
-/// against `actor_setups`.
-#[cfg(test)]
-fn is_disabled_mount(connection: &GithubConnectionConfig, coordinator: &CoordinatorConfig) -> bool {
-    !connection.uses_fixture() && !connection.missing_connection_knobs().is_empty() && !coordinator.local_lane_enabled
 }
 
 /// The restart recovery set (issue #3641): one [`WorkHandle`] per nonce still
