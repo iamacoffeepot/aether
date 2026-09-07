@@ -2212,6 +2212,7 @@ mod tests {
             fill: Some(Rgba::new(1.0, 1.0, 1.0, alpha)),
             stroke: None,
             shadow: None,
+            texture: None,
             clip,
         };
         let textured = |alpha: f32| WidgetDrawItem::TexturedQuad {
