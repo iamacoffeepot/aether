@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest};
 use crate::ids::{KeyId, StageId};
-use crate::sign::{AuthorityDoor, KeyProvider, SignatureEnvelope, authorization_message, sign_authorization};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::sign::sign_authorization;
+use crate::sign::{AuthorityDoor, KeyProvider, SignatureEnvelope, authorization_message};
 
 /// An artifact carrying words plus exactly one provenance claim.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]

@@ -109,6 +109,9 @@ pub(super) fn reduce_composition_narrowed(
 
     let cursor = record.progress.get(&workpiece).copied();
     if cursor.is_some_and(|progress| progress.candidate.is_some_and(|current| current.tree == tree)) {
+        // The second verdict is real and is journaled; the snapshot still
+        // records this member as waiting. A second dispatch would set two
+        // lanes on one seam.
         return Decisions { outcome: Outcome::CompositionRepairAlreadyInFlight { bloom: *bloom, workpiece }, effects };
     }
 

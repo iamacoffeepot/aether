@@ -960,7 +960,11 @@ fn neutralize_hooks(worktree_dir: &Path) -> Result<(), LocalExecutorError> {
 mod tests {
     use std::fs;
     use std::io;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use std::ops::{Deref, DerefMut};
     use std::path::{Path, PathBuf};
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use std::process::Child;
     use std::process::Command;
     #[cfg(target_os = "linux")]
     use std::process::Stdio;
@@ -1690,10 +1694,45 @@ mod tests {
         assert_eq!(decode_object_hex(&"a".repeat(24)).unwrap().as_bytes().len(), 12, "another even length passes too");
     }
 
-    // Live identity observation reads `/proc/<pid>/stat`. A host without that
-    // filesystem cannot record pgid, so this tripwire is Linux-only — the same
-    // bound as `ProcessIdentity::observe`.
-    #[cfg(target_os = "linux")]
+    // Live identity observation on Linux and macOS. Guard the child before
+    // `observe` so a failed expect still reaps.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    struct OwnedChild(Option<Child>);
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    impl OwnedChild {
+        fn hold(child: Child) -> Self {
+            Self(Some(child))
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    impl Deref for OwnedChild {
+        type Target = Child;
+
+        fn deref(&self) -> &Child {
+            self.0.as_ref().expect("the guard still owns the child")
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    impl DerefMut for OwnedChild {
+        fn deref_mut(&mut self) -> &mut Child {
+            self.0.as_mut().expect("the guard still owns the child")
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn spawn_isolated_makes_the_child_its_own_process_group_leader() {
         // Tripwire: a re-attached kill signals the group. If spawn forgets
@@ -1701,7 +1740,8 @@ mod tests {
         // the recorded pgid is not a group this process can isolate —
         // grandchildren survive the head's death, which is the expensive half
         // of a leaked lane.
-        let mut child = super::spawn_isolated(Command::new("sleep").arg("30")).unwrap();
+        let spawned = super::spawn_isolated(Command::new("sleep").arg("30")).unwrap();
+        let mut child = OwnedChild::hold(spawned);
         let identity = super::super::identity::ProcessIdentity::observe(child.id()).expect("the child is live");
         assert_eq!(identity.pid, child.id());
         assert_eq!(identity.pgid, child.id(), "process_group(0) makes the child its own group leader");
@@ -1717,8 +1757,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     impl Drop for GroupGuard {
         fn drop(&mut self) {
+            let Ok(pid) = super::super::identity::signed_pgid(self.0) else {
+                return;
+            };
             let _ = Command::new("kill")
-                .args(["-KILL", "--", &format!("-{}", self.0)])
+                .args(super::super::identity::kill_group_args("KILL", pid))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();

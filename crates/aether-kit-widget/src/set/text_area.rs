@@ -354,6 +354,24 @@ impl WidgetDefaults for TextAreaWidget {
         self.preferred_x_pixels = None;
         self.edit.clear_composition();
     }
+
+    //noinspection DuplicatedCode -- actor macros require one handler per type; the implementation is shared.
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
+    }
+
+    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, gained: FocusGained) {
+        self.state.gain_focus(gained.keyboard);
+        self.reconcile_scroll();
+    }
+
+    fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
+        self.state.lose_focus();
+        self.dragging = false;
+        self.paste_pending = false;
+        self.preferred_x_pixels = None;
+        self.edit.clear_composition();
+    }
 }
 
 /// Multiline text area with a fixed whole-line viewport.
@@ -408,27 +426,6 @@ impl WasmActor for TextAreaWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
-    }
-
-    #[handler::single]
-    //noinspection DuplicatedCode -- actor macros require one handler per type; the implementation is shared.
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
-    }
-
-    #[handler::single]
-    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, gained: FocusGained) {
-        self.state.gain_focus(gained.keyboard);
-        self.reconcile_scroll();
-    }
-
-    #[handler::single]
-    fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
-        self.state.lose_focus();
-        self.dragging = false;
-        self.paste_pending = false;
-        self.preferred_x_pixels = None;
-        self.edit.clear_composition();
     }
 
     #[handler::single]

@@ -120,6 +120,11 @@ impl WidgetDefaults for TextFieldWidget {
         self.paste_pending = false;
         self.edit.clear_composition();
     }
+
+    /// Restyle: adopt the fanned theme and request metrics for its font.
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
+    }
 }
 
 /// A text-field widget. Spawned inline by a panel root with a
@@ -171,12 +176,6 @@ impl WasmActor for TextFieldWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
-    }
-
-    /// Restyle: adopt the fanned theme and request metrics for its font.
-    #[handler::single]
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
     }
 
     /// Insert committed text over the active selection. `TextInput` is already

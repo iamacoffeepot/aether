@@ -121,6 +121,7 @@ fn local_dispatch_ctx_never_reads_host_reply_correlation() {
     let registry = Registry::new();
     let ctx: WasmCtx<'_, Manual> = WasmCtx::__new_local_dispatch(0x10, &registry, NO_INBOUND_SOURCE);
     assert_eq!(ctx.in_reply_to(), None, "cluster-drained dispatches carry no host correlation");
+    assert_eq!(ctx.context_kind(), None, "cluster-drained dispatches expose no request-context kind");
 }
 
 /// ADR-0134: `emit` on a `Multi<K>` ctx routes a detached mail at the

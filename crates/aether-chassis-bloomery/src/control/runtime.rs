@@ -2039,20 +2039,30 @@ fn observation_already_admitted(snapshot: &Snapshot, head: &Digest) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use aether_actor::Manual;
     use aether_bloomery::testing::digest;
     use aether_bloomery::{
-        BloomDraft, BloomId, BloomRecord, BloomStatus, CandidateRef, ConfigRegistry, Decisions, Digest, Event,
-        Evidence, EvidenceKind, Fact, HostFaultHold, IdempotencyKey, Membership, OperatorRepair, OperatorRepairError,
-        OutboxPayload, Outcome, QueryResult, ResolvedConfigs, Snapshot, SpendWindow, StudyCost, StudyRecord, Topic,
-        ViewDocument, WorkpieceId, decode_row, reduce,
+        Admit, BloomDraft, BloomId, BloomRecord, BloomStatus, CandidateRef, ClaimResult, ClaimSeal, Commit,
+        ConfigRegistry, Decision, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, HostFaultHold,
+        IdempotencyKey, Membership, OperatorRepair, OperatorRepairError, OutboxPayload, Outcome, QueryResult,
+        ResolvedConfigs, Snapshot, SpendWindow, StudyCost, StudyRecord, Topic, ViewDocument, WorkpieceId, decode_row,
+        reduce,
     };
-    use aether_data::wire::to_vec;
+    use aether_data::wire::{from_bytes, to_vec};
+    use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr};
+    use aether_substrate::actor::native::ctx::NativeCtx;
+    use aether_substrate::mail::outbound::EgressEvent;
+    use aether_substrate::testing::{manual_dispatch_ctx, test_mailer_and_rx};
+    use aether_substrate::{Dispatch, NativeBinding};
 
     use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::mpsc::Receiver;
 
     use super::{
-        load_study_records, lowercase_hex, observation_already_admitted, observe_mainline_key, owed_host_fault_resumes,
-        rejected_repair_key, release_response, resume_host_fault_key, retag_rejected_repair, view_document_outbox,
+        ControlCore, ControlCoreState, load_study_records, lowercase_hex, observation_already_admitted,
+        observe_mainline_key, owed_host_fault_resumes, rejected_repair_key, release_response, resume_host_fault_key,
+        retag_rejected_repair, view_document_outbox,
     };
     use crate::artifacts::{ArtifactsCapabilityState, PutResult};
 
@@ -2352,29 +2362,104 @@ mod tests {
         )
     }
 
+    /// Cross-cap sends to unregistered store/source mailboxes bubble to the
+    /// loopback outbound after the dispatch ctx flushes.
+    fn unresolved_sends(rx: &Receiver<EgressEvent>) -> Vec<(KindId, u64, Vec<u8>)> {
+        let mut sends = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let EgressEvent::UnresolvedMail { kind_id, correlation_id, payload, .. } = event {
+                sends.push((kind_id, correlation_id, payload));
+            }
+        }
+        sends
+    }
+
     #[test]
     fn a_sealed_member_publishes_a_view_document_naming_it() {
         // Tripwire: the topic had a drainer, a renderer and no producer, so a
-        // member's issue was silent from seal to land.
-        let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
-        let event = seal_event("seal", "issue-5381");
-        let (releases, claims, mut outbox) =
-            super::project(&reduce(&snapshot, &event, &ResolvedConfigs::default(), &SpendWindow::default()))
-                .expect("a seal projects");
-        let (document, _, payload) = admit_view(&snapshot, &event, None).expect("a seal enqueues a view row");
-        outbox.push(payload);
+        // member's issue was silent from seal to land. The commit ControlCore
+        // sends is the producer: a test that builds that row itself cannot
+        // catch a missing insertion.
+        let (mailer, rx) = test_mailer_and_rx();
+        let mailbox = MailboxId(0);
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), mailbox));
+        let mut control = ControlCoreState::inert(mailer);
+        control.snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
 
-        assert!(releases.is_empty());
-        assert!(!claims.is_empty(), "a seal still claims membership");
+        let event = seal_event("seal", "issue-5381");
+        {
+            let mut ctx = manual_dispatch_ctx::<ControlCore>(&binding, Source::NONE, mailbox);
+            assert!(
+                ControlCore::dispatch(
+                    &mut control,
+                    &mut ctx,
+                    Admit::ID,
+                    &Admit { event: to_vec(&event).expect("a reducer event encodes") }.encode_into_bytes(),
+                )
+                .is_some(),
+                "control must handle Admit",
+            );
+        }
+
+        let after_admit = unresolved_sends(&rx);
         assert!(
-            outbox.iter().any(|row| row.topic == Topic::ViewDocument.as_str()),
-            "the commit's outbox carries the view document the mirror already knows how to drain",
+            after_admit.iter().all(|(kind, _, _)| *kind != Commit::ID),
+            "a seal must not commit until the source claim succeeds",
         );
+        let claim_correlation = after_admit
+            .into_iter()
+            .find_map(|(kind, correlation, _)| (kind == ClaimSeal::ID).then_some(correlation))
+            .expect("an accepted seal claims membership refs before committing");
+
+        {
+            let mut ctx = NativeCtx::<Manual, ControlCore>::new_for_actor(
+                &binding,
+                Source::with_correlation(SourceAddr::None, claim_correlation),
+                MailId::NONE,
+                MailId::NONE,
+            );
+            assert!(
+                ControlCore::dispatch(
+                    &mut control,
+                    &mut ctx,
+                    ClaimResult::ID,
+                    &ClaimResult::Acquired.encode_into_bytes(),
+                )
+                .is_some(),
+                "control must handle the source claim reply",
+            );
+        }
+
+        let commit = unresolved_sends(&rx)
+            .into_iter()
+            .find_map(|(kind, _, payload)| {
+                (kind == Commit::ID).then(|| from_bytes::<Commit>(&payload).expect("the store commit decodes"))
+            })
+            .expect("winning the source claim emits the store commit");
+
+        assert_eq!(commit.idempotency_key, event.idempotency_key.0);
+        assert_eq!(from_bytes::<Event>(&commit.event).expect("the committed event decodes"), event);
+
+        let decisions = from_bytes::<Decisions>(&commit.decisions).expect("the committed decisions decode");
+        assert!(matches!(decisions.outcome, Outcome::Sealed(_)), "the committed outcome is the accepted seal");
         assert!(
-            document
-                .blooms
-                .iter()
-                .any(|bloom| { bloom.members.iter().any(|member| member.workpiece.0 == "issue-5381") }),
+            decisions.effects.iter().any(
+                |effect| matches!(effect, Decision::ClaimMembership { workpiece, .. } if workpiece.0 == "issue-5381")
+            ),
+            "the committed decisions still claim the sealed member",
+        );
+        assert!(commit.releases.is_empty());
+        assert!(
+            commit.claims.iter().any(|claim| claim.workpiece == "issue-5381"),
+            "the commit preserves membership claims",
+        );
+
+        let views: Vec<_> = commit.outbox.iter().filter(|row| row.topic == Topic::ViewDocument.as_str()).collect();
+        assert_eq!(views.len(), 1, "the commit carries exactly one view-document row");
+        let document = decode_row::<ViewDocument>(&views[0].payload, views[0].payload_schema.as_deref())
+            .expect("the view payload decodes");
+        assert!(
+            document.blooms.iter().any(|bloom| bloom.members.iter().any(|member| member.workpiece.0 == "issue-5381")),
             "the published document names the sealed member: {document:?}",
         );
     }

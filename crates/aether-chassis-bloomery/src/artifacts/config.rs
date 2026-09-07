@@ -9,7 +9,8 @@
 /// and their sidecars. A bare `Option<String>` (not a literal default) so an
 /// unset root resolves to a computed data-dir path at `init`
 /// ([`resolve_root`](super::runtime::resolve_root)); `--artifacts-root` /
-/// `AETHER_ARTIFACTS_ROOT` override it.
+/// `--github-artifacts-root` / `AETHER_ARTIFACTS_ROOT` override it. Both
+/// spellings resolve to this path.
 #[derive(Clone, Debug, Default, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_ARTIFACTS", cli_prefix = "artifacts")]
 pub struct ArtifactsConfig {

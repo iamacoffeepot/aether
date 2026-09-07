@@ -219,7 +219,7 @@ pub(super) fn reduce_aggregate_verify_completed(
     if record.status != BloomStatus::Sealed {
         return Decisions::rejected(Outcome::AggregateVerifyRejected(AggregateVerifyError::UnknownOrInactiveBloom));
     }
-    let Some(integration) = record.integration.clone() else {
+    let Some(integration) = record.integration.as_ref() else {
         return Decisions::rejected(Outcome::AggregateVerifyRejected(AggregateVerifyError::NoPendingIntegration));
     };
     // The verdict must bind the exact tree the held fold produced — a stale
@@ -257,7 +257,7 @@ pub(super) fn reduce_aggregate_verify_completed(
             return Decisions { outcome: Outcome::AggregateVerifyPassed { bloom: *bloom, rolls }, effects };
         }
 
-        let (resolved, resolution) = super::review::resolution_effects(record, *bloom, &integration);
+        let (resolved, resolution) = super::review::resolution_effects(record, *bloom, integration);
         effects.extend(resolution);
         return Decisions { outcome: Outcome::Resolved(resolved), effects };
     }

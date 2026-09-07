@@ -37,8 +37,12 @@
 //! has no GitHub home for are a second class of object (ADR-0149 2026-08-16
 //! amendment, derived from ADR-0199). Those create / find / update / close
 //! verbs live on [`CommissionProjectionApi`], and a title or body write
-//! addresses only a number recorded from this projector's own create (or
-//! found by its own marker after a crash between create and persist).
+//! addresses only a number recorded from this projector's own create.
+//! A plaintext marker is not ownership — not on a human issue, not on an
+//! unrelated Bot issue, and not on an issue later edited to carry the marker,
+//! including one authored by the same identity the projector authenticates as.
+//! A crash between create and persist may leave an orphan replica; the next
+//! projection mints a sibling rather than guessing.
 //!
 //! The projector reads only its own markers; free-form platform content is
 //! never interpreted as intent. GitHub edits of a replica are overwritten
@@ -137,10 +141,15 @@ impl<C: GithubApi + CommissionProjectionApi> GithubProjection<C> {
     /// title and body. `Ok(None)` is that case — this projector owns no
     /// issue for it. Otherwise title and body are written only to
     /// `projection.recorded_issue` — the store row the reactor overlays at
-    /// drain — or, when that is still absent, to a number
-    /// [`CommissionProjectionApi::find_issue`] returns for this commission's
-    /// marker. Search is advisory crash-recovery after a create that has
-    /// not yet been persisted; it is not the create-vs-update authority.
+    /// drain, originating from a successful create. That persisted number is
+    /// the only ownership authority and is never discarded.
+    ///
+    /// When it is absent, this path creates a new replica rather than adopting
+    /// a marker match. A copied marker on a human issue, an unrelated Bot
+    /// issue, or an issue the projector's own identity authored is not a
+    /// creation receipt. A crash between create and persist may therefore
+    /// leave an orphan and mint a sibling on the next drain; data preservation
+    /// wins over destructive heuristic recovery.
     pub fn project_owned_commission(&self, projection: &CommissionProjection) -> Result<Option<u64>, GithubError> {
         let key = commission_key(&projection.workpiece.0);
         let digest = content_digest("bloomery.commission", projection);
@@ -151,28 +160,11 @@ impl<C: GithubApi + CommissionProjectionApi> GithubProjection<C> {
         }
 
         let title = render_commission_title(projection);
-        let body = format!(
-            "{}\n\n{}",
-            render_commission_body(projection),
-            render_marker(&Marker { key: key.clone(), digest })
-        );
+        let body = format!("{}\n\n{}", render_commission_body(projection), render_marker(&Marker { key, digest }));
 
-        // The recorded number is the authority. Search recovers a create that
-        // has not been persisted yet; a lagging index must not mint a sibling
-        // when the store already owns a number.
-        let owned = match projection.recorded_issue {
-            Some(number) => Some(number),
-            None => self.client.find_issue(&key)?.map(|issue| issue.number),
-        };
-
-        if let Some(number) = owned {
-            if let Some(existing) = self.client.find_issue(&key)?
-                && existing.number == number
-                && existing.marker.as_ref().map(|marker| marker.digest) == Some(digest)
-            {
-                self.close_if_terminal(number, &projection.status)?;
-                return Ok(Some(number));
-            }
+        // Only a durable recorded_issue from this projector's own create is
+        // ownership. Marker search is not consulted: a match is not a receipt.
+        if let Some(number) = projection.recorded_issue {
             self.client.update_issue(number, &title, &body)?;
             self.close_if_terminal(number, &projection.status)?;
             Ok(Some(number))
@@ -184,18 +176,14 @@ impl<C: GithubApi + CommissionProjectionApi> GithubProjection<C> {
     }
 
     /// Close a replica this projector opened for a commission that now lives
-    /// as a comment on `source`. A projector that never created one does
-    /// nothing. Both the retirement comment and the close are idempotent.
+    /// as a comment on `source`. A projector that never recorded a create
+    /// leaves unknown issues alone — a marker match is not a replica to
+    /// retire. Both the retirement comment and the close are idempotent.
     fn retire_replica(&self, projection: &CommissionProjection, source: u64) -> Result<(), GithubError> {
-        let key = commission_key(&projection.workpiece.0);
-        let stray = match projection.recorded_issue {
-            Some(number) if number != source => Some(number),
-            Some(_) => None,
-            None => self.client.find_issue(&key)?.map(|issue| issue.number).filter(|&number| number != source),
-        };
-        let Some(replica) = stray else {
+        let Some(replica) = projection.recorded_issue.filter(|&number| number != source) else {
             return Ok(());
         };
+        let key = commission_key(&projection.workpiece.0);
         let retired_key = format!("{key}:retired");
         let body = format!("This replica is retired. The commission is tracked on #{source}.");
         self.comment_on(
@@ -559,9 +547,40 @@ fn render_receipt_body(receipt: &LandingReceipt) -> String {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery::WorkpieceId;
+    use aether_bloomery::{CommissionProjection, Digest, WorkpieceId};
 
-    use super::addressed_object;
+    use super::{GithubProjection, addressed_object, commission_key};
+    use crate::client::{CommissionProjectionApi, NewIssue};
+    use crate::landing::commission_floor_title;
+    use crate::marker::{Marker, render_marker};
+    use crate::testing::FakeGithub;
+
+    fn digest(seed: u8) -> Digest {
+        Digest::from_bytes([seed; 32])
+    }
+
+    fn commission(workpiece: &str, recorded_issue: Option<u64>) -> CommissionProjection {
+        CommissionProjection {
+            workpiece: WorkpieceId(workpiece.to_owned()),
+            intent: digest(1),
+            scope_revision: Some(digest(2)),
+            approval_signer: Some("operator".to_owned()),
+            approval_digest: Some(digest(3)),
+            status: "open".to_owned(),
+            recorded_issue,
+            title: String::new(),
+        }
+    }
+
+    fn copied_marker_body(workpiece: &str, preamble: &str) -> String {
+        format!("{preamble}\n\n{}", render_marker(&Marker { key: commission_key(workpiece), digest: digest(9) }))
+    }
+
+    fn assert_untouched(projection: &GithubProjection<FakeGithub>, number: u64, title: &str, body: &str) {
+        assert_eq!(projection.client().issue_title(number).as_deref(), Some(title), "title of #{number}");
+        assert_eq!(projection.client().issue_body(number).as_deref(), Some(body), "body of #{number}");
+        assert_eq!(projection.client().issue_is_closed(number), Some(false), "#{number} must stay open");
+    }
 
     #[test]
     fn only_a_canonical_issue_number_addresses_an_object() {
@@ -584,5 +603,147 @@ mod tests {
         assert_eq!(addressed("issue-abc"), None);
         assert_eq!(addressed("reactor-core"), None, "a local-lane workpiece has no GitHub home");
         assert_eq!(addressed("issue-99999999999999999999"), None, "a number past u64 addresses nothing");
+    }
+
+    #[test]
+    fn a_copied_marker_on_a_foreign_human_issue_is_not_adopted() {
+        // A person pastes the projection marker onto an issue they authored.
+        // Without a recorded create, that match must not update or close it.
+        let planted = 11;
+        let title = "human title";
+        let body = copied_marker_body("wp-1", "a person wrote this");
+        let fake = FakeGithub::new();
+        fake.seed_issue_with_title(planted, title, &body);
+        let projection = GithubProjection::new(fake);
+
+        let owned = projection.project_owned_commission(&commission("wp-1", None)).expect("project");
+
+        assert!(owned.is_some(), "a commission with no GitHub home still gets its own replica");
+        assert_ne!(owned, Some(planted), "a copied marker is not a creation receipt");
+        assert_untouched(&projection, planted, title, &body);
+        assert_eq!(projection.client().updated_issue_count(), 0);
+        assert_eq!(projection.client().issue_is_closed(planted), Some(false));
+    }
+
+    #[test]
+    fn a_copied_marker_on_a_foreign_bot_issue_is_not_adopted() {
+        // An unrelated Bot issue, or a Bot issue later edited to carry this
+        // commission's marker, is still not this projector's recorded create.
+        let planted = 12;
+        let title = "unrelated bot replica";
+        let body = copied_marker_body("wp-1", "**Bloomery replica** — do not edit this issue.");
+        let fake = FakeGithub::new();
+        fake.seed_issue_with_title(planted, title, &body);
+        let projection = GithubProjection::new(fake);
+
+        let owned = projection.project_owned_commission(&commission("wp-1", None)).expect("project");
+
+        assert!(owned.is_some(), "a commission with no GitHub home still gets its own replica");
+        assert_ne!(owned, Some(planted), "Bot authorship is not a creation receipt");
+        assert_untouched(&projection, planted, title, &body);
+        assert_eq!(projection.client().updated_issue_count(), 0);
+        assert_eq!(projection.client().issue_is_closed(planted), Some(false));
+    }
+
+    #[test]
+    fn a_copied_marker_on_the_projector_identity_is_not_adopted_without_a_receipt() {
+        // Same authenticated identity as the projector, marker present, no
+        // durable recorded_issue. Crash-before-receipt may mint a sibling;
+        // the unmarked-as-recorded issue is not closed or overwritten.
+        let fake = FakeGithub::new();
+        let projection = GithubProjection::new(fake);
+        let title = "same-identity copy";
+        let body = copied_marker_body("wp-1", "copied onto an issue this identity opened");
+        let planted = CommissionProjectionApi::create_issue(
+            projection.client(),
+            &NewIssue { title: title.into(), body: body.clone() },
+        )
+        .expect("plant")
+        .number;
+
+        let owned = projection.project_owned_commission(&commission("wp-1", None)).expect("project");
+
+        assert!(owned.is_some(), "crash-before-receipt may mint a sibling replica");
+        assert_ne!(owned, Some(planted), "same-identity create without a recorded receipt is not owned");
+        assert_untouched(&projection, planted, title, &body);
+        assert_eq!(projection.client().updated_issue_count(), 0);
+        assert_eq!(projection.client().issue_is_closed(planted), Some(false));
+    }
+
+    #[test]
+    fn a_landed_projection_does_not_close_a_marker_match_without_a_receipt() {
+        let planted = 13;
+        let title = "human landed bait";
+        let body = copied_marker_body("wp-1", "leave me open");
+        let fake = FakeGithub::new();
+        fake.seed_issue_with_title(planted, title, &body);
+        let projection = GithubProjection::new(fake);
+        let mut landed = commission("wp-1", None);
+        landed.status = "landed".to_owned();
+
+        let owned = projection.project_owned_commission(&landed).expect("project");
+
+        assert_ne!(owned, Some(planted));
+        assert_eq!(projection.client().issue_is_closed(planted), Some(false), "the bait stays open");
+        assert_untouched(&projection, planted, title, &body);
+    }
+
+    #[test]
+    fn retire_replica_without_a_receipt_leaves_unknown_issues_alone() {
+        let source = 42;
+        let stray = 99;
+        let title = "forged replica";
+        let body = copied_marker_body("issue-42", "copied marker");
+        let fake = FakeGithub::new();
+        fake.seed_issue(source, "human source");
+        fake.seed_issue_with_title(stray, title, &body);
+        let projection = GithubProjection::new(fake);
+
+        projection.project_owned_commission(&commission("issue-42", None)).expect("comment on the named source");
+
+        assert_untouched(&projection, stray, title, &body);
+        assert_eq!(projection.client().issue_is_closed(stray), Some(false));
+        assert_eq!(projection.client().updated_issue_count(), 0);
+        assert_eq!(projection.client().comments_on(source).len(), 1, "the source still carries the commission");
+    }
+
+    #[test]
+    fn a_recorded_own_creation_still_reconciles_and_closes() {
+        let projection = GithubProjection::new(FakeGithub::new());
+        let number =
+            projection.project_owned_commission(&commission("wp-1", None)).expect("create").expect("owns a replica");
+        projection.client().edit_issue(number, "a person renamed this", "a person rewrote the body");
+
+        let recorded = projection.project_owned_commission(&commission("wp-1", Some(number))).expect("overwrite");
+        assert_eq!(recorded, Some(number), "the recorded create is still the replica");
+        let title = projection.client().issue_title(number).expect("the replica still exists");
+        let body = projection.client().issue_body(number).expect("the replica still exists");
+        assert_eq!(title, commission_floor_title("wp-1"));
+        assert!(body.contains("do not edit"), "the replica notice is restored: {body}");
+        assert!(!body.contains("a person rewrote the body"), "the human body is not kept: {body}");
+
+        let mut landed = commission("wp-1", Some(number));
+        landed.status = "landed".to_owned();
+        projection.project_owned_commission(&landed).expect("close");
+        assert_eq!(projection.client().issue_is_closed(number), Some(true), "terminal close of a recorded replica");
+    }
+
+    #[test]
+    fn a_recorded_stray_replica_still_retires_onto_its_source() {
+        let fake = FakeGithub::new();
+        fake.seed_issue(42, "human");
+        let projection = GithubProjection::new(fake);
+        let replica = projection
+            .project_owned_commission(&commission("wp-before-home", None))
+            .expect("create stray")
+            .expect("owns a replica");
+
+        projection
+            .project_owned_commission(&commission("issue-42", Some(replica)))
+            .expect("retire onto the named source");
+
+        assert_eq!(projection.client().issue_is_closed(replica), Some(true), "the recorded stray closes");
+        assert_eq!(projection.client().issue_is_closed(42), Some(false), "the source stays open");
+        assert_eq!(projection.client().comments_on(42).len(), 1, "the source carries the commission");
     }
 }
