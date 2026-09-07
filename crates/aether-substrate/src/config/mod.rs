@@ -80,6 +80,7 @@ mod known_keys;
 mod manifest;
 mod member;
 mod resolve;
+mod settlement;
 mod sources;
 #[cfg(test)]
 mod test_fixtures;
@@ -88,10 +89,15 @@ pub use dump::dump_config;
 pub use error::ConfigError;
 pub use knobs::{
     DEFAULT_REGISTRY_OWNER_QUEUE_CAPACITY, DEFAULT_REGISTRY_RELAY_QUEUE_CAPACITY, RegistryQueueCapacities,
-    RingCapacities, SchedulerTuning,
+    RingCapacities, SCHEDULER_TUNING_ENV_KEYS, SchedulerTuning,
 };
 pub use known_keys::{KnobKind, KnobRecord, KnownKeys, known_keys, validate_env};
 pub use manifest::ConfigManifest;
 pub use member::{ConfigMember, ConfigMemberRecord};
 pub use resolve::{FromArgvThenEnv, file_section, parse_csv_set};
+// The derive-emitted `SettlementConfigLayer` rides along for the chassis
+// config-dump registry (`chassis_known_keys`), which enumerates every knob's
+// `META`; the `SettlementOverlay` rides along so the chassis CLI roots can
+// flatten `--settlement-cap-secs` into `--help` (issue 3882).
+pub use settlement::{SettlementConfig, SettlementConfigLayer, SettlementOverlay};
 pub use sources::{ConfigProvenance, ConfigSources, StageArgv};

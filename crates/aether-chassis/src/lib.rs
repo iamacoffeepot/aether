@@ -39,8 +39,7 @@ pub mod window;
 
 pub use aether_substrate::chassis::{BuildProvenance, PreludeAction, PreludeFlags};
 pub use boot::{
-    RenderSizeConfig, build_provenance, chassis_residual_knobs, hub_residual_knobs, resolve_teardown_budget,
-    run_describe_prelude,
+    build_provenance, chassis_residual_knobs, hub_residual_knobs, resolve_teardown_budget, run_describe_prelude,
 };
 pub use tick::{DEFAULT_TICK_HZ, TickConfig, TickConfigLayer, TickOverlay, apply_manifest_tick_settings};
 pub use window::{

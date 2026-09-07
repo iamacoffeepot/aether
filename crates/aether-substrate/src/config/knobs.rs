@@ -148,6 +148,26 @@ pub struct SchedulerTuning {
     pub wake_cost_nanos: Option<u64>,
 }
 
+/// The nine `AETHER_*` keys that name a [`SchedulerTuning`] field, in field
+/// order. The perf lane reads them straight off its own process env (a
+/// `SubstrateHarness` cannot take the chassis config path — it resolves off a
+/// hermetic source stack, ADR-0156 §5), and the chassis declares the same set
+/// as `SchedulerTuningConfig` derive-`Config` fields. Named as a const here,
+/// beside the struct whose fields it spells, so the chassis can pin its
+/// declared set against it — the two spellings are what would otherwise drift
+/// apart (issue 4234).
+pub const SCHEDULER_TUNING_ENV_KEYS: [&str; 9] = [
+    "AETHER_SPIN_WINDOW_USEC",
+    "AETHER_LOCAL_STICKY_MAX",
+    "AETHER_LOCAL_TIME_BUDGET_US",
+    "AETHER_PEER_STEAL",
+    "AETHER_LOCAL_CHAIN_BACKSTOP",
+    "AETHER_HANDOFF_COST_NS",
+    "AETHER_BLOB_RECRUIT_MIN",
+    "AETHER_BLOB_RECRUIT_MAX",
+    "AETHER_WAKE_COST_NANOS",
+];
+
 impl Default for SchedulerTuning {
     fn default() -> Self {
         Self {

@@ -39,9 +39,6 @@ aether-process = { path = "../aether-process", features = ["runtime"] }
 aether-trace = { path = "../aether-trace", features = ["runtime"] }
 aether-fs = { path = "../aether-fs" }
 aether-inventory = { path = "../aether-inventory", features = ["runtime"] }
-# The settlement-patience config layer rides the harness crate; the
-# fleet-wide registry names its `META` like every other layer.
-aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }

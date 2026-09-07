@@ -21,7 +21,6 @@ use aether_audio::{SetMasterGain, SetMasterGainResult};
 use aether_clipboard::HeadlessClipboardCapability;
 use aether_component::ComponentHostParams;
 use aether_data::Kind;
-use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
 use aether_http::HttpServerCapability;
 use aether_kinds::Tick;
 use aether_lifecycle::LifecycleCapability;
@@ -30,6 +29,7 @@ use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{BootableChassis, composed};
 use aether_substrate::{Chassis, SubstrateBoot};
+use aether_substrate_harness_cap::UnsupportedSubstrateHarnessCapability;
 use aether_window::HeadlessWindowCapability;
 
 use aether_chassis::{TickConfig, apply_manifest_tick_settings};

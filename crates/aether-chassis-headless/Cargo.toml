@@ -29,7 +29,7 @@ aether-substrate = { path = "../aether-substrate" }
 aether-render = { path = "../aether-render", features = ["runtime"] }
 aether-window = { path = "../aether-window", features = ["runtime"] }
 aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
-aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-substrate-harness-cap = { path = "../aether-substrate-harness-cap" }
 aether-lifecycle = { path = "../aether-lifecycle" }
 aether-component = { path = "../aether-component" }
 aether-http = { path = "../aether-http" }

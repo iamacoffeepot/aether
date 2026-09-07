@@ -58,6 +58,7 @@ compares these with native capabilities.
 | `aether-anthropic` | the content-gen provider component (loaded on demand, not a chassis fixture), a self-contained guest carrying its own pure DTO/string helpers |
 | `aether-chassis` | shared chassis composition: boot fragments, config registry, CLI roots, autoload, boot-manifest and package-depot formats |
 | `aether-chassis-desktop` / `aether-chassis-headless` / `aether-chassis-hub` / `aether-chassis-harness` / `aether-chassis-bloomery` | the five checked-in chassis binaries; Bloomery is the dedicated application profile and can run standalone or through the hub launch path |
+| `aether-substrate-harness-cap` | the `aether.substrate_harness` mailbox: the harness-chassis drive and the fail-fast stub every other chassis composes |
 | `aether-harness-substrate` | composable in-process substrate harness with deterministic mail, lifecycle, and settlement control |
 | `aether-harness-substrate-capture` | opt-in render/GPU capture and visual comparison support layered onto the core substrate harness |
 | `aether-harness-fleet` | real-process hub/RPC/headless fleet scenarios over raw framed calls |
