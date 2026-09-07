@@ -124,11 +124,49 @@ Keep these operations distinct:
 - **package**: produce a shippable package depot;
 - **release workflow**: the checked-in manual workflow currently builds a
   Windows `loco-motion` package artifact — a zip of the depot;
-- **version/tag/publication policy**: not comprehensively specified today.
+- **bump**: move the workspace version and re-lock — see below;
+- **version/tag/publication policy**: only the bump is specified today.
 
 ADR-0092 proposes a release-branch workflow but remains Proposed; it is not
 current repository policy. Contributor lifecycle skills do not publish a
 software release.
+
+## Bumping the workspace version
+
+Every crate takes its version from `[workspace.package] version` in the root
+`Cargo.toml` — no crate carries a literal, and no doc, script, or workflow
+spells one either. The ten `env!("CARGO_PKG_VERSION")` sites read it at compile
+time. So the bump is one edit and the lockfiles that edit invalidates:
+
+```sh
+cargo xtask bump 0.4.0-alpha --dry-run   # print the files and the commands
+cargo xtask bump 0.4.0-alpha             # write them
+```
+
+The command refuses an argument semver will not parse, and refuses a version
+the workspace is already on.
+
+There are **two** lockfiles. `fuzz` is a `[workspace] exclude` entry with its
+own standalone workspace and its own `Cargo.lock`, which pins `aether-codec`
+and `aether-data` by version through path dependencies — a root `cargo update`
+never opens it, and skipping it leaves the fuzz build resolving against a
+version that no longer exists. `bump` finds it by reading the `exclude` list
+and re-locking every excluded crate that carries a lockfile, so a future
+excluded crate is covered without editing the command. Re-locking `fuzz` needs
+network access: its lockfile lags the workspace, so the resolve pulls crates
+the offline cache may not hold.
+
+The cut is four steps:
+
+1. **Bump.** `cargo xtask bump <version>`, dry-run first.
+2. **Read the three files it touched** — `Cargo.toml`, `Cargo.lock`,
+   `fuzz/Cargo.lock`. The two lockfiles should show the workspace crates moving
+   to the new version; `fuzz/Cargo.lock` may also carry registry churn it had
+   accumulated while nothing re-locked it.
+3. **Land the bump as its own PR** (`chore(release): …`) through the ordinary
+   flow. Nothing else rides that PR, so the version move is one commit.
+4. **Tag the merged commit** and run the `Release` workflow against it for the
+   hand-out artifact.
 
 ## Verification and cleanup
 
@@ -148,6 +186,7 @@ Validate a change at the boundary it touches:
 ## Implementation routes
 
 - Discovery and commands: `xtask/src/{main,inventory}.rs`
+- Version bump + lockfile regeneration: `xtask/src/bump.rs`
 - Autoload: `crates/aether-chassis/src/autoload.rs`
 - Boot manifest schema: `crates/aether-chassis/src/boot_manifest.rs`
 - Package manifest + store-backed boot: `crates/aether-chassis/src/package.rs`

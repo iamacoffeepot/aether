@@ -3,6 +3,12 @@
 - **Status:** Proposed
 - **Date:** 2026-06-03
 
+## Status note (2026-09)
+
+None of this has been built. There is no `release/<version>` branch on the remote. `.claude/release-state.json` does not exist, tracked or otherwise, and neither do the `/release-init` and `/bounce` skills that were to read it. `allow_rebase_merge` is enabled on the repository, but nothing uses it — `main` still lands by squash-merge. 0.4 finishes the way every release so far has: on `main`, one PR at a time, with the per-PR draft read as the review gate. Read the decision below as a proposal, not as a description of how the repository works — the concrete bump procedure that *is* current lives in [Distribution and packaging](../guide/building/distribution.md#bumping-the-workspace-version).
+
+The release-branch model was intended to activate at 0.5. This ADR is to be ratified or superseded at that point; until an owner records that decision, the status line above stands as written.
+
 ## Context
 
 Releases are scoped on GitHub Project boards (ADR-era release tooling: `/release-init`, `/scope`, `/approve`, `/implement`, `/bounce`). The active release is named by `.claude/release-state.json` — a **local, gitignored** file holding `active_project`, `release_version`, and a field/option-ID cache for the board. Every release-flow skill reads it to know which board to drive.

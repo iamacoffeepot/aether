@@ -26,6 +26,7 @@
 
 mod affected;
 mod bloom;
+mod bump;
 mod cargo;
 mod dev_component;
 mod dist;
@@ -41,6 +42,7 @@ use clap::{Parser, Subcommand};
 
 use crate::affected::AffectedArgs;
 use crate::bloom::BloomArgs;
+use crate::bump::BumpArgs;
 use crate::dev_component::DevComponentArgs;
 use crate::dist::DistArgs;
 use crate::fixtures::FixturesArgs;
@@ -90,6 +92,10 @@ enum Commands {
     /// Append one field write to a `scope.fill` run's call log. The value
     /// arrives by file so multi-paragraph prose survives the transport.
     Scope(ScopeArgs),
+    /// Move `[workspace.package] version` and re-lock every workspace the
+    /// move invalidates — the root plus each excluded crate carrying its
+    /// own lockfile (issue 5718).
+    Bump(BumpArgs),
 }
 
 fn main() -> Result<()> {
@@ -104,5 +110,6 @@ fn main() -> Result<()> {
         Commands::Bloom(args) => bloom::run(&args),
         Commands::Symbols(args) => symbols::run(&args),
         Commands::Scope(args) => scope::run(&args),
+        Commands::Bump(args) => bump::run(&args),
     }
 }
