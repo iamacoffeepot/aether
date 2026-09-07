@@ -76,8 +76,13 @@ widget sends can misreport it.
   re-sendable mail: send a widget its config kind again to reconfigure it in
   place (a slider's range, a field's cap, a button's label).
 
-  **A re-sent config never moves the value.** Every `initial*` field is a
-  *seed*: the widget reads it at `init` and ignores it on every later config.
+  **A re-sent config never moves a value the widget already holds.** Every
+  `initial` field is a *seed*: the widget reads it at `init` and ignores it on
+  every later config — with one extension, that a seed still seeds what holds
+  *nothing*. The two widgets whose selection may be absent (`VirtualListConfig`,
+  `DropdownConfig`) take their seed on the config that first gives them a vector
+  to choose from, so "here are the rows, start on the first" is still one mail,
+  and every later refresh of those rows leaves the reader's choice alone.
   A reconfigure updates presentation, bounds, and options, then re-clamps what
   the widget already holds into them — a shorter option vector pulls a
   selection back to its last entry, narrower numeric bounds pull the committed

@@ -815,10 +815,14 @@ pub struct SetToggle {
 /// data-down mail: sending a widget its `Config` kind again reconfigures it in
 /// place.
 ///
-/// **A re-sent config never moves the value.** Every `initial*` field seeds the
-/// widget at `init` and is ignored on every later config; a reconfigure updates
-/// presentation, bounds, and options, then re-clamps what the widget already
-/// holds into them. So a host may re-send a config unconditionally — to
+/// **A re-sent config never moves a value the widget already holds.** Every
+/// `initial` field is a seed: read at `init`, ignored by every later config,
+/// and a reconfigure updates presentation, bounds, and options and then
+/// re-clamps what the widget already holds into them. The one extension is
+/// that a seed still seeds what holds *nothing*: the two widgets whose
+/// selection may be absent ([`VirtualListConfig`], [`DropdownConfig`]) take
+/// their seed on the config that first gives them a vector to choose from, so
+/// "here are the rows, start on the first" stays one mail. So a host may re-send a config unconditionally — to
 /// relabel, restyle, or replace an option vector — without clearing what a
 /// reader typed or chose, and without a memo of what it last sent. To move the
 /// value on purpose, send [`SetValue`], [`SetText`], [`SetSelection`], or
@@ -1216,8 +1220,12 @@ pub struct VirtualListConfig {
     pub items: Vec<VirtualListRow>,
     /// The row selected at boot, or `None` for no selection — a list whose
     /// model holds no current item shows none, rather than lighting its
-    /// first row as if it did. A seed: read at `init` and ignored by every
-    /// later config.
+    /// first row as if it did.
+    ///
+    /// A seed, and a seed seeds only what holds nothing: it is read while the
+    /// list has no selection — at `init`, and again on the config that first
+    /// populates an empty list — and ignored once there is a chosen row to
+    /// preserve. [`SetSelection`] moves a selection that already exists.
     pub initial: Option<u32>,
     pub visible_row_count: u32,
     /// The one caption line drawn in place of rows when `items` is empty
@@ -1409,8 +1417,10 @@ impl From<&str> for DropdownOption {
 #[kind(name = "aether.kit.widget.dropdown.config")]
 pub struct DropdownConfig {
     pub options: Vec<DropdownOption>,
-    /// The option chosen at boot, or `None` to show the `placeholder`. A seed:
-    /// read at `init` and ignored by every later config.
+    /// The option chosen at boot, or `None` to show the `placeholder`. A seed,
+    /// and a seed seeds only what holds nothing: read while the dropdown has no
+    /// choice — at `init`, and on the config that first gives it options — and
+    /// ignored once there is one to preserve.
     pub initial: Option<u32>,
     /// What the closed row reads when nothing is selected.
     #[serde(default)]
@@ -2020,7 +2030,7 @@ pub struct SplitterConfig {
     /// also a verb**, and the sole exception to the rule that a re-sent config
     /// never moves a value.
     ///
-    /// Every other value-carrying widget seeds itself from an `initial*` field
+    /// Every other value-carrying widget seeds itself from an `initial` field
     /// at `init` and ignores it afterwards, so a host may re-send a config
     /// freely, and moves the value through a deliberate setter
     /// ([`SetValue`], [`SetText`], [`SetSelection`], [`SetToggle`]).

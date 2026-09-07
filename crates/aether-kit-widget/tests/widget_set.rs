@@ -338,7 +338,7 @@ fn virtual_list_selected_index(message: &str) -> Option<u32> {
     if !message.contains("widget virtual list selected") {
         return None;
     }
-    message.split("selected_index=").nth(1)?.split_whitespace().next()?.parse().ok()
+    message.split("index=").nth(1)?.split_whitespace().next()?.parse().ok()
 }
 
 fn virtual_list_spec(subname: &str, state: WidgetControlState) -> WidgetChildSpec {
@@ -421,7 +421,7 @@ fn field<'a>(message: &'a str, key: &str) -> Option<&'a str> {
 fn virtual_list_hovers(log: &[String]) -> Vec<(Option<&str>, Option<&str>)> {
     log.iter()
         .filter(|message| message.contains("widget virtual list hover"))
-        .map(|message| (field(message, "widget"), field(message, "row")))
+        .map(|message| (field(message, "widget"), field(message, "index")))
         .collect()
 }
 
@@ -1195,6 +1195,9 @@ fn empty_virtual_list_becomes_eligible_when_populated() {
         .expect("tab and down");
     assert_list_phase("tab+down", &take_log_delta(&mut harness, &mut cursor), &[], &[(Some("inventory"), 1)], &[]);
 
+    // A re-sent config holds the reader's row: the config's `initial` seeded
+    // the list when it had no selection and is ignored now that it has one, so
+    // the Down that follows steps off row 1 rather than off the seed's row 0.
     harness
         .execute(vec![
             ("unchanged_live", HarnessOp::send_and_settle(&list, &populated_list_config(Some(0)))),
@@ -1202,24 +1205,26 @@ fn empty_virtual_list_becomes_eligible_when_populated() {
         ])
         .expect("unchanged live config");
     assert_list_phase(
-        "unchanged live config keeps focus",
+        "unchanged live config keeps focus and selection",
         &take_log_delta(&mut harness, &mut cursor),
         &[],
-        &[(Some("inventory"), 1)],
+        &[(Some("inventory"), 2)],
         &[],
     );
 
+    // Row 1 rather than row 2: the keyboard left the selection on 2, and a
+    // press on the row that is already chosen reports nothing.
     harness
         .execute(vec![
-            ("click_row_two", HarnessOp::send_and_settle(&panel, &press(30.0, 70.0))),
-            ("click_row_two_up", HarnessOp::send_and_settle(&panel, &release(30.0, 70.0))),
+            ("click_row_one", HarnessOp::send_and_settle(&panel, &press(30.0, 46.0))),
+            ("click_row_one_up", HarnessOp::send_and_settle(&panel, &release(30.0, 46.0))),
         ])
         .expect("row click");
     assert_list_phase(
-        "click row 2",
+        "click row 1",
         &take_log_delta(&mut harness, &mut cursor),
-        &[(Some("inventory"), Some("2"))],
-        &[(Some("inventory"), 2)],
+        &[(Some("inventory"), Some("1"))],
+        &[(Some("inventory"), 1)],
         &[],
     );
 }

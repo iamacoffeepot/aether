@@ -3046,7 +3046,7 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
         tail_log.iter().any(|message| {
             message.contains("widget virtual list selected")
                 && message.contains("widget=inventory")
-                && message.contains("selected_index=199")
+                && message.contains("index=199")
         }),
         "paging must reach and attribute the final item; log was:\n{}",
         tail_log.join("\n"),
