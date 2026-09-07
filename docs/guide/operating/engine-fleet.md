@@ -166,6 +166,16 @@ If startup fails after id allocation, the error includes that id and the hub
 records a matching `spawn_failed` entry. If the failure occurs before allocation
 (for example, selector resolution or port allocation), no id exists.
 
+`prepare_fork` materializes the stored binary and fork+execs it for both the
+initial spawn and an automatic restart. A materialization or process-spawn
+failure's `detail` — the same string on the spawn `Err` and the matching
+`spawn_failed` ring entry — names the stage, the binary content hash, and a
+path-free IO category (`ErrorKind` and an OS error code when the host supplies
+one). It does not include the realized executable path, the store source, the
+fleet scratch root, or the application-name filename. Pre-allocation,
+proxy-connect, and other errors are unchanged; those two `prepare_fork` stages
+are the sanitized surface, not every fleet error.
+
 ## Restarts and persistence
 
 A hub restart requires authority over the whole fleet; discovering a process or

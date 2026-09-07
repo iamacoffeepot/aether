@@ -295,6 +295,17 @@ impl WidgetDefaults for TabStripWidget {
     fn cancel_activation(&mut self) {
         self.pressed_tab = None;
     }
+
+    /// Restyle: adopt the fanned theme and request metrics for its font.
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
+    }
+
+    /// Leaving the strip clears the per-tab hover as well as the widget's.
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+        self.state.set_hovered(false);
+        self.hovered_tab = None;
+    }
 }
 
 /// A tab strip. Spawned inline by a panel root with a [`TabStripConfig`];
@@ -351,24 +362,11 @@ impl WasmActor for TabStripWidget {
         self.apply_control_state(ctx, set.state);
     }
 
-    /// Restyle: adopt the fanned theme and request metrics for its font.
-    #[handler::single]
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
-    }
-
     /// Install a font-metrics reply; the next `Collect` lays the tabs out
     /// against their real label widths.
     #[handler::single]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
-    }
-
-    /// Leaving the strip clears the per-tab hover as well as the widget's.
-    #[handler::single]
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
-        self.state.set_hovered(false);
-        self.hovered_tab = None;
     }
 
     /// A left press selects the tab under the pointer.

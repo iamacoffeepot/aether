@@ -2,52 +2,200 @@
 
 The Bloomery coordinator ships a REST control ingress (ADR-0149 §Packaging):
 a native `BloomeryApiCapability` router mounted on the `aether.http.server`
-capability, so an operator drives a bloom's whole lifecycle — stage
-workpieces, shape and seal a draft, supersede, and read the live blooms /
-view document / journal / artifacts — from `curl`, with no typed-mail RPC
-vocabulary. The RPC ingress stays mounted alongside it for fleet plumbing;
-this API is the human/shell surface.
+capability, so an operator authors a stored commission, shapes and seals a
+draft, supersedes, and reads the live blooms / view document / journal /
+artifacts from `curl`, with no typed-mail RPC vocabulary. The RPC ingress
+stays mounted alongside it for fleet plumbing; this API is the human/shell
+surface.
+
+The coordinator now persists commissions in its first-party store and seals
+from those rows. [ADR-0199](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0199-the-bloomery-owns-its-source-and-work-orders.md)
+is still **Proposed**: that store and these routes exist in this binary, but
+the fleet-wide source cutover is not accepted policy, and default boot still
+selects the GitHub authority backend.
+
+**Do not run this sealing tutorial against a live fleet coordinator.** A
+warning is not isolation: `bloomery.db` at the repo root, default artifact
+roots, and ambient `GITHUB_TOKEN` / `AETHER_GITHUB_*` / authority / local-lane
+knobs can reuse live state. The launch below builds into a fresh trial
+directory and starts that binary with `env -i` so only `PATH` and explicit
+local-only knobs are visible. A seal admits work into that process's journal
+only. This is a local REST seal demonstration, not a functioning source
+pipeline.
 
 ## Booting the coordinator with the API
 
-The HTTP ingress binds `AETHER_HTTP_PORT` (default `8910`) on localhost. The
-write and live-read routes need the control-core reducer, which is a native
-capability the chassis boots for you — there is nothing to point it at:
+Commission authoring is fail-closed without a bearer: `AETHER_HTTP_CONTROL_TOKEN`
+empty (the default) refuses every `/commissions` request with `401`. Other
+host-local lifecycle routes stay unauthenticated on this bind.
+
+The trial copies the shipped `approval-policy.toml` (it admits `docs/guide/**`
+at `auto`) and points every store root at the trial directory. Local lanes
+are off (`AETHER_GITHUB_LOCAL_LANE_ENABLED=false`) so nothing dispatches a
+model. CAS landing is off (`AETHER_GITHUB_CAS_LAND_ENABLED=false`). GitHub
+owner / repo / `GITHUB_TOKEN` are omitted, so the connection stays
+unconfigured: remote reactors mount disabled, and `SourceCapability::seal_op`
+is an offline no-op (`claims_enabled` is false; acquire/release never reach
+the network). `AETHER_BLOOMERY_AUTHORITY_BACKEND=github` with those knobs
+empty is not a live GitHub authority. Do not set
+`AETHER_BLOOMERY_AUTHORITY_REPO`.
+
+`AETHER_HTTP_PORT=0` and `AETHER_RPC_PORT=0` bind unused OS-assigned
+localhost ports. Read the HTTP port this **owned** process logged; do not
+assume `8910` and do not take `COORDINATOR` from ambient.
+
+The subscriber (`tsfmt::Layer` on stderr) styles every field name even when
+that stream is a file: italic SGR around `port` (`ESC[3m…ESC[0m`) and dim
+SGR around `=` (`ESC[2m=ESC[0m`), so the four bytes `port=` never appear.
+There is no production knob that turns that styling off. Strip SGR
+(`ESC[` + digits + `m`) first, then the existing `port=` sed matches the
+same announcement the harness already parses after CSI strip.
+
+The child is `exec`'d from `$TRIAL`, not the repository: `env -i` leaves
+`HOME` unset, and some helpers then write relative fallback state (a
+`.local/` tree under the process cwd). That belongs in the trial
+directory. Do not set `HOME` to invent a different fallback.
 
 ```bash
-AETHER_HTTP_PORT=8910 \
-AETHER_STORE_PATH=bloomery.db \
-  cargo run -p aether-chassis-bloomery --bin bloomery
+set -euo pipefail
+REPO=$(git rev-parse --show-toplevel)
+cd "$REPO"
+TRIAL=$(mktemp -d "${TMPDIR:-/tmp}/bloomery-rest-seal.XXXXXX")
+echo "trial directory: $TRIAL"
+cp "$REPO/approval-policy.toml" "$TRIAL/approval-policy.toml"
+mkdir -p "$TRIAL/worktrees" "$TRIAL/artifacts" "$TRIAL/archive"
+
+CARGO_TARGET_DIR="$TRIAL/target" cargo build -p aether-chassis-bloomery --bin bloomery
+BIN="$TRIAL/target/debug/bloomery"
+test -x "$BIN"
+
+TOKEN=local-only-example-token
+: > "$TRIAL/bloomery.stderr"
+# cwd is $TRIAL so relative fallback state (a helper's `.local/` tree under
+# the process working directory when HOME is unset) stays in the trial
+# directory, not the repository. HOME is not invented.
+(
+  cd "$TRIAL"
+  exec env -i \
+    PATH="$PATH" \
+    AETHER_LOG_FILTER=info \
+    AETHER_HTTP_PORT=0 \
+    AETHER_RPC_PORT=0 \
+    AETHER_STORE_PATH="$TRIAL/journal.sqlite" \
+    AETHER_ARTIFACTS_ROOT="$TRIAL/artifacts" \
+    AETHER_SESSION_DB_PATH="$TRIAL/sessions.sqlite" \
+    AETHER_GITHUB_LOCAL_WORKTREE_BASE="$TRIAL/worktrees" \
+    AETHER_BLOOMERY_ARCHIVE_BASE="$TRIAL/archive" \
+    AETHER_APPROVAL_POLICY_FILE="$TRIAL/approval-policy.toml" \
+    AETHER_HTTP_CONTROL_TOKEN="$TOKEN" \
+    AETHER_GITHUB_LOCAL_LANE_ENABLED=false \
+    AETHER_GITHUB_CAS_LAND_ENABLED=false \
+    AETHER_BLOOMERY_AUTHORITY_BACKEND=github \
+    "$BIN"
+) >>"$TRIAL/bloomery.stderr" 2>&1 &
+pid=$!
+
+stop_owned() {
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+http_port=
+for _ in $(seq 1 50); do
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "coordinator exited before it bound HTTP; last log:" >&2
+    tail -n 24 "$TRIAL/bloomery.stderr" >&2
+    stop_owned
+    exit 1
+  fi
+  http_port=$(
+    sed $'s/\x1b\\[[0-9;]*m//g' "$TRIAL/bloomery.stderr" \
+      | sed -n 's/.*http server bound.*port=\([0-9][0-9]*\).*/\1/p' \
+      | tail -n 1
+  )
+  if [ -n "$http_port" ]; then
+    break
+  fi
+  sleep 0.2
+done
+if [ -z "$http_port" ]; then
+  echo "coordinator never announced an HTTP port (bind collision or boot hang); last log:" >&2
+  tail -n 24 "$TRIAL/bloomery.stderr" >&2
+  stop_owned
+  exit 1
+fi
+
+COORDINATOR="http://127.0.0.1:$http_port"
+ready=0
+for _ in $(seq 1 50); do
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "coordinator exited before /drafts and /view answered; last log:" >&2
+    tail -n 24 "$TRIAL/bloomery.stderr" >&2
+    stop_owned
+    exit 1
+  fi
+  if curl -fsS --connect-timeout 1 --max-time 2 "$COORDINATOR/drafts" >/dev/null \
+    && curl -fsS --connect-timeout 1 --max-time 2 "$COORDINATOR/view" >/dev/null; then
+    ready=1
+    break
+  fi
+  sleep 0.2
+done
+if [ "$ready" != 1 ]; then
+  echo "boot failed or address collision on $COORDINATOR; last log:" >&2
+  tail -n 24 "$TRIAL/bloomery.stderr" >&2
+  stop_owned
+  exit 1
+fi
+
+printf 'COORDINATOR=%s\nTOKEN=%s\n' "$COORDINATOR" "$TOKEN" > "$TRIAL/curl.env"
+echo "owned pid $pid on $COORDINATOR"
 ```
 
-The ingress is an internal, unversioned, localhost-only control surface — no
-auth (a versioned public protocol is a later arc). The read routes that hit
-the store (`/journal`) and artifacts (`/artifacts/{digest}`) answer from those
-capabilities alone; the seal / supersede / live-read routes (`/blooms`,
-`/view`) go through the control core.
+The startup line `bloomery REST control api mounted policy_loaded=true` in
+`$TRIAL/bloomery.stderr` confirms the auto-approval door and a draft that
+seals no policy of its own have a fallback. Without it both refuse
+`approval policy unavailable; … fails closed`.
 
-Sealing consults a tier policy, and the draft chooses which one. A draft that
-seals an `aether.bloomery.approval_policy` entry in its bloom-wide registry is
-gated against that value, so the tier its members were admitted at is part of
-what the bloom attests. A draft that seals none falls back to the file the
-pre-seal approve gate loads at boot from `AETHER_APPROVAL_POLICY_FILE` —
-`approval-policy.toml` by default, resolved against the working directory, so
-launch from the repository root. The startup line `bloomery REST control api
-mounted policy_loaded=true` confirms the gate has that fallback. Without it, a
-draft sealing no policy of its own has nothing to be decided over and its seal is
-refused with `approval policy unavailable; seal fails closed`.
+`GET /view` always carries a `mainline` digest. On this fresh trial journal
+that is the genesis all-zero sentinel the control core starts from. Capture
+the returned value. This process has no usable git tree.
+
+A second terminal must source the **same** trial file — not ambient
+`COORDINATOR` / `AETHER_HTTP_CONTROL_TOKEN`, which may point at a fleet:
+
+```bash
+set -euo pipefail
+# TRIAL is the directory the boot terminal printed.
+. "$TRIAL/curl.env"
+: "${COORDINATOR:?}" "${TOKEN:?}"
+```
+
+Do not delete the trial directory or its `target/` from the recipe. After
+you are done, stop the process from the **same boot shell** that still holds
+`$pid` (`kill "$pid"; wait "$pid" || true`). Do not kill a number reread from
+a pid file — that slot may already belong to someone else. Then remove
+`$TRIAL` yourself if you no longer need the journal, artifacts, or build
+tree.
 
 ## The route table
 
 | Method & path | Effect |
 |---|---|
-| `POST /workpieces` | Stage a workpiece (in-memory, pre-seal shaping). |
-| `GET /workpieces` | List staged workpieces. |
+| `POST /commissions` | Persist a new open commission. **Bearer required.** `201` `{id,intent}`. |
+| `GET /commissions` · `GET /commissions/{id}` | List heads (`?status=` optional) / show one commission. **Bearer required.** |
+| `POST /commissions/{id}/revisions` | Store a scope revision. **Bearer required.** `201` `{digest}`. |
+| `POST /commissions/{id}/approvals` | Verify a signed Approve-door statement and store it. **Bearer required.** |
+| `POST /commissions/{id}/approvals/auto` | Mint the unsigned auto-tier approval from the stored revision. Empty body. **Bearer required.** |
+| `POST /commissions/{id}/cancel` · `POST /commissions/{id}/reopen` · `POST /commissions/{id}/scope-runs` | Close, restore, or open a scoping run. **Bearer required.** |
+| `POST /workpieces` | Stage an in-memory workpiece handle. This is **not** seal authority. |
+| `GET /workpieces` | List durable open commissions that already have a current revision. |
 | `POST /drafts` | Open an empty draft; returns its handle (`draft_id`). |
 | `GET /drafts` · `GET /drafts/{id}` | List / read open drafts. |
 | `PATCH /drafts/{id}` | Replace the present fields of a draft (membership, base, configuration registry, forecast). |
 | `POST /configs` | Canonically encode and durably store a configuration by kind; returns its content address. |
-| `POST /drafts/{id}/seal` | Run the approve gate over every proposal (the body carries one scope projection per member), freeze the draft to a `BloomSpec`, and admit `Fact::Seal`; returns the reducer outcome. |
+| `GET /configs/{digest}` | Read a stored configuration back as JSON. |
+| `POST /drafts/{id}/seal` | Load each member from the commission store, run the approve gate, freeze the draft to a `BloomSpec`, and admit `Fact::Seal`. The body is optional; caller projections and descriptions are not authority. |
 | `POST /blooms/{id}/supersede` | Seal the named successor draft and admit `Fact::Supersede` against the `{id}` predecessor. |
 | `POST /blooms/{id}/grant` | Hand a wedged member more attempts and resume it on the `{id}` bloom, without sealing anything. |
 | `POST /blooms/{id}/answer/{question}` | Adopt an owner-signed answer to the parked question `{question}` names, releasing the hold it took. |
@@ -64,222 +212,304 @@ refused with `approval policy unavailable; seal fails closed`.
 | `GET /archive` | List the records currently on the archive tier. |
 
 Request and response bodies are JSON over the `aether-bloomery` value types
-(`Workpiece`, `BloomDraft`, `Membership`, `ViewDocument`, …) via serde. Three
-representation notes carry from those types:
+(`Workpiece`, `BloomDraft`, `Membership`, `ViewDocument`, `ScopeRevision`,
+`Statement`, …) via serde. Three representation notes carry from those types:
 
-- **Digests** (a workpiece intent, a bloom's `base`, a `BloomId`) are 64
-  lowercase **hex** characters wherever they appear — a path segment, a request
-  body, a response body. The seal outcome hands the sealed id back in exactly
-  the spelling `/blooms/{id}` takes, so nothing has to be re-encoded between
-  reading a digest and naming it.
-- **A request body also accepts the canonical form**: the 32-element byte array
-  serde renders `Digest([u8; 32])` as. Either spelling resolves to the same
-  bytes before anything downstream sees it, so a client holding serde-encoded
-  values needs no translation layer. Hex that is the wrong length or carries a
-  non-hex character is a `400` naming the field, never a partial read.
-- **Configuration registries** map a kind name to the content address returned
-  by `POST /configs`. A draft with no stage-catalog entry uses the compiled
-  default line; an entry names the authored catalog the bloom runs. The same
-  registry carries the approval policy under `aether.bloomery.approval_policy`,
-  and that one is **bloom-wide only**: a member sealing its own entry would pick
-  the tier deciding whether that member may be admitted, so the seal is refused
-  outright rather than resolving or ignoring it. A present entry whose kind or
-  content the host cannot resolve fails loudly rather than silently falling back.
+- **Digests** (a stored intent, a scope revision, a bloom's `base`, a
+  `BloomId`) are 64 lowercase **hex** characters wherever they appear — a
+  path segment, a request body, a response body. The seal outcome hands the
+  sealed id back in exactly the spelling `/blooms/{id}` takes.
+- **A request body also accepts the canonical form**: the 32-element byte
+  array serde renders `Digest([u8; 32])` as. Either spelling resolves to the
+  same bytes before anything downstream sees it. Hex that is the wrong length
+  or carries a non-hex character is a `400` naming the field, never a partial
+  read. `Statement.words` is a byte array, not a digest spelling, even when
+  it is 32 bytes long.
+- **Configuration registries** map a kind name to the content address
+  returned by `POST /configs`. A draft with no stage-catalog entry uses the
+  compiled default line. The same registry carries the approval policy under
+  `aether.bloomery.approval_policy`, and that one is **bloom-wide only**
+  ([ADR-0174](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0174-bloom-configuration-is-a-kind-keyed-registry.md)):
+  a member sealing its own entry would pick the tier deciding whether that
+  member may be admitted, so the seal is refused outright. A present entry
+  whose kind or content the host cannot resolve fails loudly rather than
+  silently falling back.
+
+Stored commissions are the seal's authority. `POST /workpieces` still stages
+an in-memory handle, but a draft that names a workpiece with no open stored
+commission is refused (`member {id} has no commission in the store; seal
+fails closed`). The draft's membership still names the workpiece id and the
+exact stored revision digest; the gate reconstructs surface, completeness,
+description, and approval from the store.
 
 ## A curl walkthrough
 
-The walkthrough reuses a handful of digests, so bind them once — four
-placeholder hex strings. It authors its stage catalog through the same generic
-route every configuration uses:
+This is a minimal Auto-tier `docs/guide/**` seal on the trial coordinator
+above. `curl -fsS` fails the script on HTTP errors. `--connect-timeout` and
+`--max-time` bound a hung TCP connect so retries cannot wait forever.
+Capture returned ids with `jq -er` so a missing or null field is a failure.
+Do not invent placeholder digests, assume the first draft is `"1"`, or
+default `COORDINATOR` from ambient.
 
 ```bash
-intent=$(printf '02%.0s' $(seq 32))
-revision=$(printf '07%.0s' $(seq 32))
-detail=$(printf '09%.0s' $(seq 32))
-base=$(printf '01%.0s' $(seq 32))
+set -euo pipefail
+: "${COORDINATOR:?source $TRIAL/curl.env from the boot terminal}"
+: "${TOKEN:?same local-only token the trial coordinator booted with}"
+WP=wp-guide
+
+base=$(curl -fsS --connect-timeout 2 --max-time 10 "$COORDINATOR/view" | jq -er '.mainline')
 ```
 
-Stage a workpiece (its `intent` / `scope_revision` are digests):
+`base` is this trial coordinator's `GET /view` mainline. On the fresh trial
+journal that is the genesis sentinel. Capture the returned value; do not
+invent a git sha.
+
+Create the commission. The intent is a `Statement`: `words` are UTF-8 bytes,
+`provenance` is an observation (create does not verify a signature), and
+`parents` is empty. The `201` body names the stored intent digest:
 
 ```bash
-curl -s -X POST localhost:8910/workpieces \
-  -H 'content-type: application/json' \
-  -d "{\"id\":\"wp-1\",\"intent\":\"$intent\",\"scope_revision\":\"$revision\"}"
+created=$(
+  jq -n --arg id "$WP" --arg text "Correct the REST seal walkthrough." '{
+    id: $id,
+    intent: {
+      words: ($text | explode),
+      provenance: {ObservationAttestation: {source: "rest-walkthrough-local"}},
+      parents: []
+    }
+  }' | curl -fsS --connect-timeout 2 --max-time 10 -X POST "$COORDINATOR/commissions" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H 'content-type: application/json' \
+    --data-binary @-
+)
+echo "$created" | jq .
+intent=$(echo "$created" | jq -er '.intent')
+```
+
+Write a complete version-1 `ScopeRevision`. `schema` is `1`. `routing` is the
+JSON object `{size, model}`, not a markdown blob. `implements`,
+`declared_crates`, and `declared_reads` are required fields; empty arrays are
+the glob-declared Auto case. `description` must be non-empty — the seal
+refuses an empty one. Completeness is **not** a request field: at seal the
+store reconstructs it from these bytes (non-empty problem / design / plan,
+exactly one model routing, open status, fresh tip, closed dependencies).
+
+```bash
+written=$(
+  jq -n --arg id "$WP" '{
+    revision: {
+      schema: 1,
+      workpiece: $id,
+      predecessor: null,
+      problem: "The REST seal walkthrough staged an in-memory workpiece and could not seal.",
+      design: "Store a commission, write a complete scope revision, auto-approve, then seal.",
+      plan: "Author the commission over REST, then seal one auto-tier docs/guide member.",
+      declared_surface: ["docs/guide/**"],
+      dogfood_brief: "N/A",
+      routing: {size: "S", model: "construct: test"},
+      dependencies: [],
+      description: "Correct the REST seal walkthrough.",
+      implements: [],
+      declared_crates: [],
+      declared_reads: []
+    }
+  }' | curl -fsS --connect-timeout 2 --max-time 10 -X POST "$COORDINATOR/commissions/$WP/revisions" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H 'content-type: application/json' \
+    --data-binary @-
+)
+echo "$written" | jq .
+revision=$(echo "$written" | jq -er '.digest')
+```
+
+The `201` `{digest}` is the stored revision's content address — the value the
+draft must pin and the auto-approval binds. Auto-approval is a separate
+authenticated door, and it has to run **before** seal. The caller sends no
+statement and no signature: the door loads the stored revision, resolves
+`declared_surface` / `declared_crates` against the host file policy, and mints
+an `ObservationAttestation` whose words are that revision digest. A surface
+that resolves above `auto` is `422` naming the tier it found.
+
+```bash
+approved=$(
+  curl -fsS --connect-timeout 2 --max-time 10 -X POST "$COORDINATOR/commissions/$WP/approvals/auto" \
+    -H "Authorization: Bearer $TOKEN"
+)
+echo "$approved" | jq .
+approval=$(echo "$approved" | jq -er '.digest')
 ```
 
 Open a draft and read the handle it mints:
 
 ```bash
-curl -s -X POST localhost:8910/drafts        # → {"draft_id":"1","draft":{…}}
+opened=$(curl -fsS --connect-timeout 2 --max-time 10 -X POST "$COORDINATOR/drafts")
+echo "$opened" | jq .
+draft_id=$(echo "$opened" | jq -er '.draft_id')
 ```
 
-Author a stage catalog, then shape the draft into an admissible bloom. The
-catalog below is illustrative; it must bind every stage exactly once and name
-only host-routable processes:
+Shape the draft from the returned ids. The membership's `approval` is a
+reducer-shaped placeholder the gate overwrites; it is not authority. Omit
+bloom-wide `configs` to use the compiled default stage line — there is no
+`catalog.json` on this path.
 
 ```bash
-catalog=$(curl -s -X POST localhost:8910/configs -H 'content-type: application/json' -d @catalog.json | jq '.digest')
-```
-
-`catalog.json` has the generic authoring shape
-`{"kind":"aether.bloomery.stage_catalog","value":{...}}`. `value` is the
-full `StageCatalog` JSON document; save the returned `digest` under the same
-kind in the draft registry.
-
-```bash
-curl -s -X PATCH localhost:8910/drafts/1 -H 'content-type: application/json' -d @- <<JSON
-{
-  "proposals": [
+jq -n --arg wp "$WP" --arg revision "$revision" --arg base "$base" '{
+  proposals: [
     {
-      "workpiece": "wp-1",
-      "scope_revision": "$revision",
-      "configs": { "entries": {} },
-      "approval": { "subject": "$revision", "kind": "Approval", "detail": "$detail" }
+      workpiece: $wp,
+      scope_revision: $revision,
+      configs: {entries: {}},
+      approval: {
+        subject: "0000000000000000000000000000000000000000000000000000000000000000",
+        kind: "Approval",
+        detail: "0000000000000000000000000000000000000000000000000000000000000000"
+      }
     }
   ],
-  "base": "$base",
-  "configs": { "entries": { "aether.bloomery.stage_catalog": $catalog } }
-}
-JSON
+  base: $base
+}' | curl -fsS --connect-timeout 2 --max-time 10 -X PATCH "$COORDINATOR/drafts/$draft_id" \
+  -H 'content-type: application/json' \
+  --data-binary @- | jq .
 ```
 
-Omit `configs` to use the compiled default stage line. A partial `PATCH`
-preserves the existing registry, while a present `configs` object replaces it.
-
-The `approval` here is a placeholder that only has to be reducer-shaped
-(an `Approval` binding the member's own `scope_revision`) — the seal replaces it
-with the approval its gate forms, so the sealed bloom carries a policy-authored
-approval rather than the operator's assertion.
-
-Seal it. The body carries one **scope projection** per proposal, which is what
-the gate decides over; the outcome names the sealed bloom id:
+Seal it. An empty object is enough: stored commission rows supply surface,
+completeness, description, and approval. A body that still carries
+`projections` or `descriptions` is accepted and those fields are ignored.
 
 ```bash
-curl -s -X POST localhost:8910/drafts/1/seal -H 'content-type: application/json' -d @- <<JSON
-{
-  "projections": [
-    {
-      "workpiece": "wp-1",
-      "scope_revision": "$revision",
-      "declared_surface": ["docs/guide/**"],
-      "completeness": {
-        "has_problem_statement": true,
-        "has_design_notes": true,
-        "has_implementation_plan": true,
-        "referenced_adr_prs_merged": true,
-        "model_routing_count": 1,
-        "blocked": false,
-        "declared_surface_fresh": true,
-        "dependencies_all_closed": true,
-        "umbrella_integrity": true
-      },
-      "adr_touch": "None",
-      "pre_approved": false
-    }
-  ],
-  "descriptions": { "wp-1": "Correct the seal walkthrough." }
-}
-JSON
-# → {"outcome":{"Sealed":[19,165,76,49,…]}}
+sealed=$(
+  curl -fsS --connect-timeout 2 --max-time 10 -X POST "$COORDINATOR/drafts/$draft_id/seal" \
+    -H 'content-type: application/json' \
+    -d '{}'
+)
+echo "$sealed" | jq .
+bloom_id=$(echo "$sealed" | jq -er '.outcome.Sealed')
+# A 200 SealRejected body is not a sealed id; jq -er fails on null.
 ```
 
-A projection is matched to its proposal by `{workpiece, scope_revision}`, and
-both halves have to equal the proposal's exactly. The rest of the entry is the
-evidence the gate rules on:
+The outcome names the sealed bloom as hex:
 
-- `declared_surface` — the paths the change touches. The tier policy the draft
-  resolves (its sealed entry, else the file fallback) resolves them
-  most-restrictive-match-wins; an `auto` surface (`docs/guide/**` among them in
-  the shipped file) lets the gate form the approval itself. Declare at crate
-  granularity: an entry naming one file is refused unless the policy itself
-  names that file, because the same table that decides tier decides which files
-  are special enough to name.
-- `completeness` — the nine facts the gate fails closed on. Every boolean must
-  hold, `blocked` must be false, and `model_routing_count` must be exactly `1`.
-- `adr_touch` — `"None"`, `"ProposedOnly"`, or `"NewOrEstablished"`. The last
-  routes to the owner unconditionally, ahead of any policy lookup.
-- `pre_approved` — an owner-verified override that waives the tier to `auto`
-  and none of the checks above.
-- `signed_statement` — the owner-signed statement an above-`auto` member needs.
-  The seal defers on an `aether.signing` verification of it and admits only once
-  every such member verifies.
+```json
+{"outcome":{"Sealed":"<64-hex-from-jq>"}}
+```
 
-What the owner signs is not the statement's `words` on their own. Every signed
-door verifies against the digest of an *authorization*: which door the signature
-is for, the exact request digest it is good for, and the words together
-(ADR-0182). So an approve statement is signed for the approve door bound to the
-member's `scope_revision`, and an answer is signed for the answer door bound to
-the question digest the route names. A signature therefore authorizes one
-request at one door — re-pointing an envelope at a different question, revision,
-or ref produces no verifying signature, where a statement's `parents` alone
-never could, being outside the signature and rewritable by whoever holds it.
-Statements signed against the older words-only message do not verify and must be
-re-signed.
+A projection is no longer a caller input. The store-backed reader matches the
+draft membership to the current open commission by workpiece id and exact
+scope digest, then reconstructs the gate's facts:
 
-A verifying signature is not the whole gate at the answer door. The admitted
-fact carries no question field of its own, so the coordinator picks the hold to
-release out of the answer statement's `parents` — which is outside the signature.
-`POST /blooms/{id}/answer/{question}` therefore also requires `parents` to be
-exactly one digest, the same question the path names, and answers `400` for
-anything else. A list naming a different question is refused, and so is one that
-merely *includes* the path question: the release scan takes the first parent that
-is an open hold in the order you wrote them, so `[other, question]` would release
-`other`. Set `parents` to `[question]` and nothing else.
+- `declared_surface` / `declared_crates` / `declared_reads` — copied from the
+  frozen revision. Empty `declared_crates` means the surface is glob-declared,
+  so `docs/guide/**` takes the file's `auto` rule. A non-empty crate list
+  resolves tier from protected files instead.
+- `completeness` — the nine facts the gate fails closed on, reconstructed:
+  non-empty problem / design / plan, `referenced_adr_prs_merged` held,
+  `model_routing_count` exactly `1`, `blocked` false, tip fresh,
+  dependencies co-sealed or landed, umbrella integrity held.
+- `adr_touch` — `"None"`, `"ProposedOnly"`, or `"NewOrEstablished"` from the
+  ADRs at the sealed `base`. `NewOrEstablished` routes to the owner ahead of
+  any policy lookup.
+- `description` — the revision's non-empty work-order text, which construct
+  uses as `## Task`. It is not a seal-body field.
 
 The gate fails closed at every branch, so a `422` names what fell short —
-`member wp-1 has no scope projection; seal fails closed` for a proposal the
-`projections` list does not cover, and a seal carrying an empty list refuses any
-draft that has members.
+`member wp-guide has no stored approval; seal fails closed` if auto-approval
+was skipped, and a draft with no members is an empty seal rather than a
+missing-projection error.
 
-### Sealing the tier policy
-
-To have the bloom carry the policy it was admitted under rather than inherit the
-coordinator's file, author one through the same generic route the stage catalog
-uses and name it bloom-wide:
+Read the sealed bloom back — the whole view document, then one bloom by the
+hex id the seal returned:
 
 ```bash
-policy=$(curl -s -X POST localhost:8910/configs \
-  -H 'content-type: application/json' \
-  -d '{"kind":"aether.bloomery.approval_policy","value":{"default":"Judge","rules":[{"glob":"docs/guide/**","tier":"Auto"}]}}' | jq '.digest')
-
-curl -s -X PATCH localhost:8910/drafts/1 -H 'content-type: application/json' \
-  -d "{\"configs\":{\"entries\":{\"aether.bloomery.approval_policy\":$policy}}}"
+curl -fsS --connect-timeout 2 --max-time 10 "$COORDINATOR/view" | jq .
+curl -fsS --connect-timeout 2 --max-time 10 "$COORDINATOR/blooms/$bloom_id" | jq .
 ```
 
-`default` and each rule's `tier` are `"Auto"`, `"Judge"`, or `"Human"` — the JSON
-spelling of the tier enum, not the lowercase words the fallback file uses. Rules
-are unordered; resolution is most-restrictive-wins over the declared surface, the
-same semantics the file has.
+### Optional: authoring configuration
+
+The compiled default stage line is enough for the walkthrough above. To attest
+a stage catalog or the tier policy the bloom was admitted under, author the
+value through `POST /configs` and name it bloom-wide on the draft
+([ADR-0174](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0174-bloom-configuration-is-a-kind-keyed-registry.md)).
+That is a separate recipe from the minimal Auto path, and it is not required
+for `docs/guide/**` when the host file already admits that glob.
+
+The envelope is `{"kind":"<Kind::NAME>","value":{…}}`. `value` must be the
+full JSON document for that kind — a missing catalog file or an empty object
+is not a catalog. The `200` `{digest,kind}` is the address a draft registry
+seals under. A partial `PATCH` preserves the existing registry, while a
+present `configs` object replaces it.
+
+To have the bloom carry the policy it was admitted under rather than inherit
+the coordinator's file, author one and name it bloom-wide **before** seal.
+`POST /commissions/{id}/approvals/auto` still resolves the **host file**,
+because a lone commission has no bloom-wide registry. `default` and each
+rule's `tier` are `"Auto"`, `"Judge"`, or `"Human"` — the JSON spelling of
+the tier enum, not the lowercase words the fallback file uses. Rules are
+unordered; resolution is most-restrictive-wins over the declared surface.
+
+```bash
+policy=$(
+  curl -fsS --connect-timeout 2 --max-time 10 -X POST "$COORDINATOR/configs" \
+    -H 'content-type: application/json' \
+    -d '{"kind":"aether.bloomery.approval_policy","value":{"default":"Judge","rules":[{"glob":"docs/guide/**","tier":"Auto"}]}}' \
+    | jq -er '.digest'
+)
+
+jq -n --arg digest "$policy" \
+  '{"configs":{"entries":{"aether.bloomery.approval_policy":$digest}}}' \
+  | curl -fsS --connect-timeout 2 --max-time 10 -X PATCH "$COORDINATOR/drafts/$draft_id" \
+    -H 'content-type: application/json' \
+    --data-binary @-
+```
 
 Five ways a seal is refused on this axis, all `422` and all before any admit:
 
 | Response | Cause |
 |---|---|
-| `member wp-1 seals its own approval policy; the tier policy is bloom-wide only, seal fails closed` | The entry sits in a member's registry rather than the draft's. |
+| `member wp-guide seals its own approval policy; the tier policy is bloom-wide only, seal fails closed` | The entry sits in a member's registry rather than the draft's. |
 | `sealed approval policy unresolvable: …` | The bloom-wide address names content that is missing, filed under another kind, or no longer decodes. |
 | `configuration set not yet read; seal fails closed` | The seal arrived before the coordinator finished its boot configuration read. Retry. |
 | `approval policy unavailable; seal fails closed` | The draft seals no policy and the fallback file did not load. |
-| `member wp-1 declared surface "crates/aether-fs/src/lib.rs" names one file and no approval-policy rule names that file; widen it to a crate glob such as crates/<crate>/src/**; seal fails closed` | The declared surface names an individual file the policy does not. |
+| `member wp-guide declared surface "crates/aether-fs/src/lib.rs" names one file and no approval-policy rule names that file; widen it to a crate glob such as crates/<crate>/src/**; seal fails closed` | The declared surface names an individual file the policy does not. |
 
-`descriptions` is the one advisory field on the body: per-member work-order
-text, keyed by workpiece id, which the construct lane's prompt names as its
-`## Task`. A member absent from the map dispatches without one, and never
-blocks the seal.
+### Signed doors (ADR-0182)
 
-Read the sealed bloom back — the whole view document, then one bloom by its
-hex id:
+`POST /commissions/{id}/approvals/auto` is unsigned on purpose: an observation
+that the host file resolved `auto`, never an author signature. Above-`auto`
+work uses `POST /commissions/{id}/approvals` with an owner-signed `Statement`
+instead.
 
-```bash
-curl -s localhost:8910/view                    # → {"mainline":"…","blooms":[{…}]}
-curl -s localhost:8910/blooms/<the-hex-id-the-seal-returned>
-```
+What the owner signs is not the statement's `words` on their own. Every signed
+door verifies against the digest of an *authorization*: which door the
+signature is for, the exact request digest it is good for, and the words
+together
+([ADR-0182](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0182-signed-authorizations-bind-their-request.md)).
+An approve statement is signed for the Approve door bound to the member's
+`scope_revision`, and an answer is signed for the Answer door bound to the
+question digest the route names. A signature therefore authorizes one request
+at one door — re-pointing an envelope at a different question, revision, or
+ref produces no verifying signature, where a statement's `parents` alone never
+could, being outside the signature and rewritable by whoever holds it.
+Statements signed against the older words-only message do not verify and must
+be re-signed.
+
+A verifying signature is not the whole gate at the answer door. The admitted
+fact carries no question field of its own, so the coordinator picks the hold
+to release out of the answer statement's `parents` — which is outside the
+signature. `POST /blooms/{id}/answer/{question}` therefore also requires
+`parents` to be exactly one digest, the same question the path names, and
+answers `400` for anything else. A list naming a different question is
+refused, and so is one that merely *includes* the path question: the release
+scan takes the first parent that is an open hold in the order you wrote them,
+so `[other, question]` would release `other`. Set `parents` to `[question]`
+and nothing else.
 
 Read the journal (the seal is now a durable record) and fetch a referenced
 artifact by its digest:
 
 ```bash
-curl -s localhost:8910/journal                 # → {"records":[{"sequence":1,"idempotency_key":"…","event":{…}}]}
-curl -s localhost:8910/artifacts/<digest>      # → the raw bytes, or 404
+curl -fsS --connect-timeout 2 --max-time 10 "$COORDINATOR/journal" | jq .   # → {"records":[{"sequence":1,"idempotency_key":"…","event":{…}}]}
+curl -fsS --connect-timeout 2 --max-time 10 "$COORDINATOR/artifacts/<digest>"   # → the raw bytes, or 404
 ```
 
 To supersede, seal the successor draft in the same call — the predecessor is
@@ -404,9 +634,11 @@ A refusal exits non-zero so a scripted run does not read a `409` as success.
 
 The router claims a small set of path prefixes on the HTTP server cap and
 dispatches every request through one handler that switches on method + path.
-The in-memory shaping routes (workpieces, drafts) answer synchronously; the
-durable routes forward a mail to a peer cap — the control core
-(`aether.bloomery.admit` / `aether.bloomery.query`), the store
+Draft shaping is in-memory and answers synchronously. `POST /workpieces` still
+stages an in-memory handle; `GET /workpieces` lists durable open commissions,
+and `POST /drafts/{id}/seal` loads each member from the commission store
+before it admits. Other durable routes forward a mail to a peer cap — the
+control core (`aether.bloomery.admit` / `aether.bloomery.query`), the store
 (`aether.store.replay_journal`), or the artifacts cap (`aether.artifacts.get`)
 — and answer the HTTP client only when that reply lands, correlating the
 deferred reply the same way the RPC and HTTP server caps do.

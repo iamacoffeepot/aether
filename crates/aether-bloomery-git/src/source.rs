@@ -1321,12 +1321,13 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
 
     fn claim_seal(&self, bloom: &BloomId, workpieces: &[WorkpieceId]) -> Result<ClaimOutcome, Self::Error> {
         let targets = Self::claim_targets(workpieces, true);
-        let mut ops = Vec::with_capacity(targets.len());
-        for (_, name) in &targets {
-            // Commits are content-addressed garbage if the transaction loses;
-            // the all-or-nothing property lives on the ref batch below.
-            ops.push(RefTxnOp::Create { name: name.clone(), sha: self.create_claim_commit(bloom, &[], &[])? });
-        }
+        // One parentless claim commit for the bloom; every workpiece and the
+        // admission ref point at it. Commits are content-addressed garbage if
+        // the transaction loses; the all-or-nothing property lives on the ref
+        // batch below.
+        let sha = self.create_claim_commit(bloom, &[], &[])?;
+        let ops: Vec<_> =
+            targets.iter().map(|(_, name)| RefTxnOp::Create { name: name.clone(), sha: sha.clone() }).collect();
         match self.client.transact_refs(&ops) {
             Ok(()) => Ok(ClaimOutcome::Acquired),
             Err(GitDataError::RefConflict(_)) => {
@@ -2523,6 +2524,25 @@ mod tests {
             let commit = source.client().get_commit(&sha).unwrap();
             assert_eq!(commit.tree, EMPTY_TREE, "{name}'s claim commit points at the empty tree, not a real one");
         }
+        // Tripwire: one parentless claim commit is reused across every workpiece
+        // and the admission Create. Comparing the refs' shas is not enough —
+        // content-addressed remints already agree.
+        assert_eq!(fake.create_commit_count(), 1);
+    }
+
+    #[test]
+    fn claim_seal_empty_workpiece_set_still_creates_admission() {
+        let fake = FakeGithub::new();
+        let source = git_source(&fake, false);
+        let claimant = bloom_id(1);
+
+        let outcome = source.claim_seal(&claimant, &[]).unwrap();
+        assert_eq!(outcome, ClaimOutcome::Acquired);
+        assert_eq!(source.claim_holder(ADMISSION_REF).unwrap(), Some(claimant));
+        // Tripwire: an empty member set is still one parentless claim commit
+        // pointed at by admission. Identical content-addressed shas would not
+        // catch extra remints of the same claim commit.
+        assert_eq!(fake.create_commit_count(), 1);
     }
 
     #[test]

@@ -24,6 +24,7 @@ use aether_kinds::{
 };
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::content_store::{ContentStore, EvictionPolicy};
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::{MailboxEntry, OwnedDispatch, Registry};
@@ -107,6 +108,57 @@ fn boot(engine_config: FleetConfig) -> (Arc<Registry>, PassiveChassis<TestChassi
         .build_passive()
         .expect("caps boot");
     (registry, chassis, mailer, cells)
+}
+
+/// Distinctive path component planted in the private temp root so a leaked
+/// host destination, store source, or fleet scratch path is obvious in
+/// spawn-failure details.
+const SENTINEL_HOST_PATH: &str = "SENTINEL_HOST_PATH_5499";
+
+/// `--app-name` filename `prepare_fork` would materialize under. A leaked
+/// `exec_path` includes this basename.
+const SENTINEL_BASENAME: &str = "SentinelAppName5499";
+
+/// Persist an inert binary through the public content-store core so
+/// `FleetServer::init` restores it. The metadata is the fleet
+/// `StoredEntry` JSON shape; this is not a `--describe`d chassis.
+/// The seeder handle (and its `lock.pid`) drops before this returns so the
+/// cap can open the same root.
+fn write_inert_binary_store(store_dir: &Path, bytes: &[u8]) -> String {
+    ContentStore::<serde_json::Value>::open(&store_dir.join("v1"), EvictionPolicy::None)
+        .expect("test setup: open inert content store")
+        .upload(
+            bytes,
+            serde_json::json!({
+                "kind": "Binary",
+                "manifest": {
+                    "Binary": {
+                        "chassis": "headless",
+                        "caps": ["aether.rpc.server"],
+                        "git_sha": "deadbee",
+                        "profile": "debug",
+                        "target": "x86_64-unknown-linux-gnu",
+                        "env_keys": ["AETHER_RPC_PORT"],
+                        "argv_flags": ["rpc-port"]
+                    }
+                }
+            }),
+            Some("headless".into()),
+        )
+        .expect("test setup: persist inert binary")
+}
+
+fn inert_store_config(store_dir: &Path, engine_root: &Path) -> FleetConfig {
+    FleetConfig {
+        binary_store_dir: Some(store_dir.to_string_lossy().into_owned()),
+        fleet_store_root: Some(engine_root.to_string_lossy().into_owned()),
+        binary_bootstrap: HashSet::new(),
+        ..FleetConfig::default()
+    }
+}
+
+fn hash_selector(hash: &str) -> BinarySelector {
+    BinarySelector { query: Some(hash.to_owned()), chassis: None, caps: vec![], target: None }
 }
 
 /// Build the engines-cap config that isolates the hub binary store
@@ -505,6 +557,112 @@ mod tests {
             record.reason,
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn inert_spawn(hash: &str) -> SpawnEngine {
+        SpawnEngine {
+            selector: hash_selector(hash),
+            args: vec!["--app-name".to_owned(), SENTINEL_BASENAME.to_owned()],
+            boot_manifest: None,
+        }
+    }
+
+    fn assert_path_free_spawn_failure(
+        spawn: SpawnEngineResult,
+        list: &ListEnginesResult,
+        phase: &str,
+        hash: &str,
+        sentinel_root: &Path,
+    ) {
+        let (engine_id, error) = match spawn {
+            SpawnEngineResult::Err { engine_id: Some(id), error } => (id, error),
+            other => panic!("expected an id-bearing spawn Err, got {other:?}"),
+        };
+        assert_eq!(engine_id, Uuid::from_u128(1).to_string(), "the first allocated id is correlatable");
+        let prefix = format!("{phase} binary {hash}: ");
+        assert!(error.starts_with(&prefix), "detail must retain phase and hash: {error}");
+        let category = error.strip_prefix(&prefix).expect("prefix checked");
+        assert!(!category.is_empty(), "detail must retain an IO category: {error}");
+        assert!(!category.contains('/') && !category.contains('\\'), "IO category must not embed a host path: {error}");
+        let sentinel_root = sentinel_root.to_string_lossy();
+        assert!(!error.contains(sentinel_root.as_ref()), "detail must not leak the sentinel root: {error}");
+        assert!(!error.contains(SENTINEL_HOST_PATH), "detail must not leak the sentinel path component: {error}");
+        assert!(!error.contains(SENTINEL_BASENAME), "detail must not leak the app-name filename: {error}");
+        assert!(list.engines.is_empty(), "a failed spawn must not register a live engine: {list:?}");
+        let deaths: Vec<_> = list.recently_died.iter().filter(|record| record.engine_id == engine_id).collect();
+        assert_eq!(deaths.len(), 1, "the allocated id must leave exactly one death record: {list:?}");
+        match &deaths[0].reason {
+            DeathReason::SpawnFailed { detail } => {
+                assert_eq!(detail, &error, "the ring must carry the same detail as the spawn Err");
+            }
+            other => panic!("a failed spawn must be recorded as SpawnFailed, got {other:?}"),
+        }
+    }
+
+    /// Tripwire: `prepare_fork`'s materialize `map_err` used to format
+    /// `exec_path` into `SpawnFailed.detail`. Blocking the per-engine dest
+    /// dir with an owned file fails realize without a process or a
+    /// permission/root dependency; the outward detail must keep phase,
+    /// hash, and IO category and omit the host path (issue 5499).
+    #[test]
+    fn materialize_failure_is_id_bearing_and_path_free() {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir =
+            env::temp_dir().join(format!("aether-engcap-materialize-{SENTINEL_HOST_PATH}-{}-{nanos}", process::id()));
+        let store_dir = dir.join("store");
+        let root = dir.join("engines");
+        let hash = write_inert_binary_store(&store_dir, b"aether-issue-5499-inert-bytes");
+        let (_registry, chassis, mailer, cells) = boot(inert_store_config(&store_dir, &root));
+
+        fs::create_dir_all(&root).expect("test setup: fleet store root");
+        fs::write(root.join(Uuid::from_u128(1).simple().to_string()), b"owned-regular-file-blocking-engine-dir")
+            .expect("test setup: block the per-engine dest dir with a regular file");
+
+        let spawn = drive(&mailer, &inert_spawn(&hash), Duration::from_secs(10), || {
+            cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take()
+        });
+        let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
+            cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
+        });
+        assert_path_free_spawn_failure(spawn, &list, "materializing", &hash, &dir);
+
+        drop(chassis);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Tripwire: `prepare_fork`'s `Command::spawn` `map_err` used to format
+    /// `exec_path` into `SpawnFailed.detail`. Bare non-executable text hits
+    /// the platform ENOEXEC shell fallback and becomes a later child-exit;
+    /// a shebang whose interpreter is an absent path under this test's
+    /// private temp dir fails process creation directly (no live child, no
+    /// proxy-connect budget). The outward detail must keep phase, hash, and
+    /// IO category and omit the host path (issue 5499).
+    #[test]
+    fn process_spawn_failure_is_id_bearing_and_path_free() {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = env::temp_dir().join(format!("aether-engcap-exec-{SENTINEL_HOST_PATH}-{}-{nanos}", process::id()));
+        let store_dir = dir.join("store");
+        let root = dir.join("engines");
+        let interpreter = dir.join("missing");
+        assert!(
+            !interpreter.exists(),
+            "test setup: missing-interpreter path must not exist: {}",
+            interpreter.display(),
+        );
+        let bytes = format!("#!{}\n", interpreter.display());
+        let hash = write_inert_binary_store(&store_dir, bytes.as_bytes());
+        let (_registry, chassis, mailer, cells) = boot(inert_store_config(&store_dir, &root));
+
+        let spawn = drive(&mailer, &inert_spawn(&hash), Duration::from_secs(10), || {
+            cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take()
+        });
+        let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
+            cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
+        });
+        assert_path_free_spawn_failure(spawn, &list, "spawning", &hash, &dir);
+
+        drop(chassis);
         let _ = fs::remove_dir_all(&dir);
     }
 }

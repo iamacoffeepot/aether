@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::slice;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,14 +38,14 @@ use super::{
     BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState, GitCandidatePush,
     NameEvidenceClaims, Stores, TickClock, TrackedHandle, backoff_delay, candidate_push_at, default_candidate_push,
     dispatch_origin, drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_dispatch_scope, drain_and_redispatch,
-    fold_drain_backoff, is_disabled_mount, is_silent, is_stale, next_backoff, observe_heartbeat,
-    push_admitted_candidates, seed_dispatches, seed_tracked, select_stale_handles, silence_from, timeout_verdict,
+    fold_drain_backoff, is_silent, is_stale, next_backoff, observe_heartbeat, push_admitted_candidates,
+    seed_dispatches, seed_tracked, select_stale_handles, silence_from, timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
 use crate::bloomery::intake::{
-    Admission, AdmissionKey, AdmitDecision, DispatchError, DispatchRecord, UploadedEvidence, admit_uploaded,
-    attempt_artifact_name, dispatch_nonce, record_dispatch,
+    Admission, AdmissionKey, AdmitDecision, DispatchError, DispatchRecord, PendingObservation, UploadedEvidence,
+    admit_uploaded, attempt_artifact_name, dispatch_nonce, record_dispatch,
 };
 use crate::bloomery::open_scope_run;
 use crate::bloomery::outbox::TopicOutbox;
@@ -203,7 +204,10 @@ fn tick_clock_silent(now_unix_millis: u64, heartbeat_silence_millis: u64) -> Tic
     TickClock { now_unix_millis, stale_warn_after: None, heartbeat_silence_millis }
 }
 
-/// Production pull with tick-start now as the expiry sample.
+/// Production pull with `Clocks.now` held at tick-start. That callback is sampled
+/// immediately before and after each inspect, then once after the cycle for the
+/// absolute-deadline sweep; a constant value keeps existing deadline and silence
+/// tests on a single instant.
 fn pull_and_admit(
     stores: Stores<'_>,
     executor: &ExecutorShell,
@@ -218,7 +222,7 @@ fn pull_and_admit(
         executor,
         claims,
         tracked,
-        Clocks { tick: clock, expiry_now: || clock.now_unix_millis },
+        Clocks { tick: clock, now: || clock.now_unix_millis },
         correspondence,
         pusher,
     )
@@ -1193,13 +1197,20 @@ fn a_restart_neither_extends_nor_resets_a_deadline() {
     // before a restart is already overdue after one.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bloomery.db").to_str().unwrap().to_owned();
-    let shell = shell(FakeGithub::new());
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
 
-    {
+    let (original_nonce, original_deadline) = {
         let mut store = SqliteStore::open(&path).unwrap();
-        dispatch_one(&mut store, &shell, "wp-hung");
+        let nonce = dispatch_one(&mut store, &shell, "wp-hung")[0].handle.nonce.0.clone();
+        let deadline = store
+            .lookup_order(&nonce)
+            .unwrap()
+            .expect("the dispatched order is recorded before the process stops")
+            .deadline_unix_millis;
         // The process stops here, with the order dispatched and unresolved.
-    }
+        (nonce, deadline)
+    };
 
     let mut store = SqliteStore::open(&path).unwrap();
     let mut tracked: Vec<TrackedHandle> = seed_tracked(&mut store)
@@ -1208,17 +1219,51 @@ fn a_restart_neither_extends_nor_resets_a_deadline() {
         .map(|handle| TrackedHandle::new(handle, Instant::now()))
         .collect();
 
+    assert_eq!(
+        store.lookup_order(&original_nonce).unwrap().expect("the order survived the restart").deadline_unix_millis,
+        original_deadline,
+        "a restart reads the same deadline back and never replaces it",
+    );
+
     assert!(
         tick(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + 60_000).is_empty(),
         "a restart inside the allowance does not bring the deadline forward",
     );
-    let admits = tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE);
-    assert_eq!(
-        timeout_verdict(StageId::Construct),
-        Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
-        "expiry after restart still classifies as a host fault on the original deadline",
+    assert!(backend.cancelled().is_empty(), "the still-live run is not cancelled before its original deadline");
+    assert!(
+        store.lookup_order(&original_nonce).unwrap().is_some(),
+        "the original order is still outstanding before its deadline",
     );
-    let _ = admits;
+    assert_eq!(
+        tracked.iter().map(|tracked_handle| tracked_handle.handle.nonce.0.clone()).collect::<Vec<_>>(),
+        vec![original_nonce.clone()],
+        "the original order is still tracked before its deadline",
+    );
+
+    let admits = tick(&mut store, &shell, &mut tracked, original_deadline);
+    assert_eq!(
+        backend.cancelled(),
+        vec![original_nonce.clone()],
+        "the hung run is reclaimed once at the original deadline",
+    );
+    assert!(store.lookup_order(&original_nonce).unwrap().is_none(), "the original order is consumed");
+    assert!(tracked.is_empty(), "the consumed order is no longer tracked");
+    assert_eq!(admits.len(), 1, "the expired order admits a host fault rather than deferring");
+    match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
+        Fact::MemberExecutorFault { bloom, workpiece, stage, evidence } => {
+            assert_eq!(bloom, BloomId(digest(1)));
+            assert_eq!(workpiece.0, "wp-hung");
+            assert_eq!(stage, StageId::Construct);
+            assert_eq!(evidence.kind, aether_bloomery::EvidenceKind::ExecutorFault);
+        }
+        other => panic!("expected a Fact::MemberExecutorFault, got {other:?}"),
+    }
+
+    assert!(
+        tick(&mut store, &shell, &mut tracked, original_deadline + 60_000).is_empty(),
+        "the consumed order cannot expire a second time",
+    );
+    assert_eq!(backend.cancelled(), vec![original_nonce], "a later tick does not cancel the same nonce again");
 }
 
 #[test]
@@ -1765,8 +1810,18 @@ fn select_stale_handles_warns_once_for_a_wedged_handle_and_never_for_a_fresh_one
         TrackedHandle::new(WorkHandle::new(fresh_nonce.clone()), now.checked_sub(Duration::from_secs(5)).unwrap()),
     ];
     let pending = vec![
-        (wedged_nonce.clone(), ExecutionStatus::Running { last_progress_unix_millis: None }),
-        (fresh_nonce, ExecutionStatus::Queued),
+        PendingObservation {
+            nonce: wedged_nonce.clone(),
+            status: ExecutionStatus::Running { last_progress_unix_millis: None },
+            observed_from_unix_millis: 0,
+            observed_until_unix_millis: 0,
+        },
+        PendingObservation {
+            nonce: fresh_nonce,
+            status: ExecutionStatus::Queued,
+            observed_from_unix_millis: 0,
+            observed_until_unix_millis: 0,
+        },
     ];
 
     let warnings = select_stale_handles(&mut tracked, &pending, now, Some(threshold));
@@ -2930,23 +2985,14 @@ fn an_empty_token_is_named_even_when_owner_and_repo_are_set() {
 }
 
 #[test]
-fn a_local_only_boot_mounts_and_says_why_an_actions_lane_cannot_run() {
-    // Tripwire: #4626. Unconfigured GitHub used to mean no mount at all, so a
-    // bloom whose lanes all route local — which needs no credential, only
-    // `git worktree add` and a subprocess — sealed, queued, and never
-    // dispatched. Re-tightening the gate to "unconfigured → disabled" restores
-    // exactly that silence, and nothing else here would notice.
+fn an_unconfigured_shell_refuses_actions_lanes_naming_the_missing_knobs() {
+    // Direct shell coverage, not the chassis factory: an unconfigured Actions
+    // half refuses a verify lane naming the empty knobs rather than dispatching
+    // into a backend with no credential (#4626). Mount selection lives in
+    // `actor_setups`.
     let connection = GithubConnectionConfig::default();
     let coordinator = CoordinatorConfig { local_lane_enabled: true, ..CoordinatorConfig::default() };
-    assert!(!is_disabled_mount(&connection, &coordinator), "an unconfigured boot with the local lane must still mount");
 
-    // The local lane is on by default (ADR-0150), so declining to mount now takes
-    // an operator turning it off as well — the one combination with no backend.
-    let neither = CoordinatorConfig { local_lane_enabled: false, ..CoordinatorConfig::default() };
-    assert!(is_disabled_mount(&connection, &neither), "with no local lane either there is nothing to mount");
-
-    // What the mount costs an Actions-routed lane: a refusal that names the
-    // knobs, rather than a dispatch into a backend with no credential.
     let fake = Arc::new(FakeGithub::new());
     let shell =
         ExecutorShell::connect(&connection, &coordinator, fake as SharedCorrespondence, &SessionConfig::default())
@@ -2965,26 +3011,6 @@ fn a_local_only_boot_mounts_and_says_why_an_actions_lane_cannot_run() {
     for knob in ["GITHUB_TOKEN", "AETHER_GITHUB_OWNER", "AETHER_GITHUB_REPO"] {
         assert!(rendered.contains(knob), "the refusal must name {knob} — got: {rendered}");
     }
-}
-
-#[test]
-fn a_selected_fixture_mounts_even_with_the_local_lane_off() {
-    // The exact configuration the in-process scenarios boot (#4711): the
-    // in-memory double as the Actions backend, and no local lane, so every stage
-    // dispatches through one backend a scenario can script.
-    //
-    // Tripwire: `is_disabled_mount` is a test-only copy of the expression
-    // `actor_setups` mounts by, and the copy had drifted from it. Boot already
-    // counted a selected fixture as a configured backend; the copy read only the
-    // missing connection knobs, so it called this combination unmountable while
-    // boot mounted it. No binary evaluates the copy, so nothing shipped disabled
-    // — the defect was a test vouching for an answer production does not give,
-    // and this pins the two back together.
-    let fixture = GithubConnectionConfig { github_backend: "fixture".to_owned(), ..GithubConnectionConfig::default() };
-    let no_local_lane = CoordinatorConfig { local_lane_enabled: false, ..CoordinatorConfig::default() };
-
-    assert!(!fixture.missing_connection_knobs().is_empty(), "a fixture names none of the connection knobs");
-    assert!(!is_disabled_mount(&fixture, &no_local_lane), "a selected fixture is a usable Actions backend on its own");
 }
 
 #[test]
@@ -3232,6 +3258,8 @@ struct HeartbeatBackend {
     cancelled: Mutex<Vec<String>>,
     completed: Mutex<HashMap<String, Vec<EvidenceRef>>>,
     inspects: Mutex<u32>,
+    clock: Option<Arc<AtomicU64>>,
+    inspect_advance: Mutex<HashMap<String, (u64, Vec<String>)>>,
 }
 
 impl HeartbeatBackend {
@@ -3241,11 +3269,35 @@ impl HeartbeatBackend {
             cancelled: Mutex::new(Vec::new()),
             completed: Mutex::new(HashMap::new()),
             inspects: Mutex::new(0),
+            clock: None,
+            inspect_advance: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn with_clock(clock: Arc<AtomicU64>) -> Arc<Self> {
+        Arc::new(Self {
+            progress: Mutex::new(HashMap::new()),
+            cancelled: Mutex::new(Vec::new()),
+            completed: Mutex::new(HashMap::new()),
+            inspects: Mutex::new(0),
+            clock: Some(clock),
+            inspect_advance: Mutex::new(HashMap::new()),
         })
     }
 
     fn set_progress(&self, nonce: &str, progress: Option<u64>) {
         self.progress.lock().unwrap().insert(nonce.to_owned(), progress);
+    }
+
+    fn progress(&self, nonce: &str) -> Option<u64> {
+        self.progress.lock().unwrap().get(nonce).copied().flatten()
+    }
+
+    fn advance_on_inspect(&self, nonce: &str, advance_millis: u64, refresh: &[&str]) {
+        self.inspect_advance
+            .lock()
+            .unwrap()
+            .insert(nonce.to_owned(), (advance_millis, refresh.iter().map(|name| (*name).to_owned()).collect()));
     }
 
     fn complete(&self, nonce: &str, evidence: Vec<EvidenceRef>) {
@@ -3273,9 +3325,16 @@ impl ExecutorBackend for HeartbeatBackend {
         if self.completed.lock().unwrap().contains_key(&handle.nonce.0) {
             return Ok(ExecutionStatus::Completed { conclusion: Conclusion::Success });
         }
-        Ok(ExecutionStatus::Running {
-            last_progress_unix_millis: self.progress.lock().unwrap().get(&handle.nonce.0).copied().flatten(),
-        })
+        let progress = self.progress.lock().unwrap().get(&handle.nonce.0).copied().flatten();
+        if let Some((advance, refresh)) = self.inspect_advance.lock().unwrap().remove(&handle.nonce.0)
+            && let Some(clock) = &self.clock
+        {
+            let now = clock.fetch_add(advance, Ordering::Relaxed) + advance;
+            for nonce in refresh {
+                self.set_progress(&nonce, Some(now));
+            }
+        }
+        Ok(ExecutionStatus::Running { last_progress_unix_millis: progress })
     }
 
     fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
@@ -3300,6 +3359,24 @@ fn tick_silent(
         NameEvidenceClaims,
         tracked,
         &tick_clock_silent(now, SILENCE_MILLIS),
+        None,
+        &NopPush,
+    )
+}
+
+fn pull_silent_now(
+    store: &mut SqliteStore,
+    shell: &ExecutorShell,
+    tracked: &mut Vec<TrackedHandle>,
+    tick_start: u64,
+    now: impl FnMut() -> u64,
+) -> Vec<Admit> {
+    super::pull_and_admit(
+        Stores { store, artifacts: None },
+        shell,
+        NameEvidenceClaims,
+        tracked,
+        Clocks { tick: &tick_clock_silent(tick_start, SILENCE_MILLIS), now },
         None,
         &NopPush,
     )
@@ -3509,11 +3586,10 @@ fn a_silence_fault_is_the_same_host_fault_a_timeout_is() {
 
 #[test]
 fn a_heartbeat_after_tick_start_is_not_refused_as_future() {
-    // Dispatch origin T0. A later tick starts at the silence threshold, inspects
-    // a still-Running lane, and sees a progress stamp strictly between that
-    // tick-start now and a later post-intake sample. Judging the stamp against
-    // tick-start now refuses it as future, falls back to origin, and
-    // false-silences a live lane. The expiry callback is that later sample.
+    // Dispatch origin T0. A later tick starts at the silence threshold. The
+    // backend reports progress = tick_start+1, which is future of window start
+    // and equal to window end. Judging against start would refuse it as future
+    // and origin-fallback; the end accepts it. Deadline sample equals progress.
     let mut store = SqliteStore::open(":memory:").unwrap();
     let backend = HeartbeatBackend::new();
     let shell = heartbeat_shell(&backend);
@@ -3523,31 +3599,140 @@ fn a_heartbeat_after_tick_start_is_not_refused_as_future() {
 
     let tick_start = NOW_UNIX_MILLIS + SILENCE_MILLIS;
     let progress = tick_start + 1;
-    let expiry = progress + 1;
     backend.set_progress(&nonce, Some(progress));
-
-    let clock = tick_clock_silent(tick_start, SILENCE_MILLIS);
-    let inspects_before = backend.inspect_count();
-    let admits = super::pull_and_admit(
-        Stores { store: &mut store, artifacts: None },
-        &shell,
-        NameEvidenceClaims,
-        &mut tracked,
-        Clocks {
-            tick: &clock,
-            expiry_now: || {
-                assert!(
-                    backend.inspect_count() > inspects_before,
-                    "expiry is sampled after this call's inspect, not an earlier fixture one",
-                );
-                expiry
-            },
-        },
-        None,
-        &NopPush,
-    );
+    let mut now = [tick_start, progress, progress].into_iter();
+    let admits = pull_silent_now(&mut store, &shell, &mut tracked, tick_start, || {
+        now.next().expect("one-handle pull reads start, end, then deadline")
+    });
+    assert!(now.next().is_none(), "one-handle pull reads the clock exactly three times");
 
     assert!(admits.is_empty(), "no synthetic silence admission");
     assert!(backend.cancelled().is_empty(), "a live stamp after tick start is not cancelled");
     assert_eq!(store.list_outstanding_nonces().unwrap(), outstanding, "original outstanding retained");
+    assert_eq!(backend.inspect_count(), 1, "one handle is inspected once");
+}
+
+#[test]
+fn a_later_inspect_cannot_age_an_earlier_fresh_observation() {
+    // A is inspected first with a fresh stamp. B's inspect then advances the
+    // shared clock by the silence threshold and updates A's live producer
+    // progress. A's pending report still holds the early snapshot; aging that
+    // snapshot against cycle-end now would false-silence a beating lane.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let observation = Arc::new(AtomicU64::new(NOW_UNIX_MILLIS));
+    let backend = HeartbeatBackend::with_clock(Arc::clone(&observation));
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-early");
+    tracked.extend(dispatch_one(&mut store, &shell, "wp-later"));
+    let nonce_a = tracked[0].handle.nonce.0.clone();
+    let nonce_b = tracked[1].handle.nonce.0.clone();
+    let outstanding = store.list_outstanding_nonces().unwrap();
+
+    backend.set_progress(&nonce_a, Some(NOW_UNIX_MILLIS));
+    backend.set_progress(&nonce_b, Some(NOW_UNIX_MILLIS));
+    backend.advance_on_inspect(&nonce_b, SILENCE_MILLIS, &[&nonce_a]);
+
+    let admits = pull_silent_now(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS, {
+        let observation = Arc::clone(&observation);
+        move || observation.load(Ordering::Relaxed)
+    });
+
+    assert!(admits.is_empty(), "an early fresh observation is not aged by a later inspect");
+    assert!(backend.cancelled().is_empty(), "A's original nonce is not cancelled as silent");
+    assert_eq!(backend.progress(&nonce_a), Some(NOW_UNIX_MILLIS + SILENCE_MILLIS), "A kept beating after its inspect");
+    assert_eq!(store.list_outstanding_nonces().unwrap(), outstanding, "original outstanding retained");
+    assert_eq!(backend.inspect_count(), 2, "A and B are each inspected once");
+}
+
+#[test]
+fn a_long_inspect_does_not_age_the_progress_it_already_captured() {
+    // Inspect snapshots a fresh stamp, then advances the clock by the silence
+    // threshold before returning. Silence uses window start, so the captured
+    // stamp is not judged against inspect-return time.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let observation = Arc::new(AtomicU64::new(NOW_UNIX_MILLIS));
+    let backend = HeartbeatBackend::with_clock(Arc::clone(&observation));
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-inside");
+    let nonce = tracked[0].handle.nonce.0.clone();
+    let outstanding = store.list_outstanding_nonces().unwrap();
+
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS));
+    backend.advance_on_inspect(&nonce, SILENCE_MILLIS, &[nonce.as_str()]);
+
+    let admits = pull_silent_now(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS, {
+        let observation = Arc::clone(&observation);
+        move || observation.load(Ordering::Relaxed)
+    });
+
+    assert!(admits.is_empty(), "inspect-return latency is not silence");
+    assert!(backend.cancelled().is_empty(), "the original nonce is retained");
+    assert_eq!(
+        backend.progress(&nonce),
+        Some(NOW_UNIX_MILLIS + SILENCE_MILLIS),
+        "the producer advanced after the snapshot"
+    );
+    assert_eq!(store.list_outstanding_nonces().unwrap(), outstanding, "original outstanding retained");
+    assert_eq!(backend.inspect_count(), 1, "one handle is inspected once");
+}
+
+#[test]
+fn a_stamp_already_old_at_window_start_cancels_once() {
+    // Tick-start is still the dispatch origin. Observation now is already at
+    // the silence threshold, so window start is SILENCE behind the stamp —
+    // genuine silence, not later-handle aging. A second pull does not cancel again.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-old-start");
+    let nonce = tracked[0].handle.nonce.0.clone();
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS));
+
+    let observation = Arc::new(AtomicU64::new(NOW_UNIX_MILLIS + SILENCE_MILLIS));
+    let _ = pull_silent_now(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS, {
+        let observation = Arc::clone(&observation);
+        move || observation.load(Ordering::Relaxed)
+    });
+    assert_eq!(backend.cancelled(), vec![nonce.clone()], "a stamp already old at window start is silence");
+    let _ = pull_silent_now(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS, {
+        let observation = Arc::clone(&observation);
+        move || observation.load(Ordering::Relaxed)
+    });
+    assert_eq!(backend.cancelled(), vec![nonce], "silence consumes the order once");
+}
+
+#[test]
+fn an_inverted_observation_window_skips_heartbeat_and_still_honours_the_deadline() {
+    // Window end before start is an unsound clock, not a backend fault. Heartbeat
+    // fold and silence are skipped on the first non-overdue pull. A second inverted
+    // pull whose post-cycle deadline sample is AT_THE_DEADLINE still expires the
+    // order — proving deadline is not disabled for inverted windows.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-inverted");
+    let nonce = tracked[0].handle.nonce.0.clone();
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS));
+
+    let mut now = [NOW_UNIX_MILLIS + SILENCE_MILLIS, NOW_UNIX_MILLIS, NOW_UNIX_MILLIS].into_iter();
+    let admits = pull_silent_now(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS, || {
+        now.next().expect("one-handle pull reads start, end, then deadline")
+    });
+    assert!(now.next().is_none(), "one-handle pull reads the clock exactly three times");
+    assert!(admits.is_empty(), "an inverted window does not cancel as silence");
+    assert!(backend.cancelled().is_empty(), "heartbeat is skipped, not fired");
+    assert!(
+        tracked[0].last_heartbeat_unix_millis.is_none(),
+        "an inverted window must not fold the inspect stamp into the tracked heartbeat",
+    );
+    assert!(store.lookup_order(&nonce).unwrap().is_some(), "the order stays pending for the deadline sweep");
+
+    let mut now = [NOW_UNIX_MILLIS + SILENCE_MILLIS, NOW_UNIX_MILLIS, AT_THE_DEADLINE].into_iter();
+    let admits = pull_silent_now(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS, || {
+        now.next().expect("inverted overdue pull reads start, end, then the sealed deadline")
+    });
+    assert!(now.next().is_none(), "one-handle pull reads the clock exactly three times");
+    assert_eq!(backend.cancelled(), vec![nonce.clone()], "the sealed deadline still terminates it");
+    assert!(store.lookup_order(&nonce).unwrap().is_none(), "the overdue order is consumed once");
+    assert_eq!(admits.len(), 1, "deadline admission fires on the inverted pull whose post-cycle sample is due");
 }

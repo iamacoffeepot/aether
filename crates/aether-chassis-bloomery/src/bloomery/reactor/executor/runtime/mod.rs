@@ -13,7 +13,7 @@
 //!    intake context ([`dispatch_and_record`]). The delivered prefix is acked so a
 //!    dispatch is submitted once; a submit failure stops the prefix so the entry
 //!    re-drains.
-//! 2. **Pull + admit.** The same tick runs one [`run_intake_cycle`] over the
+//! 2. **Pull + admit.** The same tick runs one [`crate::bloomery::intake::run_intake_cycle`] over the
 //!    tracked handles: a completed run's evidence is decoded from its artifact name
 //!    ([`NameEvidenceClaims`]), the broker binds it to the displayed digest, and
 //!    every admitted attempt result is forwarded to the `aether.bloomery.control`
@@ -29,7 +29,7 @@
 //!
 //! Store ownership: this reactor opens its **own** [`SqliteStore`] on the shared
 //! `AETHER_STORE_PATH` because the intake helpers ([`dispatch_and_record`] /
-//! [`run_intake_cycle`]) drive the registry in-process over a `StoreBackend`, not
+//! [`crate::bloomery::intake::run_intake_cycle`]) drive the registry in-process over a `StoreBackend`, not
 //! over mail. It is the sole writer of the `outstanding_orders` table and acks
 //! only its own dispatch topic; the `busy_timeout` on every connection serializes
 //! the rare concurrent WAL write with the `StoreCapability`'s. Routing the outbox
@@ -40,7 +40,7 @@ use std::collections::BTreeSet;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
 use aether_actor::runtime;
@@ -65,13 +65,12 @@ use super::ExecutorReactorCapability;
 use crate::artifacts::{ArtifactsCapabilityState, PutResult, resolve_root};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::ExecutorShell;
-#[cfg(test)]
-use crate::bloomery::GithubConnectionConfig;
 use crate::bloomery::dispatch_model;
 use crate::bloomery::executor::OutstandingDispatch;
 use crate::bloomery::intake::{
     Admission, AdmissionKey, AdmitDecision, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims,
-    UploadedEvidence, admit_uploaded, dispatch_and_record, dispatch_nonce, run_intake_cycle,
+    PendingObservation, UploadedEvidence, admit_uploaded, dispatch_and_record, dispatch_nonce, now_unix_millis,
+    run_intake_cycle_now,
 };
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
@@ -177,22 +176,6 @@ impl TrackedHandle {
     fn new(handle: WorkHandle, first_seen: Instant) -> Self {
         Self { handle, first_seen, stale_warned: false, unterminable_reported: false, last_heartbeat_unix_millis: None }
     }
-}
-
-/// The current wall clock in Unix milliseconds (ADR-0177).
-///
-/// A dispatch tick samples this at the start to stamp recorded-order deadlines
-/// and to observe live-lane leases. After intake has observed completions it
-/// samples again for deadline and silence sweeps and heartbeat future checks, so
-/// a stamp written during that work is not refused as future of the tick-start
-/// reading. A clock before the epoch is not a reading any deadline arithmetic
-/// can use, so it reads as `0` — which defers every expiry rather than
-/// terminating anything on a number that means nothing: `0` is behind every
-/// deadline a dispatch under the same clock would have stamped. Deadlines stop
-/// enforcing until the host's clock is usable again, and no order is cancelled
-/// on a fiction in the meantime.
-fn now_unix_millis() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// The verdict a timed-out order of `stage` admits under (ADR-0177 / ADR-0195
@@ -303,7 +286,7 @@ fn store_timeout_record(artifacts: Option<&mut ArtifactsCapabilityState>, record
 /// Terminate every outstanding order whose persisted deadline has passed
 /// (ADR-0177), returning the [`Admit`]s to forward to the control core.
 ///
-/// Runs *after* [`run_intake_cycle`], so an order whose evidence arrived at the
+/// Runs *after* [`run_intake_cycle_now`], so an order whose evidence arrived at the
 /// boundary has already been admitted and consumed and cannot be selected here.
 /// For each order that is still pending past its deadline: cancel the run
 /// idempotently, store the deterministic [`TimeoutRecord`] the synthesised
@@ -372,6 +355,13 @@ fn silence_from(heartbeat: Option<u64>, observed: Option<u64>, origin: u64) -> O
 /// it is unit-testable without a clock, mirroring [`is_stale`].
 fn is_silent(start: u64, now_unix_millis: u64, threshold_millis: u64) -> bool {
     now_unix_millis.saturating_sub(start) >= threshold_millis
+}
+
+fn running_progress(status: &ExecutionStatus) -> Option<u64> {
+    match status {
+        ExecutionStatus::Running { last_progress_unix_millis } => *last_progress_unix_millis,
+        _ => None,
+    }
 }
 
 /// Why a synthesised failed attempt is being admitted for a still-pending
@@ -653,13 +643,12 @@ fn expire_silent_orders(
     stores: Stores<'_>,
     executor: &ExecutorShell,
     tracked: &mut Vec<TrackedHandle>,
-    pending: &[(Nonce, ExecutionStatus)],
+    pending: &[PendingObservation],
     unobserved: &[Nonce],
-    now_unix_millis: u64,
     silence_millis: u64,
 ) -> Vec<Admit> {
     let Stores { store, mut artifacts } = stores;
-    record_observed_heartbeats(tracked, pending, store, now_unix_millis);
+    record_observed_heartbeats(tracked, pending, store);
 
     let mut admits = Vec::new();
     let nonces: Vec<Nonce> = tracked.iter().map(|tracked_handle| tracked_handle.handle.nonce.clone()).collect();
@@ -667,6 +656,15 @@ fn expire_silent_orders(
         // A handle whose arm faulted was not observed silent — it was not
         // observed at all (#5412).
         if unobserved.contains(&nonce) {
+            continue;
+        }
+        let Some(observation) = pending.iter().find(|observation| observation.nonce == nonce) else {
+            continue;
+        };
+        // An inverted window is not a trustworthy now: skip heartbeat fold and
+        // silence for this handle, but leave it pending so the deadline sweep
+        // still sees an observed live order.
+        if observation.observed_until_unix_millis < observation.observed_from_unix_millis {
             continue;
         }
         let order = match store.lookup_order(&nonce.0) {
@@ -686,18 +684,14 @@ fn expire_silent_orders(
             continue;
         };
         let origin = dispatch_origin(order.deadline_unix_millis, record.transformation.limits.wall_clock_secs);
-        let observed =
-            pending.iter().find(|(pending_nonce, _)| *pending_nonce == nonce).and_then(|(_, status)| match status {
-                ExecutionStatus::Running { last_progress_unix_millis } => *last_progress_unix_millis,
-                _ => None,
-            });
+        let observed = running_progress(&observation.status);
         let Some(tracked_handle) = tracked.iter().find(|tracked_handle| tracked_handle.handle.nonce == nonce) else {
             continue;
         };
         let Some(start) = silence_from(tracked_handle.last_heartbeat_unix_millis, observed, origin) else {
             continue;
         };
-        if !is_silent(start, now_unix_millis, silence_millis) {
+        if !is_silent(start, observation.observed_from_unix_millis, silence_millis) {
             continue;
         }
         if let Some(admit) = terminate_live_order(
@@ -719,24 +713,25 @@ fn expire_silent_orders(
 /// the same tick extends the window rather than losing to a stale stored one.
 fn record_observed_heartbeats(
     tracked: &mut [TrackedHandle],
-    pending: &[(Nonce, ExecutionStatus)],
+    pending: &[PendingObservation],
     store: &mut dyn StoreBackend,
-    now_unix_millis: u64,
 ) {
     for tracked_handle in tracked.iter_mut() {
-        let observed = pending.iter().find(|(nonce, _)| *nonce == tracked_handle.handle.nonce).and_then(
-            |(_, status)| match status {
-                ExecutionStatus::Running { last_progress_unix_millis } => *last_progress_unix_millis,
-                _ => None,
-            },
-        );
+        let Some(observation) = pending.iter().find(|observation| observation.nonce == tracked_handle.handle.nonce)
+        else {
+            continue;
+        };
+        if observation.observed_until_unix_millis < observation.observed_from_unix_millis {
+            continue;
+        }
+        let observed = running_progress(&observation.status);
         let Ok(Some(order)) = store.lookup_order(&tracked_handle.handle.nonce.0) else {
             continue;
         };
         tracked_handle.last_heartbeat_unix_millis = observe_heartbeat(
             tracked_handle.last_heartbeat_unix_millis,
             observed,
-            now_unix_millis,
+            observation.observed_until_unix_millis,
             order.deadline_unix_millis,
         );
     }
@@ -803,7 +798,7 @@ fn stale_warn_after(stale_warn_after_secs: u64) -> Option<Duration> {
 /// unit-testable with an injected `Instant`, mirroring [`next_backoff`].
 fn select_stale_handles(
     tracked: &mut [TrackedHandle],
-    pending: &[(Nonce, ExecutionStatus)],
+    pending: &[PendingObservation],
     now: Instant,
     threshold: Option<Duration>,
 ) -> Vec<(Nonce, Duration, ExecutionStatus)> {
@@ -817,8 +812,8 @@ fn select_stale_handles(
         }
         let status = pending
             .iter()
-            .find(|(nonce, _)| *nonce == tracked_handle.handle.nonce)
-            .map_or(ExecutionStatus::Unknown, |(_, status)| status.clone());
+            .find(|observation| observation.nonce == tracked_handle.handle.nonce)
+            .map_or(ExecutionStatus::Unknown, |observation| observation.status.clone());
         warnings.push((tracked_handle.handle.nonce.clone(), now.duration_since(tracked_handle.first_seen), status));
         tracked_handle.stale_warned = true;
     }
@@ -2377,31 +2372,6 @@ fn resolve_capture_commit(
     }
 }
 
-/// Whether the reactor has no backend to mount for this pair of configs —
-/// GitHub unconfigured *and* the local lane disabled (#4626). Unconfigured alone
-/// is not enough: the local backend needs no credential, so it still dispatches
-/// every lane routed to it.
-///
-/// A `#[cfg(test)]` **mirror** of the expression `actor_setups` mounts by, so
-/// the mount decision is assertable without building a `NativeInitCtx`. Being a
-/// copy rather than the production predicate is its standing weakness: it can
-/// drift, and it had. `actor_setups` already reads a selected fixture (#4732) as
-/// a configured backend — the in-memory double answers every dispatch and
-/// artifact call even though it names no token, owner, or repo — while this copy
-/// still consulted the missing connection knobs alone. The two therefore
-/// disagreed on exactly the configuration the in-process scenarios boot (#4711):
-/// a fixture with the local lane off.
-///
-/// Only the mirror was wrong. No binary mounts on this expression, so nothing
-/// was ever silently disabled in a shipping coordinator; what the repair fixes
-/// is a test that would have vouched for the wrong answer, and
-/// `a_selected_fixture_mounts_even_with_the_local_lane_off` pins the copy back
-/// against `actor_setups`.
-#[cfg(test)]
-fn is_disabled_mount(connection: &GithubConnectionConfig, coordinator: &CoordinatorConfig) -> bool {
-    !connection.uses_fixture() && !connection.missing_connection_knobs().is_empty() && !coordinator.local_lane_enabled
-}
-
 /// The restart recovery set (issue #3641): one [`WorkHandle`] per nonce still
 /// outstanding in the store, so a dispatched-but-unresolved order (its outbox
 /// entry acked/delivered, but not yet admitted when the process stopped) is
@@ -2485,13 +2455,12 @@ struct Stores<'a> {
 }
 
 /// The tick-start clock readings: dispatch deadline computation and lease
-/// observation. Deadline and silence sweeps sample expiry separately after
-/// intake.
+/// observation. Absolute-deadline sweeps sample once after intake. Heartbeat
+/// future-checks and silence use each pending handle's inspect observation window.
 struct TickClock {
     /// Unix milliseconds at tick start — what a recorded order's deadline is
-    /// computed from and what lease observations use (ADR-0177). Deadline and
-    /// silence sweeps, and heartbeat future checks, sample separately after
-    /// intake.
+    /// computed from and what lease observations use (ADR-0177). Absolute
+    /// deadlines sample again after intake; heartbeat uses per-inspect windows.
     now_unix_millis: u64,
     /// How long a tracked handle may stay unresolved before the advisory warn
     /// (#3635); `None` when the sweep is disabled. Advisory only: it warns, and
@@ -2502,11 +2471,12 @@ struct TickClock {
     heartbeat_silence_millis: u64,
 }
 
-/// Tick-start [`TickClock`] plus the callback that samples expiry now after
-/// [`run_intake_cycle`]. Production passes [`now_unix_millis`] as that callback.
-struct Clocks<'a, ExpiryNow> {
+/// Tick-start [`TickClock`] plus the callback that samples wall now around each
+/// inspect and once after the cycle for the absolute-deadline sweep. Production
+/// passes [`now_unix_millis`].
+struct Clocks<'a, Now> {
     tick: &'a TickClock,
-    expiry_now: ExpiryNow,
+    now: Now,
 }
 
 /// Pull matched attempt results for the tracked handles and return the [`Admit`]s
@@ -2523,26 +2493,27 @@ struct Clocks<'a, ExpiryNow> {
 /// it was: a handle past `stale_warn_after` warns once, naming its nonce, age,
 /// and last observed status — it reports, and the deadline is what acts.
 ///
-/// `clocks.expiry_now` is invoked after [`run_intake_cycle`] returns. That sample
-/// is the now used for deadline and silence sweeps and heartbeat future checks.
+/// `clocks.now` is sampled around each inspect inside [`run_intake_cycle_now`]
+/// and once after the cycle returns for the absolute-deadline sweep. Heartbeat
+/// future-checks use each pending window's end; silence age uses its start.
 /// Production passes [`now_unix_millis`].
 ///
 /// The factored-out network side, unit-testable like [`drain_and_dispatch`].
-fn pull_and_admit<ExpiryNow: FnOnce() -> u64>(
+fn pull_and_admit<Now: FnMut() -> u64>(
     stores: Stores<'_>,
     executor: &ExecutorShell,
     claims: NameEvidenceClaims,
     tracked: &mut Vec<TrackedHandle>,
-    clocks: Clocks<'_, ExpiryNow>,
+    clocks: Clocks<'_, Now>,
     correspondence: Option<&SharedCorrespondence>,
     pusher: &dyn CandidatePush,
 ) -> Vec<Admit> {
-    let Clocks { tick: clock, expiry_now } = clocks;
+    let Clocks { tick: clock, mut now } = clocks;
     let Stores { store, mut artifacts } = stores;
     let mut sink = CollectingSink::default();
     let handles: Vec<WorkHandle> = tracked.iter().map(|tracked_handle| tracked_handle.handle.clone()).collect();
-    let cycle = run_intake_cycle(store, executor, &handles, &claims, artifacts.as_deref_mut(), &mut sink);
-    let expiry_unix_millis = expiry_now();
+    let cycle = run_intake_cycle_now(store, executor, &handles, &claims, artifacts.as_deref_mut(), &mut sink, &mut now);
+    let deadline_unix_millis = now();
     let completion_was_observed = cycle.is_ok();
     let report = cycle.unwrap_or_else(|error| {
         tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "intake cycle failed; results re-drive next tick");
@@ -2587,7 +2558,7 @@ fn pull_and_admit<ExpiryNow: FnOnce() -> u64>(
             executor,
             tracked,
             &report.unobserved,
-            expiry_unix_millis,
+            deadline_unix_millis,
         )
     } else {
         Vec::new()
@@ -2595,9 +2566,9 @@ fn pull_and_admit<ExpiryNow: FnOnce() -> u64>(
     // Silence after the deadline sweep: a finishing lane has already been
     // consumed, and an overdue one has already been charged as a deadline.
     // A faulted cycle has not looked at every handle, so its "silent" is as
-    // unearned as its "still pending". Heartbeat future-checks use this same
-    // post-intake sample so a stamp written during the tick's work is not
-    // refused as future of the tick-start clock.
+    // unearned as its "still pending". Heartbeat future-checks use each pending
+    // inspect window's end; silence age uses that window's start, so later
+    // handles cannot age an earlier observation.
     let silenced = if completion_was_observed {
         expire_silent_orders(
             Stores { store, artifacts },
@@ -2605,7 +2576,6 @@ fn pull_and_admit<ExpiryNow: FnOnce() -> u64>(
             tracked,
             &report.pending,
             &report.unobserved,
-            expiry_unix_millis,
             clock.heartbeat_silence_millis,
         )
     } else {
@@ -2893,9 +2863,9 @@ impl NativeActor for ExecutorReactorCapability {
         };
 
         // Tick-start clock: every order this tick records takes its deadline
-        // from it, and lease observations use the same instant. Deadline and
-        // silence sweeps sample again after intake so a heartbeat written during
-        // that work is judged against a now that is not behind it.
+        // from it, and lease observations use the same instant. Absolute
+        // deadlines sample again after intake. Heartbeat uses each inspect's
+        // observation window rather than tick-start or cycle-end now.
         let clock = TickClock {
             now_unix_millis: now_unix_millis(),
             stale_warn_after: state.stale_warn_after,
@@ -2934,7 +2904,7 @@ impl NativeActor for ExecutorReactorCapability {
             &executor,
             claims,
             &mut state.tracked,
-            Clocks { tick: &clock, expiry_now: now_unix_millis },
+            Clocks { tick: &clock, now: now_unix_millis },
             correspondence.as_ref(),
             pusher.as_ref(),
         ) {

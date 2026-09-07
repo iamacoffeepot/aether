@@ -315,6 +315,9 @@ mod tests {
         // range the work order names — the gate charges the member with files
         // it never touched, and the repair lane is then told to revert its
         // siblings' work, which re-collides on the very next fold.
+        // A spliced ancestor is the same history (#5606): sealed-base, then a
+        // prior member, then this capture. Production must select HEAD^; the
+        // range over that base names only this member's edit.
         let repo = candidate_repo();
         let order_base = git_head(repo.path());
 
@@ -326,10 +329,16 @@ mod tests {
         rewrite(repo.path(), "crates/owned/src/lib.rs", "pub fn owned() -> u8 { 2 }\n");
         commit(repo.path(), "refine on the fold");
 
+        let delta_base = candidate_delta_base(repo.path()).expect("a capture commit has a first parent");
         assert_eq!(
-            candidate_delta_base(repo.path()).as_deref(),
-            Some(fold.as_str()),
+            delta_base.as_str(),
+            fold.as_str(),
             "the candidate's delta is measured from the tree its lane was given",
+        );
+        assert_eq!(
+            changed_paths(repo.path(), &delta_base).expect("the candidate diff is readable"),
+            ["crates/owned/src/lib.rs"],
+            "the production-selected range names only this member's change",
         );
         assert_eq!(
             candidate_violations(repo.path(), Some(&order_base), &surface(&["crates/owned/**"])),
@@ -342,7 +351,8 @@ mod tests {
     fn a_candidate_written_on_the_fold_still_fails_for_its_own_stray_path() {
         // The narrowing must not become an exemption: the member's own delta is
         // still judged, so a stray edit inside the fold lap is named exactly as
-        // one on a first lap would be.
+        // one on a first lap would be. sibling-a's fold path is not this
+        // member's violation.
         let repo = candidate_repo();
         let order_base = git_head(repo.path());
         rewrite(repo.path(), "crates/sibling-a/src/lib.rs", "pub fn a() -> u8 { 1 }\n");
