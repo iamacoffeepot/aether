@@ -162,7 +162,7 @@ fn capture_first_collect(harness: &mut SubstrateHarness) {
 
 fn send_theme(harness: &mut SubstrateHarness, theme: Theme) {
     harness
-        .execute(vec![("set_theme", HarnessOp::send_and_settle(&panel_address(), &SetTheme { theme }))])
+        .execute(vec![("set_theme", HarnessOp::send_and_settle(panel_address(), &SetTheme { theme }))])
         .expect("send SetTheme before the first Tick");
 }
 
