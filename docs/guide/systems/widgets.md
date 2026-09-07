@@ -1648,22 +1648,29 @@ where its own slot sits and the plate covers it. The escape hatch above
 apply to chrome, which is why the plate carries the rule instead.
 
 That grouping is what the clip subtraction reads, and the rule it reads it by
-is **positional**: a glyph run's holes are the fills authored *after* it. Text
-reaches the render cap one hop behind the quads, so a fill later in the order
-cannot cover the glyphs before it by draw order alone; the root cuts them out
-instead, re-clipping each run to what those later fills leave and dropping it
-when nothing is left. A fill authored *before* a run never touches it.
+is **positional**: a glyph run's holes are the known opaque solids authored
+*after* it. Text reaches the render cap one hop behind the quads, so a later
+opaque plate cannot cover the glyphs before it by draw order alone; the root
+cuts them out instead, re-clipping each run to what those later solids leave
+and dropping it when nothing is left. A fill authored *before* a run never
+touches it.
 
 One walk backwards over a lane carries that: the ordinary items start with the
-whole overlay already in the hole set (the overlay is entirely after them) and
-the overlay's own items start from empty, then each fill joins the set as the
-walk passes it. So a plate hides the primary content it stands over, can never
-delete the labels of the children standing on it — those are authored after its
-fill — and a dropdown one of those children opens *does* cut the sibling rows it
-covers, because its list is authored after them. A fill's hole is the rectangle
-it actually paints, its geometry narrowed by its own clip, so a virtual list's
-row scrolled out of its viewport takes nothing out of the header it was scrolled
-behind.
+overlay's known opaque solids already in the hole set (the overlay is entirely
+after them) and the overlay's own items start from empty, then each known
+opaque solid joins the set as the walk passes it. So a plate hides the primary
+content it stands over, can never delete the labels of the children standing
+on it — those are authored after its fill — and a dropdown one of those
+children opens *does* cut the sibling rows it covers, because its list is
+authored after them. A hole is the rectangle a solid actually paints, its
+geometry narrowed by its own clip, and only when its alpha is exactly 1.0. A
+virtual list's row scrolled out of its viewport takes nothing out of the
+header it was scrolled behind, and neither does a merely drawn fill:
+transparent or partial-alpha solids, out-of-range or non-finite alpha, and
+textured quads even with an opaque tint — the texels themselves may still be
+transparent. Those still submit as draws; they just do not punch a hole.
+Leaving the text under them is not true translucent interleaving: the split
+render/text pipeline still sends every quad a hop before every glyph.
 
 What a fill is measured against is the **run**, not the run's clip. A clip is a
 scissor bound and is routinely much larger than the glyphs inside it — every row
