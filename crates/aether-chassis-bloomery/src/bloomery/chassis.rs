@@ -1068,6 +1068,60 @@ mod tests {
         .expect("github is a valid authority");
     }
 
+    fn actor_setups_for(github: &GithubConnectionConfig, local_lane_enabled: bool) -> super::BloomeryActorSetups {
+        actor_setups(
+            github,
+            &CoordinatorConfig {
+                authority_backend: "github".into(),
+                store_path: ":memory:".into(),
+                local_lane_enabled,
+                ..CoordinatorConfig::default()
+            },
+            &SessionConfig::default(),
+            &NotifyConfig::default(),
+        )
+        .expect("actor setups resolve under github authority")
+    }
+
+    // Tripwire: compose mounts the executor through `actor_setups` (#5591). A
+    // copied boolean helper used to disagree with that factory on a selected
+    // fixture with the local lane off. These cases call the factory and inspect
+    // the assembled shell, not a mirrored predicate.
+    #[test]
+    fn actor_setups_mounts_the_executor_from_the_production_gate() {
+        let unconfigured =
+            GithubConnectionConfig { api_base: "http://127.0.0.1:1".into(), ..GithubConnectionConfig::default() };
+        let unconfigured_missing = ["GITHUB_TOKEN", "AETHER_GITHUB_OWNER", "AETHER_GITHUB_REPO"];
+
+        let local_on = actor_setups_for(&unconfigured, true);
+        assert!(local_on.executor.executor.is_some(), "unconfigured + local enabled still mounts");
+        assert!(local_on.executor.correspondence.is_some(), "a mounted executor keeps correspondence");
+        assert_eq!(local_on.executor.disabled_missing, unconfigured_missing);
+
+        let local_off = actor_setups_for(&unconfigured, false);
+        assert!(local_off.executor.executor.is_none(), "unconfigured + local disabled has nothing to mount");
+        assert!(local_off.executor.correspondence.is_none(), "an unmounted executor carries no correspondence");
+        assert_eq!(local_off.executor.disabled_missing, unconfigured_missing);
+
+        let fixture = GithubConnectionConfig { github_backend: "fixture".into(), ..GithubConnectionConfig::default() };
+        assert!(!fixture.missing_connection_knobs().is_empty(), "a fixture still names empty PAT knobs");
+        let fixture_setup = actor_setups_for(&fixture, false);
+        assert!(fixture_setup.executor.executor.is_some(), "a selected fixture mounts even with the local lane off");
+        assert!(fixture_setup.executor.correspondence.is_some(), "a mounted fixture keeps correspondence");
+
+        let configured = GithubConnectionConfig {
+            token: "t".into(),
+            owner: "octo".into(),
+            repo: "shadow".into(),
+            api_base: "http://127.0.0.1:1".into(),
+            ..GithubConnectionConfig::default()
+        };
+        let configured_setup = actor_setups_for(&configured, false);
+        assert!(configured_setup.executor.executor.is_some(), "a configured PAT mounts with the local lane off");
+        assert!(configured_setup.executor.correspondence.is_some(), "a mounted PAT keeps correspondence");
+        assert!(configured_setup.executor.disabled_missing.is_empty(), "configured PAT names no missing knobs");
+    }
+
     #[test]
     fn resolve_refuses_locla_even_when_github_credentials_are_present() {
         let cli = BloomeryCli::try_parse_from([
