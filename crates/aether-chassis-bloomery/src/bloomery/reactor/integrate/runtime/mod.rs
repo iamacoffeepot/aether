@@ -20,16 +20,21 @@
 //!    against (ADR-0189, #4952). The bootstrap checkpoint also carries resume
 //!    position: a reactor restarted mid-fold reads the branch at the last
 //!    integrated candidate and continues after it rather than re-folding.
-//! 3. **Admit.** After the last candidate integrates it admits a
+//! 3. **Admit.** After the last candidate integrates it builds a
 //!    [`Fact::Resolve`] carrying the final tree, the landable head, and the
-//!    candidate lineage — where `reduce_resolve` verifies every member's claim
-//!    and emits the `DispatchLand` the existing land reactor consumes.
+//!    candidate lineage, persists those exact events on the outbox row, then
+//!    returns [`Admit`]s for the control core — where `reduce_resolve` verifies
+//!    every member's claim and emits the `DispatchLand` the existing land
+//!    reactor consumes. Ack waits until the journal holds every retained key.
+//!    The host effect and the receipt row are not one atomic write: a crash in
+//!    the window before persistence still re-effects.
 //!
 //! A stale checkpoint mid-fold (a concurrent writer on the single-writer branch)
-//! stops the ack prefix so the entry re-drains and re-resumes; a branch tree that
-//! matches neither the base nor any candidate is a foreign advance — a definitive
-//! refusal, acked with a loud warn rather than re-driven forever. Config-gated
-//! exactly like the mirror / executor / land reactors.
+//! stops the prefix so the entry re-drains and re-resumes; a branch tree that
+//! matches neither the base nor any candidate is a foreign advance — a
+//! definitive refusal, persisted and admitted like a resolve rather than
+//! re-driven forever. Config-gated exactly like the mirror / executor / land
+//! reactors.
 
 use std::mem::take;
 use std::sync::Arc;
@@ -53,7 +58,7 @@ use super::IntegrateReactorCapability;
 use crate::artifacts::{ArtifactsCapabilityState, PutResult, resolve_root};
 use crate::bloomery::IntegrateReactorSetup;
 use crate::bloomery::SourceShell;
-use crate::bloomery::outbox::TopicOutbox;
+use crate::bloomery::outbox::{OutboxResultDelivery, TopicOutbox};
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::control::ControlCore;
 use crate::store::{SqliteStore, StoreBackend};
@@ -229,9 +234,9 @@ enum FoldOutcome {
     Conflicted(Vec<Conflicted>),
     /// A definitive refusal — a named guard stopped the fold, or the branch
     /// carries a tree that matches neither the bootstrap position nor any
-    /// candidate (a foreign advance). Acked with the carried reason, never
-    /// re-driven; a named-guard refusal is admitted so the served view can
-    /// show it (ADR-0206).
+    /// candidate (a foreign advance). Persisted and admitted so the served view
+    /// can show it (ADR-0206); ack waits on the journal rather than treating
+    /// observation as delivery.
     Refused(Refusal),
     /// A transient stop — a stale checkpoint mid-fold or a transport fault; the
     /// entry re-drains next tick and the bootstrap checkpoint re-resumes it.
@@ -572,18 +577,16 @@ fn conflicted_member(
     Conflicted { event: Box::new(event), overlay, workpiece: owner.clone(), checkpoint }
 }
 
-/// Persist each conflicted member's overlay and encode its fact, returning the
-/// [`Admit`]s to forward. `None` is a transient failure: the caller stops the
-/// ack prefix, the entry re-drains, and the same settled checkpoint re-derives
-/// the same keys.
-fn admit_conflicts(
+/// Persist each conflicted member's overlay. `false` is a transient failure: the
+/// caller leaves the entry undelivered with no result receipt, the entry
+/// re-drains, and the same settled checkpoint re-derives the same keys.
+fn persist_conflict_overlays(
     store: &mut dyn StoreBackend,
     mut artifacts: Option<&mut ArtifactsCapabilityState>,
     bloom: &Digest,
     sequence: u64,
     conflicts: &[Conflicted],
-) -> Option<Vec<Admit>> {
-    let mut admits = Vec::with_capacity(conflicts.len());
+) -> bool {
     for conflicted in conflicts {
         let workpiece = &conflicted.workpiece.0;
         if let Err(error) = store.record_fold_conflict(bloom.as_bytes(), workpiece, &conflicted.overlay) {
@@ -594,7 +597,7 @@ fn admit_conflicts(
                 %error,
                 "fold-conflict overlay did not persist; stopping the ack prefix to re-drive",
             );
-            return None;
+            return false;
         }
         if !store_fold_conflict_overlay(artifacts.as_deref_mut(), &conflicted.overlay, &conflicted.checkpoint) {
             tracing::warn!(
@@ -603,31 +606,64 @@ fn admit_conflicts(
                 %workpiece,
                 "fold-conflict overlay was not stored; stopping the ack prefix to re-drive",
             );
-            return None;
+            return false;
         }
-        let Ok(bytes) = to_vec(&*conflicted.event) else {
+    }
+    true
+}
+
+/// Persist a nonempty result batch on the outbox row, then encode the admits to
+/// forward. `None` leaves the entry undelivered and sends no results.
+fn persist_pending_results(
+    store: &mut dyn StoreBackend,
+    topic: Topic,
+    sequence: u64,
+    events: &[Event],
+) -> Option<Vec<Admit>> {
+    if events.is_empty() {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::integrate",
+            sequence,
+            "empty outbox results refuse rather than acknowledging",
+        );
+        return None;
+    }
+    if let Err(error) = store.record_topic_results(topic, sequence, events) {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::integrate",
+            sequence,
+            %error,
+            "outbox results did not persist; leaving the entry undelivered",
+        );
+        return None;
+    }
+    let mut admits = Vec::with_capacity(events.len());
+    for event in events {
+        let Ok(bytes) = to_vec(event) else {
             tracing::warn!(
                 target: "aether_chassis_bloomery::integrate",
                 sequence,
-                %workpiece,
-                "fold-conflict event did not encode; stopping the ack prefix to re-drive",
+                "outbox result event did not encode; leaving the entry undelivered",
             );
             return None;
         };
         admits.push(Admit { event: bytes });
     }
-
     Some(admits)
 }
 
 /// Drain the integrate topic and fold each entry, returning the [`Admit`]s to
-/// forward to the control core (one per resolved bloom) and the highest
-/// contiguously-processed outbox sequence to ack (`None` when nothing
-/// processed). A decode failure, an encode failure, or a transient fold stop
-/// halts the ack prefix so the entry re-drains; a definitive refusal is a
-/// processed entry (acked, no admit). The factored-out network side,
-/// unit-testable against a `SqliteStore` + a fake-GitHub-backed shell without
-/// the mail harness.
+/// forward to the control core and the highest contiguously-journaled outbox
+/// sequence to ack (`None` when nothing is journaled). Each entry is replayed
+/// against its result receipt before any payload decode or source effect: a
+/// fully journaled receipt acks and continues; a pending receipt resends the
+/// retained batch and stops the prefix; an unrecorded row folds, persists the
+/// exact events, returns those admits, and leaves the row unacked. A decode
+/// failure, a persistence/encode failure, or a transient fold stop leaves the
+/// entry undelivered. A definitive refusal persists and waits like a resolve.
+/// The host effect is not atomic with the receipt row. The factored-out
+/// network side, unit-testable against a `SqliteStore` + a fake-GitHub-backed
+/// shell without the mail harness.
 fn drain_and_integrate(
     store: &mut dyn StoreBackend,
     source: &SourceShell,
@@ -637,6 +673,26 @@ fn drain_and_integrate(
     let mut admits = Vec::new();
     let mut ack_through = None;
     for entry in entries {
+        match store.replay_topic_results(Topic::Integrate, entry.sequence) {
+            Ok(OutboxResultDelivery::Journaled) => {
+                ack_through = Some(entry.sequence);
+                continue;
+            }
+            Ok(OutboxResultDelivery::Pending(pending)) => {
+                admits.extend(pending);
+                break;
+            }
+            Ok(OutboxResultDelivery::Unrecorded) => {}
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::integrate",
+                    sequence = entry.sequence,
+                    %error,
+                    "integrate result replay failed; leaving the entry undelivered",
+                );
+                break;
+            }
+        }
         let Ok(payload) = from_bytes::<IntegratePayload>(&entry.payload) else {
             tracing::warn!(
                 target: "aether_chassis_bloomery::integrate",
@@ -647,43 +703,49 @@ fn drain_and_integrate(
         };
         match fold_integration(source, &payload) {
             FoldOutcome::Resolved(event) => {
-                let Ok(bytes) = to_vec(&*event) else {
-                    tracing::warn!(
-                        target: "aether_chassis_bloomery::integrate",
-                        sequence = entry.sequence,
-                        "resolve event did not encode; stopping the ack prefix to re-drive",
-                    );
+                let Some(pending) = persist_pending_results(
+                    store,
+                    Topic::Integrate,
+                    entry.sequence,
+                    std::slice::from_ref(event.as_ref()),
+                ) else {
                     break;
                 };
-                admits.push(Admit { event: bytes });
-                ack_through = Some(entry.sequence);
+                admits.extend(pending);
+                break;
             }
             FoldOutcome::Conflicted(conflicts) => {
-                let Some(conflicted) =
-                    admit_conflicts(store, artifacts.as_deref_mut(), &payload.bloom, entry.sequence, &conflicts)
-                else {
+                if !persist_conflict_overlays(
+                    store,
+                    artifacts.as_deref_mut(),
+                    &payload.bloom,
+                    entry.sequence,
+                    &conflicts,
+                ) {
+                    break;
+                }
+                let events: Vec<Event> = conflicts.into_iter().map(|conflicted| *conflicted.event).collect();
+                let Some(pending) = persist_pending_results(store, Topic::Integrate, entry.sequence, &events) else {
                     break;
                 };
-                admits.extend(conflicted);
-                ack_through = Some(entry.sequence);
+                admits.extend(pending);
+                break;
             }
             FoldOutcome::Refused(refusal) => {
                 tracing::warn!(
                     target: "aether_chassis_bloomery::integrate",
                     sequence = entry.sequence,
                     %refusal,
-                    "integration refused definitively; admitting the refusal and acking the entry instead of re-driving",
+                    "integration refused definitively; persisting the refusal until the journal holds it",
                 );
-                let Ok(bytes) = to_vec(&fold_refused_event(BloomId(payload.bloom), &refusal)) else {
-                    tracing::warn!(
-                        target: "aether_chassis_bloomery::integrate",
-                        sequence = entry.sequence,
-                        "fold-refused event did not encode; stopping the ack prefix to re-drive",
-                    );
+                let event = fold_refused_event(BloomId(payload.bloom), &refusal);
+                let Some(pending) =
+                    persist_pending_results(store, Topic::Integrate, entry.sequence, std::slice::from_ref(&event))
+                else {
                     break;
                 };
-                admits.push(Admit { event: bytes });
-                ack_through = Some(entry.sequence);
+                admits.extend(pending);
+                break;
             }
             FoldOutcome::Stopped(reason) => {
                 tracing::warn!(
@@ -708,6 +770,26 @@ fn drain_and_splice(
     let mut admits = Vec::new();
     let mut ack_through = None;
     for entry in entries {
+        match store.replay_topic_results(Topic::Splice, entry.sequence) {
+            Ok(OutboxResultDelivery::Journaled) => {
+                ack_through = Some(entry.sequence);
+                continue;
+            }
+            Ok(OutboxResultDelivery::Pending(pending)) => {
+                admits.extend(pending);
+                break;
+            }
+            Ok(OutboxResultDelivery::Unrecorded) => {}
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::integrate",
+                    sequence = entry.sequence,
+                    %error,
+                    "splice result replay failed; leaving the entry undelivered",
+                );
+                break;
+            }
+        }
         let Ok(payload) = from_bytes::<SplicePayload>(&entry.payload) else {
             tracing::warn!(
                 target: "aether_chassis_bloomery::integrate",
@@ -718,43 +800,46 @@ fn drain_and_splice(
         };
         match fold_splice(source, &payload) {
             FoldOutcome::Resolved(event) => {
-                let Ok(bytes) = to_vec(&*event) else {
-                    tracing::warn!(
-                        target: "aether_chassis_bloomery::integrate",
-                        sequence = entry.sequence,
-                        "splice-assembled event did not encode; stopping the ack prefix to re-drive",
-                    );
-                    break;
-                };
-                admits.push(Admit { event: bytes });
-                ack_through = Some(entry.sequence);
-            }
-            FoldOutcome::Conflicted(conflicts) => {
-                let Some(conflicted) =
-                    admit_conflicts(store, artifacts.as_deref_mut(), &payload.bloom, entry.sequence, &conflicts)
+                let Some(pending) =
+                    persist_pending_results(store, Topic::Splice, entry.sequence, std::slice::from_ref(event.as_ref()))
                 else {
                     break;
                 };
-                admits.extend(conflicted);
-                ack_through = Some(entry.sequence);
+                admits.extend(pending);
+                break;
+            }
+            FoldOutcome::Conflicted(conflicts) => {
+                if !persist_conflict_overlays(
+                    store,
+                    artifacts.as_deref_mut(),
+                    &payload.bloom,
+                    entry.sequence,
+                    &conflicts,
+                ) {
+                    break;
+                }
+                let events: Vec<Event> = conflicts.into_iter().map(|conflicted| *conflicted.event).collect();
+                let Some(pending) = persist_pending_results(store, Topic::Splice, entry.sequence, &events) else {
+                    break;
+                };
+                admits.extend(pending);
+                break;
             }
             FoldOutcome::Refused(refusal) => {
                 tracing::warn!(
                     target: "aether_chassis_bloomery::integrate",
                     sequence = entry.sequence,
                     %refusal,
-                    "splice refused definitively; admitting the refusal and acking the entry instead of re-driving",
+                    "splice refused definitively; persisting the refusal until the journal holds it",
                 );
-                let Ok(bytes) = to_vec(&fold_refused_event(BloomId(payload.bloom), &refusal)) else {
-                    tracing::warn!(
-                        target: "aether_chassis_bloomery::integrate",
-                        sequence = entry.sequence,
-                        "fold-refused event did not encode; stopping the ack prefix to re-drive",
-                    );
+                let event = fold_refused_event(BloomId(payload.bloom), &refusal);
+                let Some(pending) =
+                    persist_pending_results(store, Topic::Splice, entry.sequence, std::slice::from_ref(&event))
+                else {
                     break;
                 };
-                admits.push(Admit { event: bytes });
-                ack_through = Some(entry.sequence);
+                admits.extend(pending);
+                break;
             }
             FoldOutcome::Stopped(reason) => {
                 tracing::warn!(
@@ -896,8 +981,9 @@ impl NativeActor for IntegrateReactorCapability {
         }
     }
 
-    /// Poll wake: drain + fold the integrate topic, acking the processed prefix
-    /// and forwarding each resolved bloom's `Fact::Resolve` to the control core.
+    /// Poll wake: drain the integrate and splice topics. Ack covers only the
+    /// prefix whose results the journal already holds; newly persisted results
+    /// are admitted without being acked, so a miss resends the same events.
     /// The GitHub calls run inline on the dispatcher (the poll cadence spaces
     /// them).
     #[handler::single]

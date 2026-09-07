@@ -5,25 +5,31 @@
 //! reached.
 //!
 //! 1. **Drain.** Each tick drains the store's `topic:orphan_claim_release` outbox
-//!    topic (its own store connection, mirroring the land reactor) and decodes
-//!    each [`OrphanClaimReleasePayload`] — the request digest and the signed
-//!    target the reducer already admitted.
-//! 2. **Release.** It calls [`SourceShell::complete_release`] with
-//!    `Some(expected_holder)`, so a ref that has moved off that holder is spared
-//!    and reported rather than clobbered.
-//! 3. **Admit.** Every clean outcome is terminal and admits
-//!    [`Fact::CompleteOrphanClaimRelease`], keyed by the request digest — so a
-//!    redrive of the same entry reduces to a duplicate rather than releasing
-//!    twice.
+//!    topic (its own store connection, mirroring the land reactor) and inspects
+//!    that row's persisted completion before decoding the payload or touching
+//!    the source.
+//! 2. **Release.** An unrecorded entry calls [`SourceShell::complete_release`]
+//!    with `Some(expected_holder)`, so a ref that has moved off that holder is
+//!    spared and reported rather than clobbered.
+//! 3. **Persist.** Every clean outcome is terminal. The exact
+//!    [`Fact::CompleteOrphanClaimRelease`] Event is recorded on the outbox row
+//!    before a detached [`Admit`] is returned, keyed by the request digest.
+//! 4. **Ack.** The prefix advances only after the journal holds every receipt
+//!    key. A journaled receipt acks without re-effecting the source; a pending
+//!    receipt resends its exact Admit batch and holds later rows.
 //!
-//! **The crash window closes on the redrive.** A release whose source mutation
-//! landed but whose completion was never admitted leaves its outbox entry
-//! unacked; the next tick re-drains it, the source reports
+//! **A recorded receipt is never recomputed.** Re-running the compare-and-swap
+//! after a holder change can turn
+//! [`Changed`](aether_bloomery::OrphanClaimReleaseCompletion::Changed) into
+//! [`Released`](aether_bloomery::OrphanClaimReleaseCompletion::Released) if the
+//! expected holder reacquired, or `Released` into `Changed` if a different
+//! holder appeared. Once the sidecar exists, redrive returns that exact variant
+//! regardless of what the source now shows. ADR-0179
 //! [`AlreadyAbsent`](aether_bloomery::OrphanClaimReleaseCompletion::AlreadyAbsent)
-//! because the ref is genuinely gone, and the request completes idempotently.
-//! That is exactly why absence is a success rather than an error: making it an
-//! error would leave the same authorized request permanently uncompletable —
-//! the shape of bug this whole ADR exists to retire.
+//! remains the no-receipt crash window: a source mutation that landed before
+//! the completion was persisted still completes idempotently on redrive.
+//! External effect before receipt persistence is still a window; this is not
+//! atomic exactly-once.
 //!
 //! An operational source fault stops the ack prefix instead, leaving the request
 //! pending for the next tick. A fault is not a terminal result: journaling one
@@ -40,7 +46,7 @@ use aether_bloomery::{
     WorkpieceId,
 };
 use aether_bloomery_github::{SourceError, short_hex};
-use aether_data::wire::{Error as WireError, from_bytes, to_vec};
+use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -51,7 +57,7 @@ use serde::{Deserialize, Serialize};
 use super::{ClaimReleaseReactorCapability, ClaimReleaseReactorSetup};
 
 use crate::bloomery::SourceShell;
-use crate::bloomery::outbox::TopicOutbox;
+use crate::bloomery::outbox::{OutboxResultDelivery, TopicOutbox};
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::control::ControlCore;
 use crate::store::{SqliteStore, StoreBackend};
@@ -101,9 +107,9 @@ impl ClaimReleaseReactorState {
 }
 
 /// The idempotency key a release completion admits under — deterministic in the
-/// request digest, so a re-drain (before the ack lands, or after a crash) reduces
-/// to a duplicate rather than a second completion. An authorized release
-/// completes exactly once.
+/// request digest, so a re-drain of a persisted receipt reduces to a duplicate
+/// rather than a second completion. An authorized release completes exactly
+/// once.
 fn completion_key(request: &Digest) -> IdempotencyKey {
     let mut key = String::with_capacity(45 + 64);
     key.push_str("aether.bloomery.orphan_claim_release_completed:");
@@ -111,13 +117,13 @@ fn completion_key(request: &Digest) -> IdempotencyKey {
     IdempotencyKey(key)
 }
 
-/// Build the completion admit for one finished release.
-fn completion_admit(request: &Digest, completion: OrphanClaimReleaseCompletion) -> Result<Admit, WireError> {
-    let event = Event {
+/// Build the completion event for one finished release — the exact bytes the
+/// sidecar persists and the Admit later carries.
+fn completion_event(request: &Digest, completion: OrphanClaimReleaseCompletion) -> Event {
+    Event {
         idempotency_key: completion_key(request),
         fact: Fact::CompleteOrphanClaimRelease { request: *request, completion },
-    };
-    to_vec(&event).map(|event| Admit { event })
+    }
 }
 
 /// Run one authorized release against the source and map its outcome onto the
@@ -131,12 +137,20 @@ fn release(source: &SourceShell, target: &OrphanClaimRelease) -> Result<OrphanCl
 }
 
 /// Drain the release topic and run each entry's compare-and-swap, returning the
-/// [`Admit`]s to forward to the control core and the highest
-/// contiguously-processed outbox sequence to ack (`None` when nothing
-/// processed). A decode failure, an encode failure, or a source fault stops the
-/// ack prefix at the last success so the failed entry re-drains. The factored-out
-/// network side, unit-testable against a `SqliteStore` + a fake-GitHub-backed
-/// shell without the mail harness.
+/// [`Admit`]s to forward to the control core and the highest journal-confirmed
+/// outbox sequence to ack (`None` when nothing is journal-confirmed). Replay
+/// inspects a persisted completion before any payload decode or source
+/// mutation: a journaled receipt acks and continues; a pending receipt resends
+/// its exact Admit batch and stops the prefix so a later entry cannot skip it;
+/// an unrecorded entry runs the release, persists the exact completion Event,
+/// returns its Admit, and holds the prefix without acking. A decode failure, an
+/// encode failure, a store fault, or a source fault stops the ack prefix at the
+/// last success so the failed entry re-drains. ADR-0179
+/// [`AlreadyAbsent`](aether_bloomery::OrphanClaimReleaseCompletion::AlreadyAbsent)
+/// remains the no-receipt redrive; a recorded receipt is never recomputed, even
+/// when the holder has since changed. The factored-out network side,
+/// unit-testable against a `SqliteStore` + a fake-GitHub-backed shell without
+/// the mail harness.
 pub(super) fn drain_and_release(
     store: &mut dyn StoreBackend,
     source: &SourceShell,
@@ -145,6 +159,27 @@ pub(super) fn drain_and_release(
     let mut admits = Vec::new();
     let mut ack_through = None;
     for entry in entries {
+        match store.replay_topic_results(Topic::OrphanClaimRelease, entry.sequence) {
+            Ok(OutboxResultDelivery::Journaled) => {
+                ack_through = Some(entry.sequence);
+                continue;
+            }
+            Ok(OutboxResultDelivery::Pending(retained)) => {
+                admits.extend(retained);
+                break;
+            }
+            Ok(OutboxResultDelivery::Unrecorded) => {}
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::claim_release",
+                    sequence = entry.sequence,
+                    %error,
+                    "orphan claim release result replay failed; stopping the ack prefix to re-drain",
+                );
+                break;
+            }
+        }
+
         let Ok(payload) = from_bytes::<OrphanClaimReleasePayload>(&entry.payload) else {
             tracing::warn!(
                 target: "aether_chassis_bloomery::claim_release",
@@ -168,16 +203,18 @@ pub(super) fn drain_and_release(
                 break;
             }
         };
-        match completion_admit(&payload.request, completion) {
-            Ok(admit) => {
+        let event = completion_event(&payload.request, completion);
+        match to_vec(&event) {
+            Ok(bytes) => {
+                store.record_topic_results(Topic::OrphanClaimRelease, entry.sequence, &[event])?;
                 tracing::info!(
                     target: "aether_chassis_bloomery::claim_release",
                     sequence = entry.sequence,
                     ?completion,
                     "authorized orphan claim release completed",
                 );
-                admits.push(admit);
-                ack_through = Some(entry.sequence);
+                admits.push(Admit { event: bytes });
+                break;
             }
             Err(error) => {
                 tracing::warn!(
@@ -324,8 +361,9 @@ impl NativeActor for ClaimReleaseReactorCapability {
     }
 
     /// Fire an immediate boot tick so a release left undrained by a prior crash
-    /// runs without waiting a full poll interval — which is also the redrive that
-    /// closes the deleted-but-uncompleted window. Disabled reactors push nothing.
+    /// runs without waiting a full poll interval — including a persisted
+    /// completion whose Admit never reached the journal. Disabled reactors push
+    /// nothing.
     fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
         if state.source.is_some() {
             state.mailer.push(Mail::new(
@@ -337,8 +375,10 @@ impl NativeActor for ClaimReleaseReactorCapability {
         }
     }
 
-    /// Poll wake: drain + run the release topic, acking the processed prefix and
-    /// forwarding each completion to the control core.
+    /// Poll wake: drain the release topic, acking only a journal-confirmed
+    /// prefix and forwarding each completion Admit to the control core. The
+    /// sidecar is the receipt; the detached Admit is not treated as reliable
+    /// local mail.
     #[handler::single]
     fn on_claim_release_tick(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: ClaimReleaseTick) {
         let Some(source) = state.source.clone() else {
@@ -361,8 +401,10 @@ impl NativeActor for ClaimReleaseReactorCapability {
                     );
                 }
                 for admit in admits {
-                    // Fire-and-forget: the control core's `on_admit` is reliable
-                    // local mail and the completion key dedups a resend.
+                    // Detached: the sidecar already holds the exact completion.
+                    // A dispatch miss redrives that receipt without a second
+                    // source mutation; ack waits until the journal holds every
+                    // receipt key.
                     let _ = ctx.send_envelope_detached(control_mailbox, Admit::ID, &admit.encode_into_bytes());
                 }
             }

@@ -884,7 +884,7 @@ fn a_landing_whose_proposal_drifted_is_refused_and_journaled_rather_than_merged(
     let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
 
     assert_eq!(fake.pull_request_merged(number), Some(false), "a drifted proposal is not merged");
-    assert_eq!(ack_through, Some(sequence), "the refusal is definitive, so it is acked rather than re-driven");
+    assert_eq!(ack_through, None, "a rejection holds the prefix until the journal confirms it");
     assert_eq!(admits.len(), 1, "the refusal is journaled, not swallowed");
     match from_bytes::<Event>(&admits[0].event).unwrap().fact {
         Fact::LandingRejected { bloom: refused, evidence } => {
@@ -898,6 +898,12 @@ fn a_landing_whose_proposal_drifted_is_refused_and_journaled_rather_than_merged(
     // to understand is the invisible wait in another costume.
     let findings = store.lookup_review_findings(bloom.0.as_bytes(), "").unwrap().expect("the refusal left findings");
     assert!(findings.contains(&pushed), "the findings name the head that was found: {findings}");
+
+    journal_event(&mut store, &rejection_admit(&admits));
+    let (again, ack_through) = drain_and_land(&mut store, &source).unwrap();
+    assert!(again.is_empty(), "a journaled rejection does not fabricate another receipt");
+    assert_eq!(ack_through, Some(sequence), "journal confirmation acknowledges the rejection");
+    assert_eq!(fake.pull_request_merged(number), Some(false), "confirmation does not merge a drifted proposal");
 }
 
 // The single landing-rejection admit a drain produced, or panic.
@@ -934,7 +940,10 @@ fn two_landings_refused_for_the_same_cause_admit_under_distinct_keys() {
     fake.push_to_pull_request(number, &"ee".repeat(20));
     let (first_lap, ack) = drain_and_land(&mut store, &source).unwrap();
     let first = rejection_admit(&first_lap);
-    store.ack_topic(Topic::Land, ack.expect("the first refusal is acked")).unwrap();
+    assert_eq!(ack, None, "a rejection holds the prefix until the journal confirms it");
+    journal_event(&mut store, &first);
+    let (_, ack) = drain_and_land(&mut store, &source).unwrap();
+    store.ack_topic(Topic::Land, ack.expect("the first refusal is acked once journaled")).unwrap();
 
     // A new outbox entry for the re-resolved bloom. The open proposal is
     // adopted; its recorded head is still the drifted sha, so the second
@@ -1120,6 +1129,17 @@ fn journal_event(store: &mut SqliteStore, event: &Event) -> AppendOutcome {
         .unwrap()
 }
 
+fn file_store() -> (tempfile::TempDir, std::path::PathBuf, SqliteStore) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+    let store = SqliteStore::open(path.to_str().unwrap()).unwrap();
+    (dir, path, store)
+}
+
+fn reopen_store(path: &std::path::Path) -> SqliteStore {
+    SqliteStore::open(path.to_str().unwrap()).unwrap()
+}
+
 #[test]
 fn a_dispatch_miss_before_journal_commit_redrives_the_same_land() {
     // Tripwire: acking the Land outbox on merge observation deletes the only
@@ -1257,4 +1277,136 @@ fn a_committed_land_emits_a_source_replica_row_only_after_the_receipt_is_admitte
     assert_eq!(entries.len(), 1, "exactly one replica request after admit");
     let payload: SourceReplicaPayload = from_bytes(&entries[0].payload).unwrap();
     assert_eq!(payload.new_head, new_head, "the replica request carries the landed head the outbox named");
+}
+
+#[test]
+fn a_landing_rejection_survives_a_closed_pr_and_a_fresh_source() {
+    // Tripwire: a persisted LandingRejected must not be recomputed. Closing the
+    // proposal and constructing a new source instance (empty in-memory proposal
+    // map) would otherwise observe Declined and drop the original refusal.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake.clone(), true);
+    let (_dir, path, mut store) = file_store();
+    let bloom = BloomId(digest(1));
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    let aether_bloomery_github::ProposalOutcome::Proposed { number } =
+        source.land_proposal(&bloom, &base, &new_head, None).unwrap()
+    else {
+        panic!("expected Proposed");
+    };
+    fake.push_to_pull_request(number, &"ee".repeat(20));
+
+    let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
+    assert_eq!(ack_through, None, "a rejection holds the prefix until the journal confirms it");
+    let first = rejection_admit(&admits);
+    let first_bytes = admits[0].event.clone();
+    drop(store);
+    drop(source);
+
+    fake.close_pull_request(number);
+    let source = shell(fake.clone(), true);
+    let mut store = reopen_store(&path);
+    let (again, ack_through) = drain_and_land(&mut store, &source).unwrap();
+    assert_eq!(ack_through, None, "a pending rejection does not ack");
+    assert_eq!(again[0].event, first_bytes, "the exact rejection bytes are retained");
+    assert_eq!(
+        rejection_admit(&again).idempotency_key,
+        first.idempotency_key,
+        "the recorded rejection key is retained"
+    );
+    match &rejection_admit(&again).fact {
+        Fact::LandingRejected { bloom: refused, evidence } => {
+            assert_eq!(*refused, bloom);
+            assert_eq!(evidence.subject, new_head);
+        }
+        other => panic!("expected Fact::LandingRejected, got {other:?}"),
+    }
+    assert_eq!(fake.pull_request_merged(number), Some(false), "a closed drifted proposal is not merged");
+}
+
+#[test]
+fn a_pending_landing_rejection_holds_later_rows() {
+    // Tripwire: a persisted-but-unjournaled rejection must not let a later land
+    // entry propose. The later bloom would otherwise open a proposal while the
+    // earlier refusal is still awaiting control.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    let aether_bloomery_github::ProposalOutcome::Proposed { number } =
+        source.land_proposal(&bloom, &base, &new_head, None).unwrap()
+    else {
+        panic!("expected Proposed");
+    };
+    fake.push_to_pull_request(number, &"ee".repeat(20));
+    let later = BloomId(digest(2));
+    let later_head = digest(91);
+    fake.seed_git_object(&later_head);
+    enqueue_land(&mut store, later, base, later_head);
+
+    let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
+    assert_eq!(ack_through, None, "the pending prefix is not acked");
+    let first = rejection_admit(&admits);
+    match &first.fact {
+        Fact::LandingRejected { bloom: refused, .. } => assert_eq!(*refused, bloom),
+        other => panic!("expected Fact::LandingRejected, got {other:?}"),
+    }
+    assert_eq!(
+        fake.find_pull_request_for_head(&format!("bloom/{}/landing", short_hex(&later.0))).unwrap(),
+        None,
+        "a pending rejection holds later rows; the next bloom is not proposed",
+    );
+
+    let (again, ack_through) = drain_and_land(&mut store, &source).unwrap();
+    assert_eq!(ack_through, None);
+    assert_eq!(again[0].event, admits[0].event, "the original rejection bytes are retained");
+    assert_eq!(rejection_admit(&again).idempotency_key, first.idempotency_key);
+    assert_eq!(
+        fake.find_pull_request_for_head(&format!("bloom/{}/landing", short_hex(&later.0))).unwrap(),
+        None,
+        "a redrive of the pending rejection still does not propose the later bloom",
+    );
+}
+
+#[test]
+fn a_journaled_landing_rejection_acks_without_a_source_mutation() {
+    // Tripwire: once control has journaled the rejection, restart recovers the
+    // ack from the sidecar. Restoring the proven head would make a re-effect
+    // merge; the journaled path must not call the source.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake.clone(), true);
+    let (_dir, path, mut store) = file_store();
+    let bloom = BloomId(digest(1));
+    let sequence = enqueue_land(&mut store, bloom, base, new_head);
+
+    let aether_bloomery_github::ProposalOutcome::Proposed { number } =
+        source.land_proposal(&bloom, &base, &new_head, None).unwrap()
+    else {
+        panic!("expected Proposed");
+    };
+    let proven = fake.pull_request_head_sha(number).unwrap();
+    fake.push_to_pull_request(number, &"ee".repeat(20));
+
+    let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
+    assert_eq!(ack_through, None);
+    let rejected = rejection_admit(&admits);
+    fake.push_to_pull_request(number, &proven);
+    journal_event(&mut store, &rejected);
+    drop(store);
+
+    let mut store = reopen_store(&path);
+    let (again, ack_through) = drain_and_land(&mut store, &source).unwrap();
+    assert!(again.is_empty(), "a journaled rejection does not resend");
+    assert_eq!(ack_through, Some(sequence), "journal confirmation acknowledges the rejection");
+    assert_eq!(fake.pull_request_merged(number), Some(false), "a journaled rejection must not merge");
+    assert_eq!(proposal_number(&fake, bloom), number, "confirmation must not open a second proposal");
 }
