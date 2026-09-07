@@ -58,7 +58,7 @@ pub use doctor::{
     ToolStatus, UNRESOLVED_HEAD_AGE_BOUND, evaluate,
 };
 #[cfg(feature = "github")]
-pub use doctor::{DoctorBoard, DoctorReactorCapability, DoctorReactorSetup, DoctorReactorState, DoctorTick};
+pub use doctor::{DoctorReactorCapability, DoctorReactorSetup, DoctorReactorState, DoctorTick, LatestDoctorReport};
 pub use driver::{BloomeryDriverCapability, BloomeryDriverRunning};
 #[cfg(feature = "github")]
 pub use executor::{

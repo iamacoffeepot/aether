@@ -32,6 +32,8 @@ use aether_bloomery::{AdmitResult, LoadConfigsResult};
 use aether_http::RegisterRouteResult;
 use aether_kinds::trace::Settled;
 
+#[cfg(feature = "github")]
+use crate::bloomery::LatestDoctorReport;
 use crate::signing::VerifyResult;
 use crate::store::{
     CancelCommissionResult, ListCommissionsResult, LoadCommissionResult, RecordCommissionApprovalResult,

@@ -107,7 +107,9 @@ use super::BloomeryApiCapability;
 use crate::artifacts::{ArtifactsCapabilityState, GetRange, GetRangeResult, resolve_root};
 use crate::bloomery::load_policy;
 #[cfg(feature = "github")]
-use crate::bloomery::{ArchiveRecordsResult, CandidatePush, DoctorBoard, ListArchiveResult};
+use crate::bloomery::{
+    ArchiveRecordsResult, CandidatePush, DoctorReactorCapability, LatestDoctorReport, ListArchiveResult,
+};
 use crate::signing::VerifyResult;
 use crate::store::{
     CancelCommissionResult, CreateCommissionResult, EnqueueScopeRunResult, ListCommissionsResult, LoadCommissionResult,
@@ -201,10 +203,6 @@ pub struct ApiParams {
     /// Bearer token commission routes require. Empty refuses every commission
     /// request so an unconfigured host cannot approve work.
     pub control_token: String,
-    /// The doctor's latest invariant report, overlaid on `GET /view`. `None`
-    /// when the doctor reactor is not mounted.
-    #[cfg(feature = "github")]
-    pub doctor: Option<DoctorBoard>,
 }
 
 #[http::router]
@@ -268,7 +266,7 @@ impl NativeActor for BloomeryApiCapability {
             seal_verifications: HashMap::new(),
             control_token: params.control_token,
             #[cfg(feature = "github")]
-            doctor: params.doctor,
+            doctor: None,
             commission_verifying: HashMap::new(),
             commission_writing: HashMap::new(),
             commission_http: HashMap::new(),
@@ -967,6 +965,18 @@ impl NativeActor for BloomeryApiCapability {
         state.answer(ctx, &response);
     }
 
+    /// Last completed doctor pass. Only the doctor reactor may overwrite it;
+    /// a missing or foreign immediate sender leaves the overlay unchanged.
+    #[cfg(feature = "github")]
+    #[handler::single]
+    fn on_latest_doctor_report(state: &mut ApiCapabilityState, ctx: &mut NativeCtx<'_>, mail: LatestDoctorReport) {
+        let doctor = ctx.actor::<DoctorReactorCapability>().mailbox_id();
+        if ctx.source_mailbox() != Some(doctor) {
+            return;
+        }
+        state.doctor = Some(mail.into());
+    }
+
     /// The control core's reply to a live projection read, to an orphan-claim
     /// release's status read (ADR-0179), or to a calibration read (ADR-0184).
     ///
@@ -985,8 +995,7 @@ impl NativeActor for BloomeryApiCapability {
             mail => {
                 #[cfg(feature = "github")]
                 {
-                    let doctor = state.doctor.as_ref().and_then(DoctorBoard::latest);
-                    query_response(mail, doctor.as_ref())
+                    query_response(mail, state.doctor.as_ref())
                 }
                 #[cfg(not(feature = "github"))]
                 {
