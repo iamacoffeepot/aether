@@ -51,6 +51,8 @@ pub use local::{
     OrphanedRun, ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec, TransformRunner, admits_lane_key,
     mock_lane,
 };
+#[cfg(any(test, feature = "testing"))]
+pub use local::{GroupAbsence, IDENTITY_RECORD, ProcessIdentity, strict_group_absence};
 pub use reconcile::{LaneOccupancy, LocalLane, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 pub use routing::RoutingExecutor;
 

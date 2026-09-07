@@ -86,6 +86,8 @@
 mod affinity;
 mod backend;
 mod error;
+#[cfg(any(test, feature = "testing"))]
+mod group_absence;
 mod identity;
 mod lane_env;
 mod lane_program;
@@ -100,6 +102,10 @@ mod task_argv;
 
 pub use backend::LocalExecutor;
 pub use error::LocalExecutorError;
+#[cfg(any(test, feature = "testing"))]
+pub use group_absence::{GroupAbsence, strict_group_absence};
+#[cfg(any(test, feature = "testing"))]
+pub use identity::{IDENTITY_RECORD, ProcessIdentity};
 pub use lane_env::admits_lane_key;
 pub use lane_program::{DEFAULT_LANE_PROGRAM, LaneProgram};
 pub use orphan::OrphanedRun;
