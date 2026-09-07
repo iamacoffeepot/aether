@@ -92,6 +92,7 @@ dependencies = [
  "aether-actor",
  "aether-data",
  "aether-fs",
+ "aether-harness-substrate",
  "aether-substrate",
  "bytemuck",
  "clap",
