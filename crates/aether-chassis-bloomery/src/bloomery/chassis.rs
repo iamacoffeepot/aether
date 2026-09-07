@@ -34,7 +34,7 @@ use crate::bloomery::doctor::KitReport;
 use crate::bloomery::driver::BloomeryDriverCapability;
 #[cfg(feature = "github")]
 use crate::bloomery::{
-    CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, DoctorBoard, DoctorReactorCapability,
+    CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, DoctorReactorCapability,
     DoctorReactorSetup, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig,
     IntegrateReactorCapability, IntegrateReactorSetup, JanitorReactorCapability, JanitorReactorSetup,
     LandReactorCapability, LandReactorSetup, LaneProgram, MirrorReactorCapability, MirrorReactorSetup, NotifyConfig,
@@ -118,7 +118,6 @@ struct BloomeryActorSetups {
     source: SourceSetup,
     correspondence: SharedCorrespondence,
     pusher: Arc<dyn CandidatePush>,
-    doctor_board: DoctorBoard,
 }
 
 #[cfg(feature = "github")]
@@ -323,7 +322,6 @@ fn doctor_setup(
     coordinator: &CoordinatorConfig,
     poll_interval_secs: u64,
     source_configured: bool,
-    board: DoctorBoard,
 ) -> DoctorReactorSetup {
     DoctorReactorSetup {
         source: source_configured.then(|| source.clone()),
@@ -332,7 +330,6 @@ fn doctor_setup(
         store_path: coordinator.store_path.clone(),
         worktree_base: coordinator.local_worktree_base.clone(),
         poll_interval_secs,
-        board,
     }
 }
 
@@ -362,7 +359,6 @@ fn actor_setups(
     let executor_correspondence = mounted_correspondence(executor.as_ref(), &correspondence);
     let repo = coordinator.lane_repository();
     let (pusher, publish_candidate) = candidate_publication(github, coordinator, repo.clone());
-    let doctor_board = DoctorBoard::default();
     let github_poll_interval_secs = github_cadence_secs(coordinator, configured);
 
     Ok(BloomeryActorSetups {
@@ -434,12 +430,10 @@ fn actor_setups(
             coordinator,
             github_poll_interval_secs,
             source_configured,
-            doctor_board.clone(),
         ),
         source: SourceSetup { shell: source, claims_enabled: source_configured, mainline: coordinator.mainline() },
         correspondence,
         pusher,
-        doctor_board,
     })
 }
 
@@ -821,7 +815,6 @@ impl BootableChassis for BloomeryChassis {
                 archive_base: coordinator.archive_base.clone(),
                 artifacts_root,
                 control_token: coordinator.http_control_token,
-                doctor: Some(setups.doctor_board),
             }))
     }
     #[cfg(not(feature = "github"))]
