@@ -64,21 +64,18 @@ impl NativeActor for FleetLocalSink {
     }
 
     #[handler::single]
-    #[allow(clippy::needless_pass_by_value)]
     fn on_upload_binary(&mut self, _ctx: &mut NativeCtx<'_>, mail: UploadBinary) -> UploadBinaryResult {
         self.cells.binary.lock().expect("binary log mutex").push(mail);
         self.cells.binary_reply.lock().expect("binary reply mutex").clone()
     }
 
     #[handler::single]
-    #[allow(clippy::needless_pass_by_value)]
     fn on_upload_component(&mut self, _ctx: &mut NativeCtx<'_>, mail: UploadComponent) -> UploadComponentResult {
         self.cells.component.lock().expect("component log mutex").push(mail);
         self.cells.component_reply.lock().expect("component reply mutex").clone()
     }
 
     #[handler::single]
-    #[allow(clippy::needless_pass_by_value)]
     fn on_set_artifact_pinned(
         &mut self,
         _ctx: &mut NativeCtx<'_>,
@@ -106,8 +103,7 @@ fn boot_hub_with_fleet_local_sink(cells: FleetLocalCells) -> (PassiveChassis<Tes
                     engine_version: "0.1.0".into(),
                     kinds: vec![],
                 },
-                #[allow(clippy::disallowed_methods)] // test hub routes engine calls to its trusted singleton sink
-                route_target: Some(mailbox_id_from_name("aether.fleet")),
+                route_target: None,
             },
             RpcServerConfig { port: Some(0) },
         )
@@ -591,13 +587,6 @@ async fn upload_component_forwards_pin_hub_local_and_errors() {
         .await
         .expect("scripted component upload ok");
     assert_eq!(out, r#"{"hash":"cmp-hash","name":null}"#);
-    {
-        let forwarded = cells.component.lock().expect("component log mutex").clone();
-        assert_eq!(forwarded.len(), 1);
-        assert_eq!(forwarded[0].staged_path, missing);
-        assert!(forwarded[0].pin);
-        assert!(forwarded[0].name.is_none());
-    }
 
     *cells.component_reply.lock().expect("component reply mutex") =
         UploadComponentResult::Err { error: "unparseable wasm".to_owned() };
@@ -610,6 +599,15 @@ async fn upload_component_forwards_pin_hub_local_and_errors() {
         .await
         .expect_err("typed Err is a tool error");
     assert!(err.to_string().contains("unparseable wasm"), "got {err}");
+
+    let forwarded = cells.component.lock().expect("component log mutex").clone();
+    assert_eq!(forwarded.len(), 2, "ok and error uploads must both reach the hub-local handler");
+    assert_eq!(forwarded[0].staged_path, missing);
+    assert!(forwarded[0].pin);
+    assert!(forwarded[0].name.is_none());
+    assert_eq!(forwarded[1].staged_path, missing);
+    assert!(!forwarded[1].pin);
+    assert!(forwarded[1].name.is_none());
 }
 
 #[tokio::test]
@@ -641,15 +639,26 @@ async fn pin_and_unpin_artifact_forward_exact_hash_and_bit() {
 }
 
 #[tokio::test]
-async fn pin_artifact_propagates_typed_error() {
+async fn pin_and_unpin_artifact_propagate_typed_errors() {
     let cells = FleetLocalCells::new();
     *cells.pin_reply.lock().expect("pin reply mutex") =
         SetArtifactPinnedResult::Err { error: "no stored artifact has hash \"missing\"".to_owned() };
-    let (_chassis, port) = boot_hub_with_fleet_local_sink(cells);
+    let (_chassis, port) = boot_hub_with_fleet_local_sink(cells.clone());
     let mcp = connect_mcp(port);
-    let err = mcp
+    let pin_err = mcp
         .pin_artifact(Parameters(ArtifactPinArgs { hash: "missing".to_owned() }))
         .await
-        .expect_err("typed Err is a tool error");
-    assert!(err.to_string().contains("no stored artifact has hash"), "got {err}");
+        .expect_err("typed pin Err is a tool error");
+    assert!(pin_err.to_string().contains("no stored artifact has hash"), "got {pin_err}");
+    let unpin_err = mcp
+        .unpin_artifact(Parameters(ArtifactPinArgs { hash: "missing".to_owned() }))
+        .await
+        .expect_err("typed unpin Err is a tool error");
+    assert!(unpin_err.to_string().contains("no stored artifact has hash"), "got {unpin_err}");
+    let forwarded = cells.pins.lock().expect("pin log mutex").clone();
+    assert_eq!(forwarded.len(), 2);
+    assert_eq!(forwarded[0].hash, "missing");
+    assert!(forwarded[0].pinned);
+    assert_eq!(forwarded[1].hash, "missing");
+    assert!(!forwarded[1].pinned);
 }
