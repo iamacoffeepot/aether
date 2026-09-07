@@ -183,7 +183,7 @@ impl WasmActor for BehaviorHost {
 
     /// Load a script from an `aether.fs` namespace. Carries the requester's
     /// reply target through the async read as a request context.
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::unused_self)] // aether-suppression-request: required wasm handler receiver
     #[handler::manual]
     fn on_load_script(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: LoadScript) {
         let context = ScriptLoadContext {
