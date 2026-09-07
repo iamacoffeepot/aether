@@ -44,7 +44,7 @@ pub struct WriteScopeRevision {
     /// Canonical [`aether_bloomery::ScopeRevision`] bytes.
     #[serde(with = "aether_data::bytes")]
     pub canonical: Vec<u8>,
-    /// Encoded [`super::RevisionEvidence`] — what is known about the revision
+    /// Encoded [`aether_bloomery::RevisionEvidence`] — what is known about the revision
     /// without being part of it. Optionality lives inside the sidecar's own
     /// fields; these bytes are always an encoding of that type, never empty as
     /// a stand-in for absence.
