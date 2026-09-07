@@ -1,10 +1,10 @@
 //! Typed cluster-child addressing — [`InlineChild`] and the
 //! [`WasmCtx::child_as`] / [`WasmCtx::sibling_as`] verbs that resolve one.
 //!
-//! The typed counterpart of `super::relative`: a [`RelativeMailbox`] is
-//! positional and therefore type-erased, while an [`InlineChild<C>`] names the
-//! child type it addresses, so every send through it is checked against `C`'s
-//! handler set.
+//! The typed counterpart of `super::relative`: a
+//! [`RelativeMailbox`](super::RelativeMailbox) is positional and therefore
+//! type-erased, while an [`InlineChild<C>`] names the child type it addresses,
+//! so every send through it is checked against `C`'s handler set.
 
 use core::fmt::{Debug, Formatter, Result as FmtResult};
 use core::marker::PhantomData;
