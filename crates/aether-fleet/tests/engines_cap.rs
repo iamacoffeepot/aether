@@ -1133,7 +1133,7 @@ mod operator_pins {
 
             let again = drive(
                 &mailer,
-                &UploadBinary { staged_path: headless.clone(), name: None, pin: false },
+                &UploadBinary { staged_path: headless, name: None, pin: false },
                 Duration::from_secs(30),
                 || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
             );
