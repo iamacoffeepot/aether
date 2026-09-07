@@ -45,6 +45,7 @@ use crate::bloomery::{ScopeRunRefusal, open_scope_run};
 
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
+use rusqlite::TransactionBehavior;
 use rusqlite::ffi::{Error as SqliteFfiError, SQLITE_ERROR};
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -880,8 +881,15 @@ fn connect(path: &str) -> rusqlite::Result<Connection> {
 /// Bring `conn` to the current schema. Unconditional by design — which is why
 /// the holder guard runs in front of it rather than inside it.
 fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(MIGRATIONS)?;
-    migrate_schema(conn)?;
+    // Immediate takes the write lock before the first schema read so a second
+    // connection still inside BEGIN IMMEDIATE cannot force a deferred
+    // read-to-write upgrade to SQLITE_BUSY. `MIGRATIONS` and the versioned
+    // schema steps share that transaction: they commit together or roll back
+    // together, so a fault cannot leave a half-migrated store.
+    let migration = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    migration.execute_batch(MIGRATIONS)?;
+    migrate_schema(&migration)?;
+    migration.commit()?;
     // Foreign keys are per-connection and default OFF. Existing tables have
     // no REFERENCES, so turning the pragma on does not change their DML.
     // The commission tables do use REFERENCES; enforcement is a deliberate
@@ -1008,12 +1016,13 @@ pub type StoredConfigRow = (String, Vec<u8>, Option<Vec<u8>>);
 /// empty legacy store migrates mechanically and a legacy store still holding
 /// order rows is refused by name, with the operator reset or export/recreate
 /// cycle ADR-0177 requires.
-fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
-    if conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? >= SCHEMA_VERSION {
+fn migrate_schema(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    if migration.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? >= SCHEMA_VERSION {
         return Ok(());
     }
-    // One transaction over the whole step — the counts that decide the refusal,
-    // every `ALTER`, and the version stamp. Left as separate autocommits, a
+    // The caller's Immediate transaction already covers `MIGRATIONS` and these
+    // steps. The counts that decide the refusal, every `ALTER`, and the version
+    // stamp must stay on that same transaction: left as separate autocommits, a
     // second `ALTER` that faults (or a process that dies between two of them)
     // commits the first and skips the stamp, and the *next* open sees one
     // migrated table, concludes there is nothing to do, and stamps the version
@@ -1021,7 +1030,6 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     // missing its column, which silently breaks the ADR-0151 park/replay path
     // for good. SQLite makes both DDL and the `user_version` header write
     // transactional, so committing them together is all-or-nothing.
-    let migration = conn.transaction()?;
     // Each table is gated on its own column rather than one standing in for
     // both: they are altered independently, so only their own `PRAGMA
     // table_info` says whether they still need it — and a store already left
@@ -1029,14 +1037,14 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     // read as done.
     let mut pending = Vec::new();
     for table in ORDER_BEARING_TABLES {
-        if !has_column(&migration, table, "deadline_unix_millis")? {
+        if !has_column(migration, table, "deadline_unix_millis")? {
             pending.push(table);
         }
     }
 
     if !pending.is_empty() {
-        let outstanding = count_rows(&migration, "outstanding_orders")?;
-        let parked = count_rows(&migration, "parked_question")?;
+        let outstanding = count_rows(migration, "outstanding_orders")?;
+        let parked = count_rows(migration, "parked_question")?;
         if outstanding > 0 || parked > 0 {
             return Err(legacy_store_refusal(outstanding, parked));
         }
@@ -1049,7 +1057,7 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     // added without a default — pre-existing rows read back `NULL` and are
     // refused at replay by name until a backfill stamps them, because inventing
     // a decision here would attest an outcome no reducer produced.
-    if !has_column(&migration, "journal", "decisions")? {
+    if !has_column(migration, "journal", "decisions")? {
         migration.execute_batch(
             "ALTER TABLE journal ADD COLUMN decisions BLOB;
              ALTER TABLE journal ADD COLUMN decider TEXT;",
@@ -1060,7 +1068,7 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     // Existing decided rows are stamped with the identity current at this
     // migration — they already decode under it. Unstamped (NULL decisions)
     // rows stay NULL and still refuse as pre-ADR-0190.
-    if !has_column(&migration, "journal", "decisions_schema")? {
+    if !has_column(migration, "journal", "decisions_schema")? {
         migration.execute_batch("ALTER TABLE journal ADD COLUMN decisions_schema TEXT;")?;
         migration.execute(
             "UPDATE journal SET decisions_schema = ?1 WHERE decisions_schema IS NULL AND decisions IS NOT NULL",
@@ -1071,51 +1079,51 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     // ADR-0200 (version 4): the proof-fact ledger. Empty on creation; a
     // pre-existing store has no facts to invent, and a stale key is left in
     // place — lookup simply misses once the tree moves.
-    if !has_table(&migration, "proof_facts")? {
+    if !has_table(migration, "proof_facts")? {
         migration.execute_batch(PROOF_FACTS_TABLE)?;
     }
 
     // Version 5: the journal envelope's host-clock stamp. Added nullable
     // with no default and no backfill — a pre-existing row stays NULL.
-    if !has_column(&migration, "journal", "recorded_unix_millis")? {
+    if !has_column(migration, "journal", "recorded_unix_millis")? {
         migration.execute_batch("ALTER TABLE journal ADD COLUMN recorded_unix_millis INTEGER;")?;
     }
 
     // Version 6: metrics rollup cache. Empty on creation; a pre-existing
     // store has no invented rollups — the first open folds them from the
     // journal.
-    if !has_table(&migration, "metric_cursor")? {
+    if !has_table(migration, "metric_cursor")? {
         migration.execute_batch(METRICS_TABLES)?;
     }
 
     // Version 7 (ADR-0199): the commission store. Empty on creation; a
     // pre-existing store has no signed commissions to invent from issue
     // bodies.
-    if !has_table(&migration, "commissions")? {
+    if !has_table(migration, "commissions")? {
         migration.execute_batch(super::commission::COMMISSION_TABLES)?;
     }
 
     // Version 8 (ADR-0199): the persisted replica-issue number. Empty on
     // creation; a pre-existing store has no owned issues to invent.
-    if !has_table(&migration, "commission_projections")? {
+    if !has_table(migration, "commission_projections")? {
         migration.execute_batch(super::commission::COMMISSION_PROJECTION_TABLE)?;
     }
 
     // Version 12 (ADR-0208): the scope-verify report ledger. Empty on creation;
     // a revision frozen before the check existed reads as absent, never clean.
-    if !has_table(&migration, "scope_verify_reports")? {
+    if !has_table(migration, "scope_verify_reports")? {
         migration.execute_batch(super::commission::SCOPE_VERIFY_REPORTS_TABLE)?;
     }
 
     // Version 13 (ADR-0208): the pre-bloom scoping-run ledger. Empty on
     // creation; a revision authored by hand was not produced by a run.
-    if !has_table(&migration, "scope_runs")? {
+    if !has_table(migration, "scope_runs")? {
         migration.execute_batch(super::commission::SCOPE_RUNS_TABLE)?;
     }
 
     // Version 14: one transition per (commission, ordinal). New stores take
     // this from the table's UNIQUE; a v13 file needs the index installed.
-    if has_table(&migration, "scope_runs")? {
+    if has_table(migration, "scope_runs")? {
         migration.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS scope_runs_unique_transition ON scope_runs (commission, ordinal, kind);",
         )?;
@@ -1124,23 +1132,23 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     // Version 9 (ADR-0201): architecture decision records. Empty on
     // creation; a pre-existing store has no signed ADRs to invent from
     // markdown files.
-    if !has_table(&migration, "adrs")? {
+    if !has_table(migration, "adrs")? {
         migration.execute_batch(super::adr::ADR_TABLES)?;
     }
 
     // Version 10 (#5177): the construct session a same-member refine resumes.
     // Empty on creation; a pre-existing store has no captured handles to invent.
-    if !has_table(&migration, "construct_session")? {
+    if !has_table(migration, "construct_session")? {
         migration.execute_batch(CONSTRUCT_SESSION_TABLE)?;
     }
 
     // Version 11 (#5178): deposit time on the construct session, and the sealed
     // member graph a dependent looks up at unblock. No backfill — a missing
     // deposit is stale, and a missing graph launches the dependent fresh.
-    if has_table(&migration, "construct_session")? && !has_column(&migration, "construct_session", "deposited_unix")? {
+    if has_table(migration, "construct_session")? && !has_column(migration, "construct_session", "deposited_unix")? {
         migration.execute_batch("ALTER TABLE construct_session ADD COLUMN deposited_unix INTEGER;")?;
     }
-    if !has_table(&migration, "member_dependency")? {
+    if !has_table(migration, "member_dependency")? {
         migration.execute_batch(MEMBER_DEPENDENCY_TABLE)?;
     }
 
@@ -1148,31 +1156,31 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     // own id demoted to an attribute of the row it keys. No backfill — a
     // pre-existing row names no checkout, so the member it belongs to mints a
     // slug on its next dispatch and starts a session of its own.
-    if has_column(&migration, "construct_session", "session_id")? {
+    if has_column(migration, "construct_session", "session_id")? {
         migration.execute_batch("ALTER TABLE construct_session RENAME COLUMN session_id TO harness_session_id;")?;
     }
-    if !has_column(&migration, "construct_session", "slug")? {
+    if !has_column(migration, "construct_session", "slug")? {
         migration.execute_batch("ALTER TABLE construct_session ADD COLUMN slug TEXT;")?;
     }
     migration.execute_batch("CREATE INDEX IF NOT EXISTS construct_session_by_slug ON construct_session (slug);")?;
 
     // Version 16 (ADR-0211): the candidate-hash journal. Empty on creation; a
     // pre-existing store has no observed pushes to invent.
-    if !has_table(&migration, "candidate_hash")? {
+    if !has_table(migration, "candidate_hash")? {
         migration.execute_batch(CANDIDATE_HASH_TABLE)?;
     }
 
-    migrate_schema_digests(&migration)?;
+    migrate_schema_digests(migration)?;
 
     // Version 18: the outbox writing-schema stamp. Added nullable with no
     // backfill — an undrained pre-adoption row reads back NULL and is the
     // positional identity.
-    if !has_column(&migration, "outbox", "payload_schema")? {
+    if !has_column(migration, "outbox", "payload_schema")? {
         migration.execute_batch("ALTER TABLE outbox ADD COLUMN payload_schema TEXT;")?;
     }
 
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    migration.commit()
+    Ok(())
 }
 
 /// Whether `table` already exists.
@@ -3411,4 +3419,138 @@ fn nonce_spellings(nonce: &str) -> Vec<String> {
         spellings.push(format!("dispatch-{rest}"));
     }
     spellings
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use rusqlite::{Connection, TransactionBehavior};
+
+    use super::{SCHEMA_VERSION, SqliteStore, connect, migrate};
+
+    const LOCK_HANDOFF_BUDGET: Duration = Duration::from_secs(5);
+
+    thread_local! {
+        static RELEASE: RefCell<Option<mpsc::Sender<()>>> = const { RefCell::new(None) };
+        static ACK: RefCell<Option<mpsc::Receiver<()>>> = const { RefCell::new(None) };
+        static INVOKED: Cell<bool> = const { Cell::new(false) };
+        static ACK_FAILED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    struct MigratorBusyGuard;
+
+    impl MigratorBusyGuard {
+        fn install(release: mpsc::Sender<()>, ack: mpsc::Receiver<()>) -> Self {
+            RELEASE.with(|slot| *slot.borrow_mut() = Some(release));
+            ACK.with(|slot| *slot.borrow_mut() = Some(ack));
+            INVOKED.with(|flag| flag.set(false));
+            ACK_FAILED.with(|flag| flag.set(false));
+            Self
+        }
+
+        fn invoked() -> bool {
+            INVOKED.with(Cell::get)
+        }
+
+        fn ack_failed() -> bool {
+            ACK_FAILED.with(Cell::get)
+        }
+    }
+
+    impl Drop for MigratorBusyGuard {
+        fn drop(&mut self) {
+            RELEASE.with(|slot| *slot.borrow_mut() = None);
+            ACK.with(|slot| *slot.borrow_mut() = None);
+            INVOKED.with(|flag| flag.set(false));
+            ACK_FAILED.with(|flag| flag.set(false));
+        }
+    }
+
+    struct ReleaseOnDrop(mpsc::Sender<()>);
+
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    /// `SQLite` may call this from `sqlite3_busy_handler`. It must not panic.
+    fn release_writer_then_retry(count: i32) -> bool {
+        INVOKED.with(|flag| flag.set(true));
+        if count != 0 {
+            return false;
+        }
+        let released = RELEASE.with(|slot| slot.borrow().as_ref().is_some_and(|release| release.send(()).is_ok()));
+        if !released {
+            ACK_FAILED.with(|flag| flag.set(true));
+            return false;
+        }
+        let acknowledged =
+            ACK.with(|slot| slot.borrow().as_ref().is_some_and(|ack| ack.recv_timeout(LOCK_HANDOFF_BUDGET).is_ok()));
+        if acknowledged {
+            true
+        } else {
+            ACK_FAILED.with(|flag| flag.set(true));
+            false
+        }
+    }
+
+    #[test]
+    fn migrate_waits_until_a_live_writer_releases_before_stamping_the_schema_version() {
+        // Current-schema file so `MIGRATIONS` `CREATE IF NOT EXISTS` are
+        // read-only no-ops (SQLite does not take the write lock). Lowering
+        // `user_version` forces `migrate_schema` to open a transaction and
+        // stamp. A deferred transaction reads then upgrades; Immediate waits
+        // at BEGIN, which is the only path that invokes this busy handler.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("bloomery.db");
+        let path = path.to_str().expect("a temp path is utf-8").to_owned();
+        drop(SqliteStore::open(&path).expect("the current schema is applied"));
+        Connection::open(&path)
+            .expect("the journal reopens")
+            .pragma_update(None, "user_version", SCHEMA_VERSION - 1)
+            .expect("the version stamp is lowered");
+
+        let mut migrator = connect(&path).expect("the migrator connects before any locker");
+        migrator.busy_handler(Some(release_writer_then_retry)).expect("the test busy handler is installed");
+
+        let (holding_tx, holding_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (ack_tx, ack_rx) = mpsc::channel();
+        let (result, invoked, ack_failed) = thread::scope(|scope| {
+            scope.spawn(move || {
+                let mut locker = Connection::open(&path).expect("the locker opens");
+                let Ok(write) = locker.transaction_with_behavior(TransactionBehavior::Immediate) else {
+                    return;
+                };
+                let _ = holding_tx.send(());
+                let _ = release_rx.recv_timeout(LOCK_HANDOFF_BUDGET);
+                drop(write);
+                let _ = ack_tx.send(());
+            });
+            let release = ReleaseOnDrop(release_tx.clone());
+            holding_rx.recv_timeout(LOCK_HANDOFF_BUDGET).expect("the locker acquired the write lock");
+            let busy = MigratorBusyGuard::install(release_tx, ack_rx);
+            let result = migrate(&mut migrator);
+            let invoked = MigratorBusyGuard::invoked();
+            let ack_failed = MigratorBusyGuard::ack_failed();
+            drop(release);
+            drop(busy);
+            (result, invoked, ack_failed)
+        });
+        let _ = migrator.busy_handler(None);
+
+        let version = migrator
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .expect("user_version is readable");
+        assert!(
+            result.is_ok() && invoked && !ack_failed && version == SCHEMA_VERSION,
+            "migrate must wait for the live writer, invoke the busy handler, and stamp the schema; \
+             result={result:?} invoked={invoked} ack_failed={ack_failed} user_version={version}",
+        );
+    }
 }
