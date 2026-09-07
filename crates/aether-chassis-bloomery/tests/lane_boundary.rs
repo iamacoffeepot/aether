@@ -427,7 +427,7 @@ fn a_missing_evidence_lane_is_a_host_fault_not_a_candidate_failure() {
     );
 }
 
-/// Bound on observing absolute-deadline cancellation after the first NeverExits
+/// Bound on observing absolute-deadline cancellation after the first `NeverExits`
 /// run records. Longer than the 5 s sealed wall clock plus the 1 s executor poll,
 /// and shorter than the 30 s heartbeat-silence allowance the noisy scenario uses,
 /// so a silence timeout cannot satisfy that claim.
