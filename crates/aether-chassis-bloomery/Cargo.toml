@@ -63,6 +63,7 @@ runtime = [
     "dep:anyhow",
     "dep:serde_json",
     "dep:signal-hook",
+    "dep:libc",
 ]
 # Lane-boundary harness (#4732): in-memory GitHub fixture so the
 # aggregate line (Integrate -> AggregateVerify -> AggregateReview -> Land)
@@ -144,6 +145,11 @@ serde_json = { workspace = true, optional = true }
 # The signal-blocking driver (SIGINT/SIGTERM) mirrors the hub chassis.
 [target.'cfg(unix)'.dependencies]
 signal-hook = { version = "0.3", optional = true }
+
+# `proc_pidinfo` / `sysctlbyname` for macOS process identity (issue #5693).
+# Optional so a wasm marker build does not take it; `runtime` enables `dep:libc`.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { version = "0.2", optional = true }
 
 # `#[derive(aether_data::Kind)]` emits an `inventory::submit!` only on
 # native targets; wasm marker builds skip it.

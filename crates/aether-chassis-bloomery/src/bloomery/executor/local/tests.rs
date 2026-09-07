@@ -11,9 +11,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::ops::{Deref, DerefMut};
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Child;
 use std::process::Command;
 
@@ -35,11 +37,9 @@ use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::to_hex;
 use aether_data::wire::to_vec;
 
-// Unconditional: the live-process cases below are Linux-gated because they read
-// `/proc/<pid>/stat`, but the recorded-identity case is a plain struct literal
-// written to a file and runs everywhere. Gating the import with them made this
-// crate's whole test target refuse to compile off Linux, so no test in it could
-// be run on a developer's machine at all.
+// Unconditional: live identity cases run on Linux/macOS, while recorded identity
+// literals run everywhere. Gating this import with the live cases made the whole
+// test target refuse to compile on other hosts.
 use super::backend::OrderIdentity;
 use super::identity::ProcessIdentity;
 use super::orphan::OrphanedRun;
@@ -1971,12 +1971,50 @@ fn a_disk_quarantine_withholds_the_slot_from_allocation() {
     );
 }
 
-// These live-process cases observe `/proc/<pid>/stat`. Off Linux that read
-// returns None, the expect panics, and the sleep child leaks into nextest.
-#[cfg(target_os = "linux")]
-fn spawn_isolated_sleep() -> (Child, ProcessIdentity) {
+// These live-process cases call `ProcessIdentity::observe`. Guard the `Child`
+// before observe so a failed expect still reaps. Linux and macOS observe;
+// other unix hosts stay gated off.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct OwnedChild(Option<Child>);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl OwnedChild {
+    fn hold(child: Child) -> Self {
+        Self(Some(child))
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Deref for OwnedChild {
+    type Target = Child;
+
+    fn deref(&self) -> &Child {
+        self.0.as_ref().expect("the guard still owns the child")
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl DerefMut for OwnedChild {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.0.as_mut().expect("the guard still owns the child")
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn spawn_isolated_sleep() -> (OwnedChild, ProcessIdentity) {
     use std::os::unix::process::CommandExt;
-    let child = Command::new("sleep").arg("60").process_group(0).spawn().unwrap();
+    let spawned = Command::new("sleep").arg("60").process_group(0).spawn().unwrap();
+    let child = OwnedChild::hold(spawned);
     let identity = ProcessIdentity::observe(child.id()).expect("the child is live long enough to observe");
     assert_eq!(identity.pid, child.id());
     assert_eq!(identity.pgid, child.id(), "process_group(0) makes the child its own group leader");
@@ -1984,7 +2022,7 @@ fn spawn_isolated_sleep() -> (Child, ProcessIdentity) {
     (child, identity)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn reattachment_refuses_a_pid_whose_start_time_does_not_match() {
     // The recycled-pid kill: a live process at the recorded pid whose start
@@ -2036,10 +2074,10 @@ fn an_orphan_does_not_invent_a_signal_or_a_wait_fault() {
         .write(&evidence_dir)
         .unwrap();
     #[cfg_attr(
-        not(target_os = "linux"),
+        not(any(target_os = "linux", target_os = "macos")),
         allow(
             clippy::redundant_clone,
-            reason = "the Linux-gated block below reuses `nonce`; off Linux it is compiled out and this read is the last"
+            reason = "the linux/macos-gated block below reuses `nonce`; off those hosts it is compiled out and this read is the last"
         )
     )]
     let mut departed = OrphanedRun::new(Nonce(nonce.clone()), &evidence_dir);
@@ -2053,7 +2091,7 @@ fn an_orphan_does_not_invent_a_signal_or_a_wait_fault() {
     // recorded identity that still names its live process is a lane that is
     // simply still working, and reading that as exited would destroy in-flight
     // work on every restart.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let (mut child, identity) = spawn_isolated_sleep();
         identity.write(&evidence_dir).unwrap();
@@ -2072,7 +2110,7 @@ fn an_orphan_does_not_invent_a_signal_or_a_wait_fault() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn restart_readopt_cancel_terminates_an_attached_child() {
     // The happy path this issue exists to restore: a coordinator that restarts
