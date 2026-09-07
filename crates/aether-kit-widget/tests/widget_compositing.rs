@@ -2,7 +2,7 @@
 //!
 //! A cluster of `aether-kit` `Widget` inline-child actors draws local and
 //! composites up so the whole subtree reaches `aether.render` through **one
-//! root sender**. Unclipped baselines remain one ordered `DrawSolidQuads`;
+//! root sender**. Unclipped baselines remain one ordered `DrawShapes`;
 //! distinct effective clips may require multiple ordered batches. These are
 //! the gate that the protocol's own
 //! logic — the filled-slot completion counter, `source_mailbox`
@@ -13,7 +13,7 @@
 //! Two properties are pinned per frame:
 //!
 //! - **Unclipped one-batch baseline.**
-//!   `count_observed("aether.render.draw_solid_quads")` is exactly 1 after one
+//!   `count_observed("aether.render.draw_shapes")` is exactly 1 after one
 //!   frame for an unclipped flat panel and two-level tree alike. Clipped runs
 //!   may emit multiple mails, but every batch still comes from the one root
 //!   sender — the #1852 fan-in fix regardless of widget count.
@@ -71,13 +71,29 @@ fn panel_address() -> String {
     format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
 }
 
-/// A flat-colored quad draw item in the widget's own local coordinates.
+/// A flat-colored rectangle draw item in the widget's own local
+/// coordinates — a radius-zero `Shape` with a fill and nothing else, which
+/// is what `set::quad` builds (ADR-0213).
 fn quad(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> WidgetDrawItem {
-    WidgetDrawItem::Quad { x, y, width, height, color, clip: None }
+    flat_shape(x, y, width, height, color, None)
 }
 
 fn clipped_quad(x: f32, y: f32, width: f32, height: f32, color: Rgba, clip: WidgetClipRect) -> WidgetDrawItem {
-    WidgetDrawItem::Quad { x, y, width, height, color, clip: Some(clip) }
+    flat_shape(x, y, width, height, color, Some(clip))
+}
+
+fn flat_shape(x: f32, y: f32, width: f32, height: f32, color: Rgba, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
+    WidgetDrawItem::Shape {
+        x,
+        y,
+        width,
+        height,
+        corner_radius: 0.0,
+        fill: Some(color),
+        stroke: None,
+        shadow: None,
+        clip,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -232,7 +248,7 @@ fn dominant(pixel: [u8; 3], channel: usize) -> bool {
 }
 
 /// A flat panel: a blue root-chrome background under a red and a green
-/// leaf child. Exactly one `DrawSolidQuads` reaches the render sink for
+/// leaf child. Exactly one `DrawShapes` reaches the render sink for
 /// the whole cluster, and each child's fill sits over the background where
 /// it overlaps — chrome-first structural order.
 #[test]
@@ -276,10 +292,10 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
     let img = decode_png(png).expect("decode capture png");
 
     assert_eq!(
-        harness.count_observed("aether.render.draw_solid_quads"),
+        harness.count_observed("aether.render.draw_shapes"),
         1,
         "the whole two-widget cluster must reach the render sink as exactly one \
-         DrawSolidQuads; observed: {:?}",
+         DrawShapes; observed: {:?}",
         harness.observed_kinds(),
     );
 
@@ -376,10 +392,10 @@ fn nested_tree_draws_in_depth_first_order() {
     let img = decode_png(png).expect("decode capture png");
 
     assert_eq!(
-        harness.count_observed("aether.render.draw_solid_quads"),
+        harness.count_observed("aether.render.draw_shapes"),
         1,
         "the whole two-level tree must reach the render sink as exactly one \
-         DrawSolidQuads; observed: {:?}",
+         DrawShapes; observed: {:?}",
         harness.observed_kinds(),
     );
 
@@ -769,9 +785,9 @@ fn scroll_composition_offsets_content_and_contains_pixels_on_every_viewport_edge
         "content_origin - initial_offset and panel placement agree exactly",
     );
     assert_eq!(
-        harness.count_observed("aether.render.draw_solid_quads"),
+        harness.count_observed("aether.render.draw_shapes"),
         2,
-        "the panel background and one equal-clip content run are the only solid batches",
+        "the panel background and one equal-clip content run are the only shape batches",
     );
 
     let strong_primary = |pixel: [u8; 3], channel: usize| {

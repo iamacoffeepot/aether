@@ -273,7 +273,7 @@ mod tests {
             .draw_items()
             .into_iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { x, width, color, .. }
+                WidgetDrawItem::Shape { x, width, fill: Some(color), .. }
                     if width == ROW_RULE_THICKNESS && color == widget.theme.edge() =>
                 {
                     Some(x)

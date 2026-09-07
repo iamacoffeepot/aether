@@ -25,9 +25,9 @@ use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::QuadBlend;
 use aether_render::{
-    CreateTexture, CreateTextureResult, DrawSolidQuads, DrawTexturedQuads, InputSlot, OutputSlot, PassStage,
-    ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, SlotExtent, SlotSpec, SolidQuad,
-    TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
+    CreateTexture, CreateTextureResult, DrawShapes, DrawTexturedQuads, InputSlot, OutputSlot, PassStage,
+    ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, Shape, SlotExtent, SlotSpec, TextureFormat,
+    TextureSampling, TextureUsage, TexturedQuad,
 };
 
 /// Skip (or panic under `AETHER_REQUIRE_RUNTIME`) when no wgpu adapter
@@ -378,15 +378,18 @@ fn mismatched_binding_dispatch_drops_and_frame_survives() {
         envelope("aether.render", &output_overlay(output_id)),
         envelope(
             "aether.render",
-            &DrawSolidQuads {
+            &DrawShapes {
                 space: QuadSpace::Screen,
                 clip: None,
-                quads: vec![SolidQuad {
+                shapes: vec![Shape {
                     x: 2.0,
                     y: 2.0,
                     width: 5.0,
                     height: 5.0,
-                    color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                    corner_radius: 0.0,
+                    fill: Some(Rgba::new(1.0, 1.0, 1.0, 1.0)),
+                    stroke: None,
+                    shadow: None,
                 }],
             },
         ),

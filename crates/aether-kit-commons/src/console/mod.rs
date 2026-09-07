@@ -17,7 +17,7 @@ use aether_kinds::{CachedFontMetrics, Key, KeyRelease, MouseWheel, QuadSpace, Qu
 use aether_lifecycle::LifecycleCapability;
 use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Rgba;
-use aether_render::{DrawSolidQuads, RenderCapability, SolidQuad};
+use aether_render::{DrawShapes, RenderCapability, Shape};
 use aether_text::{
     DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontBytes, LoadFontResult,
     MEMORY_FONT_NAMESPACE, TextCapability,
@@ -95,28 +95,22 @@ impl ConsoleOverlay {
         self.state.clamp_scroll(visible_rows);
         let panel_height = self.config.panel_height.min(bounded_u32_to_f32(self.window_size[1]));
         let history = self.state.visible_markdown_history(visible_rows);
-        let mut quads = vec![
-            SolidQuad { x: 0.0, y: 0.0, width, height: panel_height, color: self.config.theme.background_color },
-            SolidQuad {
-                x: 0.0,
-                y: panel_height - SEPARATOR_HEIGHT,
-                width,
-                height: SEPARATOR_HEIGHT,
-                color: self.config.theme.separator_color,
-            },
+        let mut shapes = vec![
+            fill(0.0, 0.0, width, panel_height, self.config.theme.background_color),
+            fill(0.0, panel_height - SEPARATOR_HEIGHT, width, SEPARATOR_HEIGHT, self.config.theme.separator_color),
         ];
 
         let input_y = self.input_y();
         if self.state.cursor_visible {
             let prompt_width = self.measure(&self.config.prompt);
             let caret_text_width = self.measure_prefix(&self.state.input, self.state.caret);
-            quads.push(SolidQuad {
-                x: HORIZONTAL_PADDING + prompt_width + caret_text_width,
-                y: input_y,
-                width: self.cursor_width(),
-                height: self.config.font_size,
-                color: self.config.theme.cursor_color,
-            });
+            shapes.push(fill(
+                HORIZONTAL_PADDING + prompt_width + caret_text_width,
+                input_y,
+                self.cursor_width(),
+                self.config.font_size,
+                self.config.theme.cursor_color,
+            ));
         }
 
         let mut y = self.history_top_y();
@@ -124,11 +118,11 @@ impl ConsoleOverlay {
             if y + self.config.font_size > input_y - HISTORY_INPUT_GAP {
                 break;
             }
-            self.push_markdown_quads(&mut quads, line, y, width);
+            self.push_markdown_shapes(&mut shapes, line, y, width);
             y += self.row_height();
         }
 
-        ctx.actor::<RenderCapability>().send(&DrawSolidQuads { space: QuadSpace::Screen, clip: None, quads });
+        ctx.actor::<RenderCapability>().send(&DrawShapes { space: QuadSpace::Screen, clip: None, shapes });
 
         let Some(font_id) = self.font_id else {
             return;
@@ -163,26 +157,26 @@ impl ConsoleOverlay {
         });
     }
 
-    fn push_markdown_quads(&self, quads: &mut Vec<SolidQuad>, line: &MarkdownLine, y: f32, width: f32) {
+    fn push_markdown_shapes(&self, shapes: &mut Vec<Shape>, line: &MarkdownLine, y: f32, width: f32) {
         let padding = self.config.theme.markdown.code_padding_pixels.max(0.0);
         if line.thematic_break {
-            quads.push(SolidQuad {
-                x: HORIZONTAL_PADDING,
-                y: self.config.font_size.mul_add(0.55, y),
-                width: HORIZONTAL_PADDING.mul_add(-2.0, width).max(0.0),
-                height: 1.0,
-                color: self.config.theme.markdown.thematic_break_color,
-            });
+            shapes.push(fill(
+                HORIZONTAL_PADDING,
+                self.config.font_size.mul_add(0.55, y),
+                HORIZONTAL_PADDING.mul_add(-2.0, width).max(0.0),
+                1.0,
+                self.config.theme.markdown.thematic_break_color,
+            ));
             return;
         }
         if line.code_block {
-            quads.push(SolidQuad {
-                x: HORIZONTAL_PADDING - padding,
-                y: y - padding,
-                width: padding.mul_add(2.0, HORIZONTAL_PADDING.mul_add(-2.0, width)),
-                height: self.config.font_size + (padding * 2.0),
-                color: self.config.theme.markdown.fenced_code_background_color,
-            });
+            shapes.push(fill(
+                HORIZONTAL_PADDING - padding,
+                y - padding,
+                padding.mul_add(2.0, HORIZONTAL_PADDING.mul_add(-2.0, width)),
+                self.config.font_size + (padding * 2.0),
+                self.config.theme.markdown.fenced_code_background_color,
+            ));
             return;
         }
 
@@ -190,13 +184,13 @@ impl ConsoleOverlay {
         for run in &line.runs {
             let run_width = self.measure(&run.text);
             if run.tone == MarkdownTone::InlineCode {
-                quads.push(SolidQuad {
-                    x: x - padding,
-                    y: y - padding,
-                    width: run_width + (padding * 2.0),
-                    height: self.config.font_size + (padding * 2.0),
-                    color: self.config.theme.markdown.inline_code_background_color,
-                });
+                shapes.push(fill(
+                    x - padding,
+                    y - padding,
+                    run_width + (padding * 2.0),
+                    self.config.font_size + (padding * 2.0),
+                    self.config.theme.markdown.inline_code_background_color,
+                ));
             }
             x += run_width;
         }
@@ -555,6 +549,13 @@ impl WasmActor for ConsoleOverlay {
     fn on_command_output(&mut self, _ctx: &mut WasmCtx<'_, Manual>, output: ConsoleCommandOutput) {
         self.state.append_command_output(output.lines, output.error);
     }
+}
+
+/// A flat-colored rectangle: the console draws only square-cornered
+/// plates, seams, and code backgrounds, so every one of its shapes is a
+/// radius-zero fill with no stroke and no shadow (ADR-0213).
+fn fill(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> Shape {
+    Shape { x, y, width, height, corner_radius: 0.0, fill: Some(color), stroke: None, shadow: None }
 }
 
 fn bounded_u32_to_f32(value: u32) -> f32 {

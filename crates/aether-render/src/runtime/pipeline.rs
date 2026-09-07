@@ -14,7 +14,8 @@ use aether_substrate::render::{
     SHAPE_VERTEX_STRIDE, ShapeParams, Targets, TextureBindings, build_main_pipeline, build_material_pipelines,
     build_quad_pipeline, build_texture_bindings, push_coverage_params, push_material_rect_vertices,
     push_screen_quad_vertices, push_screen_shape_vertices, push_screen_triangle_vertices, push_textured_params,
-    push_world_quad_vertices, push_world_shape_vertices, record_material_pass, record_quad_overlay_pass,
+    push_world_quad_vertices, push_world_shape_vertices, push_world_triangle_vertices, record_material_pass,
+    record_quad_overlay_pass,
 };
 
 use super::material::{MaterialBatch, accepts_coverage_texture};
@@ -194,8 +195,8 @@ pub(super) fn record_overlay_batches(
         };
         #[allow(clippy::cast_possible_truncation)]
         let first_vertex = (vertex_bytes.len() / QUAD_VERTEX_STRIDE as usize) as u32;
-        let vertices = match &batch.geometry {
-            OverlayGeometry::Quads { space: QuadSpace::Screen, quads } => {
+        let (vertices, blend) = match &batch.geometry {
+            OverlayGeometry::Quads { space: QuadSpace::Screen, blend, quads } => {
                 for quad in quads {
                     push_screen_quad_vertices(
                         &mut vertex_bytes,
@@ -204,9 +205,9 @@ pub(super) fn record_overlay_batches(
                         quad.tint.to_array(),
                     );
                 }
-                quads.len() * QUAD_VERTICES_PER_QUAD
+                (quads.len() * QUAD_VERTICES_PER_QUAD, composite_blend(*blend))
             }
-            OverlayGeometry::Quads { space: QuadSpace::World { anchor, scale }, quads } => {
+            OverlayGeometry::Quads { space: QuadSpace::World { anchor, scale }, blend, quads } => {
                 let k = world_scale_factor(scale);
                 for quad in quads {
                     push_world_quad_vertices(
@@ -218,18 +219,28 @@ pub(super) fn record_overlay_batches(
                         k,
                     );
                 }
-                quads.len() * QUAD_VERTICES_PER_QUAD
+                (quads.len() * QUAD_VERTICES_PER_QUAD, composite_blend(*blend))
             }
-            OverlayGeometry::ScreenTriangles(triangles) => {
+            OverlayGeometry::ScreenTriangles { space, triangles } => {
                 for triangle in triangles {
                     let corners = [&triangle.a, &triangle.b, &triangle.c];
-                    push_screen_triangle_vertices(
-                        &mut vertex_bytes,
-                        corners.map(|corner| [corner.x, corner.y]),
-                        corners.map(|corner| corner.color.to_array()),
-                    );
+                    let positions = corners.map(|corner| [corner.x, corner.y]);
+                    let tints = corners.map(|corner| corner.color.to_array());
+                    match space {
+                        QuadSpace::Screen => push_screen_triangle_vertices(&mut vertex_bytes, positions, tints),
+                        QuadSpace::World { anchor, scale } => push_world_triangle_vertices(
+                            &mut vertex_bytes,
+                            *anchor,
+                            positions,
+                            tints,
+                            world_scale_factor(scale),
+                        ),
+                    }
                 }
-                triangles.len() * QUAD_VERTICES_PER_TRIANGLE
+                // Flat per-vertex colours over the reserved white texture:
+                // the caller composited no image, so there is nothing that
+                // could already be premultiplied.
+                (triangles.len() * QUAD_VERTICES_PER_TRIANGLE, CompositeBlend::Straight)
             }
             OverlayGeometry::Shapes { .. } => unreachable!("shape batches are expanded above"),
         };
@@ -239,7 +250,7 @@ pub(super) fn record_overlay_batches(
             continue;
         }
         draws.push(OverlayDraw {
-            source: OverlaySource::Textured { bind_group: realized.bind_group(), blend: composite_blend(batch.blend) },
+            source: OverlaySource::Textured { bind_group: realized.bind_group(), blend },
             first_vertex,
             vertex_count,
             clip,
@@ -281,7 +292,7 @@ pub(super) fn record_overlay_batches(
                 // report here. The snapshot is a quad-batch view of the
                 // committed overlay, and the pixels are what a triangle or
                 // shape scenario asserts on.
-                let OverlayGeometry::Quads { space, quads } = &batch.geometry else {
+                let OverlayGeometry::Quads { space, blend, quads } = &batch.geometry else {
                     continue;
                 };
                 let clip = batch.clip.as_ref().map(|clip| [clip.x, clip.y, clip.width, clip.height]);
@@ -296,7 +307,7 @@ pub(super) fn record_overlay_batches(
                         texture_id: batch.texture_id,
                         space: space.clone(),
                         clip: batch.clip.clone(),
-                        blend: batch.blend,
+                        blend: *blend,
                         quads: quads.clone(),
                     });
                 }

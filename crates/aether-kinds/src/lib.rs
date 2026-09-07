@@ -1074,8 +1074,8 @@ mod control_plane {
 
     // ADR-0105 textured-quad render surface. The texture + quad draw
     // kinds (`CreateTexture` / `CreateTextureResult` / `UpdateTexture` /
-    // `TexturedQuad` / `DrawTexturedQuads` / `SolidQuad` /
-    // `DrawSolidQuads`) moved to `aether_render::kinds`
+    // `TexturedQuad` / `DrawTexturedQuads`) moved to
+    // `aether_render::kinds`
     // (ADR-0121). The `QuadScale` / `QuadSpace` projection types stay
     // central: the `aether.text.draw` kind below consumes `QuadSpace`,
     // and `aether-kinds` has no dependency on `aether-render`, so

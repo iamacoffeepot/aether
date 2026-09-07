@@ -121,10 +121,9 @@ pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
 
 use super::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyGeometry,
-    DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawShapes, DrawSolidQuads,
-    DrawTexturedQuads, DrawTriangle, Frame, Occluded, PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister,
-    ProgramRegisterResult, ProgramTimings, ProgramTimingsResult, RenderCapability, UpdateGeometry, UpdateTexture,
-    ViewProjection,
+    DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawShapes, DrawTexturedQuads,
+    DrawTriangle, Frame, Occluded, PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult,
+    ProgramTimings, ProgramTimingsResult, RenderCapability, UpdateGeometry, UpdateTexture, ViewProjection,
 };
 
 /// Wedge-to-`Err` cap for a parked capture (ADR-0161): if a capture's
@@ -990,22 +989,10 @@ impl NativeActor for RenderCapability {
         state.quad_frame.push(QuadBatch::textured(mail));
     }
 
-    /// `DrawSolidQuads` (ADR-0107 §4), on the owned `quad_frame` — expand to
-    /// the reserved white texture tinted by `color`.
-    #[handler::single]
-    fn on_draw_solid_quads(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawSolidQuads) {
-        state.observe(<DrawSolidQuads as Kind>::ID);
-        if state.warn_drop_if_unusable("draw_solid_quads") {
-            return;
-        }
-        let batch = QuadBatch::solid(mail, &mut state.textures);
-        state.quad_frame.push(batch);
-    }
-
     /// `DrawScreenTriangles` (iamacoffeepot/aether#5504), on the owned
-    /// `quad_frame` — arbitrary window-pixel triangles on the overlay pass's
-    /// screen path, so flat 2D content keeps its proportions on a non-square
-    /// window without a camera publishing a projection for it.
+    /// `quad_frame` — arbitrary pixel-space triangles on the overlay pass,
+    /// so flat 2D content keeps its proportions on a non-square window
+    /// without a camera publishing a projection for it.
     #[handler::single]
     fn on_draw_screen_triangles(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawScreenTriangles) {
         state.observe(<DrawScreenTriangles as Kind>::ID);
@@ -1294,7 +1281,7 @@ impl NativeActor for RenderCapability {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Shape, SolidQuad, TextureFormat, TextureSampling, TextureUsage};
+    use super::super::{ScreenTriangle, ScreenVertex, Shape, TextureFormat, TextureSampling, TextureUsage};
     use super::quad::OverlayGeometry;
     use super::texture::StagedTexture;
     use super::*;
@@ -1689,59 +1676,12 @@ mod tests {
         );
     }
 
-    /// ADR-0107 §4: `draw_solid_quads` accumulates into `quad_frame` under
-    /// the reserved `WHITE_TEXTURE_ID` and records its kind name in
-    /// `observed_kinds`. Verifies the expand-to-TexturedQuad path and the
-    /// lazy white-texture insertion without a GPU.
-    #[test]
-    fn draw_solid_quads_accumulates_and_observed() {
-        let (mailer, _rx) = test_mailer_and_rx();
-        let observed = Arc::new(Mutex::new(Vec::<KindId>::new()));
-        let mut state = headless_state(&mailer);
-        state.observed_kinds = Some(Arc::clone(&observed));
-        let binding = ctx_binding(&mailer);
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-
-        RenderCapability::on_draw_solid_quads(
-            &mut state,
-            &mut ctx,
-            DrawSolidQuads {
-                space: QuadSpace::Screen,
-                clip: None,
-                quads: vec![SolidQuad {
-                    x: 10.0,
-                    y: 20.0,
-                    width: 30.0,
-                    height: 40.0,
-                    color: Rgba::new(1.0, 0.0, 0.5, 0.8),
-                }],
-            },
-        );
-
-        let seen = observed.lock().expect("observed_kinds mutex is not poisoned").clone();
-        assert!(
-            seen.contains(&<DrawSolidQuads as Kind>::ID),
-            "draw_solid_quads handler should push its kind name; observed: {seen:?}",
-        );
-
-        assert_eq!(state.quad_frame.len(), 1, "one QuadBatch should be in the accumulator");
-        assert_eq!(state.quad_frame[0].texture_id, WHITE_TEXTURE_ID, "batch must use the reserved white texture id");
-        let OverlayGeometry::Quads { quads, .. } = &state.quad_frame[0].geometry else {
-            panic!("a solid-quad submission must accumulate as quad geometry");
-        };
-        assert_eq!(quads.len(), 1, "batch must contain the one expanded quad");
-        assert_eq!(quads[0].tint, Rgba::new(1.0, 0.0, 0.5, 0.8), "expanded quad tint must match the SolidQuad color");
-        assert_eq!(quads[0].width, 30.0);
-
-        let white =
-            state.textures.entries.get(&WHITE_TEXTURE_ID).expect("white texture must be lazily inserted on first send");
-        assert_eq!(white.format, TextureFormat::Rgba8, "white texture must remain RGBA8");
-    }
-
     /// ADR-0213: `draw_shapes` accumulates into `quad_frame` as shape
     /// geometry — the one accumulator, so painter order interleaves with
-    /// the quad batches — and records its kind name in `observed_kinds`,
-    /// which is what a harness's `count_observed` reads. Without a GPU.
+    /// the batches of the other overlay verbs — and records its kind name
+    /// in `observed_kinds`, which is what a harness's `count_observed`
+    /// reads. The triangle batch sent before it also proves the reserved
+    /// white texture is inserted lazily on first use. Without a GPU.
     #[test]
     fn draw_shapes_accumulates_in_painter_order_and_observed() {
         let (mailer, _rx) = test_mailer_and_rx();
@@ -1750,7 +1690,7 @@ mod tests {
         state.observed_kinds = Some(Arc::clone(&observed));
         let binding = ctx_binding(&mailer);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let quad = SolidQuad { x: 0.0, y: 0.0, width: 8.0, height: 8.0, color: Rgba::WHITE };
+        let corner = |x: f32, y: f32| ScreenVertex { x, y, color: Rgba::WHITE };
         let shape = Shape {
             x: 10.0,
             y: 20.0,
@@ -1762,10 +1702,14 @@ mod tests {
             shadow: None,
         };
 
-        RenderCapability::on_draw_solid_quads(
+        RenderCapability::on_draw_screen_triangles(
             &mut state,
             &mut ctx,
-            DrawSolidQuads { space: QuadSpace::Screen, clip: None, quads: vec![quad] },
+            DrawScreenTriangles {
+                space: QuadSpace::Screen,
+                clip: None,
+                triangles: vec![ScreenTriangle { a: corner(0.0, 0.0), b: corner(8.0, 0.0), c: corner(4.0, 8.0) }],
+            },
         );
         RenderCapability::on_draw_shapes(
             &mut state,
@@ -1780,8 +1724,12 @@ mod tests {
         );
         assert_eq!(state.quad_frame.len(), 2, "both batches share the one overlay accumulator");
         let OverlayGeometry::Shapes { shapes, .. } = &state.quad_frame[1].geometry else {
-            panic!("a shape submission must accumulate as shape geometry, after the quad sent before it");
+            panic!("a shape submission must accumulate as shape geometry, after the triangles sent before it");
         };
         assert_eq!(shapes.as_slice(), &[shape]);
+
+        let white =
+            state.textures.entries.get(&WHITE_TEXTURE_ID).expect("white texture must be lazily inserted on first send");
+        assert_eq!(white.format, TextureFormat::Rgba8, "white texture must remain RGBA8");
     }
 }

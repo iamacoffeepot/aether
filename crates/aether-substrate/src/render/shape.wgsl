@@ -1,4 +1,4 @@
-// Screen-space shape overlay (ADR-0213). Each shape is an axis-aligned
+// Shape overlay (ADR-0213). Each shape is an axis-aligned
 // box expanded to one quad grown by its shadow extent; the fragment
 // stage evaluates a rounded-box signed distance per pixel and composes
 // shadow under fill under stroke, each edge anti-aliased over one

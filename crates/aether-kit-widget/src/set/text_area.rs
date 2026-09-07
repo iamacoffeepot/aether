@@ -719,7 +719,9 @@ mod tests {
         let accent_bands: Vec<_> = items
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { x, y, width, color, .. } if *color == Theme::DEFAULT.accent && *width > 1.0 => {
+                WidgetDrawItem::Shape { x, y, width, fill: Some(color), .. }
+                    if *color == Theme::DEFAULT.accent && *width > 1.0 =>
+                {
                     Some((*x, *y, *width))
                 }
                 _ => None,

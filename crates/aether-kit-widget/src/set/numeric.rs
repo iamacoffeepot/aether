@@ -51,10 +51,6 @@ const NUMERIC_EDIT_MAX_CHARS: u32 = 32;
 /// enough that the arrow reads as a mark on a button rather than as the button.
 const ARROW_EXTENT_FRACTION: f32 = 0.45;
 
-/// Rows [`push_triangle`] uses for one arrow at the sizes a stepper button
-/// comes to — only a `Vec::with_capacity` hint, never a correctness bound.
-const TRIANGLE_ROWS_PER_ARROW: usize = 8;
-
 /// How long a stepper button must be held before it starts repeating, in the
 /// root's per-frame `Collect`s — half a second at sixty a second. Long enough
 /// that a deliberate single click never turns into two, short enough that a
@@ -462,7 +458,9 @@ impl NumericWidget {
     /// same surface lifted — never a second box beside the value.
     fn stepper_items(&self, column: StepperColumn, box_fill: Rgba) -> Vec<WidgetDrawItem> {
         let theme = &self.theme;
-        let mut items = Vec::with_capacity(3 + TRIANGLE_ROWS_PER_ARROW * 2);
+        // The hairline, plus an arrow and at most one touched-button overlay
+        // for each of the two directions.
+        let mut items = Vec::with_capacity(5);
         for direction in [StepDirection::Up, StepDirection::Down] {
             let (top, height) = column.button_span(direction);
             let button_state = self.stepper_state(direction);
@@ -1085,7 +1083,7 @@ mod tests {
         let fills: Vec<_> = items
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { x, y, width, height, color, .. }
+                WidgetDrawItem::Shape { x, y, width, height, fill: Some(color), .. }
                     if (*width - column.width).abs() < 1e-4 && *height > 1.0 =>
                 {
                     Some((*x, *y, *color))
@@ -1100,11 +1098,11 @@ mod tests {
         assert!(
             !items
                 .iter()
-                .any(|item| matches!(item, WidgetDrawItem::Quad { color, .. } if *color == Theme::DEFAULT.surface)),
+                .any(|item| matches!(item, WidgetDrawItem::Shape { fill: Some(color), .. } if *color == Theme::DEFAULT.surface)),
             "no part of the column fills itself from a second surface role; items were {items:?}",
         );
         let hairlines = items.iter().filter(|item| {
-            matches!(item, WidgetDrawItem::Quad { x, width, height, color, .. }
+            matches!(item, WidgetDrawItem::Shape { x, width, height, fill: Some(color), .. }
                 if *x == column.left && *width == 1.0 && *height == column.height && *color == Theme::DEFAULT.outline)
         });
         assert_eq!(hairlines.count(), 1, "one hairline is the whole seam; items were {items:?}");

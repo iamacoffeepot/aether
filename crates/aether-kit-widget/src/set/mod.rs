@@ -552,10 +552,59 @@ fn reply_with_draw_items(
     }
 }
 
-/// A flat-colored quad in a widget's own local coordinates — the shared
-/// constructor the widgets build their chrome from.
+/// A flat-colored rectangle in a widget's own local coordinates — the
+/// shared constructor the widgets build their square-cornered chrome
+/// from: a rule, a seam, a caret, a selection band, a hover overlay.
+/// A [`WidgetDrawItem::Shape`] at radius zero with a fill and nothing
+/// else, which is the whole of what a flat rect ever was (ADR-0213).
 pub(crate) fn quad(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> WidgetDrawItem {
-    WidgetDrawItem::Quad { x, y, width, height, color, clip: None }
+    shape(x, y, width, height, 0.0, Some(color), None)
+}
+
+/// A stadium in a widget's own local coordinates: the box rounded by half
+/// its shorter side, which is the radius the shape primitive draws a fully
+/// round end at (ADR-0213) — a toggle's track, a scroll thumb, a pill.
+pub(crate) fn stadium(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    fill: Option<Rgba>,
+    stroke: Option<(f32, Rgba)>,
+) -> WidgetDrawItem {
+    shape(x, y, width, height, width.min(height) * 0.5, fill, stroke)
+}
+
+/// A circle in a widget's own local coordinates: the [`stadium`] of a
+/// square box `size` on a side — a toggle's knob, a radio's marker, a
+/// status dot.
+pub(crate) fn disc(x: f32, y: f32, size: f32, fill: Option<Rgba>, stroke: Option<(f32, Rgba)>) -> WidgetDrawItem {
+    stadium(x, y, size, size, fill, stroke)
+}
+
+/// The unclipped, unshadowed [`WidgetDrawItem::Shape`] every constructor
+/// above lands on, with the corner radius stated outright rather than
+/// taken from the theme.
+fn shape(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    corner_radius: f32,
+    fill: Option<Rgba>,
+    stroke: Option<(f32, Rgba)>,
+) -> WidgetDrawItem {
+    WidgetDrawItem::Shape {
+        x,
+        y,
+        width,
+        height,
+        corner_radius,
+        fill,
+        stroke: stroke.map(|(width_pixels, color)| ShapeStroke { width_pixels, color }),
+        shadow: None,
+        clip: None,
+    }
 }
 
 /// A rounded box in a widget's own local coordinates at the theme's corner
@@ -573,17 +622,7 @@ pub(crate) fn plate(
     fill: Option<Rgba>,
     stroke: Option<(f32, Rgba)>,
 ) -> WidgetDrawItem {
-    WidgetDrawItem::Shape {
-        x,
-        y,
-        width,
-        height,
-        corner_radius: theme.corner_radius_pixels,
-        fill,
-        stroke: stroke.map(|(width_pixels, color)| ShapeStroke { width_pixels, color }),
-        shadow: None,
-        clip: None,
-    }
+    shape(x, y, width, height, theme.corner_radius_pixels, fill, stroke)
 }
 
 /// A plate that **stands over** what is under it — a dialog, a tooltip, a
@@ -954,13 +993,8 @@ fn single_line_edit_draw_items(edit: &SingleLineEdit<'_>) -> Vec<WidgetDrawItem>
     // Everything the reader typed lives inside the value's own box, never in
     // the gutter beside it (round-4 note 6).
     let content_clip = edit.content_clip();
-    let content_quad = |x: f32, y: f32, quad_width: f32, quad_height: f32, color: Rgba| WidgetDrawItem::Quad {
-        x,
-        y,
-        width: quad_width,
-        height: quad_height,
-        color,
-        clip: content_clip,
+    let content_quad = |x: f32, y: f32, quad_width: f32, quad_height: f32, color: Rgba| {
+        quad(x, y, quad_width, quad_height, color).with_clip(content_clip)
     };
 
     let mut items = Vec::new();
@@ -1611,8 +1645,7 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 WidgetDrawItem::Text { text, .. } => Some(text.as_str()),
-                WidgetDrawItem::Quad { .. }
-                | WidgetDrawItem::TexturedQuad { .. }
+                WidgetDrawItem::TexturedQuad { .. }
                 | WidgetDrawItem::Shape { .. }
                 | WidgetDrawItem::Triangle { .. } => None,
             })

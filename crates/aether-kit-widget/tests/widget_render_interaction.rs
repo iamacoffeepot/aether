@@ -472,7 +472,17 @@ fn solid_leaf(subname: &str, width_pixels: f32, stripes: Vec<WidgetDrawItem>) ->
 }
 
 fn solid_quad(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> WidgetDrawItem {
-    WidgetDrawItem::Quad { x, y, width, height, color, clip: None }
+    WidgetDrawItem::Shape {
+        x,
+        y,
+        width,
+        height,
+        corner_radius: 0.0,
+        fill: Some(color),
+        stroke: None,
+        shadow: None,
+        clip: None,
+    }
 }
 
 fn scroll_child(

@@ -399,10 +399,10 @@ mod tests {
         let quads: Vec<_> = items
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { y, height, color, .. } => Some((*y, *height, *color)),
+                WidgetDrawItem::Shape { y, height, fill: Some(color), .. } => Some((*y, *height, *color)),
                 WidgetDrawItem::Text { .. }
                 | WidgetDrawItem::TexturedQuad { .. }
-                | WidgetDrawItem::Shape { .. }
+                | WidgetDrawItem::Shape { fill: None, .. }
                 | WidgetDrawItem::Triangle { .. } => None,
             })
             .collect();

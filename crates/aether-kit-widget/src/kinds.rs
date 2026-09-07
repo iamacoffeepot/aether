@@ -239,10 +239,6 @@ fn intersect_widget_clips(item: Option<WidgetClipRect>, slot: Option<WidgetClipR
 /// its own; only addressable inside [`WidgetDrawList::items`].
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum WidgetDrawItem {
-    /// A flat-colored rectangle. `(x, y)` is the top-left corner and
-    /// `(width, height)` the size, in the widget's local pixels; `color`
-    /// is a linear RGBA value.
-    Quad { x: f32, y: f32, width: f32, height: f32, color: Rgba, clip: Option<WidgetClipRect> },
     /// A textured rectangle. `(x, y)` is the top-left corner and
     /// `(width, height)` the size in the widget's local pixels;
     /// `(u0, v0)`–`(u1, v1)` selects the texture sub-rectangle;
@@ -275,7 +271,9 @@ pub enum WidgetDrawItem {
     /// at or above half the shorter side is a circle); `fill`, `stroke`
     /// (inside the edge), and `shadow` are each optional and compose
     /// shadow under fill under stroke, every edge anti-aliased on the GPU.
-    /// One item where a plate and its four stroke quads used to be.
+    /// One item where a plate and its four stroke quads used to be, and —
+    /// at `corner_radius: 0.0` with a fill alone — the flat rectangle the
+    /// retired `Quad` variant used to be.
     Shape {
         x: f32,
         y: f32,
@@ -303,14 +301,6 @@ impl WidgetDrawItem {
     #[must_use]
     pub fn offset(&self, by: Vec2) -> Self {
         match self {
-            Self::Quad { x, y, width, height, color, clip } => Self::Quad {
-                x: x + by.x,
-                y: y + by.y,
-                width: *width,
-                height: *height,
-                color: *color,
-                clip: clip.map(|rect| rect.offset(by)),
-            },
             Self::TexturedQuad { texture_id, x, y, width, height, u0, v0, u1, v1, tint, clip } => Self::TexturedQuad {
                 texture_id: *texture_id,
                 x: x + by.x,
@@ -364,25 +354,31 @@ impl WidgetDrawItem {
             WidgetClipIntersection::Finite { rect } => Some(rect),
             WidgetClipIntersection::Empty => return None,
         };
-        let mut item = self.clone();
-        match &mut item {
-            Self::Quad { clip: own, .. }
-            | Self::TexturedQuad { clip: own, .. }
+        Some(self.clone().with_clip(clip))
+    }
+
+    /// This item drawn under `clip` instead of its own, whichever variant
+    /// it is. The shared `set` constructors build unclipped items, so a
+    /// widget drawing inside a scrolled or inset region states that region
+    /// once here rather than hand-building the item to carry it.
+    #[must_use]
+    pub(crate) fn with_clip(mut self, clip: Option<WidgetClipRect>) -> Self {
+        match &mut self {
+            Self::TexturedQuad { clip: own, .. }
             | Self::Text { clip: own, .. }
             | Self::Shape { clip: own, .. }
             | Self::Triangle { clip: own, .. } => {
                 *own = clip;
             }
         }
-        Some(item)
+        self
     }
 
     /// This item's own clip, whichever variant it is.
     #[must_use]
     fn clip(&self) -> Option<WidgetClipRect> {
         match self {
-            Self::Quad { clip, .. }
-            | Self::TexturedQuad { clip, .. }
+            Self::TexturedQuad { clip, .. }
             | Self::Text { clip, .. }
             | Self::Shape { clip, .. }
             | Self::Triangle { clip, .. } => *clip,
@@ -404,8 +400,7 @@ impl WidgetDrawItem {
     #[must_use]
     pub(super) fn covered_rect(&self) -> Option<WidgetClipRect> {
         let (rect, clip) = match self {
-            Self::Quad { x, y, width, height, clip, .. }
-            | Self::TexturedQuad { x, y, width, height, clip, .. }
+            Self::TexturedQuad { x, y, width, height, clip, .. }
             | Self::Shape { x, y, width, height, fill: Some(_), clip, .. } => {
                 (WidgetClipRect { x: *x, y: *y, width: *width, height: *height }, *clip)
             }
@@ -2050,25 +2045,21 @@ mod tests {
     }
 
     #[test]
-    fn quad_offset_translates_position_and_keeps_size() {
-        let item = WidgetDrawItem::Quad {
-            x: 3.0,
-            y: 5.0,
+    fn shape_offset_translates_position_and_keeps_size() {
+        let shape = |x: f32, y: f32, clip: WidgetClipRect| WidgetDrawItem::Shape {
+            x,
+            y,
             width: 10.0,
             height: 4.0,
-            color: Rgba::new(1.0, 0.0, 0.0, 1.0),
-            clip: Some(WidgetClipRect { x: 4.0, y: 6.0, width: 8.0, height: 2.0 }),
+            corner_radius: 2.0,
+            fill: Some(Rgba::new(1.0, 0.0, 0.0, 1.0)),
+            stroke: None,
+            shadow: None,
+            clip: Some(clip),
         };
         assert_eq!(
-            item.offset(Vec2::new(100.0, 20.0)),
-            WidgetDrawItem::Quad {
-                x: 103.0,
-                y: 25.0,
-                width: 10.0,
-                height: 4.0,
-                color: Rgba::new(1.0, 0.0, 0.0, 1.0),
-                clip: Some(WidgetClipRect { x: 104.0, y: 26.0, width: 8.0, height: 2.0 }),
-            },
+            shape(3.0, 5.0, WidgetClipRect { x: 4.0, y: 6.0, width: 8.0, height: 2.0 }).offset(Vec2::new(100.0, 20.0)),
+            shape(103.0, 25.0, WidgetClipRect { x: 104.0, y: 26.0, width: 8.0, height: 2.0 }),
             "offset moves the corner by the vector and leaves the extent untouched",
         );
     }

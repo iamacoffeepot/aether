@@ -493,7 +493,7 @@ mod tests {
             .draw_items()
             .iter()
             .flat_map(|item| match item {
-                WidgetDrawItem::Quad { color, .. } | WidgetDrawItem::Text { color, .. } => vec![*color],
+                WidgetDrawItem::Text { color, .. } => vec![*color],
                 WidgetDrawItem::TexturedQuad { tint, .. } => vec![*tint],
                 WidgetDrawItem::Shape { fill, stroke, .. } => {
                     fill.iter().copied().chain(stroke.as_ref().map(|stroke| stroke.color)).collect()

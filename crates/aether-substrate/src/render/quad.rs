@@ -541,6 +541,24 @@ pub fn push_screen_triangle_vertices(out: &mut Vec<u8>, positions: [[f32; 2]; 3]
     }
 }
 
+/// Push the three vertices of one world-anchored triangle into `out` —
+/// the same expansion as [`push_screen_triangle_vertices`] with the
+/// corners read as pixel offsets from `anchor`, and `k` the world scale
+/// factor the quad overlay uses (`k < 0` Pixels mode, `k > 0` the
+/// Distance-mode reference distance). The world counterpart a gauge or a
+/// graph edge hanging off a point in the world is drawn through.
+pub fn push_world_triangle_vertices(
+    out: &mut Vec<u8>,
+    anchor: [f32; 3],
+    positions: [[f32; 2]; 3],
+    tints: [[f32; 4]; 3],
+    k: f32,
+) {
+    for (position, tint) in positions.into_iter().zip(tints) {
+        push_overlay_vertex(out, anchor, position, [0.5, 0.5], tint, k, false);
+    }
+}
+
 /// Write one overlay vertex into `out` in the unified world-aware
 /// layout: `anchor vec3`, `offset_px vec2`, `uv vec2`, `tint vec4`,
 /// `k f32`, `is_screen u32` — [`QUAD_VERTEX_STRIDE`] bytes. The single
