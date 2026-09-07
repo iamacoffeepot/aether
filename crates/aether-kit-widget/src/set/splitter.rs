@@ -98,9 +98,21 @@ pub struct SplitterConfig {
     pub axis: SplitterAxis,
     pub min_pixels: f32,
     pub max_pixels: f32,
-    /// Where the split stands now. Re-send the config to move it from the
-    /// host's side (a menu command that resets a pane's width); the widget
-    /// clamps whatever it is given.
+    /// Where the split stands now — **the one config field in the set that is
+    /// also a verb**, and the sole exception to the rule that a re-sent config
+    /// never moves a value.
+    ///
+    /// Every other value-carrying widget seeds itself from an `initial*` field
+    /// at `init` and ignores it afterwards, so a host may re-send a config
+    /// freely, and moves the value through a deliberate setter
+    /// ([`SetValue`](crate::SetValue), [`SetText`](crate::SetText),
+    /// [`SetSelection`](crate::SetSelection), [`SetToggle`](crate::SetToggle)).
+    /// A splitter has no such setter because its position *is* its
+    /// configuration — there is nothing else in this struct a host would resend
+    /// on its own — so re-sending the config is how a host moves the bar (a
+    /// menu command that resets a pane's width). It is named without an
+    /// `initial` prefix for exactly that reason: it is not a seed. The widget
+    /// clamps whatever it is given, and a re-send ends a live drag.
     pub position_pixels: f32,
     /// The region grows as the pointer travels toward the origin rather than
     /// away from it.

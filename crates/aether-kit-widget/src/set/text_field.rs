@@ -45,7 +45,7 @@ use crate::set::{
 use crate::state::InteractionState;
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, TextEditState, TextSpan};
 use crate::theme::{SetTheme, Theme, ThemeState};
-use crate::{Collect, SetWidgetState, TextCommitted, TextFieldConfig, WidgetControlState, WidgetFrame};
+use crate::{Collect, SetText, SetWidgetState, TextCommitted, TextFieldConfig, WidgetControlState, WidgetFrame};
 
 /// A single-line editable string. Holds the reusable editing state, the
 /// character cap, the latest modifiers, whether a pointer drag is live, and the
@@ -73,6 +73,15 @@ impl TextFieldWidget {
     /// `max_chars`.
     fn policy(&self) -> EditPolicy {
         EditPolicy { single_line: true, max_chars: self.max_chars }
+    }
+
+    /// The presentation half of a re-sent config: the cap and the theme, and
+    /// the metrics request the new font is owed. The buffer is not its
+    /// business, which is the whole of the re-send contract.
+    fn reconfigure(&mut self, max_chars: u32, theme: Theme) {
+        self.max_chars = max_chars;
+        self.font_metrics.set_desired(theme.font_id);
+        self.theme = theme;
     }
 
     /// Start a font-metrics request when one is due (single-flight; a duplicate
@@ -132,7 +141,9 @@ impl WidgetDefaults for TextFieldWidget {
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
-/// its `TextFieldConfig` again to reset its contents or theme in place.
+/// its `TextFieldConfig` again to re-cap or restyle it in place — that holds
+/// the buffer, the caret, and the selection. Send it [`SetText`] to replace
+/// what it holds.
 #[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for TextFieldWidget {
     type Config = TextFieldConfig;
@@ -159,16 +170,14 @@ impl WasmActor for TextFieldWidget {
         self.pump_font_metrics(ctx);
     }
 
-    /// Reset the contents / cap / theme in place from a re-sent config, and
-    /// request metrics for the new theme font.
+    /// Re-cap and restyle in place from a re-sent config, and request metrics
+    /// for the new theme font. `initial` seeds the buffer only at `init`, so
+    /// this holds the text, the caret, and the selection: a host may relabel or
+    /// restyle a field under someone typing in it. [`SetText`] is the lane that
+    /// replaces the contents.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: TextFieldConfig) {
-        self.edit = TextEditState::new(config.initial);
-        self.max_chars = config.max_chars;
-        self.font_metrics.set_desired(config.theme.font_id);
-        self.theme = config.theme;
-        self.dragging = false;
-        self.paste_pending = false;
+        self.reconfigure(config.max_chars, config.theme);
         self.apply_control_state(ctx, config.state);
         self.pump_font_metrics(ctx);
     }
@@ -176,6 +185,13 @@ impl WasmActor for TextFieldWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
+    }
+
+    /// Replace the buffer from the host. Silent — no [`TextCommitted`], since
+    /// the host wrote the value it would be told about.
+    #[handler::single]
+    fn on_set_text(&mut self, _ctx: &mut WasmCtx<'_>, set: SetText) {
+        self.edit.replace_value(set.text, set.keep_caret);
     }
 
     /// Insert committed text over the active selection. `TextInput` is already
@@ -329,6 +345,27 @@ mod tests {
             paste_pending: false,
             font_metrics: FontMetricsAdapter::new(7),
         }
+    }
+
+    #[test]
+    fn a_re_sent_config_holds_the_buffer_and_caret_and_set_text_replaces_them() {
+        // Tripwire: `on_config` used to run `self.edit = TextEditState::new(config.initial)`,
+        // so a host that re-capped or restyled a row cleared what the reader
+        // had typed and threw their caret to the end. The seed is read at
+        // `init` alone now, and `SetText` is the lane that replaces contents.
+        let mut field = field();
+        field.edit = TextEditState::new(String::from("héllo"));
+        field.edit.place_caret(3);
+
+        field.reconfigure(64, Theme::DEFAULT);
+
+        assert_eq!(field.edit.value(), "héllo");
+        assert_eq!(field.edit.caret(), 3);
+        assert_eq!(field.max_chars, 64);
+
+        field.edit.replace_value(String::from("hé"), true);
+        assert_eq!(field.edit.value(), "hé");
+        assert_eq!(field.edit.caret(), 3, "a kept caret is floored onto the new string's boundaries");
     }
 
     #[test]
