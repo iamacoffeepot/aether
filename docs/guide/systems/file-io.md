@@ -49,18 +49,25 @@ Each request kind pairs with a reply kind that names the same operation:
 
 | Request | Fields | Reply | `Ok` adds |
 |---|---|---|---|
-| `aether.fs.read` | `namespace`, `path` | `aether.fs.read_result` | `bytes` |
-| `aether.fs.write` | `namespace`, `path`, `bytes` | `aether.fs.write_result` | — (ack) |
-| `aether.fs.delete` | `namespace`, `path` | `aether.fs.delete_result` | — (ack) |
-| `aether.fs.list` | `namespace`, `prefix` | `aether.fs.list_result` | `entries` |
+| `aether.fs.read` | `addr` | `aether.fs.read_result` | `bytes` |
+| `aether.fs.write` | `addr`, `bytes` | `aether.fs.write_result` | — (ack) |
+| `aether.fs.delete` | `addr` | `aether.fs.delete_result` | — (ack) |
+| `aether.fs.list` | `addr` | `aether.fs.list_result` | `entries` |
 | `aether.fs.copy` | `from`, `to` | `aether.fs.copy_result` | — (ack) |
-| `aether.fs.fetch` | `namespace`, `path`, `transforms` | `aether.fs.fetch_result` | `output_kind`, `data` |
+| `aether.fs.fetch` | `addr`, `transforms` | `aether.fs.fetch_result` | `output_kind`, `data` |
 
-Each reply is an `Ok` / `Err` enum. `read`, `write`, `delete`, and `fetch`
-echo `namespace` + `path`; `list` echoes `namespace` + `prefix`; and `copy`
-echoes its raw `from` plus structured namespace destination `to`. The column
-above is what `Ok` adds beyond those domain fields. An `Err` arm replaces the
-operation's added data with its structured error.
+**One addressing type.** `addr` is a `NamespaceAddr { namespace, path }` — the
+same shape everywhere, including `copy`'s destination `to`. `list` addresses a
+prefix through it (`addr.path` is matched as a prefix; empty lists the namespace
+root), which is what the verb does with the address rather than a different way
+of writing one, so it takes no special case.
+
+Each reply is an `Ok` / `Err` enum echoing the request's address on both arms —
+`addr` for the five namespace verbs, `from` + `to` for `copy`. The column above
+is what `Ok` adds beyond that echo. An `Err` arm replaces the operation's added
+data with its structured error. Each reply enum owns a `from_op` constructor
+that folds an adapter `Result` into the two arms, so the echo is written once
+per verb rather than at every return.
 
 **`copy` is trusted ingestion by convention, not enforcement.** Its `from`
 field is passed directly to `std::fs::read`, while `to` is a namespace address.
@@ -116,8 +123,8 @@ path by joining an entry back under the prefix you listed.
 
 **Replies carry domain echoes and mail correlation.** A handler dispatches on
 the reply *kind*, which on its own erases *which* request a given reply answers.
-Namespace operations echo `namespace` and `path` (`prefix` for `list`), while
-`copy` echoes `from` and `to`, preserving readable domain context. Per
+Namespace operations echo `addr`, while `copy` echoes `from` and `to`,
+preserving readable domain context. Per
 [ADR-0139](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0139-guest-reply-correlation-and-request-contexts.md),
 those fields are informational rather than a duplicate-safe demultiplexing key.
 Bind a typed context with `.with_context(&context)` before sending and recover it
@@ -154,14 +161,14 @@ receive like any other kind:
 #[handler::single]
 fn on_read_result(&mut self, ctx: &mut WasmCtx<'_>, result: ReadResult) {
     match result {
-        ReadResult::Ok { path, bytes, .. } => { /* path supplies readable domain context */ }
-        ReadResult::Err { path, error, .. } => { /* path supplies readable domain context */ }
+        ReadResult::Ok { addr, bytes } => { /* addr supplies readable domain context */ }
+        ReadResult::Err { addr, error } => { /* addr supplies readable domain context */ }
     }
 }
 ```
 
-The echoed `namespace` + `path` fields make logs and MCP replies readable, but
-they do not uniquely identify duplicate concurrent reads. For duplicate-safe
+The echoed `addr` makes logs and MCP replies readable, but it does not uniquely
+identify duplicate concurrent reads. For duplicate-safe
 one-shot matching, derive `Kind` for a small context, bind it once, and take it
 from the matching reply:
 
