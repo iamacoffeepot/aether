@@ -478,10 +478,16 @@ impl WasmActor for VirtualListWidget {
     }
 
     /// Replace the items / viewport / theme in place, holding the selection and
-    /// the scrolled row window and re-clamping both into the new vector.
-    /// `initial_selected_index` seeds the list only at `init`, so a list that
-    /// refreshes under a reader does not jump back to the top;
+    /// the scrolled row window and re-clamping both into the new vector, so a
+    /// list that refreshes under a reader does not jump back to the top.
     /// [`SetSelection`] moves the selection.
+    ///
+    /// `initial_selected_index` is a seed, and a seed seeds: it is read while
+    /// the list holds **no** selection — at `init`, and again on the config
+    /// that first populates an empty list — and ignored once there is a chosen
+    /// row to preserve. So "here are the rows, start on the first" is still one
+    /// mail, and a later refresh of those rows cannot undo what the reader
+    /// chose.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: VirtualListConfig) {
         let previous_eligible = content_eligible(self.items.len(), self.visible_row_count);
@@ -492,7 +498,11 @@ impl WasmActor for VirtualListWidget {
         self.scroll_bar_gap_units = config.scroll_bar_gap_units;
         self.bar_placement = BarPlacement::of(config.host_scroll_strip);
         self.visible_row_count = usize_from_u32(config.visible_row_count);
-        self.selected_index = clamp_optional_selection(self.selected_index, self.items.len());
+        let held = self.selected_index;
+        self.selected_index = held.map_or_else(
+            || clamp_optional_index(config.initial_selected_index, self.items.len()),
+            |index| clamp_optional_selection(Some(index), self.items.len()),
+        );
         self.hovered_action = None;
         self.pressed_action = None;
         self.font_metrics.set_desired(config.theme.font_id);
@@ -501,7 +511,11 @@ impl WasmActor for VirtualListWidget {
         // The heights are a function of the theme, so the table is rebuilt
         // once it has landed and before anything asks where a row stands.
         self.refresh_row_layout();
-        self.first_index = self.first_index.min(self.max_first_index());
+        if held.is_none() && self.selected_index.is_some() {
+            self.reveal_selection();
+        } else {
+            self.first_index = self.first_index.min(self.max_first_index());
+        }
         self.apply_control_state(ctx, config.state);
         let next_eligible = content_eligible(self.items.len(), self.visible_row_count);
         if previous_eligible != next_eligible

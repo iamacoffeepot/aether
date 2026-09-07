@@ -244,12 +244,19 @@ impl DropdownWidget {
 
     /// The presentation half of a re-sent config: the options, the placeholder,
     /// the open row count, and the theme, with the current choice re-clamped
-    /// into the new option vector. `initial_selected_index` and `state` are not
-    /// its business — the first is a seed the widget read at `init`, the second
-    /// travels its own lane so a state change can be reported.
+    /// into the new option vector.
+    ///
+    /// `initial_selected_index` is a seed and seeds only what holds nothing: it
+    /// is read while the dropdown has no choice — at `init`, and on the config
+    /// that first gives it options — and ignored once there is one to preserve.
+    /// `state` is not its business at all; it travels its own lane so a state
+    /// change can be reported.
     fn reconfigure(&mut self, config: DropdownConfig) {
         self.options = config.options;
-        self.selected_index = clamp_optional_selection(self.selected_index, self.options.len());
+        self.selected_index = self.selected_index.map_or_else(
+            || clamp_optional_index(config.initial_selected_index, self.options.len()),
+            |index| clamp_optional_selection(Some(index), self.options.len()),
+        );
         self.placeholder = config.placeholder;
         self.open_row_count = usize::try_from(config.open_row_count).unwrap_or(usize::MAX);
         self.first_index = 0;
