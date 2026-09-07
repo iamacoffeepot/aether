@@ -265,11 +265,7 @@ mod tests {
 
         let ledger = read_ledger(base.path()).unwrap();
         assert_eq!(ledger.len(), 1);
-        assert_eq!(
-            ledger[0].process_id,
-            Some(std::process::id()),
-            "the mock records this process's id before it acts",
-        );
+        assert_eq!(ledger[0].process_id, Some(std::process::id()), "the mock records this process's id before it acts",);
     }
 
     #[test]
