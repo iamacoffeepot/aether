@@ -10,7 +10,7 @@ use std::process::Command;
 use std::slice;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -3610,6 +3610,53 @@ fn a_heartbeat_after_tick_start_is_not_refused_as_future() {
     assert!(backend.cancelled().is_empty(), "a live stamp after tick start is not cancelled");
     assert_eq!(store.list_outstanding_nonces().unwrap(), outstanding, "original outstanding retained");
     assert_eq!(backend.inspect_count(), 1, "one handle is inspected once");
+}
+
+#[test]
+fn a_local_heartbeat_mtime_after_tick_start_is_not_refused_as_future() {
+    // The local backend reports progress from heartbeat file mtime. A stamp
+    // strictly after tick-start and at window end is future of start (old
+    // refuse/origin-fallback) and accepted at end. The pinned time is in the
+    // recorded-dispatch epoch so inspect's wall-clock future filter keeps it,
+    // and the hour deadline is still ahead of the post-cycle sample.
+    let base = tempfile::TempDir::new().unwrap();
+    let fake = FakeGithub::new();
+    fake.seed_git_object(&digest(0xC0));
+    let correspondence = Arc::new(fake) as SharedCorrespondence;
+    let runner = FixedRunner::new("{}", RunLifecycle::Running, false);
+    let local = Arc::new(LocalExecutor::new(Arc::new(runner), correspondence, base.path()));
+    let shell = ExecutorShell::new(local);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-mtime");
+    let nonce = tracked[0].handle.nonce.0.clone();
+    let outstanding = store.list_outstanding_nonces().unwrap();
+
+    let tick_start = NOW_UNIX_MILLIS + SILENCE_MILLIS;
+    let stamp = NOW_UNIX_MILLIS + SILENCE_MILLIS + 1_000;
+    let heartbeat = base.path().join(format!("{nonce}-evidence")).join("heartbeat");
+    fs::write(&heartbeat, b"").unwrap();
+    let file = fs::File::open(&heartbeat).unwrap();
+    file.set_modified(UNIX_EPOCH + Duration::from_millis(stamp)).unwrap();
+    drop(file);
+
+    assert_eq!(
+        shell.inspect(&tracked[0].handle).unwrap(),
+        ExecutionStatus::Running { last_progress_unix_millis: Some(stamp) },
+        "the local backend reports the pinned heartbeat mtime",
+    );
+
+    let mut now = [tick_start, stamp, stamp].into_iter();
+    let admits = pull_silent_now(&mut store, &shell, &mut tracked, tick_start, || {
+        now.next().expect("one-handle pull reads start, end, then deadline")
+    });
+    assert!(now.next().is_none(), "one-handle pull reads the clock exactly three times");
+    assert!(admits.is_empty(), "no synthetic silence admission");
+    assert_eq!(store.list_outstanding_nonces().unwrap(), outstanding, "original outstanding retained");
+    assert_eq!(
+        tracked[0].last_heartbeat_unix_millis,
+        Some(stamp),
+        "the tracked heartbeat advances to the real filesystem stamp",
+    );
 }
 
 #[test]
