@@ -3,18 +3,15 @@
 //!
 //! `WidgetPanel` fans style across an empty child list until the first Tick
 //! spawns it; `ScrollWidget` used to drop the same mail until its first
-//! Collect. These scenarios send the update first, then capture the first
-//! Collect, and read the child's committed draw payload — a filled button
-//! plate tint, or resident glyph quads — so a dropped restyle cannot hide
-//! behind retained pending state.
+//! Collect. Color scenarios send the update first, then capture the first
+//! Collect and read the child's committed solid-plate tint. The font scenario
+//! delivers `LoadFontResult` before spawn and asserts resident glyph quads
+//! after rasterization priming, so a dropped restyle cannot hide behind
+//! retained pending state.
 //!
 //! Skipped when no wgpu adapter is available or the `aether_kit_widget` wasm
 //! has not been pre-built (the shared `require_runtime` gate). CI sets
 //! `AETHER_REQUIRE_RUNTIME=1` to turn either skip into a hard failure.
-
-// Integration-test skip diagnostic: emit via stderr so `cargo test`
-// surfaces "skipping: ..." alongside `test ... ok` (issue 891).
-#![allow(clippy::print_stderr)]
 
 use aether_harness_substrate_capture::{RenderHarnessBuilderExt, RenderHarnessExt};
 use std::env;
@@ -154,12 +151,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<WidgetC
 }
 
 fn color_bench() -> SubstrateHarness {
-    SubstrateHarness::builder()
-        .size(240, 80)
-        .with_render()
-        .with_component_host()
-        .build()
-        .expect("boot")
+    SubstrateHarness::builder().size(240, 80).with_render().with_component_host().build().expect("boot")
 }
 
 fn capture_first_collect(harness: &mut SubstrateHarness) {
@@ -271,10 +263,7 @@ fn first_collect_keeps_explicit_child_themes_when_nothing_was_fanned() {
     load_panel(
         &mut harness,
         &wasm,
-        vec![
-            filled_button("red", accent_theme(RESTYLE_RED)),
-            filled_button("blue", accent_theme(RESTYLE_BLUE)),
-        ],
+        vec![filled_button("red", accent_theme(RESTYLE_RED)), filled_button("blue", accent_theme(RESTYLE_BLUE))],
     );
     capture_first_collect(&mut harness);
 
@@ -343,12 +332,13 @@ fn nested_scroll_forwards_early_theme_before_the_first_collect() {
 }
 
 /// **Bug class: a resolved font id that beats the first Tick never reaches
-/// text.** The panel stamps `LoadFontResult` and used to fan it to no children;
-/// the first Collect then draws with the config placeholder, so `aether.text`
-/// warn-drops the run. Resident glyph quads after that result are the proof
-/// the resolved id was replayed.
+/// text.** The panel stamps `LoadFontResult` and used to fan it to no children,
+/// so later Collects still draw with the config placeholder and `aether.text`
+/// warn-drops the run. This scenario delivers that result before spawn, then
+/// primes rasterization; resident glyph quads after priming prove the resolved
+/// id survived lazy spawn. The snapshot is not the first Collect.
 #[test]
-fn early_load_font_result_draws_glyphs_on_the_first_collect_path() {
+fn early_load_font_result_survives_lazy_spawn_and_renders_glyphs_after_priming() {
     let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
@@ -406,6 +396,6 @@ fn early_load_font_result_draws_glyphs_on_the_first_collect_path() {
         .collect();
     assert!(
         glyph_batches.iter().any(|batch| !batch.quads.is_empty()),
-        "the resolved font id must reach the label before Collect so glyphs rasterize; snapshot: {snapshot:?}",
+        "the early LoadFontResult must survive lazy spawn so glyphs rasterize after priming; snapshot: {snapshot:?}",
     );
 }
