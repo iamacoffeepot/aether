@@ -639,14 +639,7 @@ mod tests {
     }
 
     fn fill_with(rect: WidgetClipRect, color: Rgba, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
-        WidgetDrawItem::Quad {
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-            color,
-            clip,
-        }
+        WidgetDrawItem::Quad { x: rect.x, y: rect.y, width: rect.width, height: rect.height, color, clip }
     }
 
     fn textured_fill(rect: WidgetClipRect, tint: Rgba) -> WidgetDrawItem {
@@ -932,11 +925,7 @@ mod tests {
         assert_eq!(
             clip_of(text_items(
                 core::slice::from_ref(&label),
-                &[fill_with(
-                    overlay,
-                    Rgba::WHITE,
-                    Some(WidgetClipRect { x: 0.0, y: 0.0, width: 30.0, height: 24.0 }),
-                )],
+                &[fill_with(overlay, Rgba::WHITE, Some(WidgetClipRect { x: 0.0, y: 0.0, width: 30.0, height: 24.0 }),)],
             )),
             Some((30.0, 0.0, 50.0, 12.0)),
             "an opaque hole is still geometry ∩ clip",
