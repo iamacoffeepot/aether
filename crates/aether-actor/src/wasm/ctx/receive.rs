@@ -8,7 +8,7 @@
 use core::marker::PhantomData;
 use core::ptr;
 
-use aether_data::{Kind, MailboxId, RequestId, Source};
+use aether_data::{Kind, KindId, MailboxId, RequestId, Source};
 
 use crate::mail::ReplyHandle;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
@@ -174,9 +174,31 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         (correlation != Source::NO_CORRELATION).then_some(RequestId(correlation))
     }
 
+    /// Kind of the context stored for the request this inbound reply answers,
+    /// leaving it stored. Returns `None` for ordinary request mail, uncorrelated
+    /// replies, unmatched replies, and inline-cluster drained dispatches.
+    ///
+    /// A handler that serves several context kinds from one reply kind probes
+    /// with this and only then commits to the matching
+    /// [`Self::take_context`]; a wrong guess would otherwise consume another
+    /// subsystem's context. Actor dispatch is serialized, so no other handler
+    /// can consume the entry between the probe and the take.
+    #[must_use]
+    pub fn context_kind(&self) -> Option<KindId> {
+        let request = self.in_reply_to()?;
+        // SAFETY: the macro-emitted registry is accessed only under the
+        // serialized wasm guest entrypoint.
+        unsafe { self.inline.request_contexts_mut().kind(request) }
+    }
+
     /// Recover and remove the typed context for the request this inbound reply
     /// answers. Returns `None` for ordinary mail, unmatched replies, wrong
     /// context kind, or decode failure.
+    ///
+    /// Wrong-kind and decode failures consume the stored entry: a later
+    /// [`Self::take_context`] for the matching type cannot recover it. Probe
+    /// with [`Self::context_kind`] first when several context kinds share one
+    /// reply handler, then take only the matching type.
     pub fn take_context<C: Kind>(&mut self) -> Option<C> {
         let request = self.in_reply_to()?;
         // SAFETY: the macro-emitted registry is accessed only under the
