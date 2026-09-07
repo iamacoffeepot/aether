@@ -1,0 +1,113 @@
+# Crates allowed to write another crate's declared actor NAMESPACE as a string
+# literal, read by `cargo xtask namespaces` (iamacoffeepot/aether#5720).
+#
+# An entry is a claim about a dependency edge: this crate cannot see the const
+# that declares this name, so the literal is the only spelling available. State
+# that reason — an entry without one is an unexplained exemption, which is the
+# thing the check exists to stop. The check reports entries nothing matches any
+# more, so a fixed call site retires its allowance rather than leaving a
+# standing licence behind.
+#
+# `crates/aether-substrate/src/mail/registry/names.rs` documents the same
+# argument in prose for the two names it has to write; these entries are that
+# paragraph, made checkable.
+
+[[allow]]
+crate = "aether-harness-fleet"
+namespace = "aether.component"
+reason = """
+The fleet harness speaks raw `WireFrame::Call` frames — recipient names cross
+the wire as strings — and does not depend on aether-component, which is the
+point: it exercises the wire boundary rather than the in-process typed one.
+"""
+
+[[allow]]
+crate = "aether-mcp"
+namespace = "aether.component"
+reason = """
+ADR-0072 wire front. aether-mcp does not depend on aether-component; the
+literal is the dependency-direction case the addressing review (F6) marks as
+honest. The trusted-cap envelope that consumes it is #5726's subject.
+"""
+
+[[allow]]
+crate = "aether-mcp"
+namespace = "aether.render"
+reason = """
+Same as `aether.component` above: aether-mcp does not depend on aether-render.
+"""
+
+[[allow]]
+crate = "aether-kinds"
+namespace = "aether.trace"
+reason = """
+`TRACE_MAILBOX_NAME` names the chassis-internal trace sink for crates that sit
+below aether-trace in the graph, aether-kinds included. The mailbox has no
+actor behind it at this layer, so there is no `NAMESPACE` to read.
+"""
+
+[[allow]]
+crate = "aether-bloomery"
+namespace = "aether.bloomery.api"
+reason = """
+The domain crate names the chassis cap that hosts it; aether-chassis-bloomery
+depends on aether-bloomery, not the other way round.
+"""
+
+[[allow]]
+crate = "aether-data"
+namespace = "aether.source"
+reason = """
+aether-data is the root of the graph — every crate depends on it and it depends
+on none of them — so a name it labels can only be a literal.
+"""
+
+# Below this line: literals a typed const could carry today. Each is outside
+# iamacoffeepot/aether#5720's declared surface, so the entry states the debt
+# rather than pretending the dependency graph forced it. Retiring one is a
+# one-line change plus deleting its entry here.
+
+[[allow]]
+crate = "aether-harness-fleet"
+namespace = "aether.fleet"
+reason = """
+Deferred, not forced: aether-harness-fleet does depend on aether-fleet. Eleven
+`call(None, "aether.fleet", …)` sites whose recipient parameter is an
+`impl Into<String>` — the harness-recipient finding the addressing review
+raises separately, and the fix is that parameter, not eleven edits.
+"""
+
+[[allow]]
+crate = "aether-chassis-hub"
+namespace = "aether.fleet"
+reason = """
+Deferred to iamacoffeepot/aether#5726, which owns the trusted-cap envelope this
+`mailbox_id_from_name("aether.fleet")` feeds. Left untouched here so the two
+changes do not collide.
+"""
+
+[[allow]]
+crate = "aether-mcp"
+namespace = "aether.fleet"
+reason = """
+`FLEET_CAP`, deferred to iamacoffeepot/aether#5726 with the envelope signature
+it is passed to. aether-mcp does depend on aether-fleet, so unlike
+`COMPONENT_CAP` / `RENDER_CAP` above this one is a real duplicate.
+"""
+
+[[allow]]
+crate = "aether-mcp"
+namespace = "aether.inventory"
+reason = """
+`INVENTORY_CAP`, same deferral as `FLEET_CAP`: aether-inventory is a direct
+dependency, so the const duplicates a reachable `NAMESPACE`.
+"""
+
+[[allow]]
+crate = "aether-chassis-headless"
+namespace = "aether.audio"
+reason = """
+The headless audio nop sink registers by name. aether-audio is a direct
+dependency and exports `AudioCapability`, so this is fixable; it sits outside
+iamacoffeepot/aether#5720's surface and is left for the chassis crate's own pass.
+"""

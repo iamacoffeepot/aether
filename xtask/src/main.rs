@@ -31,6 +31,7 @@ mod dev_component;
 mod dist;
 mod fixtures;
 mod inventory;
+mod namespaces;
 mod package;
 mod scope;
 mod symbols;
@@ -44,6 +45,7 @@ use crate::bloom::BloomArgs;
 use crate::dev_component::DevComponentArgs;
 use crate::dist::DistArgs;
 use crate::fixtures::FixturesArgs;
+use crate::namespaces::NamespacesArgs;
 use crate::package::PackageArgs;
 use crate::scope::ScopeArgs;
 use crate::symbols::SymbolsArgs;
@@ -90,6 +92,10 @@ enum Commands {
     /// Append one field write to a `scope.fill` run's call log. The value
     /// arrives by file so multi-paragraph prose survives the transport.
     Scope(ScopeArgs),
+    /// Report string literals repeating another crate's declared actor
+    /// `NAMESPACE` — the hand-naming half of the addressing gate, where
+    /// `clippy.toml` covers only hand-hashing (#5720).
+    Namespaces(NamespacesArgs),
 }
 
 fn main() -> Result<()> {
@@ -104,5 +110,6 @@ fn main() -> Result<()> {
         Commands::Bloom(args) => bloom::run(&args),
         Commands::Symbols(args) => symbols::run(&args),
         Commands::Scope(args) => scope::run(&args),
+        Commands::Namespaces(args) => namespaces::run(&args),
     }
 }
