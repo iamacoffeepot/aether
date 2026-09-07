@@ -336,7 +336,7 @@ fn capture_frame_schema_requires_exactly_the_non_defaulted_fields() {
     // it. `engine_id` defaults too — the shared engine resolver supplies the
     // sole supervised engine and errors when that is ambiguous, so capture
     // never guesses a window's engine any more than it guesses a window.
-    let expected: BTreeSet<String> = ["window_id".to_owned()].into_iter().collect();
+    let expected = BTreeSet::from(["window_id".to_owned()]);
 
     assert_eq!(
         required, expected,
