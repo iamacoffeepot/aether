@@ -390,6 +390,7 @@ fn mismatched_binding_dispatch_drops_and_frame_survives() {
                     fill: Some(Rgba::new(1.0, 1.0, 1.0, 1.0)),
                     stroke: None,
                     shadow: None,
+                    texture: None,
                 }],
             },
         ),

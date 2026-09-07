@@ -1700,6 +1700,7 @@ mod tests {
             fill: Some(Rgba::WHITE),
             stroke: None,
             shadow: None,
+            texture: None,
         };
 
         RenderCapability::on_draw_screen_triangles(

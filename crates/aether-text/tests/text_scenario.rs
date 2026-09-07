@@ -314,6 +314,7 @@ fn capture_pins_current_tick_content_not_stale_frame() {
                 fill: Some(Rgba::new(0.9, 0.9, 0.2, 1.0)),
                 stroke: None,
                 shadow: None,
+                texture: None,
             }],
         };
         let glyph_draw = DrawText {

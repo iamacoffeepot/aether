@@ -555,7 +555,7 @@ impl WasmActor for ConsoleOverlay {
 /// plates, seams, and code backgrounds, so every one of its shapes is a
 /// radius-zero fill with no stroke and no shadow (ADR-0213).
 fn fill(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> Shape {
-    Shape { x, y, width, height, corner_radius: 0.0, fill: Some(color), stroke: None, shadow: None }
+    Shape { x, y, width, height, corner_radius: 0.0, fill: Some(color), stroke: None, shadow: None, texture: None }
 }
 
 fn bounded_u32_to_f32(value: u32) -> f32 {

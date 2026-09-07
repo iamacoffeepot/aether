@@ -481,6 +481,7 @@ fn solid_quad(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> WidgetDra
         fill: Some(color),
         stroke: None,
         shadow: None,
+        texture: None,
         clip: None,
     }
 }

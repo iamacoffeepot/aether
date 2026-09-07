@@ -229,6 +229,7 @@ fn control_quad() -> DrawShapes {
             fill: Some(Rgba::new(1.0, 1.0, 1.0, 1.0)),
             stroke: None,
             shadow: None,
+            texture: None,
         }],
     }
 }

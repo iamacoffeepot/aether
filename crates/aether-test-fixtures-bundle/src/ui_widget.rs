@@ -73,6 +73,7 @@ impl WasmActor for UiWidget {
                 fill: Some(Rgba::new(0.2, 0.4, 0.8, 1.0)),
                 stroke: None,
                 shadow: None,
+                texture: None,
             });
         }
         ctx.actor::<RenderCapability>().send(&DrawShapes { space: QuadSpace::Screen, clip: None, shapes });

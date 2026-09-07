@@ -117,6 +117,14 @@ the studio's real widget count. Until then the per-tick resend stands.
   cost is honest — a flat rect goes from 52 to 112 bytes per vertex, so the
   shared 4 MiB overlay cap holds about 6.2k rects a frame instead of 13.4k, far
   above anything the kit or the console draws.
+- `Shape` gains an optional `texture` (iamacoffeepot/aether#5709) sampled inside
+  the fill's coverage, so a rounded avatar, a thumbnail at the panel's radius,
+  and a circular icon are expressible — the one thing the overlay could not draw
+  at all, since `draw_textured_quads` gave the image with square corners and
+  `draw_shapes` gave the corners with no image. It costs a second shape pipeline
+  variant (the group-1 texture bind), 20 more bytes of vertex, and a draw split
+  at each texture transition inside a batch. The kit's image widget draws through
+  it, so it is rounded like every other face in the set.
 - Follow-on work, in order: (a) render cap: `Shape`, `draw_shapes`, `shape.wgsl`,
   the overlay pipeline, headless absorb, a SubstrateHarness pixel test for radius,
   stroke, and shadow; (b) kit: `WidgetDrawItem::Shape`, `direct_runs`, theme tokens,

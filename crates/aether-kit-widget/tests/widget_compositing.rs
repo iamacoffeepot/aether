@@ -92,6 +92,7 @@ fn flat_shape(x: f32, y: f32, width: f32, height: f32, color: Rgba, clip: Option
         fill: Some(color),
         stroke: None,
         shadow: None,
+        texture: None,
         clip,
     }
 }
