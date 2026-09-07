@@ -79,7 +79,8 @@ use crate::{
     ScrollExtent, ScrollOutcome, ScrollResidual, ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged,
     SliderConfig, TabSelected, TabStripConfig, TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig,
     ToggleChanged, ToggleConfig, VirtualListAction, VirtualListConfig, VirtualListHover, VirtualListSelected, Widget,
-    WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
+    WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetEligibilityChanged, WidgetFrame,
+    WidgetKind, WidgetStateChanged,
 };
 use crate::{FrameDischarge, decode_nested_widget_config};
 use crate::{accept_open_child_list, emit, flush_membership};
@@ -941,6 +942,7 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         HoverLost::ID.0,
         crate::SetWidgetState::ID.0,
         WidgetStateChanged::ID.0,
+        WidgetEligibilityChanged::ID.0,
         crate::ChildrenChanged::ID.0,
         ScrollOutcome::ID.0,
         ScrollResidual::ID.0,
@@ -1364,6 +1366,21 @@ impl WasmActor for WidgetPanel {
         apply_availability(ctx, effects, self.modifiers);
     }
 
+    /// Keep content-derived pointer/keyboard eligibility synchronized. Source
+    /// attribution identifies the panel slot, including a behavior host that
+    /// forwarded the wrapped widget's event.
+    #[handler::manual]
+    fn on_widget_eligibility_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: WidgetEligibilityChanged) {
+        let Some(source) = ctx.source_mailbox() else {
+            return;
+        };
+        let effects = self.focus.update_eligibility(
+            source,
+            FocusEligibility { pointer: changed.pointer, keyboard: changed.keyboard },
+        );
+        apply_availability(ctx, effects, self.modifiers);
+    }
+
     /// Observe one descendant scroll container's exact typed outcome. The
     /// `container` field remains authoritative after intermediate scroll
     /// actors relay the event unchanged.
@@ -1771,6 +1788,7 @@ mod behavior_tests {
         let mirrored = behavior_mirror_kinds();
         assert!(mirrored.contains(&ScrollOutcome::ID.0));
         assert!(mirrored.contains(&ScrollResidual::ID.0));
+        assert!(mirrored.contains(&WidgetEligibilityChanged::ID.0));
     }
 
     // Tripwire: a wrapped widget's profile is the unwrapped one, field for

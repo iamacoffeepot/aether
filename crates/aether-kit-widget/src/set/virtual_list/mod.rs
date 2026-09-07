@@ -244,7 +244,7 @@ use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, Theme};
 use crate::{
     Collect, HoverLost, SetWidgetState, VirtualListConfig, VirtualListRow, WidgetControlState, WidgetDrawList,
-    WidgetFrame,
+    WidgetEligibilityChanged, WidgetFrame,
 };
 
 use actions::RowActionIndex;
@@ -473,6 +473,7 @@ impl WasmActor for VirtualListWidget {
 
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: VirtualListConfig) {
+        let previous_eligible = content_eligible(self.items.len(), self.visible_row_count);
         self.rows_vary = rows_vary(&config.items);
         self.items = config.items;
         self.empty_text = config.empty_text;
@@ -494,6 +495,12 @@ impl WasmActor for VirtualListWidget {
         self.refresh_row_layout();
         self.reveal_selection();
         self.apply_control_state(ctx, config.state);
+        let next_eligible = content_eligible(self.items.len(), self.visible_row_count);
+        if previous_eligible != next_eligible
+            && let Some(parent) = ctx.parent()
+        {
+            parent.send(&WidgetEligibilityChanged { pointer: next_eligible, keyboard: next_eligible });
+        }
         // A fresh vector under a still pointer is a different row under it.
         self.settle_hovered_row(ctx);
         pump_text_font_metrics(ctx, &mut self.font_metrics);
@@ -635,6 +642,10 @@ impl WasmActor for VirtualListWidget {
 
 fn usize_from_u32(value: u32) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+fn content_eligible(item_count: usize, visible_row_count: usize) -> bool {
+    item_count > 0 && visible_row_count > 0
 }
 
 fn initial_selection(initial_selected_index: Option<u32>, item_count: usize) -> Option<usize> {

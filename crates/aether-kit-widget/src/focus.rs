@@ -1,9 +1,11 @@
 //! Root-owned focus, hover, and pointer-capture routing for one widget panel.
 //!
-//! Static widget eligibility and dynamic external availability are distinct:
-//! labels never take focus or pointer input, while any stock control may become
-//! hidden or disabled at runtime without losing its layout slot. The helper
-//! owns no mail; it returns named transitions that the panel turns into mail.
+//! Widget eligibility and dynamic external availability are distinct: labels
+//! never take focus or pointer input, while any stock control may become hidden
+//! or disabled at runtime without losing its layout slot. Content-derived
+//! eligibility (an empty list that later gains rows) can flip through
+//! [`Focus::update_eligibility`] without rebuilding the table. The helper owns
+//! no mail; it returns named transitions that the panel turns into mail.
 
 use alloc::vec::Vec;
 
@@ -30,8 +32,9 @@ pub struct HoverTransition {
     pub next: Option<MailboxId>,
 }
 
-/// Cleanup caused by a live availability update. A focused child moves focus
-/// forward through the remaining ring; hover and capture clear immediately.
+/// Cleanup caused by a live availability or eligibility update. Losing
+/// keyboard liveness moves focus forward through the remaining ring; losing
+/// pointer liveness clears hover, capture, and grab immediately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AvailabilityEffects {
     pub focus: Option<FocusTransition>,
@@ -288,39 +291,72 @@ impl Focus {
         Some(HoverTransition { previous, next })
     }
 
-    /// Apply a source-attributed state change. If the child becomes
-    /// unavailable, move focus forward and drop every pointer path it held —
-    /// hover, the drag capture, and the modal grab. The grab is dropped rather
-    /// than merely filtered out of [`Self::grabbed`] because a filtered grab is
-    /// still stored: the widget's own close handshake (`grabbed() == source`)
-    /// misses while the child is away, and the grab re-arms the moment the
-    /// child comes back, swallowing every press on the panel.
+    /// Apply a source-attributed state change. If the child loses keyboard
+    /// liveness, move focus forward; if it loses pointer liveness, drop every
+    /// pointer path it held — hover, the drag capture, and the modal grab. The
+    /// grab is dropped rather than merely filtered out of [`Self::grabbed`]
+    /// because a filtered grab is still stored: the widget's own close
+    /// handshake (`grabbed() == source`) misses while the child is away, and
+    /// the grab re-arms the moment the child comes back, swallowing every press
+    /// on the panel. Becoming available does not auto-focus or synthesize hover.
     pub fn update_availability(&mut self, child: MailboxId, state: &WidgetControlState) -> AvailabilityEffects {
         let Some(index) = self.entries.iter().position(|entry| entry.child == child) else {
             return AvailabilityEffects::default();
         };
+        let was_pointer_live = self.entries[index].pointer_live();
+        let was_focus_live = self.entries[index].focus_live();
         self.entries[index].availability = Availability { visible: state.visible, enabled: state.enabled };
-        if state.visible && state.enabled {
+        self.reconcile_live_routing(child, index, was_pointer_live, was_focus_live)
+    }
+
+    /// Apply a source-attributed eligibility change. Pointer and keyboard axes
+    /// reconcile independently through the same live-routing cleanup as
+    /// [`Self::update_availability`]: losing keyboard liveness moves focus
+    /// forward, losing pointer liveness clears hover/capture/grab, and gaining
+    /// either does not auto-focus or synthesize hover. Hidden or disabled
+    /// children stay unavailable. Unknown sources and identical updates are
+    /// inert. Ring order, frames, and unrelated routing are unchanged.
+    pub fn update_eligibility(&mut self, child: MailboxId, eligibility: FocusEligibility) -> AvailabilityEffects {
+        let Some(index) = self.entries.iter().position(|entry| entry.child == child) else {
+            return AvailabilityEffects::default();
+        };
+        if self.entries[index].eligibility == eligibility {
             return AvailabilityEffects::default();
         }
+        let was_pointer_live = self.entries[index].pointer_live();
+        let was_focus_live = self.entries[index].focus_live();
+        self.entries[index].eligibility = eligibility;
+        self.reconcile_live_routing(child, index, was_pointer_live, was_focus_live)
+    }
 
+    fn reconcile_live_routing(
+        &mut self,
+        child: MailboxId,
+        index: usize,
+        was_pointer_live: bool,
+        was_focus_live: bool,
+    ) -> AvailabilityEffects {
+        let pointer_live = self.entries[index].pointer_live();
+        let focus_live = self.entries[index].focus_live();
         let mut effects = AvailabilityEffects::default();
-        if self.focused == Some(child) {
+        if was_focus_live && !focus_live && self.focused == Some(child) {
             self.focused = None;
             let next = self.next_live_from(index, FocusDirection::Forward);
             self.focused = next;
             effects.focus = Some(FocusTransition { previous: Some(child), next });
         }
-        if self.hovered == Some(child) {
-            self.hovered = None;
-            effects.hover = Some(HoverTransition { previous: Some(child), next: None });
-        }
-        if self.capture == Some(child) {
-            self.capture = None;
-            effects.cleared_capture = Some(child);
-        }
-        if self.grab == Some(child) {
-            self.grab = None;
+        if was_pointer_live && !pointer_live {
+            if self.hovered == Some(child) {
+                self.hovered = None;
+                effects.hover = Some(HoverTransition { previous: Some(child), next: None });
+            }
+            if self.capture == Some(child) {
+                self.capture = None;
+                effects.cleared_capture = Some(child);
+            }
+            if self.grab == Some(child) {
+                self.grab = None;
+            }
         }
         effects
     }
@@ -600,5 +636,167 @@ mod tests {
         focus.update_availability(MailboxId(3), &disabled);
         assert_eq!(focus.move_focus(FocusDirection::Backward), None);
         assert_eq!(focus.hit_test(5.0, 5.0), None);
+    }
+
+    #[test]
+    fn gaining_eligibility_opens_routing_without_auto_focus_or_hover() {
+        let mut focus = Focus::new();
+        register(&mut focus, 1, 0.0, 0.0, false, false);
+        register(&mut focus, 3, 0.0, 40.0, true, true);
+
+        assert_eq!(
+            focus.update_eligibility(MailboxId(1), FocusEligibility { pointer: true, keyboard: true }),
+            AvailabilityEffects::default(),
+            "gaining eligibility does not synthesize focus or hover",
+        );
+        assert_eq!(focus.keyboard_target(), None);
+        assert_eq!(focus.hit_test(5.0, 5.0), Some(MailboxId(1)));
+        assert_eq!(
+            focus.move_focus(FocusDirection::Forward),
+            Some(FocusTransition { previous: None, next: Some(MailboxId(1)) }),
+            "the newly eligible child keeps its register order in the ring",
+        );
+        assert_eq!(
+            focus.move_focus(FocusDirection::Forward),
+            Some(FocusTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) }),
+        );
+    }
+
+    #[test]
+    fn losing_eligibility_clears_focus_hover_capture_and_grab_without_rearming() {
+        let mut focus = focus_with_three();
+        focus.set_focus(Some(MailboxId(1)));
+        focus.update_hover(5.0, 5.0);
+        focus.begin_capture(MailboxId(1));
+        focus.begin_grab(MailboxId(1));
+
+        assert_eq!(
+            focus.update_eligibility(MailboxId(1), FocusEligibility { pointer: false, keyboard: false }),
+            AvailabilityEffects {
+                focus: Some(FocusTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) }),
+                hover: Some(HoverTransition { previous: Some(MailboxId(1)), next: None }),
+                cleared_capture: Some(MailboxId(1)),
+            },
+        );
+        assert_eq!(focus.keyboard_target(), Some(MailboxId(3)));
+        assert_eq!(focus.captured(), None);
+        assert_eq!(focus.grabbed(), None);
+        assert_eq!(focus.hit_test(5.0, 5.0), None);
+        assert_eq!(focus.hit_test(5.0, 45.0), Some(MailboxId(3)), "unrelated routing is unchanged");
+
+        assert_eq!(
+            focus.update_eligibility(MailboxId(1), FocusEligibility { pointer: true, keyboard: true }),
+            AvailabilityEffects::default(),
+        );
+        assert_eq!(focus.keyboard_target(), Some(MailboxId(3)), "restored eligibility does not re-focus");
+        assert_eq!(focus.captured(), None, "and does not rearm capture");
+        assert_eq!(focus.grabbed(), None, "or the modal grab");
+        assert_eq!(
+            focus.update_hover(5.0, 5.0),
+            Some(HoverTransition { previous: None, next: Some(MailboxId(1)) }),
+            "hover is a new edge, not a resurrected one",
+        );
+        assert_eq!(
+            focus.move_focus(FocusDirection::Forward),
+            Some(FocusTransition { previous: Some(MailboxId(3)), next: Some(MailboxId(1)) }),
+            "the restored child keeps its original ring slot",
+        );
+    }
+
+    #[test]
+    fn eligibility_axes_reconcile_independently() {
+        let mut focus = focus_with_three();
+        focus.set_focus(Some(MailboxId(1)));
+        focus.update_hover(5.0, 5.0);
+        focus.begin_capture(MailboxId(1));
+        focus.begin_grab(MailboxId(1));
+
+        assert_eq!(
+            focus.update_eligibility(MailboxId(1), FocusEligibility { pointer: true, keyboard: false }),
+            AvailabilityEffects {
+                focus: Some(FocusTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) }),
+                hover: None,
+                cleared_capture: None,
+            },
+            "losing keyboard liveness moves focus and leaves pointer paths",
+        );
+        assert_eq!(focus.keyboard_target(), Some(MailboxId(3)));
+        assert_eq!(focus.captured(), Some(MailboxId(1)));
+        assert_eq!(focus.grabbed(), Some(MailboxId(1)));
+        assert_eq!(focus.hit_test(5.0, 5.0), Some(MailboxId(1)));
+
+        let mut pointer = focus_with_three();
+        pointer.set_focus(Some(MailboxId(3)));
+        pointer.update_hover(5.0, 45.0);
+        pointer.begin_capture(MailboxId(3));
+        pointer.begin_grab(MailboxId(3));
+        assert_eq!(
+            pointer.update_eligibility(MailboxId(3), FocusEligibility { pointer: false, keyboard: true }),
+            AvailabilityEffects {
+                focus: None,
+                hover: Some(HoverTransition { previous: Some(MailboxId(3)), next: None }),
+                cleared_capture: Some(MailboxId(3)),
+            },
+            "losing pointer liveness clears hover/capture/grab and keeps focus",
+        );
+        assert_eq!(pointer.keyboard_target(), Some(MailboxId(3)));
+        assert_eq!(pointer.captured(), None);
+        assert_eq!(pointer.grabbed(), None);
+        assert_eq!(pointer.hit_test(5.0, 45.0), None);
+        assert_eq!(pointer.pointer_target(5.0, 45.0), None);
+        pointer.begin_grab(MailboxId(3));
+        assert_eq!(pointer.grabbed(), None, "a pointer-ineligible child cannot take a new grab");
+    }
+
+    #[test]
+    fn hidden_and_disabled_children_stay_unavailable_when_eligibility_arrives() {
+        let mut focus = Focus::new();
+        register(&mut focus, 1, 0.0, 0.0, false, false);
+        register(&mut focus, 3, 0.0, 40.0, true, true);
+
+        let mut hidden = available();
+        hidden.visible = false;
+        focus.update_availability(MailboxId(1), &hidden);
+        assert_eq!(
+            focus.update_eligibility(MailboxId(1), FocusEligibility { pointer: true, keyboard: true }),
+            AvailabilityEffects::default(),
+        );
+        assert_eq!(focus.hit_test(5.0, 5.0), None);
+        assert_eq!(focus.move_focus(FocusDirection::Forward), Some(FocusTransition {
+            previous: None,
+            next: Some(MailboxId(3)),
+        }));
+
+        let mut disabled = available();
+        disabled.enabled = false;
+        focus.update_availability(MailboxId(3), &disabled);
+        assert_eq!(
+            focus.update_eligibility(MailboxId(3), FocusEligibility { pointer: true, keyboard: true }),
+            AvailabilityEffects::default(),
+            "an identical eligibility write on a disabled child is still gated",
+        );
+        assert_eq!(focus.keyboard_target(), None);
+        assert_eq!(focus.hit_test(5.0, 45.0), None);
+    }
+
+    #[test]
+    fn unknown_and_unchanged_eligibility_updates_are_inert() {
+        let mut focus = focus_with_three();
+        focus.set_focus(Some(MailboxId(1)));
+        focus.update_hover(5.0, 5.0);
+        focus.begin_capture(MailboxId(1));
+
+        assert_eq!(
+            focus.update_eligibility(MailboxId(99), FocusEligibility { pointer: true, keyboard: true }),
+            AvailabilityEffects::default(),
+        );
+        assert_eq!(
+            focus.update_eligibility(MailboxId(1), FocusEligibility { pointer: true, keyboard: true }),
+            AvailabilityEffects::default(),
+        );
+        assert_eq!(focus.keyboard_target(), Some(MailboxId(1)));
+        assert_eq!(focus.captured(), Some(MailboxId(1)));
+        assert_eq!(focus.hit_test(5.0, 5.0), Some(MailboxId(1)));
+        assert_eq!(focus.hit_test(5.0, 45.0), Some(MailboxId(3)));
     }
 }

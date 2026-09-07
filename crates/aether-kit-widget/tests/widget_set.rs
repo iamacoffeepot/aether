@@ -42,8 +42,8 @@ use aether_kinds::{
     TextInput, Tick, WindowId,
 };
 use aether_kit_widget::{
-    ButtonConfig, PanelConfig, RadioConfig, SetWidgetState, SliderConfig, TextFieldConfig, Theme, VirtualListConfig,
-    VirtualListRow, WidgetChildSpec, WidgetControlState, WidgetKind,
+    BehaviorHostSpec, ButtonConfig, PanelConfig, RadioConfig, ScriptRef, SetWidgetState, SliderConfig, TextFieldConfig,
+    Theme, VirtualListConfig, VirtualListRow, WidgetChildSpec, WidgetControlState, WidgetKind,
 };
 
 const TEST_WINDOW_ID: WindowId = WindowId(1);
@@ -359,6 +359,97 @@ fn virtual_list_spec(subname: &str, state: WidgetControlState) -> WidgetChildSpe
         }
         .encode_into_bytes(),
     }
+}
+
+fn populated_rows() -> Vec<VirtualListRow> {
+    vec![VirtualListRow::from("Alpha"), VirtualListRow::from("Beta"), VirtualListRow::from("Gamma")]
+}
+
+fn live_list_config(
+    items: Vec<VirtualListRow>,
+    initial_selected_index: Option<u32>,
+    state: WidgetControlState,
+) -> VirtualListConfig {
+    VirtualListConfig {
+        items,
+        initial_selected_index,
+        visible_row_count: 5,
+        theme: Theme::DEFAULT,
+        state,
+        ..VirtualListConfig::default()
+    }
+}
+
+fn live_list_spec(
+    subname: &str,
+    items: Vec<VirtualListRow>,
+    initial_selected_index: Option<u32>,
+    state: WidgetControlState,
+) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::VirtualList,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: live_list_config(items, initial_selected_index, state).encode_into_bytes(),
+    }
+}
+
+fn behavior_host_list_spec(
+    subname: &str,
+    items: Vec<VirtualListRow>,
+    initial_selected_index: Option<u32>,
+    state: WidgetControlState,
+) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::BehaviorHost,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: BehaviorHostSpec {
+            wrapped: WidgetKind::VirtualList,
+            wrapped_config: live_list_config(items, initial_selected_index, state).encode_into_bytes(),
+            script: ScriptRef::None,
+            fuel_per_call: 0,
+            disable_after_traps: 0,
+        }
+        .encode_into_bytes(),
+    }
+}
+
+fn field<'a>(message: &'a str, key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}=");
+    message.split_whitespace().find_map(|token| token.strip_prefix(&prefix))
+}
+
+fn virtual_list_hovers(log: &[String]) -> Vec<(Option<&str>, Option<&str>)> {
+    log.iter()
+        .filter(|message| message.contains("widget virtual list hover"))
+        .map(|message| (field(message, "widget"), field(message, "row")))
+        .collect()
+}
+
+fn virtual_list_selections(log: &[String]) -> Vec<(Option<&str>, u32)> {
+    log.iter()
+        .filter(|message| message.contains("widget virtual list selected"))
+        .map(|message| {
+            (field(message, "widget"), virtual_list_selected_index(message).expect("selection log carries an index"))
+        })
+        .collect()
+}
+
+fn button_click_widgets(log: &[String]) -> Vec<&str> {
+    log.iter()
+        .filter(|message| message.contains("widget button clicked"))
+        .filter_map(|message| field(message, "widget"))
+        .collect()
+}
+
+fn take_log_delta(harness: &mut SubstrateHarness, cursor: &mut usize) -> Vec<String> {
+    let log = panel_log_messages(harness);
+    let delta = log.get(*cursor..).unwrap_or(&[]).to_vec();
+    *cursor = log.len();
+    delta
 }
 
 /// A panel handed an explicit `children` list stacks exactly those widgets in
@@ -993,5 +1084,493 @@ fn availability_focus_move_inherits_already_held_ctrl() {
         commits,
         ["widget=second text=new widget text committed"],
         "hiding the focused field must inherit Ctrl so SelectAll replaces `keep`; log was:\n{joined}",
+    );
+}
+
+fn space() -> Key {
+    Key { window: TEST_WINDOW_ID, code: KEY_SPACE }
+}
+
+fn space_up() -> KeyRelease {
+    KeyRelease { window: TEST_WINDOW_ID, code: KEY_SPACE }
+}
+
+fn tab() -> Key {
+    Key { window: TEST_WINDOW_ID, code: KEY_TAB }
+}
+
+fn down() -> Key {
+    Key { window: TEST_WINDOW_ID, code: KEY_DOWN }
+}
+
+fn hover_at(x: f32, y: f32) -> MouseMove {
+    MouseMove { window: TEST_WINDOW_ID, x, y }
+}
+
+fn hover_row_zero() -> MouseMove {
+    hover_at(30.0, 22.0)
+}
+
+fn empty_list_config() -> VirtualListConfig {
+    live_list_config(Vec::new(), None, WidgetControlState::default())
+}
+
+fn populated_list_config(initial_selected_index: Option<u32>) -> VirtualListConfig {
+    live_list_config(populated_rows(), initial_selected_index, WidgetControlState::default())
+}
+
+fn assert_list_phase(phase: &str, delta: &[String], hovers: &[(Option<&str>, Option<&str>)], selections: &[(Option<&str>, u32)], buttons: &[&str]) {
+    let joined = delta.join("\n");
+    assert_eq!(virtual_list_hovers(delta), hovers, "{phase} hover; log was:\n{joined}");
+    assert_eq!(virtual_list_selections(delta), selections, "{phase} selection; log was:\n{joined}");
+    assert_eq!(button_click_widgets(delta), buttons, "{phase} button; log was:\n{joined}");
+}
+
+/// An initially empty positive-height list must not take pointer or Tab until a
+/// re-sent config populates it; the sibling button is the empty-phase control.
+#[test]
+fn empty_virtual_list_becomes_eligible_when_populated() {
+    let Some(wasm_path) = require_wasm("aether_kit_widget") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut harness = SubstrateHarness::builder().size(240, 180).with_component_host().build().expect("boot");
+    load_panel_with(
+        &mut harness,
+        &wasm,
+        vec![
+            live_list_spec("inventory", Vec::new(), None, WidgetControlState::default()),
+            button_spec("run", WidgetControlState::default()),
+        ],
+    );
+    let panel = panel_address();
+    let list = child_address("inventory");
+    let mut cursor = 0;
+
+    harness
+        .execute(vec![
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            ("empty_hover", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
+            ("empty_press", HarnessOp::send_and_settle(&panel, &press(30.0, 22.0))),
+            ("empty_release", HarnessOp::send_and_settle(&panel, &release(30.0, 22.0))),
+            ("empty_tab", HarnessOp::send_and_settle(&panel, &tab())),
+            ("empty_space", HarnessOp::send_and_settle(&panel, &space())),
+            ("empty_space_up", HarnessOp::send_and_settle(&panel, &space_up())),
+        ])
+        .expect("empty list baseline");
+    assert_list_phase("empty baseline", &take_log_delta(&mut harness, &mut cursor), &[], &[], &["run"]);
+
+    harness
+        .execute(vec![
+            ("unchanged_empty", HarnessOp::send_and_settle(&list, &empty_list_config())),
+            ("unchanged_empty_hover", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
+            ("unchanged_empty_press", HarnessOp::send_and_settle(&panel, &press(30.0, 22.0))),
+            ("unchanged_empty_release", HarnessOp::send_and_settle(&panel, &release(30.0, 22.0))),
+        ])
+        .expect("unchanged empty config");
+    assert_list_phase("unchanged empty config", &take_log_delta(&mut harness, &mut cursor), &[], &[], &[]);
+
+    harness
+        .execute(vec![
+            ("populate", HarnessOp::send_and_settle(&list, &populated_list_config(Some(0)))),
+            ("hover", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
+        ])
+        .expect("populate hover");
+    assert_list_phase(
+        "populate hover",
+        &take_log_delta(&mut harness, &mut cursor),
+        &[(Some("inventory"), Some("0"))],
+        &[],
+        &[],
+    );
+
+    harness
+        .execute(vec![
+            ("tab_to_list", HarnessOp::send_and_settle(&panel, &tab())),
+            ("down", HarnessOp::send_and_settle(&panel, &down())),
+        ])
+        .expect("tab and down");
+    assert_list_phase(
+        "tab+down",
+        &take_log_delta(&mut harness, &mut cursor),
+        &[],
+        &[(Some("inventory"), 1)],
+        &[],
+    );
+
+    harness
+        .execute(vec![
+            ("unchanged_live", HarnessOp::send_and_settle(&list, &populated_list_config(Some(0)))),
+            ("down_without_tab", HarnessOp::send_and_settle(&panel, &down())),
+        ])
+        .expect("unchanged live config");
+    assert_list_phase(
+        "unchanged live config keeps focus",
+        &take_log_delta(&mut harness, &mut cursor),
+        &[],
+        &[(Some("inventory"), 1)],
+        &[],
+    );
+
+    harness
+        .execute(vec![
+            ("click_row_two", HarnessOp::send_and_settle(&panel, &press(30.0, 70.0))),
+            ("click_row_two_up", HarnessOp::send_and_settle(&panel, &release(30.0, 70.0))),
+        ])
+        .expect("row click");
+    assert_list_phase(
+        "click row 2",
+        &take_log_delta(&mut harness, &mut cursor),
+        &[(Some("inventory"), Some("2"))],
+        &[(Some("inventory"), 2)],
+        &[],
+    );
+}
+
+/// Emptying a focused, captured list must drop routing and activation so the
+/// sibling can take keyboard and pointer; repopulating must not resurrect the
+/// old capture or armed press.
+#[test]
+fn emptying_a_live_virtual_list_drops_routing_and_does_not_rearm() {
+    let Some(wasm_path) = require_wasm("aether_kit_widget") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut harness = SubstrateHarness::builder().size(240, 180).with_component_host().build().expect("boot");
+    load_panel_with(
+        &mut harness,
+        &wasm,
+        vec![
+            live_list_spec("inventory", populated_rows(), Some(0), WidgetControlState::default()),
+            button_spec("run", WidgetControlState::default()),
+        ],
+    );
+    let panel = panel_address();
+    let list = child_address("inventory");
+    let mut cursor = 0;
+
+    harness
+        .execute(vec![
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            ("hover", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
+            ("focus", HarnessOp::send_and_settle(&panel, &tab())),
+            ("select_one", HarnessOp::send_and_settle(&panel, &down())),
+            ("press_capture", HarnessOp::send_and_settle(&panel, &press(30.0, 22.0))),
+        ])
+        .expect("arm list");
+    assert_list_phase(
+        "arm",
+        &take_log_delta(&mut harness, &mut cursor),
+        &[(Some("inventory"), Some("0"))],
+        &[(Some("inventory"), 1), (Some("inventory"), 0)],
+        &[],
+    );
+
+    harness
+        .execute(vec![("empty", HarnessOp::send_and_settle(&list, &empty_list_config()))])
+        .expect("empty the list");
+    assert_list_phase(
+        "empty",
+        &take_log_delta(&mut harness, &mut cursor),
+        &[(Some("inventory"), None)],
+        &[],
+        &[],
+    );
+
+    harness
+        .execute(vec![
+            ("sibling_space", HarnessOp::send_and_settle(&panel, &space())),
+            ("sibling_space_up", HarnessOp::send_and_settle(&panel, &space_up())),
+        ])
+        .expect("sibling keyboard while empty");
+    assert_list_phase("sibling keyboard while empty", &take_log_delta(&mut harness, &mut cursor), &[], &[], &["run"]);
+
+    harness
+        .execute(vec![
+            ("populate", HarnessOp::send_and_settle(&list, &populated_list_config(Some(0)))),
+            ("stale_release", HarnessOp::send_and_settle(&panel, &release(30.0, 22.0))),
+            ("stale_move", HarnessOp::send_and_settle(&panel, &hover_at(30.0, 148.0))),
+        ])
+        .expect("stale release and move after repopulate");
+    assert_list_phase(
+        "stale release/move before any fresh press",
+        &take_log_delta(&mut harness, &mut cursor),
+        &[],
+        &[],
+        &[],
+    );
+
+    harness
+        .execute(vec![
+            ("sibling_press", HarnessOp::send_and_settle(&panel, &press(30.0, 148.0))),
+            ("sibling_release", HarnessOp::send_and_settle(&panel, &release(30.0, 148.0))),
+        ])
+        .expect("sibling pointer");
+    assert_list_phase("sibling pointer", &take_log_delta(&mut harness, &mut cursor), &[], &[], &["run"]);
+
+    harness
+        .execute(vec![
+            ("hover", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
+            ("fresh_press", HarnessOp::send_and_settle(&panel, &press(30.0, 70.0))),
+            ("fresh_release", HarnessOp::send_and_settle(&panel, &release(30.0, 70.0))),
+        ])
+        .expect("fresh list input");
+    assert_list_phase(
+        "fresh list input",
+        &take_log_delta(&mut harness, &mut cursor),
+        &[(Some("inventory"), Some("0")), (Some("inventory"), Some("2"))],
+        &[(Some("inventory"), 2)],
+        &[],
+    );
+}
+
+/// Populating a disabled or hidden list must not enter routing until an
+/// explicit state enable; the sibling button is the positive control.
+#[test]
+fn populating_disabled_or_hidden_virtual_list_stays_out_of_routing() {
+    let Some(wasm_path) = require_wasm("aether_kit_widget") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut harness = SubstrateHarness::builder().size(240, 320).with_component_host().build().expect("boot");
+    let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
+    let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
+    load_panel_with(
+        &mut harness,
+        &wasm,
+        vec![
+            live_list_spec("blocked", Vec::new(), None, disabled.clone()),
+            live_list_spec("ghost", Vec::new(), None, hidden.clone()),
+            button_spec("run", WidgetControlState::default()),
+        ],
+    );
+    let panel = panel_address();
+    let mut cursor = 0;
+
+    harness
+        .execute(vec![
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            (
+                "populate_blocked",
+                HarnessOp::send_and_settle(
+                    &child_address("blocked"),
+                    &live_list_config(populated_rows(), Some(0), disabled),
+                ),
+            ),
+            (
+                "populate_ghost",
+                HarnessOp::send_and_settle(
+                    &child_address("ghost"),
+                    &live_list_config(populated_rows(), Some(0), hidden),
+                ),
+            ),
+            ("blocked_hover", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
+            ("blocked_press", HarnessOp::send_and_settle(&panel, &press(30.0, 22.0))),
+            ("blocked_release", HarnessOp::send_and_settle(&panel, &release(30.0, 22.0))),
+            ("ghost_hover", HarnessOp::send_and_settle(&panel, &hover_at(30.0, 148.0))),
+            ("ghost_press", HarnessOp::send_and_settle(&panel, &press(30.0, 148.0))),
+            ("ghost_release", HarnessOp::send_and_settle(&panel, &release(30.0, 148.0))),
+            ("tab", HarnessOp::send_and_settle(&panel, &tab())),
+            ("space", HarnessOp::send_and_settle(&panel, &space())),
+            ("space_up", HarnessOp::send_and_settle(&panel, &space_up())),
+        ])
+        .expect("unavailable populate session");
+    assert_list_phase("unavailable populate", &take_log_delta(&mut harness, &mut cursor), &[], &[], &["run"]);
+
+    harness
+        .execute(vec![
+            (
+                "enable_blocked",
+                HarnessOp::send_and_settle(
+                    &child_address("blocked"),
+                    &SetWidgetState { state: WidgetControlState::default() },
+                ),
+            ),
+            ("blocked_hover_live", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
+            ("tab_blocked", HarnessOp::send_and_settle(&panel, &tab())),
+            ("down_blocked", HarnessOp::send_and_settle(&panel, &down())),
+        ])
+        .expect("enable blocked");
+    assert_list_phase(
+        "enable blocked",
+        &take_log_delta(&mut harness, &mut cursor),
+        &[(Some("blocked"), Some("0"))],
+        &[(Some("blocked"), 1)],
+        &[],
+    );
+
+    harness
+        .execute(vec![
+            (
+                "show_ghost",
+                HarnessOp::send_and_settle(
+                    &child_address("ghost"),
+                    &SetWidgetState { state: WidgetControlState::default() },
+                ),
+            ),
+            ("ghost_hover_live", HarnessOp::send_and_settle(&panel, &hover_at(30.0, 148.0))),
+            ("ghost_press_live", HarnessOp::send_and_settle(&panel, &press(30.0, 172.0))),
+            ("ghost_release_live", HarnessOp::send_and_settle(&panel, &release(30.0, 172.0))),
+        ])
+        .expect("show ghost");
+    assert_list_phase(
+        "show ghost",
+        &take_log_delta(&mut harness, &mut cursor),
+        &[
+            (Some("blocked"), None),
+            (Some("ghost"), Some("0")),
+            (Some("ghost"), Some("1")),
+        ],
+        &[(Some("ghost"), 1)],
+        &[],
+    );
+}
+
+/// A read-only populated list stays hoverable and focusable but rejects
+/// selection mutation until an explicit mutable state update.
+#[test]
+fn read_only_populated_virtual_list_hovers_and_focuses_without_mutating() {
+    let Some(wasm_path) = require_wasm("aether_kit_widget") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut harness = SubstrateHarness::builder().size(240, 180).with_component_host().build().expect("boot");
+    let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
+    load_panel_with(
+        &mut harness,
+        &wasm,
+        vec![
+            live_list_spec("inventory", Vec::new(), None, read_only.clone()),
+            button_spec("run", WidgetControlState::default()),
+        ],
+    );
+    let panel = panel_address();
+    let list = child_address("inventory");
+    let mut cursor = 0;
+
+    harness
+        .execute(vec![
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            ("populate", HarnessOp::send_and_settle(&list, &live_list_config(populated_rows(), Some(0), read_only))),
+            ("hover", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
+            ("focus", HarnessOp::send_and_settle(&panel, &tab())),
+            ("blocked_down", HarnessOp::send_and_settle(&panel, &down())),
+            ("blocked_press", HarnessOp::send_and_settle(&panel, &press(30.0, 70.0))),
+            ("blocked_release", HarnessOp::send_and_settle(&panel, &release(30.0, 70.0))),
+        ])
+        .expect("read-only input");
+    assert_list_phase(
+        "read-only hover/focus/click",
+        &take_log_delta(&mut harness, &mut cursor),
+        &[(Some("inventory"), Some("0")), (Some("inventory"), Some("2"))],
+        &[],
+        &[],
+    );
+
+    harness
+        .execute(vec![
+            ("tab_button", HarnessOp::send_and_settle(&panel, &tab())),
+            ("space", HarnessOp::send_and_settle(&panel, &space())),
+            ("space_up", HarnessOp::send_and_settle(&panel, &space_up())),
+        ])
+        .expect("tab away");
+    assert_list_phase(
+        "tab away does not emit HoverLost",
+        &take_log_delta(&mut harness, &mut cursor),
+        &[],
+        &[],
+        &["run"],
+    );
+
+    harness
+        .execute(vec![
+            ("enable", HarnessOp::send_and_settle(&list, &SetWidgetState { state: WidgetControlState::default() })),
+            ("tab_list", HarnessOp::send_and_settle(&panel, &tab())),
+            ("allowed_down", HarnessOp::send_and_settle(&panel, &down())),
+        ])
+        .expect("mutable down");
+    assert_list_phase(
+        "mutable down",
+        &take_log_delta(&mut harness, &mut cursor),
+        &[],
+        &[(Some("inventory"), 1)],
+        &[],
+    );
+}
+
+/// A behavior-wrapped initially empty list must become eligible through the
+/// host slot once its config is populated.
+#[test]
+fn behavior_host_empty_virtual_list_becomes_eligible_when_populated() {
+    let Some(wasm_path) = require_wasm("aether_kit_widget_behavior") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut harness = SubstrateHarness::builder().size(240, 180).with_component_host().build().expect("boot");
+    load_panel_with(
+        &mut harness,
+        &wasm,
+        vec![
+            behavior_host_list_spec("inventory", Vec::new(), None, WidgetControlState::default()),
+            button_spec("run", WidgetControlState::default()),
+        ],
+    );
+    let panel = panel_address();
+    let host = child_address("inventory");
+    let mut cursor = 0;
+
+    harness
+        .execute(vec![
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            ("empty_hover", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
+            ("empty_press", HarnessOp::send_and_settle(&panel, &press(30.0, 22.0))),
+            ("empty_release", HarnessOp::send_and_settle(&panel, &release(30.0, 22.0))),
+            ("empty_tab", HarnessOp::send_and_settle(&panel, &tab())),
+            ("empty_space", HarnessOp::send_and_settle(&panel, &space())),
+            ("empty_space_up", HarnessOp::send_and_settle(&panel, &space_up())),
+        ])
+        .expect("empty host baseline");
+    assert_list_phase("empty host baseline", &take_log_delta(&mut harness, &mut cursor), &[], &[], &["run"]);
+
+    harness
+        .execute(vec![
+            ("populate", HarnessOp::send_and_settle(&host, &populated_list_config(Some(0)))),
+            ("hover", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
+        ])
+        .expect("populate host hover");
+    assert_list_phase(
+        "host populate hover",
+        &take_log_delta(&mut harness, &mut cursor),
+        &[(Some("inventory"), Some("0"))],
+        &[],
+        &[],
+    );
+
+    harness
+        .execute(vec![
+            ("tab_to_list", HarnessOp::send_and_settle(&panel, &tab())),
+            ("down", HarnessOp::send_and_settle(&panel, &down())),
+        ])
+        .expect("host tab and down");
+    assert_list_phase(
+        "host tab+down",
+        &take_log_delta(&mut harness, &mut cursor),
+        &[],
+        &[(Some("inventory"), 1)],
+        &[],
+    );
+
+    harness
+        .execute(vec![
+            ("click_row_two", HarnessOp::send_and_settle(&panel, &press(30.0, 70.0))),
+            ("click_row_two_up", HarnessOp::send_and_settle(&panel, &release(30.0, 70.0))),
+        ])
+        .expect("host row click");
+    assert_list_phase(
+        "host click row 2",
+        &take_log_delta(&mut harness, &mut cursor),
+        &[(Some("inventory"), Some("2"))],
+        &[(Some("inventory"), 2)],
+        &[],
     );
 }

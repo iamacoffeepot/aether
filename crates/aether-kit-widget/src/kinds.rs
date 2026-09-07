@@ -731,6 +731,18 @@ pub struct WidgetStateChanged {
     pub state: WidgetControlState,
 }
 
+/// `aether.kit.widget.eligibility_changed` — a source-attributed events-up
+/// reply emitted when a widget's content-derived pointer/keyboard eligibility
+/// flips. No identity field and no data-down setter: the panel attributes the
+/// source mailbox recorded at spawn. Distinct from [`WidgetStateChanged`],
+/// which carries external visible/enabled/read-only/validation state.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[kind(name = "aether.kit.widget.eligibility_changed")]
+pub struct WidgetEligibilityChanged {
+    pub pointer: bool,
+    pub keyboard: bool,
+}
+
 /// The widget set's config/style/layout/state/interaction data-down lanes and
 /// value/state events-up lanes. Events carry **no widget identity field**: the
 /// root attributes replies against the `MailboxId` recorded at spawn
