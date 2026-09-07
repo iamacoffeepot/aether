@@ -32,7 +32,7 @@
 //! so it belongs with the surface that owns replies. Child spawning and the
 //! cluster-relative verbs are their own concerns and stay on the full ctx.
 
-use aether_data::{Kind, MailboxId, mailbox_id_from_name};
+use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 
 use super::WasmCtx;
 use crate::mail::mailbox::Mailbox;
@@ -175,8 +175,11 @@ impl MailSender for Sends<'_> {
     // Runtime-name send escape hatch (the `MailSender::send_to_named` contract):
     // the recipient name is supplied at runtime, no compile-time `R` to resolve.
     #[allow(clippy::disallowed_methods)]
+    // `mailbox_id_from_path` is the runtime-name routing path itself — it resolves
+    // the written name by the same ADR-0099 §4 parse → fold the registry does, so a
+    // rendered lineage address routes where a flat hash would miss and warn-drop
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        self.route::<K>(mailbox_id_from_name(name).0, &payload.encode_into_bytes(), 1, ChainMode::Inherit);
+        self.route::<K>(mailbox_id_from_path(name).0, &payload.encode_into_bytes(), 1, ChainMode::Inherit);
     }
 
     fn prev_correlation(&self) -> u64 {
@@ -193,8 +196,9 @@ impl MailSender for Sends<'_> {
 
     // Runtime-name detached escape hatch — the `send_to_named` counterpart.
     #[allow(clippy::disallowed_methods)]
+    // `mailbox_id_from_path` for the same reason: same ADR-0099 §4 parse → fold
     fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        self.route::<K>(mailbox_id_from_name(name).0, &payload.encode_into_bytes(), 1, ChainMode::Detached);
+        self.route::<K>(mailbox_id_from_path(name).0, &payload.encode_into_bytes(), 1, ChainMode::Detached);
     }
 
     fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
