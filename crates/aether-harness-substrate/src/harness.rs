@@ -40,6 +40,7 @@ use aether_kinds::{LogTail, LogTailResult, Tick};
 use aether_trace::walk::TreeWalk;
 // `push_to_mailbox` encodes any sent kind through the descriptor-aware
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape).
+use crate::cap::SubstrateHarnessCapability;
 use crate::poll_config::PollConfig;
 use crate::pump_stats::PumpStats;
 use crate::settlement_config::SettlementConfig;
@@ -1166,9 +1167,10 @@ impl SubstrateHarness {
         // (`SubstrateHarnessCapability`).
         self.push_to_mailbox(
             // Harness route to the harness's own `SubstrateHarnessCapability` mailbox by
-            // its well-known name — ctx-less driver-side push, no resolver here.
+            // its well-known name — ctx-less driver-side push, no resolver here. The name
+            // comes off the cap type this crate also owns, so the two cannot drift.
             #[allow(clippy::disallowed_methods)]
-            aether_data::mailbox_id_from_name("aether.substrate_harness"),
+            aether_data::mailbox_id_from_name(<SubstrateHarnessCapability as Addressable>::NAMESPACE),
             &Advance { ticks, delta_micros },
             cid,
         );
