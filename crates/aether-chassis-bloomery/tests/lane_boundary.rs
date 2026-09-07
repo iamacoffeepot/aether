@@ -18,6 +18,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs, thread};
 
@@ -26,9 +27,10 @@ use aether_bloomery::{
     VerifyFailureSet,
 };
 use aether_chassis_bloomery::bloomery::admits_lane_key;
-use aether_chassis_bloomery::bloomery::mock_lane::{FOREIGN_SESSION_ID, LaneMode, LaneScript};
+use aether_chassis_bloomery::bloomery::mock_lane::{FOREIGN_SESSION_ID, LaneMode, LaneRun, LaneScript, read_ledger};
 use aether_chassis_bloomery::store::{SqliteStore, StoreBackend};
 use aether_harness_bloomery::{HarnessBuilder, HarnessRoots, LaneHarness, while_pumping};
+use aether_substrate::pid_lock::is_pid_alive;
 
 /// Whether the bloom's single member has come to rest either way — resolved, or
 /// wedged. The predicate most scenarios wait on, because what separates them is
@@ -426,16 +428,91 @@ fn a_missing_evidence_lane_is_a_host_fault_not_a_candidate_failure() {
     );
 }
 
+/// Bound on observing absolute-deadline cancellation after the first `NeverExits`
+/// run records. Longer than the 5 s sealed wall clock plus the 1 s executor poll,
+/// and shorter than the 30 s heartbeat-silence allowance the noisy scenario uses,
+/// so a silence timeout cannot satisfy that claim.
+const ABSOLUTE_DEADLINE_OBSERVE_BUDGET: Duration = Duration::from_secs(20);
+
+fn first_never_exits_run(harness: &LaneHarness) -> LaneRun {
+    harness
+        .ledger()
+        .into_iter()
+        .find(|run| run.mode == LaneMode::NeverExits)
+        .expect("the first NeverExits dispatch recorded itself before parking")
+}
+
+fn wait_until_original_child_is_dead_and_consumed(harness: &LaneHarness, run: &LaneRun) {
+    assert!(!run.nonce.is_empty(), "the original nonce must be the exact minted identity, not empty");
+    let Some(process_id) = run.process_id.filter(|&id| id > 0) else {
+        panic!(
+            "NeverExits nonce={} must record a positive process id, not missing or zero; process_id={:?} \
+             outstanding={:?} ledger={:?}",
+            run.nonce,
+            run.process_id,
+            harness.outstanding(),
+            harness.ledger(),
+        );
+    };
+    let pid = i32::try_from(process_id).unwrap_or_else(|error| {
+        panic!(
+            "NeverExits nonce={} process_id={process_id} does not fit the substrate liveness probe ({error}); \
+             outstanding={:?} ledger={:?}",
+            run.nonce,
+            harness.outstanding(),
+            harness.ledger(),
+        )
+    });
+    let outstanding = harness.outstanding();
+    assert!(
+        is_pid_alive(pid),
+        "original child pid={pid} nonce={} must still be live before deadline observation; outstanding={outstanding:?} \
+         ledger={:?}",
+        run.nonce,
+        harness.ledger(),
+    );
+    assert!(
+        outstanding.contains(&run.nonce),
+        "original nonce {} must still be outstanding before deadline observation; pid={pid} outstanding={outstanding:?} \
+         ledger={:?}",
+        run.nonce,
+        harness.ledger(),
+    );
+
+    let deadline = Instant::now() + ABSOLUTE_DEADLINE_OBSERVE_BUDGET;
+    loop {
+        let child_alive = is_pid_alive(pid);
+        let outstanding = harness.outstanding();
+        if !child_alive && !outstanding.contains(&run.nonce) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "original child must die and nonce must leave outstanding while the harness stays up; nonce={} pid={pid} \
+             child_alive={child_alive} outstanding={outstanding:?} ledger={:?}",
+            run.nonce,
+            harness.ledger(),
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
 #[test]
 fn an_expired_real_process_lane_is_cancelled_as_a_host_fault() {
     // NeverExits writes valid evidence and then parks. Only the sealed
     // deadline can end it. The producer emits ExecutorFault for that
-    // expiry; the child must still be reclaimed (no per-order checkout).
+    // expiry; the original child must die and its nonce must leave outstanding.
     let mut harness =
         LaneHarness::start_with_wall_clock(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 5);
     harness.wait_for_runs(1);
-    thread::sleep(Duration::from_secs(7));
-    assert_scratch_checkouts_are_named_for_work(&harness, "an expired child leaves no checkout of its own");
+    let run = first_never_exits_run(&harness);
+    wait_until_original_child_is_dead_and_consumed(&harness, &run);
+    let bloom = harness.view();
+    assert!(bloom.blooms[0].members[0].resolution.is_none(), "a lane that never answered resolves nothing");
+    assert_scratch_checkouts_are_named_for_work(
+        &harness,
+        "retained session and slot checkout names are not proof the child was reaped",
+    );
 }
 
 #[test]
@@ -553,10 +630,14 @@ fn a_lane_that_never_exits_is_cancelled_as_a_host_fault() {
         LaneHarness::start_with_wall_clock(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 5);
 
     harness.wait_for_runs(1);
-    thread::sleep(Duration::from_secs(7));
+    let run = first_never_exits_run(&harness);
+    wait_until_original_child_is_dead_and_consumed(&harness, &run);
     let bloom = harness.view();
     assert!(bloom.blooms[0].members[0].resolution.is_none(), "a lane that never answered resolves nothing");
-    assert_scratch_checkouts_are_named_for_work(&harness, "a cancelled run leaves no checkout of its own behind");
+    assert_scratch_checkouts_are_named_for_work(
+        &harness,
+        "retained session and slot checkout names are not proof the child was reaped",
+    );
 }
 
 #[test]
@@ -605,30 +686,171 @@ fn a_lane_beating_only_its_heartbeat_is_not_silence() {
 
     harness.wait_for_runs(1);
     let nonces = harness.evidence_nonces();
+    let captured_outstanding = harness.outstanding();
+    let pump = Mutex::new(PumpWrites::default());
     for nonce in &nonces {
         harness.write_transcript(nonce, "{}\n");
         harness.touch_heartbeat(nonce);
+        pump.lock().expect("the pump trace lock is held only by this test thread").record_seed();
     }
     let runs = harness.runs_dir();
     let pumped = nonces.clone();
     while_pumping(
         || {
+            let mut pump = pump.lock().expect("the pump trace lock is held only by the helper thread");
             for nonce in &pumped {
                 let dir = runs.join(format!("{nonce}-evidence"));
-                let _ = fs::create_dir_all(&dir);
                 let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis());
-                let _ = fs::write(dir.join("heartbeat"), stamp.to_string());
+                match fs::create_dir_all(&dir).and_then(|()| fs::write(dir.join("heartbeat"), stamp.to_string())) {
+                    Ok(()) => pump.record_pump(),
+                    Err(error) => pump.last_error = Some(format!("{nonce}: {error}")),
+                }
             }
         },
         || thread::sleep(Duration::from_secs(12)),
     );
 
-    let outstanding = harness.outstanding();
+    let observed = LossObservation {
+        outstanding: harness.outstanding(),
+        observed_at: Instant::now(),
+        observed_unix_millis: unix_millis(),
+    };
+    let pump = pump.into_inner().expect("the pump trace lock is held only after the helper thread stops");
+    let lost = nonces.iter().any(|nonce| !observed.outstanding.contains(nonce));
+    let diag = lost.then(|| heartbeat_loss_report(&harness, &runs, &nonces, &captured_outstanding, &observed, &pump));
     for nonce in &nonces {
         assert!(
-            outstanding.contains(nonce),
-            "a lane beating its heartbeat must keep its original nonce, not be cancelled and redispatched; outstanding={outstanding:?} original={nonces:?}"
+            observed.outstanding.contains(nonce),
+            "a lane beating its heartbeat must keep its original nonce, not be cancelled and redispatched; outstanding={:?} original={nonces:?}{}",
+            observed.outstanding,
+            diag.as_deref().unwrap_or("")
         );
+    }
+}
+
+#[derive(Default)]
+struct PumpWrites {
+    last_ok: Option<Instant>,
+    last_pump: Option<Instant>,
+    first_unix_millis: Option<u128>,
+    last_unix_millis: Option<u128>,
+    initial_gap: Option<Duration>,
+    max_pump_gap: Option<Duration>,
+    seed_ok: u32,
+    pump_ok: u32,
+    last_error: Option<String>,
+}
+
+impl PumpWrites {
+    fn record_seed(&mut self) {
+        let now = Instant::now();
+        let wall = unix_millis();
+        if self.first_unix_millis.is_none() {
+            self.first_unix_millis = Some(wall);
+        }
+        self.last_ok = Some(now);
+        self.last_unix_millis = Some(wall);
+        self.seed_ok = self.seed_ok.saturating_add(1);
+    }
+
+    fn record_pump(&mut self) {
+        let now = Instant::now();
+        let wall = unix_millis();
+        if self.pump_ok == 0 {
+            if let Some(seed) = self.last_ok {
+                self.initial_gap = Some(now.saturating_duration_since(seed));
+            }
+        } else if let Some(last_pump) = self.last_pump {
+            let gap = now.saturating_duration_since(last_pump);
+            self.max_pump_gap = Some(self.max_pump_gap.map_or(gap, |kept| kept.max(gap)));
+        }
+        self.last_pump = Some(now);
+        self.last_ok = Some(now);
+        self.last_unix_millis = Some(wall);
+        self.pump_ok = self.pump_ok.saturating_add(1);
+    }
+}
+
+struct LossObservation {
+    outstanding: Vec<String>,
+    observed_at: Instant,
+    observed_unix_millis: u128,
+}
+
+fn heartbeat_loss_report(
+    harness: &LaneHarness,
+    runs: &Path,
+    original: &[String],
+    captured_outstanding: &[String],
+    observed: &LossObservation,
+    pump: &PumpWrites,
+) -> String {
+    let final_gap = pump
+        .last_ok
+        .map_or_else(|| "n/a".to_owned(), |last| format!("{:?}", observed.observed_at.saturating_duration_since(last)));
+    let ledger = bounded_ledger_summary(&harness.ledger());
+    let files = original
+        .iter()
+        .map(|nonce| {
+            let dir = runs.join(format!("{nonce}-evidence"));
+            format!(
+                "{nonce} transcript={} heartbeat={}",
+                file_mtime_millis(&dir.join("transcript.jsonl")),
+                file_mtime_millis(&dir.join("heartbeat")),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let first = pump.first_unix_millis.map_or_else(|| "none".to_owned(), |millis| format!("{millis} millis"));
+    let last = pump.last_unix_millis.map_or_else(|| "none".to_owned(), |millis| format!("{millis} millis"));
+    let initial_gap = pump.initial_gap.map_or_else(|| "n/a".to_owned(), |gap| format!("{gap:?}"));
+    let max_pump_gap = pump.max_pump_gap.map_or_else(|| "n/a".to_owned(), |gap| format!("{gap:?}"));
+    let write_error = pump.last_error.as_deref().unwrap_or("none");
+    let tail = match harness.coordinator_boot_log_tail() {
+        None => "no forked coordinator".to_owned(),
+        Some(lines) if lines.is_empty() => "empty; no cancellation reason in the bounded stderr window".to_owned(),
+        Some(lines) => {
+            let joined = lines.join("\n  ");
+            if lines.iter().any(|line| {
+                line.contains("silent past the host heartbeat")
+                    || line.contains("outlived its sealed execution limit")
+                    || line.contains("host fault")
+            }) {
+                joined
+            } else {
+                format!("no cancellation reason in the bounded stderr window:\n  {joined}")
+            }
+        }
+    };
+    format!(
+        "\ncapture outstanding={captured_outstanding:?}\nledger={ledger}\nfiles={files}\nseed_ok={} pump_ok={} first={first} last={last} observed={} millis initial_gap={initial_gap} max_pump_gap={max_pump_gap} final_gap={final_gap} write_error={write_error}\nfinal outstanding={:?}\nboot-log tail: {tail}",
+        pump.seed_ok, pump.pump_ok, observed.observed_unix_millis, observed.outstanding,
+    )
+}
+
+fn bounded_ledger_summary(runs: &[LaneRun]) -> String {
+    const LAST: usize = 24;
+    let total = runs.len();
+    let shown = if total > LAST {
+        &runs[total - LAST..]
+    } else {
+        runs
+    };
+    let body =
+        shown.iter().map(|run| format!("{}:{}:{:?}", run.nonce, run.command, run.mode)).collect::<Vec<_>>().join("; ");
+    format!("total={total} last={LAST} [{body}]")
+}
+
+fn unix_millis() -> u128 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis())
+}
+
+fn file_mtime_millis(path: &Path) -> String {
+    match fs::metadata(path).and_then(|meta| meta.modified()) {
+        Ok(modified) => modified
+            .duration_since(UNIX_EPOCH)
+            .map_or_else(|_| String::from("before-epoch"), |since| format!("{} millis", since.as_millis())),
+        Err(error) => format!("unreadable ({error})"),
     }
 }
 
@@ -642,29 +864,50 @@ fn a_continuously_noisy_lane_still_dies_at_its_absolute_deadline() {
     let runs = harness.runs_dir();
     while_pumping(
         || {
-            if let Ok(entries) = fs::read_dir(&runs) {
-                for entry in entries.filter_map(Result::ok) {
-                    let name = entry.file_name();
-                    let Some(nonce) = name.to_str().and_then(|name| name.strip_suffix("-evidence")) else {
-                        continue;
-                    };
-                    let path = entry.path().join("transcript.jsonl");
-                    let _ = fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut file| {
-                        use std::io::Write as _;
-                        file.write_all(nonce.as_bytes())
-                    });
-                }
+            let Ok(ledger) = read_ledger(&runs) else {
+                return;
+            };
+            let Some(run) = ledger.into_iter().find(|run| run.mode == LaneMode::NeverExits) else {
+                return;
+            };
+            if run.nonce.is_empty() {
+                return;
             }
+            let dir = runs.join(format!("{}-evidence", run.nonce));
+            fs::create_dir_all(&dir).expect("owned evidence directory creates");
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("transcript.jsonl"))
+                .and_then(|mut file| {
+                    use std::io::Write as _;
+                    file.write_all(b"{}\n")
+                })
+                .expect("owned transcript progresses");
         },
         || {
             harness.wait_for_runs(1);
-            thread::sleep(Duration::from_secs(7));
+            let run = first_never_exits_run(&harness);
+            wait_until_original_child_is_dead_and_consumed(&harness, &run);
+            let transcript = harness.runs_dir().join(format!("{}-evidence", run.nonce)).join("transcript.jsonl");
+            let bytes = fs::read(&transcript).expect("owned transcript reads after the wait");
+            assert!(
+                !bytes.is_empty(),
+                "owned transcript must have progressed during the wait; nonce={} pid={:?} outstanding={:?} ledger={:?}",
+                run.nonce,
+                run.process_id,
+                harness.outstanding(),
+                harness.ledger(),
+            );
         },
     );
 
     let bloom = harness.view();
     assert!(bloom.blooms[0].members[0].resolution.is_none(), "a noisy hung lane resolves nothing");
-    assert_scratch_checkouts_are_named_for_work(&harness, "a deadline-killed noisy run leaves no checkout of its own");
+    assert_scratch_checkouts_are_named_for_work(
+        &harness,
+        "retained session and slot checkout names are not proof the child was reaped",
+    );
 }
 
 // Every checkout git has registered under the harness's run directories.

@@ -15,25 +15,52 @@ use super::RoutingExecutor;
 use crate::bloomery::executor::local::LocalExecutorError;
 use crate::bloomery::executor::{OutstandingDispatch, ReconcileLanes, ReconcileReport};
 
-/// The shared record of nonces a recorder backend was asked to submit.
+/// The shared record of nonces a recorder backend was asked to submit, cancel, or stream.
 type Seen = Arc<Mutex<Vec<String>>>;
+
+// Distinct inspect results so a forwarded status identifies which arm the router called.
+// Both arms used to return `Unknown`, so a mis-routed inspect still matched.
+const ACTIONS_INSPECT: ExecutionStatus = ExecutionStatus::Queued;
+const LOCAL_INSPECT: ExecutionStatus = ExecutionStatus::Running { last_progress_unix_millis: Some(1) };
 
 // A backend that records the nonces it was asked to submit, so a test can read
 // which arm an order routed to. Never errors, so its error type is a phantom.
 struct Recorder<E> {
     seen: Seen,
+    // Inspect nonces, kept apart from `seen` so inspect assertions do not mix with
+    // submit / cancel / stream, and those tests stay valid if inspect is added beside them.
+    inspected: Seen,
     evidence: Vec<EvidenceRef>,
     // What this arm claims to have re-adopted at boot, when the router asks it to
     // reconcile — the local arm's observed footprint, which is what the router
     // rebuilds its routing map from.
     readopted: Vec<Nonce>,
+    inspect_status: ExecutionStatus,
     _marker: PhantomData<fn() -> E>,
 }
 
 impl<E> Recorder<E> {
     fn new() -> (Self, Seen) {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        (Self { seen: Arc::clone(&seen), evidence: Vec::new(), readopted: Vec::new(), _marker: PhantomData }, seen)
+        let inspected = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                seen: Arc::clone(&seen),
+                inspected,
+                evidence: Vec::new(),
+                readopted: Vec::new(),
+                inspect_status: ExecutionStatus::Unknown,
+                _marker: PhantomData,
+            },
+            seen,
+        )
+    }
+
+    fn with_inspect(status: ExecutionStatus) -> (Self, Seen, Seen) {
+        let (mut recorder, seen) = Self::new();
+        recorder.inspect_status = status;
+        let inspected = Arc::clone(&recorder.inspected);
+        (recorder, seen, inspected)
     }
 
     fn returning(evidence: Vec<EvidenceRef>) -> (Self, Seen) {
@@ -63,8 +90,9 @@ impl<E: Send + Sync> ExecutorBackend for Recorder<E> {
         Ok(WorkHandle::new(order.nonce.clone()))
     }
 
-    fn inspect(&self, _handle: &WorkHandle) -> Result<ExecutionStatus, E> {
-        Ok(ExecutionStatus::Unknown)
+    fn inspect(&self, handle: &WorkHandle) -> Result<ExecutionStatus, E> {
+        self.inspected.lock().unwrap().push(handle.nonce.0.clone());
+        Ok(self.inspect_status.clone())
     }
 
     fn cancel(&self, handle: &WorkHandle) -> Result<(), E> {
@@ -96,16 +124,21 @@ fn order(command: &str, nonce: &str) -> WorkOrder {
     }
 }
 
-fn router(local_prefixes: Vec<String>) -> (RoutingExecutor, Seen, Seen) {
-    let (actions, actions_seen) = Recorder::<ExecutorError>::new();
-    let (local, local_seen) = Recorder::<LocalExecutorError>::new();
+fn router(local_prefixes: Vec<String>) -> (RoutingExecutor, Seen, Seen, Seen, Seen) {
+    let (actions, actions_seen, actions_inspected) = Recorder::<ExecutorError>::with_inspect(ACTIONS_INSPECT);
+    let (local, local_seen, local_inspected) = Recorder::<LocalExecutorError>::with_inspect(LOCAL_INSPECT);
     let router = RoutingExecutor::new(Arc::new(actions), Arc::new(local), local_prefixes);
-    (router, actions_seen, local_seen)
+    (router, actions_seen, local_seen, actions_inspected, local_inspected)
+}
+
+fn assert_only_inspected(selected: &Seen, other: &Seen, nonce: &str) {
+    assert_eq!(*selected.lock().unwrap(), vec![nonce.to_owned()], "the selected arm received this inspect");
+    assert!(other.lock().unwrap().is_empty(), "the other arm received no inspect");
 }
 
 #[test]
 fn construct_routes_local_and_verify_routes_actions_by_default() {
-    let (router, actions_seen, local_seen) = router(vec!["construct.".to_owned()]);
+    let (router, actions_seen, local_seen, _, _) = router(vec!["construct.".to_owned()]);
 
     router.submit(&order("construct.implement", "n-c")).unwrap();
     router.submit(&order("verify.clippy", "n-v")).unwrap();
@@ -118,7 +151,7 @@ fn construct_routes_local_and_verify_routes_actions_by_default() {
 fn a_config_override_repoints_a_verify_lane_to_local() {
     // The release valve: adding `verify.` to the local prefix set flips the verify
     // lane to the local backend without touching the routing code.
-    let (router, actions_seen, local_seen) = router(vec!["construct.".to_owned(), "verify.".to_owned()]);
+    let (router, actions_seen, local_seen, _, _) = router(vec!["construct.".to_owned(), "verify.".to_owned()]);
 
     router.submit(&order("verify.clippy", "n-v")).unwrap();
 
@@ -132,7 +165,7 @@ fn streaming_a_consumed_order_evicts_its_routing_record() {
     // last message for a completed order drops its lane record. `stream_evidence`
     // is that last message, so a later message for the same nonce falls back to
     // the Actions arm instead of re-resolving to the local arm the submit used.
-    let (router, actions_seen, local_seen) = router(vec!["construct.".to_owned()]);
+    let (router, actions_seen, local_seen, _, _) = router(vec!["construct.".to_owned()]);
     let handle = router.submit(&order("construct.implement", "n-c")).unwrap();
 
     router.stream_evidence(&handle).unwrap();
@@ -149,7 +182,7 @@ fn a_repeated_cancel_re_resolves_to_the_lane_the_order_submitted_to() {
     // tick until the expired order is admitted, so a router that dropped the lane
     // record on the first cancel would spend a GitHub round trip probing both
     // wrappers for a nonce that only ever existed on the local lane.
-    let (router, actions_seen, local_seen) = router(vec!["construct.".to_owned()]);
+    let (router, actions_seen, local_seen, _, _) = router(vec!["construct.".to_owned()]);
     let handle = router.submit(&order("construct.implement", "n-c")).unwrap();
 
     router.cancel(&handle).unwrap();
@@ -162,10 +195,28 @@ fn a_repeated_cancel_re_resolves_to_the_lane_the_order_submitted_to() {
 #[test]
 fn inspect_resolves_a_handle_to_the_lane_its_order_submitted_to() {
     // The router records the lane at submit so a nonce-only inspect re-resolves
-    // to the arm the order went to — here the local arm, whose stub reports Unknown.
-    let (router, _actions_seen, _local_seen) = router(vec!["construct.".to_owned()]);
-    let handle = router.submit(&order("construct.implement", "n-c")).unwrap();
-    assert_eq!(router.inspect(&handle).unwrap(), ExecutionStatus::Unknown);
+    // to that arm. Distinct stub results plus per-arm inspect logs prove the call
+    // reached it — both stubs used to return Unknown without recording.
+    let (router, _, _, actions_inspected, local_inspected) = router(vec!["construct.".to_owned()]);
+    let local_handle = router.submit(&order("construct.implement", "n-c")).unwrap();
+    let actions_handle = router.submit(&order("verify.clippy", "n-v")).unwrap();
+
+    assert_eq!(router.inspect(&local_handle).unwrap(), LOCAL_INSPECT);
+    assert_only_inspected(&local_inspected, &actions_inspected, "n-c");
+
+    assert_eq!(router.inspect(&actions_handle).unwrap(), ACTIONS_INSPECT);
+    assert_eq!(*local_inspected.lock().unwrap(), vec!["n-c".to_owned()], "the Actions inspect did not hit local");
+    assert_eq!(*actions_inspected.lock().unwrap(), vec!["n-v".to_owned()]);
+}
+
+#[test]
+fn inspect_follows_a_config_override_to_the_local_arm() {
+    let (router, _, _, actions_inspected, local_inspected) =
+        router(vec!["construct.".to_owned(), "verify.".to_owned()]);
+    let handle = router.submit(&order("verify.clippy", "n-v")).unwrap();
+
+    assert_eq!(router.inspect(&handle).unwrap(), LOCAL_INSPECT);
+    assert_only_inspected(&local_inspected, &actions_inspected, "n-v");
 }
 
 #[test]
@@ -211,4 +262,32 @@ fn reconcile_re_routes_a_readopted_nonce_to_the_local_arm() {
         vec!["n-untouched".to_owned()],
         "a nonce with no local footprint keeps the Actions fallback",
     );
+}
+
+#[test]
+fn inspect_follows_a_readopted_nonce_to_the_local_arm() {
+    // Reconcile seeds `routed` from the local footprint; inspect must use that
+    // record rather than the Actions miss fallback.
+    let (actions, _, actions_inspected) = Recorder::<ExecutorError>::with_inspect(ACTIONS_INSPECT);
+    let (mut local, _, local_inspected) = Recorder::<LocalExecutorError>::with_inspect(LOCAL_INSPECT);
+    local.readopted = vec![Nonce("n-c".to_owned())];
+    let router = RoutingExecutor::new(Arc::new(actions), Arc::new(local), vec!["construct.".to_owned()]);
+
+    router.reconcile(&[]);
+    assert_eq!(router.inspect(&WorkHandle::new(Nonce("n-c".to_owned()))).unwrap(), LOCAL_INSPECT);
+    assert_only_inspected(&local_inspected, &actions_inspected, "n-c");
+}
+
+#[test]
+fn inspect_falls_back_to_actions_when_the_routing_record_is_missing() {
+    // `stream_evidence` drops the routing record; a later inspect is the same miss
+    // as a nonce this router never saw, and both take the Actions fallback.
+    let (router, _, _, actions_inspected, local_inspected) = router(vec!["construct.".to_owned()]);
+    let handle = router.submit(&order("construct.implement", "n-c")).unwrap();
+    router.stream_evidence(&handle).unwrap();
+
+    assert_eq!(router.inspect(&handle).unwrap(), ACTIONS_INSPECT);
+    assert_eq!(router.inspect(&WorkHandle::new(Nonce("n-unrecorded".to_owned()))).unwrap(), ACTIONS_INSPECT);
+    assert_eq!(*actions_inspected.lock().unwrap(), vec!["n-c".to_owned(), "n-unrecorded".to_owned()]);
+    assert!(local_inspected.lock().unwrap().is_empty(), "neither fallback inspect hit the local arm");
 }

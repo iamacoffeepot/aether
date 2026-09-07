@@ -79,7 +79,8 @@ use crate::{
     ScrollExtent, ScrollOutcome, ScrollResidual, ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged,
     SliderConfig, TabSelected, TabStripConfig, TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig,
     ToggleChanged, ToggleConfig, VirtualListAction, VirtualListConfig, VirtualListHover, VirtualListSelected, Widget,
-    WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
+    WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetEligibilityChanged, WidgetFrame,
+    WidgetKind, WidgetStateChanged,
 };
 use crate::{FrameDischarge, decode_nested_widget_config};
 use crate::{accept_open_child_list, emit, flush_membership};
@@ -184,9 +185,12 @@ pub struct WidgetPanel {
     scroll_focus: Focus,
     children: Vec<ChildRef>,
     spawned: bool,
+    /// A live `SetTheme` or resolved `LoadFontResult` arrived before children existed.
+    pending_style: bool,
     /// The total stack height, for the background chrome; set at spawn.
     panel_height: f32,
-    /// Latest modifier state, used by panel-owned forward/reverse Tab routing.
+    /// Latest modifier state: Tab direction, and the chord fanned to a child
+    /// that just gained focus.
     modifiers: Modifiers,
 }
 
@@ -246,6 +250,12 @@ impl WidgetPanel {
         }
 
         self.panel_height = y - self.config.y;
+        // Replay only a live update that beat the first Tick. Spawning with no such
+        // update must keep each child's own config theme.
+        if self.pending_style {
+            self.fan_theme(ctx);
+            self.pending_style = false;
+        }
     }
 
     /// Record one spawned child's rect into the composite (as its draw offset,
@@ -309,9 +319,20 @@ impl WidgetPanel {
     }
 
     /// Re-fan the live theme to every child (after a font stamp or a restyle).
-    fn fan_theme(&self, ctx: &mut WasmCtx<'_>) {
+    fn fan_theme<M: aether_actor::ReplyMode>(&self, ctx: &mut WasmCtx<'_, M>) {
         for child in &self.children {
             ctx.send_to(child.id, &SetTheme { theme: self.theme.clone() });
+        }
+    }
+
+    /// Adopt a live style change now, and either fan it immediately or keep it
+    /// until the first successful spawn so the FIFO drain applies it before Collect.
+    fn retain_or_fan_theme<M: aether_actor::ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, M>) {
+        if self.spawned {
+            self.fan_theme(ctx);
+            self.pending_style = false;
+        } else {
+            self.pending_style = true;
         }
     }
 
@@ -816,16 +837,22 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
 }
 
 /// Send a focus transition down: `FocusLost` to the child that lost focus,
-/// `FocusGained` to the one that gained it.
-/// `keyboard` rides on the gain so the child knows whether to draw its
-/// ring (see [`FocusGained`]).
-fn apply_focus<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, transition: FocusTransition, keyboard: bool) {
+/// then `FocusGained` and the panel's latest [`Modifiers`] to the one that
+/// gained it. Lost still goes first. `keyboard` rides on the gain so the
+/// child knows whether to draw its ring (see [`FocusGained`]).
+fn apply_focus<M: aether_actor::ReplyMode>(
+    ctx: &mut WasmCtx<'_, M>,
+    transition: FocusTransition,
+    keyboard: bool,
+    modifiers: Modifiers,
+) {
     let FocusTransition { previous, next } = transition;
     if let Some(prev) = previous {
         ctx.send_to(prev, &FocusLost);
     }
     if let Some(gained) = next {
         ctx.send_to(gained, &FocusGained { keyboard });
+        ctx.send_to(gained, &modifiers);
     }
 }
 
@@ -841,12 +868,16 @@ fn apply_hover<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, transition:
     }
 }
 
-fn apply_availability<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, effects: AvailabilityEffects) {
+fn apply_availability<M: aether_actor::ReplyMode>(
+    ctx: &mut WasmCtx<'_, M>,
+    effects: AvailabilityEffects,
+    modifiers: Modifiers,
+) {
     if let Some(hover) = effects.hover {
         apply_hover(ctx, hover);
     }
     if let Some(focus) = effects.focus {
-        apply_focus(ctx, focus, false);
+        apply_focus(ctx, focus, false, modifiers);
     }
 }
 
@@ -911,6 +942,7 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         HoverLost::ID.0,
         crate::SetWidgetState::ID.0,
         WidgetStateChanged::ID.0,
+        WidgetEligibilityChanged::ID.0,
         crate::ChildrenChanged::ID.0,
         ScrollOutcome::ID.0,
         ScrollResidual::ID.0,
@@ -1124,6 +1156,7 @@ impl WasmActor for WidgetPanel {
             scroll_focus: Focus::new(),
             children: Vec::new(),
             spawned: false,
+            pending_style: false,
             panel_height: 0.0,
             modifiers: Modifiers::default(),
         })
@@ -1212,7 +1245,7 @@ impl WasmActor for WidgetPanel {
             }
             let focusable = self.focus.focus_hit_test(press.x, press.y);
             if let Some(transition) = self.focus.set_focus(focusable) {
-                apply_focus(ctx, transition, false);
+                apply_focus(ctx, transition, false, self.modifiers);
             }
             hit
         } else {
@@ -1278,7 +1311,7 @@ impl WasmActor for WidgetPanel {
                 FocusDirection::Forward
             };
             if let Some(transition) = self.focus.move_focus(direction) {
-                apply_focus(ctx, transition, true);
+                apply_focus(ctx, transition, true, self.modifiers);
             }
             return;
         }
@@ -1330,7 +1363,21 @@ impl WasmActor for WidgetPanel {
             return;
         };
         let effects = self.focus.update_availability(source, &changed.state);
-        apply_availability(ctx, effects);
+        apply_availability(ctx, effects, self.modifiers);
+    }
+
+    /// Keep content-derived pointer/keyboard eligibility synchronized. Source
+    /// attribution identifies the panel slot, including a behavior host that
+    /// forwarded the wrapped widget's event.
+    #[handler::manual]
+    fn on_widget_eligibility_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: WidgetEligibilityChanged) {
+        let Some(source) = ctx.source_mailbox() else {
+            return;
+        };
+        let effects = self
+            .focus
+            .update_eligibility(source, FocusEligibility { pointer: changed.pointer, keyboard: changed.keyboard });
+        apply_availability(ctx, effects, self.modifiers);
     }
 
     /// Observe one descendant scroll container's exact typed outcome. The
@@ -1597,7 +1644,7 @@ impl WasmActor for WidgetPanel {
         match result {
             LoadFontResult::Ok { font_id, .. } => {
                 self.theme.font_id = font_id;
-                self.fan_theme(ctx);
+                self.retain_or_fan_theme(ctx);
             }
             LoadFontResult::Err { error, .. } => {
                 tracing::warn!(target: "aether_kit_widget", %error, "panel font load failed");
@@ -1609,7 +1656,7 @@ impl WasmActor for WidgetPanel {
     #[handler::single]
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
         self.theme = set.theme;
-        self.fan_theme(ctx);
+        self.retain_or_fan_theme(ctx);
     }
 }
 
@@ -1740,6 +1787,7 @@ mod behavior_tests {
         let mirrored = behavior_mirror_kinds();
         assert!(mirrored.contains(&ScrollOutcome::ID.0));
         assert!(mirrored.contains(&ScrollResidual::ID.0));
+        assert!(mirrored.contains(&WidgetEligibilityChanged::ID.0));
     }
 
     // Tripwire: a wrapped widget's profile is the unwrapped one, field for

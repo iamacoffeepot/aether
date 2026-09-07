@@ -243,6 +243,7 @@ dependencies = [
  "dirs",
  "ed25519-dalek",
  "inventory",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

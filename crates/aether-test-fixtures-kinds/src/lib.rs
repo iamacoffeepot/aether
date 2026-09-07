@@ -339,6 +339,26 @@ pub struct FsDemuxReport {
     pub second_matched: bool,
 }
 
+/// Issue 5508: trigger for the typed request-context probe-then-take fixture.
+/// The fixture sends two `aether.fs.read` requests carrying distinct context
+/// kinds and recovers them from the shared `ReadResult` handler.
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.test_fixtures.run_fs_context_demux")]
+pub struct RunFsContextDemux {
+    pub namespace: String,
+    pub path: String,
+}
+
+/// Issue 5508: report emitted once both distinct typed request contexts were
+/// recovered by probe-then-take on the shared `ReadResult` handler. Payloads
+/// are the values actually decoded from each context, not synthetic flags.
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.test_fixtures.fs_context_demux_report")]
+pub struct FsContextDemuxReport {
+    pub first_payload: u32,
+    pub second_payload: u32,
+}
+
 /// Configure the listener lineage used by the TCP load probe when it echoes
 /// frames received from accepted sessions.
 #[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]

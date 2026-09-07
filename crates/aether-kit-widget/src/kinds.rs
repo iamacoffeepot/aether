@@ -385,30 +385,39 @@ impl WidgetDrawItem {
         }
     }
 
-    /// The rectangle this item actually paints — its geometry narrowed by its
-    /// own clip — or `None` for text, which casts no hole, and for a fill its
-    /// clip erases. This is the hole a fill punches in the glyph runs authored
-    /// before it: reading the geometry alone would let a row scrolled out of a
-    /// viewport cut text the viewport clip already spared it from.
+    /// Known opaque coverage this item punches as a hole in earlier glyph
+    /// runs, or `None` when that coverage is unknown or empty.
     ///
-    /// A shape covers its **fill box** and nothing more: the shadow covers
-    /// nothing (it is soft, and what it stands over is meant to show through),
-    /// and a shape with no fill — a ring, a halo — covers nothing either, so
-    /// a focus ring drawn as one stroke never punches a hole in the field it
+    /// A hole is only a [`Self::Shape`] whose fill color alpha is exactly
+    /// `1.0`, after the existing geometry-and-clip intersection. A shape
+    /// covers its **fill box** and nothing more — the shadow covers nothing
+    /// (it is soft, and what it stands over is meant to show through), and a
+    /// shape with no fill — a ring, a halo — covers nothing either, so a
+    /// focus ring drawn as one stroke never punches a hole in the field it
     /// rings. Conservative at rounded corners, where the box is a little more
-    /// than the fill. A triangle is a mark and covers nothing.
+    /// than the fill.
+    ///
+    /// Text casts no hole, and a triangle is a mark that casts none. A
+    /// [`Self::TexturedQuad`] does not either: its texels can be transparent
+    /// even when its tint is opaque, so coverage is unknown. Alpha that is
+    /// not exactly `1.0` — zero, partial, out of range, or non-finite —
+    /// cannot prove opaque coverage. Leaving those fills out of the hole set
+    /// preserves the text they stand over; it does not implement true
+    /// translucent text/quad interleaving, because the split render/text
+    /// pipeline still submits quads first.
     #[must_use]
     pub(super) fn covered_rect(&self) -> Option<WidgetClipRect> {
-        let (rect, clip) = match self {
-            Self::TexturedQuad { x, y, width, height, clip, .. }
-            | Self::Shape { x, y, width, height, fill: Some(_), clip, .. } => {
-                (WidgetClipRect { x: *x, y: *y, width: *width, height: *height }, *clip)
+        let (x, y, width, height, color, clip) = match self {
+            Self::Shape { x, y, width, height, fill: Some(fill), clip, .. } => (x, y, width, height, fill, clip),
+            Self::TexturedQuad { .. } | Self::Text { .. } | Self::Shape { fill: None, .. } | Self::Triangle { .. } => {
+                return None;
             }
-            Self::Text { .. } | Self::Shape { fill: None, .. } | Self::Triangle { .. } => return None,
         };
-        match intersect_widget_clips(Some(rect), clip) {
-            WidgetClipIntersection::Finite { rect } => Some(rect),
-            WidgetClipIntersection::Unbounded | WidgetClipIntersection::Empty => None,
+        match intersect_widget_clips(Some(WidgetClipRect { x: *x, y: *y, width: *width, height: *height }), *clip) {
+            WidgetClipIntersection::Finite { rect } if color.a == 1.0 => Some(rect),
+            WidgetClipIntersection::Finite { .. }
+            | WidgetClipIntersection::Unbounded
+            | WidgetClipIntersection::Empty => None,
         }
     }
 
@@ -781,6 +790,18 @@ pub struct SetWidgetState {
 #[kind(name = "aether.kit.widget.state_changed")]
 pub struct WidgetStateChanged {
     pub state: WidgetControlState,
+}
+
+/// `aether.kit.widget.eligibility_changed` — a source-attributed events-up
+/// reply emitted when a widget's content-derived pointer/keyboard eligibility
+/// flips. No identity field and no data-down setter: the panel attributes the
+/// source mailbox recorded at spawn. Distinct from [`WidgetStateChanged`],
+/// which carries external visible/enabled/read-only/validation state.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[kind(name = "aether.kit.widget.eligibility_changed")]
+pub struct WidgetEligibilityChanged {
+    pub pointer: bool,
+    pub keyboard: bool,
 }
 
 /// The widget set's config/style/layout/state/interaction data-down lanes and
@@ -2166,5 +2187,77 @@ mod tests {
         ] {
             assert_eq!(intersect_widget_clips(Some(invalid), None), WidgetClipIntersection::Empty,);
         }
+    }
+
+    #[test]
+    fn covered_rect_is_known_opaque_solid_coverage_only() {
+        // Tripwire: a hole used to follow fill geometry regardless of alpha,
+        // so an invisible overlay could erase text. Only a shape fill with
+        // alpha exactly 1.0, after geometry ∩ clip, is known opaque coverage.
+        let painted = WidgetClipRect { x: 0.0, y: 0.0, width: 100.0, height: 24.0 };
+        let solid = |alpha: f32, clip: Option<WidgetClipRect>| WidgetDrawItem::Shape {
+            x: painted.x,
+            y: painted.y,
+            width: painted.width,
+            height: painted.height,
+            corner_radius: 0.0,
+            fill: Some(Rgba::new(1.0, 1.0, 1.0, alpha)),
+            stroke: None,
+            shadow: None,
+            clip,
+        };
+        let textured = |alpha: f32| WidgetDrawItem::TexturedQuad {
+            texture_id: 1,
+            x: painted.x,
+            y: painted.y,
+            width: painted.width,
+            height: painted.height,
+            u0: 0.0,
+            v0: 0.0,
+            u1: 1.0,
+            v1: 1.0,
+            tint: Rgba::new(1.0, 1.0, 1.0, alpha),
+            clip: None,
+        };
+
+        assert_eq!(solid(1.0, None).covered_rect(), Some(painted));
+        assert_eq!(
+            solid(1.0, Some(WidgetClipRect { x: 80.0, y: 0.0, width: 40.0, height: 24.0 })).covered_rect(),
+            Some(WidgetClipRect { x: 80.0, y: 0.0, width: 20.0, height: 24.0 }),
+            "opaque coverage is still the geometry/clip intersection",
+        );
+        assert_eq!(
+            solid(1.0, Some(WidgetClipRect { x: 200.0, y: 0.0, width: 10.0, height: 10.0 })).covered_rect(),
+            None,
+            "a disjoint clip still erases the hole",
+        );
+        assert_eq!(
+            solid(1.0, Some(WidgetClipRect { x: 0.0, y: 0.0, width: 0.0, height: 10.0 })).covered_rect(),
+            None,
+            "an invalid clip still erases the hole",
+        );
+        for alpha in [0.0, 0.5, -0.25, 1.25, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(solid(alpha, None).covered_rect(), None);
+            assert_eq!(
+                solid(alpha, Some(WidgetClipRect { x: 80.0, y: 0.0, width: 40.0, height: 24.0 })).covered_rect(),
+                None,
+            );
+        }
+        for alpha in [0.0, 0.5, 1.0] {
+            assert_eq!(textured(alpha).covered_rect(), None);
+        }
+        assert_eq!(
+            WidgetDrawItem::Text {
+                x: 0.0,
+                y: 0.0,
+                font_id: 1,
+                text: "label".into(),
+                size_pixels: 12.0,
+                color: Rgba::WHITE,
+                clip: Some(WidgetClipRect { x: 0.0, y: 0.0, width: 80.0, height: 12.0 }),
+            }
+            .covered_rect(),
+            None,
+        );
     }
 }

@@ -84,13 +84,18 @@ widget sends can misreport it.
   `WidgetControlState { visible, enabled, read_only, validation }`.
   `SetWidgetState` replaces that external state without resetting the widget's
   value; a changed config or state mail emits source-attributed
-  `WidgetStateChanged` so panel routing cannot drift. Hidden widgets keep their
-  slot and answer `Collect` with an empty `WidgetDrawList`; disabled widgets
-  draw muted but leave input routing; read-only Slider, Radio, TextField,
-  TextArea, VirtualList, Toggle, Segmented, TabStrip, and Numeric controls
-  remain focusable but reject mutation. Button and Label ignore read-only and
-  validation; the menu bar ignores read-only too — it holds no value to
-  protect — while becoming disabled or hidden closes any menu it had open.
+  `WidgetStateChanged` so panel routing cannot drift. Content-derived pointer
+  and keyboard eligibility is a separate events-up kind,
+  `WidgetEligibilityChanged { pointer, keyboard }` — no identity field and no
+  data-down setter; the panel attributes `ctx.source_mailbox()`. Hidden widgets
+  keep their slot and answer `Collect` with an empty `WidgetDrawList`; disabled
+  widgets draw muted but leave input routing; read-only Slider, Radio,
+  TextField, TextArea, VirtualList, Toggle, Segmented, TabStrip, and Numeric
+  controls remain focusable but reject mutation. Hidden and disabled still gate
+  liveness when eligibility arrives: gaining eligibility does not auto-focus or
+  synthesize hover. Button and Label ignore read-only and validation; the menu
+  bar ignores read-only too — it holds no value to protect — while becoming
+  disabled or hidden closes any menu it had open.
 - **Interaction, down.** The root sends `FocusGained { keyboard }` /
   `FocusLost` and `HoverGained` / `HoverLost`. Hover comes from explicit edges,
   not from a child inferring absence from raw motion. Pressed and hover select
@@ -387,8 +392,15 @@ retains the complete row vector while
 realizing the rows the viewport reaches. The panel fixes the slot height at
 `theme.row_height * visible_row_count` for every list, table or not — it has no
 font metrics and reads no child reply, so a uniform pitch is the only height it
-can compute — and clips the slot to that viewport; an empty item vector or
-zero-row viewport is not pointer- or focus-eligible. A list whose rows carry
+can compute — and clips the slot to that viewport. Pointer and keyboard
+eligibility is content-derived and live: `!items.is_empty() && visible_row_count > 0`.
+An empty item vector or a zero-row viewport is not pointer- or focus-eligible,
+and re-sending `VirtualListConfig` with a nonempty vector (still a positive
+`visible_row_count`) flips that eligibility so the already-laid-out slot can
+receive hover, click, and Tab. Emptying a populated list drops it from routing
+the same way, without treating empty as externally disabled. `visible_row_count == 0`
+still computes ineligible; changing a zero-height slot to a positive height
+after spawn is separate relayout work, not a live-eligibility update. A list whose rows carry
 heights of their own ([below](#a-row-that-is-a-table-entry)) therefore needs a
 host that sizes the slot itself, from the list's reported
 `WidgetDrawList::intrinsic` (below); the widget draws whatever rows the frame it
@@ -406,8 +418,10 @@ than its viewport draws that many normal rows at the top and leaves the rest of
 the frame empty, and hit testing below the last realized row selects nothing.
 (A list that spread its items to fill the frame instead turned a two-item list
 into a pair of slabs, with a selected row half the viewport high.) Hidden lists
-answer every `Collect` with an empty draw list; disabled and read-only lists
-reject both pointer and keyboard selection changes.
+answer every `Collect` with an empty draw list and stay out of routing even if
+their item vector becomes nonempty; disabled lists likewise stay out until an
+explicit `SetWidgetState` enables them. Read-only lists remain focusable and
+hoverable but reject selection mutation.
 
 The list measures its rows. Like the label and the tooltip it drives the
 single-flight `FontMetricsRequest`, and once the advances land a row too long
@@ -1519,9 +1533,11 @@ Widgets never subscribe to input. The panel root subscribes the pointer and
 keyboard streams once (the input cap) and the frame stage once (the lifecycle
 cap), then routes every event through a `Focus` helper it embeds — the
 input-side counterpart to `Composite`. `Focus` holds child hit rects in layout
-order, static pointer/focus eligibility, dynamic visible/enabled availability,
-the hovered and focused children, and the drag-captured child. It answers four
-questions:
+order, pointer/keyboard eligibility, dynamic visible/enabled availability,
+the hovered and focused children, and the drag-captured child. Eligibility is
+seeded from each child's decoded config at spawn and can flip later through
+source-attributed `WidgetEligibilityChanged` without rebuilding the table. It
+answers four questions:
 
 - **Where does a pointer event go?** To the child holding the modal grab if
   there is one, then to the drag-captured child if one holds capture — so a
@@ -1533,8 +1549,13 @@ questions:
   capture routes raw drag motion elsewhere.
 - **What moves focus?** A left press on a focusable child, Tab forward, or
   Shift+Tab backward. Traversal wraps and skips hidden/disabled/static entries.
-  A live availability change moves focus forward when its holder disappears
-  and clears hover/capture through named transition effects.
+  A live availability or eligibility change reconciles pointer and keyboard
+  axes independently: losing keyboard liveness moves focus forward; losing
+  pointer liveness clears hover, capture, and grab. Gaining eligibility does
+  not auto-focus or synthesize hover. Hidden and disabled children stay
+  unavailable even when content-derived eligibility becomes true. Current
+  modifiers accompany the focus gain, the same helper an availability move
+  uses.
 - **What clears focus?** A left press that lands on *no* focusable child —
   bare panel background, a label, the gap between two rows. Clicking away from
   a control is how a person says they are done with it, so the field they were
@@ -1546,14 +1567,18 @@ when the press hit nothing focusable *and* when it hit the already-focused
 child, so a root that only reacts to its `Some` never clears anything and a
 pressed input stays lit forever. Ask `Focus::focus_hit_test(x, y)` for the
 focusable child under the point and hand the answer — `Some` or `None` — to
-`Focus::set_focus`, then fan the returned transition:
+`Focus::set_focus`, then fan the returned transition. Current modifiers must
+accompany the gain — Tab, a pointer press, and an availability or eligibility
+move all use this helper — so a newly focused child sees already-held Ctrl/Shift
+and a child that missed a release while unfocused does not keep a stale chord:
 
 ```rust
 let focusable = self.focus.focus_hit_test(press.x, press.y);
 if let Some(transition) = self.focus.set_focus(focusable) {
-    // FocusLost to `previous`, FocusGained to `next`. `false`: this focus came
-    // from a press, so the child it lands on must not draw a ring.
-    apply_focus(ctx, transition, false);
+    // FocusLost to `previous`, then FocusGained plus the panel's cached
+    // modifiers to `next`. `false`: this focus came from a press, so the
+    // child it lands on must not draw a ring.
+    apply_focus(ctx, transition, false, self.modifiers);
 }
 ```
 
@@ -1648,22 +1673,29 @@ where its own slot sits and the plate covers it. The escape hatch above
 apply to chrome, which is why the plate carries the rule instead.
 
 That grouping is what the clip subtraction reads, and the rule it reads it by
-is **positional**: a glyph run's holes are the fills authored *after* it. Text
-reaches the render cap one hop behind the quads, so a fill later in the order
-cannot cover the glyphs before it by draw order alone; the root cuts them out
-instead, re-clipping each run to what those later fills leave and dropping it
-when nothing is left. A fill authored *before* a run never touches it.
+is **positional**: a glyph run's holes are the known opaque solids authored
+*after* it. Text reaches the render cap one hop behind the quads, so a later
+opaque plate cannot cover the glyphs before it by draw order alone; the root
+cuts them out instead, re-clipping each run to what those later solids leave
+and dropping it when nothing is left. A fill authored *before* a run never
+touches it.
 
 One walk backwards over a lane carries that: the ordinary items start with the
-whole overlay already in the hole set (the overlay is entirely after them) and
-the overlay's own items start from empty, then each fill joins the set as the
-walk passes it. So a plate hides the primary content it stands over, can never
-delete the labels of the children standing on it — those are authored after its
-fill — and a dropdown one of those children opens *does* cut the sibling rows it
-covers, because its list is authored after them. A fill's hole is the rectangle
-it actually paints, its geometry narrowed by its own clip, so a virtual list's
-row scrolled out of its viewport takes nothing out of the header it was scrolled
-behind.
+overlay's known opaque solids already in the hole set (the overlay is entirely
+after them) and the overlay's own items start from empty, then each known
+opaque solid joins the set as the walk passes it. So a plate hides the primary
+content it stands over, can never delete the labels of the children standing
+on it — those are authored after its fill — and a dropdown one of those
+children opens *does* cut the sibling rows it covers, because its list is
+authored after them. A hole is the rectangle a solid actually paints, its
+geometry narrowed by its own clip, and only when its alpha is exactly 1.0. A
+virtual list's row scrolled out of its viewport takes nothing out of the
+header it was scrolled behind, and neither does a merely drawn fill:
+transparent or partial-alpha solids, out-of-range or non-finite alpha, and
+textured quads even with an opaque tint — the texels themselves may still be
+transparent. Those still submit as draws; they just do not punch a hole.
+Leaving the text under them is not true translucent interleaving: the split
+render/text pipeline still sends every quad a hop before every glyph.
 
 What a fill is measured against is the **run**, not the run's clip. A clip is a
 scissor bound and is routinely much larger than the glyphs inside it — every row
@@ -1876,12 +1908,16 @@ pre-encoded config; an empty child list falls back to the built-in reference
 stack), loads a font through `aether.text` and stamps the
 session `font_id` into its theme when `load_font_result` arrives, drives the
 collect/emit loop each frame, and routes input through `Focus`. Row height,
-initial state, and static eligibility derive from each child's decoded config.
-TextArea slots derive their height from `theme.row_height * rows.max(1)`.
-A `WidgetKind::BehaviorHost` derives the same metadata from both its `wrapped`
-discriminator and opaque `wrapped_config`; wrapping does not make every child
-focusable. A `WidgetKind::Scroll` row takes its width and height from its named
-viewport extent and also enters the panel's separate wheel-only hit table.
+initial state, and initial eligibility derive from each child's decoded config.
+A later `WidgetEligibilityChanged` from a child (or from a behavior host that
+forwarded its wrapped widget's event) updates that slot in place; the host
+slot is the attributed source, and wrapping does not make every child
+focusable. TextArea slots derive their height from `theme.row_height * rows.max(1)`.
+A `WidgetKind::BehaviorHost` derives the same spawn metadata from both its
+`wrapped` discriminator and opaque `wrapped_config`. A `WidgetKind::Scroll`
+row takes its width and height from its named viewport extent and also enters
+the panel's separate wheel-only hit table. Scroll widgets are wheel-only and
+have no pointer/Tab router of their own.
 The vertical order follows the declared order, so what a panel
 contains is config data. Its
 value-up handlers are the seam: each attributes the event by

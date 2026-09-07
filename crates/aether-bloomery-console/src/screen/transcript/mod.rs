@@ -542,13 +542,14 @@ impl Transcript {
         frame.render_stateful_widget(list, area, &mut state);
     }
 
-    fn render_expanded(&self, frame: &mut Frame<'_>, area: Rect, id: u64) {
+    fn render_expanded(&mut self, frame: &mut Frame<'_>, area: Rect, id: u64) {
         let raw = self.buffer.index_of(id).and_then(|index| self.buffer.raw(index));
         if let Some(raw) = raw
             && let Some(value) = event::expand_value(raw)
         {
             let lines = super::json::present(&value);
-            let offset = u16::try_from(self.expand_scroll.min(lines.len().saturating_sub(1))).unwrap_or(u16::MAX);
+            self.expand_scroll = super::json::clamp_wrapped_scroll(self.expand_scroll, &lines, area.width);
+            let offset = u16::try_from(self.expand_scroll).unwrap_or(u16::MAX);
             frame.render_widget(
                 Paragraph::new(lines).style(palette::body()).wrap(Wrap { trim: false }).scroll((offset, 0)),
                 area,
@@ -867,5 +868,55 @@ mod tests {
         }
         view.reseat(&store);
         assert_eq!(view.prompt.lines, ["# Opening instructions"]);
+    }
+
+    fn drawn_at(view: &mut Transcript, store: &Store, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");
+        terminal.draw(|frame| view.render(frame, frame.area(), store)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area().height {
+            let mut row = String::new();
+            for x in 0..buffer.area().width {
+                row.push_str(buffer[(x, y)].symbol());
+            }
+            text.push_str(row.trim_end());
+        }
+        text
+    }
+
+    #[test]
+    fn expanded_json_tail_is_reachable_by_wrapped_scroll() {
+        // The plausible bug: expand_scroll clamps to logical JSON lines, so a
+        // long string field wraps to many screen rows whose tail is unreachable.
+        let tail = "TAILTOKEN";
+        let payload = format!("{}{tail}", "x".repeat(400));
+        let line = format!(r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{payload}"}}]}}}}"#);
+        let store = store_with(page(&[&line]));
+        let mut view = Transcript::new("dispatch-1");
+        view.reseat(&store);
+        assert_eq!(view.handle_key(KeyEvent::from(KeyCode::Enter), &store), Outcome::Handled);
+
+        let start = drawn_at(&mut view, &store, 20, 6);
+        assert!(!start.contains(tail), "narrow first page must not already show the tail:\n{start}");
+
+        let mut found = String::new();
+        for _ in 0..512 {
+            view.handle_key(KeyEvent::from(KeyCode::Char('j')), &store);
+            found = drawn_at(&mut view, &store, 20, 6);
+            if found.contains(tail) {
+                break;
+            }
+        }
+        assert!(found.contains(tail), "expanded JSON wrapped-row scroll must reach the tail:\n{found}");
+
+        for _ in 0..512 {
+            view.handle_key(KeyEvent::from(KeyCode::Char('j')), &store);
+        }
+        let wide = drawn_at(&mut view, &store, 80, 6);
+        assert!(
+            wide.contains('}'),
+            "widening must reclamp onto JSON content, not a blank pane or the status line:\n{wide}"
+        );
     }
 }

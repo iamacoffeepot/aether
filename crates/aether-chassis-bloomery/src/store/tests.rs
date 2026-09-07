@@ -1262,14 +1262,76 @@ fn replay_state_matches_whether_the_envelope_stamp_is_populated() {
 fn metrics_rollups_refold_to_identical_payloads() {
     // The tables are cache: delete and refold from the journal must reproduce
     // the same dispatch payloads. The fold itself is proven in aether-bloomery;
-    // this pins the persist/clear/refold path the host uses.
+    // this pins the persist/clear/refold path the host uses over recorded
+    // dispatch history, not an empty journal.
+    use aether_bloomery::testing::{digest, draft, event, membership, workpiece};
+    use aether_bloomery::{
+        CandidateRef, Evidence, EvidenceKind, Fact, MetricDispatch, ResolvedConfigs, Snapshot, SpendWindow, StageId,
+        reduce,
+    };
+    use aether_data::wire::{from_bytes, to_vec};
+
+    const MEMBER: &str = "wp-a";
+    const TREE: u8 = 100;
+
+    let spec = draft(1, vec![membership(MEMBER, 10)]).seal();
+    let bloom = spec.id();
+    let configs = ResolvedConfigs::default();
+    let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
+
+    let seal = event("seal", Fact::Seal(spec));
+    let seal_decisions = reduce(&snapshot, &seal, &configs, &SpendWindow::default());
+    snapshot = snapshot.apply(&seal, &seal_decisions, &configs);
+    let seal_event = to_vec(&seal).unwrap();
+    let seal_decided = to_vec(&seal_decisions).unwrap();
+
+    let completed = event(
+        "construct",
+        Fact::AttemptCompleted {
+            bloom,
+            workpiece: workpiece(MEMBER),
+            stage: StageId::Construct,
+            passed: true,
+            evidence: Evidence { subject: digest(TREE), kind: EvidenceKind::VerificationResult, detail: digest(90) },
+            candidate: Some(CandidateRef { tree: digest(TREE), checkout: digest(TREE + 1) }),
+        },
+    );
+    let completed_decisions = reduce(&snapshot, &completed, &configs, &SpendWindow::default());
+    let completed_event = to_vec(&completed).unwrap();
+    let completed_decided = to_vec(&completed_decisions).unwrap();
+
     let mut store = memory();
+    store.append_event(&write("seal", &seal_event, &seal_decided)).unwrap();
+    store.append_event(&write("construct", &completed_event, &completed_decided)).unwrap();
+
     store.fold_metrics_from_journal().unwrap();
     let first = store.metric_dispatch_payloads().unwrap();
+    // Tripwire: an empty journal used to make the identity check pass without
+    // ever persisting a dispatch row.
+    assert!(!first.is_empty(), "a sealed construct history folds at least one dispatch");
+    let rows: Vec<MetricDispatch> =
+        first.iter().map(|payload| from_bytes(payload).expect("payload is MetricDispatch")).collect();
+    assert!(
+        rows.iter().any(|row| row.bloom == bloom && row.workpiece == MEMBER && row.stage == StageId::Construct),
+        "the construct dispatch survives the host persist: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.bloom == bloom && row.workpiece == MEMBER && row.stage == StageId::Verify),
+        "completing construct records the verify dispatch: {rows:?}"
+    );
+
+    let through = store.replay_journal().unwrap().last().map(|row| row.sequence).expect("the journal recorded history");
+    assert!(through > 0, "recorded history advances the journal sequence");
+    let cursor = store.metrics_cursor().unwrap();
+    assert_eq!(cursor, through, "the cursor stops at the last journaled sequence");
+
     store.clear_metrics().unwrap();
+    assert!(store.metric_dispatch_payloads().unwrap().is_empty(), "clear drops the dispatch cache");
     assert_eq!(store.metrics_cursor().unwrap(), 0, "clear drops the cursor");
+
     store.fold_metrics_from_journal().unwrap();
     assert_eq!(store.metric_dispatch_payloads().unwrap(), first);
+    assert_eq!(store.metrics_cursor().unwrap(), cursor);
 }
 
 fn fold_journal(store: &mut SqliteStore) -> aether_bloomery::Snapshot {

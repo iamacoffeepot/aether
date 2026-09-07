@@ -1,4 +1,5 @@
-//! The thin GitHub REST client the projection drives (#3459 step 2).
+//! The thin GitHub REST client the projection drives (#3459 step 2), plus
+//! GraphQL `updateRefs` for expected-value ref mutation.
 //!
 //! The adapter owns this client directly — it is host-side native code, not a
 //! wasm guest, so it does not route through the guest-facing `aether.http`
@@ -31,7 +32,7 @@
 //!
 //! [#3460]: https://github.com/iamacoffeepot/aether/issues/3460
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -203,6 +204,13 @@ enum Refusal {
     /// same request with the same credential fails the same way in an hour, so
     /// the refusal is surfaced now rather than slept on.
     Credential,
+    /// A GraphQL secondary (abuse-detection) limit. Same evidence as
+    /// [`Self::SecondaryLimit`] — `Retry-After` or wording — but GitHub's GraphQL
+    /// docs floor an unstated wait at 60 seconds, which REST does not.
+    GraphqlSecondary {
+        /// `Retry-After` in seconds, when the response stated one as delta-seconds.
+        retry_after_secs: Option<u64>,
+    },
 }
 
 /// `Retry-After` in seconds, when the response stated one as delta-seconds.
@@ -214,6 +222,16 @@ fn retry_after_of(response: &HttpResponse) -> Option<u64> {
     response.header("retry-after").and_then(|value| value.trim().parse().ok())
 }
 
+/// Whether a GraphQL envelope carries a nonempty `errors` array. Used only at
+/// the GraphQL dispatch boundary — ordinary REST classification never parses
+/// a body as JSON just to look for this.
+fn nonempty_graphql_errors(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    value.get("errors").and_then(serde_json::Value::as_array).is_some_and(|entries| !entries.is_empty())
+}
+
 /// Read the refusal off one response, or `None` when the response is not one.
 ///
 /// Ordered by how load-bearing the evidence is. A stated `Retry-After` is
@@ -223,10 +241,15 @@ fn retry_after_of(response: &HttpResponse) -> Option<u64> {
 /// secondary limit and the primary one differently, and both differently from
 /// a permission refusal. What is left is a `403` that claims no limit at all,
 /// which is about the credential.
+///
+/// REST only: statuses other than 403/429 return `None` without parsing the
+/// body. GraphQL HTTP 200 rate envelopes are classified separately at the
+/// GraphQL dispatch boundary.
 fn classify(status: u16, rate: RateLimit, body: &str) -> Option<Refusal> {
     if status != 403 && status != 429 {
         return None;
     }
+
     if rate.retry_after_secs.is_some() {
         return Some(Refusal::SecondaryLimit { retry_after_secs: rate.retry_after_secs });
     }
@@ -250,13 +273,64 @@ fn classify(status: u16, rate: RateLimit, body: &str) -> Option<Refusal> {
     Some(Refusal::Credential)
 }
 
+/// Protocol of the request that produced a response, so GraphQL HTTP 200 rate
+/// envelopes are observed only at the GraphQL URL.
+#[derive(Clone, Copy)]
+enum ObservedProtocol {
+    Rest,
+    Graphql,
+}
+
+/// GraphQL rate classification. HTTP 200 participates only when the envelope
+/// has a nonempty `errors` array, so a successful last-allowance mutation is
+/// not a refusal. 403/429 use the same evidence order as REST but emit
+/// [`Refusal::GraphqlSecondary`] so an unstated wait floors at 60 seconds.
+fn classify_graphql(status: u16, rate: RateLimit, body: &str) -> Option<Refusal> {
+    if status == 200 && !nonempty_graphql_errors(body) {
+        return None;
+    }
+    if status != 200 && status != 403 && status != 429 {
+        return None;
+    }
+
+    if rate.retry_after_secs.is_some() {
+        return Some(Refusal::GraphqlSecondary { retry_after_secs: rate.retry_after_secs });
+    }
+    if rate.is_exhausted() {
+        return Some(Refusal::PrimaryLimit { reset_unix_secs: rate.reset_unix_secs });
+    }
+
+    let said = body.to_ascii_lowercase();
+    if said.contains("secondary rate limit") || said.contains("abuse detection") {
+        return Some(Refusal::GraphqlSecondary { retry_after_secs: None });
+    }
+    if said.contains("rate limit exceeded") {
+        return Some(Refusal::PrimaryLimit { reset_unix_secs: rate.reset_unix_secs });
+    }
+
+    if status == 200 {
+        return None;
+    }
+    if status == 429 {
+        return Some(Refusal::GraphqlSecondary { retry_after_secs: None });
+    }
+    Some(Refusal::Credential)
+}
+
+fn classify_observed(status: u16, rate: RateLimit, body: &str, protocol: ObservedProtocol) -> Option<Refusal> {
+    match protocol {
+        ObservedProtocol::Rest => classify(status, rate, body),
+        ObservedProtocol::Graphql => classify_graphql(status, rate, body),
+    }
+}
+
 /// The status a caller sees for this response. An allowance refusal — a real
 /// primary 429, a real secondary-limit 403, or a body that names the rate —
 /// is always 429, GitHub's own newer surface. A 403 that reaches a caller is
 /// therefore a permission or object refusal, never a spent window.
 fn reported_status(response: &HttpResponse) -> u16 {
     match classify(response.status, RateLimit::of(response), &response.body) {
-        Some(Refusal::PrimaryLimit { .. } | Refusal::SecondaryLimit { .. }) => 429,
+        Some(Refusal::PrimaryLimit { .. } | Refusal::SecondaryLimit { .. } | Refusal::GraphqlSecondary { .. }) => 429,
         _ => response.status,
     }
 }
@@ -267,6 +341,9 @@ fn status_error(response: HttpResponse) -> GithubError {
 
 /// The first backoff window for a refusal that named no reset instant.
 const BACKOFF_BASE: Duration = Duration::from_secs(30);
+
+/// Official GraphQL secondary-limit minimum when GitHub states no `Retry-After`.
+const GRAPHQL_SECONDARY_MIN: Duration = Duration::from_mins(1);
 
 /// The ceiling on any withholding window. GitHub's primary window is an hour,
 /// so an hour and a minute covers the longest honest reset plus clock skew, and
@@ -295,7 +372,11 @@ fn withhold_for(refusal: Refusal, now_unix_secs: u64, consecutive_refusals: u32)
         }
         // Floored at a second: a `Retry-After: 0` would put the client straight
         // back into the rate that earned the refusal.
-        Refusal::SecondaryLimit { retry_after_secs: Some(secs) } => Duration::from_secs(secs.max(1)),
+        Refusal::SecondaryLimit { retry_after_secs: Some(secs) }
+        | Refusal::GraphqlSecondary { retry_after_secs: Some(secs) } => Duration::from_secs(secs.max(1)),
+        Refusal::GraphqlSecondary { retry_after_secs: None } => {
+            BACKOFF_BASE.saturating_mul(1_u32 << consecutive_refusals.min(7)).max(GRAPHQL_SECONDARY_MIN)
+        }
         Refusal::PrimaryLimit { .. } | Refusal::SecondaryLimit { .. } => {
             BACKOFF_BASE.saturating_mul(1_u32 << consecutive_refusals.min(7))
         }
@@ -484,6 +565,11 @@ const PER_PAGE: u32 = 100;
 impl<T: HttpTransport> ReqwestGithub<T> {
     /// Build a client over `transport` bearing tokens from `token_source`,
     /// rooted at `api_base` (no trailing slash) for `owner/repo`.
+    ///
+    /// GraphQL `updateRefs` (compare-and-swap and ref transactions) derives its
+    /// URL from `api_base`: a trailing slash is trimmed, an `/api/v3` suffix
+    /// becomes `/api/graphql`, and every other root appends `/graphql`. There
+    /// is no public-endpoint fallback.
     pub fn with_transport(
         transport: T,
         token_source: Arc<dyn TokenSource>,
@@ -512,8 +598,13 @@ impl<T: HttpTransport> ReqwestGithub<T> {
 
         let token = self.token_source.token()?;
         let headers = vec![("Authorization".to_owned(), format!("Bearer {token}"))];
+        let protocol = if url == self.graphql_url() {
+            ObservedProtocol::Graphql
+        } else {
+            ObservedProtocol::Rest
+        };
         let response = self.transport.execute(HttpRequest { method, url, headers, body })?;
-        self.observe(&response);
+        self.observe(&response, protocol);
         Ok(response)
     }
 
@@ -555,9 +646,9 @@ impl<T: HttpTransport> ReqwestGithub<T> {
     /// and reports the stall to the caller as a rate limit — so the operator
     /// reads "API rate limit exceeded" while the actual answer is that the
     /// token needs replacing.
-    fn observe(&self, response: &HttpResponse) {
+    fn observe(&self, response: &HttpResponse, protocol: ObservedProtocol) {
         let rate = RateLimit::of(response);
-        let Some(refusal) = classify(response.status, rate, &response.body) else {
+        let Some(refusal) = classify_observed(response.status, rate, &response.body, protocol) else {
             let mut budget = self.lock();
             budget.consecutive_refusals = 0;
             budget.withhold_until = None;
@@ -637,6 +728,51 @@ impl<T: HttpTransport> ReqwestGithub<T> {
 
     fn git_url(&self, suffix: &str) -> String {
         format!("{}/repos/{}/git/{suffix}", self.api_base, self.repo_path)
+    }
+
+    fn graphql_url(&self) -> String {
+        let base = self.api_base.trim_end_matches('/');
+        base.strip_suffix("/api/v3").map_or_else(|| format!("{base}/graphql"), |root| format!("{root}/api/graphql"))
+    }
+
+    fn repository_node_id(&self) -> Result<String, GitDataError> {
+        let node_id = decode::<GhRepository>(
+            &self
+                .request(Method::Get, format!("{}/repos/{}", self.api_base, self.repo_path), None)
+                .map_err(repository_lookup_error)?,
+        )
+        .map_err(|error| command_error(&error))?
+        .node_id;
+        if node_id.trim().is_empty() {
+            return Err(GitDataError::Command("repository node_id was empty".to_owned()));
+        }
+        Ok(node_id)
+    }
+
+    fn atomic_ref_updates(&self, ops: &[RefTxnOp]) -> Result<(), GitDataError> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        validate_ref_txn_ops(ops)?;
+        let repository_id = self.repository_node_id()?;
+        let payload = serde_json::json!({
+            "query": UPDATE_REFS_MUTATION,
+            "variables": {
+                "input": {
+                    "clientMutationId": UPDATE_REFS_MUTATION_ID,
+                    "repositoryId": repository_id,
+                    "refUpdates": ops.iter().map(graphql_ref_update).collect::<Vec<_>>(),
+                }
+            }
+        })
+        .to_string();
+        let response =
+            self.dispatch(Method::Post, self.graphql_url(), Some(payload)).map_err(|error| command_error(&error))?;
+        if (200..300).contains(&response.status) {
+            accept_update_refs(&response.body)
+        } else {
+            Err(GitDataError::Command(status_error(response).to_string()))
+        }
     }
 
     fn actions_url(&self, suffix: &str) -> String {
@@ -751,6 +887,11 @@ struct GhIssue {
     /// when finding a commission marker so a PR cannot be adopted as a replica.
     #[serde(default)]
     pull_request: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct GhRepository {
+    node_id: String,
 }
 
 #[derive(Deserialize)]
@@ -1034,6 +1175,160 @@ fn git_data_error(error: GithubError) -> GitDataError {
     }
 }
 
+/// Internal GraphQL create/delete sentinel. Never accepted as a caller-supplied
+/// SHA — a zero, short, or non-hex OID is `Command` before any HTTP.
+const ZERO_OID: &str = "0000000000000000000000000000000000000000";
+
+/// Fixed `clientMutationId` echoed through `updateRefs`. Schema/ack validation
+/// against the mutation we sent, not an idempotency key and not a nonce.
+const UPDATE_REFS_MUTATION_ID: &str = "aether-bloomery-update-refs";
+
+const UPDATE_REFS_MUTATION: &str =
+    "mutation($input: UpdateRefsInput!) { updateRefs(input: $input) { clientMutationId } }";
+
+fn command_error(error: &GithubError) -> GitDataError {
+    GitDataError::Command(error.to_string())
+}
+
+fn repository_lookup_error(error: GithubError) -> GitDataError {
+    match error {
+        GithubError::Status { status: 404, body } => GitDataError::MissingObject(body),
+        other => GitDataError::Command(other.to_string()),
+    }
+}
+
+fn ref_txn_name(op: &RefTxnOp) -> &str {
+    match op {
+        RefTxnOp::Create { name, .. } | RefTxnOp::Update { name, .. } | RefTxnOp::Delete { name, .. } => name,
+    }
+}
+
+fn is_legal_git_ref_name(name: &str) -> bool {
+    if name.is_empty() || name == "@" {
+        return false;
+    }
+    if name.starts_with('/') || name.ends_with('/') || name.ends_with('.') {
+        return false;
+    }
+    if name.contains("//") || name.contains("..") || name.contains("@{") {
+        return false;
+    }
+    if name
+        .bytes()
+        .any(|byte| byte <= 0x20 || byte == 0x7f || matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\'))
+    {
+        return false;
+    }
+    name.split('/').all(|component| {
+        !component.is_empty()
+            && !component.starts_with('.')
+            && component.rsplit_once('.').is_none_or(|(_, suffix)| suffix != "lock")
+    })
+}
+
+fn reject_ref_name(name: &str) -> Result<(), GitDataError> {
+    if is_legal_git_ref_name(name) {
+        Ok(())
+    } else {
+        Err(GitDataError::Command(format!("bad name {name}")))
+    }
+}
+
+fn is_nonzero_github_oid(sha: &str) -> bool {
+    sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()) && sha.bytes().any(|byte| byte != b'0')
+}
+
+fn reject_github_oid(sha: &str, what: &str) -> Result<(), GitDataError> {
+    if is_nonzero_github_oid(sha) {
+        Ok(())
+    } else {
+        Err(GitDataError::Command(format!("{what} must be a nonzero 40-hex GitHub OID, got {sha:?}")))
+    }
+}
+
+fn validate_ref_txn_ops(ops: &[RefTxnOp]) -> Result<(), GitDataError> {
+    let mut seen = BTreeSet::new();
+    for op in ops {
+        let name = ref_txn_name(op);
+        if !seen.insert(name) {
+            return Err(GitDataError::Command(format!("multiple updates for {name}")));
+        }
+        reject_ref_name(name)?;
+        match op {
+            RefTxnOp::Create { sha, .. } => reject_github_oid(sha, "new object")?,
+            RefTxnOp::Update { sha, expected, .. } => {
+                reject_github_oid(sha, "new object")?;
+                reject_github_oid(expected, "expected object")?;
+            }
+            RefTxnOp::Delete { expected, .. } => reject_github_oid(expected, "expected object")?,
+        }
+    }
+    Ok(())
+}
+
+fn graphql_ref_update(op: &RefTxnOp) -> serde_json::Value {
+    match op {
+        RefTxnOp::Create { name, sha } => serde_json::json!({
+            "name": format!("refs/{name}"),
+            "afterOid": sha,
+            "beforeOid": ZERO_OID,
+            "force": false,
+        }),
+        RefTxnOp::Update { name, sha, expected } => serde_json::json!({
+            "name": format!("refs/{name}"),
+            "afterOid": sha,
+            "beforeOid": expected,
+            "force": true,
+        }),
+        RefTxnOp::Delete { name, expected } => serde_json::json!({
+            "name": format!("refs/{name}"),
+            "afterOid": ZERO_OID,
+            "beforeOid": expected,
+            "force": false,
+        }),
+    }
+}
+
+fn accept_update_refs(body: &str) -> Result<(), GitDataError> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| GitDataError::Command(format!("malformed GraphQL envelope: {error}; body: {body}")))?;
+
+    match value.get("errors") {
+        None => {}
+        Some(serde_json::Value::Array(errors)) if errors.is_empty() => {}
+        Some(serde_json::Value::Array(_)) => {
+            return Err(GitDataError::Command(format!("GraphQL updateRefs errors: {body}")));
+        }
+        Some(other) => {
+            return Err(GitDataError::Command(format!("malformed GraphQL errors: {other}; body: {body}")));
+        }
+    }
+
+    let Some(data) = value.get("data") else {
+        return Err(GitDataError::Command(format!("malformed GraphQL envelope: missing data; body: {body}")));
+    };
+    if data.is_null() {
+        return Err(GitDataError::Command(format!(
+            "malformed GraphQL envelope: data is null; execution may have failed after mutation; body: {body}"
+        )));
+    }
+    let Some(update_refs) = data.get("updateRefs") else {
+        return Err(GitDataError::Command(format!("malformed GraphQL envelope: missing updateRefs; body: {body}")));
+    };
+    if update_refs.is_null() {
+        return Err(GitDataError::Command(format!("malformed GraphQL envelope: updateRefs is null; body: {body}")));
+    }
+    match update_refs.get("clientMutationId").and_then(serde_json::Value::as_str) {
+        Some(id) if id == UPDATE_REFS_MUTATION_ID => Ok(()),
+        Some(id) => {
+            Err(GitDataError::Command(format!("GraphQL updateRefs clientMutationId mismatch: {id}; body: {body}")))
+        }
+        None => {
+            Err(GitDataError::Command(format!("malformed GraphQL envelope: missing clientMutationId; body: {body}")))
+        }
+    }
+}
+
 impl<T: HttpTransport> GithubApi for ReqwestGithub<T> {
     fn issue_title(&self, number: u64) -> Result<Option<String>, GithubError> {
         let Some(response) = self.request_opt(Method::Get, format!("{}/{number}", self.issues_url()))? else {
@@ -1264,37 +1559,16 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
     }
 
     fn compare_and_swap_ref(&self, name: &str, sha: &str, expected: &str) -> Result<GitRef, GitDataError> {
-        match self.get_ref(name)? {
-            Some(current) if current.sha == expected => self.update_ref(name, sha, true),
-            Some(current) => {
-                Err(GitDataError::RefConflict(format!("ref {name} is at {}, expected {expected}", current.sha)))
-            }
-            None => Err(GitDataError::MissingObject(format!("no ref {name}"))),
-        }
+        self.atomic_ref_updates(&[RefTxnOp::Update {
+            name: name.to_owned(),
+            sha: sha.to_owned(),
+            expected: expected.to_owned(),
+        }])?;
+        Ok(GitRef { name: name.to_owned(), sha: sha.to_owned() })
     }
 
     fn transact_refs(&self, ops: &[RefTxnOp]) -> Result<(), GitDataError> {
-        let mut created: Vec<String> = Vec::new();
-        for op in ops {
-            let result = match op {
-                RefTxnOp::Create { name, sha } => self.create_ref(name, sha).map(|_| created.push(name.clone())),
-                RefTxnOp::Update { name, sha, expected } => self.compare_and_swap_ref(name, sha, expected).map(|_| ()),
-                RefTxnOp::Delete { name, expected } => match self.get_ref(name)? {
-                    None => Ok(()),
-                    Some(current) if current.sha == *expected => self.delete_ref(name),
-                    Some(current) => {
-                        Err(GitDataError::RefConflict(format!("ref {name} is at {}, expected {expected}", current.sha)))
-                    }
-                },
-            };
-            if let Err(error) = result {
-                for name in created.iter().rev() {
-                    let _ = self.delete_ref(name);
-                }
-                return Err(error);
-            }
-        }
-        Ok(())
+        self.atomic_ref_updates(ops)
     }
 }
 
@@ -1426,13 +1700,17 @@ impl<T: HttpTransport> ActionsApi for ReqwestGithub<T> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::cell::RefCell;
-
-    use std::sync::{Arc, Mutex};
+    use std::collections::BTreeMap;
+    use std::fmt::Debug;
+    use std::sync::{Arc, Condvar, Mutex, PoisonError};
+    use std::thread;
+    use std::time::Duration;
 
     use super::{
-        BACKOFF_BASE, CommissionProjectionApi, GitDataApi, GitDataError, GithubApi, GithubError, HttpRequest,
-        HttpResponse, HttpTransport, IssueStateApi, MAX_WITHHOLD, MergeResult, Method, NewComment, NewIssue,
-        NewPullRequest, PullRequestApi, RateLimit, Refusal, ReqwestGithub, StaticTokenSource, TokenSource, classify,
+        BACKOFF_BASE, CommissionProjectionApi, GRAPHQL_SECONDARY_MIN, GitDataApi, GitDataError, GithubApi, GithubError,
+        HttpRequest, HttpResponse, HttpTransport, IssueStateApi, MAX_WITHHOLD, MergeResult, Method, NewComment,
+        NewIssue, NewPullRequest, PullRequestApi, RateLimit, RefTxnOp, Refusal, ReqwestGithub, StaticTokenSource,
+        TokenSource, UPDATE_REFS_MUTATION, UPDATE_REFS_MUTATION_ID, ZERO_OID, classify, classify_graphql,
         retry_after_of, withhold_for,
     };
 
@@ -1461,17 +1739,19 @@ mod tests {
     // body cannot answer both, so this walks a queue.
     struct QueuedTransport {
         last: RefCell<Option<HttpRequest>>,
+        all: RefCell<Vec<HttpRequest>>,
         responses: RefCell<Vec<HttpResponse>>,
     }
 
     impl QueuedTransport {
         fn new(responses: Vec<HttpResponse>) -> Self {
-            Self { last: RefCell::new(None), responses: RefCell::new(responses) }
+            Self { last: RefCell::new(None), all: RefCell::new(Vec::new()), responses: RefCell::new(responses) }
         }
     }
 
     impl HttpTransport for QueuedTransport {
         fn execute(&self, request: HttpRequest) -> Result<HttpResponse, GithubError> {
+            self.all.borrow_mut().push(request.clone());
             *self.last.borrow_mut() = Some(request);
             let mut responses = self.responses.borrow_mut();
             if responses.is_empty() {
@@ -1885,7 +2165,6 @@ mod tests {
     }
 
     use super::{ActionsApi, RunConclusion, RunStatus};
-    use std::collections::BTreeMap;
 
     #[test]
     fn dispatch_workflow_posts_ref_and_inputs_and_tolerates_204() {
@@ -2448,5 +2727,737 @@ mod tests {
                 "a permission 403 stays a 403: {refusal}",
             );
         }
+    }
+
+    const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const SHA_C: &str = "cccccccccccccccccccccccccccccccccccccccc";
+
+    fn repo_ok() -> HttpResponse {
+        HttpResponse::new(200, r#"{"node_id":"R_kgDOshadow"}"#.to_owned())
+    }
+
+    fn update_refs_ack() -> HttpResponse {
+        HttpResponse::new(
+            200,
+            format!(r#"{{"data":{{"updateRefs":{{"clientMutationId":"{UPDATE_REFS_MUTATION_ID}"}}}}}}"#),
+        )
+    }
+
+    fn queued_on(api_base: &str, responses: Vec<HttpResponse>) -> ReqwestGithub<QueuedTransport> {
+        ReqwestGithub::with_transport(
+            QueuedTransport::new(responses),
+            Arc::new(StaticTokenSource::new("t0ken".to_owned())),
+            api_base,
+            "octo/shadow",
+        )
+    }
+
+    fn queued(responses: Vec<HttpResponse>) -> ReqwestGithub<QueuedTransport> {
+        queued_on("https://api.github.com", responses)
+    }
+
+    fn assert_command<T: Debug>(result: Result<T, GitDataError>) {
+        match result {
+            Err(GitDataError::Command(_)) => {}
+            other => panic!("expected Command, got {other:?}"),
+        }
+    }
+
+    fn assert_no_rest_ref_writes(requests: &[HttpRequest]) {
+        for request in requests {
+            assert_ne!(request.method, Method::Patch, "GraphQL CAS must not PATCH: {request:?}");
+            assert_ne!(request.method, Method::Delete, "GraphQL CAS must not DELETE: {request:?}");
+            assert!(
+                !request.url.contains("/git/refs"),
+                "GraphQL CAS must not hit the REST git-refs route: {request:?}"
+            );
+        }
+    }
+
+    struct SequencingTokenSource {
+        n: Mutex<u32>,
+    }
+
+    impl TokenSource for SequencingTokenSource {
+        fn token(&self) -> Result<String, GithubError> {
+            let mut n = self.n.lock().expect("token lock");
+            *n += 1;
+            let value = *n;
+            drop(n);
+            Ok(format!("tok-{value}"))
+        }
+    }
+
+    /// Bounded rendezvous at the mutation POST, before the fake's ref-state
+    /// lock. Times out as a transport error rather than hanging on a barrier.
+    struct MutationGate {
+        arrived: Mutex<u32>,
+        cond: Condvar,
+    }
+
+    impl MutationGate {
+        fn pair() -> Arc<Self> {
+            Arc::new(Self { arrived: Mutex::new(0), cond: Condvar::new() })
+        }
+
+        fn meet(&self) -> Result<(), GithubError> {
+            let mut arrived = self.arrived.lock().unwrap_or_else(PoisonError::into_inner);
+            *arrived = arrived.saturating_add(1);
+            let paired = *arrived >= 2;
+            drop(arrived);
+            if paired {
+                self.cond.notify_all();
+                return Ok(());
+            }
+            let (guard, timed_out) = self
+                .cond
+                .wait_timeout_while(
+                    self.arrived.lock().unwrap_or_else(PoisonError::into_inner),
+                    Duration::from_secs(5),
+                    |count| *count < 2,
+                )
+                .unwrap_or_else(PoisonError::into_inner);
+            let timed_out = timed_out.timed_out() && *guard < 2;
+            drop(guard);
+            if timed_out {
+                return Err(GithubError::Transport(
+                    "mutation gate timed out waiting for the overlapping client".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    struct AtomicGraphqlTransport {
+        refs: Arc<Mutex<BTreeMap<String, String>>>,
+        node_id: String,
+        requests: Mutex<Vec<HttpRequest>>,
+        gate: Option<Arc<MutationGate>>,
+        fail_after_apply: bool,
+    }
+
+    impl AtomicGraphqlTransport {
+        fn new(refs: Arc<Mutex<BTreeMap<String, String>>>) -> Self {
+            Self {
+                refs,
+                node_id: "R_kgDOshadow".to_owned(),
+                requests: Mutex::new(Vec::new()),
+                gate: None,
+                fail_after_apply: false,
+            }
+        }
+    }
+
+    impl HttpTransport for AtomicGraphqlTransport {
+        fn execute(&self, request: HttpRequest) -> Result<HttpResponse, GithubError> {
+            self.requests.lock().unwrap_or_else(PoisonError::into_inner).push(request.clone());
+            // Test model of request shape and an in-process beforeOid lock. It
+            // does not prove GitHub's remote atomicity.
+            match request.method {
+                Method::Get if request.url == "https://api.github.com/repos/octo/shadow" => {
+                    return Ok(HttpResponse::new(200, format!(r#"{{"node_id":"{}"}}"#, self.node_id)));
+                }
+                Method::Post if request.url == "https://api.github.com/graphql" => {}
+                _ => {
+                    return Err(GithubError::Transport(format!(
+                        "atomic fake rejected unexpected {} {}",
+                        match request.method {
+                            Method::Get => "GET",
+                            Method::Post => "POST",
+                            Method::Put => "PUT",
+                            Method::Patch => "PATCH",
+                            Method::Delete => "DELETE",
+                        },
+                        request.url
+                    )));
+                }
+            }
+            if let Some(gate) = &self.gate {
+                gate.meet()?;
+            }
+            let payload: serde_json::Value = serde_json::from_str(request.body.as_deref().unwrap_or(""))
+                .map_err(|error| GithubError::Transport(format!("malformed GraphQL payload: {error}")))?;
+            let input = &payload["variables"]["input"];
+            if payload["query"].as_str() != Some(UPDATE_REFS_MUTATION)
+                || input["repositoryId"].as_str() != Some(self.node_id.as_str())
+                || input["clientMutationId"].as_str() != Some(UPDATE_REFS_MUTATION_ID)
+            {
+                return Err(GithubError::Transport("atomic fake rejected malformed updateRefs envelope".to_owned()));
+            }
+            let Some(updates) = input["refUpdates"].as_array() else {
+                return Err(GithubError::Transport("atomic fake rejected missing refUpdates".to_owned()));
+            };
+            if updates.is_empty()
+                || updates.iter().any(|update| {
+                    !update["name"].is_string() || !update["beforeOid"].is_string() || !update["afterOid"].is_string()
+                })
+            {
+                return Err(GithubError::Transport("atomic fake rejected empty or unshaped refUpdates".to_owned()));
+            }
+            let mutation_id = UPDATE_REFS_MUTATION_ID;
+            let mut refs = self.refs.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut next = refs.clone();
+            for update in updates {
+                let name = update["name"].as_str().unwrap_or("");
+                let before = update["beforeOid"].as_str().unwrap_or("");
+                let after = update["afterOid"].as_str().unwrap_or("");
+                let current = next.get(name).cloned();
+                let applied = match (before == ZERO_OID, after == ZERO_OID, current.as_deref()) {
+                    (true, false, None) => {
+                        next.insert(name.to_owned(), after.to_owned());
+                        true
+                    }
+                    (false, true, Some(current)) if current == before => {
+                        next.remove(name);
+                        true
+                    }
+                    (false, false, Some(current)) if current == before => {
+                        next.insert(name.to_owned(), after.to_owned());
+                        true
+                    }
+                    _ => false,
+                };
+                if !applied {
+                    return Ok(HttpResponse::new(200, r#"{"errors":[{"message":"updateRefs rejected"}]}"#.to_owned()));
+                }
+            }
+            *refs = next;
+            drop(refs);
+            if self.fail_after_apply {
+                return Err(GithubError::Transport("applied then failed".to_owned()));
+            }
+            Ok(HttpResponse::new(
+                200,
+                serde_json::json!({ "data": { "updateRefs": { "clientMutationId": mutation_id } } }).to_string(),
+            ))
+        }
+    }
+
+    fn atomic_client(refs: Arc<Mutex<BTreeMap<String, String>>>) -> ReqwestGithub<AtomicGraphqlTransport> {
+        atomic_client_on(refs, None, false)
+    }
+
+    fn atomic_client_on(
+        refs: Arc<Mutex<BTreeMap<String, String>>>,
+        gate: Option<Arc<MutationGate>>,
+        fail_after_apply: bool,
+    ) -> ReqwestGithub<AtomicGraphqlTransport> {
+        let mut transport = AtomicGraphqlTransport::new(refs);
+        transport.gate = gate;
+        transport.fail_after_apply = fail_after_apply;
+        ReqwestGithub::with_transport(
+            transport,
+            Arc::new(StaticTokenSource::new("t0ken".to_owned())),
+            "https://api.github.com",
+            "octo/shadow",
+        )
+    }
+
+    #[test]
+    fn compare_and_swap_posts_one_update_refs_mutation() {
+        let github = queued(vec![repo_ok(), update_refs_ack()]);
+        let git_ref = github.compare_and_swap_ref("heads/main", SHA_B, SHA_A).expect("acked CAS");
+        assert_eq!(git_ref.name, "heads/main");
+        assert_eq!(git_ref.sha, SHA_B, "success returns the requested SHA, not a post-read");
+
+        let requests = github.transport.all.borrow().clone();
+        assert_eq!(requests.len(), 2, "repository lookup then one mutation");
+        assert_eq!(requests[0].method, Method::Get);
+        assert_eq!(requests[0].url, "https://api.github.com/repos/octo/shadow");
+        assert_eq!(requests[1].method, Method::Post);
+        assert_eq!(requests[1].url, "https://api.github.com/graphql");
+        assert_no_rest_ref_writes(&requests);
+
+        let sent: serde_json::Value = serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
+        assert_eq!(sent["query"], UPDATE_REFS_MUTATION);
+        let input = &sent["variables"]["input"];
+        assert_eq!(input["clientMutationId"], UPDATE_REFS_MUTATION_ID);
+        assert_eq!(input["repositoryId"], "R_kgDOshadow");
+        assert_eq!(input["refUpdates"][0]["name"], "refs/heads/main");
+        assert_eq!(input["refUpdates"][0]["beforeOid"], SHA_A);
+        assert_eq!(input["refUpdates"][0]["afterOid"], SHA_B);
+        assert_eq!(input["refUpdates"][0]["force"], true);
+        assert_ne!(input["refUpdates"][0]["beforeOid"], ZERO_OID);
+        assert_ne!(input["refUpdates"][0]["afterOid"], ZERO_OID);
+    }
+
+    #[test]
+    fn transact_refs_maps_create_update_delete_sentinels_in_one_mutation() {
+        let github = queued(vec![repo_ok(), update_refs_ack()]);
+        github
+            .transact_refs(&[
+                RefTxnOp::Create { name: "heads/fresh".into(), sha: SHA_A.into() },
+                RefTxnOp::Update { name: "heads/main".into(), sha: SHA_B.into(), expected: SHA_A.into() },
+                RefTxnOp::Delete { name: "heads/old".into(), expected: SHA_C.into() },
+            ])
+            .expect("acked batch");
+
+        let requests = github.transport.all.borrow().clone();
+        assert_eq!(requests.len(), 2);
+        assert_no_rest_ref_writes(&requests);
+        let sent: serde_json::Value = serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
+        let updates = &sent["variables"]["input"]["refUpdates"];
+        assert_eq!(updates[0]["name"], "refs/heads/fresh");
+        assert_eq!(updates[0]["beforeOid"], ZERO_OID);
+        assert_eq!(updates[0]["afterOid"], SHA_A);
+        assert_eq!(updates[0]["force"], false, "Create sets force false");
+        assert_eq!(updates[1]["name"], "refs/heads/main");
+        assert_eq!(updates[1]["beforeOid"], SHA_A);
+        assert_eq!(updates[1]["afterOid"], SHA_B);
+        assert_eq!(updates[1]["force"], true);
+        assert_eq!(updates[2]["name"], "refs/heads/old");
+        assert_eq!(updates[2]["beforeOid"], SHA_C);
+        assert_eq!(updates[2]["afterOid"], ZERO_OID);
+        assert_eq!(updates[2]["force"], false, "Delete sets force false");
+    }
+
+    #[test]
+    fn empty_and_duplicate_and_invalid_inputs_issue_no_http() {
+        let github = client(500, "no");
+        github.transact_refs(&[]).expect("empty batch is Ok");
+        assert!(github.transport.last.borrow().is_none(), "empty batch issues no HTTP");
+
+        assert_command(github.transact_refs(&[
+            RefTxnOp::Create { name: "heads/a".into(), sha: SHA_A.into() },
+            RefTxnOp::Update { name: "heads/a".into(), sha: SHA_B.into(), expected: SHA_A.into() },
+        ]));
+        assert!(github.transport.last.borrow().is_none(), "duplicate names issue no HTTP");
+
+        for name in [
+            "",
+            "@",
+            "heads/bad name",
+            "heads/foo.lock",
+            "heads/.hidden",
+            "heads/foo/../bar",
+            "heads/foo/",
+            "heads//foo",
+            "heads/foo.",
+            "heads/foo@{up}",
+            "heads/foo~1",
+            "heads/foo^2",
+            "heads/foo:bar",
+            "heads/foo?",
+            "heads/foo*",
+            "heads/foo[a]",
+            "heads/foo\\bar",
+        ] {
+            assert_command(github.compare_and_swap_ref(name, SHA_B, SHA_A));
+            assert!(github.transport.last.borrow().is_none(), "illegal name {name:?} issues no HTTP");
+        }
+
+        for sha in [
+            "",
+            ZERO_OID,
+            "abc",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        ] {
+            assert_command(github.compare_and_swap_ref("heads/main", sha, SHA_A));
+            assert_command(github.compare_and_swap_ref("heads/main", SHA_B, sha));
+            assert_command(github.transact_refs(&[RefTxnOp::Create { name: "heads/fresh".into(), sha: sha.into() }]));
+            assert_command(
+                github.transact_refs(&[RefTxnOp::Delete { name: "heads/old".into(), expected: sha.into() }]),
+            );
+            assert!(github.transport.last.borrow().is_none(), "invalid OID {sha:?} issues no HTTP");
+        }
+    }
+
+    #[test]
+    fn git_ref_lock_suffix_is_case_sensitive() {
+        let github = client(500, "no");
+        assert_command(github.compare_and_swap_ref("heads/example.lock", SHA_B, SHA_A));
+        assert!(github.transport.last.borrow().is_none(), "lowercase .lock suffix is illegal, so no HTTP");
+
+        let github = client(500, "no");
+        assert_command(github.compare_and_swap_ref("heads/example.LOCK", SHA_B, SHA_A));
+        assert!(
+            github.transport.last.borrow().is_some(),
+            "uppercase .LOCK is a legal git-ref suffix and must reach the repository lookup",
+        );
+    }
+
+    #[test]
+    fn graphql_url_follows_api_base_without_a_public_fallback() {
+        let public = queued_on("https://api.github.com", vec![repo_ok(), update_refs_ack()]);
+        public.compare_and_swap_ref("heads/main", SHA_B, SHA_A).unwrap();
+        assert_eq!(public.transport.all.borrow()[1].url, "https://api.github.com/graphql");
+
+        let enterprise = queued_on("https://ghe.example.com/api/v3", vec![repo_ok(), update_refs_ack()]);
+        enterprise.compare_and_swap_ref("heads/main", SHA_B, SHA_A).unwrap();
+        assert_eq!(enterprise.transport.all.borrow()[0].url, "https://ghe.example.com/api/v3/repos/octo/shadow");
+        assert_eq!(enterprise.transport.all.borrow()[1].url, "https://ghe.example.com/api/graphql");
+
+        let slashed = queued_on("https://ghe.example.com/api/v3/", vec![repo_ok(), update_refs_ack()]);
+        slashed.compare_and_swap_ref("heads/main", SHA_B, SHA_A).unwrap();
+        assert_eq!(slashed.transport.all.borrow()[1].url, "https://ghe.example.com/api/graphql");
+
+        let custom = queued_on("http://127.0.0.1:9", vec![repo_ok(), update_refs_ack()]);
+        custom.compare_and_swap_ref("heads/main", SHA_B, SHA_A).unwrap();
+        assert_eq!(custom.transport.all.borrow()[0].url, "http://127.0.0.1:9/repos/octo/shadow");
+        assert_eq!(custom.transport.all.borrow()[1].url, "http://127.0.0.1:9/graphql");
+    }
+
+    #[test]
+    fn token_rotates_between_repository_lookup_and_mutation() {
+        let github = ReqwestGithub::with_transport(
+            QueuedTransport::new(vec![repo_ok(), update_refs_ack()]),
+            Arc::new(SequencingTokenSource { n: Mutex::new(0) }),
+            "https://api.github.com",
+            "octo/shadow",
+        );
+        github.compare_and_swap_ref("heads/main", SHA_B, SHA_A).unwrap();
+        let requests = github.transport.all.borrow().clone();
+        assert_eq!(bearer(&requests[0]), "Bearer tok-1");
+        assert_eq!(bearer(&requests[1]), "Bearer tok-2");
+    }
+
+    #[test]
+    fn update_refs_ack_rejects_malformed_partial_and_mismatched_envelopes() {
+        for (label, body) in [
+            ("empty", ""),
+            ("not json", "nope"),
+            (
+                "errors null",
+                r#"{"errors":null,"data":{"updateRefs":{"clientMutationId":"aether-bloomery-update-refs"}}}"#,
+            ),
+            (
+                "errors string",
+                r#"{"errors":"boom","data":{"updateRefs":{"clientMutationId":"aether-bloomery-update-refs"}}}"#,
+            ),
+            ("errors nonempty", r#"{"errors":[{"message":"conflict"}]}"#),
+            (
+                "partial errors and data",
+                r#"{"errors":[{"message":"conflict"}],"data":{"updateRefs":{"clientMutationId":"aether-bloomery-update-refs"}}}"#,
+            ),
+            ("data null", r#"{"data":null}"#),
+            ("errors and data null", r#"{"errors":[{"message":"x"}],"data":null}"#),
+            ("missing data", r#"{"updateRefs":{"clientMutationId":"aether-bloomery-update-refs"}}"#),
+            ("missing updateRefs", r#"{"data":{}}"#),
+            ("null updateRefs", r#"{"data":{"updateRefs":null}}"#),
+            ("missing echo", r#"{"data":{"updateRefs":{}}}"#),
+            ("null echo", r#"{"data":{"updateRefs":{"clientMutationId":null}}}"#),
+            ("mismatched echo", r#"{"data":{"updateRefs":{"clientMutationId":"other"}}}"#),
+        ] {
+            let github = queued(vec![repo_ok(), HttpResponse::new(200, body.to_owned())]);
+            match github.compare_and_swap_ref("heads/main", SHA_B, SHA_A) {
+                Err(GitDataError::Command(_)) => {}
+                other => panic!("{label}: expected Command, got {other:?}"),
+            }
+            assert_no_rest_ref_writes(&github.transport.all.borrow());
+        }
+
+        let empty_errors = queued(vec![
+            repo_ok(),
+            HttpResponse::new(
+                200,
+                format!(
+                    r#"{{"errors":[],"data":{{"updateRefs":{{"clientMutationId":"{UPDATE_REFS_MUTATION_ID}"}}}}}}"#
+                ),
+            ),
+        ]);
+        empty_errors.compare_and_swap_ref("heads/main", SHA_B, SHA_A).expect("absent-or-empty errors array is success");
+    }
+
+    #[test]
+    fn graphql_http_failures_are_command_never_ref_conflict() {
+        for status in [401, 403, 404, 409, 422, 429, 500] {
+            let github =
+                queued(vec![repo_ok(), HttpResponse::new(status, format!(r#"{{"message":"status {status}"}}"#))]);
+            match github.compare_and_swap_ref("heads/main", SHA_B, SHA_A) {
+                Err(GitDataError::Command(detail)) => {
+                    assert!(!detail.to_ascii_lowercase().contains("authorization"), "{detail}");
+                    assert!(!detail.contains("Bearer"), "{detail}");
+                    assert!(!detail.contains("t0ken"), "{detail}");
+                    assert!(!GitDataError::Command(detail.clone()).to_string().contains("t0ken"), "{detail}");
+                }
+                other => panic!("{status}: expected Command, got {other:?}"),
+            }
+            assert_no_rest_ref_writes(&github.transport.all.borrow());
+        }
+
+        let github = queued(vec![repo_ok()]);
+        assert_command(github.compare_and_swap_ref("heads/main", SHA_B, SHA_A));
+        let requests = github.transport.all.borrow().clone();
+        assert_eq!(requests.len(), 2, "lookup then one mutation attempt; completion is unknown");
+        assert_eq!(requests[0].method, Method::Get);
+        assert_eq!(requests[1].method, Method::Post);
+        assert_eq!(requests[1].url, "https://api.github.com/graphql");
+        assert_no_rest_ref_writes(&github.transport.all.borrow());
+    }
+
+    #[test]
+    fn missing_repository_lookup_is_missing_object_and_skips_the_mutation() {
+        let github = queued(vec![HttpResponse::new(404, r#"{"message":"Not Found"}"#.to_owned())]);
+        match github.compare_and_swap_ref("heads/main", SHA_B, SHA_A) {
+            Err(GitDataError::MissingObject(_)) => {}
+            other => panic!("expected MissingObject, got {other:?}"),
+        }
+        assert_eq!(github.transport.all.borrow().len(), 1);
+        assert_no_rest_ref_writes(&github.transport.all.borrow());
+
+        let empty_id = queued(vec![HttpResponse::new(200, r#"{"node_id":""}"#.to_owned())]);
+        assert_command(empty_id.compare_and_swap_ref("heads/main", SHA_B, SHA_A));
+        assert_eq!(empty_id.transport.all.borrow().len(), 1, "empty node_id must not invent an id or mutate");
+
+        let missing_id = queued(vec![HttpResponse::new(200, "{}".to_owned())]);
+        assert_command(missing_id.compare_and_swap_ref("heads/main", SHA_B, SHA_A));
+        assert_eq!(missing_id.transport.all.borrow().len(), 1, "missing node_id must not invent an id or mutate");
+
+        let null_id = queued(vec![HttpResponse::new(200, r#"{"node_id":null}"#.to_owned())]);
+        match null_id.compare_and_swap_ref("heads/main", SHA_B, SHA_A) {
+            Err(GitDataError::Command(detail)) => {
+                assert!(!detail.contains("t0ken"), "{detail}");
+                assert!(!GitDataError::Command(detail.clone()).to_string().contains("t0ken"), "{detail}");
+            }
+            other => panic!("null node_id expected Command, got {other:?}"),
+        }
+        assert_eq!(null_id.transport.all.borrow().len(), 1);
+        assert_eq!(null_id.transport.all.borrow()[0].method, Method::Get);
+        assert!(null_id.transport.all.borrow().iter().all(|request| request.method != Method::Post));
+
+        let wrong_type = queued(vec![HttpResponse::new(200, r#"{"node_id":1}"#.to_owned())]);
+        match wrong_type.compare_and_swap_ref("heads/main", SHA_B, SHA_A) {
+            Err(GitDataError::Command(detail)) => {
+                assert!(!detail.contains("t0ken"), "{detail}");
+                assert!(!GitDataError::Command(detail.clone()).to_string().contains("t0ken"), "{detail}");
+            }
+            other => panic!("wrong-type node_id expected Command, got {other:?}"),
+        }
+        assert_eq!(wrong_type.transport.all.borrow().len(), 1);
+        assert_eq!(wrong_type.transport.all.borrow()[0].method, Method::Get);
+        assert!(wrong_type.transport.all.borrow().iter().all(|request| request.method != Method::Post));
+    }
+
+    #[test]
+    fn exhausted_graphql_envelope_withholds_the_next_request() {
+        let spent = HttpResponse {
+            status: 200,
+            body: r#"{"errors":[{"message":"API rate limit exceeded"}]}"#.to_owned(),
+            headers: vec![
+                ("x-ratelimit-remaining".to_owned(), "0".to_owned()),
+                ("x-ratelimit-reset".to_owned(), u64::from(u32::MAX).to_string()),
+            ],
+        };
+        let github = queued(vec![repo_ok(), spent, repo_ok(), update_refs_ack()]);
+        assert_command(github.compare_and_swap_ref("heads/main", SHA_B, SHA_A));
+        assert_eq!(github.transport.all.borrow().len(), 2);
+        assert_command(github.compare_and_swap_ref("heads/main", SHA_B, SHA_A));
+        assert_eq!(github.transport.all.borrow().len(), 2, "the remembered GraphQL window issues no further HTTP");
+    }
+
+    #[test]
+    fn graphql_permission_error_does_not_withhold_the_next_request() {
+        let denied =
+            HttpResponse::new(200, r#"{"errors":[{"message":"Resource not accessible by integration"}]}"#.to_owned());
+        let github = queued(vec![repo_ok(), denied.clone(), repo_ok(), denied]);
+        assert_command(github.compare_and_swap_ref("heads/main", SHA_B, SHA_A));
+        assert_command(github.compare_and_swap_ref("heads/main", SHA_B, SHA_A));
+        assert_eq!(github.transport.all.borrow().len(), 4, "a permission GraphQL error is not a spent window");
+    }
+
+    #[test]
+    fn graphql_retry_after_header_withholds() {
+        let limited = HttpResponse {
+            status: 200,
+            body: r#"{"errors":[{"message":"You have exceeded a secondary rate limit"}]}"#.to_owned(),
+            headers: vec![("retry-after".to_owned(), "60".to_owned())],
+        };
+        let github = queued(vec![repo_ok(), limited, repo_ok(), update_refs_ack()]);
+        assert_command(github.compare_and_swap_ref("heads/main", SHA_B, SHA_A));
+        assert_command(github.compare_and_swap_ref("heads/main", SHA_B, SHA_A));
+        assert_eq!(github.transport.all.borrow().len(), 2, "Retry-After on a GraphQL 200 withholds");
+    }
+
+    #[test]
+    fn graphql_403_secondary_withholds_with_and_without_retry_after() {
+        let unstated =
+            HttpResponse::new(403, r#"{"errors":[{"message":"You have exceeded a secondary rate limit"}]}"#.to_owned());
+        let github = queued(vec![repo_ok(), unstated, repo_ok(), update_refs_ack()]);
+        assert_command(github.compare_and_swap_ref("heads/main", SHA_B, SHA_A));
+        assert_command(github.compare_and_swap_ref("heads/main", SHA_B, SHA_A));
+        assert_eq!(github.transport.all.borrow().len(), 2, "GraphQL 403 unnamed secondary withholds");
+
+        let headed = HttpResponse {
+            status: 403,
+            body: r#"{"errors":[{"message":"You have exceeded a secondary rate limit"}]}"#.to_owned(),
+            headers: vec![("retry-after".to_owned(), "60".to_owned())],
+        };
+        let github = queued(vec![repo_ok(), headed, repo_ok(), update_refs_ack()]);
+        assert_command(github.compare_and_swap_ref("heads/main", SHA_B, SHA_A));
+        assert_command(github.compare_and_swap_ref("heads/main", SHA_B, SHA_A));
+        assert_eq!(github.transport.all.borrow().len(), 2, "GraphQL 403 Retry-After withholds");
+    }
+
+    #[test]
+    fn a_successful_last_allowance_mutation_is_not_a_refusal() {
+        let last_call = HttpResponse {
+            status: 200,
+            body: format!(r#"{{"data":{{"updateRefs":{{"clientMutationId":"{UPDATE_REFS_MUTATION_ID}"}}}}}}"#),
+            headers: vec![
+                ("x-ratelimit-remaining".to_owned(), "0".to_owned()),
+                ("x-ratelimit-reset".to_owned(), u64::from(u32::MAX).to_string()),
+            ],
+        };
+        let github = queued(vec![repo_ok(), last_call, repo_ok(), update_refs_ack()]);
+        github.compare_and_swap_ref("heads/main", SHA_B, SHA_A).expect("last-allowance success");
+        github.compare_and_swap_ref("heads/main", SHA_C, SHA_B).expect("the next request is still issued");
+        assert_eq!(github.transport.all.borrow().len(), 4);
+    }
+
+    #[test]
+    fn graphql_rate_limit_classify_does_not_change_rest() {
+        let spent = RateLimit { remaining: Some(0), reset_unix_secs: Some(9), retry_after_secs: None };
+        assert_eq!(
+            classify_graphql(200, spent, r#"{"errors":[{"message":"API rate limit exceeded"}]}"#),
+            Some(Refusal::PrimaryLimit { reset_unix_secs: Some(9) }),
+        );
+        assert_eq!(
+            classify(200, spent, r#"{"errors":[{"message":"API rate limit exceeded"}]}"#),
+            None,
+            "REST classify does not parse HTTP 200 bodies",
+        );
+        assert_eq!(
+            classify_graphql(
+                200,
+                spent,
+                r#"{"data":{"updateRefs":{"clientMutationId":"aether-bloomery-update-refs"}}}"#
+            ),
+            None,
+            "success with remaining 0 is not a refusal",
+        );
+        assert_eq!(
+            classify_graphql(
+                200,
+                RateLimit::default(),
+                r#"{"errors":[{"message":"Resource not accessible by integration"}]}"#,
+            ),
+            None,
+        );
+        let retry = RateLimit { remaining: Some(10), reset_unix_secs: None, retry_after_secs: Some(12) };
+        assert_eq!(
+            classify_graphql(200, retry, r#"{"errors":[{"message":"You have exceeded a secondary rate limit"}]}"#),
+            Some(Refusal::GraphqlSecondary { retry_after_secs: Some(12) }),
+        );
+        assert_eq!(
+            classify_graphql(
+                200,
+                RateLimit::default(),
+                r#"{"errors":[{"message":"You have exceeded a secondary rate limit"}]}"#,
+            ),
+            Some(Refusal::GraphqlSecondary { retry_after_secs: None }),
+        );
+        assert_eq!(
+            classify_graphql(403, retry, r#"{"errors":[{"message":"You have exceeded a secondary rate limit"}]}"#,),
+            Some(Refusal::GraphqlSecondary { retry_after_secs: Some(12) }),
+        );
+        assert_eq!(
+            classify_graphql(
+                403,
+                RateLimit::default(),
+                r#"{"errors":[{"message":"You have exceeded a secondary rate limit"}]}"#,
+            ),
+            Some(Refusal::GraphqlSecondary { retry_after_secs: None }),
+        );
+        assert_eq!(
+            classify(
+                403,
+                RateLimit::default(),
+                r#"{"errors":[{"message":"You have exceeded a secondary rate limit"}]}"#,
+            ),
+            Some(Refusal::SecondaryLimit { retry_after_secs: None }),
+            "REST 403 unnamed secondary stays SecondaryLimit",
+        );
+        assert_eq!(
+            withhold_for(Refusal::GraphqlSecondary { retry_after_secs: None }, 0, 0),
+            Some(GRAPHQL_SECONDARY_MIN),
+        );
+        assert_eq!(
+            withhold_for(Refusal::SecondaryLimit { retry_after_secs: None }, 0, 0),
+            Some(BACKOFF_BASE),
+            "REST unnamed secondary stays at the existing 30s base",
+        );
+    }
+
+    #[test]
+    fn race_model_fake_evaluates_before_oid_atomically() {
+        let refs = Arc::new(Mutex::new(BTreeMap::from([("refs/heads/main".to_owned(), SHA_A.to_owned())])));
+        let gate = MutationGate::pair();
+        let first = atomic_client_on(refs.clone(), Some(gate.clone()), false);
+        let second = atomic_client_on(refs.clone(), Some(gate), false);
+        let (left, right) = thread::scope(|scope| {
+            let left = scope.spawn(|| first.compare_and_swap_ref("heads/main", SHA_B, SHA_A));
+            let right = scope.spawn(|| second.compare_and_swap_ref("heads/main", SHA_C, SHA_A));
+            (left.join().expect("left"), right.join().expect("right"))
+        });
+        let wins = usize::from(left.is_ok()) + usize::from(right.is_ok());
+        let losses = usize::from(matches!(left, Err(GitDataError::Command(_))))
+            + usize::from(matches!(right, Err(GitDataError::Command(_))));
+        assert_eq!(wins, 1, "exactly one writer wins: {left:?} {right:?}");
+        assert_eq!(losses, 1, "the loser is an error, not success: {left:?} {right:?}");
+        let sha = {
+            let won = refs.lock().unwrap_or_else(PoisonError::into_inner);
+            won.get("refs/heads/main").expect("main remains").clone()
+        };
+        let winner = left.as_ref().ok().or_else(|| right.as_ref().ok()).expect("one ack");
+        assert_eq!(winner.sha, sha, "winning ref matches the winner");
+        let first_requests = first.transport.requests.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_no_rest_ref_writes(&first_requests);
+        drop(first_requests);
+        let second_requests = second.transport.requests.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_no_rest_ref_writes(&second_requests);
+        drop(second_requests);
+    }
+
+    #[test]
+    fn transport_error_after_apply_preserves_write_and_does_not_retry() {
+        let refs = Arc::new(Mutex::new(BTreeMap::from([("refs/heads/main".to_owned(), SHA_A.to_owned())])));
+        let github = atomic_client_on(refs.clone(), None, true);
+        match github.compare_and_swap_ref("heads/main", SHA_B, SHA_A) {
+            Err(GitDataError::Command(detail)) => {
+                assert!(!detail.contains("t0ken"), "{detail}");
+                assert!(!GitDataError::Command(detail.clone()).to_string().contains("t0ken"), "{detail}");
+            }
+            other => panic!("expected Command after applied-then-failed transport, got {other:?}"),
+        }
+        assert_eq!(
+            refs.lock().unwrap_or_else(PoisonError::into_inner).get("refs/heads/main").map(String::as_str),
+            Some(SHA_B),
+            "the write may already have happened; Command must not claim otherwise or roll back",
+        );
+        let requests = github.transport.requests.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(requests.len(), 2, "lookup plus one mutation; no retry");
+        assert_no_rest_ref_writes(&requests);
+        drop(requests);
+    }
+
+    #[test]
+    fn mixed_batch_all_or_none_preserves_preexisting_and_concurrent_refs() {
+        let refs = Arc::new(Mutex::new(BTreeMap::from([
+            ("refs/heads/held".to_owned(), SHA_A.to_owned()),
+            ("refs/heads/keep".to_owned(), SHA_B.to_owned()),
+        ])));
+        atomic_client(refs.clone())
+            .transact_refs(&[RefTxnOp::Create { name: "heads/prize".into(), sha: SHA_C.into() }])
+            .expect("concurrent acquire");
+
+        let failed = atomic_client(refs.clone()).transact_refs(&[
+            RefTxnOp::Delete { name: "heads/held".into(), expected: SHA_A.into() },
+            RefTxnOp::Create { name: "heads/prize".into(), sha: SHA_A.into() },
+        ]);
+        assert_command(failed);
+
+        let store = refs.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(store.get("refs/heads/held").map(String::as_str), Some(SHA_A), "preexisting held survived");
+        assert_eq!(store.get("refs/heads/keep").map(String::as_str), Some(SHA_B), "untouched keep survived");
+        assert_eq!(
+            store.get("refs/heads/prize").map(String::as_str),
+            Some(SHA_C),
+            "concurrently acquired prize was not deleted by name"
+        );
+        drop(store);
     }
 }
