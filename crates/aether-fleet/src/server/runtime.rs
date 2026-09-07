@@ -207,10 +207,10 @@ fn set_own_process_group(command: &mut Command) {
 /// so this never includes `exec_source`, `exec_path`, the fleet root, or the
 /// app-name filename. `io::Error`'s Display is not used; it can embed paths.
 fn prepare_fork_io_detail(stage: &str, hash: &str, err: &io::Error) -> String {
-    match err.raw_os_error() {
-        Some(code) => format!("{stage} binary {hash}: {:?} (os error {code})", err.kind()),
-        None => format!("{stage} binary {hash}: {:?}", err.kind()),
-    }
+    err.raw_os_error().map_or_else(
+        || format!("{stage} binary {hash}: {:?}", err.kind()),
+        |code| format!("{stage} binary {hash}: {:?} (os error {code})", err.kind()),
+    )
 }
 
 /// One supervised engine in [`FleetServerState`]'s table.
