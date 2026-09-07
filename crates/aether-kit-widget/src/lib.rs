@@ -392,10 +392,11 @@ fn framebuffer_clip(rect: WidgetClipRect) -> ClipRect {
     ClipRect { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
 }
 
-/// The fills a glyph run has to stay out from under: every fill that lands
-/// after it. Built by walking a lane backwards, so at each text item the set
-/// holds exactly the lane's later fills — seeded, for the ordinary lane, with
-/// the whole overlay, which is after all of it.
+/// The known opaque solid holes a glyph run has to stay out from under: every
+/// such coverage that lands after it. Built by walking a lane backwards, so at
+/// each text item the set holds exactly the lane's later opaque solids —
+/// seeded, for the ordinary lane, with the overlay's known opaque solids,
+/// which land after all of it.
 ///
 /// `bounds` is the union of the set. Almost no glyph run in a frame has a
 /// later fill anywhere near it, and one rejection against the union answers
@@ -490,30 +491,36 @@ fn glyph_box(x: f32, y: f32, text: &str, size_pixels: f32) -> WidgetClipRect {
 
 /// Collect the filtered text subsequence of one emit lane into authored-order
 /// text items. `items` is the lane; `later_overlay` seeds the hole set with
-/// fills that land after every item in it — the cluster overlay for the
-/// ordinary lane, empty for the overlay lane. Invalid clips omit their items
-/// before the root converts the remaining clips into framebuffer coordinates.
+/// known opaque solid coverage that lands after every item in it — the cluster
+/// overlay for the ordinary lane, empty for the overlay lane. Invalid clips
+/// omit their items before the root converts the remaining clips into
+/// framebuffer coordinates.
 ///
 /// Text reaches the render cap one hop after the quads a cluster sends
 /// directly, so no fill can cover the glyphs authored before it by draw order
 /// alone. The hierarchy answers that the way a plate always has — by not
 /// drawing what it covers: a text item's clip is re-clipped to the part of its
-/// rect the fills **after it** leave uncovered
+/// rect the known opaque solids **after it** leave uncovered
 /// ([`WidgetClipRect::subtract`]), and omitted when nothing is left. Only the
-/// fills that reach the run's own line take part ([`LaterFills::cut`]); a clip
+/// holes that reach the run's own line take part ([`LaterFills::cut`]); a clip
 /// is a scissor bound and is routinely much larger than the glyphs inside it.
-/// An unclipped text item (root chrome with no clip) cannot be cut and is
-/// drawn as authored.
+///
+/// [`WidgetDrawItem::covered_rect`] is what joins the hole set: a solid `Quad`
+/// with alpha exactly `1.0`, after geometry ∩ clip. A merely drawn fill —
+/// transparent or partial-alpha, out-of-range or non-finite alpha, or a
+/// textured quad — still goes out on the render hop and does not subtract
+/// text. Preserving glyphs under those draws is not true translucent
+/// text/quad interleaving; the split render/text pipeline remains.
 ///
 /// The subtraction is **positional**, which is what makes a plate able to hold
 /// children *and* a control on that plate able to open over its own siblings.
-/// A fill only cuts the glyphs authored before it, so a plate's own fill
-/// leaves the labels its children draw after it whole, while an open dropdown
-/// list — registered after the controls it stands over — cuts every one of
-/// them. The rule reads the same in both lanes: [`emit`] runs it over the
-/// ordinary items with the overlay's fills already in the set (the overlay is
-/// entirely after the ordinary lane) and again over the overlay's own items
-/// from empty.
+/// A known opaque solid only cuts the glyphs authored before it, so a plate's
+/// own fill leaves the labels its children draw after it whole, while an open
+/// dropdown list — registered after the controls it stands over — cuts every
+/// one of them. The rule reads the same in both lanes: [`emit`] runs it over
+/// the ordinary items with the overlay's known opaque solids already in the
+/// set (the overlay is entirely after the ordinary lane) and again over the
+/// overlay's own items from empty.
 ///
 /// A run with **no clip of its own** takes part on the same terms: it is cut
 /// against its own [`glyph_box`], and keeps its unbounded scissor only while
@@ -622,18 +629,32 @@ mod tests {
     use crate::set::text_origin_y;
     use aether_data::MailboxId;
     use aether_math::Rgba;
+    use core::slice::from_ref;
 
     fn quad(x: f32, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
         WidgetDrawItem::Quad { x, y: 0.0, width: 1.0, height: 1.0, color: Rgba::WHITE, clip }
     }
 
     fn fill(rect: WidgetClipRect) -> WidgetDrawItem {
-        WidgetDrawItem::Quad {
+        fill_with(rect, Rgba::WHITE, None)
+    }
+
+    fn fill_with(rect: WidgetClipRect, color: Rgba, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
+        WidgetDrawItem::Quad { x: rect.x, y: rect.y, width: rect.width, height: rect.height, color, clip }
+    }
+
+    fn textured_fill(rect: WidgetClipRect, tint: Rgba) -> WidgetDrawItem {
+        WidgetDrawItem::TexturedQuad {
+            texture_id: 1,
             x: rect.x,
             y: rect.y,
             width: rect.width,
             height: rect.height,
-            color: Rgba::WHITE,
+            u0: 0.0,
+            v0: 0.0,
+            u1: 1.0,
+            v1: 1.0,
+            tint,
             clip: None,
         }
     }
@@ -860,6 +881,77 @@ mod tests {
         assert_eq!(items[0].text, "half");
         let clip = items[0].clip.clone().expect("the half-covered row keeps a finite clip");
         assert_eq!((clip.y, clip.height), (76.0, 12.0), "only the strip below the fill survives");
+    }
+
+    #[test]
+    fn later_fills_subtract_only_known_opaque_solid_coverage() {
+        // Tripwire: an alpha-zero 100×24 overlay used to punch a hole from
+        // geometry alone and drop a clipped 12px label. Only a solid Quad
+        // with alpha exactly 1.0 is known opaque coverage; textured tints
+        // and every other alpha still draw, but they do not subtract text.
+        // That is not translucent interleaving — quads still leave first.
+        let label_clip = WidgetClipRect { x: 0.0, y: 0.0, width: 80.0, height: 12.0 };
+        let overlay = WidgetClipRect { x: 0.0, y: 0.0, width: 100.0, height: 24.0 };
+        let label = text(0.0, "label", Some(label_clip));
+        let original = Some((label_clip.x, label_clip.y, label_clip.width, label_clip.height));
+        let clip_of = |items: Vec<DrawText>| {
+            assert_eq!(items.len(), 1, "{items:?}");
+            assert_eq!(items[0].text, "label");
+            items[0].clip.clone().map(|clip| (clip.x, clip.y, clip.width, clip.height))
+        };
+
+        let solid = |alpha: f32| fill_with(overlay, Rgba::new(1.0, 1.0, 1.0, alpha), None);
+        assert_eq!(
+            clip_of(text_items(from_ref(&label), &[solid(0.0)])),
+            original,
+            "reported alpha-zero overlay keeps the exact text clip",
+        );
+        assert_eq!(clip_of(text_items(from_ref(&label), &[solid(0.5)])), original);
+        for alpha in [0.0, 0.5, 1.0] {
+            assert_eq!(
+                clip_of(text_items(from_ref(&label), &[textured_fill(overlay, Rgba::new(1.0, 1.0, 1.0, alpha))],)),
+                original,
+            );
+        }
+        for alpha in [-1.0, 1.5, f32::NAN, f32::INFINITY] {
+            assert_eq!(clip_of(text_items(from_ref(&label), &[solid(alpha)])), original);
+        }
+        assert!(
+            text_items(from_ref(&label), &[fill(overlay)]).is_empty(),
+            "an alpha-one solid still cuts covered text",
+        );
+        assert_eq!(
+            clip_of(text_items(
+                from_ref(&label),
+                &[fill_with(overlay, Rgba::WHITE, Some(WidgetClipRect { x: 0.0, y: 0.0, width: 30.0, height: 24.0 }),)],
+            )),
+            Some((30.0, 0.0, 50.0, 12.0)),
+            "an opaque hole is still geometry ∩ clip",
+        );
+
+        assert_eq!(
+            clip_of(text_items(&[fill(overlay), label.clone()], &[])),
+            original,
+            "an earlier same-lane fill does not cut later text",
+        );
+        assert!(
+            text_items(&[label.clone(), fill(overlay)], &[]).is_empty(),
+            "a later same-lane opaque fill still cuts",
+        );
+        assert_eq!(
+            clip_of(text_items(&[label, solid(0.0)], &[])),
+            original,
+            "a later same-lane transparent fill does not",
+        );
+
+        let unbounded = text(0.0, "label", None);
+        assert!(
+            text_items(from_ref(&unbounded), &[fill(overlay)]).is_empty(),
+            "an opaque overlay still cuts unbounded text",
+        );
+        let kept = text_items(from_ref(&unbounded), &[solid(0.0)]);
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].clip.is_none(), "a transparent overlay leaves unbounded text unbounded");
     }
 
     #[test]
