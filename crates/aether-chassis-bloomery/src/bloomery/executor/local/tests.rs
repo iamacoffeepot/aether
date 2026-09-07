@@ -11,9 +11,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::ops::{Deref, DerefMut};
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Child;
 use std::process::Command;
 
@@ -26,8 +28,8 @@ use aether_bloomery::testing::digest;
 use aether_bloomery::{
     BackendObjectId, Conclusion, ConfigRegistry, Correspondence, CorrespondenceError, Digest, ExecutionStatus,
     ExecutorBackend, Harness, Nonce, Observation, Provenance, ReasoningEffort, ResolvedModel, SCOPE_REVISION_SCHEMA,
-    ScopeRevision, ScopeRouting, SessionSlug, StageCatalog, StageId, StageVerdict, Statement, Transformation,
-    VerifyFailure, VerifyFailureSet, WorkHandle, WorkpieceId,
+    ScopeRevision, ScopeRouting, SessionSlug, StageCatalog, StageId, StageVerdict, Statement, StudyCall, StudyCost,
+    Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkpieceId,
 };
 use tempfile::TempDir;
 
@@ -35,11 +37,9 @@ use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::to_hex;
 use aether_data::wire::to_vec;
 
-// Unconditional: the live-process cases below are Linux-gated because they read
-// `/proc/<pid>/stat`, but the recorded-identity case is a plain struct literal
-// written to a file and runs everywhere. Gating the import with them made this
-// crate's whole test target refuse to compile off Linux, so no test in it could
-// be run on a developer's machine at all.
+// Unconditional: live identity cases run on Linux/macOS, while recorded identity
+// literals run everywhere. Gating this import with the live cases made the whole
+// test target refuse to compile on other hosts.
 use super::backend::OrderIdentity;
 use super::identity::ProcessIdentity;
 use super::orphan::OrphanedRun;
@@ -762,6 +762,7 @@ fn evidence_for_a_different_nonce_fails_closed_before_its_claims_are_read() {
     assert!(refs[0].observation.candidate.is_none(), "a stale construct body cannot trigger capture");
     assert!(refs[0].observation.findings.is_none(), "a stale body cannot direct a repair lap");
     assert!(refs[0].observation.cost.is_none(), "a stale body cannot enter study accounting");
+    assert!(refs[0].observation.calls.is_none(), "a stale body cannot enter study accounting");
     assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Unknown, "the terminal stale body is consumed");
 }
 
@@ -833,6 +834,110 @@ fn construct_gate_fails_unparseable_evidence() {
     // Bytes that do not decode as a construct record rendered no judgment —
     // a host observation, not a candidate defect.
     assert_eq!(construct_verdict("not json at all"), StageVerdict::ExecutorFault);
+}
+
+#[test]
+fn a_result_record_projects_cost_and_calls_together_onto_the_observation() {
+    // Tripwire (#5612): both observation fields come from one parse of the nested
+    // result_record. Splitting them re-decoded the same bytes and allocated the
+    // call vector twice; filling an unmeasured attempt with zero columns would
+    // make a ledger gap look free.
+    let cost = StudyCost {
+        turns: 3,
+        duration_millis: 1_200,
+        input_tokens: 1_000,
+        cache_write_tokens: 400,
+        cache_write_1h_tokens: 150,
+        cache_write_5m_tokens: 50,
+        cache_read_tokens: 8_000,
+        output_tokens: 900,
+        ..StudyCost::default()
+    };
+    let calls = vec![StudyCall {
+        input_tokens: 1_000,
+        cache_write_tokens: 400,
+        cache_write_1h_tokens: 150,
+        cache_write_5m_tokens: 50,
+        cache_read_tokens: 8_000,
+        output_tokens: 900,
+    }];
+
+    for (label, nonce, body, expected_cost, expected_calls) in [
+        (
+            "cost and calls together",
+            "n-both",
+            r#"{"command":"verify.check","nonce":"n-both","status":"pass","result_record":{"num_turns":3,"duration_ms":1200,"input":1000,"cache_write":400,"cache_write_1h":150,"cache_write_5m":50,"cache_read":8000,"output":900,"calls":[{"input":1000,"cache_write":400,"cache_write_1h":150,"cache_write_5m":50,"cache_read":8000,"output":900}]}}"#,
+            Some(cost),
+            Some(calls),
+        ),
+        (
+            "cost without calls",
+            "n-cost",
+            r#"{"command":"verify.check","nonce":"n-cost","status":"pass","result_record":{"num_turns":3,"duration_ms":1200,"input":1000,"cache_write":400,"cache_write_1h":150,"cache_write_5m":50,"cache_read":8000,"output":900}}"#,
+            Some(cost),
+            None,
+        ),
+        ("absent record", "n-none", r#"{"command":"verify.check","nonce":"n-none","status":"pass"}"#, None, None),
+        (
+            "malformed record",
+            "n-bad",
+            r#"{"command":"verify.check","nonce":"n-bad","status":"pass","result_record":"not-an-object"}"#,
+            None,
+            None,
+        ),
+    ] {
+        let base = TempDir::new().unwrap();
+        let exec = executor(&base, body, RunLifecycle::Exited { success: true });
+        let reference = exec.stream_evidence(&exec.submit(&verify_order(digest(7), nonce)).unwrap()).unwrap().remove(0);
+
+        assert_eq!(reference.observation.cost, expected_cost, "{label}: cost");
+        assert_eq!(reference.observation.calls, expected_calls, "{label}: calls");
+        assert!(
+            reference.observation.failed_verifiers.is_empty(),
+            "{label}: a passing verify still names no failed verifier",
+        );
+        assert_eq!(
+            NameEvidenceClaims.claim_for(&reference).expect("canonical local name decodes").verdict,
+            StageVerdict::VerificationPassed,
+            "{label}: measured columns must not change the verdict",
+        );
+    }
+}
+
+#[test]
+fn an_authored_environment_fault_still_carries_measured_cost_and_calls() {
+    // The environment stamp is the other dual consumer of the measured pair
+    // (`authored_executor_fault`). A parse that only ran on the judged path
+    // would drop usage from a no-judgment report that still nested a record.
+    let base = TempDir::new().unwrap();
+    let evidence = r#"{"command":"review.critic","nonce":"n-env-cost","status":"environment","findings":"the sandbox refused to start.","result_record":{"num_turns":1,"duration_ms":50,"input":10,"output":2,"calls":[{"input":10,"output":2}]}}"#;
+    let exec = executor(&base, evidence, RunLifecycle::Exited { success: false });
+    let order = aether_bloomery::WorkOrder {
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(7),
+            digest(0xC0),
+            digest(0xC0),
+        ),
+        nonce: Nonce("n-env-cost".to_owned()),
+    };
+    let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
+    let upload = NameEvidenceClaims.claim_for(&reference).expect("the fault name round-trips through the claim seam");
+
+    assert_eq!(upload.verdict, StageVerdict::ExecutorFault);
+    assert_eq!(
+        reference.observation.findings.as_deref(),
+        Some("the sandbox refused to start."),
+        "the authored cause still rides the observation",
+    );
+    assert_eq!(
+        reference.observation.cost,
+        Some(StudyCost { turns: 1, duration_millis: 50, input_tokens: 10, output_tokens: 2, ..StudyCost::default() }),
+    );
+    assert_eq!(
+        reference.observation.calls,
+        Some(vec![StudyCall { input_tokens: 10, output_tokens: 2, ..StudyCall::default() }]),
+    );
 }
 
 // A `tracing` sink that renders each event as "LEVEL field=value …" into a shared
@@ -1866,17 +1971,58 @@ fn a_disk_quarantine_withholds_the_slot_from_allocation() {
     );
 }
 
-// These live-process cases observe `/proc/<pid>/stat`. Off Linux that read
-// returns None, the expect panics, and the sleep child leaks into nextest.
-#[cfg(target_os = "linux")]
-fn spawn_isolated_sleep() -> (Child, ProcessIdentity) {
+// These live-process cases call `ProcessIdentity::observe`. Guard the `Child`
+// before observe so a failed expect still reaps. Linux and macOS observe;
+// other unix hosts stay gated off.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct OwnedChild(Option<Child>);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl OwnedChild {
+    fn hold(child: Child) -> Self {
+        Self(Some(child))
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Deref for OwnedChild {
+    type Target = Child;
+
+    fn deref(&self) -> &Child {
+        self.0.as_ref().expect("the guard still owns the child")
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl DerefMut for OwnedChild {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.0.as_mut().expect("the guard still owns the child")
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn spawn_isolated_sleep() -> (OwnedChild, ProcessIdentity) {
     use std::os::unix::process::CommandExt;
-    let child = Command::new("sleep").arg("60").process_group(0).spawn().unwrap();
+    let spawned = Command::new("sleep").arg("60").process_group(0).spawn().unwrap();
+    let child = OwnedChild::hold(spawned);
     let identity = ProcessIdentity::observe(child.id()).expect("the child is live long enough to observe");
+    assert_eq!(identity.pid, child.id());
+    assert_eq!(identity.pgid, child.id(), "process_group(0) makes the child its own group leader");
+    assert!(identity.pgid > 1, "a spawned child must own a private group, not a broadcast target");
     (child, identity)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn reattachment_refuses_a_pid_whose_start_time_does_not_match() {
     // The recycled-pid kill: a live process at the recorded pid whose start
@@ -1928,10 +2074,10 @@ fn an_orphan_does_not_invent_a_signal_or_a_wait_fault() {
         .write(&evidence_dir)
         .unwrap();
     #[cfg_attr(
-        not(target_os = "linux"),
+        not(any(target_os = "linux", target_os = "macos")),
         allow(
             clippy::redundant_clone,
-            reason = "the Linux-gated block below reuses `nonce`; off Linux it is compiled out and this read is the last"
+            reason = "the linux/macos-gated block below reuses `nonce`; off those hosts it is compiled out and this read is the last"
         )
     )]
     let mut departed = OrphanedRun::new(Nonce(nonce.clone()), &evidence_dir);
@@ -1945,7 +2091,7 @@ fn an_orphan_does_not_invent_a_signal_or_a_wait_fault() {
     // recorded identity that still names its live process is a lane that is
     // simply still working, and reading that as exited would destroy in-flight
     // work on every restart.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let (mut child, identity) = spawn_isolated_sleep();
         identity.write(&evidence_dir).unwrap();
@@ -1964,7 +2110,7 @@ fn an_orphan_does_not_invent_a_signal_or_a_wait_fault() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn restart_readopt_cancel_terminates_an_attached_child() {
     // The happy path this issue exists to restore: a coordinator that restarts
@@ -1980,6 +2126,9 @@ fn restart_readopt_cancel_terminates_an_attached_child() {
 
     let report = exec.reconcile(&[outstanding(digest(5), &nonce)]);
     assert_eq!(report.readopted, vec![Nonce(nonce.clone())], "the live order is re-adopted");
+
+    assert_eq!(identity.pgid, child.id(), "cancel must target this child's own group, not a stranger");
+    assert!(identity.pgid > 1, "cancel must not aim a broadcast operand at a live child");
 
     let handle = WorkHandle::new(Nonce(nonce));
     exec.cancel(&handle).expect("a re-attached kill reports success only after the group is gone");

@@ -382,18 +382,36 @@ fn commission(workpiece: &str, recorded_issue: Option<u64>) -> CommissionProject
 
 #[test]
 fn reconciling_a_commission_twice_creates_one_issue() {
-    // Idempotency is find-by-marker then recorded number. A second pass that
-    // created again would duplicate the replica; a pass that forgot the
-    // marker would do the same after a crash between create and persist.
+    // The real caller persists the number returned from create before the next
+    // projection. That recorded_issue is the only ownership authority.
     let projection = GithubProjection::new(FakeGithub::new());
     let first = projection.project_commission(&commission("wp-1", None)).expect("first create");
-    let second = projection.project_commission(&commission("wp-1", None)).expect("second reconcile");
+    let second = projection.project_commission(&commission("wp-1", first)).expect("second reconcile");
 
-    assert_eq!(first, second, "the second pass must reuse the created number");
-    assert_eq!(projection.client().issue_count(), 1, "reconciling twice creates one issue");
-    let recorded = projection.project_commission(&commission("wp-1", first)).expect("recorded reconcile");
-    assert_eq!(recorded, first);
-    assert_eq!(projection.client().issue_count(), 1);
+    assert_eq!(first, second, "the persisted receipt is the replica");
+    assert_eq!(projection.client().issue_count(), 1, "reconciling with the receipt updates the one issue");
+    assert_eq!(projection.client().created_issue_count(), 1);
+}
+
+#[test]
+fn a_missing_receipt_does_not_adopt_a_matching_marker() {
+    // Crash-before-persist: the first create's marker is already on GitHub, but
+    // recorded_issue was never stored. Adopting that match would overwrite or
+    // close an issue this drain has no receipt for. A sibling replica is
+    // allowed; the original issue must stay untouched.
+    let projection = GithubProjection::new(FakeGithub::new());
+    let first =
+        projection.project_commission(&commission("wp-1", None)).expect("first create").expect("owns a replica");
+    let title = projection.client().issue_title(first).expect("created");
+    let body = projection.client().issue_body(first).expect("created");
+
+    let second = projection.project_commission(&commission("wp-1", None)).expect("second without receipt");
+
+    assert_ne!(second, Some(first), "a matching marker is not a creation receipt");
+    assert_eq!(projection.client().issue_title(first).as_deref(), Some(title.as_str()));
+    assert_eq!(projection.client().issue_body(first).as_deref(), Some(body.as_str()));
+    assert_eq!(projection.client().issue_is_closed(first), Some(false), "the unrecepted create stays open");
+    assert_eq!(projection.client().updated_issue_count(), 0, "the unrecepted create is not overwritten");
 }
 
 #[test]

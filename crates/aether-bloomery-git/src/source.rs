@@ -581,6 +581,27 @@ impl<C: GitDataApi> GitSource<C> {
         Ok(minted)
     }
 
+    // Name the landable head for an integration commit the same way a fresh
+    // merge does: content-address over bloom+tree, then record `head ↔ commit`.
+    // Reverse-resolving the live sha would fault when the merge published and
+    // the record did not (#5554), or return a sealed-base / foreign digest
+    // that is not an integration head. An object another digest already names
+    // is left alone — recording would retire that identity.
+    fn ensure_integrated_head(&self, bloom: &BloomId, tree: Digest, commit_sha: &str) -> Result<Digest, SourceError> {
+        let head = digest_of(&IntegratedHead { bloom: *bloom, tree });
+        let commit_object = GitObjectId::from_hex(commit_sha)
+            .ok_or_else(|| SourceError::Malformed(format!("integration commit sha `{commit_sha}`")))?;
+        let object = BackendObjectId::from(commit_object);
+        match self.correspondence.resolve_digest(&object)? {
+            Some(known) if known == head => Ok(head),
+            Some(_) => Err(SourceError::UnresolvedCorrespondence("integration head commit".to_owned())),
+            None => {
+                self.correspondence.record(&head, &object)?;
+                Ok(head)
+            }
+        }
+    }
+
     fn integration_ref(bloom: &BloomId) -> String {
         format!("heads/bloom/{}/integration", short_hex(&bloom.0))
     }
@@ -1193,13 +1214,14 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         let commit = match self.client.merge(&integration, candidate_ref, &format!("bloomery fold {candidate_ref}"))? {
             MergeResult::Merged(commit) => commit,
             // The branch already carries this candidate — a fold resuming after
-            // an interrupted run re-offering a member it already folded. Report
-            // where the branch stands so the fold advances past it instead of
-            // stalling. Reaching this at the *base* commit would resolve a base
-            // digest as a landable head, but that needs a candidate whose tree
-            // equals the base tree, and capture refuses an empty diff.
+            // an interrupted run re-offering a member it already folded. The
+            // merge endpoint publishes before the head record, so a retry can
+            // land here with the ref advanced and the correspondence missing
+            // (#5554). Name the head the same way a fresh merge does rather
+            // than reverse-resolving the live sha: that would fault on the
+            // missing record, or return a sealed-base / foreign digest.
             MergeResult::AlreadyUpToDate => {
-                let head = self.resolve_object_digest(&current.sha, "integration head commit")?;
+                let head = self.ensure_integrated_head(bloom, current_tree, &current.sha)?;
                 return Ok(IntegrateOutcome::Integrated { tree: current_tree, head });
             }
             // A cross-member collision: an owner decision, not a fault to
@@ -1223,12 +1245,10 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         // named here or the next snapshot could not reverse-resolve the branch.
         // The head stays a distinct content-address over the tree, the same way
         // the tree-replace path keeps `head ↔ commit` from clobbering
-        // `tree ↔ tree-object`.
+        // `tree ↔ tree-object`. The merge has already published the ref; a
+        // record fault is recovered on the AlreadyUpToDate retry above.
         let tree = self.integration_tree_digest(&commit.tree)?;
-        let head = digest_of(&IntegratedHead { bloom: *bloom, tree });
-        let commit_object = GitObjectId::from_hex(&commit.sha)
-            .ok_or_else(|| SourceError::Malformed(format!("merge commit sha `{}`", commit.sha)))?;
-        self.correspondence.record(&head, &BackendObjectId::from(commit_object))?;
+        let head = self.ensure_integrated_head(bloom, tree, &commit.sha)?;
         Ok(IntegrateOutcome::Integrated { tree, head })
     }
 
@@ -1301,12 +1321,13 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
 
     fn claim_seal(&self, bloom: &BloomId, workpieces: &[WorkpieceId]) -> Result<ClaimOutcome, Self::Error> {
         let targets = Self::claim_targets(workpieces, true);
-        let mut ops = Vec::with_capacity(targets.len());
-        for (_, name) in &targets {
-            // Commits are content-addressed garbage if the transaction loses;
-            // the all-or-nothing property lives on the ref batch below.
-            ops.push(RefTxnOp::Create { name: name.clone(), sha: self.create_claim_commit(bloom, &[], &[])? });
-        }
+        // One parentless claim commit for the bloom; every workpiece and the
+        // admission ref point at it. Commits are content-addressed garbage if
+        // the transaction loses; the all-or-nothing property lives on the ref
+        // batch below.
+        let sha = self.create_claim_commit(bloom, &[], &[])?;
+        let ops: Vec<_> =
+            targets.iter().map(|(_, name)| RefTxnOp::Create { name: name.clone(), sha: sha.clone() }).collect();
         match self.client.transact_refs(&ops) {
             Ok(()) => Ok(ClaimOutcome::Acquired),
             Err(GitDataError::RefConflict(_)) => {
@@ -2187,6 +2208,78 @@ mod tests {
     }
 
     #[test]
+    fn an_interrupted_merge_recovers_head_correspondence_on_restart() {
+        // Tripwire: merge publishes the ref before the head record (#5554). A
+        // correspondence fault must not absorb: the published ref stays, and the
+        // restart checkpoint path re-offers the already-folded member as
+        // AlreadyUpToDate, which records the missing head rather than reverse-
+        // resolving an absence.
+        let (fake, bloom, base) = seeded();
+        let source = git_source(&fake, false);
+        let base_tree = source.snapshot(&base).unwrap().tree;
+        let expected = source.checkpoint(&bloom, &base_tree).unwrap();
+        let candidate = seed_candidate_ref(&fake, "wp-a", "tree-a");
+        let integration = GitSource::<FakeGithub>::integration_ref(&bloom);
+        let before = fake.ref_target(&integration).expect("the namespace exists");
+
+        fake.fail_next_commit_correspondence_record("store fault");
+        assert!(source.integrate_merge(&bloom, &candidate, &expected).is_err(), "the store fault surfaces");
+
+        let published = fake.ref_target(&integration).expect("the merge published");
+        assert_ne!(published, before, "the merge ref stays published after the correspondence fault");
+
+        let position = source.integration_checkpoint(&bloom, &base).unwrap();
+        assert_eq!(position.head, None, "the missing head record is visible to restart");
+
+        let outcome = source.integrate_merge(&bloom, &candidate, &position.checkpoint).unwrap();
+        let IntegrateOutcome::Integrated { head, tree } = outcome else {
+            panic!("the restart must recover, got {outcome:?}");
+        };
+        assert_eq!(tree, position.checkpoint.tree, "recovery reports the published tree, not a fresh merge");
+        assert_eq!(
+            resolve_git(&fake, &head).expect("the recovered head resolves").to_hex(),
+            published,
+            "the recovered head names the published merge commit",
+        );
+
+        let recovered = source.integration_checkpoint(&bloom, &base).unwrap();
+        assert_eq!(recovered.head, Some(head), "a subsequent restart now sees the landable head");
+    }
+
+    #[test]
+    fn already_up_to_date_at_the_base_does_not_rebind_the_sealed_head() {
+        // Tripwire: AlreadyUpToDate must not reverse-resolve the live commit
+        // into a landable head (#5554). At the un-advanced base that commit is
+        // the sealed base; returning it as Integrated, or recording an
+        // integration head over it, would retire the base correspondence.
+        let (fake, bloom, base) = seeded();
+        let source = git_source(&fake, false);
+        let base_tree = source.snapshot(&base).unwrap().tree;
+        let expected = source.checkpoint(&bloom, &base_tree).unwrap();
+        let integration = GitSource::<FakeGithub>::integration_ref(&bloom);
+        let base_sha = fake.ref_target(&integration).expect("the namespace sits at the sealed base");
+        fake.seed_ref("heads/bloom/cand/wp-base", &base_sha);
+
+        match source.integrate_merge(&bloom, "heads/bloom/cand/wp-base", &expected) {
+            Err(SourceError::UnresolvedCorrespondence(_)) => {}
+            Ok(IntegrateOutcome::Integrated { head, .. }) => {
+                panic!("must not name the sealed base as a landable head, got {head:?}");
+            }
+            other => panic!("expected UnresolvedCorrespondence, got {other:?}"),
+        }
+        assert_eq!(
+            resolve_git(&fake, &base).expect("the sealed base still resolves").to_hex(),
+            base_sha,
+            "recovery must not retire the base correspondence",
+        );
+        assert_eq!(
+            fake.ref_target(&integration).as_deref(),
+            Some(base_sha.as_str()),
+            "the namespace stays at the base"
+        );
+    }
+
+    #[test]
     fn observing_a_head_bloomery_already_named_returns_that_same_digest() {
         // Tripwire: the observation reverse-resolves before it mints (#4667).
         // `seeded` records the base head ↔ commit correspondence and points
@@ -2431,6 +2524,25 @@ mod tests {
             let commit = source.client().get_commit(&sha).unwrap();
             assert_eq!(commit.tree, EMPTY_TREE, "{name}'s claim commit points at the empty tree, not a real one");
         }
+        // Tripwire: one parentless claim commit is reused across every workpiece
+        // and the admission Create. Comparing the refs' shas is not enough —
+        // content-addressed remints already agree.
+        assert_eq!(fake.create_commit_count(), 1);
+    }
+
+    #[test]
+    fn claim_seal_empty_workpiece_set_still_creates_admission() {
+        let fake = FakeGithub::new();
+        let source = git_source(&fake, false);
+        let claimant = bloom_id(1);
+
+        let outcome = source.claim_seal(&claimant, &[]).unwrap();
+        assert_eq!(outcome, ClaimOutcome::Acquired);
+        assert_eq!(source.claim_holder(ADMISSION_REF).unwrap(), Some(claimant));
+        // Tripwire: an empty member set is still one parentless claim commit
+        // pointed at by admission. Identical content-addressed shas would not
+        // catch extra remints of the same claim commit.
+        assert_eq!(fake.create_commit_count(), 1);
     }
 
     #[test]

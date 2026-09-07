@@ -20,6 +20,11 @@
 //! `behavior`-feature widget wasm / the fixture script wasm has not been pre-built
 //! (the `require_wasm` gate). CI sets `AETHER_REQUIRE_RUNTIME=1` to turn the
 //! skip into a hard failure.
+//!
+//! Issue 5545 adds a second scenario over the same wasm: a `ScriptRef::None`
+//! host wrapping a radio, so `spawn_behavior_host`'s type/config/subname
+//! conversion and the live passthrough routes are what the log records — not
+//! a derived `BehaviorHostSpec` roundtrip.
 
 use std::fs;
 
@@ -27,11 +32,15 @@ use aether_actor::Addressable;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_kinds::keycode::{KEY_DOWN, KEY_TAB};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
-    LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, MouseMove, Tick, WindowId,
+    Key, LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, MouseMove, Tick, WindowId,
 };
-use aether_kit_widget::{BehaviorHostSpec, PanelConfig, ScriptRef, SliderConfig, Theme, WidgetChildSpec, WidgetKind};
+use aether_kit_widget::{
+    BehaviorHostSpec, PanelConfig, RadioConfig, ScriptRef, SetWidgetState, SliderConfig, Theme, WidgetChildSpec,
+    WidgetControlState, WidgetKind,
+};
 use serde::{Deserialize, Serialize};
 
 /// Local twin of `aether_behavior::host::SetScript` (`aether.behavior.set_script`),
@@ -89,17 +98,49 @@ fn load_panel_with_host(harness: &mut SubstrateHarness, kit_wasm: &[u8], script:
         step: 1.0,
         initial: 40.0,
         theme: Theme::DEFAULT,
-        state: aether_kit_widget::WidgetControlState::default(),
+        state: WidgetControlState::default(),
     }
     .encode_into_bytes();
-    let host_spec = BehaviorHostSpec {
-        wrapped: WidgetKind::Slider,
-        wrapped_config,
-        script: ScriptRef::Inline(script),
-        // Zero ⇒ the host defaults (fuel ~1M, disable after 3 traps).
-        fuel_per_call: 0,
-        disable_after_traps: 0,
-    };
+    load_panel_with_host_spec(
+        harness,
+        kit_wasm,
+        &BehaviorHostSpec {
+            wrapped: WidgetKind::Slider,
+            wrapped_config,
+            script: ScriptRef::Inline(script),
+            // Zero ⇒ the host defaults (fuel ~1M, disable after 3 traps).
+            fuel_per_call: 0,
+            disable_after_traps: 0,
+        },
+    );
+}
+
+/// Load the reference panel with a single `BehaviorHost` slot wrapping a
+/// three-option radio, no script, and zero fuel/trap knobs (the host's real
+/// defaults). The host spawns the wrapped radio in `wire`.
+fn load_panel_with_radio_host(harness: &mut SubstrateHarness, kit_wasm: &[u8]) {
+    let wrapped_config = RadioConfig {
+        options: vec!["First".to_owned(), "Second".to_owned(), "Third".to_owned()],
+        initial_index: 0,
+        theme: Theme::DEFAULT,
+        state: WidgetControlState::default(),
+    }
+    .encode_into_bytes();
+    load_panel_with_host_spec(
+        harness,
+        kit_wasm,
+        &BehaviorHostSpec {
+            wrapped: WidgetKind::Radio,
+            wrapped_config,
+            script: ScriptRef::None,
+            // Zero ⇒ the host defaults (fuel ~1M, disable after 3 traps).
+            fuel_per_call: 0,
+            disable_after_traps: 0,
+        },
+    );
+}
+
+fn load_panel_with_host_spec(harness: &mut SubstrateHarness, kit_wasm: &[u8], host_spec: &BehaviorHostSpec) {
     let config = PanelConfig {
         x: 10.0,
         y: 10.0,
@@ -312,5 +353,69 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
         committed_trap.iter().any(|v| *v > CAP + EPS),
         "a trapping script must fail open — the raw unclamped value forwards; \
          got {committed_trap:?}; log was:\n{joined3}",
+    );
+}
+
+/// `spawn_behavior_host` must convert wrapped type/config/subname and spawn
+/// the real child: Tab-then-Down through a `ScriptRef::None` radio wrap
+/// yields a host-slot-attributed index 1, and `SetWidgetState` to the nested
+/// `{slot}_wrapped` alias disables then re-enables that radio. An empty log
+/// (no spawned actor) cannot satisfy the exact index.
+#[test]
+fn behavior_host_converts_radio_wrap_and_passthroughs_nested_state() {
+    let Some(kit_path) = require_wasm("aether_kit_widget_behavior") else {
+        return;
+    };
+    let kit_wasm = fs::read(&kit_path).expect("read kit wasm");
+
+    let mut harness = SubstrateHarness::builder().with_component_host().build().expect("boot");
+    load_panel_with_radio_host(&mut harness, &kit_wasm);
+    let panel = panel_address();
+    let wrapped = format!("{}/{}:{}_wrapped", host_address(), aether_component::WasmTrampoline::NAMESPACE, SLOT);
+    let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
+
+    harness
+        .execute(vec![
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            ("tab", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("down", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+        ])
+        .expect("spawn + Tab + Down");
+    let (phase1, cursor) = read_panel_log(&mut harness, None);
+    let joined1 = phase1.join("\n");
+    assert_eq!(
+        emitted_counts(&phase1),
+        vec![1],
+        "Tab-then-Down through the host must select index 1 attributed to {SLOT}; log was:\n{joined1}",
+    );
+
+    harness
+        .execute(vec![
+            ("disable", HarnessOp::send_and_settle(&wrapped, &SetWidgetState { state: disabled })),
+            ("blocked", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+        ])
+        .expect("disable wrapped radio + Down");
+    let (phase2, cursor) = read_panel_log(&mut harness, Some(cursor));
+    let joined2 = phase2.join("\n");
+    assert!(
+        emitted_counts(&phase2).is_empty(),
+        "Down after nested-alias disable must emit no selection; log was:\n{joined2}",
+    );
+
+    // Disable forwards WidgetStateChanged through the host and drops the slot
+    // from the focus ring; re-enable restores availability but not focus.
+    harness
+        .execute(vec![
+            ("enable", HarnessOp::send_and_settle(&wrapped, &SetWidgetState { state: WidgetControlState::default() })),
+            ("refocus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("down", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+        ])
+        .expect("re-enable wrapped radio + Down");
+    let (phase3, _) = read_panel_log(&mut harness, Some(cursor));
+    let joined3 = phase3.join("\n");
+    assert_eq!(
+        emitted_counts(&phase3),
+        vec![2],
+        "Down after nested-alias re-enable must select index 2 attributed to {SLOT}; log was:\n{joined3}",
     );
 }

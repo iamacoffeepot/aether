@@ -22,6 +22,7 @@
 //! a finding that is genuinely about member code is recorded as new work rather
 //! than re-opening finished work.
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate};
@@ -31,7 +32,7 @@ use super::{
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{CandidateRef, CompositionFinding, Evidence, VerifyFailureSet, Wedge};
+use crate::values::{CandidateRef, CompositionFinding, Evidence, Membership, VerifyFailureSet, Wedge};
 
 /// One refusal of a bloom's composed tree — everything the weave repair needs to
 /// be aimed, from whichever gate refused it.
@@ -194,13 +195,16 @@ pub(super) fn reweave(record: &BloomRecord, bloom: &BloomId, refusal: &Refusal<'
     }
 }
 
-/// Put the member whose verdict minted `composition` back on its own Verify,
+/// Put every member still waiting on `composition` back on its own Verify,
 /// against the tree the repair produced (ADR-0210).
 ///
-/// Empty when the snapshot holds no narrowing for this composition, when the
-/// member has since left the membership, or when it is no longer sitting at the
-/// Verify its verdict came from — each of those is a member that has already
-/// moved, and re-entering it would overwrite a cursor somebody else set.
+/// Empty when the snapshot holds no narrowing for this composition. A waiter
+/// that has since been withdrawn, already carries a resolution claim, left
+/// Verify, or is no longer a member is skipped — each of those has already
+/// moved, and re-entering it would overwrite a cursor somebody else set. A
+/// member recorded twice is dispatched once. Apply retires the pending set
+/// after this completion, so a later repair over the same parents cannot
+/// reset a member this lap already resumed.
 fn reverify_after_repair(
     snapshot: &Snapshot,
     record: &BloomRecord,
@@ -212,23 +216,36 @@ fn reverify_after_repair(
     else {
         return Vec::new();
     };
-    let Some(member) = record.spec.members().iter().find(|member| member.workpiece == narrowed.verified) else {
-        return Vec::new();
-    };
-    if record.progress.get(&narrowed.verified).is_none_or(|progress| progress.stage != StageId::Verify) {
-        return Vec::new();
-    }
 
-    move_effects_with_candidate(
-        *bloom,
-        &narrowed.verified,
-        member.scope_revision,
-        composition_progress(StageId::Verify, 1, repaired),
-        DispatchTargets { subject: repaired.tree, checkout: repaired.checkout },
-        Some(repaired.tree),
-        SealedLine::of(record, member),
-    )
-    .to_vec()
+    let mut resumed = BTreeSet::new();
+    let mut effects = Vec::new();
+    for waiter in &narrowed.waiters {
+        if !resumed.insert(waiter.clone()) {
+            continue;
+        }
+        let Some(member) = eligible_repair_waiter(record, waiter) else {
+            continue;
+        };
+        effects.extend(move_effects_with_candidate(
+            *bloom,
+            waiter,
+            member.scope_revision,
+            composition_progress(StageId::Verify, 1, repaired),
+            DispatchTargets { subject: repaired.tree, checkout: repaired.checkout },
+            Some(repaired.tree),
+            SealedLine::of(record, member),
+        ));
+    }
+    effects
+}
+
+/// A waiter still sitting at Verify, not withdrawn and not already resolved.
+fn eligible_repair_waiter<'a>(record: &'a BloomRecord, waiter: &WorkpieceId) -> Option<&'a Membership> {
+    if record.withdrawn.contains_key(waiter) || record.claims.contains_key(waiter) {
+        return None;
+    }
+    let member = record.spec.members().iter().find(|member| member.workpiece == *waiter)?;
+    record.progress.get(waiter).is_some_and(|progress| progress.stage == StageId::Verify).then_some(member)
 }
 
 /// Reduce a weave-repair completion — a [`Fact::AttemptCompleted`](crate::Fact::AttemptCompleted)
@@ -240,9 +257,9 @@ fn reverify_after_repair(
 /// diverge. The whole-bloom composition's `Verify` and `Review` complete through
 /// the two aggregate facts, and a pass hands the re-woven tree straight back to
 /// the composite gate run. A narrowed composition's line ends at its repair: the
-/// cursor advances to record the tree it produced, and the member that refused
-/// the original fold is the one that judges it. A failure retries the repair
-/// inside its budget and wedges the composition once that is spent.
+/// cursor advances to record the tree it produced, and every waiter still at
+/// Verify judges the repaired tree. A failure retries the repair inside its
+/// budget and wedges the composition once that is spent.
 pub(super) fn reduce_composition_attempt(
     snapshot: &Snapshot,
     bloom: &BloomId,
@@ -276,23 +293,24 @@ pub(super) fn reduce_composition_attempt(
     // A narrowed composition holds no fold of its own, so its pass re-gates
     // nothing: it advances the cursor to Verify as a record of the repair and
     // does not dispatch. No admitted fact can complete a composition at that
-    // stage. The member that minted the narrowing re-verifies the repaired
-    // tree — that is the only worker whose verdict a door can take. The
-    // whole-bloom instance below *is* the fold, which is why its pass hands
-    // the woven tree straight to the composite gates.
+    // stage. Every waiter whose Verify attributed the narrowing re-verifies
+    // the repaired tree — those are the workers whose verdict a door can take.
+    // The whole-bloom instance below *is* the fold, which is why its pass
+    // hands the woven tree straight to the composite gates.
     if let Some(repaired) = captured.filter(|_| passed && composition.composition_parents().is_some()) {
         effects.push(Decision::AdvanceStage {
             bloom: *bloom,
             workpiece: composition.clone(),
             progress: composition_progress(StageId::Verify, 1, repaired),
         });
-        // The member whose verdict minted this narrowing judged a tree it does
-        // not own, and that tree has now been redone. Leaving it holding that
-        // refusal strands it: it is neither resolved nor wedged and nothing is
-        // in flight for it, which is the shape the liveness oracle exists to
-        // catch. So it goes back to its own Verify against the repaired tree —
-        // no attempt charged for the collision, because the lap it is being
-        // given is the one its original verdict should have judged.
+        // Every waiter whose Verify attributed this narrowing judged a tree it
+        // does not own, and that tree has now been redone. Leaving any of them
+        // holding that refusal strands it: it is neither resolved nor wedged
+        // and nothing is in flight for it, which is the shape the liveness
+        // oracle exists to catch. Each still-eligible waiter goes back to its
+        // own Verify against the repaired tree — no attempt charged for the
+        // collision, because the lap it is being given is the one its original
+        // verdict should have judged.
         effects.extend(reverify_after_repair(snapshot, record, bloom, &composition, repaired));
         return Decisions { outcome: Outcome::CompositionRepaired { bloom: *bloom, tree: repaired.tree }, effects };
     }

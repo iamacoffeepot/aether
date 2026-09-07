@@ -225,12 +225,15 @@ pub fn bloom_in<'a>(view: &'a ViewDocument, bloom_id: &str) -> Result<&'a BloomV
 #[cfg(test)]
 mod tests {
     use std::io::{self, Read, Write};
-    use std::net::{TcpListener, TcpStream};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::panic::{self, AssertUnwindSafe};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
+    use aether_bloomery::HTTP_READ_TIMEOUT;
     use serde_json::{Value, json};
 
     use super::Client;
@@ -319,14 +322,121 @@ mod tests {
         );
     }
 
-    fn serve_one(mut stream: TcpStream, handler: &impl Fn(&Recorded) -> (u16, Value), log: &Mutex<Vec<Recorded>>) {
-        stream.set_read_timeout(Some(Duration::from_secs(2))).expect("read timeout");
+    #[test]
+    fn journal_fixture_resumes_a_body_panic_after_a_request() {
+        // A panic in the client body must shut the accept loop down and resume the same panic.
+        const DISTINCTIVE: &str = "issue-5498 distinctive journal fixture panic";
+        let panicked = panic::catch_unwind(AssertUnwindSafe(|| {
+            with_fake(
+                |request| match (request.method.as_str(), from_sequence(&request.path)) {
+                    ("GET", None) => (200, page(1, false, None)),
+                    _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+                },
+                |port| {
+                    let journal = Client::new(&Endpoint { host: "127.0.0.1".to_owned(), port, token: None })
+                        .journal()
+                        .expect("served request before panic");
+                    assert_eq!(journal.records.iter().map(|record| record.sequence).collect::<Vec<_>>(), vec![1]);
+                    assert!(!journal.truncated);
+                    assert_eq!(journal.shown, 1);
+                    assert_eq!(journal.total_matched, 3);
+                    assert_eq!(journal.next_from_sequence, None);
+                    panic::panic_any(DISTINCTIVE);
+                },
+            )
+        }));
+        let payload = panicked.expect_err("body panic must propagate");
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .map(str::to_owned)
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .expect("string panic payload");
+        assert_eq!(message, DISTINCTIVE);
+    }
+
+    #[test]
+    fn journal_fixture_serves_a_request_delayed_past_the_old_read_cutoff() {
+        // A scheduled client that pauses past the old 2s read cutoff must still be served.
+        const RETIRED_READ_TIMEOUT: Duration = Duration::from_secs(2);
+        let log = Mutex::new(Vec::new());
+        let (armed_tx, armed_rx) = mpsc::sync_channel(1);
+        let reply = page(7, false, None);
+        let served = reply.clone();
+
+        run_listener(
+            |stream| {
+                serve_one_when_armed(
+                    stream,
+                    &|request| match (request.method.as_str(), request.path.as_str()) {
+                        ("GET", "/journal?limit=1000") => (200, served.clone()),
+                        _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+                    },
+                    &log,
+                    || {
+                        let _ = armed_tx.try_send(());
+                    },
+                );
+            },
+            |port| {
+                let mut client =
+                    TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), HTTP_READ_TIMEOUT)
+                        .expect("connect delayed client");
+                client.set_nonblocking(false).expect("blocking delayed client");
+                client.set_read_timeout(Some(HTTP_READ_TIMEOUT)).expect("delayed client read timeout");
+                client.set_write_timeout(Some(HTTP_READ_TIMEOUT)).expect("delayed client write timeout");
+                armed_rx.recv_timeout(HTTP_READ_TIMEOUT).expect("fixture armed");
+                thread::sleep(RETIRED_READ_TIMEOUT + Duration::from_millis(500));
+                client
+                    .write_all(b"GET /journal?limit=1000 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                    .expect("write delayed request");
+                client.flush().expect("flush delayed request");
+                let mut response = Vec::new();
+                client.read_to_end(&mut response).expect("read delayed response");
+
+                let payload = serde_json::to_vec(&reply).expect("encode reply");
+                let mut expected = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                )
+                .into_bytes();
+                expected.extend_from_slice(&payload);
+                assert_eq!(response, expected);
+            },
+        );
+
+        assert_eq!(
+            log.into_inner()
+                .expect("log")
+                .iter()
+                .map(|entry| (entry.method.as_str(), entry.path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("GET", "/journal?limit=1000")]
+        );
+    }
+
+    fn serve_one(stream: TcpStream, handler: &impl Fn(&Recorded) -> (u16, Value), log: &Mutex<Vec<Recorded>>) {
+        serve_one_when_armed(stream, handler, log, || {});
+    }
+
+    fn serve_one_when_armed(
+        mut stream: TcpStream,
+        handler: &impl Fn(&Recorded) -> (u16, Value),
+        log: &Mutex<Vec<Recorded>>,
+        on_armed: impl FnOnce(),
+    ) {
+        stream.set_nonblocking(false).expect("blocking accepted socket");
+        stream.set_read_timeout(Some(HTTP_READ_TIMEOUT)).expect("read timeout");
+        stream.set_write_timeout(Some(HTTP_READ_TIMEOUT)).expect("write timeout");
+        on_armed();
+
         let mut buf = Vec::new();
         loop {
             let mut chunk = [0_u8; 1024];
             let n = match stream.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => n,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock || err.kind() == io::ErrorKind::TimedOut => break,
                 Err(_) => break,
             };
@@ -356,16 +466,22 @@ mod tests {
     where
         H: Fn(&Recorded) -> (u16, Value) + Send + Sync,
     {
+        let log = Mutex::new(Vec::new());
+        let result = run_listener(|stream| serve_one(stream, &handler, &log), body);
+        (result, log.into_inner().expect("log"))
+    }
+
+    fn run_listener<T>(serve: impl Fn(TcpStream) + Send + Sync, body: impl FnOnce(u16) -> T) -> T {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake coordinator");
         listener.set_nonblocking(true).expect("nonblocking accept");
         let port = listener.local_addr().expect("local addr").port();
-        let log = Mutex::new(Vec::new());
         let stop = AtomicBool::new(false);
         let result = thread::scope(|scope| {
             scope.spawn(|| {
                 while !stop.load(Ordering::Relaxed) {
                     match listener.accept() {
-                        Ok((stream, _)) => serve_one(stream, &handler, &log),
+                        Ok((stream, _)) => serve(stream),
+                        Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
                         Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(5));
                         }
@@ -373,10 +489,13 @@ mod tests {
                     }
                 }
             });
-            let result = body(port);
+            // A panic inside `body` must still flip `stop`: otherwise the
+            // accept loop never leaves and `thread::scope` waits out the
+            // nextest slow-timeout instead of reporting the panic.
+            let result = panic::catch_unwind(AssertUnwindSafe(|| body(port)));
             stop.store(true, Ordering::Relaxed);
             result
         });
-        (result, log.into_inner().expect("log"))
+        result.unwrap_or_else(|payload| panic::resume_unwind(payload))
     }
 }

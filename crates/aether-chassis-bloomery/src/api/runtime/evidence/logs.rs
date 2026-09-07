@@ -62,18 +62,28 @@ impl LogQuery {
     }
 }
 
-/// Read one page. `runner` is the journalctl seam tests inject.
+/// Read one page using the real `/run/systemd/system` probe.
+/// `runner` is the journalctl invocation; production passes [`journalctl`].
 pub fn read(
     query: &str,
     runner: impl FnOnce(&[String]) -> Result<Output, LogError>,
 ) -> Result<CoordinatorLogsView, LogError> {
+    read_with(query, || Path::new(SYSTEMD_MARKER).exists(), runner)
+}
+
+/// Shared read path. `systemd_present` stands in for `/run/systemd/system`;
+/// `runner` stands in for journalctl.
+pub fn read_with(
+    query: &str,
+    systemd_present: impl FnOnce() -> bool,
+    runner: impl FnOnce(&[String]) -> Result<Output, LogError>,
+) -> Result<CoordinatorLogsView, LogError> {
     let parsed = LogQuery::parse(query).map_err(LogError::BadQuery)?;
-    if !Path::new(SYSTEMD_MARKER).exists() {
+    if !systemd_present() {
         return Err(LogError::Unavailable { reason: UNAVAILABLE.to_owned() });
     }
 
-    let argv = journalctl_argv(&parsed);
-    let output = runner(&argv)?;
+    let output = runner(&journalctl_argv(&parsed))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(LogError::Io(format!("journalctl exited {}: {stderr}", output.status)));
@@ -112,33 +122,6 @@ pub fn journalctl(argv: &[String]) -> Result<Output, LogError> {
             LogError::Io(error.to_string())
         }
     })
-}
-
-/// Filter and page an already-decoded journalctl JSONL body — the test seam
-/// that does not spawn a process.
-#[cfg(test)]
-pub fn page_entries(query: &LogQuery, jsonl: &str) -> CoordinatorLogsView {
-    let min_priority = query.level.as_deref().and_then(|level| parse_level(level).ok()).unwrap_or(7);
-    let mut entries = Vec::new();
-    for line in jsonl.lines() {
-        let Some(entry) = parse_entry(line) else {
-            continue;
-        };
-        if entry_priority(line) > min_priority {
-            continue;
-        }
-        if let Some(contains) = &query.contains
-            && !entry.message.contains(contains)
-        {
-            continue;
-        }
-        entries.push(entry);
-    }
-    let limit = usize::try_from(query.limit).unwrap_or(usize::MAX);
-    let truncated = entries.len() > limit;
-    entries.truncate(limit);
-    let next_cursor = truncated.then(|| entries.last().map(|entry| entry.cursor.clone())).flatten();
-    CoordinatorLogsView { entries, next_cursor, truncated, notice: query.notice.clone() }
 }
 
 fn journalctl_argv(query: &LogQuery) -> Vec<String> {

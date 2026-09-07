@@ -453,6 +453,26 @@ impl WidgetDefaults for MenuBarWidget {
         self.open_menu = None;
         self.highlighted_item = None;
     }
+
+    /// Restyle: adopt the fanned theme and request metrics for its font.
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
+    }
+
+    /// Focus loss closes the menu. Overrides the shared default because
+    /// `cancel_activation` cannot report the close, and an unreported close
+    /// would leave the root holding a grab for a plate nobody can see.
+    fn on_focus_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
+        self.state.lose_focus();
+        self.pressed_title = None;
+        self.dismiss().emit(ctx);
+    }
+
+    /// Leaving the bar clears the per-title hover as well as the widget's.
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+        self.state.set_hovered(false);
+        self.hovered_title = None;
+    }
 }
 
 /// A menu bar. Spawned inline by a panel root with a [`MenuBarConfig`];
@@ -520,34 +540,11 @@ impl WasmActor for MenuBarWidget {
         }
     }
 
-    /// Restyle: adopt the fanned theme and request metrics for its font.
-    #[handler::single]
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
-    }
-
     /// Install a font-metrics reply; the next `Collect` lays the titles out
     /// against their real widths.
     #[handler::single]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
-    }
-
-    /// Focus loss closes the menu. Overrides the shared default because
-    /// `cancel_activation` cannot report the close, and an unreported close
-    /// would leave the root holding a grab for a plate nobody can see.
-    #[handler::single]
-    fn on_focus_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
-        self.state.lose_focus();
-        self.pressed_title = None;
-        self.dismiss().emit(ctx);
-    }
-
-    /// Leaving the bar clears the per-title hover as well as the widget's.
-    #[handler::single]
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
-        self.state.set_hovered(false);
-        self.hovered_title = None;
     }
 
     /// While a menu is open every left press is the bar's: on an item it
