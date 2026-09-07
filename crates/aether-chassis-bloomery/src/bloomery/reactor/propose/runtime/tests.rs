@@ -7,6 +7,8 @@
 //! oracle. Publication before the receipt row remains a window; these tests
 //! do not claim exactly-once for that host effect.
 
+use std::path::{Path, PathBuf};
+use std::slice::from_ref;
 use std::sync::Mutex;
 
 use aether_bloomery::testing::digest;
@@ -94,14 +96,14 @@ fn journal_event(store: &mut SqliteStore, event: &Event) {
         .expect("the journal append lands");
 }
 
-fn file_store() -> (tempfile::TempDir, std::path::PathBuf, SqliteStore) {
+fn file_store() -> (tempfile::TempDir, PathBuf, SqliteStore) {
     let dir = tempfile::tempdir().expect("a temp dir binds");
     let path = dir.path().join("store.sqlite");
     let store = SqliteStore::open(path.to_str().expect("utf-8 path")).expect("a file store opens");
     (dir, path, store)
 }
 
-fn reopen_store(path: &std::path::Path) -> SqliteStore {
+fn reopen_store(path: &Path) -> SqliteStore {
     SqliteStore::open(path.to_str().expect("utf-8 path")).expect("the same file reopens")
 }
 
@@ -146,7 +148,7 @@ fn a_proposal_seals_without_acking_until_the_journal_confirms() {
     assert_eq!(admitted_event(&admits[0]), seal_event(&proposal, base));
     assert_eq!(
         store.outbox_results(Topic::Proposal.as_str(), sequence).expect("the result lookup succeeds").as_deref(),
-        Some(std::slice::from_ref(&seal_event(&proposal, base))),
+        Some(from_ref(&seal_event(&proposal, base))),
         "the sidecar keeps the exact Seal Event",
     );
     assert_eq!(

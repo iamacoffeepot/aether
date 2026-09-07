@@ -9,6 +9,8 @@
 
 use aether_bloomery::{Admit, Event, Topic};
 use aether_data::wire::to_vec;
+use rusqlite::ffi::{Error as SqliteFfiError, SQLITE_ERROR};
+use std::slice::from_ref;
 
 use crate::store::{OutboxEntry, StoreBackend};
 
@@ -92,7 +94,7 @@ impl<S: StoreBackend + ?Sized> TopicOutbox for S {
         }
         let mut journaled = true;
         for event in &events {
-            journaled &= self.journal_holds_any(std::slice::from_ref(&event.idempotency_key.0))?;
+            journaled &= self.journal_holds_any(from_ref(&event.idempotency_key.0))?;
         }
         if journaled {
             return Ok(OutboxResultDelivery::Journaled);
@@ -113,5 +115,5 @@ fn encode_result_admits(events: &[Event]) -> rusqlite::Result<Vec<Admit>> {
 }
 
 fn named_store_error(message: String) -> rusqlite::Error {
-    rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR), Some(message))
+    rusqlite::Error::SqliteFailure(SqliteFfiError::new(SQLITE_ERROR), Some(message))
 }

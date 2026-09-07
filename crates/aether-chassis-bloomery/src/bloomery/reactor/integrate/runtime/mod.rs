@@ -37,6 +37,7 @@
 //! reactors.
 
 use std::mem::take;
+use std::slice::from_ref;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -703,12 +704,9 @@ fn drain_and_integrate(
         };
         match fold_integration(source, &payload) {
             FoldOutcome::Resolved(event) => {
-                let Some(pending) = persist_pending_results(
-                    store,
-                    Topic::Integrate,
-                    entry.sequence,
-                    std::slice::from_ref(event.as_ref()),
-                ) else {
+                let Some(pending) =
+                    persist_pending_results(store, Topic::Integrate, entry.sequence, from_ref(event.as_ref()))
+                else {
                     break;
                 };
                 admits.extend(pending);
@@ -739,8 +737,7 @@ fn drain_and_integrate(
                     "integration refused definitively; persisting the refusal until the journal holds it",
                 );
                 let event = fold_refused_event(BloomId(payload.bloom), &refusal);
-                let Some(pending) =
-                    persist_pending_results(store, Topic::Integrate, entry.sequence, std::slice::from_ref(&event))
+                let Some(pending) = persist_pending_results(store, Topic::Integrate, entry.sequence, from_ref(&event))
                 else {
                     break;
                 };
@@ -801,7 +798,7 @@ fn drain_and_splice(
         match fold_splice(source, &payload) {
             FoldOutcome::Resolved(event) => {
                 let Some(pending) =
-                    persist_pending_results(store, Topic::Splice, entry.sequence, std::slice::from_ref(event.as_ref()))
+                    persist_pending_results(store, Topic::Splice, entry.sequence, from_ref(event.as_ref()))
                 else {
                     break;
                 };
@@ -833,8 +830,7 @@ fn drain_and_splice(
                     "splice refused definitively; persisting the refusal until the journal holds it",
                 );
                 let event = fold_refused_event(BloomId(payload.bloom), &refusal);
-                let Some(pending) =
-                    persist_pending_results(store, Topic::Splice, entry.sequence, std::slice::from_ref(&event))
+                let Some(pending) = persist_pending_results(store, Topic::Splice, entry.sequence, from_ref(&event))
                 else {
                     break;
                 };

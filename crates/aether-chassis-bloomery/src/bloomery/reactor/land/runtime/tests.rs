@@ -6,6 +6,7 @@
 //! the structural gates hold, and admits the `Fact::Land` it then observes.
 
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aether_bloomery::testing::{claim, digest, draft, event as decided_event, membership as member_of};
@@ -1129,14 +1130,14 @@ fn journal_event(store: &mut SqliteStore, event: &Event) -> AppendOutcome {
         .unwrap()
 }
 
-fn file_store() -> (tempfile::TempDir, std::path::PathBuf, SqliteStore) {
+fn file_store() -> (tempfile::TempDir, PathBuf, SqliteStore) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let store = SqliteStore::open(path.to_str().unwrap()).unwrap();
     (dir, path, store)
 }
 
-fn reopen_store(path: &std::path::Path) -> SqliteStore {
+fn reopen_store(path: &Path) -> SqliteStore {
     SqliteStore::open(path.to_str().unwrap()).unwrap()
 }
 

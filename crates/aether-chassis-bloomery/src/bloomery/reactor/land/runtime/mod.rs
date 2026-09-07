@@ -371,6 +371,89 @@ fn landed(bloom: &BloomId, payload: &LandPayload, new_head: Digest) -> Result<Wa
         .map_err(|error| SourceError::Malformed(format!("land event did not encode: {error}")))
 }
 
+/// Fold one watched proposal into the drain loop. `true` stops the ack prefix
+/// so a later row cannot skip this entry. `false` means the row is a no-receipt
+/// `Declined` and the caller should ack and continue.
+fn fold_watched_land(
+    store: &mut SqliteStore,
+    source: &dyn LandingSource,
+    sequence: u64,
+    bloom: &BloomId,
+    payload: &LandPayload,
+    number: u64,
+    admits: &mut Vec<Admit>,
+) -> rusqlite::Result<bool> {
+    match watch_proposal(source, bloom, payload, number) {
+        Ok(Watched::Landed { admit, new_head }) => {
+            mark_member_commissions_landed(store, bloom);
+            record_landed_candidate_hashes(store, bloom);
+            close_member_source_issues(store, source, bloom, &payload.expected_base, &new_head);
+            // External merge is observed; the receipt is not durable
+            // until the journal holds `land_key`. Hold the prefix and
+            // return the idempotent Admit so a miss or restart resends.
+            admits.push(admit);
+            Ok(true)
+        }
+        Ok(Watched::Rejected { admit, cause, findings }) => {
+            // Persist the findings on the bloom row before the sidecar,
+            // so the repair dispatch the admit triggers finds them
+            // already there. The empty workpiece key is the
+            // bloom-scope row a failing aggregate verdict uses, and
+            // every re-opened member reads it.
+            store.record_review_findings(payload.bloom.as_bytes(), "", &findings)?;
+            tracing::warn!(
+                target: "aether_chassis_bloomery::land",
+                sequence,
+                number,
+                %cause,
+                "the landing was refused; routing the bloom back into the line",
+            );
+            let Ok(event) = from_bytes::<Event>(&admit.event) else {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::land",
+                    sequence,
+                    "landing rejection did not decode for persistence; leaving the entry durable",
+                );
+                return Ok(true);
+            };
+            store.record_topic_results(Topic::Land, sequence, &[event])?;
+            admits.push(admit);
+            Ok(true)
+        }
+        Ok(Watched::Declined(why)) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::land",
+                sequence,
+                number,
+                %why,
+                "the landing did not proceed; the resolved bloom stays supersedable",
+            );
+            Ok(false)
+        }
+        // Still open: leave the entry unacked so it re-drains next
+        // tick. The outbox *is* the watch — durable already, and
+        // replayed after a crash — and issuing a land is idempotent,
+        // so the redrive adopts the same proposal rather than
+        // opening another. No second table to keep in step.
+        //
+        // An open proposal holds the ack prefix, which parks any
+        // later land entry behind it. That matches the invariant
+        // rather than fighting it: V1 permits one sealed, unlanded
+        // bloom per mainline, so there is at most one to park.
+        Ok(Watched::Open) => Ok(true),
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::land",
+                sequence,
+                number,
+                %error,
+                "land watch failed; stopping the ack prefix to re-drive",
+            );
+            Ok(true)
+        }
+    }
+}
+
 /// Drain the land topic and issue each entry's compare-and-swap, returning the
 /// [`Admit`]s to forward to the control core (one per landed bloom whose journal
 /// key is not yet present, or a persisted rejection still awaiting journal
@@ -458,75 +541,10 @@ fn drain_and_land_emitting(
         let assembled = proposal::assemble(store, &bloom)?;
         match source.land_proposal(&bloom, &payload.expected_base, &payload.new_head, Some(&assembled)) {
             Ok(ProposalOutcome::Proposed { number }) => {
-                match watch_proposal(source, &bloom, &payload, number) {
-                    Ok(Watched::Landed { admit, new_head }) => {
-                        mark_member_commissions_landed(store, &bloom);
-                        record_landed_candidate_hashes(store, &bloom);
-                        close_member_source_issues(store, source, &bloom, &payload.expected_base, &new_head);
-                        // External merge is observed; the receipt is not durable
-                        // until the journal holds `land_key`. Hold the prefix and
-                        // return the idempotent Admit so a miss or restart resends.
-                        admits.push(admit);
-                        break;
-                    }
-                    Ok(Watched::Rejected { admit, cause, findings }) => {
-                        // Persist the findings on the bloom row before the ack,
-                        // so the repair dispatch the admit triggers finds them
-                        // already there. The empty workpiece key is the
-                        // bloom-scope row a failing aggregate verdict uses, and
-                        // every re-opened member reads it.
-                        store.record_review_findings(payload.bloom.as_bytes(), "", &findings)?;
-                        tracing::warn!(
-                            target: "aether_chassis_bloomery::land",
-                            sequence = entry.sequence,
-                            number,
-                            %cause,
-                            "the landing was refused; routing the bloom back into the line",
-                        );
-                        let Ok(event) = from_bytes::<Event>(&admit.event) else {
-                            tracing::warn!(
-                                target: "aether_chassis_bloomery::land",
-                                sequence = entry.sequence,
-                                "landing rejection did not decode for persistence; leaving the entry durable",
-                            );
-                            break;
-                        };
-                        store.record_topic_results(Topic::Land, entry.sequence, &[event])?;
-                        admits.push(admit);
-                        break;
-                    }
-                    Ok(Watched::Declined(why)) => {
-                        tracing::warn!(
-                            target: "aether_chassis_bloomery::land",
-                            sequence = entry.sequence,
-                            number,
-                            %why,
-                            "the landing did not proceed; the resolved bloom stays supersedable",
-                        );
-                        ack_through = Some(entry.sequence);
-                    }
-                    // Still open: leave the entry unacked so it re-drains next
-                    // tick. The outbox *is* the watch — durable already, and
-                    // replayed after a crash — and issuing a land is idempotent,
-                    // so the redrive adopts the same proposal rather than
-                    // opening another. No second table to keep in step.
-                    //
-                    // An open proposal holds the ack prefix, which parks any
-                    // later land entry behind it. That matches the invariant
-                    // rather than fighting it: V1 permits one sealed, unlanded
-                    // bloom per mainline, so there is at most one to park.
-                    Ok(Watched::Open) => break,
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "aether_chassis_bloomery::land",
-                            sequence = entry.sequence,
-                            number,
-                            %error,
-                            "land watch failed; stopping the ack prefix to re-drive",
-                        );
-                        break;
-                    }
+                if fold_watched_land(store, source, entry.sequence, &bloom, &payload, number, &mut admits)? {
+                    break;
                 }
+                ack_through = Some(entry.sequence);
             }
             Ok(ProposalOutcome::BaseMoved { .. }) => {
                 // A moved mainline forces supersession, never a land onto the new

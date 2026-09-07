@@ -15,6 +15,7 @@
 //! External publication before receipt persistence is still a window; this is
 //! not atomic exactly-once. A recorded receipt is never republished.
 
+use std::slice::from_ref;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -98,6 +99,101 @@ fn seal_event(proposal: &OperatorProposal, base: Digest) -> Event {
     Event { idempotency_key: seal_key(proposal), fact: Fact::Seal(proposal_spec(proposal, base)) }
 }
 
+fn seal_unrecorded(
+    store: &mut dyn StoreBackend,
+    correspondence: &dyn Correspondence,
+    pusher: &dyn CandidatePush,
+    publish_candidate: bool,
+    sequence: u64,
+    payload: &[u8],
+) -> Option<Admit> {
+    let Ok(payload) = from_bytes::<ProposalPayload>(payload) else {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::propose",
+            sequence,
+            "proposal outbox entry did not decode; stopping the ack prefix to re-drain",
+        );
+        return None;
+    };
+    let bytes = match to_vec(&payload.proposal) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::propose",
+                sequence,
+                %error,
+                "proposal did not encode; stopping the ack prefix to re-drain",
+            );
+            return None;
+        }
+    };
+    let address = payload.proposal.address();
+    if let Err(error) = store.record_config(address.as_bytes(), OperatorProposal::NAME, &bytes) {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::propose",
+            sequence,
+            %error,
+            "proposal config write failed; stopping the ack prefix to re-drive",
+        );
+        return None;
+    }
+    let spec = proposal_spec(&payload.proposal, payload.base);
+    let bloom = spec.id();
+    let object = match correspondence.resolve_backend_object(&payload.proposal.candidate.checkout) {
+        Ok(Some(object)) => object,
+        Ok(None) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::propose",
+                sequence,
+                "proposal checkout has no correspondence; stopping the ack prefix to re-drive",
+            );
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::propose",
+                sequence,
+                %error,
+                "proposal correspondence lookup failed; stopping the ack prefix to re-drive",
+            );
+            return None;
+        }
+    };
+    if publish_candidate
+        && let Err(error) = push_candidate(pusher, &bloom, WorkpieceId::COMPOSITION, &encode_hex(object.as_bytes()))
+    {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::propose",
+            sequence,
+            %error,
+            "proposal candidate push failed; stopping the ack prefix to re-drive",
+        );
+        return None;
+    }
+    let event = seal_event(&payload.proposal, payload.base);
+    if let Err(error) = store.record_topic_results(Topic::Proposal, sequence, from_ref(&event)) {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::propose",
+            sequence,
+            %error,
+            "proposal result did not persist; leaving the entry undelivered",
+        );
+        return None;
+    }
+    match to_vec(&event) {
+        Ok(bytes) => Some(Admit { event: bytes }),
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::propose",
+                sequence,
+                %error,
+                "proposal seal did not encode; leaving the entry undelivered",
+            );
+            None
+        }
+    }
+}
+
 /// Drain the proposal topic and admit each memberless seal, returning the
 /// [`Admit`]s to forward and the highest journal-confirmed outbox sequence to
 /// ack (`None` when nothing is journal-confirmed). Replay inspects a persisted
@@ -139,94 +235,13 @@ pub(super) fn drain_and_seal(
                 break;
             }
         }
-        let Ok(payload) = from_bytes::<ProposalPayload>(&entry.payload) else {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::propose",
-                sequence = entry.sequence,
-                "proposal outbox entry did not decode; stopping the ack prefix to re-drain",
-            );
+        let Some(admit) =
+            seal_unrecorded(store, correspondence, pusher, publish_candidate, entry.sequence, &entry.payload)
+        else {
             break;
         };
-        let bytes = match to_vec(&payload.proposal) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::propose",
-                    sequence = entry.sequence,
-                    %error,
-                    "proposal did not encode; stopping the ack prefix to re-drain",
-                );
-                break;
-            }
-        };
-        let address = payload.proposal.address();
-        if let Err(error) = store.record_config(address.as_bytes(), OperatorProposal::NAME, &bytes) {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::propose",
-                sequence = entry.sequence,
-                %error,
-                "proposal config write failed; stopping the ack prefix to re-drive",
-            );
-            break;
-        }
-        let spec = proposal_spec(&payload.proposal, payload.base);
-        let bloom = spec.id();
-        let object = match correspondence.resolve_backend_object(&payload.proposal.candidate.checkout) {
-            Ok(Some(object)) => object,
-            Ok(None) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::propose",
-                    sequence = entry.sequence,
-                    "proposal checkout has no correspondence; stopping the ack prefix to re-drive",
-                );
-                break;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::propose",
-                    sequence = entry.sequence,
-                    %error,
-                    "proposal correspondence lookup failed; stopping the ack prefix to re-drive",
-                );
-                break;
-            }
-        };
-        if publish_candidate
-            && let Err(error) = push_candidate(pusher, &bloom, WorkpieceId::COMPOSITION, &encode_hex(object.as_bytes()))
-        {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::propose",
-                sequence = entry.sequence,
-                %error,
-                "proposal candidate push failed; stopping the ack prefix to re-drive",
-            );
-            break;
-        }
-        let event = seal_event(&payload.proposal, payload.base);
-        if let Err(error) = store.record_topic_results(Topic::Proposal, entry.sequence, std::slice::from_ref(&event)) {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::propose",
-                sequence = entry.sequence,
-                %error,
-                "proposal result did not persist; leaving the entry undelivered",
-            );
-            break;
-        }
-        match to_vec(&event) {
-            Ok(bytes) => {
-                admits.push(Admit { event: bytes });
-                break;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::propose",
-                    sequence = entry.sequence,
-                    %error,
-                    "proposal seal did not encode; leaving the entry undelivered",
-                );
-                break;
-            }
-        }
+        admits.push(admit);
+        break;
     }
     Ok((admits, ack_through))
 }

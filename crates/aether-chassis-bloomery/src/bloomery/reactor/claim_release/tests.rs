@@ -10,6 +10,8 @@
 //! completion is the third pin: a recorded `Changed` or `Released` must keep
 //! that variant even after the source holder has moved.
 
+use std::path::{Path, PathBuf};
+use std::slice::from_ref;
 use std::sync::Arc;
 
 use aether_bloomery::testing::{digest, workpiece};
@@ -80,14 +82,14 @@ fn journal_event(store: &mut SqliteStore, event: &Event) -> AppendOutcome {
         .expect("the journal append lands")
 }
 
-fn file_store() -> (tempfile::TempDir, std::path::PathBuf, SqliteStore) {
+fn file_store() -> (tempfile::TempDir, PathBuf, SqliteStore) {
     let dir = tempfile::tempdir().expect("a temp dir binds");
     let path = dir.path().join("store.sqlite");
     let store = SqliteStore::open(path.to_str().expect("utf-8 path")).expect("a file store opens");
     (dir, path, store)
 }
 
-fn reopen_store(path: &std::path::Path) -> SqliteStore {
+fn reopen_store(path: &Path) -> SqliteStore {
     SqliteStore::open(path.to_str().expect("utf-8 path")).expect("the same file reopens")
 }
 
@@ -191,10 +193,7 @@ fn a_changed_receipt_survives_the_expected_holder_reacquiring_the_ref() {
     let (authorized, live) = (bloom(7), bloom(9));
     let held = workpiece("wp-live");
     let ref_kind = ClaimRefKind::Workpiece(held.clone());
-    assert_eq!(
-        source.claim_seal(&live, std::slice::from_ref(&held)).expect("the acquire succeeds"),
-        ClaimOutcome::Acquired
-    );
+    assert_eq!(source.claim_seal(&live, from_ref(&held)).expect("the acquire succeeds"), ClaimOutcome::Acquired);
 
     let (_dir, path, mut store) = file_store();
     let target = OrphanClaimRelease { ref_kind: ref_kind.clone(), expected_holder: authorized };
@@ -210,9 +209,7 @@ fn a_changed_receipt_survives_the_expected_holder_reacquiring_the_ref() {
     drop(store);
 
     assert_eq!(
-        source
-            .transfer_seal(&live, &authorized, std::slice::from_ref(&held), &[], &[])
-            .expect("the expected holder reacquires"),
+        source.transfer_seal(&live, &authorized, from_ref(&held), &[], &[]).expect("the expected holder reacquires"),
         ClaimOutcome::Acquired
     );
     assert_eq!(holder_of(&source, &ref_kind), Some(ClaimHolder::Held(authorized)));
@@ -242,10 +239,7 @@ fn a_released_receipt_stays_released_after_another_holder_appears() {
     let (orphan, other) = (bloom(7), bloom(9));
     let held = workpiece("wp-released");
     let ref_kind = ClaimRefKind::Workpiece(held.clone());
-    assert_eq!(
-        source.claim_seal(&orphan, std::slice::from_ref(&held)).expect("the acquire succeeds"),
-        ClaimOutcome::Acquired
-    );
+    assert_eq!(source.claim_seal(&orphan, from_ref(&held)).expect("the acquire succeeds"), ClaimOutcome::Acquired);
 
     let (_dir, path, mut store) = file_store();
     let target = OrphanClaimRelease { ref_kind: ref_kind.clone(), expected_holder: orphan };
@@ -283,11 +277,11 @@ fn a_pending_prior_release_blocks_a_later_entry() {
     let (first_wp, second_wp) = (workpiece("wp-a"), workpiece("wp-b"));
     fake.seed_claim_hold(&format!("bloomery/claims/{}", first_wp.0), &first_holder);
     fake.seed_claim_hold(&format!("bloomery/claims/{}", second_wp.0), &second_holder);
-    let first_kind = ClaimRefKind::Workpiece(first_wp.clone());
-    let second_kind = ClaimRefKind::Workpiece(second_wp.clone());
+    let first_kind = ClaimRefKind::Workpiece(first_wp);
+    let second_kind = ClaimRefKind::Workpiece(second_wp);
 
     let (_dir, path, mut store) = file_store();
-    let first_target = OrphanClaimRelease { ref_kind: first_kind.clone(), expected_holder: first_holder };
+    let first_target = OrphanClaimRelease { ref_kind: first_kind, expected_holder: first_holder };
     let second_target = OrphanClaimRelease { ref_kind: second_kind.clone(), expected_holder: second_holder };
     enqueue_release(&mut store, &first_target);
     enqueue_release(&mut store, &second_target);
@@ -315,10 +309,7 @@ fn a_journaled_release_acks_without_calling_the_source() {
     let orphan = bloom(7);
     let held = workpiece("wp-acked");
     let ref_kind = ClaimRefKind::Workpiece(held.clone());
-    assert_eq!(
-        source.claim_seal(&orphan, std::slice::from_ref(&held)).expect("the acquire succeeds"),
-        ClaimOutcome::Acquired
-    );
+    assert_eq!(source.claim_seal(&orphan, from_ref(&held)).expect("the acquire succeeds"), ClaimOutcome::Acquired);
 
     let (_dir, path, mut store) = file_store();
     let target = OrphanClaimRelease { ref_kind: ref_kind.clone(), expected_holder: orphan };
