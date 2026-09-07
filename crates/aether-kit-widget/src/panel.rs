@@ -184,6 +184,8 @@ pub struct WidgetPanel {
     scroll_focus: Focus,
     children: Vec<ChildRef>,
     spawned: bool,
+    /// A live `SetTheme` or resolved `LoadFontResult` arrived before children existed.
+    pending_style: bool,
     /// The total stack height, for the background chrome; set at spawn.
     panel_height: f32,
     /// Latest modifier state, used by panel-owned forward/reverse Tab routing.
@@ -246,6 +248,12 @@ impl WidgetPanel {
         }
 
         self.panel_height = y - self.config.y;
+        // Replay only a live update that beat the first Tick. Spawning with no such
+        // update must keep each child's own config theme.
+        if self.pending_style {
+            self.fan_theme(ctx);
+            self.pending_style = false;
+        }
     }
 
     /// Record one spawned child's rect into the composite (as its draw offset,
@@ -309,9 +317,20 @@ impl WidgetPanel {
     }
 
     /// Re-fan the live theme to every child (after a font stamp or a restyle).
-    fn fan_theme(&self, ctx: &mut WasmCtx<'_>) {
+    fn fan_theme<M: aether_actor::ReplyMode>(&self, ctx: &mut WasmCtx<'_, M>) {
         for child in &self.children {
             ctx.send_to(child.id, &SetTheme { theme: self.theme.clone() });
+        }
+    }
+
+    /// Adopt a live style change now, and either fan it immediately or keep it
+    /// until the first successful spawn so the FIFO drain applies it before Collect.
+    fn retain_or_fan_theme<M: aether_actor::ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, M>) {
+        if self.spawned {
+            self.fan_theme(ctx);
+            self.pending_style = false;
+        } else {
+            self.pending_style = true;
         }
     }
 
@@ -1124,6 +1143,7 @@ impl WasmActor for WidgetPanel {
             scroll_focus: Focus::new(),
             children: Vec::new(),
             spawned: false,
+            pending_style: false,
             panel_height: 0.0,
             modifiers: Modifiers::default(),
         })
@@ -1597,7 +1617,7 @@ impl WasmActor for WidgetPanel {
         match result {
             LoadFontResult::Ok { font_id, .. } => {
                 self.theme.font_id = font_id;
-                self.fan_theme(ctx);
+                self.retain_or_fan_theme(ctx);
             }
             LoadFontResult::Err { error, .. } => {
                 tracing::warn!(target: "aether_kit_widget", %error, "panel font load failed");
@@ -1609,7 +1629,7 @@ impl WasmActor for WidgetPanel {
     #[handler::single]
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
         self.theme = set.theme;
-        self.fan_theme(ctx);
+        self.retain_or_fan_theme(ctx);
     }
 }
 
