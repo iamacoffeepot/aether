@@ -105,10 +105,10 @@ async fn capture_frame_bad_bundle_is_tool_error() {
     let mcp = connect_mcp(port);
     let result = mcp
         .capture_frame(Parameters(CaptureFrameArgs {
-            engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+            engine_id: Some("00000000-0000-0000-0000-000000000001".to_owned()),
             window_id: "1".to_owned(),
             mails: vec![EngineMailSpec {
-                recipient_name: "aether.render".to_owned(),
+                address: "aether.render".to_owned(),
                 kind_name: "not.a.real.kind".to_owned(),
                 params: None,
             }],
@@ -133,7 +133,7 @@ async fn capture_frame_relative_save_path_is_tool_error() {
     let mcp = connect_mcp(port);
     let result = mcp
         .capture_frame(Parameters(CaptureFrameArgs {
-            engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+            engine_id: Some("00000000-0000-0000-0000-000000000001".to_owned()),
             window_id: "1".to_owned(),
             mails: vec![],
             after_mails: vec![],
@@ -331,10 +331,12 @@ fn capture_frame_schema_requires_exactly_the_non_defaulted_fields() {
         .map(|items| items.iter().filter_map(|i| i.as_str().map(str::to_owned)).collect())
         .unwrap_or_default();
 
-    // `engine_id` and `window_id` are the two fields `CaptureFrameArgs`
-    // declares without `#[serde(default)]`; every other field defaults, so a
-    // caller may omit it.
-    let expected: BTreeSet<String> = ["engine_id".to_owned(), "window_id".to_owned()].into_iter().collect();
+    // `window_id` is the one field `CaptureFrameArgs` declares without
+    // `#[serde(default)]`; every other field defaults, so a caller may omit
+    // it. `engine_id` defaults too — the shared engine resolver supplies the
+    // sole supervised engine and errors when that is ambiguous, so capture
+    // never guesses a window's engine any more than it guesses a window.
+    let expected: BTreeSet<String> = ["window_id".to_owned()].into_iter().collect();
 
     assert_eq!(
         required, expected,

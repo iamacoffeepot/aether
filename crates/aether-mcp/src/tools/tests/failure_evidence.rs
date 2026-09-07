@@ -13,7 +13,6 @@ use crate::args::{
 };
 
 const ENGINE_ID: &str = "abcdefab-cdef-4abc-8def-abcdefabcdef";
-const UPPERCASE_ENGINE_ID: &str = "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF";
 
 struct FakeReply {
     delay: Duration,
@@ -56,11 +55,11 @@ fn delayed_json_reply(delay: Duration, value: serde_json::Value) -> FakeReply {
 
 fn args() -> CollectFailureEvidenceArgs {
     CollectFailureEvidenceArgs {
-        engine_id: ENGINE_ID.into(),
+        engine_id: Some(ENGINE_ID.into()),
         primary_error: "original send failed".into(),
         operation: Some("send_mail".into()),
-        actors: Vec::new(),
-        components: Vec::new(),
+        actor_addresses: Vec::new(),
+        component_addresses: Vec::new(),
         kinds: Vec::new(),
         frame: None,
     }
@@ -76,6 +75,7 @@ fn result_json(result: &CallToolResult) -> serde_json::Value {
 async fn assert_invalid_without_observations(request: CollectFailureEvidenceArgs, expected: &str) {
     let mut source = FakeSource::default();
     let error = collect_failure_evidence_with_source(
+        ENGINE_ID.to_owned(),
         request,
         &mut source,
         Duration::from_millis(10),
@@ -89,10 +89,6 @@ async fn assert_invalid_without_observations(request: CollectFailureEvidenceArgs
 
 #[tokio::test]
 async fn invalid_and_oversized_requests_make_no_observations() {
-    let mut request = args();
-    request.engine_id = "not-a-uuid".into();
-    assert_invalid_without_observations(request, "valid UUID").await;
-
     let mut request = args();
     request.primary_error = "   ".into();
     assert_invalid_without_observations(request, "primary_error must not be empty").await;
@@ -110,40 +106,42 @@ async fn invalid_and_oversized_requests_make_no_observations() {
     assert_invalid_without_observations(request, "operation exceeds").await;
 
     for (field, count) in [
-        ("actors", MAX_FAILURE_EVIDENCE_ACTORS),
-        ("components", MAX_FAILURE_EVIDENCE_COMPONENTS),
+        ("actor_addresses", MAX_FAILURE_EVIDENCE_ACTORS),
+        ("component_addresses", MAX_FAILURE_EVIDENCE_COMPONENTS),
         ("kinds", MAX_FAILURE_EVIDENCE_KINDS),
     ] {
         let values = (0..=count).map(|index| format!("selector-{index}")).collect();
         let mut request = args();
         match field {
-            "actors" => request.actors = values,
-            "components" => request.components = values,
+            "actor_addresses" => request.actor_addresses = values,
+            "component_addresses" => request.component_addresses = values,
             "kinds" => request.kinds = values,
             _ => unreachable!(),
         }
         assert_invalid_without_observations(request, &format!("at most {count} {field}")).await;
     }
 
-    for field in ["actors", "components", "kinds"] {
+    for field in ["actor_addresses", "component_addresses", "kinds"] {
         let mut request = args();
         match field {
-            "actors" => request.actors = vec![" ".into()],
-            "components" => request.components = vec![" ".into()],
+            "actor_addresses" => request.actor_addresses = vec![" ".into()],
+            "component_addresses" => request.component_addresses = vec![" ".into()],
             "kinds" => request.kinds = vec![" ".into()],
             _ => unreachable!(),
         }
         assert_invalid_without_observations(request, &format!("{field}[0] must not be empty")).await;
     }
 
-    for (field, max_bytes) in
-        [("actors", MAX_ADDRESS_BYTES), ("components", MAX_ADDRESS_BYTES), ("kinds", MAX_KIND_NAME_BYTES)]
-    {
+    for (field, max_bytes) in [
+        ("actor_addresses", MAX_ADDRESS_BYTES),
+        ("component_addresses", MAX_ADDRESS_BYTES),
+        ("kinds", MAX_KIND_NAME_BYTES),
+    ] {
         let mut request = args();
         let values = vec!["x".repeat(max_bytes + 1)];
         match field {
-            "actors" => request.actors = values,
-            "components" => request.components = values,
+            "actor_addresses" => request.actor_addresses = values,
+            "component_addresses" => request.component_addresses = values,
             "kinds" => request.kinds = values,
             _ => unreachable!(),
         }
@@ -176,8 +174,8 @@ fn exact_string_and_frame_boundaries_are_accepted() {
     let mut request = args();
     request.primary_error = "e".repeat(MAX_PRIMARY_ERROR_BYTES);
     request.operation = Some("o".repeat(MAX_OPERATION_BYTES));
-    request.actors = vec!["a".repeat(MAX_ADDRESS_BYTES)];
-    request.components = vec!["c".repeat(MAX_ADDRESS_BYTES)];
+    request.actor_addresses = vec!["a".repeat(MAX_ADDRESS_BYTES)];
+    request.component_addresses = vec!["c".repeat(MAX_ADDRESS_BYTES)];
     request.kinds = vec!["k".repeat(MAX_KIND_NAME_BYTES)];
     request.frame = Some(FailureEvidenceFrameArgs {
         window_id: "17".into(),
@@ -196,14 +194,19 @@ fn exact_string_and_frame_boundaries_are_accepted() {
 async fn selectors_are_sorted_deduplicated_and_forwarded_exactly() {
     let mut request = args();
     request.kinds = vec!["z.kind".into(), "a.kind".into(), "a.kind".into()];
-    request.components = vec!["component/z".into(), "component/a".into(), "component/a".into()];
-    request.actors = vec!["actor/z".into(), "actor/a".into(), "actor/a".into()];
+    request.component_addresses = vec!["component/z".into(), "component/a".into(), "component/a".into()];
+    request.actor_addresses = vec!["actor/z".into(), "actor/a".into(), "actor/a".into()];
     let mut source = FakeSource::with_replies((0..8).map(|index| json_reply(serde_json::json!({"call": index}))));
 
-    let result =
-        collect_failure_evidence_with_source(request, &mut source, Duration::from_millis(50), Duration::from_secs(1))
-            .await
-            .expect("collection succeeds");
+    let result = collect_failure_evidence_with_source(
+        ENGINE_ID.to_owned(),
+        request,
+        &mut source,
+        Duration::from_millis(50),
+        Duration::from_secs(1),
+    )
+    .await
+    .expect("collection succeeds");
 
     assert_eq!(source.calls[0], FailureEvidenceQuery::Fleet { engine_id: ENGINE_ID.into() });
     assert_eq!(
@@ -212,54 +215,62 @@ async fn selectors_are_sorted_deduplicated_and_forwarded_exactly() {
     );
     assert_eq!(
         source.calls[2],
-        FailureEvidenceQuery::Component { engine_id: ENGINE_ID.into(), component: "component/a".into() }
+        FailureEvidenceQuery::Component { engine_id: ENGINE_ID.into(), address: "component/a".into() }
     );
     assert_eq!(
         source.calls[3],
-        FailureEvidenceQuery::Component { engine_id: ENGINE_ID.into(), component: "component/z".into() }
+        FailureEvidenceQuery::Component { engine_id: ENGINE_ID.into(), address: "component/z".into() }
     );
     assert_eq!(
         source.calls[4],
         FailureEvidenceQuery::ActorLogs {
             engine_id: ENGINE_ID.into(),
-            mailbox_name: "actor/a".into(),
+            address: "actor/a".into(),
             max: FAILURE_EVIDENCE_LOG_ENTRIES,
         }
     );
     assert_eq!(
         source.calls[5],
-        FailureEvidenceQuery::ActorCost { engine_id: ENGINE_ID.into(), mailbox_name: "actor/a".into() }
+        FailureEvidenceQuery::ActorCost { engine_id: ENGINE_ID.into(), address: "actor/a".into() }
     );
     assert_eq!(
         source.calls[6],
         FailureEvidenceQuery::ActorLogs {
             engine_id: ENGINE_ID.into(),
-            mailbox_name: "actor/z".into(),
+            address: "actor/z".into(),
             max: FAILURE_EVIDENCE_LOG_ENTRIES,
         }
     );
     assert_eq!(
         source.calls[7],
-        FailureEvidenceQuery::ActorCost { engine_id: ENGINE_ID.into(), mailbox_name: "actor/z".into() }
+        FailureEvidenceQuery::ActorCost { engine_id: ENGINE_ID.into(), address: "actor/z".into() }
     );
 
     let json = result_json(&result);
     assert_eq!(json["primary_error"], "original send failed");
-    assert_eq!(json["components"][0]["selector"], "component/a");
-    assert_eq!(json["actors"][0]["mailbox_name"], "actor/a");
+    assert_eq!(json["components"][0]["address"], "component/a");
+    assert_eq!(json["actors"][0]["address"], "actor/a");
     assert_eq!(json["limits"]["actor_log_entries"], 100);
 }
 
+/// The resolved engine id — canonicalized by the shared engine resolver, so
+/// an uppercase caller spelling arrives lowercased — reaches every query and
+/// the bundle unchanged. A canonicalization that stopped short of one of them
+/// would make the bundle's rows unmatchable against its own fleet row.
 #[tokio::test]
-async fn engine_id_is_canonicalized_before_queries_and_output() {
-    let mut request = args();
-    request.engine_id = UPPERCASE_ENGINE_ID.into();
+async fn the_resolved_engine_id_reaches_every_query_and_the_bundle() {
+    let request = args();
     let mut source = FakeSource::with_replies([json_reply(serde_json::json!({"alive": []}))]);
 
-    let result =
-        collect_failure_evidence_with_source(request, &mut source, Duration::from_millis(50), Duration::from_secs(1))
-            .await
-            .expect("uppercase UUID spelling is valid");
+    let result = collect_failure_evidence_with_source(
+        ENGINE_ID.to_owned(),
+        request,
+        &mut source,
+        Duration::from_millis(50),
+        Duration::from_secs(1),
+    )
+    .await
+    .expect("collection succeeds");
 
     assert_eq!(source.calls, vec![FailureEvidenceQuery::Fleet { engine_id: ENGINE_ID.into() }]);
     assert_eq!(result_json(&result)["engine_id"], ENGINE_ID);
@@ -277,7 +288,7 @@ async fn engine_id_is_canonicalized_before_queries_and_output() {
 #[tokio::test]
 async fn partial_errors_and_timeouts_do_not_stop_later_observations() {
     let mut request = args();
-    request.components = vec!["slow".into(), "later".into()];
+    request.component_addresses = vec!["slow".into(), "later".into()];
     let mut source = FakeSource::with_replies([
         FakeReply { delay: Duration::ZERO, result: Err("fleet unavailable".into()) },
         delayed_json_reply(Duration::from_millis(30), serde_json::json!({"too": "late"})),
@@ -285,6 +296,7 @@ async fn partial_errors_and_timeouts_do_not_stop_later_observations() {
     ]);
 
     let result = collect_failure_evidence_with_source(
+        ENGINE_ID.to_owned(),
         request,
         &mut source,
         Duration::from_millis(10),
@@ -303,15 +315,20 @@ async fn partial_errors_and_timeouts_do_not_stop_later_observations() {
 #[tokio::test]
 async fn whole_budget_marks_remaining_fields_without_starting_them() {
     let mut request = args();
-    request.components = vec!["never-started".into()];
-    request.actors = vec!["also-never-started".into()];
+    request.component_addresses = vec!["never-started".into()];
+    request.actor_addresses = vec!["also-never-started".into()];
     let mut source =
         FakeSource::with_replies([delayed_json_reply(Duration::from_millis(50), serde_json::json!({"too": "late"}))]);
 
-    let result =
-        collect_failure_evidence_with_source(request, &mut source, Duration::from_secs(1), Duration::from_millis(10))
-            .await
-            .expect("budget exhaustion is bundle data");
+    let result = collect_failure_evidence_with_source(
+        ENGINE_ID.to_owned(),
+        request,
+        &mut source,
+        Duration::from_secs(1),
+        Duration::from_millis(10),
+    )
+    .await
+    .expect("budget exhaustion is bundle data");
     let json = result_json(&result);
 
     assert_eq!(json["fleet"]["status"], "budget_exhausted");
@@ -371,7 +388,7 @@ fn oversized_json_uses_the_whole_response_spill_before_images() {
 fn frame_argument_builder_forbids_mutation_checks_and_host_writes() {
     let capture = failure_evidence_capture_args(ENGINE_ID.into(), "mbx-AAAA-AAAA-AAAA".into(), Some(0.5), Some(320));
 
-    assert_eq!(capture.engine_id, ENGINE_ID);
+    assert_eq!(capture.engine_id.as_deref(), Some(ENGINE_ID));
     assert_eq!(capture.window_id, "mbx-AAAA-AAAA-AAAA");
     assert!(capture.mails.is_empty());
     assert!(capture.after_mails.is_empty());
@@ -421,10 +438,15 @@ async fn multiple_frame_images_are_recorded_as_an_error_and_not_emitted() {
         },
     ]);
 
-    let result =
-        collect_failure_evidence_with_source(request, &mut source, Duration::from_millis(50), Duration::from_secs(1))
-            .await
-            .expect("capture cardinality failures are bundle data");
+    let result = collect_failure_evidence_with_source(
+        ENGINE_ID.to_owned(),
+        request,
+        &mut source,
+        Duration::from_millis(50),
+        Duration::from_secs(1),
+    )
+    .await
+    .expect("capture cardinality failures are bundle data");
 
     assert_eq!(result.content.len(), 1, "invalid image blocks never escape after the JSON bundle");
     assert_eq!(result_json(&result)["frame"]["observation"]["status"], "error");
@@ -451,10 +473,15 @@ async fn frame_is_non_mutating_and_json_precedes_the_inline_png() {
         },
     ]);
 
-    let result =
-        collect_failure_evidence_with_source(request, &mut source, Duration::from_millis(50), Duration::from_secs(1))
-            .await
-            .expect("frame collection succeeds");
+    let result = collect_failure_evidence_with_source(
+        ENGINE_ID.to_owned(),
+        request,
+        &mut source,
+        Duration::from_millis(50),
+        Duration::from_secs(1),
+    )
+    .await
+    .expect("frame collection succeeds");
 
     assert_eq!(
         source.calls[1],
@@ -478,10 +505,11 @@ fn tool_router_registers_the_bounded_failure_evidence_schema() {
         .find(|tool| tool.name.as_ref() == "collect_failure_evidence")
         .expect("collect_failure_evidence is registered");
     let schema = serde_json::to_value(tool.input_schema).expect("tool schema serializes");
-    assert!(schema["required"].as_array().is_some_and(|required| {
-        ["engine_id", "primary_error"].iter().all(|name| required.iter().any(|value| value == name))
-    }));
-    assert_eq!(schema["properties"]["actors"]["type"], "array");
+    assert!(
+        schema["required"].as_array().is_some_and(|required| required.iter().any(|value| value == "primary_error")),
+        "primary_error stays required; engine_id does not, because the shared resolver may supply it",
+    );
+    assert_eq!(schema["properties"]["actor_addresses"]["type"], "array");
     assert_eq!(schema["properties"]["frame"]["anyOf"][0]["$ref"], "#/$defs/FailureEvidenceFrameArgs");
 }
 
@@ -492,8 +520,9 @@ fn selector_limits_are_the_documented_contract() {
     assert_eq!(MAX_FAILURE_EVIDENCE_KINDS, 16);
 
     let mut request = args();
-    request.actors = (0..MAX_FAILURE_EVIDENCE_ACTORS).map(|index| format!("actor-{index}")).collect();
-    request.components = (0..MAX_FAILURE_EVIDENCE_COMPONENTS).map(|index| format!("component-{index}")).collect();
+    request.actor_addresses = (0..MAX_FAILURE_EVIDENCE_ACTORS).map(|index| format!("actor-{index}")).collect();
+    request.component_addresses =
+        (0..MAX_FAILURE_EVIDENCE_COMPONENTS).map(|index| format!("component-{index}")).collect();
     request.kinds = (0..MAX_FAILURE_EVIDENCE_KINDS).map(|index| format!("kind-{index}")).collect();
     validate_failure_evidence_args(&mut request).expect("boundary counts are accepted");
 }
