@@ -1,0 +1,41 @@
+# Kind names declared before the grammar in docs/guide/systems/mail-and-kinds.md
+# was written down. Sorted, one per line; `#` starts a comment.
+#
+# This list only shrinks. `kind_name_grammar.rs` fails on a violator that is not
+# here AND on an entry here that no longer violates, so a rename removes its
+# line and nothing can add one. Draining an entry means changing the kind's
+# `Kind::ID` — a per-family decision with a wire cost, not a drive-by edit.
+aether.behavior.host_config
+aether.bloomery.doctor.latest_report
+aether.bloomery.test_lane_config
+aether.bloomery.test_seal_config
+aether.draw_triangle
+aether.http.server.response
+aether.ime_preedit
+aether.key
+aether.key_release
+aether.lifecycle.advance_complete
+aether.modifiers
+aether.mouse_button
+aether.mouse_button_release
+aether.mouse_move
+aether.mouse_wheel
+aether.ping
+aether.pong
+aether.rpc.test.deferred_echo_reply
+aether.rpc.test.echo_reply
+aether.store.record_config
+aether.test.inventory_handlers.reply
+aether.test_fixtures.count_report
+aether.test_fixtures.fs_context_demux_report
+aether.test_fixtures.fs_demux_report
+aether.test_fixtures.inline_configured_child_config
+aether.test_fixtures.matrix_report
+aether.test_fixtures.probe_config
+aether.test_fixtures.source_report
+aether.test_fixtures.tag_spawn_report
+aether.test_fixtures.ui_widget_config
+aether.text_input
+aether.trace.dispatch_traced_ack
+aether.view_projection
+aether.window_size
