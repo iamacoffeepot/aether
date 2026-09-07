@@ -629,6 +629,7 @@ mod tests {
     use crate::set::text_origin_y;
     use aether_data::MailboxId;
     use aether_math::Rgba;
+    use core::slice::from_ref;
 
     fn quad(x: f32, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
         WidgetDrawItem::Quad { x, y: 0.0, width: 1.0, height: 1.0, color: Rgba::WHITE, clip }
@@ -901,30 +902,27 @@ mod tests {
 
         let solid = |alpha: f32| fill_with(overlay, Rgba::new(1.0, 1.0, 1.0, alpha), None);
         assert_eq!(
-            clip_of(text_items(core::slice::from_ref(&label), &[solid(0.0)])),
+            clip_of(text_items(from_ref(&label), &[solid(0.0)])),
             original,
             "reported alpha-zero overlay keeps the exact text clip",
         );
-        assert_eq!(clip_of(text_items(core::slice::from_ref(&label), &[solid(0.5)])), original);
+        assert_eq!(clip_of(text_items(from_ref(&label), &[solid(0.5)])), original);
         for alpha in [0.0, 0.5, 1.0] {
             assert_eq!(
-                clip_of(text_items(
-                    core::slice::from_ref(&label),
-                    &[textured_fill(overlay, Rgba::new(1.0, 1.0, 1.0, alpha))],
-                )),
+                clip_of(text_items(from_ref(&label), &[textured_fill(overlay, Rgba::new(1.0, 1.0, 1.0, alpha))],)),
                 original,
             );
         }
         for alpha in [-1.0, 1.5, f32::NAN, f32::INFINITY] {
-            assert_eq!(clip_of(text_items(core::slice::from_ref(&label), &[solid(alpha)])), original);
+            assert_eq!(clip_of(text_items(from_ref(&label), &[solid(alpha)])), original);
         }
         assert!(
-            text_items(core::slice::from_ref(&label), &[fill(overlay)]).is_empty(),
+            text_items(from_ref(&label), &[fill(overlay)]).is_empty(),
             "an alpha-one solid still cuts covered text",
         );
         assert_eq!(
             clip_of(text_items(
-                core::slice::from_ref(&label),
+                from_ref(&label),
                 &[fill_with(overlay, Rgba::WHITE, Some(WidgetClipRect { x: 0.0, y: 0.0, width: 30.0, height: 24.0 }),)],
             )),
             Some((30.0, 0.0, 50.0, 12.0)),
@@ -941,17 +939,17 @@ mod tests {
             "a later same-lane opaque fill still cuts",
         );
         assert_eq!(
-            clip_of(text_items(&[label.clone(), solid(0.0)], &[])),
+            clip_of(text_items(&[label, solid(0.0)], &[])),
             original,
             "a later same-lane transparent fill does not",
         );
 
         let unbounded = text(0.0, "label", None);
         assert!(
-            text_items(core::slice::from_ref(&unbounded), &[fill(overlay)]).is_empty(),
+            text_items(from_ref(&unbounded), &[fill(overlay)]).is_empty(),
             "an opaque overlay still cuts unbounded text",
         );
-        let kept = text_items(core::slice::from_ref(&unbounded), &[solid(0.0)]);
+        let kept = text_items(from_ref(&unbounded), &[solid(0.0)]);
         assert_eq!(kept.len(), 1);
         assert!(kept[0].clip.is_none(), "a transparent overlay leaves unbounded text unbounded");
     }
