@@ -188,7 +188,8 @@ pub struct WidgetPanel {
     pending_style: bool,
     /// The total stack height, for the background chrome; set at spawn.
     panel_height: f32,
-    /// Latest modifier state, used by panel-owned forward/reverse Tab routing.
+    /// Latest modifier state: Tab direction, and the chord fanned to a child
+    /// that just gained focus.
     modifiers: Modifiers,
 }
 
@@ -835,16 +836,22 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
 }
 
 /// Send a focus transition down: `FocusLost` to the child that lost focus,
-/// `FocusGained` to the one that gained it.
-/// `keyboard` rides on the gain so the child knows whether to draw its
-/// ring (see [`FocusGained`]).
-fn apply_focus<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, transition: FocusTransition, keyboard: bool) {
+/// then `FocusGained` and the panel's latest [`Modifiers`] to the one that
+/// gained it. Lost still goes first. `keyboard` rides on the gain so the
+/// child knows whether to draw its ring (see [`FocusGained`]).
+fn apply_focus<M: aether_actor::ReplyMode>(
+    ctx: &mut WasmCtx<'_, M>,
+    transition: FocusTransition,
+    keyboard: bool,
+    modifiers: Modifiers,
+) {
     let FocusTransition { previous, next } = transition;
     if let Some(prev) = previous {
         ctx.send_to(prev, &FocusLost);
     }
     if let Some(gained) = next {
         ctx.send_to(gained, &FocusGained { keyboard });
+        ctx.send_to(gained, &modifiers);
     }
 }
 
@@ -860,12 +867,16 @@ fn apply_hover<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, transition:
     }
 }
 
-fn apply_availability<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, effects: AvailabilityEffects) {
+fn apply_availability<M: aether_actor::ReplyMode>(
+    ctx: &mut WasmCtx<'_, M>,
+    effects: AvailabilityEffects,
+    modifiers: Modifiers,
+) {
     if let Some(hover) = effects.hover {
         apply_hover(ctx, hover);
     }
     if let Some(focus) = effects.focus {
-        apply_focus(ctx, focus, false);
+        apply_focus(ctx, focus, false, modifiers);
     }
 }
 
@@ -1232,7 +1243,7 @@ impl WasmActor for WidgetPanel {
             }
             let focusable = self.focus.focus_hit_test(press.x, press.y);
             if let Some(transition) = self.focus.set_focus(focusable) {
-                apply_focus(ctx, transition, false);
+                apply_focus(ctx, transition, false, self.modifiers);
             }
             hit
         } else {
@@ -1298,7 +1309,7 @@ impl WasmActor for WidgetPanel {
                 FocusDirection::Forward
             };
             if let Some(transition) = self.focus.move_focus(direction) {
-                apply_focus(ctx, transition, true);
+                apply_focus(ctx, transition, true, self.modifiers);
             }
             return;
         }
@@ -1350,7 +1361,7 @@ impl WasmActor for WidgetPanel {
             return;
         };
         let effects = self.focus.update_availability(source, &changed.state);
-        apply_availability(ctx, effects);
+        apply_availability(ctx, effects, self.modifiers);
     }
 
     /// Observe one descendant scroll container's exact typed outcome. The
