@@ -157,6 +157,25 @@ impl BootLog {
                 .0;
         }
     }
+
+    /// A snapshot of the bounded stderr tail the reader already keeps.
+    ///
+    /// At most 24 lines, oldest dropped first. Empty when the child has logged
+    /// nothing yet. Does not wait, drain further, or grow.
+    ///
+    /// # Panics
+    /// The boot-log lock is poisoned.
+    #[must_use]
+    pub fn tail(&self) -> Vec<String> {
+        let (announced, _) = &*self.announced;
+        announced
+            .lock()
+            .expect("the boot log lock is held only by non-panicking readers")
+            .tail
+            .iter()
+            .cloned()
+            .collect()
+    }
 }
 
 fn drain(stderr: ChildStderr, announced: &Arc<(Mutex<Announced>, Condvar)>) {
@@ -213,7 +232,18 @@ fn strip_ansi(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{HTTP_BOUND, RPC_BOUND, announced_port};
+    use super::{BootLog, HTTP_BOUND, RPC_BOUND, TAIL_LINES, announced_port};
+    use std::sync::{Arc, Condvar, Mutex};
+
+    impl BootLog {
+        fn recording() -> Self {
+            Self { announced: Arc::new((Mutex::new(super::Announced::default()), Condvar::new())) }
+        }
+
+        fn push_line(&self, line: &str) {
+            self.announced.0.lock().expect("the boot log lock is held only by non-panicking readers").record(line);
+        }
+    }
 
     /// The bind announcement exactly as the coordinator writes it: the
     /// subscriber styles the level, the target, and every field name, so
@@ -242,5 +272,21 @@ mod tests {
     fn one_ingress_does_not_answer_for_the_other() {
         assert_eq!(announced_port(STYLED_HTTP, RPC_BOUND), None);
         assert_eq!(announced_port(STYLED_RPC, HTTP_BOUND), None);
+    }
+
+    // Tripwire: the diagnostic accessor must surface the same bounded window
+    // await_port already keeps. Growing the deque, or returning an empty snapshot
+    // after lines were recorded, would hide the child's last stderr on failure.
+    #[test]
+    fn the_tail_keeps_only_the_newest_bounded_lines() {
+        let log = BootLog::recording();
+        assert!(log.tail().is_empty(), "a silent child has no tail");
+        for index in 0..TAIL_LINES + 6 {
+            log.push_line(&format!("line-{index}"));
+        }
+        let tail = log.tail();
+        assert_eq!(tail.len(), TAIL_LINES);
+        assert_eq!(tail[0], format!("line-{}", 6));
+        assert_eq!(tail[TAIL_LINES - 1], format!("line-{}", TAIL_LINES + 5));
     }
 }

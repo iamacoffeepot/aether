@@ -133,6 +133,11 @@ impl WidgetDefaults for ButtonWidget {
     fn cancel_activation(&mut self) {
         self.clear_arms();
     }
+
+    /// Restyle: adopt the fanned theme and request metrics for its font.
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
+    }
 }
 
 /// A push-button widget. Spawned inline by a panel root with a
@@ -176,12 +181,6 @@ impl WasmActor for ButtonWidget {
         self.theme = config.theme;
         self.apply_control_state(ctx, config.state);
         pump_text_font_metrics(ctx, &mut self.font_metrics);
-    }
-
-    /// Restyle: adopt the fanned theme and request metrics for its font.
-    #[handler::single]
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
     }
 
     /// Install a font-metrics reply; the next `Collect` centers the label.

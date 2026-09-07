@@ -221,7 +221,7 @@ impl ScriptSlot {
                 FilterOutcome::Output(output)
             }
             Err(reason) => {
-                self.record_trap(reason);
+                self.record_trap(&reason);
                 FilterOutcome::Passthrough
             }
         }
@@ -234,13 +234,13 @@ impl ScriptSlot {
         // than wedging the host.
         self.store.set_fuel(self.fuel_per_call).map_err(|_| FaultReason::FuelSetFailed)?;
         let (ptr, len) = self.write_guest(bytes).ok_or(FaultReason::GuestWrite)?;
-        let packed = self.filter_fn.call(&mut self.store, (kind.0, ptr, len)).map_err(classify_trap)?;
+        let packed = self.filter_fn.call(&mut self.store, (kind.0, ptr, len)).map_err(|error| classify_trap(&error))?;
         let out = self.read_packed(packed).ok_or(FaultReason::MalformedReturn)?;
         envelope::decode(&out).ok_or(FaultReason::DecodeFailed { kind })
     }
 
     /// Record a trap: bump the counter and disable at the threshold.
-    fn record_trap(&mut self, reason: FaultReason) {
+    fn record_trap(&mut self, reason: &FaultReason) {
         self.consecutive_traps = self.consecutive_traps.saturating_add(1);
         tracing::warn!(
             target: "aether_behavior",
@@ -276,7 +276,7 @@ impl ScriptSlot {
     }
 }
 
-fn classify_trap(error: wasmi::Error) -> FaultReason {
+fn classify_trap(error: &wasmi::Error) -> FaultReason {
     if error.as_trap_code() == Some(TrapCode::OutOfFuel) {
         FaultReason::FuelExhausted
     } else {

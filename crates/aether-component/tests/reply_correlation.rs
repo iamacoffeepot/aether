@@ -4,6 +4,10 @@
 //! to the same namespace/path. The fs replies echo identical payload fields, so
 //! the guest can only distinguish them by the envelope request id returned from
 //! `send_tracked` and later surfaced by `WasmCtx::in_reply_to()`.
+//!
+//! Issue 5508 adds a separate typed-context trigger on the same fixture: two
+//! in-flight reads carry distinct context kinds, and the shared `ReadResult`
+//! handler recovers them by `context_kind` probe-then-take.
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary.
@@ -18,7 +22,7 @@ use aether_data::{Kind, MailboxId};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots, write_fixture};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_test_fixtures_kinds::{FsDemuxReport, RunFsDemux};
+use aether_test_fixtures_kinds::{FsContextDemuxReport, FsDemuxReport, RunFsContextDemux, RunFsDemux};
 
 const FIXTURE_CRATE: &str = "aether_test_fixtures_bundle";
 
@@ -76,6 +80,47 @@ fn same_payload_fs_replies_demux_by_request_id() {
         harness.count_observed(FsDemuxReport::NAME) - baseline,
         1,
         "fixture did not report both same-payload fs replies as request-id matched; observed kinds: {:?}",
+        harness.observed_kinds(),
+    );
+}
+
+#[test]
+fn typed_fs_replies_demux_by_context_kind_probe_then_take() {
+    let Some(wasm_path) = require_wasm(FIXTURE_CRATE) else {
+        return;
+    };
+
+    let sandbox = init_save_sandbox("reply-correlation-context");
+    let mut harness = SubstrateHarness::builder()
+        .with_component_host()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
+
+    let path = write_fixture("typed-context.txt", b"same path, distinct typed contexts");
+    let wasm = fs::read(&wasm_path).expect("read fs_demux wasm");
+    let (_, fixture_addr) = load_fs_demux(&mut harness, wasm, "fs-context-demux");
+    let baseline = harness.count_observed(FsContextDemuxReport::NAME);
+    let raw_baseline = harness.count_observed(FsDemuxReport::NAME);
+
+    harness
+        .execute(vec![(
+            "trigger",
+            HarnessOp::send_and_settle(&fixture_addr, &RunFsContextDemux { namespace: "save".to_owned(), path }),
+        )])
+        .expect("RunFsContextDemux to fixture");
+
+    assert_eq!(
+        harness.count_observed(FsContextDemuxReport::NAME) - baseline,
+        1,
+        "fixture did not report both distinct typed contexts recovered by probe-then-take; observed kinds: {:?}",
+        harness.observed_kinds(),
+    );
+    assert_eq!(
+        harness.count_observed(FsDemuxReport::NAME) - raw_baseline,
+        0,
+        "typed-context trigger must not emit the raw request-id report; observed kinds: {:?}",
         harness.observed_kinds(),
     );
 }

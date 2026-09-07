@@ -236,16 +236,30 @@ fn a_bad_signature_is_a_false_verdict_before_any_tier_answer() {
     // Order matters: a ceiling lookup on a merely claimed signer would answer
     // for a key the caller has not proven it holds, turning the tier refusal
     // into an oracle over the allowlist. An unverifiable signature must reach
-    // `verified: false` and never `BelowTier`, however low the claimed signer's
-    // ceiling is.
+    // `verified: false` and never `BelowTier`, even when the claimed signer is
+    // allowlisted below the required tier. The genuine-signature control on
+    // the same state proves that ceiling is discoverable — so a false verdict
+    // here is the ordering, not a missing allowlist row.
     let key = signing_key(7);
-    let statement = signed("intruder", &key, b"approve", AuthorityDoor::Approve, binding(1));
+    let other = signing_key(8);
+    let state = state_at("operator", &key, Tier::Auto);
+    let authority = authority_bytes(AuthorityDoor::Approve, binding(1));
 
-    let reply = state_at("owner", &key, Tier::Auto).verify(
-        &statement,
-        &authority_bytes(AuthorityDoor::Approve, binding(1)),
+    let forged = state.verify(
+        &signed("operator", &other, b"approve", AuthorityDoor::Approve, binding(1)),
+        &authority,
+        Some(Tier::Human),
+    );
+    let genuine = state.verify(
+        &signed("operator", &key, b"approve", AuthorityDoor::Approve, binding(1)),
+        &authority,
         Some(Tier::Human),
     );
 
-    assert_eq!(reply, VerifyResult::Ok { verified: false }, "the signature is judged before the ceiling is consulted");
+    assert_eq!(forged, VerifyResult::Ok { verified: false }, "the signature is judged before the ceiling is consulted");
+    assert_eq!(
+        genuine,
+        VerifyResult::BelowTier { required: Tier::Human, ceiling: Tier::Auto },
+        "the same signer discloses its ceiling only after a genuine signature holds"
+    );
 }

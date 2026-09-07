@@ -533,6 +533,34 @@ impl WidgetDefaults for DropdownWidget {
         self.open = false;
         self.highlighted_index = None;
     }
+
+    /// Restyle: adopt the fanned theme and request metrics for its font. The
+    /// dropdown declares this rather than adopting the shared default, because
+    /// a new font or type size invalidates every option it measured.
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
+        self.forget_measurements();
+    }
+
+    /// Focus loss closes the list. Overrides the shared default because
+    /// `cancel_activation` cannot report the close, and an unreported close
+    /// would leave the root holding a grab for a list nobody can see.
+    fn on_focus_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
+        self.state.lose_focus();
+        self.arms.clear();
+        self.dismiss().emit(ctx);
+        self.settle_hovered_option(ctx);
+    }
+
+    /// The pointer left this widget, so nothing of the open list is under it.
+    /// Overrides the shared default because that one keeps only the
+    /// widget-wide hover fact, which says nothing about *which* option the
+    /// reader was resting on.
+    fn on_hover_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+        self.state.set_hovered(false);
+        self.pointer_window = None;
+        self.settle_hovered_option(ctx);
+    }
 }
 
 /// A dropdown. Spawned inline by a panel root with a [`DropdownConfig`];
@@ -579,15 +607,6 @@ impl WasmActor for DropdownWidget {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
-    /// Restyle: adopt the fanned theme and request metrics for its font. The
-    /// dropdown declares this rather than adopting the shared default, because
-    /// a new font or type size invalidates every option it measured.
-    #[handler::single]
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
-        self.forget_measurements();
-    }
-
     /// Install a font-metrics reply; the next `Collect` reports an intrinsic
     /// measured against real advances.
     #[handler::single]
@@ -629,28 +648,6 @@ impl WasmActor for DropdownWidget {
             self.arms.clear();
             self.dismiss().emit(ctx);
         }
-        self.settle_hovered_option(ctx);
-    }
-
-    /// Focus loss closes the list. Overrides the shared default because
-    /// `cancel_activation` cannot report the close, and an unreported close
-    /// would leave the root holding a grab for a list nobody can see.
-    #[handler::single]
-    fn on_focus_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
-        self.state.lose_focus();
-        self.arms.clear();
-        self.dismiss().emit(ctx);
-        self.settle_hovered_option(ctx);
-    }
-
-    /// The pointer left this widget, so nothing of the open list is under it.
-    /// Overrides the shared default because that one keeps only the
-    /// widget-wide hover fact, which says nothing about *which* option the
-    /// reader was resting on.
-    #[handler::single]
-    fn on_hover_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
-        self.state.set_hovered(false);
-        self.pointer_window = None;
         self.settle_hovered_option(ctx);
     }
 

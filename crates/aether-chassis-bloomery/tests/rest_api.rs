@@ -204,6 +204,14 @@ fn owner_allowlist() -> String {
     format!("owner:{}:human", aether_bloomery::encode_hex(&owner_signing_key().verifying_key().to_bytes()))
 }
 
+/// Same key as [`owner_allowlist`], at the `auto` ceiling — below the file
+/// policy's `human` for `crates/aether-data/**`. Commission POST approvals do
+/// not apply a required tier; the seal does, so this ceiling stores a genuine
+/// signature that the file policy still refuses.
+fn owner_auto_allowlist() -> String {
+    format!("owner:{}:auto", aether_bloomery::encode_hex(&owner_signing_key().verifying_key().to_bytes()))
+}
+
 /// Fork the `bloomery` bin with the HTTP ingress and control core autoloaded,
 /// pointing the pre-seal approve gate at `policy_path` (#3583). Reaped when the
 /// returned guard drops.
@@ -220,11 +228,18 @@ fn spawn(policy_path: &str) -> Coordinator {
 /// [`spawn`], with a caller-provided durable store for a test that reads the
 /// dispatch outbox through a second store connection.
 fn spawn_with_store(policy_path: &str, store_path: &str) -> Coordinator {
+    spawn_with_store_allowlist(policy_path, store_path, &owner_allowlist())
+}
+
+/// [`spawn_with_store`], with a caller-provided signing allowlist. Other tests
+/// keep the shared human-ceiling owner; the sealed-policy comparison needs a
+/// lower ceiling on the same key.
+fn spawn_with_store_allowlist(policy_path: &str, store_path: &str, allowlist: &str) -> Coordinator {
     Coordinator::spawn(
         0,
         &[
             ("AETHER_STORE_PATH", store_path),
-            ("AETHER_SIGNING_ALLOWLIST", &owner_allowlist()),
+            ("AETHER_SIGNING_ALLOWLIST", allowlist),
             ("AETHER_APPROVAL_POLICY_FILE", policy_path),
             ("AETHER_HTTP_CONTROL_TOKEN", CONTROL_TOKEN),
         ],
@@ -821,10 +836,12 @@ fn authoring_a_config_stores_it_under_a_stable_content_address() {
 // member is admitted at is a property of the bloom.
 //
 // The A/B is the whole point and both halves run in one process against one
-// file policy: the same declared surface, the same projection with no signed
-// statement, refused under the file policy (`crates/aether-data/**` is `human`)
-// and admitted under a sealed policy that resolves it `auto`. Nothing else about
-// the request changes, so a pass cannot come from anywhere but the sealed value.
+// file policy: the same declared surface, the same already-stored signed
+// approval, and the same auto-ceiling owner key. The file policy resolves
+// `crates/aether-data/**` as `human` and refuses because that ceiling is below
+// Human; a sealed bloom-wide policy that resolves the same surface `auto` then
+// admits. Nothing about the signature or allowlist changes between trials, so a
+// pass cannot come from anywhere but the sealed value.
 //
 // The refusals pinned alongside it are the security decisions, not error
 // plumbing: a member sealing its own policy would choose the tier admitting that
@@ -834,21 +851,34 @@ fn authoring_a_config_stores_it_under_a_stable_content_address() {
 #[test]
 fn a_sealed_approval_policy_decides_the_tier_the_file_policy_would_refuse() {
     let (_policy_dir, policy_path) = test_policy();
-    let coordinator = spawn(&policy_path);
+    let allowlist = owner_auto_allowlist();
+    let coordinator = spawn_with_store_allowlist(&policy_path, ":memory:", &allowlist);
     let http_port = announced_port(&coordinator, Ingress::Http);
 
     wait_for_200(http_port, "/drafts");
     wait_for_200(http_port, "/view");
 
-    // The surface the file policy resolves `human`. An auto-only stored
-    // approval (no signed statement) is signer-policy under that file, and
-    // auto under a sealed policy that names the same surface.
-    let revision = seed_commission_with(http_port, "wp-1", &["crates/aether-data/**"], "problem", false);
+    // One signed revision approval, stored before either seal. Commission POST
+    // approvals apply no required tier; the file policy still resolves this
+    // surface `human`, so the auto-ceiling key is genuine authority that the
+    // seal must refuse.
+    let revision = seed_commission(http_port, "wp-1", &["crates/aether-data/**"]);
     let seal = || seal_body();
 
     let (status, body) =
         send_json(http_port, "POST", &format!("/drafts/{}/seal", draft_with(http_port, revision, None)), &seal());
-    assert_eq!(status, 422, "under the file policy the surface is human and the seal fails closed: {body:?}");
+    assert_eq!(status, 422, "under the file policy the surface is human and the signer ceiling is auto: {body:?}");
+    let error = body["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("resolves Human tier")
+            && error.contains("authorizes only to Auto")
+            && error.contains("seal fails closed"),
+        "file policy must refuse because the stored signer's ceiling is below Human: {body:?}"
+    );
+    assert!(
+        !error.contains("no stored approval") && !error.contains("did not verify"),
+        "the stored signature is valid; the refusal is the ceiling: {body:?}"
+    );
 
     // A member that seals the policy deciding its own admission is refused
     // outright — neither resolved (self-authorization) nor ignored (a sealed
@@ -874,7 +904,8 @@ fn a_sealed_approval_policy_decides_the_tier_the_file_policy_would_refuse() {
     );
     assert_eq!(status, 422, "a sealed policy address with no stored content fails the seal closed");
 
-    // The same surface, admitted `auto` by a policy the draft seals.
+    // The same surface, same stored signature, same allowlist — admitted `auto`
+    // solely because the draft seals a bloom-wide policy that resolves it so.
     let authored = ApprovalPolicy {
         default: Tier::Judge,
         rules: vec![ApprovalRule { glob: "crates/aether-data/**".to_owned(), tier: Tier::Auto }],
@@ -888,11 +919,6 @@ fn a_sealed_approval_policy_decides_the_tier_the_file_policy_would_refuse() {
     assert_eq!(status, 200, "the authored policy is durable before its address is returned: {stored:?}");
     let address = digest_at(&stored["digest"]);
     assert_eq!(address, authored.address(), "the route addresses the policy exactly as a typed seal would");
-
-    let statement = owner_signed_at(AuthorityDoor::Approve, revision, revision.as_bytes().to_vec(), Vec::new());
-    let (status, approved) =
-        send_auth(http_port, "POST", "/commissions/wp-1/approvals", &serde_json::to_value(&statement).unwrap());
-    assert_eq!(status, 201, "store an approval so the auto path is not an absent-approval refuse: {approved:?}");
 
     let sealed_draft = draft_with(http_port, revision, Some(registry_naming(address)));
     let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{sealed_draft}/seal"), &seal());

@@ -6,6 +6,8 @@ pub use kit::{KitReport, KitTool, REQUIRED_KIT, ResolvedTool, ToolStatus};
 
 mod invariants;
 #[cfg(feature = "github")]
+mod kinds;
+#[cfg(feature = "github")]
 mod runtime;
 
 pub use invariants::{
@@ -13,7 +15,9 @@ pub use invariants::{
     REPLICA_AGE_BOUND, ReplicaObservation, SURFACE_PARK_AGE_BOUND, UNRESOLVED_HEAD_AGE_BOUND, evaluate,
 };
 #[cfg(feature = "github")]
-pub use runtime::{DoctorBoard, DoctorReactorState, DoctorTick};
+pub use kinds::LatestDoctorReport;
+#[cfg(feature = "github")]
+pub use runtime::{DoctorReactorState, DoctorTick};
 
 #[cfg(feature = "github")]
 use crate::bloomery::{ExecutorShell, SourceShell};
@@ -37,8 +41,6 @@ pub struct DoctorReactorSetup {
     pub worktree_base: String,
     /// How often to wake and re-evaluate.
     pub poll_interval_secs: u64,
-    /// The shared report cell `/view` overlays.
-    pub board: DoctorBoard,
 }
 
 /// Addressing identity for the doctor reactor capability.

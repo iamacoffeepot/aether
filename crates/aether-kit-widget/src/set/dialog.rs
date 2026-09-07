@@ -314,6 +314,11 @@ impl WidgetDefaults for DialogWidget {
     /// Nothing to cancel: a dialog is a plate, and everything on it is the
     /// host's own child.
     fn cancel_activation(&mut self) {}
+
+    /// Restyle: adopt the fanned theme and request metrics for its font.
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
+    }
 }
 
 /// A modal's plate. Spawned inline by a panel root with a [`DialogConfig`];
@@ -372,12 +377,6 @@ impl WasmActor for DialogWidget {
         if self.state.replace(set.state) {
             emit_state_changed(ctx, &self.state);
         }
-    }
-
-    /// Restyle: adopt the fanned theme and request metrics for its font.
-    #[handler::single]
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
     }
 
     /// Install a font-metrics reply; the next `Collect` measures the title
