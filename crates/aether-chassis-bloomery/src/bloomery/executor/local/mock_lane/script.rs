@@ -296,6 +296,15 @@ pub struct LaneRun {
     /// have.
     #[serde(default)]
     pub env: Vec<String>,
+    /// The OS process identity of the mock lane that recorded this run.
+    ///
+    /// Taken from `std::process::id` in the child before the ledger line is
+    /// appended, so a mode that never exits still names the process a scenario
+    /// can probe. `#[serde(default)]` so a ledger written before the field
+    /// still reads as absent. Absence and zero are not evidence of death: a
+    /// missing field is a pre-field ledger, and pid 0 is not a child.
+    #[serde(default)]
+    pub process_id: Option<u32>,
 }
 
 /// Append `run` to the ledger in `dir`.
@@ -460,6 +469,7 @@ mod tests {
             task: None,
             worktree: None,
             env: Vec::new(),
+            process_id: None,
         }
     }
 
@@ -564,6 +574,7 @@ mod tests {
             task: None,
             worktree: None,
             env: Vec::new(),
+            process_id: None,
         };
 
         append_run(dir.path(), &run("wp-a", StageId::Construct, "n-1")).unwrap();
@@ -616,6 +627,7 @@ mod tests {
                 task: None,
                 worktree: None,
                 env: Vec::new(),
+                process_id: None,
             },
         )
         .unwrap();
@@ -624,5 +636,24 @@ mod tests {
             LaneMode::Pass,
             "wp-b must consume the second global verify step, not restart at Fail",
         );
+    }
+
+    #[test]
+    fn a_legacy_ledger_line_without_process_id_still_decodes_absent() {
+        // Tripwire: a missing process_id is not a dead child. Pre-field ledgers
+        // must decode, and the absence must stay None so a scenario cannot treat
+        // a default or zero as reaped.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(super::LEDGER_FILE),
+            r#"{"command":"verify.check","nonce":"n-1","mode":"pass","subject":null,"diff_base":null,"task":null,"worktree":null,"env":[]}
+"#,
+        )
+        .unwrap();
+
+        let ledger = read_ledger(dir.path()).unwrap();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].nonce, "n-1");
+        assert_eq!(ledger[0].process_id, None, "a pre-field ledger line must decode process_id as absent");
     }
 }
