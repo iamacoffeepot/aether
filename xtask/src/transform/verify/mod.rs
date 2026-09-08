@@ -2648,7 +2648,7 @@ pub(super) fn run_verify_check(args: &TransformArgs, position: Position) -> Resu
     }
 }
 
-/// What one fan-out over [`verify_check_members`] produced.
+/// What one fan-out over a position's spawn list produced.
 ///
 /// Held as a value so the `verify.check` and `verify.base` umbrellas share the
 /// fan-out rather than each spelling it: two loops over the same member list

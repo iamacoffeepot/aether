@@ -398,8 +398,12 @@ impl Serialize for Evidence {
         }
         // The interned bit-or the Actions wrapper prints as the four-hex
         // artifact token. Derived from the same set the envelope names, so the
-        // wrapper does not carry a second copy of the vocabulary.
-        state.serialize_field("failure_mask", &interned_mask_bits(self.failed_verifiers.as_ref()))?;
+        // wrapper does not carry a second copy of the vocabulary. Omitted at
+        // zero so a passing envelope's keys do not move.
+        let bits = interned_mask_bits(self.failed_verifiers.as_ref());
+        if bits != 0 {
+            state.serialize_field("failure_mask", &bits)?;
+        }
         self.channels.serialize_into(&mut state, ChannelKind::Environment)?;
         if let Some(counters) = &self.sccache {
             state.serialize_field("sccache", counters)?;
