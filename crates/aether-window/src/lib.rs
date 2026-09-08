@@ -22,10 +22,14 @@ pub(crate) use kinds::{RetireWindow, WindowForwardContext};
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use aether_actor::validate_namespace_segment;
-use aether_actor::{HandlesKind, WasmActorMailbox, WasmActorMailboxWithContext, actor};
+use aether_actor::{HandlesKind, Publishes, WasmActorMailbox, WasmActorMailboxWithContext, actor};
 use aether_data::{Kind, MailboxId};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use aether_kinds::MonitorNotice;
+use aether_kinds::{
+    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
+    WindowSize,
+};
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::{NativeActorMailbox, NativeActorMailboxWithContext};
 
@@ -84,6 +88,34 @@ pub struct SyntheticWindowCapability;
 #[actor(instanced, child_of(SyntheticWindowCapability), runtime::synthetic::instance)]
 pub struct SyntheticWindowInstance;
 
+// The kinds the `aether.window` mailbox fans out to its selector-keyed
+// subscriber set, one `Publishes` impl each — the compile-time gate on
+// `WindowManagerMailboxExt::subscribe`. Device events and window
+// lifecycle both travel that one machinery, so both are listed.
+//
+// These sit on the neutral `WindowCapability` identity rather than on
+// a runtime, because the published vocabulary belongs to the mailbox:
+// desktop, synthetic, and headless all claim `aether.window`, and a
+// subscriber addresses the identity without knowing which is installed.
+// A runtime with no window peripheral emits none of them — that is a
+// deployment fact the marker cannot and should not encode.
+//
+// The request/reply vocabulary (`ListWindows`, `SetWindowTitle`, their
+// results) is absent: it is mail *to* the cap, not a broadcast from it.
+impl Publishes<Key> for WindowCapability {}
+impl Publishes<KeyRelease> for WindowCapability {}
+impl Publishes<MouseMove> for WindowCapability {}
+impl Publishes<MouseButton> for WindowCapability {}
+impl Publishes<MouseButtonRelease> for WindowCapability {}
+impl Publishes<MouseWheel> for WindowCapability {}
+impl Publishes<WindowSize> for WindowCapability {}
+impl Publishes<TextInput> for WindowCapability {}
+impl Publishes<ImePreedit> for WindowCapability {}
+impl Publishes<Modifiers> for WindowCapability {}
+impl Publishes<WindowOpened> for WindowCapability {}
+impl Publishes<WindowClosed> for WindowCapability {}
+impl Publishes<WindowMenuActivated> for WindowCapability {}
+
 trait WindowManagerMailboxForward {
     fn forward<K>(&self, payload: &K)
     where
@@ -105,22 +137,38 @@ pub trait WindowManagerMailboxExt: WindowManagerMailboxForward + Sized {
     }
 
     /// Subscribe the calling actor to kind `K` for `selector`.
-    fn subscribe<K: Kind>(&self, selector: WindowSelector) {
+    ///
+    /// `K` is gated on `WindowCapability: Publishes<K>`, so a kind this
+    /// cap never emits — a lifecycle stage, say — is a compile error
+    /// naming the capability that does publish it.
+    fn subscribe<K: Kind>(&self, selector: WindowSelector)
+    where
+        WindowCapability: Publishes<K>,
+    {
         self.forward(&SubscribeWindowSelf { selector, kind: K::ID });
     }
 
     /// Subscribe an explicit mailbox to kind `K` for `selector`.
-    fn subscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId) {
+    fn subscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId)
+    where
+        WindowCapability: Publishes<K>,
+    {
         self.forward(&SubscribeWindow { selector, kind: K::ID, mailbox });
     }
 
     /// Remove the calling actor's kind-`K` subscription for `selector`.
-    fn unsubscribe<K: Kind>(&self, selector: WindowSelector) {
+    fn unsubscribe<K: Kind>(&self, selector: WindowSelector)
+    where
+        WindowCapability: Publishes<K>,
+    {
         self.forward(&UnsubscribeWindowSelf { selector, kind: K::ID });
     }
 
     /// Remove an explicit mailbox's kind-`K` subscription for `selector`.
-    fn unsubscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId) {
+    fn unsubscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId)
+    where
+        WindowCapability: Publishes<K>,
+    {
         self.forward(&UnsubscribeWindow { selector, kind: K::ID, mailbox });
     }
 

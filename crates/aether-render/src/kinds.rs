@@ -518,6 +518,70 @@ pub struct DrawSolidQuads {
     pub quads: Vec<SolidQuad>,
 }
 
+/// The stroke a [`Shape`] draws just inside its edge: `width_pixels`
+/// wide, in the unit the batch's `space` selects, in linear RGBA `color`.
+/// It lies over the fill, so a translucent stroke shows the fill through
+/// it. Not a kind on its own — only addressable inside `Shape.stroke`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ShapeStroke {
+    pub width_pixels: f32,
+    pub color: Rgba,
+}
+
+/// The shadow a [`Shape`] casts: the same rounded box moved by `offset`
+/// (`[x, y]`, y down, in the batch's unit) with its edge feathered over
+/// `blur_pixels` each side, in linear RGBA `color`. It lies under the
+/// fill and the stroke, so with an opaque fill only the part that
+/// escapes the box is seen; with no fill it is a soft halo. Not a kind on
+/// its own — only addressable inside `Shape.shadow`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ShapeShadow {
+    pub blur_pixels: f32,
+    pub offset: [f32; 2],
+    pub color: Rgba,
+}
+
+/// One shape in a `DrawShapes` batch (ADR-0213): an axis-aligned box —
+/// `(x, y)` the top-left corner, `(width, height)` the size, in the unit
+/// the batch's `space` selects — with its corners rounded by
+/// `corner_radius`, filled with `fill` when given, stroked inside its edge
+/// by `stroke` when given, and shadowed by `shadow` when given. The three
+/// parts compose shadow under fill under stroke, every edge anti-aliased.
+/// A radius at or above half the shorter side is a circle (or a stadium);
+/// a stroke with no fill is a ring; a shadow with neither is a soft halo.
+/// Not a kind on its own — only addressable inside `DrawShapes.shapes`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Shape {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub corner_radius: f32,
+    pub fill: Option<Rgba>,
+    pub stroke: Option<ShapeStroke>,
+    pub shadow: Option<ShapeShadow>,
+}
+
+/// `aether.render.draw_shapes` — draw a batch of rounded, stroked,
+/// shadowed boxes (ADR-0213) in the projection `space` selects, evaluated
+/// as a signed distance field on the GPU. Accumulated per frame with the
+/// same immediate-mode contract as `aether.draw_triangle`: send it every
+/// frame the shapes should appear, or they vanish next frame. Rides the
+/// overlay pass at the same painter position and under the same scissor
+/// as the quad batches, through its own pipeline — one more overlay
+/// draw, not a pass and not a layer. The vocabulary is fixed and
+/// substrate-owned: callers supply parameters, never WGSL.
+/// Fire-and-forget; no reply.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.render.draw_shapes")]
+pub struct DrawShapes {
+    pub space: QuadSpace,
+    /// Optional framebuffer-pixel scissor applied to this batch. `None`
+    /// leaves the draw unclipped.
+    pub clip: Option<ClipRect>,
+    pub shapes: Vec<Shape>,
+}
+
 /// One corner of a [`ScreenTriangle`]. `(x, y)` is a window-pixel
 /// position with the top-left origin and y pointing down — the same
 /// convention `QuadSpace::Screen` quads address in. `color` is a linear
