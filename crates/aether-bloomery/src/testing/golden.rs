@@ -11,11 +11,12 @@ use crate::reduce::{
 };
 use crate::values::{
     Adjudication, AgentProfile, BaseReceipt, BaseVerdict, CandidateRef, CompositionFinding, ConfigRegistry,
-    Disposition, Evidence, EvidenceKind, ExecutionLimits, Harness, LandingReceipt, MemberCandidate, MemberDependency,
-    NetworkProfile, OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion,
-    ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedModel, SpendQuiesce, StageBinding, StageCatalog,
-    ToolPolicy, Transformation, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
-    Withdrawal, WithdrawalCause,
+    DeclaredEvidence, DeclaredLanes, DeclaredVerifiers, Disposition, Evidence, EvidenceKind, ExecutionLimits, Harness,
+    LandingReceipt, LaneEntrypoint, MemberCandidate, MemberDependency, NetworkProfile, OperatorHold, OperatorProposal,
+    OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, PipelineManifest, ReasoningEffort,
+    ResolutionClaim, ResolvedBloom, ResolvedModel, SpendQuiesce, StageBinding, StageCatalog, ToolPolicy,
+    Transformation, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
+    WithdrawalCause,
 };
 
 use super::digest;
@@ -83,6 +84,23 @@ fn stage_catalog() -> StageCatalog {
             retry_budget: 2,
             wall_clock_secs: 3_600,
         }],
+    }
+}
+
+/// A small hand-authored manifest, for the reason [`stage_catalog`] is one: a
+/// fixture built from the compiled vocabulary would move its pinned bytes every
+/// time an identity or a lane command changed, which says nothing about the
+/// shape these bytes exist to freeze.
+fn pipeline_manifest() -> PipelineManifest {
+    PipelineManifest {
+        version: 1,
+        entrypoint: LaneEntrypoint { program: "cargo".into(), args: vec!["xtask".into(), "transform".into()] },
+        lanes: DeclaredLanes { model: vec!["construct.implement".into()], mechanical: vec!["verify.check".into()] },
+        verifiers: DeclaredVerifiers {
+            identities: vec!["verify.fmt".into(), "verify.clippy".into()],
+            runs: [("verify.check".into(), vec!["verify.fmt".into()])].into_iter().collect(),
+        },
+        evidence: DeclaredEvidence { envelope: 1 },
     }
 }
 
@@ -397,6 +415,7 @@ pub fn representative() -> Decisions {
             Decision::RevokeResolution { bloom, workpiece: workpiece.clone() },
             advance_stage(bloom, workpiece.clone()),
             Decision::RecordStageCatalog { bloom, catalog: stage_catalog() },
+            Decision::RecordPipelineManifest { bloom, manifest: pipeline_manifest() },
             Decision::RecordEvidence {
                 bloom,
                 evidence: Evidence { subject: digest(6), kind: EvidenceKind::VerificationResult, detail: digest(7) },

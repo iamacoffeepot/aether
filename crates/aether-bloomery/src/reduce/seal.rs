@@ -23,9 +23,9 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
     BaseReceipt, BaseVerdict, BloomSpec, CandidateRef, ConfigKind, ConfigResolveError, ConfigScopes, DependencyError,
-    EvidenceKind, MemberCandidate, MemberDependency, Membership, ModelOverride, OperatorProposal, ResolutionClaim,
-    ResolvedConfigs, SpendCeiling, SpendWindow, StageCatalog, Transformation, Unproducible, VerifyFailureSet,
-    VerifyGateSet, VerifyProof, resolve_member_dependencies,
+    EvidenceKind, MemberCandidate, MemberDependency, Membership, ModelOverride, OperatorProposal, PipelineManifest,
+    ResolutionClaim, ResolvedConfigs, SpendCeiling, SpendWindow, StageCatalog, Transformation, Unproducible,
+    VerifyFailureSet, VerifyGateSet, VerifyProof, resolve_member_dependencies,
 };
 
 pub(super) fn reduce_seal(
@@ -60,8 +60,8 @@ pub(super) fn reduce_seal(
     // The sealed catalog must be one the line can actually run, and every
     // member's override must be one that catalog can honour — a bloom is graded
     // against the exact line it promised (ADR-0149 §The line).
-    let catalog = match validate_line(spec, configs) {
-        Ok(catalog) => catalog,
+    let AdmittedLine { catalog, manifest } = match validate_line(spec, configs) {
+        Ok(line) => line,
         Err(error) => return Decisions::rejected(Outcome::SealRejected(error)),
     };
     // All-or-nothing admission: any member already in a foreign active bloom
@@ -110,7 +110,7 @@ pub(super) fn reduce_seal(
         effects.push(Decision::RecordSpendQuiesce { quiesce: None });
     }
     if let Some(proposal) = proposal {
-        return seal_proposal(spec, bloom, catalog, proposal, effects);
+        return seal_proposal(spec, bloom, AdmittedLine { catalog, manifest }, proposal, effects);
     }
     // Claim each member, then seed the ready ones at the entry stage and
     // dispatch their first attempt. Roots (no incoming *declared* edges)
@@ -121,9 +121,10 @@ pub(super) fn reduce_seal(
     for member in spec.members() {
         effects.push(Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom });
     }
-    // Record the catalog admission resolved so the fold reads the record, not
-    // a later binary's compiled line (#4944).
+    // Record the catalog and the lane vocabulary admission resolved so the fold
+    // reads the record, not a later binary's compiled copies (#4944, ADR-0215).
     effects.push(Decision::RecordStageCatalog { bloom, catalog: catalog.clone() });
+    effects.push(Decision::RecordPipelineManifest { bloom, manifest });
     let proven = enqueue_base_verify_if_needed(snapshot, spec.base(), &catalog, &mut effects);
     effects.extend(ready_entries(
         bloom,
@@ -143,16 +144,18 @@ pub(super) fn reduce_seal(
 fn seal_proposal(
     spec: &BloomSpec,
     bloom: BloomId,
-    catalog: StageCatalog,
+    line: AdmittedLine,
     proposal: OperatorProposal,
     mut effects: Vec<Decision>,
 ) -> Decisions {
+    let AdmittedLine { catalog, manifest } = line;
     let candidate = proposal.candidate;
     // Occupy `active` so the executor's live-bloom check does not retire the
     // mechanical gate as a superseded plan. The composition is not a member;
     // this is the bloom's own slot.
     effects.push(Decision::ClaimMembership { workpiece: WorkpieceId::composition(), bloom });
     effects.push(Decision::RecordStageCatalog { bloom, catalog: catalog.clone() });
+    effects.push(Decision::RecordPipelineManifest { bloom, manifest });
     effects.push(Decision::DequeueProposal { proposal });
     effects.push(Decision::RecordIntegration {
         bloom,
@@ -320,10 +323,17 @@ const EMPTY_SURFACE: [String; 0] = [];
 /// override, both structurally valid by construction. Both admission doors run
 /// this, so a successor promises a runnable line exactly as a fresh seal does;
 /// supersession wraps the error as [`SupersedeError::InvalidMember`].
-fn validate_line(spec: &BloomSpec, configs: &ResolvedConfigs) -> Result<StageCatalog, SealError> {
+///
+/// The manifest resolves here too, beside the catalog it will be cross-checked
+/// against (ADR-0215): the two are one answer to "can the tree I am about to
+/// dispatch against run what this catalog names", so the door resolves them
+/// together and hands both to the caller that records and dispatches them.
+fn validate_line(spec: &BloomSpec, configs: &ResolvedConfigs) -> Result<AdmittedLine, SealError> {
     let catalog = sealed_config::<StageCatalog>(ConfigScopes::bloom_wide(spec.configs()), configs)?
         .unwrap_or_else(StageCatalog::line);
     catalog.validate().map_err(SealError::UnrunnableStageCatalog)?;
+    let manifest = sealed_config::<PipelineManifest>(ConfigScopes::bloom_wide(spec.configs()), configs)?
+        .unwrap_or_else(PipelineManifest::compiled);
 
     for member in spec.members() {
         let scopes = ConfigScopes::member_of(&member.configs, spec.configs());
@@ -332,7 +342,21 @@ fn validate_line(spec: &BloomSpec, configs: &ResolvedConfigs) -> Result<StageCat
             .validate(&catalog)
             .map_err(|error| SealError::UnusableModelOverride { workpiece: member.workpiece.clone(), error })?;
     }
-    Ok(catalog)
+    Ok(AdmittedLine { catalog, manifest })
+}
+
+/// The two sealed values an admission door resolves together: the line a bloom
+/// runs and the lane vocabulary its checkout declares (ADR-0174, ADR-0215).
+///
+/// One value rather than two returns because the door, the record, and the
+/// dispatch all read both — and because the cross-check that joins them is a
+/// pure function of exactly this pair.
+struct AdmittedLine {
+    /// The catalog the bloom is graded against.
+    catalog: StageCatalog,
+    /// The vocabulary the bloom's base declares, or the compiled one when it
+    /// sealed none.
+    manifest: PipelineManifest,
 }
 
 /// Resolve a configuration the seal door itself must read, refusing rather than
@@ -486,8 +510,8 @@ pub(super) fn reduce_supersede(
     }
     // And to seal's line admission, so a successor cannot introduce a catalog
     // that cannot run or an override that catalog cannot honour.
-    let catalog = match validate_line(successor, configs) {
-        Ok(catalog) => catalog,
+    let AdmittedLine { catalog, manifest } = match validate_line(successor, configs) {
+        Ok(line) => line,
         Err(error) => return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error))),
     };
     // Supersession is a second door into `active`, so it runs the same
@@ -536,6 +560,7 @@ pub(super) fn reduce_supersede(
         effects.push(Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom: successor_id });
     }
     effects.push(Decision::RecordStageCatalog { bloom: successor_id, catalog: catalog.clone() });
+    effects.push(Decision::RecordPipelineManifest { bloom: successor_id, manifest });
     let proven = enqueue_base_verify_if_needed(snapshot, successor.base(), &catalog, &mut effects);
     // An edgeless supersede of a graph bloom keeps the remaining subgraph —
     // dropping a wedged member must not also drop the edges among the

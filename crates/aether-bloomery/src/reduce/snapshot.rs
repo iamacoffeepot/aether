@@ -20,8 +20,9 @@ use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BaseReceipt, BloomSpec, CandidateRef, CompositionFinding, CompositionParents, ConfigScopes,
     DispatchKey, Evidence, EvidenceKind, MemberDependency, OperatorHold, OperatorProposal, OperatorRepair,
-    OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs, SpendQuiesce, StageCatalog, SuppressionDisposition,
-    SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
+    OrphanClaimReleaseRecord, PipelineManifest, ResolutionClaim, ResolvedConfigs, SpendQuiesce, StageCatalog,
+    SuppressionDisposition, SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse,
+    Wedge, Withdrawal,
 };
 // Only [`Snapshot::with_green_base`] names it, and that door is behind the same cfg.
 // A plain import would be an unused one on a lib-scoped build, where the fixture
@@ -395,6 +396,18 @@ pub struct BloomRecord {
     /// incident class that fold closes, a no-catalog bloom whose recorded
     /// catalog otherwise moved with the binary.
     pub stage_catalog: StageCatalog,
+    /// The lane vocabulary this bloom's checkout declares, resolved once at
+    /// seal (ADR-0215).
+    ///
+    /// Journal-derived exactly like [`stage_catalog`](Self::stage_catalog): a
+    /// newly sealed bloom records it as [`Decision::RecordPipelineManifest`]
+    /// and the fold copies that value, while a pre-existing row that never
+    /// carried the effect keeps the compiled fallback at record construction
+    /// (`PipelineManifest::sealed_in`). Read rather than re-derived because the
+    /// value came out of a *tree*: a base's `pipeline.toml` can be rewritten
+    /// under a digest no journal row names, so re-reading it at replay would
+    /// grade a bloom against a vocabulary it never ran.
+    pub pipeline_manifest: PipelineManifest,
     /// The bloom's lifecycle status.
     pub status: BloomStatus,
     /// The resolution claims accumulated by integration (and inherited from a
@@ -1693,7 +1706,9 @@ impl Snapshot {
             Decision::RecordObservation { head } => {
                 self.observed = *head;
             }
-            Decision::RecordStageCatalog { .. } => self.apply_catalog_effect(effect),
+            Decision::RecordStageCatalog { .. } | Decision::RecordPipelineManifest { .. } => {
+                self.apply_sealed_line_effect(effect);
+            }
             Decision::RecordCompositionFinding { .. }
             | Decision::RecordAdjudication { .. }
             | Decision::RecordOperatorRepair { .. } => self.apply_composition_effect(effect),
@@ -1971,14 +1986,24 @@ impl Snapshot {
         }
     }
 
-    /// Fold the catalog a seal recorded (#4944). Split out of
-    /// [`apply_effect`](Self::apply_effect) so adding the arm does not blow
-    /// the parent match's line budget.
-    fn apply_catalog_effect(&mut self, effect: &Decision) {
-        if let Decision::RecordStageCatalog { bloom, catalog } = effect
-            && let Some(record) = self.blooms.get_mut(bloom)
-        {
-            record.stage_catalog.clone_from(catalog);
+    /// Fold the catalog and the lane vocabulary a seal recorded (#4944,
+    /// ADR-0215). Split out of [`apply_effect`](Self::apply_effect) so adding
+    /// the arms does not blow the parent match's line budget, and kept as one
+    /// fold because the two effects are emitted together and write the same
+    /// record's two halves of one admission.
+    fn apply_sealed_line_effect(&mut self, effect: &Decision) {
+        match effect {
+            Decision::RecordStageCatalog { bloom, catalog } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.stage_catalog.clone_from(catalog);
+                }
+            }
+            Decision::RecordPipelineManifest { bloom, manifest } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.pipeline_manifest.clone_from(manifest);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2138,7 +2163,7 @@ impl BloomRecord {
     /// An empty record over `spec`: compiled-line catalog, sealed status,
     /// empty collections, and zeroed counters.
     ///
-    /// The one 30-field literal. Production sealed-record construction and every
+    /// The one 31-field literal. Production sealed-record construction and every
     /// test fixture fill from here, so a new field has a single home rather than
     /// steering placement across four test copies.
     #[must_use]
@@ -2146,6 +2171,7 @@ impl BloomRecord {
         Self {
             spec,
             stage_catalog: StageCatalog::line(),
+            pipeline_manifest: PipelineManifest::compiled(),
             status: BloomStatus::Sealed,
             claims: BTreeMap::new(),
             evidence: Vec::new(),
@@ -2184,12 +2210,14 @@ impl BloomRecord {
     /// A newly sealed bloom overwrites [`stage_catalog`](Self::stage_catalog)
     /// from [`Decision::RecordStageCatalog`]. Pre-existing rows without that
     /// effect keep this compiled-line fallback: [`StageCatalog::sealed_in`],
-    /// which is [`StageCatalog::line`] when the spec sealed no catalog. Stated
-    /// here because a later binary's edited line must not rewrite a no-catalog
-    /// bloom that never recorded one.
+    /// which is [`StageCatalog::line`] when the spec sealed no catalog, and
+    /// [`PipelineManifest::sealed_in`] on the same terms. Stated here because a
+    /// later binary's edited line — or its edited lane vocabulary — must not
+    /// rewrite a bloom that never recorded one.
     fn sealed(spec: BloomSpec, configs: &ResolvedConfigs) -> Self {
         Self {
             stage_catalog: StageCatalog::sealed_in(ConfigScopes::bloom_wide(spec.configs()), configs),
+            pipeline_manifest: PipelineManifest::sealed_in(ConfigScopes::bloom_wide(spec.configs()), configs),
             ..Self::empty(spec)
         }
     }

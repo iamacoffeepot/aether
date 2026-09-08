@@ -280,6 +280,16 @@ pub const DECISIONS_V1_DIGEST: Digest =
 pub const DECISIONS_PRE_PROPOSE_DIGEST: Digest =
     Digest::pinned("ee7c8fcea13dc3607ffd0733d3e9f0f6a7b90b011e77b1f36b59ca3eb82d9aab");
 
+/// The stamp on journaled decisions rows written before ADR-0215 appended
+/// `Decision::RecordPipelineManifest`.
+///
+/// Copied from the last `decisions` line of
+/// `tests/golden_decisions/fixtures/schema-digests.txt` as it stood before that
+/// append, which is the identity the store actually stamped those rows with —
+/// never recomputed from live code (#5500).
+pub const DECISIONS_PRE_MANIFEST_DIGEST: Digest =
+    Digest::pinned("7ed0db5b5946fee65b566f4f36229438888552f46863d3552e0230d8037f4108");
+
 /// The stamp on journaled event rows written before the #5278 propose door
 /// appended `Fact::ProposeChange`.
 pub const EVENT_PRE_PROPOSE_DIGEST: Digest =
@@ -295,16 +305,21 @@ pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
 ///
 /// The current identity decodes as today. A missing digest is the implicit v1
 /// identity — rows written before the column existed. v1 upcasts by filling
-/// `StageProgress::reconcile_assembles_base` as `false`; the pre-#5278 shape
-/// decodes as today because everything since is a tail-appended variant. Any
-/// other identity is a named refusal.
+/// `StageProgress::reconcile_assembles_base` as `false`; the pre-#5278 and
+/// pre-ADR-0215 shapes decode as today because everything since each is a
+/// tail-appended variant. Any other identity is a named refusal.
 ///
 /// # Errors
 ///
 /// [`PersistedSchemaError`] when the bytes do not decode as the named shape,
 /// or when this binary has no upcast for the recorded digest.
 pub fn decode_recorded_decisions(bytes: &[u8], schema: Option<&[u8]>) -> Result<Decisions, PersistedSchemaError> {
-    decode_persisted(&DECISIONS, schema, bytes, &[upcast_decisions_v1, upcast_decisions_pre_propose])
+    decode_persisted(
+        &DECISIONS,
+        schema,
+        bytes,
+        &[upcast_decisions_v1, upcast_decisions_pre_propose, upcast_decisions_pre_manifest],
+    )
 }
 
 fn upcast_decisions_v1(bytes: &[u8]) -> Result<Decisions, WireError> {
@@ -315,6 +330,13 @@ fn upcast_decisions_v1(bytes: &[u8]) -> Result<Decisions, WireError> {
 /// only appended `Decision` and `Outcome` variants, so every discriminant a
 /// row of that era could hold is unmoved.
 fn upcast_decisions_pre_propose(bytes: &[u8]) -> Result<Decisions, WireError> {
+    from_bytes(bytes)
+}
+
+/// Pre-ADR-0215 rows carry the same wire layout today's decoder reads:
+/// `Decision::RecordPipelineManifest` is appended past every discriminant a row
+/// of that era could hold, so no wire position moved.
+fn upcast_decisions_pre_manifest(bytes: &[u8]) -> Result<Decisions, WireError> {
     from_bytes(bytes)
 }
 
@@ -351,6 +373,7 @@ pub static DECISIONS: PersistedKind = PersistedKind {
     upcasts: &[
         PersistedUpcast { digest: DECISIONS_V1_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_PROPOSE_DIGEST, reshape: None },
+        PersistedUpcast { digest: DECISIONS_PRE_MANIFEST_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };

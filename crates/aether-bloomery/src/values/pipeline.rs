@@ -25,8 +25,11 @@
 //! sealed base's tree through the source port, so the only thing to place is
 //! text-to-value, and that half is inseparable from the version refusal below.
 //!
-//! Nothing reads this yet. Resolving the manifest from the base, recording it on
-//! the bloom, and enforcing it at the seal door are the slices that follow.
+//! The host reads the file out of the sealed base's tree and seals the decoded
+//! value into the bloom's registry; the seal door resolves it through
+//! [`PipelineManifest::sealed_in`] and journals it onto the record, so the fold
+//! reads the vocabulary the bloom sealed rather than the one its binary
+//! happens to compile. Enforcing it at the seal door is the slice that follows.
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -35,6 +38,11 @@ use core::error::Error;
 use core::fmt;
 
 use serde::{Deserialize, Serialize};
+
+use super::{
+    CONSTRUCT_IMPLEMENT_COMMAND, ConfigScopes, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, ResolvedConfigs,
+    SCOPE_FILL_COMMAND, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_MEMBER_COMMAND, VerifyFailure, VerifyGateSet,
+};
 
 /// Where a repository states its lanes: the root of the checkout, beside
 /// `approval-policy.toml`.
@@ -144,6 +152,17 @@ pub const EVIDENCE_ENVELOPE_VERSION: u32 = 1;
 /// seventeenth identity is a further decision, exactly as the ninth was.
 pub const MAX_VERIFIER_IDENTITIES: usize = 16;
 
+/// The program the compiled lane entrypoint spawns, and the words it passes
+/// before the work order's own argv.
+///
+/// Named here because [`PipelineManifest::compiled`] is the value a bloom
+/// sealed before this vocabulary was declared folds against, and the entrypoint
+/// is one of the five copies this record collapses: the host's own
+/// `DEFAULT_LANE_PROGRAM` is deleted by the slice that reads `[entrypoint]`
+/// from the sealed manifest.
+const COMPILED_ENTRYPOINT_PROGRAM: &str = "cargo";
+const COMPILED_ENTRYPOINT_ARGS: [&str; 2] = ["xtask", "transform"];
+
 /// The version probe: what a reader must decode before it can honestly refuse.
 ///
 /// Deliberately tolerant where [`PipelineManifest`] is strict. A manifest from a
@@ -156,6 +175,65 @@ struct VersionProbe {
 }
 
 impl PipelineManifest {
+    /// The vocabulary compiled into this binary — the value this repository's
+    /// `pipeline.toml` transcribes, named the way
+    /// [`StageCatalog::line`](super::StageCatalog::line) names the compiled
+    /// line.
+    ///
+    /// Its only production reader is the fallback at record construction: a
+    /// bloom sealed before ADR-0215 named no manifest, so the fold has to give
+    /// its record *something*, and the honest something is the vocabulary that
+    /// bloom actually ran under. Rendered from the compiled copies rather than
+    /// written out again — [`VerifyFailure::ALL`], the three
+    /// [`VerifyGateSet`] positions, and the lane command constants — so this is
+    /// a projection of them and not a sixth copy to keep in step.
+    ///
+    /// It is deliberately *not* a fallback for a checkout that carries no
+    /// `pipeline.toml`: a base that cannot state its lanes refuses the seal
+    /// rather than silently borrowing this one, because a fallback is silent at
+    /// exactly the moment the tree and the coordinator disagree most.
+    #[must_use]
+    pub fn compiled() -> Self {
+        Self {
+            version: PIPELINE_MANIFEST_VERSION,
+            entrypoint: LaneEntrypoint {
+                program: String::from(COMPILED_ENTRYPOINT_PROGRAM),
+                args: COMPILED_ENTRYPOINT_ARGS.iter().copied().map(String::from).collect(),
+            },
+            lanes: DeclaredLanes {
+                model: commands(&[
+                    CONSTRUCT_IMPLEMENT_COMMAND,
+                    REVIEW_CRITIC_COMMAND,
+                    SCOPE_FILL_COMMAND,
+                    RETROSPECT_READ_COMMAND,
+                ]),
+                mechanical: commands(&[VERIFY_MEMBER_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_BASE_COMMAND]),
+            },
+            verifiers: DeclaredVerifiers {
+                identities: identities(VerifyFailure::ALL.into_iter()),
+                runs: [VerifyGateSet::member(), VerifyGateSet::fold(), VerifyGateSet::base()]
+                    .into_iter()
+                    .map(|gates| (gates.command, identities(gates.verifiers.iter())))
+                    .collect(),
+            },
+            evidence: DeclaredEvidence { envelope: EVIDENCE_ENVELOPE_VERSION },
+        }
+    }
+
+    /// The manifest `scopes` seals, or [`compiled`](Self::compiled) when it
+    /// seals none.
+    ///
+    /// The one place the "which vocabulary does this bloom run" question is
+    /// answered, so the seal door and the snapshot fold cannot give different
+    /// answers for the same spec — the same shape
+    /// [`StageCatalog::sealed_in`](super::StageCatalog::sealed_in) has, for the
+    /// same reason. A present unresolved entry is refused before this lookup;
+    /// only absence selects the compiled vocabulary.
+    #[must_use]
+    pub fn sealed_in(scopes: ConfigScopes<'_>, configs: &ResolvedConfigs) -> Self {
+        configs.resolve::<Self>(scopes).ok().flatten().unwrap_or_else(Self::compiled)
+    }
+
     /// Read a manifest from its TOML text.
     ///
     /// Refuses, in this order: text that does not carry a version at all, a
@@ -179,6 +257,18 @@ impl PipelineManifest {
         }
         Ok(manifest)
     }
+}
+
+/// The declared spelling of each compiled lane command, in the order given.
+fn commands(compiled: &[&str]) -> Vec<String> {
+    compiled.iter().copied().map(String::from).collect()
+}
+
+/// The declared spelling of each compiled verifier identity, in canonical
+/// order — the order both [`VerifyFailure::ALL`] and a
+/// [`VerifyGateSet`]'s set iterate in.
+fn identities(compiled: impl Iterator<Item = VerifyFailure>) -> Vec<String> {
+    compiled.map(|identity| String::from(identity.as_str())).collect()
 }
 
 /// Why a `pipeline.toml` cannot become a usable [`PipelineManifest`].
@@ -243,15 +333,11 @@ impl Error for PipelineManifestError {}
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::fs;
     use std::path::Path;
 
     use super::{PipelineManifest, PipelineManifestError};
-    use crate::values::{
-        CONSTRUCT_IMPLEMENT_COMMAND, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND,
-        VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_MEMBER_COMMAND, VerifyFailure, VerifyGateSet, is_model_lane,
-    };
+    use crate::values::is_model_lane;
 
     fn checked_in_manifest() -> PipelineManifest {
         let text = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pipeline.toml"))
@@ -279,18 +365,9 @@ mod tests {
         // times. An identity appended to `VerifyFailure::ALL`, a lane command
         // respelled, or a gate set's fan-out changed without the matching edit
         // to `pipeline.toml` fails here rather than at a seal door months later.
-        assert_eq!(manifest.verifiers.identities, names(VerifyFailure::ALL.into_iter()));
-        assert_eq!(
-            manifest.lanes.model,
-            [CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND, RETROSPECT_READ_COMMAND]
-        );
-        assert_eq!(manifest.lanes.mechanical, [VERIFY_MEMBER_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_BASE_COMMAND]);
-        let runs: BTreeMap<String, Vec<String>> =
-            [VerifyGateSet::member(), VerifyGateSet::fold(), VerifyGateSet::base()]
-                .into_iter()
-                .map(|gates| (gates.command, names(gates.verifiers.iter())))
-                .collect();
-        assert_eq!(manifest.verifiers.runs, runs);
+        // `compiled` renders the compiled halves rather than restating them, so
+        // this is one comparison and not a per-axis list to keep in step.
+        assert_eq!(manifest, PipelineManifest::compiled());
 
         // The declared split has to agree with the compiled disjunction that
         // decides which dispatch carries a credential, since that disjunction is
@@ -337,9 +414,5 @@ mod tests {
             PipelineManifest::from_toml(&manifest_text(1, 1, &identities)),
             Err(PipelineManifestError::TooManyIdentities { declared: 17 })
         );
-    }
-
-    fn names(identities: impl Iterator<Item = VerifyFailure>) -> Vec<String> {
-        identities.map(|identity| identity.as_str().to_owned()).collect()
     }
 }

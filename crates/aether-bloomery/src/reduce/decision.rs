@@ -14,8 +14,8 @@ use crate::port::ProjectedReceipt;
 use crate::values::{
     Adjudication, AgentProfile, BaseReceipt, CandidateRef, CompositionFinding, ConfigRegistry, Evidence,
     MemberCandidate, MemberDependency, OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease,
-    OrphanClaimReleaseCompletion, ResolutionClaim, ResolvedBloom, SpendQuiesce, StageCatalog, Transformation,
-    VerifyProof, VerifyReuse, Wedge, Withdrawal,
+    OrphanClaimReleaseCompletion, PipelineManifest, ResolutionClaim, ResolvedBloom, SpendQuiesce, StageCatalog,
+    Transformation, VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -885,5 +885,27 @@ pub enum Decision {
         /// The mainline head the memberless spec bases on — current mainline
         /// at propose time, or the head a land just advanced to.
         base: Digest,
+    },
+    /// Record the lane vocabulary this bloom runs (ADR-0215) — the manifest the
+    /// host read out of the sealed base's tree, resolved once at admission so
+    /// the fold reads the record rather than the vocabulary its own binary
+    /// happens to compile.
+    ///
+    /// [`Decision::RecordStageCatalog`]'s sibling, emitted beside it and folded
+    /// the same way, because it answers the other half of one question: the
+    /// catalog says which lane command each stage dispatches, and this says
+    /// which lane commands the checkout implements. Under ADR-0190 replay never
+    /// re-derives it from a tree — a base's file can change under a digest
+    /// nothing recorded, which is the whole reason the value is journaled and
+    /// not re-read. A journal written before this variant keeps the compiled
+    /// fallback at [`BloomRecord`](crate::BloomRecord) construction, exactly as
+    /// its sibling already provides for. Appended so every stored row stays
+    /// decodable under the current shape.
+    RecordPipelineManifest {
+        /// The bloom the vocabulary is recorded on.
+        bloom: BloomId,
+        /// The manifest admission resolved — the compiled vocabulary when the
+        /// spec sealed none, otherwise the sealed value.
+        manifest: PipelineManifest,
     },
 }

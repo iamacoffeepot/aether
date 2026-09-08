@@ -375,9 +375,11 @@ impl Topic {
             // dispatched — a topic here would enqueue rows for work nobody runs.
             | Decision::RecordVerifyProof { .. }
             | Decision::RecordVerifyReuse { .. }
-            // Snapshot-only: the catalog a seal recorded is folded onto the
-            // bloom record. Nothing is dispatched from it.
+            // Snapshot-only: the catalog a seal recorded, and the lane
+            // vocabulary its base declared, are folded onto the bloom record.
+            // Nothing is dispatched from either.
             | Decision::RecordStageCatalog { .. }
+            | Decision::RecordPipelineManifest { .. }
             // Snapshot-only: the composition's findings channel is a record an
             // operator and the weave repair read, and the repair reaches the
             // executor through the `DispatchAttempt` emitted beside it. A topic
