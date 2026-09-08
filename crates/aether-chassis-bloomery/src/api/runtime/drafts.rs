@@ -10,7 +10,7 @@
 //! refuses.
 
 use aether_actor::Manual;
-use aether_bloomery::{BloomDraft, PIPELINE_MANIFEST_PATH, PipelineManifest};
+use aether_bloomery::{BloomDraft, ConfigRegistry, PIPELINE_MANIFEST_PATH, PipelineManifest};
 use aether_data::Kind;
 use aether_http::HttpServerResponse;
 use aether_substrate::actor::native::NativeCtx;
@@ -118,7 +118,7 @@ impl ApiCapabilityState {
 
         let named = patch.configs.as_ref().map_or_else(
             || self.drafts.get(&handle).and_then(|draft| draft.configs.address::<PipelineManifest>()),
-            |configs| configs.address::<PipelineManifest>(),
+            ConfigRegistry::address::<PipelineManifest>,
         );
         if let Some(named) = named
             && named != derived.address
