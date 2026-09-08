@@ -27,13 +27,6 @@ library = []
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
-# iamacoffeepot/aether#3756: the component cap was extracted to
-# `aether-component`. kit is a wasm guest, so it takes the marker-only
-# identity face — it addresses `ComponentHostCapability`, resolves loaded
-# peers through `ComponentHostWasmExt`, and reads `WasmTrampoline::NAMESPACE`
-# to build trampoline addresses. This replaced the crate's last use of the
-# old capabilities monolith, so that dependency is gone.
-aether-component = { path = "../aether-component", default-features = false }
 # iamacoffeepot/aether#3749: the lifecycle cap was extracted to
 # `aether-lifecycle`. kit is a wasm guest, so it takes the marker-only
 # identity face.
@@ -74,6 +67,11 @@ inventory = { workspace = true }
 # cap crates a composition names appear here with their default `runtime`
 # feature on — dev-only, the wasm lib build keeps the marker-only face above.
 [dev-dependencies]
+# iamacoffeepot/aether#5790: `console_render_interaction` builds a loaded
+# component's rendered lineage string from `WasmTrampoline::NAMESPACE`. That is
+# the crate's only remaining use of the component cap, so it takes the
+# marker-only identity face here rather than in `[dependencies]`.
+aether-component = { path = "../aether-component", default-features = false }
 aether-render = { path = "../aether-render" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }

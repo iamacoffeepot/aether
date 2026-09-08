@@ -12,7 +12,9 @@ use aether_data::{Kind, KindId, MailboxId, RequestId, Source};
 
 use crate::mail::ReplyHandle;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
-use crate::model::{Addressable, CallerAddressable, CallerScope, CallerScoped, Instanced, Resolve, Singleton};
+use crate::model::{
+    Addressable, CallerAddressable, CallerScope, CallerScoped, Embedded, Instanced, Resolve, Singleton,
+};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
 use crate::wasm::mailbox::WasmActorMailbox;
@@ -220,17 +222,20 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// the inline registry the send routes through.
     #[must_use]
     pub fn actor<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R> {
-        self.__actor_with_namespace::<R>(R::NAMESPACE)
+        self.actor_with_namespace::<R>(R::NAMESPACE)
     }
 
-    /// Namespace-aware typed actor construction for cap-owned facades whose
-    /// recipient namespace is a runtime fact. Uses the same resolver-selected
-    /// root/current/parent routing scope as [`Self::actor`]; unlike
-    /// [`Self::resolve_actor`], this does not flatten `namespace` into a root
-    /// mailbox name.
-    #[doc(hidden)]
+    /// Namespace-aware typed actor construction: the shared body behind
+    /// [`Self::actor`] (which supplies `R::NAMESPACE`) and
+    /// [`Self::resolve_embedded`] (which supplies a runtime load name). Uses
+    /// the same resolver-selected root/current/parent routing scope as
+    /// [`Self::actor`]; unlike [`Self::resolve_actor`], it does not flatten
+    /// `namespace` into a root mailbox name.
     #[must_use]
-    pub fn __actor_with_namespace<R: Singleton + CallerAddressable>(&self, namespace: &str) -> WasmActorMailbox<'_, R> {
+    pub(crate) fn actor_with_namespace<R: Singleton + CallerAddressable>(
+        &self,
+        namespace: &str,
+    ) -> WasmActorMailbox<'_, R> {
         WasmActorMailbox::__new(
             <<R as Addressable>::Resolver as Resolve>::resolve(
                 self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE),
@@ -254,6 +259,40 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
             self.mailbox,
             self.inline,
         )
+    }
+
+    /// The instance of embedded actor `R` that its host loaded under the
+    /// runtime name `name` — the keyed spelling of [`Self::actor`] for a
+    /// component whose load name is not the one its type declares (an explicit
+    /// `name` at load, or a later `{base}-{index}` replica).
+    ///
+    /// [`Embedded`] is keyless, so an embedded actor is a [`Singleton`] and
+    /// [`Self::resolve_actor`] — which addresses an [`Instanced`] recipient by
+    /// subname — cannot name one. A load name instead occupies the namespace
+    /// slot of the very fold [`Self::actor`] performs, under the same runtime
+    /// parent, so the two agree exactly when `name == R::NAMESPACE`.
+    ///
+    /// The `Resolver = Embedded` bound is the contract: root ([`One`](crate::One)),
+    /// caller-relative ([`Many`](crate::Many)), and spawned embedded
+    /// ([`EmbeddedMany`](crate::EmbeddedMany)) types describe other placements
+    /// and cannot be retyped onto this route.
+    ///
+    /// ```compile_fail
+    /// use aether_actor::{Addressable, One, WasmCtx};
+    ///
+    /// struct RootCap;
+    /// impl Addressable for RootCap {
+    ///     const NAMESPACE: &'static str = "example.root";
+    ///     type Resolver = One;
+    /// }
+    ///
+    /// fn named_root(ctx: &WasmCtx<'_>) {
+    ///     let _ = ctx.resolve_embedded::<RootCap>("example.root-1");
+    /// }
+    /// ```
+    #[must_use]
+    pub fn resolve_embedded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R> {
+        self.actor_with_namespace::<R>(name)
     }
 
     /// ADR-0063 fail-fast: bring the substrate down with `reason`.

@@ -171,9 +171,7 @@ impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
 /// on the wasm transport — split into two traits because the listener /
 /// session peer resolvers return [`NativeActorMailbox<'a, R>`] here
 /// (with a transport-binding lifetime) vs [`WasmActorMailbox<R>`] on
-/// FFI, and a single trait can't carry both signatures. The precedent
-/// is the component host's `ComponentHostWasmExt` /
-/// `ComponentHostNativeExt` (issue 654).
+/// FFI, and a single trait can't carry both signatures (issue 654).
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub trait TcpNativeExt {
     /// Mail `aether.tcp.connect { addr, name, consumer }` to the cap.

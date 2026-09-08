@@ -162,7 +162,7 @@ pub(super) fn replica_base_name(
 /// Derive the name set a `replicas` fan-out registers under, through the
 /// shared [`replica_load_name`] rule the chassis fan-out also applies:
 /// replica 0 claims the bare `base`, later replicas `{base}-{index}`. The
-/// bare instance is what a bare-type `ctx.peer::<R>()` in a peer component
+/// bare instance is what a bare-type `ctx.actor::<R>()` in a peer component
 /// resolves to (iamacoffeepot/aether#5727), and it makes `replicas: 1`
 /// identical to an omitted field.
 pub(super) fn replica_names(base: &str, replicas: u32) -> Vec<String> {
