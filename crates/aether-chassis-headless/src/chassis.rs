@@ -8,20 +8,22 @@
 //! kind moved onto its own cap. `HeadlessRenderCapability` (Phase 2)
 //! handles `aether.render`; `HeadlessWindowCapability` (Phase 3)
 //! handles `aether.window`; `UnsupportedSubstrateHarnessCapability` (Phase 4)
-//! handles `aether.substrate_harness`. `aether.control.platform_info` (now
-//! a deleted kind name from a retired namespace) was
-//! deleted as a kind in Phase 4 — no replacement, no MCP path until
-//! issue 603 §F2 revives the per-domain shape.
+//! handles `aether.substrate_harness`; `HeadlessAudioCapability`
+//! (iamacoffeepot/aether#5705) handles `aether.audio`, retiring the last
+//! inline sink — a hand-written closure that answered one of the six
+//! reply-promising audio kinds and silently absorbed the other five.
+//! `aether.control.platform_info` (now a deleted kind name from a retired
+//! namespace) was deleted as a kind in Phase 4 — no replacement, no MCP
+//! path until issue 603 §F2 revives the per-domain shape.
 
 use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_audio::{SetMasterGain, SetMasterGainResult};
+use aether_audio::HeadlessAudioCapability;
 use aether_clipboard::HeadlessClipboardCapability;
 use aether_component::ComponentHostParams;
 use aether_data::Kind;
-use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
 use aether_http::HttpServerCapability;
 use aether_kinds::Tick;
 use aether_lifecycle::LifecycleCapability;
@@ -30,6 +32,7 @@ use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{BootableChassis, composed};
 use aether_substrate::{Chassis, SubstrateBoot};
+use aether_substrate_harness_cap::UnsupportedSubstrateHarnessCapability;
 use aether_window::HeadlessWindowCapability;
 
 use aether_chassis::{TickConfig, apply_manifest_tick_settings};
@@ -42,7 +45,6 @@ use aether_chassis::boot::{
 use aether_substrate::config::{ConfigError, KnobRecord, validate_env};
 
 use crate::cli::HeadlessCli;
-use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::log_install::apply_filter;
 
 /// Marker type for the headless chassis. Carries no fields — the
@@ -149,9 +151,8 @@ impl BootableChassis for HeadlessChassis {
 
     /// Compose the headless capability chain — the single claim/build path
     /// (ADR-0155) both [`Chassis::build`] and the describe / config helpers run,
-    /// so the manifest roster can never drift from what boots. Registers the
-    /// `aether.audio` fail-fast inline sink on the shared registry, then composes
-    /// the common caps plus the headless render / clipboard / window /
+    /// so the manifest roster can never drift from what boots. Composes the
+    /// common caps plus the headless render / audio / clipboard / window /
     /// substrate-harness / lifecycle caps and the always-claim RPC + HTTP servers
     /// (ADR-0155 §3). Returns the composed builder before the driver is installed:
     /// [`Chassis::build`] adds the timer driver and starts, while the describe /
@@ -169,46 +170,6 @@ impl BootableChassis for HeadlessChassis {
             hub_outbound: Arc::clone(&boot.outbound),
         };
 
-        // Audio nop sink — NoteOn/NoteOff fall through silently;
-        // SetMasterGain replies Err so agents fail fast rather than
-        // hang on a chassis with no audio device.
-        //
-        // Issue 838: registered as `Sink` (not `Closure`) so the
-        // `Mailer::push` route brackets the inline handler with
-        // `Received`/`Finished`. The handler does its work
-        // synchronously (calls `send_reply` directly); there's no
-        // actor dispatch loop behind it, so without the bracket
-        // any chain that mails `aether.audio` from the headless
-        // chassis leaks `in_flight` and never settles. Same shape
-        // as the AETHER_DIAGNOSTICS sink in `boot.rs::register_inline`.
-        //
-        // ADR-0155: registering the sink here (Compose) is what puts
-        // `aether.audio` in the claim-derived `--describe` roster — an
-        // inline sink is a claim like any other.
-        //
-        // iamacoffeepot/aether#4171: the direct mutator is named through the
-        // boot's authority, borrowed for this call. `composed` spends the token
-        // the moment this delta returns, so the sink registration is inside the
-        // window and nothing after it — including the driver that ends up owning
-        // this `boot` — can reach the direct write path.
-        let authority = boot.authority().ok_or(BootError::AlreadyComposed)?;
-        let kind_set_master_gain = boot.registry.kind_id(SetMasterGain::NAME).expect("SetMasterGain registered");
-        let outbound_for_audio_sink = Arc::clone(&boot.outbound);
-        boot.registry.register_inline(
-            authority,
-            "aether.audio",
-            Arc::new(move |dispatch: MailDispatch<'_>| {
-                if dispatch.kind == kind_set_master_gain {
-                    outbound_for_audio_sink.send_reply(
-                        dispatch.sender,
-                        &SetMasterGainResult::Err {
-                            error: "unsupported on headless chassis — no audio device".to_owned(),
-                        },
-                    );
-                }
-            }),
-        );
-
         // Boot order is declaration order. `into_common_boot` reads the
         // env-sourced `CommonBoot` fields off the shared env in one place; the
         // aborter and source stack are supplied earlier by `composed` /
@@ -220,6 +181,7 @@ impl BootableChassis for HeadlessChassis {
         // Tick to `aether.input` via the relay subscriber.
         let builder = with_full_stack_caps(builder, common)
             .with_actor::<HeadlessRenderCapability>(())
+            .with_actor::<HeadlessAudioCapability>(())
             .with_actor::<HeadlessClipboardCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())

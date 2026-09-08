@@ -398,9 +398,9 @@ mod tests {
 
         let items = label.overflow_overlay(size, label.measured_width(size));
         let (plate_width, run_x) = items.iter().fold((0.0_f32, None), |(width, x), item| match item {
-            WidgetDrawItem::Quad { width: plate, .. } => (width.max(*plate), x),
+            WidgetDrawItem::Shape { width: plate, .. } => (width.max(*plate), x),
             WidgetDrawItem::Text { x: run, .. } => (width, x.or(Some(*run))),
-            WidgetDrawItem::TexturedQuad { .. } => (width, x),
+            WidgetDrawItem::TexturedQuad { .. } | WidgetDrawItem::Triangle { .. } => (width, x),
         });
         let run_x = run_x.expect("the plate carries the run it reveals");
 

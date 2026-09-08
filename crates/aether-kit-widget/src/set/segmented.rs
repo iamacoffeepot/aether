@@ -19,15 +19,16 @@ use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{
-    accept_font_metrics_result, apply_text_theme, clamp_option_index, elide_to_width, measured_text_width,
-    pump_text_font_metrics, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y,
+    accept_font_metrics_result, apply_text_theme, clamp_option_index, clamp_selection, elide_to_width,
+    measured_text_width, pump_text_font_metrics, push_control_outlines, quad, release_left, reply_if_hidden,
+    text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, Theme, ThemeState};
 use crate::{
-    Collect, HoverLost, SegmentedConfig, SegmentedSelected, SetWidgetState, WidgetControlState, WidgetDrawItem,
-    WidgetDrawList, WidgetFrame,
+    Collect, HoverLost, SegmentedConfig, SegmentedSelected, SetSelection, SetWidgetState, WidgetControlState,
+    WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -253,7 +254,7 @@ impl WasmActor for SegmentedWidget {
     const NAMESPACE: &'static str = "aether.kit.widget.segmented";
 
     fn init(config: SegmentedConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        let selected = clamp_option_index(config.initial_index, config.options.len());
+        let selected = clamp_option_index(config.initial, config.options.len());
         let desired_font_id = config.theme.font_id;
         Ok(Self {
             options: config.options,
@@ -273,10 +274,13 @@ impl WasmActor for SegmentedWidget {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
+    /// Replace the options / theme in place, re-clamping the selection into
+    /// the new vector. `initial` seeds the control only at `init`;
+    /// [`SetSelection`] moves the choice.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: SegmentedConfig) {
-        self.selected = clamp_option_index(config.initial_index, config.options.len());
         self.options = config.options;
+        self.selected = clamp_selection(self.selected, self.options.len());
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
         self.pressed_segment = None;
@@ -288,6 +292,16 @@ impl WasmActor for SegmentedWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
+    }
+
+    /// Push the chosen segment from the host, clamped into the options.
+    /// Silent — no [`SegmentedSelected`]. A `None` index is ignored: a
+    /// segmented control always has a selection.
+    #[handler::single]
+    fn on_set_selection(&mut self, _ctx: &mut WasmCtx<'_>, set: SetSelection) {
+        if let Some(index) = set.index {
+            self.selected = clamp_option_index(index, self.options.len());
+        }
     }
 
     /// Install a font-metrics reply; the next `Collect` cuts each label

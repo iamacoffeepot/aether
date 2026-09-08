@@ -5,12 +5,11 @@
 //! The dialog: the plate a modal stands on, with a title, a rule under it,
 //! and a body the host lays its own controls into.
 //!
-//! It exists for the owner's round-5 notes 10 and 12 — "the modal should have
-//! a title and probably a bar below it or some basic layout/format" and
-//! "modals should be resizable as well". A modal built without either is a
-//! rectangle of controls with no name on it: the reader has to infer what
-//! they opened from what is inside it, and cannot make it bigger when what is
-//! inside does not fit.
+//! Two rules it exists for: a modal carries a **title and a rule under it**,
+//! and a modal is **resizable**. A modal built without either is a rectangle
+//! of controls with no name on it — the reader has to infer what they opened
+//! from what is inside it, and cannot make it bigger when what is inside does
+//! not fit.
 //!
 //! # What it owns, and what it does not
 //!
@@ -42,7 +41,7 @@
 //! [`SplitterWidget`](super::SplitterWidget) with `bare: true` over the
 //! plate's right edge, another over its bottom edge, and a third over the
 //! bottom-right corner (`SplitterAxis::Corner`), and re-frames the dialog on
-//! each `SplitterMoved`. `bare` is the point: the edge of a plate is
+//! each `SplitterChanged`. `bare` is the point: the edge of a plate is
 //! something the reader can already see, so the pointer's resize shape is the
 //! whole signal and a line lighting under it is one more thing on the screen.
 //! The dialog clamps whatever size it is handed, and reports what it actually
@@ -71,17 +70,16 @@ use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_text::FontMetricsResult;
-use serde::{Deserialize, Serialize};
 
 use crate::set::placement::PlacementBounds;
 use crate::set::{
-    WidgetDefaults, accept_font_metrics_result, apply_text_theme, measured_text_width, pump_text_font_metrics,
-    push_rect_border, quad, reply_if_hidden, text_origin_y,
+    WidgetDefaults, accept_font_metrics_result, apply_text_theme, measured_text_width, pump_text_font_metrics, quad,
+    raised_plate, reply_if_hidden, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, TextRole, Theme};
-use crate::{Collect, SetWidgetState, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
+use crate::{Collect, DialogConfig, DialogPlaced, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
 
 /// The plate's inset, in spacing units — two, which is the least a control
 /// inside a plate may sit from its edge.
@@ -89,52 +87,6 @@ const PAD_UNITS: u8 = 2;
 
 /// The hairline the plate's ring and its title rule are drawn at.
 const RULE_THICKNESS: f32 = 1.0;
-
-/// `aether.kit.widget.dialog.config` — the plate a modal stands on. The
-/// widget's assigned [`WidgetFrame`] is the plate's rectangle; this says what
-/// is written on it and how small it may get.
-///
-/// A dialog is re-framed, not re-configured, to resize: the host's splitters
-/// write the frame. Re-send the config to rename it or to change the floor.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.dialog.config")]
-pub struct DialogConfig {
-    /// The one line naming what the reader opened, set at
-    /// [`TextRole::Heading`]. An empty title draws no title row at all — the
-    /// plate is then a bare frame, which is what a confirmation with nothing
-    /// to name wants.
-    pub title: String,
-    /// The narrowest the plate may be drawn. `0` (the default) is the title's
-    /// own floor alone: the plate never goes narrower than its title plus a
-    /// pad each side once the font's advances land, because a modal whose
-    /// name is cut in half is worse than one that refuses to shrink.
-    #[serde(default)]
-    pub min_width_pixels: f32,
-    /// The shortest the plate may be drawn. `0` (the default) is the chrome's
-    /// own floor: the title row, its rule, and the padding under it, which is
-    /// a dialog with an empty body rather than one with a clipped title.
-    #[serde(default)]
-    pub min_height_pixels: f32,
-    pub theme: Theme,
-    #[serde(default)]
-    pub state: WidgetControlState,
-}
-
-/// `aether.kit.widget.dialog.placed` — where the plate actually stands and
-/// where its body is, in the same window pixels the frame was assigned in.
-/// Reported whenever either changes, never every frame.
-///
-/// The host needs both. `body` is where it frames its own slot children, so
-/// they land under the title rather than over it. `frame` is the plate as
-/// *drawn* — which is the assigned frame grown to the minimum the title
-/// needs — so the host can hand it to its peers as the rectangle they are
-/// occluded by, and hang its resize splitters on the edges the reader sees.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
-#[kind(name = "aether.kit.widget.dialog.placed")]
-pub struct DialogPlaced {
-    pub frame: PlacementBounds,
-    pub body: PlacementBounds,
-}
 
 /// The dialog widget. Holds the title and the floor it was given plus the
 /// cached theme, frame, and font metrics it measures the title with.
@@ -264,8 +216,15 @@ impl DialogWidget {
         let (width, height, pad) = (plate.width, plate.height, self.pad());
 
         let mut items = Vec::with_capacity(7);
-        items.push(quad(0.0, 0.0, width, height, self.theme.surface_raised));
-        push_rect_border(&mut items, 0.0, 0.0, width, height, RULE_THICKNESS, self.theme.outline);
+        items.push(raised_plate(
+            &self.theme,
+            0.0,
+            0.0,
+            width,
+            height,
+            self.theme.surface_raised,
+            Some(self.theme.outline),
+        ));
         if self.title.is_empty() {
             return items;
         }
@@ -406,6 +365,7 @@ impl WasmActor for DialogWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WidgetControlState;
     use aether_kinds::{CachedFontMetrics, FontMetrics};
 
     fn dialog(title: &str, width: f32, height: f32) -> DialogWidget {
@@ -440,8 +400,8 @@ mod tests {
 
     fn rule(widget: &DialogWidget) -> (f32, f32, f32) {
         let items = widget.overlay_items();
-        let Some(&WidgetDrawItem::Quad { x, y, width, .. }) = items.last() else {
-            panic!("a titled plate ends in its rule, a quad: {items:?}");
+        let Some(&WidgetDrawItem::Shape { x, y, width, .. }) = items.last() else {
+            panic!("a titled plate ends in its rule, a flat shape: {items:?}");
         };
         (x, y, width)
     }
@@ -476,7 +436,11 @@ mod tests {
         // nothing above it and a body pushed down by an empty row.
         let widget = measured("", 400.0, 300.0);
         assert_eq!(widget.body().y, widget.plate().y + widget.pad());
-        assert_eq!(widget.overlay_items().len(), 5, "a fill and its four-sided ring, and nothing else");
+        assert_eq!(
+            widget.overlay_items().len(),
+            1,
+            "the plate — fill, edge, and shadow in one shape — and nothing else"
+        );
     }
 
     #[test]

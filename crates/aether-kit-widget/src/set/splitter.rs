@@ -4,22 +4,22 @@
 
 //! The splitter: the drag handle on the edge between two regions.
 //!
-//! It exists for the owner's round-1 note 10 — "left panel should be
-//! horizontally resizable by pulling it to the right to some maximum width.
-//! Same with ascendancy window" — and for the two notes that shaped its look:
-//! round-2 note 19, "resize highlight on left bar too wide, could be
-//! smaller", and round-3 note 3, which asked for the affordance back after it
-//! was removed. So the handle is a **thin mark**, two logical pixels of
+//! It exists so a pane or a plate can be resized by pulling the edge between
+//! it and its neighbour, up to a range the host names. Two rules shape its
+//! look, and they pull against each other: the affordance has to be *there* —
+//! an edge with no mark on it is an edge nobody discovers — and it has to be
+//! **thin**, because a wide highlight on an edge reads as a column of chrome.
+//! So the handle is a **thin mark**, two logical pixels of
 //! [`Theme::accent`] lit only while the pointer is on it or a drag is live,
 //! over a hit strip as wide as the host cares to make the slot — the target
 //! is generous, the mark is not.
 //!
 //! # What it does not do
 //!
-//! It does not set the pointer shape. Round-2 note 7 asked for a resize
-//! cursor on a resizable edge and round-3 note 4 asked for no cursor where
-//! the gesture is obvious, and both of those are the *host's* judgement about
-//! its own screen — so the widget reports [`SplitterHover`] up and the root
+//! It does not set the pointer shape. Whether a resizable edge deserves a
+//! resize cursor, or whether the gesture is obvious enough without one, is the
+//! *host's* judgement about its own screen — so the widget reports
+//! [`SplitterHover`] up and the root
 //! decides whether to mail `aether.window.set_cursor`. A widget never talks
 //! to the window cap.
 //!
@@ -46,28 +46,14 @@ use core::mem;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{MouseButton, MouseButtonRelease, MouseMove, mouse_button};
-use serde::{Deserialize, Serialize};
 
 use crate::set::{WidgetDefaults, quad, reply_if_hidden};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
 use crate::{
-    Collect, HoverGained, HoverLost, SetWidgetState, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, HoverGained, HoverLost, SetWidgetState, SplitterAxis, SplitterChanged, SplitterConfig, SplitterHover,
+    WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
-
-/// Which pointer motion moves a splitter's position.
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SplitterAxis {
-    /// Left and right: a vertical edge between two side-by-side regions, the
-    /// docked pane's case.
-    #[default]
-    Horizontal,
-    /// Up and down: a horizontal edge between two stacked regions.
-    Vertical,
-    /// Both at once, averaged: one side length of a square plate dragged by
-    /// its corner.
-    Corner,
-}
 
 impl SplitterAxis {
     /// How far this axis reads a pointer that has travelled `(dx, dy)` from
@@ -79,65 +65,6 @@ impl SplitterAxis {
             Self::Corner => (dx + dy) * 0.5,
         }
     }
-}
-
-/// `aether.kit.widget.splitter.config` — the drag handle between two
-/// regions. `position_pixels` is the scalar the host resizes with (a pane's
-/// width, a plate's side), held between `min_pixels` and `max_pixels`;
-/// `axis` says which pointer motion moves it, and `inverted` flips the
-/// direction for a region anchored to the far edge — a plate pinned to the
-/// bottom-right grows as its top-left corner is dragged *up and left*, so its
-/// handle counts travel the other way.
-///
-/// The widget's assigned [`WidgetFrame`] is the
-/// hit strip; the lit mark is two logical pixels inside it, so the target can
-/// be as generous as the host likes without the affordance becoming a column.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.splitter.config")]
-pub struct SplitterConfig {
-    pub axis: SplitterAxis,
-    pub min_pixels: f32,
-    pub max_pixels: f32,
-    /// Where the split stands now. Re-send the config to move it from the
-    /// host's side (a menu command that resets a pane's width); the widget
-    /// clamps whatever it is given.
-    pub position_pixels: f32,
-    /// The region grows as the pointer travels toward the origin rather than
-    /// away from it.
-    #[serde(default)]
-    pub inverted: bool,
-    /// A bare handle draws no mark while the pointer is on it. An edge the
-    /// reader can already see (the border of a plate) needs none: the
-    /// pointer's resize shape is the whole signal, and a line lighting under
-    /// it is one more thing on the screen. A bare handle still reports every
-    /// hover and move.
-    #[serde(default)]
-    pub bare: bool,
-    pub theme: Theme,
-    #[serde(default)]
-    pub state: WidgetControlState,
-}
-
-/// `aether.kit.widget.splitter.moved` — the split's new position, clamped
-/// into the configured range, streamed while the pointer drags. There is no
-/// preview/commit split: a region resize is applied as it happens, which is
-/// the whole feedback the gesture has.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
-#[kind(name = "aether.kit.widget.splitter.moved")]
-pub struct SplitterMoved {
-    pub position_pixels: f32,
-}
-
-/// `aether.kit.widget.splitter.hover` — the pointer entered (`true`) or left
-/// (`false`) the handle's strip. The host decides what to do with it: on a
-/// screen where the edge is the only resizable thing, mail
-/// `aether.window.set_cursor` with the axis's resize icon; on one where the
-/// gesture is already obvious, do nothing. A widget never sets the cursor
-/// itself.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[kind(name = "aether.kit.widget.splitter.hover")]
-pub struct SplitterHover {
-    pub entered: bool,
 }
 
 /// A live drag: where the pointer went down, and what the position was then.
@@ -215,9 +142,9 @@ impl SplitterWidget {
             && y <= self.frame.y + self.frame.height
     }
 
-    /// How thick the lit mark is: half a spacing unit, which is the owner's
-    /// two logical pixels on the default four-pixel grid and scales with a
-    /// theme scaled for the display.
+    /// How thick the lit mark is: half a spacing unit, which is two logical
+    /// pixels on the default four-pixel grid and scales with a theme scaled
+    /// for the display.
     fn mark_thickness(&self) -> f32 {
         (self.theme.space_unit_pixels * MARK_UNIT_RATIO).max(1.0)
     }
@@ -294,8 +221,8 @@ impl SplitterWidget {
     }
 }
 
-/// The lit mark's thickness as a fraction of the spacing unit — the owner's
-/// two logical pixels at the default grid.
+/// The lit mark's thickness as a fraction of the spacing unit — two logical
+/// pixels at the default grid.
 const MARK_UNIT_RATIO: f32 = 0.5;
 
 impl WidgetDefaults for SplitterWidget {
@@ -336,7 +263,7 @@ impl WidgetDefaults for SplitterWidget {
 }
 
 /// A splitter. Spawned inline by a panel root with a [`SplitterConfig`];
-/// reports [`SplitterMoved`] as it is dragged and [`SplitterHover`] as the
+/// reports [`SplitterChanged`] as it is dragged and [`SplitterHover`] as the
 /// pointer crosses it.
 ///
 /// # Agent
@@ -419,7 +346,7 @@ impl WasmActor for SplitterWidget {
         }
         self.position_pixels = position;
         if let Some(parent) = ctx.parent() {
-            parent.send(&SplitterMoved { position_pixels: position });
+            parent.send(&SplitterChanged { position_pixels: position });
         }
     }
 
@@ -466,6 +393,7 @@ impl WasmActor for SplitterWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WidgetControlState;
 
     fn splitter(axis: SplitterAxis, inverted: bool) -> SplitterWidget {
         SplitterWidget {
@@ -581,8 +509,8 @@ mod tests {
         widget.state.set_hovered(true);
         let items = widget.draw_items();
         assert_eq!(items.len(), 1);
-        let WidgetDrawItem::Quad { width, height, color, .. } = items[0] else {
-            panic!("the mark is a quad: {items:?}");
+        let WidgetDrawItem::Shape { width, height, fill: Some(color), .. } = items[0] else {
+            panic!("the mark is a flat fill: {items:?}");
         };
         assert!((width - 2.0).abs() < f32::EPSILON, "two logical pixels of mark: {width}");
         assert!((height - widget.frame.height).abs() < f32::EPSILON, "down the whole edge: {height}");

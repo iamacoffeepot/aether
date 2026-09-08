@@ -22,6 +22,13 @@ use crate::wasm::inline::{ChainMode, Registry};
 /// the inline registry's cluster router: a cluster-member recipient (which a
 /// resolved relative always is) dispatches in place via the queue + drain,
 /// never the scheduler.
+///
+/// Reach for this when the position is what you know and the type genuinely
+/// is not — a parent hop, a forwarding interposer, a subname read off runtime
+/// data. When the child type *is* known, take the typed handle instead:
+/// [`WasmCtx::child_as`] / [`WasmCtx::sibling_as`] answer the same lookup as
+/// an [`InlineChild<C>`](super::InlineChild) whose sends are checked against
+/// `C`'s handler set.
 pub struct RelativeMailbox<'a> {
     id: MailboxId,
     /// The addressing actor's own folded [`MailboxId`] raw value — the "from"

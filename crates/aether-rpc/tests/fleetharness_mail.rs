@@ -11,7 +11,7 @@
 
 mod tests {
     use aether_data::{Kind, MailId};
-    use aether_fs::{List, ListResult};
+    use aether_fs::{List, ListResult, NamespaceAddr};
     use aether_kinds::trace::DispatchTraced;
     use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 
@@ -75,7 +75,7 @@ mod tests {
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
 
-        let replies = harness.send(engine, "aether.fs", &List { namespace: "save".to_owned(), prefix: String::new() });
+        let replies = harness.send(engine, "aether.fs", &List { addr: NamespaceAddr::new("save", String::new()) });
         let reply = match replies.as_slice() {
             [one] => one,
             other => panic!("send_mail expected exactly one reply event, got {}", other.len()),
@@ -105,7 +105,7 @@ mod tests {
         let engine = harness.spawn_headless();
 
         let (root, replies) =
-            harness.send_traced(engine, "aether.fs", &List { namespace: "save".to_owned(), prefix: String::new() });
+            harness.send_traced(engine, "aether.fs", &List { addr: NamespaceAddr::new("save", String::new()) });
         assert_ne!(root, MailId::NONE, "the traced batch ack carries a non-sentinel chassis root");
 
         let echoed = replies
@@ -131,12 +131,12 @@ mod tests {
     }
 
     /// Decode an `fs::List` reply and return the echoed namespace,
-    /// matching either arm — both `Ok` and `Err` echo `namespace`,
+    /// matching either arm — both `Ok` and `Err` echo `addr`,
     /// so the row's assertion is deterministic regardless of the save
     /// dir's contents.
     fn fs_reply_namespace(payload: &[u8]) -> String {
         match ListResult::decode_from_bytes(payload) {
-            Some(ListResult::Ok { namespace, .. } | ListResult::Err { namespace, .. }) => namespace,
+            Some(ListResult::Ok { addr, .. } | ListResult::Err { addr, .. }) => addr.namespace,
             None => panic!("undecodable ListResult"),
         }
     }

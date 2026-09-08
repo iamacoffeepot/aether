@@ -26,7 +26,7 @@
 //! drives the same single-flight font-metrics request the label and the
 //! tooltip do, and once the theme font's advances land it elides a row too
 //! long for its frame with an ellipsis rather than letting the slot clip cut
-//! it mid-glyph (the studio's gap 17). The same metrics give the widest row of
+//! it mid-glyph. The same metrics give the widest row of
 //! the whole item vector, which the list reports as its intrinsic width so a
 //! column can be sized to what it holds.
 //!
@@ -40,7 +40,7 @@
 //! the item count for a fixed-pitch list. A host draws the container around a
 //! list from the second — a four-row table gets a four-row plate rather than a
 //! tall empty box — because only the widget can answer it, the wrapping being
-//! the widget's and the font metrics with it (the studio's gap 41).
+//! the widget's and the font metrics with it.
 //!
 //! # The row under the pointer
 //!
@@ -48,8 +48,9 @@
 //! realizes a window of them, and scrolls that window under a pointer that has
 //! not moved — so a host that wanted to explain the row a reader is resting on
 //! had to redo the list's own geometry and got it wrong the moment the list
-//! scrolled (the studio's gap 19). The list says it instead:
-//! [`VirtualListHover`](crate::VirtualListHover) carries the row under the pointer, or `None` once the
+//! scrolled. The list says it instead:
+//! [`VirtualListHover`](crate::VirtualListHover) carries the row under the
+//! pointer and that row's rectangle, or `None` and a zero rectangle once the
 //! pointer has left the rows, and is sent whenever that answer *changes* — from
 //! a pointer move, a wheel, a thumb drag, or a new item vector arriving under a
 //! still pointer. The scroll bar's gutter is not a row, so a thumb drag reports
@@ -100,7 +101,7 @@
 //! emphasis ladder, one elision rule, and one hover answer serve a verb whether
 //! it stands in a slot of its own or inside a row this widget owns.
 //!
-//! The verbs are **flush** (round-12 note 1): nothing between one face and the
+//! The verbs are **flush**: nothing between one face and the
 //! next, and the last face ends on the row's own right edge rather than on its
 //! right pad. Two touching faces are told apart by a hairline in
 //! [`Theme::edge`] on every boundary inside the block, because the rank a row
@@ -115,7 +116,7 @@
 //! trailing run sits clear of the verbs instead of under them. The reserve is
 //! that block plus one gap of clear space *less* one pad, since the block
 //! stands in the pad the text budget already gave up. A press on a
-//! verb arms it and the release-inside fires [`VirtualListAction`](crate::VirtualListAction) — the
+//! verb arms it and the release-inside fires [`VirtualListActivated`](crate::VirtualListActivated) — the
 //! button's own press-then-release-inside, so a press that slides off cancels,
 //! which is what a `×` that unbinds a skill deserves. It reports **no**
 //! selection: the whole reason a verb is on the row is that removing the third
@@ -190,18 +191,16 @@
 //! clears a viewport of the content's end, rather than the last row starting
 //! before it. A frame is rarely an exact prefix sum of its rows — a plate
 //! capped by a pane's height never is — and rounding the other way left the
-//! final row hanging below the frame's edge with nothing left to roll, which
-//! is round-17 note 1, "on defense extended stats cannot scroll to bottom"
-//! (the studio's gap 41a). The slack, never more than one row, falls above
-//! the last window's start.
+//! final row hanging below the frame's edge with nothing left to roll — a
+//! list that cannot be scrolled to its own bottom. The slack, never more than
+//! one row, falls above the last window's start.
 //!
 //! The bar stands off the rows by a **gutter**, and the gutter is the host's:
 //! [`VirtualListConfig::scroll_bar_gap_units`], two spacing units by default,
 //! because a control inside a plate sits at least two units from its edge
 //! (`designing-a-screen.md` §6) and from the rows' side the rail is that edge.
-//! One unit was the whole gutter until round 15, and the owner read it as
-//! touching the values twice — round-14 note 5 and round-17 note 7, "the
-//! scrollbar is still too close to content to the left side". The gutter comes
+//! One unit reads as the bar touching the values beside it: gutter and track
+//! are both narrow, so a single unit between them is not seen. The gutter comes
 //! out of the row's own width, so the fill, the trailing column and the
 //! leading run's elision all stop on the gutter's left edge rather than
 //! running under the track.
@@ -210,8 +209,8 @@
 //! [`VirtualListConfig::host_scroll_strip`] the track stands one gutter past
 //! the frame's right edge — the way a pane's rail is drawn past the body it
 //! scrolls — and the rows give up nothing, so a value's right edge does not
-//! move when the vector starts to overflow (round-16 note 3, "the scrollbar
-//! should EXTEND the panel slightly to exist and be adjacent"). The host owes
+//! move when the vector starts to overflow: a bar that appears extends the
+//! list rather than narrowing it. The host owes
 //! the widget that column: [`VirtualListConfig::scroll_strip_width`] is how
 //! wide it is, and the slot's clip has to reach across it, since a clip of the
 //! frame alone erases a track drawn outside it.
@@ -238,13 +237,16 @@ use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove, MouseWheel};
 use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
-use crate::set::{accept_font_metrics_result, apply_text_theme, pump_text_font_metrics, release_left, reply_if_hidden};
+use crate::set::{
+    accept_font_metrics_result, apply_text_theme, clamp_optional_index, clamp_optional_selection,
+    pump_text_font_metrics, release_left, reply_if_hidden,
+};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, Theme};
 use crate::{
-    Collect, HoverLost, SetWidgetState, VirtualListConfig, VirtualListRow, WidgetControlState, WidgetDrawList,
-    WidgetEligibilityChanged, WidgetFrame,
+    Collect, HoverLost, SetSelection, SetWidgetState, VirtualListConfig, VirtualListRow, WidgetControlState,
+    WidgetDrawList, WidgetEligibilityChanged, WidgetFrame,
 };
 
 use actions::RowActionIndex;
@@ -343,7 +345,7 @@ impl VirtualListWidget {
     fn from_config(config: VirtualListConfig) -> Self {
         let font_id = config.theme.font_id;
         let visible_row_count = usize_from_u32(config.visible_row_count);
-        let selected_index = initial_selection(config.initial_selected_index, config.items.len());
+        let selected_index = clamp_optional_index(config.initial, config.items.len());
         let first_index = selected_index.map_or(0, |selected_index| {
             reveal_window(selected_index, 0, visible_row_count, config.items.len()).first_index
         });
@@ -436,13 +438,16 @@ impl WidgetDefaults for VirtualListWidget {
 
 /// A fixed-row virtual list. Spawned inline by a panel root with a
 /// [`VirtualListConfig`]; reports [`VirtualListSelected`](crate::VirtualListSelected) when selection
-/// changes, [`VirtualListAction`](crate::VirtualListAction) when a verb bound to
+/// changes, [`VirtualListActivated`](crate::VirtualListActivated) when a verb bound to
 /// a row is pressed, and [`VirtualListHover`](crate::VirtualListHover) when the
 /// row under the pointer changes.
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
-/// its `VirtualListConfig` again to replace the item vector or viewport. An
+/// its `VirtualListConfig` again to replace the item vector or viewport — that
+/// holds the selection and the scrolled row window, so a list that refreshes
+/// under a reader does not jump back to the top; [`SetSelection`] moves the
+/// selection. An
 /// item is a
 /// `VirtualListRow { text, trailing, role, ink, actions, note, indent, space_before, rule_above }`
 /// — write plain strings through `VirtualListRow::from` for a one-column list,
@@ -471,6 +476,17 @@ impl WasmActor for VirtualListWidget {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
+    /// Replace the items / viewport / theme in place, holding the selection and
+    /// the scrolled row window and re-clamping both into the new vector, so a
+    /// list that refreshes under a reader does not jump back to the top.
+    /// [`SetSelection`] moves the selection.
+    ///
+    /// `initial` is a seed, and a seed seeds: it is read while
+    /// the list holds **no** selection — at `init`, and again on the config
+    /// that first populates an empty list — and ignored once there is a chosen
+    /// row to preserve. So "here are the rows, start on the first" is still one
+    /// mail, and a later refresh of those rows cannot undo what the reader
+    /// chose.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: VirtualListConfig) {
         let previous_eligible = content_eligible(self.items.len(), self.visible_row_count);
@@ -481,10 +497,11 @@ impl WasmActor for VirtualListWidget {
         self.scroll_bar_gap_units = config.scroll_bar_gap_units;
         self.bar_placement = BarPlacement::of(config.host_scroll_strip);
         self.visible_row_count = usize_from_u32(config.visible_row_count);
-        self.selected_index = initial_selection(config.initial_selected_index, self.items.len());
-        self.first_index = 0;
-        self.thumb_grab_pixels = None;
-        self.wheel_residual_pixels = 0.0;
+        let held = self.selected_index;
+        self.selected_index = held.map_or_else(
+            || clamp_optional_index(config.initial, self.items.len()),
+            |index| clamp_optional_selection(Some(index), self.items.len()),
+        );
         self.hovered_action = None;
         self.pressed_action = None;
         self.font_metrics.set_desired(config.theme.font_id);
@@ -493,7 +510,11 @@ impl WasmActor for VirtualListWidget {
         // The heights are a function of the theme, so the table is rebuilt
         // once it has landed and before anything asks where a row stands.
         self.refresh_row_layout();
-        self.reveal_selection();
+        if held.is_none() && self.selected_index.is_some() {
+            self.reveal_selection();
+        } else {
+            self.first_index = self.first_index.min(self.max_first_index());
+        }
         self.apply_control_state(ctx, config.state);
         let next_eligible = content_eligible(self.items.len(), self.visible_row_count);
         if previous_eligible != next_eligible
@@ -504,6 +525,18 @@ impl WasmActor for VirtualListWidget {
         // A fresh vector under a still pointer is a different row under it.
         self.settle_hovered_row(ctx);
         pump_text_font_metrics(ctx, &mut self.font_metrics);
+    }
+
+    /// Push the selected row from the host, clamped into the items and `None`
+    /// for no selection at all, scrolling it into view. Silent — no
+    /// [`VirtualListSelected`](crate::VirtualListSelected).
+    #[handler::single]
+    fn on_set_selection(&mut self, ctx: &mut WasmCtx<'_>, set: SetSelection) {
+        self.selected_index = clamp_optional_index(set.index, self.items.len());
+        if self.selected_index.is_some() {
+            self.reveal_selection();
+        }
+        self.settle_hovered_row(ctx);
     }
 
     /// Install a font-metrics reply; the next `Collect` elides and measures
@@ -648,14 +681,6 @@ fn content_eligible(item_count: usize, visible_row_count: usize) -> bool {
     item_count > 0 && visible_row_count > 0
 }
 
-fn initial_selection(initial_selected_index: Option<u32>, item_count: usize) -> Option<usize> {
-    let initial_selected_index = initial_selected_index?;
-    if item_count == 0 {
-        return None;
-    }
-    Some(usize_from_u32(initial_selected_index).min(item_count - 1))
-}
-
 fn valid_frame(frame: &WidgetFrame) -> bool {
     frame.x.is_finite()
         && frame.y.is_finite()
@@ -670,15 +695,6 @@ mod tests {
     use super::*;
     use crate::set::virtual_list::fixture::list;
     use crate::theme::ThemeState;
-
-    #[test]
-    fn initial_selection_is_none_for_empty_and_clamped_for_nonempty() {
-        assert_eq!(initial_selection(Some(0), 0), None);
-        assert_eq!(initial_selection(None, 5), None, "no selection asked for is no selection");
-        assert_eq!(initial_selection(Some(0), 1), Some(0));
-        assert_eq!(initial_selection(Some(99), 5), Some(4));
-        assert_eq!(initial_selection(Some(u32::MAX), usize::MAX), Some(usize_from_u32(u32::MAX)));
-    }
 
     #[test]
     fn hover_focus_and_control_state_follow_shared_interaction_rules() {

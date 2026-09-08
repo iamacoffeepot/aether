@@ -13,7 +13,7 @@ use aether_kinds::CaptureFrame;
 
 use crate::kinds::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DestroyGeometry, DestroyTexture,
-    DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawSolidQuads, DrawTexturedQuads, DrawTriangle,
+    DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawShapes, DrawTexturedQuads, DrawTriangle,
     ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult,
     UpdateGeometry, UpdateTexture, ViewProjection,
 };

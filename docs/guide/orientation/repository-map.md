@@ -58,6 +58,7 @@ compares these with native capabilities.
 | `aether-anthropic` | the content-gen provider component (loaded on demand, not a chassis fixture), a self-contained guest carrying its own pure DTO/string helpers |
 | `aether-chassis` | shared chassis composition: boot fragments, config registry, CLI roots, autoload, boot-manifest and package-depot formats |
 | `aether-chassis-desktop` / `aether-chassis-headless` / `aether-chassis-hub` / `aether-chassis-harness` / `aether-chassis-bloomery` | the five checked-in chassis binaries; Bloomery is the dedicated application profile and can run standalone or through the hub launch path |
+| `aether-substrate-harness-cap` | the `aether.substrate_harness` mailbox: the harness-chassis drive and the fail-fast stub every other chassis composes |
 | `aether-harness-substrate` | composable in-process substrate harness with deterministic mail, lifecycle, and settlement control |
 | `aether-harness-substrate-capture` | opt-in render/GPU capture and visual comparison support layered onto the core substrate harness |
 | `aether-harness-fleet` | real-process hub/RPC/headless fleet scenarios over raw framed calls |
@@ -109,7 +110,9 @@ Test-only packages are grouped by role rather than maintained here as an
 exhaustive crate ledger. `aether-test-fixtures-*` packages provide deliberately
 small wasm/native artifacts for replacement, capability-split, boot,
 multi-actor, and behavior contracts. `aether-component-ui-tests` is the narrow
-trybuild host for component route compile contracts. Derive crates also keep
+trybuild host for component route compile contracts, and
+`aether-subscribe-ui-tests` the equally narrow host for the publisher gate on
+the lifecycle and window subscribe surfaces. Derive crates also keep
 their compile-pass/fail fixtures beside the macro they exercise. These are
 often better executable examples than an old prose snippet.
 

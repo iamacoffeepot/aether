@@ -415,3 +415,43 @@ fn reconstruct_does_not_run_wire() {
     assert_eq!(PROBE_WIRE_COUNT.get(), 0, "a reconstruct runs init + on_rehydrate, never wire");
     assert!(registry.take(alias).is_some(), "the reconstructed child is resident under its alias");
 }
+
+/// Issue 5722: `spawn_inline` keeps the parent-identity *read* — a ctx whose
+/// mailbox identifies no actor is still rejected before the host alias call,
+/// exactly as the two-type verb rejects it. Dropping the redundant `P` must
+/// not mean dropping the guard, which an implementation that skipped the
+/// registry read entirely would do (and then panic in the host-fn stub).
+#[test]
+fn spawn_inline_rejects_unavailable_parent_identity_before_host_call() {
+    let registry = Registry::new();
+    registry.set_self_id(0x7010);
+    let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x7010, &registry, NO_INBOUND_SOURCE);
+
+    let result = ctx.spawn_inline::<SucceedingChild>(Subname::Named("bad:name"), &());
+    assert!(
+        matches!(result, Err(SpawnError::ParentIdentityUnavailable(MailboxId(0x7010)))),
+        "a ctx with no registry actor identity is rejected before subname handling or allocation, got {result:?}",
+    );
+}
+
+/// Issue 5722: `spawn_inline` does not care *which* exported actor the ctx is
+/// executing — a `composable` child may sit beneath any parent its module
+/// exports. Under a ctx whose recorded identity is a `LifecycleProbe`, the
+/// two-type verb naming `NestingParent` fails with `ParentIdentityMismatch`
+/// (the sibling test above), while this one falls through the parent gate to
+/// subname validation. The mismatch error is what a copied-from-a-sibling
+/// wrong `P` produces, and consumers `.ok()` or warn-log it into a silently
+/// absent child.
+#[test]
+fn spawn_inline_accepts_any_recorded_parent_type() {
+    let registry = Registry::new();
+    registry.set_self_id(0x7020);
+    registry.set_entry_actor_tag(ActorTypeTag::of::<LifecycleProbe>());
+    let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x7020, &registry, NO_INBOUND_SOURCE);
+
+    let result = ctx.spawn_inline::<SucceedingChild>(Subname::Named("bad:name"), &());
+    assert!(
+        matches!(result, Err(SpawnError::SubnameInvalid(_))),
+        "the parent type is read, not named, so the spawn reaches subname validation, got {result:?}",
+    );
+}

@@ -6,10 +6,10 @@
 
 use aether_actor::WasmCtx;
 
-use crate::VirtualListHover;
 use crate::set::virtual_list::VirtualListWidget;
 use crate::set::virtual_list::actions::RowActionIndex;
 use crate::set::virtual_list::scroll_bar::ScrollBar;
+use crate::{VirtualListHover, WidgetFrame};
 
 /// What a left press inside the list lands on.
 ///
@@ -46,17 +46,27 @@ impl VirtualListWidget {
     /// Called from everything that can move a row out from under the pointer —
     /// the pointer itself, the wheel, a thumb drag, a fresh item vector — so
     /// the fact the host is told stays true while the list scrolls under a
-    /// still pointer, which is the half of the studio's gap 19 that a host
-    /// redoing the geometry itself could never get right.
+    /// still pointer — which is the half a host redoing the geometry itself
+    /// could never get right.
     pub(super) fn settle_hovered_row(&mut self, ctx: &WasmCtx<'_>) {
         let next = self.pointer_row();
         if self.hovered_row == next {
             return;
         }
         self.hovered_row = next;
-        if let Some(parent) = ctx.parent() {
-            parent.send(&VirtualListHover { row: next.and_then(|row| u32::try_from(row).ok()) });
-        }
+        let Some(parent) = ctx.parent() else {
+            return;
+        };
+
+        let row =
+            next.and_then(|row| self.row_frame(row)).unwrap_or(WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 });
+        parent.send(&VirtualListHover {
+            index: next.and_then(|row| u32::try_from(row).ok()),
+            x: row.x,
+            y: row.y,
+            width: row.width,
+            height: row.height,
+        });
     }
 
     /// The verb under a point, if the point is on one. Consulted *before* the

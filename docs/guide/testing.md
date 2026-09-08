@@ -292,6 +292,41 @@ already carries the answer. When the behavior is genuinely visual, the
 assertion — pin a band, not an exact pixel, since GPU / anti-aliasing nondeterminism
 makes an exact golden image the wrong primary oracle.
 
+## Running a wasm-gated scenario
+
+Every scenario that loads a component opens with `require_wasm("<crate_stem>")`, which
+locates the component's cross-built wasm under
+`target/wasm32-unknown-unknown/<profile>/`. Build that artifact first:
+
+```sh
+cargo xtask build-wasm
+```
+
+The command discovers the component set structurally — a workspace package with a
+`cdylib` target and an `aether-actor` dependency — so a new component needs no entry
+anywhere; it is `cargo xtask dist` without the chassis binaries, and it is what CI's
+pre-build step runs.
+
+Without the artifact the gate **fails** the scenario:
+
+```
+SKIPPED (no wasm for aether_kit_widget): run `cargo xtask build-wasm` — set AETHER_ALLOW_WASM_SKIP=1 to ignore
+```
+
+That is the whole point of the message. The gate used to return `None` here and let
+each scenario `return` early, which reports `test … ok` — a green suite that ran none
+of the code under test, indistinguishable from a green suite that ran all of it. An
+agent changing a widget, running `cargo test -p aether-kit-widget`, and reporting the
+change proven was reading that. If you genuinely cannot cross-build wasm, take the
+skip deliberately with `AETHER_ALLOW_WASM_SKIP=1`, and do not read the result as
+proof of anything the wasm would have exercised.
+
+A missing wgpu adapter is the other half of the same gate and answers the other way:
+`require_runtime` still skips a visual scenario on a driverless box, because no
+command the reader can run puts a GPU there. `AETHER_REQUIRE_RUNTIME=1` — which CI
+exports through `cargo xtask transform verify.test` — makes that a failure too, and
+overrides `AETHER_ALLOW_WASM_SKIP`.
+
 ## Diagnosing a failing visual assertion
 
 A frame reduction that fails leaves only its scalar diagnostic in the test log — the

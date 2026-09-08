@@ -1,10 +1,12 @@
 //! Host-build unit tests for the wasm ctx family, and the fixture actors
 //! they share. The fixtures live here so both test modules reach them
 //! through `super::`; the assertions split by subject — `spawn` for child
-//! creation and teardown, `dispatch` for what a ctx reads off the dispatch
-//! it was built for.
+//! creation and teardown, `child` for typed cluster-child resolution, and
+//! `dispatch` for what a ctx reads off the dispatch it was built for.
 
+mod child;
 mod dispatch;
+mod sends;
 mod spawn;
 
 use super::{ActorTypeTag, NO_INBOUND_SOURCE, SpawnError, WasmCtx, install_inline_child};
@@ -19,6 +21,8 @@ use crate::wasm::{
 };
 use crate::{Addressable, ChildOf, HandlesKind, ModuleChild};
 use aether_data::{Kind, MailboxId};
+use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::string::String;
 use core::cell::Cell;
 
@@ -370,4 +374,51 @@ impl ErasedWasmActor for NestingParent {
     fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
     fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
     fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
+}
+
+/// A target actor that records every dispatch it receives and the source the
+/// dispatching ctx reported, so a test can prove both *that* a send arrived
+/// and *who* the runtime stamped as its sender.
+struct RecordingTarget {
+    dispatches: Rc<Cell<u32>>,
+    source: Rc<Cell<Option<MailboxId>>>,
+}
+
+/// A [`RecordingTarget`] boxed for registry insertion, beside the counters it
+/// writes — the registry takes the actor by value, so the test keeps its own
+/// handles on the shared cells.
+struct RecordingTargetProbe {
+    actor: Box<dyn ErasedWasmActor>,
+    dispatches: Rc<Cell<u32>>,
+    source: Rc<Cell<Option<MailboxId>>>,
+}
+
+impl ErasedWasmActor for RecordingTarget {
+    fn erased_namespace(&self) -> &'static str {
+        "test.wasm.recording_target"
+    }
+
+    fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+        self.dispatches.set(self.dispatches.get() + 1);
+        self.source.set(ctx.source_mailbox());
+        0
+    }
+
+    fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+
+    fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+
+    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
+
+    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
+}
+
+fn recording_target() -> RecordingTargetProbe {
+    let dispatches = Rc::new(Cell::new(0));
+    let source = Rc::new(Cell::new(None));
+    RecordingTargetProbe {
+        actor: Box::new(RecordingTarget { dispatches: Rc::clone(&dispatches), source: Rc::clone(&source) }),
+        dispatches,
+        source,
+    }
 }

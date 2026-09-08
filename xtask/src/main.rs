@@ -25,12 +25,17 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod affected;
+mod bins;
 mod bloom;
+mod build_wasm;
+mod bump;
 mod cargo;
 mod dev_component;
 mod dist;
+mod docs;
 mod fixtures;
 mod inventory;
+mod namespaces;
 mod package;
 mod scope;
 mod symbols;
@@ -40,10 +45,15 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::affected::AffectedArgs;
+use crate::bins::BinsArgs;
 use crate::bloom::BloomArgs;
+use crate::build_wasm::BuildWasmArgs;
+use crate::bump::BumpArgs;
 use crate::dev_component::DevComponentArgs;
 use crate::dist::DistArgs;
+use crate::docs::DocsArgs;
 use crate::fixtures::FixturesArgs;
+use crate::namespaces::NamespacesArgs;
 use crate::package::PackageArgs;
 use crate::scope::ScopeArgs;
 use crate::symbols::SymbolsArgs;
@@ -60,8 +70,17 @@ struct Cli {
 enum Commands {
     /// Watch, build, upload, and hot-reload one component on an explicit engine.
     DevComponent(DevComponentArgs),
+    /// Cross-build the component wasm the scenario tests' `require_wasm`
+    /// gate looks for — `dist` without the chassis binaries. Named in the
+    /// gate's own failure text, so it is the one command a reader who hit
+    /// a missing artifact is told to run.
+    BuildWasm(BuildWasmArgs),
     /// Build component wasm + chassis bins into `dist/` with a manifest.
     Dist(DistArgs),
+    /// Pin hand-written documentation against the surface it mirrors.
+    /// `check-mcp-tools` diffs `CLAUDE.md`'s MCP tool list against the
+    /// `#[tool]`-registered set in `aether-mcp`.
+    Docs(DocsArgs),
     /// Rewrite or check pinned golden fixture files.
     Fixtures(FixturesArgs),
     /// Emit the shippable depot layout (ADR-0163 §1): the chassis binary,
@@ -90,13 +109,27 @@ enum Commands {
     /// Append one field write to a `scope.fill` run's call log. The value
     /// arrives by file so multi-paragraph prose survives the transport.
     Scope(ScopeArgs),
+    /// Report string literals repeating another crate's declared actor
+    /// `NAMESPACE` — the hand-naming half of the addressing gate, where
+    /// `clippy.toml` covers only hand-hashing (#5720).
+    Namespaces(NamespacesArgs),
+    /// Move `[workspace.package] version` and re-lock every workspace the
+    /// move invalidates — the root plus each excluded crate carrying its
+    /// own lockfile (issue 5718).
+    Bump(BumpArgs),
+    /// Print the chassis-binary inventory (`inventory::CHASSIS_BINS`) so a
+    /// script or workflow reads the shipped binary names instead of
+    /// re-spelling them (issue 5707).
+    Bins(BinsArgs),
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::DevComponent(args) => dev_component::run(&args),
+        Commands::BuildWasm(args) => build_wasm::run(&args),
         Commands::Dist(args) => dist::run(&args),
+        Commands::Docs(args) => docs::run(&args),
         Commands::Fixtures(args) => fixtures::run(&args),
         Commands::Package(args) => package::run(&args),
         Commands::Transform(args) => transform::run(&args),
@@ -104,5 +137,8 @@ fn main() -> Result<()> {
         Commands::Bloom(args) => bloom::run(&args),
         Commands::Symbols(args) => symbols::run(&args),
         Commands::Scope(args) => scope::run(&args),
+        Commands::Namespaces(args) => namespaces::run(&args),
+        Commands::Bump(args) => bump::run(&args),
+        Commands::Bins(args) => bins::run(&args),
     }
 }

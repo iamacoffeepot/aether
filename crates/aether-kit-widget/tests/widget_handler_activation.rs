@@ -88,7 +88,7 @@ fn exported_adopters() -> [NamedLoad; 6] {
             name: "segmented",
             config: SegmentedConfig {
                 options: vec!["Raise".to_owned(), "Lower".to_owned()],
-                initial_index: 0,
+                initial: 0,
                 theme: Theme::DEFAULT,
                 ..SegmentedConfig::default()
             }
@@ -99,7 +99,7 @@ fn exported_adopters() -> [NamedLoad; 6] {
             name: "virtual_list",
             config: VirtualListConfig {
                 items: vec![VirtualListRow::from("Row 0"), VirtualListRow::from("Row 1")],
-                initial_selected_index: Some(0),
+                initial: Some(0),
                 visible_row_count: 2,
                 theme: Theme::DEFAULT,
                 ..VirtualListConfig::default()
@@ -289,7 +289,7 @@ fn virtual_list_hover_lost_clears_the_hovered_row() {
                 clip: None,
                 config: VirtualListConfig {
                     items: vec![VirtualListRow::from("Row 0"), VirtualListRow::from("Row 1")],
-                    initial_selected_index: Some(0),
+                    initial: Some(0),
                     visible_row_count: 2,
                     theme: Theme::DEFAULT,
                     ..VirtualListConfig::default()
@@ -320,7 +320,7 @@ fn virtual_list_hover_lost_clears_the_hovered_row() {
         assert_eq!(field(before_hover[0], "widget"), Some("inventory"));
         // tracing records Option<u32> as the inner number, or omits the field when None;
         // a missing `row` is the leave only on this newly emitted second hover event.
-        assert_eq!(field(before_hover[0], "row"), Some("0"));
+        assert_eq!(field(before_hover[0], "index"), Some("0"));
         harness
             .execute(vec![("leave", HarnessOp::send_and_settle(&list, &HoverLost))])
             .expect("virtual-list hover-lost session");
@@ -329,6 +329,6 @@ fn virtual_list_hover_lost_clears_the_hovered_row() {
             after.iter().filter(|message| message.contains("widget virtual list hover")).collect();
         assert_eq!(after_hover.len(), 2, "{stem}: HoverLost must append the leave; log was:\n{}", after.join("\n"));
         assert_eq!(field(after_hover[1], "widget"), Some("inventory"));
-        assert_eq!(field(after_hover[1], "row"), None);
+        assert_eq!(field(after_hover[1], "index"), None);
     }
 }

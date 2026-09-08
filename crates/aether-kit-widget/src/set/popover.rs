@@ -1,10 +1,11 @@
 //! The popover: a plate that stands over the primary view holding controls
 //! of its own, dismissed by a press outside it or by Escape.
 //!
-//! It exists for the owner's round-3 note 16 — "settings should be its own
-//! pop-up inline window? Panel?" — and it has to satisfy round-1 note 16 at
-//! the same time: "pop ups have tree text overlay where they should take
-//! priority". The second is why the plate's draws go in the **overlay**
+//! It exists so a group of controls — a settings block, a small form — can
+//! stand over the primary view instead of taking a permanent column of it,
+//! and it has to satisfy the rule that a plate over content **takes priority**
+//! over that content rather than having it print through. That is why the
+//! plate's draws go in the **overlay**
 //! ([`WidgetDrawList`](crate::WidgetDrawList)'s
 //! `overlay`): the root emits every overlay fill after every ordinary draw
 //! *and* cuts the ordinary text under it out of what it sends, so a popover
@@ -53,11 +54,8 @@ use aether_kinds::keycode::KEY_ESCAPE;
 
 use crate::WidgetDrawItem;
 use crate::set::placement::{PlacementBounds, PlacementSide, place_plate};
-use crate::set::{push_rect_border, quad};
+use crate::set::raised_plate;
 use crate::theme::Theme;
-
-/// The hairline a popover's ring is drawn at.
-const RING_THICKNESS: f32 = 1.0;
 
 /// One popover: whether it is up, and the plate it occupies while it is.
 ///
@@ -193,8 +191,15 @@ impl Popover {
             return Vec::new();
         }
         let mut items = Vec::with_capacity(5);
-        items.push(quad(plate.x, plate.y, plate.width, plate.height, theme.surface_raised));
-        push_rect_border(&mut items, plate.x, plate.y, plate.width, plate.height, RING_THICKNESS, theme.outline);
+        items.push(raised_plate(
+            theme,
+            plate.x,
+            plate.y,
+            plate.width,
+            plate.height,
+            theme.surface_raised,
+            Some(theme.outline),
+        ));
         items
     }
 }

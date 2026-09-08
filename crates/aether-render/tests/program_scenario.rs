@@ -25,9 +25,9 @@ use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::QuadBlend;
 use aether_render::{
-    CreateTexture, CreateTextureResult, DrawSolidQuads, DrawTexturedQuads, InputSlot, OutputSlot, PassStage,
-    ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, SlotExtent, SlotSpec, SolidQuad,
-    TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
+    CreateTexture, CreateTextureResult, DrawShapes, DrawTexturedQuads, InputSlot, OutputSlot, PassStage,
+    ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, Shape, SlotExtent, SlotSpec, TextureFormat,
+    TextureSampling, TextureUsage, TexturedQuad,
 };
 
 /// Skip (or panic under `AETHER_REQUIRE_RUNTIME`) when no wgpu adapter
@@ -144,7 +144,7 @@ fn register_reply(
 
 fn register_err(harness: &mut SubstrateHarness, label: &'static str, mail: &ProgramRegister) -> String {
     match register_reply(harness, label, mail) {
-        ProgramRegisterResult::Err { reason } => reason,
+        ProgramRegisterResult::Err { error } => error,
         ProgramRegisterResult::Ok { program_id } => panic!("register ({label}) must reject; got program {program_id}"),
     }
 }
@@ -233,7 +233,7 @@ fn register_validation_classes_reply_distinguishable_errors() {
         ProgramRegisterResult::Ok { program_id } => {
             assert_eq!(program_id, 0, "rejected registers must not consume ids");
         }
-        ProgramRegisterResult::Err { reason } => panic!("the valid ping-pong program must register: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("the valid ping-pong program must register: {error}"),
     }
 }
 
@@ -286,7 +286,7 @@ fn ping_pong_program_writes_expected_pixels_into_output() {
     );
     let program_id = match register_reply(&mut harness, "register", &ping_pong_register()) {
         ProgramRegisterResult::Ok { program_id } => program_id,
-        ProgramRegisterResult::Err { reason } => panic!("register failed: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("register failed: {error}"),
     };
 
     // Blob bytes 0..4: threshold 0.5 (pass 0's window). Bytes 4..8:
@@ -361,7 +361,7 @@ fn mismatched_binding_dispatch_drops_and_frame_survives() {
     );
     let program_id = match register_reply(&mut harness, "register", &ping_pong_register()) {
         ProgramRegisterResult::Ok { program_id } => program_id,
-        ProgramRegisterResult::Err { reason } => panic!("register failed: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("register failed: {error}"),
     };
 
     let uniforms: Vec<u8> = [0.5f32, 1.0].iter().flat_map(|value| value.to_le_bytes()).collect();
@@ -378,15 +378,19 @@ fn mismatched_binding_dispatch_drops_and_frame_survives() {
         envelope("aether.render", &output_overlay(output_id)),
         envelope(
             "aether.render",
-            &DrawSolidQuads {
+            &DrawShapes {
                 space: QuadSpace::Screen,
                 clip: None,
-                quads: vec![SolidQuad {
+                shapes: vec![Shape {
                     x: 2.0,
                     y: 2.0,
                     width: 5.0,
                     height: 5.0,
-                    color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                    corner_radius: 0.0,
+                    fill: Some(Rgba::new(1.0, 1.0, 1.0, 1.0)),
+                    stroke: None,
+                    shadow: None,
+                    texture: None,
                 }],
             },
         ),
@@ -441,7 +445,7 @@ fn cached_pass_setup_follows_an_updated_texture_and_a_rebind() {
     let output_id = create_2x2(&mut harness, "create_output", Vec::new());
     let program_id = match register_reply(&mut harness, "register", &ping_pong_register()) {
         ProgramRegisterResult::Ok { program_id } => program_id,
-        ProgramRegisterResult::Err { reason } => panic!("register failed: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("register failed: {error}"),
     };
 
     let uniforms: Vec<u8> = [0.5f32, 1.0].iter().flat_map(|value| value.to_le_bytes()).collect();
