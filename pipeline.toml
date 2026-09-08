@@ -35,7 +35,7 @@ args = ["xtask", "transform"]
 # model; a mechanical one runs a compiler over a checked-out tree and reaches
 # nothing.
 [lanes]
-model = ["construct.implement", "review.critic", "scope.fill"]
+model = ["construct.implement", "review.critic", "scope.fill", "retrospect.read"]
 mechanical = ["verify.member", "verify.check", "verify.base"]
 
 # The verifier identity vocabulary, in canonical order. A position here is an
