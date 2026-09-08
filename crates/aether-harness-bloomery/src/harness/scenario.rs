@@ -165,15 +165,20 @@ impl ScenarioHarness {
             }
             CoordinatorKind::Forked => {
                 let repo = repo.as_ref().expect("the forked cell needs a scratch repository");
+                let lane_program = crate::mock_lane_program();
                 let (child, stream) = spawn_listening_coordinator(
                     repo,
-                    &worktree_base,
-                    &store_path,
-                    &artifacts_root,
-                    builder.heartbeat_silence_secs,
-                    builder.poll_interval_secs,
-                    builder.cas_land_enabled,
-                    &authorized,
+                    &ForkedLaneSettings {
+                        store_path: &store_path,
+                        artifacts_root: &artifacts_root,
+                        lane_program: &lane_program,
+                        worktree_base: &worktree_base,
+                        poll_interval_secs: builder.poll_interval_secs,
+                        cas_land_enabled: builder.cas_land_enabled,
+                        fixture_base_sha: repo.head(),
+                        heartbeat_silence_secs: builder.heartbeat_silence_secs,
+                        authorized_instructions: &authorized,
+                    },
                 );
                 (None, Some(child), Wire::from_stream(stream), None)
             }
@@ -955,30 +960,9 @@ fn in_process_env(
 /// RPC port `0`: the child holds its port from the moment it binds and reports
 /// which one in its boot log, so a concurrently booting sibling has no window in
 /// which to take it.
-fn spawn_listening_coordinator(
-    repo: &Repo,
-    worktree_base: &str,
-    store_path: &str,
-    artifacts_root: &str,
-    heartbeat_silence_secs: Option<u64>,
-    poll_interval_secs: u64,
-    cas_land_enabled: bool,
-    authorized_instructions: &str,
-) -> (Coordinator, TcpStream) {
-    let lane_program = crate::mock_lane_program();
+fn spawn_listening_coordinator(repo: &Repo, settings: &ForkedLaneSettings<'_>) -> (Coordinator, TcpStream) {
     spawn_and_connect("lane-boundary-harness", COORDINATOR_HANDSHAKE_BUDGET, || {
-        let env = ForkedLaneSettings {
-            store_path,
-            artifacts_root,
-            lane_program: lane_program.as_str(),
-            worktree_base,
-            poll_interval_secs,
-            cas_land_enabled,
-            fixture_base_sha: repo.head(),
-            heartbeat_silence_secs,
-            authorized_instructions,
-        }
-        .env();
+        let env = settings.env();
         let env: Vec<_> = env.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect();
         Coordinator::spawn_in(0, Some(&repo.work_dir()), &env)
     })
