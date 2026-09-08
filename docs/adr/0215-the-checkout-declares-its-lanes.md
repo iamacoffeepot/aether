@@ -1,7 +1,7 @@
 # ADR-0215: The checkout declares its lanes
 
-- **Status:** Provisional
-- **Date:** 2026-09-08
+- **Status:** Accepted
+- **Date:** 2026-09-09
 
 ## Context
 
