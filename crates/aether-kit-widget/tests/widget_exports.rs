@@ -336,7 +336,7 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
     let log = panel_log_messages(&mut harness);
     let joined = log.join("\n");
     assert!(
-        log.iter().any(|message| message.contains("widget tab selected") && message.contains("index=1")),
+        log.iter().any(|message| message.contains("widget tab strip selected") && message.contains("index=1")),
         "{stem}: reconstructed TabStrip at the original alias must still step and report to the panel; log was:\n{joined}"
     );
     assert!(
