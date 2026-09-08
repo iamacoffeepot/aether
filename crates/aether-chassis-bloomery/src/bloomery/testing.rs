@@ -37,8 +37,8 @@
 //! [`admit_uploaded`]: crate::bloomery::admit_uploaded
 
 use aether_bloomery::{
-    CandidateRef, CompositionParents, Digest, LaneObservation, Nonce, StageVerdict, StudyCall, StudyCost,
-    VerifyFailureSet,
+    CandidateRef, CompositionParents, Digest, LaneObservation, Nonce, RetrospectClaim, StageVerdict, StudyCall,
+    StudyCost, VerifyFailureSet,
 };
 use serde::{Deserialize, Serialize};
 
@@ -124,6 +124,16 @@ pub struct ScriptedUpload {
     /// against real repositories beside it.
     #[serde(default)]
     pub narrowing: Option<CompositionParents>,
+    /// The work orders a bloom-level reader emitted (ADR-0216).
+    ///
+    /// Scripted rather than parsed out of an `evidence.json`, for the reason
+    /// [`narrowing`](Self::narrowing) is: the scenario this drives is about
+    /// what the coordinator does with an emission — which commissions it files
+    /// and how inert they are — and the backend's own JSON reader is proved
+    /// beside it. Raw claims, so a scenario can emit a malformed one and watch
+    /// the trust boundary refuse the whole set.
+    #[serde(default)]
+    pub retrospect_findings: Vec<RetrospectClaim>,
 }
 
 impl ScriptedUpload {
@@ -142,6 +152,7 @@ impl ScriptedUpload {
                 cost: self.cost,
                 calls: self.calls,
                 narrowing: self.narrowing,
+                retrospect_findings: self.retrospect_findings,
                 ..LaneObservation::default()
             },
         }

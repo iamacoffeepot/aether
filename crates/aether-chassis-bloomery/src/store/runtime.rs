@@ -824,6 +824,21 @@ pub trait StoreBackend: Send {
     /// Every scoping-run row for `commission`, in write order — the operator
     /// read, and the termination rule's input.
     fn list_scope_runs(&mut self, commission: &str) -> rusqlite::Result<Vec<ScopeRunRow>>;
+    /// File one open, unapproved commission the coordinator derived (ADR-0216
+    /// §3), answering whether a row was written.
+    ///
+    /// On the journal trait for the reason `record_scope_verdict` is: the write
+    /// belongs to the commission store, but its *caller* is the evidence
+    /// intake, which holds this trait and nothing else. Intake reaching for the
+    /// commission connection directly would give the admission broker a second
+    /// store handle to keep consistent with the one it already has.
+    ///
+    /// `false` is a taken id — the reader's ids are derived from each finding's
+    /// content address, so a replayed admission re-files what it already filed.
+    /// That is a no-op, never a refusal: a filing lost to a duplicate check
+    /// would be a *second* commission wearing the same words if the id were not
+    /// deterministic, and is nothing at all now that it is.
+    fn file_derived_commission(&mut self, id: &WorkpieceId, intent: &Statement) -> rusqlite::Result<bool>;
 }
 
 /// A WAL-mode `SQLite` store. Opening runs the migrations idempotently, so
@@ -3061,6 +3076,16 @@ impl StoreBackend for SqliteStore {
                 |row| Ok((row.get::<_, String>(0)?, u64::try_from(row.get::<_, i64>(1)?).unwrap_or_default())),
             )
             .optional()
+    }
+
+    fn file_derived_commission(&mut self, id: &WorkpieceId, intent: &Statement) -> rusqlite::Result<bool> {
+        // The commission layer's error vocabulary is about *doors* — a
+        // duplicate, a stale revision, a wrong provenance — and this write
+        // passes through none of them: the only refusal it can meet is the
+        // taken id, which it answers `false` for, so what is left is a store
+        // fault and reads as one to this trait's callers.
+        super::commission::file_derived_commission(&mut self.conn, id, intent)
+            .map_err(|error| sqlite_fail(error.to_string()))
     }
 
     fn list_scope_runs(&mut self, commission: &str) -> rusqlite::Result<Vec<ScopeRunRow>> {

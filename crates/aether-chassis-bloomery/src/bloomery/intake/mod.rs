@@ -44,6 +44,7 @@ mod admit;
 mod claims;
 mod cycle;
 mod dispatch;
+mod retrospect;
 
 pub use admission_key::AdmissionKey;
 pub use admit::{Admission, AdmitDecision, IntakeError, IntakeRefusal, UploadedEvidence, admit_uploaded};

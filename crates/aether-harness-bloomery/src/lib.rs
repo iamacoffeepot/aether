@@ -28,7 +28,7 @@ mod script;
 pub mod support;
 
 pub use cells::{FixtureHarness, LaneHarness};
-pub use harness::drive::{captured, draft, failed, faulted, member, member_with, narrowed, passed, verdict};
+pub use harness::drive::{captured, draft, failed, faulted, member, member_with, narrowed, passed, read, verdict};
 pub use harness::{
     Backend, BloomeryHarness, CoordinatorKind, HarnessBuilder, HarnessRoots, Lane, ScenarioHarness, digest,
     while_pumping,

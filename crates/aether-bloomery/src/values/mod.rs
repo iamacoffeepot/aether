@@ -30,6 +30,7 @@ pub(crate) mod process_instructions_pre_reader;
 mod profile;
 mod proof;
 mod question;
+mod retrospect;
 mod scope_verify;
 mod spend;
 mod stage;
@@ -97,6 +98,9 @@ pub use process_instructions::{ModelProcessInstructions, ModelProcessInstruction
 pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use proof::{VerifiedTree, VerifyGateSet, VerifyProof, VerifyReuse};
 pub use question::Question;
+pub use retrospect::{
+    RetrospectClaim, RetrospectEmission, RetrospectFinding, RetrospectRefusal, filed_intent, reader_derivation,
+};
 pub use scope_verify::{
     NamedPath, NamedSymbol, PathOrigin, SCOPE_VERIFY_SCHEMA, ScopeVerifyInput, ScopeVerifyReport, verify_scope,
 };
