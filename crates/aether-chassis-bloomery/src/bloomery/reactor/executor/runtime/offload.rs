@@ -287,19 +287,31 @@ impl AdapterOffload {
     /// What does not fit stays queued and starts as slots free, so a round
     /// wider than the ceiling still finishes inside its own round.
     pub fn start_wanted(&mut self, ctx: &mut NativeCtx<'_>, shell: &ExecutorShell, pusher: &Arc<dyn CandidatePush>) {
+        // Every ledger borrow here is bound to its own block: the guard is not
+        // reentrant, and this loop takes it three times per pass.
         while self.in_flight() < MAX_IN_FLIGHT {
-            let Some(work) = self.lock().wanted.pop_front() else {
+            let next = {
+                let mut ledger = self.lock();
+                ledger.wanted.pop_front()
+            };
+            let Some(work) = next else {
                 break;
             };
+
             let call = work.call();
-            {
+            let claimed = {
                 let mut ledger = self.lock();
-                if !ledger.in_flight.insert(call.clone()) {
-                    continue;
+                let claimed = ledger.in_flight.insert(call.clone());
+                if claimed {
+                    ledger.asked_this_round.insert(call.clone());
                 }
-                ledger.asked_this_round.insert(call.clone());
+                claimed
+            };
+            // Already out on a worker from an earlier round — the re-derived
+            // want is redundant, not a second run.
+            if claimed {
+                self.spawn(ctx, shell, pusher, call, work);
             }
-            self.spawn(ctx, shell, pusher, call, work);
         }
     }
 
