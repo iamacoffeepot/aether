@@ -82,7 +82,10 @@ const STATE_RUNNING: u8 = 2;
 /// Atomic state machine for a single dispatcher slot. Held in an
 /// `Arc<SlotState>` so the inbox-sender side ([`WakeHandle`]) and the
 /// worker side (the [`Drainable`]) operate on the same atomic.
-#[derive(Debug)]
+///
+/// The derived `Default` and [`Self::new`] agree because `STATE_IDLE` is the
+/// zero encoding: a fresh slot starts idle either way.
+#[derive(Debug, Default)]
 pub struct SlotState {
     state: AtomicU8,
 }
@@ -182,12 +185,6 @@ impl SlotState {
             STATE_RUNNING => SlotStateLabel::Running,
             _ => unreachable!("SlotState only stores 0..=2"),
         }
-    }
-}
-
-impl Default for SlotState {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

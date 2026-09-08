@@ -50,12 +50,16 @@ pub const DISPATCH_AXIS_FILE: &str = "mock-lane-axis.json";
 ///
 /// Every variant reproduces something a real lane has done in production; the
 /// docs name which.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LaneMode {
     /// The lane concluded and its work stands: a verify/review `status: pass`,
     /// or a construct run that writes a candidate file and stamps
     /// `produced_candidate: true`.
+    ///
+    /// The default: an unscripted run passes, so a scenario names only the
+    /// failures it is about.
+    #[default]
     Pass,
     /// The lane concluded and its work does not stand: `status: fail` with
     /// findings, or a construct run that reports no candidate. Exits non-zero
@@ -160,7 +164,7 @@ impl LaneStep {
 
 /// The whole script: ordered steps, plus the mode every run past its command's
 /// last step takes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneScript {
     /// Consumed in order, per command.
     pub steps: Vec<LaneStep>,
@@ -169,12 +173,6 @@ pub struct LaneScript {
     /// unbounded number of times, and the script should not have to predict the
     /// ceiling it is trying to observe.
     pub default: LaneMode,
-}
-
-impl Default for LaneScript {
-    fn default() -> Self {
-        Self { steps: Vec::new(), default: LaneMode::Pass }
-    }
 }
 
 impl LaneScript {
