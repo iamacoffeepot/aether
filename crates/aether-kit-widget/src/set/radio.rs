@@ -29,7 +29,7 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease};
 
-use crate::set::defaults::WidgetDefaults;
+use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{
     clamp_option_index, clamp_selection, disc, push_control_outlines, release_left, reply_if_hidden, text_origin_y,
 };
@@ -156,19 +156,9 @@ impl RadioGroupWidget {
     }
 }
 
+widget_chrome!(RadioGroupWidget);
+
 impl WidgetDefaults for RadioGroupWidget {
-    fn widget_frame(&mut self) -> &mut WidgetFrame {
-        &mut self.frame
-    }
-
-    fn widget_theme(&mut self) -> &mut Theme {
-        &mut self.theme
-    }
-
-    fn widget_state(&mut self) -> &mut InteractionState {
-        &mut self.state
-    }
-
     fn cancel_activation(&mut self) {
         self.pressed = false;
     }

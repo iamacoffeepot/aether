@@ -60,13 +60,14 @@ use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
 use crate::set::{
-    WidgetDefaults, accept_font_metrics_result, apply_text_theme, centered_text_x, clamp_option_index, clamp_selection,
-    elide_to_width, even_split_widths, fit_row_widths, measured_text_width, pointer_wash, pump_text_font_metrics,
+    WidgetDefaults, accept_font_metrics_result, centered_text_x, clamp_option_index, clamp_selection, elide_to_width,
+    even_split_widths, fit_row_widths, measured_text_width, pointer_wash, pump_text_font_metrics,
     push_control_outlines, quad, release_left, reply_if_hidden, slot_at_local_x, spread_row_widths, text_origin_y,
+    widget_chrome,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
-use crate::theme::{SetTheme, Theme, ThemeState};
+use crate::theme::{Theme, ThemeState};
 use crate::{
     Collect, HoverLost, SetSelection, SetWidgetState, TabStripConfig, TabStripSelected, TabStripStyle,
     WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
@@ -278,26 +279,11 @@ impl TabStripWidget {
     }
 }
 
+widget_chrome!(TabStripWidget, font_metrics);
+
 impl WidgetDefaults for TabStripWidget {
-    fn widget_frame(&mut self) -> &mut WidgetFrame {
-        &mut self.frame
-    }
-
-    fn widget_theme(&mut self) -> &mut Theme {
-        &mut self.theme
-    }
-
-    fn widget_state(&mut self) -> &mut InteractionState {
-        &mut self.state
-    }
-
     fn cancel_activation(&mut self) {
         self.pressed_tab = None;
-    }
-
-    /// Restyle: adopt the fanned theme and request metrics for its font.
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
     }
 
     /// Leaving the strip clears the per-tab hover as well as the widget's.

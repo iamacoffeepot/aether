@@ -73,12 +73,12 @@ use aether_text::FontMetricsResult;
 
 use crate::set::placement::PlacementBounds;
 use crate::set::{
-    WidgetDefaults, accept_font_metrics_result, apply_text_theme, measured_text_width, pump_text_font_metrics, quad,
-    raised_plate, reply_if_hidden, text_origin_y,
+    WidgetDefaults, accept_font_metrics_result, measured_text_width, pump_text_font_metrics, quad, raised_plate,
+    reply_if_hidden, text_origin_y, widget_chrome,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
-use crate::theme::{SetTheme, TextRole, Theme};
+use crate::theme::{TextRole, Theme};
 use crate::{Collect, DialogConfig, DialogPlaced, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
 
 /// The plate's inset, in spacing units — two, which is the least a control
@@ -250,27 +250,12 @@ impl DialogWidget {
     }
 }
 
+widget_chrome!(DialogWidget, font_metrics);
+
 impl WidgetDefaults for DialogWidget {
-    fn widget_frame(&mut self) -> &mut WidgetFrame {
-        &mut self.frame
-    }
-
-    fn widget_theme(&mut self) -> &mut Theme {
-        &mut self.theme
-    }
-
-    fn widget_state(&mut self) -> &mut InteractionState {
-        &mut self.state
-    }
-
     /// Nothing to cancel: a dialog is a plate, and everything on it is the
     /// host's own child.
     fn cancel_activation(&mut self) {}
-
-    /// Restyle: adopt the fanned theme and request metrics for its font.
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
-    }
 }
 
 /// A modal's plate. Spawned inline by a panel root with a [`DialogConfig`];

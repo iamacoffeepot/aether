@@ -37,8 +37,8 @@ use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
 use crate::set::{
-    RevealPlate, apply_static_control_state, elide_to_width, overflow_reveal_items, pump_text_font_metrics,
-    reply_if_hidden, text_origin_y,
+    RevealPlate, accept_font_metrics_result, apply_static_control_state, elide_to_width, overflow_reveal_items,
+    pump_text_font_metrics, reply_if_hidden, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{FontMetricsAdapter, SingleLineLayout};
@@ -257,16 +257,7 @@ impl WasmActor for LabelWidget {
     /// stale reply (its font is no longer the desired one) is dropped.
     #[handler::single]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
-        let pump_deferred = match result {
-            FontMetricsResult::Ok { metrics } => self.font_metrics.accept_reply(Some(CachedFontMetrics::new(&metrics))),
-            FontMetricsResult::Err { error } => {
-                tracing::warn!(target: "aether_kit_widget", %error, "label font metrics failed");
-                self.font_metrics.accept_reply(None)
-            }
-        };
-        if pump_deferred {
-            self.pump_font_metrics(ctx);
-        }
+        accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
 
     /// Reply the label's local draw: its text at the size its role is set at,

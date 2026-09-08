@@ -17,15 +17,14 @@ use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
 use aether_text::FontMetricsResult;
 
-use crate::set::defaults::WidgetDefaults;
+use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{
-    accept_font_metrics_result, apply_text_theme, clamp_option_index, clamp_selection, elide_to_width,
-    measured_text_width, pump_text_font_metrics, push_control_outlines, quad, release_left, reply_if_hidden,
-    text_origin_y,
+    accept_font_metrics_result, clamp_option_index, clamp_selection, elide_to_width, measured_text_width,
+    pump_text_font_metrics, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
-use crate::theme::{SetTheme, Theme, ThemeState};
+use crate::theme::{Theme, ThemeState};
 use crate::{
     Collect, HoverLost, SegmentedConfig, SegmentedSelected, SetSelection, SetWidgetState, WidgetControlState,
     WidgetDrawItem, WidgetDrawList, WidgetFrame,
@@ -218,26 +217,11 @@ impl SegmentedWidget {
     }
 }
 
+widget_chrome!(SegmentedWidget, font_metrics);
+
 impl WidgetDefaults for SegmentedWidget {
-    fn widget_frame(&mut self) -> &mut WidgetFrame {
-        &mut self.frame
-    }
-
-    fn widget_theme(&mut self) -> &mut Theme {
-        &mut self.theme
-    }
-
-    fn widget_state(&mut self) -> &mut InteractionState {
-        &mut self.state
-    }
-
     fn cancel_activation(&mut self) {
         self.pressed_segment = None;
-    }
-
-    /// Restyle: adopt the fanned theme and request metrics for its font.
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
     }
 
     fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {

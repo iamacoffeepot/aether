@@ -18,7 +18,7 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
 
-use crate::set::defaults::WidgetDefaults;
+use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{push_control_outlines, quad, reply_if_hidden};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
@@ -177,19 +177,9 @@ impl SliderWidget {
     }
 }
 
+widget_chrome!(SliderWidget);
+
 impl WidgetDefaults for SliderWidget {
-    fn widget_frame(&mut self) -> &mut WidgetFrame {
-        &mut self.frame
-    }
-
-    fn widget_theme(&mut self) -> &mut Theme {
-        &mut self.theme
-    }
-
-    fn widget_state(&mut self) -> &mut InteractionState {
-        &mut self.state
-    }
-
     fn cancel_activation(&mut self) {
         self.dragging = false;
     }

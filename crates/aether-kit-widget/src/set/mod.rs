@@ -75,7 +75,8 @@ pub mod tooltip;
 pub mod virtual_list;
 
 pub use button::ButtonWidget;
-pub use defaults::WidgetDefaults;
+pub(crate) use defaults::widget_chrome;
+pub use defaults::{WidgetChrome, WidgetDefaults};
 pub use dialog::DialogWidget;
 pub use dropdown::DropdownWidget;
 pub use image::ImageWidget;
@@ -462,7 +463,8 @@ fn accept_font_metrics_result(ctx: &mut WasmCtx<'_>, font_metrics: &mut FontMetr
 /// draw until then rather than guessing a width from the per-character
 /// approximation ([`APPROX_ADVANCE_RATIO`]), which would place the text wrong
 /// and then visibly jump.
-fn measured_text_width(metrics: &CachedFontMetrics, text: &str, size_pixels: f32) -> f32 {
+#[must_use]
+pub fn measured_text_width(metrics: &CachedFontMetrics, text: &str, size_pixels: f32) -> f32 {
     SingleLineLayout::build(text, metrics, size_pixels).width()
 }
 
@@ -984,11 +986,12 @@ pub(super) fn push_control_outlines(
 /// `Theme` does not carry in v1; this proportional approximation keeps caret
 /// motion local and synchronous. The byte-offset caret *logic* (which the unit
 /// tests pin) is exact regardless — only the pixel placement approximates.
-pub(crate) const APPROX_ADVANCE_RATIO: f32 = 0.5;
+pub const APPROX_ADVANCE_RATIO: f32 = 0.5;
 
 /// The approximate pixel width of `char_count` characters at `size_pixels`,
 /// using [`APPROX_ADVANCE_RATIO`].
-pub(crate) fn approx_text_width(char_count: usize, size_pixels: f32) -> f32 {
+#[must_use]
+pub fn approx_text_width(char_count: usize, size_pixels: f32) -> f32 {
     #[allow(clippy::cast_precision_loss)]
     let count = char_count as f32;
     count * size_pixels * APPROX_ADVANCE_RATIO

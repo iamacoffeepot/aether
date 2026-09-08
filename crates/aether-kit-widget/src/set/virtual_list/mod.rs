@@ -236,7 +236,7 @@ use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove, MouseWheel};
 use aether_text::FontMetricsResult;
 
-use crate::set::defaults::WidgetDefaults;
+use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{
     accept_font_metrics_result, apply_text_theme, clamp_optional_index, clamp_optional_selection,
     pump_text_font_metrics, release_left, reply_if_hidden,
@@ -398,19 +398,9 @@ impl VirtualListWidget {
     }
 }
 
+widget_chrome!(VirtualListWidget, font_metrics);
+
 impl WidgetDefaults for VirtualListWidget {
-    fn widget_frame(&mut self) -> &mut WidgetFrame {
-        &mut self.frame
-    }
-
-    fn widget_theme(&mut self) -> &mut Theme {
-        &mut self.theme
-    }
-
-    fn widget_state(&mut self) -> &mut InteractionState {
-        &mut self.state
-    }
-
     fn cancel_activation(&mut self) {
         self.pressed = false;
         self.pressed_action = None;

@@ -47,7 +47,7 @@ use aether_text::FontMetricsResult;
 use crate::set::{
     ActivationArms, WidgetDefaults, accept_font_metrics_result, apply_text_theme, clamp_optional_index,
     clamp_optional_selection, elide_to_width, measured_text_width, plate, pump_text_font_metrics,
-    push_control_outlines, push_triangle, quad, raised_plate, reply_if_hidden, ring, text_origin_y,
+    push_control_outlines, push_triangle, quad, raised_plate, reply_if_hidden, ring, text_origin_y, widget_chrome,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
@@ -540,19 +540,9 @@ impl DropdownWidget {
     }
 }
 
+widget_chrome!(DropdownWidget, font_metrics);
+
 impl WidgetDefaults for DropdownWidget {
-    fn widget_frame(&mut self) -> &mut WidgetFrame {
-        &mut self.frame
-    }
-
-    fn widget_theme(&mut self) -> &mut Theme {
-        &mut self.theme
-    }
-
-    fn widget_state(&mut self) -> &mut InteractionState {
-        &mut self.state
-    }
-
     fn cancel_activation(&mut self) {
         self.arms.clear();
         self.open = false;

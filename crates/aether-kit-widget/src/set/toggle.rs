@@ -16,7 +16,7 @@ use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
 use aether_math::Rgba;
 
-use crate::set::defaults::WidgetDefaults;
+use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{ActivationArms, disc, push_control_outlines, reply_if_hidden, stadium, text_origin_y};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
@@ -169,19 +169,9 @@ impl ToggleWidget {
     }
 }
 
+widget_chrome!(ToggleWidget);
+
 impl WidgetDefaults for ToggleWidget {
-    fn widget_frame(&mut self) -> &mut WidgetFrame {
-        &mut self.frame
-    }
-
-    fn widget_theme(&mut self) -> &mut Theme {
-        &mut self.theme
-    }
-
-    fn widget_state(&mut self) -> &mut InteractionState {
-        &mut self.state
-    }
-
     fn cancel_activation(&mut self) {
         self.clear_arms();
     }

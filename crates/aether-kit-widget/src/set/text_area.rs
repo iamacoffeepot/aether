@@ -15,16 +15,16 @@ use aether_kinds::{
 };
 use aether_text::FontMetricsResult;
 
-use crate::set::defaults::WidgetDefaults;
+use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{
-    accept_clipboard_paste, apply_text_control_state, apply_text_theme, approx_text_width, edit_command, plate,
-    pump_text_font_metrics, push_control_outlines, quad, release_left, reply_with_draw_items, report_clipboard_copy,
-    run_edit_key, single_line_hit_byte, text_baseline_y, text_control_theme_state, text_origin_y,
-    update_text_modifiers,
+    accept_clipboard_paste, accept_font_metrics_result, apply_text_control_state, approx_text_width, edit_command,
+    plate, pump_text_font_metrics, push_control_outlines, quad, release_left, reply_with_draw_items,
+    report_clipboard_copy, run_edit_key, single_line_hit_byte, text_baseline_y, text_control_theme_state,
+    text_origin_y, update_text_modifiers,
 };
 use crate::state::InteractionState;
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState, TextSpan};
-use crate::theme::{SetTheme, Theme, ThemeState};
+use crate::theme::{Theme, ThemeState};
 use crate::{
     Collect, FocusGained, FocusLost, SetText, SetWidgetState, TextAreaConfig, TextCommitted, WidgetControlState,
     WidgetDrawItem, WidgetFrame,
@@ -343,19 +343,9 @@ impl TextAreaWidget {
     }
 }
 
+widget_chrome!(TextAreaWidget, font_metrics);
+
 impl WidgetDefaults for TextAreaWidget {
-    fn widget_frame(&mut self) -> &mut WidgetFrame {
-        &mut self.frame
-    }
-
-    fn widget_theme(&mut self) -> &mut Theme {
-        &mut self.theme
-    }
-
-    fn widget_state(&mut self) -> &mut InteractionState {
-        &mut self.state
-    }
-
     fn cancel_activation(&mut self) {
         self.dragging = false;
         self.paste_pending = false;
@@ -364,9 +354,6 @@ impl WidgetDefaults for TextAreaWidget {
     }
 
     //noinspection DuplicatedCode -- actor macros require one handler per type; the implementation is shared.
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
-    }
 
     fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, gained: FocusGained) {
         self.state.gain_focus(gained.keyboard);
@@ -554,16 +541,7 @@ impl WasmActor for TextAreaWidget {
 
     #[handler::single]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
-        let pump_deferred = match result {
-            FontMetricsResult::Ok { metrics } => self.font_metrics.accept_reply(Some(CachedFontMetrics::new(&metrics))),
-            FontMetricsResult::Err { error } => {
-                tracing::warn!(target: "aether_kit_widget", %error, "text area font metrics failed");
-                self.font_metrics.accept_reply(None)
-            }
-        };
-        if pump_deferred {
-            self.pump_font_metrics(ctx);
-        }
+        accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
 
     #[handler::single]
