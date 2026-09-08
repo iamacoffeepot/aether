@@ -514,6 +514,22 @@ impl ScenarioHarness {
         self.try_seal_configured(&configured)
     }
 
+    /// Freeze `members` into a successor spec on the observed mainline, carrying
+    /// the harness's own bloom-wide configuration.
+    ///
+    /// What a scenario that admits its own [`Fact::Supersede`] reaches for
+    /// instead of the free [`draft`](super::draft): a successor sealed with no
+    /// configuration carries no authorized process pin (ADR-0214), so every
+    /// model dispatch it decides is refused and the scenario stalls on a
+    /// supersession that looks like it worked.
+    ///
+    /// # Panics
+    /// The projection could not be read.
+    pub fn successor_draft(&mut self, members: &[Membership]) -> BloomSpec {
+        let base = self.view().mainline;
+        BloomDraft { proposals: members.to_vec(), base, configs: self.configs.clone(), ..BloomDraft::default() }.seal()
+    }
+
     /// Seal a multi-member bloom whose members carry their own sealed
     /// registries, layered over the harness's bloom-wide one.
     ///

@@ -12,7 +12,7 @@
 use aether_bloomery::{BloomStatus, Fact, Outcome, StageId, Transformation};
 use aether_chassis_bloomery::store::OutstandingOrder;
 use aether_data::wire::from_bytes;
-use aether_harness_bloomery::{FixtureHarness, Oracle, captured, digest, draft, member, passed};
+use aether_harness_bloomery::{FixtureHarness, Oracle, captured, digest, member, passed};
 
 const FIRST: &str = "wp-0";
 const SECOND: &str = "wp-1";
@@ -49,7 +49,7 @@ fn a_supersede_adopted_member_that_collides_reconciles_back_to_verify() {
     let mut first_member = member(FIRST, digest(0x51));
     first_member.approval.detail = digest(0xAB);
     first_member.approval.subject = first_member.subject();
-    let successor_spec = draft(harness.view().mainline, &[first_member, member(SECOND, digest(0x52))]);
+    let successor_spec = harness.successor_draft(&[first_member, member(SECOND, digest(0x52))]);
     let successor = successor_spec.id();
     harness.seed_fold_conflict(successor, SECOND, vec!["crates/example-shared/src/lib.rs".into()]);
     match harness.admit("inherit-both", Fact::Supersede { predecessor, successor: successor_spec }) {
