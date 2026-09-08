@@ -552,6 +552,8 @@ enum KillScript {
     Stall { started: mpsc::Sender<()>, block: mpsc::Receiver<()> },
     PanicOnce { armed: bool },
     FailThenSucceed { fails_left: u32 },
+    StartStall { started: mpsc::Sender<()>, block: mpsc::Receiver<()> },
+    StartFail,
 }
 
 struct ScriptedKillRunner {
@@ -567,6 +569,22 @@ impl TransformRunner for ScriptedKillRunner {
         fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
         fs::write(spec.evidence_dir.join("evidence.json"), "{}").map_err(LocalExecutorError::Io)?;
         let script = self.scripts.lock().unwrap().remove(spec.nonce).unwrap_or(KillScript::Succeed);
+        let script = match script {
+            KillScript::StartStall { started, block } => {
+                let _ = started.send(());
+                block.recv_timeout(CANCEL_TEST_DEADLOCK).map_err(|error| {
+                    LocalExecutorError::Io(IoError::new(
+                        ErrorKind::TimedOut,
+                        format!("start was not explicitly released: {error}"),
+                    ))
+                })?;
+                KillScript::Succeed
+            }
+            KillScript::StartFail => {
+                return Err(LocalExecutorError::Io(IoError::other("scripted start failure")));
+            }
+            other => other,
+        };
         Ok(Box::new(ScriptedKillProcess { script }))
     }
 
@@ -615,6 +633,9 @@ impl RunProcess for ScriptedKillProcess {
                 } else {
                     Ok(())
                 }
+            }
+            KillScript::StartStall { .. } | KillScript::StartFail => {
+                Err(LocalExecutorError::Unterminated("start script used as kill".into()))
             }
         }
     }
@@ -754,6 +775,202 @@ fn panic_during_kill_restores_the_run_so_a_later_cancel_can_reclaim() {
     assert!(exec.lane_occupancy().slots.contains(&0), "the slot is still withheld");
     exec.cancel(&handle).expect("restoration after panic must let a later cancel reclaim");
     assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Unknown);
+}
+
+#[test]
+fn cancel_during_submit_start_is_retryable_not_absent() {
+    let base = TempDir::new().unwrap();
+    let nonce = test_nonce("submit-stall");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let exec = scripted_executor(
+        &base,
+        HashMap::from([(nonce.clone(), KillScript::StartStall { started: started_tx, block: release_rx })]),
+        1,
+    );
+    let order = construct_order(digest(5), &nonce);
+
+    thread::scope(|scope| {
+        let submit = scope.spawn(|| exec.submit(&order));
+        let unblock = UnblockOnDrop(Some(release_tx));
+        started_rx.recv_timeout(CANCEL_TEST_DEADLOCK).expect("start began; timeout is deadlock protection");
+        let (probe_tx, probe_rx) = mpsc::channel();
+        let exec = &exec;
+        let nonce = &nonce;
+        let order = &order;
+        let probe = scope.spawn(move || {
+            let handle = WorkHandle::new(Nonce(nonce.clone()));
+            assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Queued);
+            assert!(matches!(exec.cancel(&handle), Err(LocalExecutorError::Unterminated(_))));
+            assert!(
+                matches!(exec.submit(order), Err(LocalExecutorError::Unterminated(_))),
+                "an in-progress duplicate submit must not report success"
+            );
+            assert!(
+                exec.reconcile(&[outstanding(digest(5), nonce)]).readopted.is_empty(),
+                "reconciliation must not install an orphan over an in-progress submit",
+            );
+            probe_tx.send(()).unwrap();
+        });
+        probe_rx.recv_timeout(CANCEL_TEST_DEADLOCK).expect("probe finished; timeout is deadlock protection");
+        probe.join().unwrap();
+        drop(unblock);
+        submit.join().unwrap().unwrap();
+    });
+
+    let handle = WorkHandle::new(Nonce(nonce.clone()));
+    assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Running { last_progress_unix_millis: None },);
+    assert_eq!(exec.submit(&construct_order(digest(5), &nonce)).unwrap().nonce.0, nonce);
+    exec.cancel(&handle).expect("once start finishes, cancel kills the tracked run");
+    assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Unknown);
+}
+
+#[test]
+fn cancel_during_pumped_start_is_retryable_and_keeps_the_ceiling() {
+    let base = TempDir::new().unwrap();
+    let live = test_nonce("pump-live");
+    let queued = test_nonce("pump-start");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let exec = scripted_executor(
+        &base,
+        HashMap::from([
+            (live.clone(), KillScript::Succeed),
+            (queued.clone(), KillScript::StartStall { started: started_tx, block: release_rx }),
+        ]),
+        1,
+    );
+    let live_handle = exec.submit(&construct_order(digest(5), &live)).unwrap();
+    let queued_handle = exec.submit(&construct_order(digest(5), &queued)).unwrap();
+    assert_eq!(exec.inspect(&queued_handle).unwrap(), ExecutionStatus::Queued);
+
+    thread::scope(|scope| {
+        let cancel_live = scope.spawn(|| exec.cancel(&live_handle));
+        let unblock = UnblockOnDrop(Some(release_tx));
+        started_rx.recv_timeout(CANCEL_TEST_DEADLOCK).expect("pumped start began; timeout is deadlock protection");
+        let (probe_tx, probe_rx) = mpsc::channel();
+        let exec = &exec;
+        let queued_handle = &queued_handle;
+        let probe = scope.spawn(move || {
+            assert_eq!(exec.inspect(queued_handle).unwrap(), ExecutionStatus::Queued);
+            assert!(matches!(exec.cancel(queued_handle), Err(LocalExecutorError::Unterminated(_))));
+            assert!(exec.lane_occupancy().slots.contains(&0), "the pumped start still occupies the slot");
+            let overflow = exec.submit(&construct_order(digest(5), &test_nonce("pump-overflow"))).unwrap();
+            assert_eq!(exec.inspect(&overflow).unwrap(), ExecutionStatus::Queued);
+            probe_tx.send(()).unwrap();
+        });
+        probe_rx.recv_timeout(CANCEL_TEST_DEADLOCK).expect("probe finished; timeout is deadlock protection");
+        probe.join().unwrap();
+        drop(unblock);
+        cancel_live.join().unwrap().expect("freeing the live lane starts the queued one");
+    });
+
+    assert_eq!(exec.inspect(&queued_handle).unwrap(), ExecutionStatus::Running { last_progress_unix_millis: None },);
+    exec.cancel(&queued_handle).expect("after start returns, cancel kills the run");
+}
+
+#[test]
+fn direct_enqueue_hold_overlaps_pumped_start() {
+    let base = TempDir::new().unwrap();
+    let live = test_nonce("overlap-live");
+    let queued = test_nonce("overlap-queued");
+    let (enqueued_tx, enqueued_rx) = mpsc::channel();
+    let (enqueue_release_tx, enqueue_release_rx) = mpsc::channel();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (start_release_tx, start_release_rx) = mpsc::channel();
+    let exec = scripted_executor(
+        &base,
+        HashMap::from([
+            (live.clone(), KillScript::Succeed),
+            (queued.clone(), KillScript::StartStall { started: started_tx, block: start_release_rx }),
+        ]),
+        1,
+    );
+    exec.arm_enqueue_park(&queued, enqueued_tx, enqueue_release_rx);
+    let live_handle = exec.submit(&construct_order(digest(5), &live)).unwrap();
+    let queued_order = construct_order(digest(5), &queued);
+
+    thread::scope(|scope| {
+        let submit_queued = scope.spawn(|| exec.submit(&queued_order));
+        let unblock_enqueue = UnblockOnDrop(Some(enqueue_release_tx));
+        enqueued_rx.recv_timeout(CANCEL_TEST_DEADLOCK).expect("enqueue parked; timeout is deadlock protection");
+        let cancel_live = scope.spawn(|| exec.cancel(&live_handle));
+        let unblock_start = UnblockOnDrop(Some(start_release_tx));
+        started_rx.recv_timeout(CANCEL_TEST_DEADLOCK).expect("pumped start began; timeout is deadlock protection");
+        let (probe_tx, probe_rx) = mpsc::channel();
+        let exec = &exec;
+        let queued = &queued;
+        let probe = scope.spawn(move || {
+            let handle = WorkHandle::new(Nonce(queued.clone()));
+            assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Queued);
+            assert!(matches!(exec.cancel(&handle), Err(LocalExecutorError::Unterminated(_))));
+            probe_tx.send(()).unwrap();
+        });
+        probe_rx.recv_timeout(CANCEL_TEST_DEADLOCK).expect("probe finished; timeout is deadlock protection");
+        probe.join().unwrap();
+        drop(unblock_enqueue);
+        submit_queued.join().unwrap().unwrap();
+        let handle = WorkHandle::new(Nonce(queued.clone()));
+        assert!(
+            matches!(exec.cancel(&handle), Err(LocalExecutorError::Unterminated(_))),
+            "dropping the direct enqueue hold must not uncover the pump start"
+        );
+        drop(unblock_start);
+        cancel_live.join().unwrap().unwrap();
+    });
+
+    let handle = WorkHandle::new(Nonce(queued));
+    assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Running { last_progress_unix_millis: None },);
+}
+
+#[test]
+fn failed_direct_start_releases_its_identity_and_slot() {
+    let base = TempDir::new().unwrap();
+    let nonce = test_nonce("direct-start-fail");
+    let exec = scripted_executor(&base, HashMap::from([(nonce.clone(), KillScript::StartFail)]), 1);
+    let order = construct_order(digest(5), &nonce);
+    let handle = WorkHandle::new(Nonce(nonce));
+
+    assert!(exec.submit(&order).is_err());
+    assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Unknown);
+    assert!(!exec.lane_occupancy().any_running(), "failed startup releases its slot");
+    exec.cancel(&handle).expect("a failed launch left no child");
+    assert_eq!(exec.submit(&order).unwrap(), handle);
+    assert_eq!(
+        exec.inspect(&handle).unwrap(),
+        ExecutionStatus::Running { last_progress_unix_millis: None },
+        "the same executor can retry after a failed direct start",
+    );
+}
+
+#[test]
+fn pumped_start_failure_records_a_placeholder_and_allows_retry() {
+    let base = TempDir::new().unwrap();
+    let live = test_nonce("fail-live");
+    let queued = test_nonce("fail-queued");
+    let exec = scripted_executor(
+        &base,
+        HashMap::from([(live.clone(), KillScript::Succeed), (queued.clone(), KillScript::StartFail)]),
+        1,
+    );
+    let live_handle = exec.submit(&construct_order(digest(5), &live)).unwrap();
+    let queued_handle = exec.submit(&construct_order(digest(5), &queued)).unwrap();
+    assert_eq!(exec.inspect(&queued_handle).unwrap(), ExecutionStatus::Queued);
+
+    exec.cancel(&live_handle).unwrap();
+    assert_eq!(
+        exec.inspect(&queued_handle).unwrap(),
+        ExecutionStatus::Completed { conclusion: Conclusion::Failure },
+        "a failed pumped start remains as the UnlaunchedRun placeholder"
+    );
+    exec.cancel(&queued_handle).expect("the placeholder is reclaimable");
+    assert_eq!(exec.inspect(&queued_handle).unwrap(), ExecutionStatus::Unknown);
+    let retried = exec.submit(&construct_order(digest(5), &queued)).unwrap();
+    assert_eq!(
+        exec.inspect(&retried).unwrap(),
+        ExecutionStatus::Running { last_progress_unix_millis: None },
+        "the same executor must start the nonce again after the failed start"
+    );
 }
 
 fn evidence_dir(base: &TempDir, nonce: &str) -> PathBuf {

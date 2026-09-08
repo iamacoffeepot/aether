@@ -5,7 +5,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf, absolute};
+#[cfg(test)]
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+#[cfg(test)]
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::{
@@ -395,6 +399,10 @@ struct Registry {
     // hold the registry lock, so this stand-in keeps the nonce and slot counted
     // until kill succeeds (release) or Drop restores the run.
     cancelling: HashMap<String, CancellingHold>,
+    // How many live `SubmitHold`s name this nonce. Direct `submit` and a pump
+    // start can overlap after enqueue; a set would drop the nonce when the
+    // first guard ended. Not a lane slot — omitted from `occupied`.
+    submitting: HashMap<String, usize>,
 }
 
 impl Registry {
@@ -454,7 +462,28 @@ impl Registry {
     }
 
     fn tracks(&self, nonce: &str) -> bool {
-        self.runs.contains_key(nonce) || self.cancelling.contains_key(nonce)
+        self.runs.contains_key(nonce)
+            || self.cancelling.contains_key(nonce)
+            || self.submit_in_progress(nonce)
+            || self.waiting.iter().any(|pending| pending.nonce == nonce)
+    }
+
+    fn submit_in_progress(&self, nonce: &str) -> bool {
+        self.submitting.get(nonce).copied().unwrap_or(0) > 0
+    }
+
+    fn acquire_submit(&mut self, nonce: &str) {
+        *self.submitting.entry(nonce.to_owned()).or_insert(0) += 1;
+    }
+
+    fn release_submit(&mut self, nonce: &str) {
+        let Some(count) = self.submitting.get_mut(nonce) else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            self.submitting.remove(nonce);
+        }
     }
 }
 
@@ -510,6 +539,24 @@ impl Drop for CancelReservation<'_> {
         let mut registry = self.backend.lock();
         registry.cancelling.remove(&self.nonce);
         registry.runs.insert(self.nonce.clone(), run);
+    }
+}
+
+#[cfg(test)]
+struct EnqueuePark {
+    started: mpsc::Sender<()>,
+    block: mpsc::Receiver<()>,
+}
+
+/// One acquired submit/start identity. Drop releases exactly one count.
+struct SubmitHold<'a> {
+    backend: &'a LocalExecutor,
+    nonce: String,
+}
+
+impl Drop for SubmitHold<'_> {
+    fn drop(&mut self) {
+        self.backend.lock().release_submit(&self.nonce);
     }
 }
 
@@ -569,6 +616,8 @@ pub struct LocalExecutor {
     // a dispatched lane inherits; a test names a directory of stand-in
     // binaries so a missing-tool refusal does not depend on this host.
     kit_path: Option<OsString>,
+    #[cfg(test)]
+    enqueue_parks: Mutex<HashMap<String, EnqueuePark>>,
 }
 
 impl LocalExecutor {
@@ -603,6 +652,8 @@ impl LocalExecutor {
             builders,
             kit_gate: false,
             kit_path: None,
+            #[cfg(test)]
+            enqueue_parks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1053,12 +1104,51 @@ impl LocalExecutor {
             registry.waiting.push_back(pending);
             registry.waiting.len()
         };
+        #[cfg(test)]
+        self.park_enqueued(&nonce);
         tracing::info!(
             %nonce,
             queue_depth = depth,
             ceiling = self.max_concurrent_lanes,
             "local executor backend: lane ceiling reached; dispatch is queued and starts when a lane finishes",
         );
+    }
+
+    #[cfg(test)]
+    fn park_enqueued(&self, nonce: &str) {
+        let parked = self.enqueue_parks.lock().unwrap_or_else(PoisonError::into_inner).remove(nonce);
+        let Some(EnqueuePark { started, block }) = parked else {
+            return;
+        };
+        let _ = started.send(());
+        block.recv_timeout(Duration::from_secs(5)).expect("enqueue park was not explicitly released");
+    }
+
+    /// Stall `enqueue` of `nonce` until the test releases `block`. Test-only:
+    /// proves a direct submit hold can overlap a pump start of the same nonce.
+    #[cfg(test)]
+    pub fn arm_enqueue_park(&self, nonce: &str, started: mpsc::Sender<()>, block: mpsc::Receiver<()>) {
+        self.enqueue_parks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(nonce.to_owned(), EnqueuePark { started, block });
+    }
+
+    /// Latch one submit/start owner, or `None` when this nonce is already a
+    /// finished accept (running or queued, no in-progress owner). In-progress
+    /// or cancelling duplicates are retryable: the original `submit` may still
+    /// fail.
+    fn claim_submit(&self, nonce: &str) -> Result<Option<SubmitHold<'_>>, LocalExecutorError> {
+        let mut registry = self.lock();
+        if registry.cancelling.contains_key(nonce) || registry.submit_in_progress(nonce) {
+            return Err(LocalExecutorError::Unterminated(format!("a submit is still in progress for nonce `{nonce}`")));
+        }
+        if registry.runs.contains_key(nonce) || registry.waiting.iter().any(|pending| pending.nonce == nonce) {
+            return Ok(None);
+        }
+        registry.acquire_submit(nonce);
+        drop(registry);
+        Ok(Some(SubmitHold { backend: self, nonce: nonce.to_owned() }))
     }
 
     /// Rewrite `evidence.json` with the host-owned reuse and slot-affinity
@@ -1527,6 +1617,7 @@ impl LocalExecutor {
     // the loop moves on to the next waiting dispatch.
     fn pump(&self) {
         while let Some((pending, slot, reason)) = self.take_waiting() {
+            let _startup = SubmitHold { backend: self, nonce: pending.nonce.clone() };
             let failed = FailedStart::of(&pending);
             if let Err(error) = self.start_reserved(pending, slot, reason) {
                 self.record_failed_start(failed, &error);
@@ -1552,7 +1643,7 @@ impl LocalExecutor {
         );
         let FailedStart { nonce, evidence_dir, subject, gates } = failed;
         let mut registry = self.lock();
-        if registry.tracks(&nonce) {
+        if registry.runs.contains_key(&nonce) || registry.cancelling.contains_key(&nonce) {
             return;
         }
         registry.runs.insert(
@@ -1587,6 +1678,7 @@ impl LocalExecutor {
         // the spawn it is handed to returns.
         let pending = registry.take_waiting()?;
         registry.starting += 1;
+        registry.acquire_submit(&pending.nonce);
         let (slot, reason) = registry.claim_for(pending.preferred, &quarantined);
         drop(registry);
         Some((pending, slot, reason))
@@ -2546,6 +2638,9 @@ impl ExecutorBackend for LocalExecutor {
     type Error = LocalExecutorError;
 
     fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+        let Some(_submit) = self.claim_submit(&order.nonce.0)? else {
+            return Ok(WorkHandle::new(order.nonce.clone()));
+        };
         if self.kit_gate {
             let report = self
                 .kit_path
@@ -2608,6 +2703,9 @@ impl ExecutorBackend for LocalExecutor {
                 if registry.waiting.iter().any(|pending| pending.nonce == handle.nonce.0) {
                     return Ok(ExecutionStatus::Queued);
                 }
+                if registry.submit_in_progress(&handle.nonce.0) {
+                    return Ok(ExecutionStatus::Queued);
+                }
                 // A cancel owns the process for kill/wait. The child is not
                 // confirmed gone, so this is still Running — never a successful
                 // completion, and never Unknown (that would look like eviction).
@@ -2655,6 +2753,15 @@ impl ExecutorBackend for LocalExecutor {
                 )));
             }
             let Some(run) = registry.runs.remove(&handle.nonce.0) else {
+                if registry.submit_in_progress(&handle.nonce.0) {
+                    // Prepare/start is still on the stack and there is no child
+                    // to kill. Git fetch is not interruptible from here; the
+                    // deadline tick retries until a run exists or submit fails.
+                    return Err(LocalExecutorError::Unterminated(format!(
+                        "a submit is still in progress for nonce `{}`",
+                        handle.nonce.0
+                    )));
+                }
                 // A dispatch still waiting for a lane slot has no child to kill and
                 // no checkout to reclaim, so dropping it from the queue is the whole
                 // cancel — and it has to happen here, or the ceiling would go on to
