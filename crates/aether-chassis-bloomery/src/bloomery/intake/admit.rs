@@ -6,9 +6,9 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    Admit, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, LaneObservation, Nonce, ResolutionClaim,
-    StageCatalog, StageId, StageResult, StageVerdict, SurfaceRequest, VerifyFailure, VerifyFailureSet, WorkpieceId,
-    classify_findings, normalize_stage_result,
+    Admit, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, LaneObservation, Nonce, PipelineManifest,
+    ResolutionClaim, StageCatalog, StageId, StageResult, StageVerdict, SurfaceRequest, VerifyFailure, VerifyFailureSet,
+    WorkpieceId, classify_findings, normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 use std::fmt::Write as _;
@@ -89,6 +89,26 @@ pub enum IntakeRefusal {
     /// (ADR-0195 / ADR-0176); every other stage refuses rather than being
     /// given unratified semantics by admission.
     ExecutorFaultOutOfStage(StageId),
+    /// The verdict named a verifier identity the bloom's sealed vocabulary does
+    /// not declare (ADR-0215).
+    ///
+    /// The strict half of ADR-0215's decode-tolerant / intake-strict move. A
+    /// fresh verdict's names are interned here against the sealed vocabulary,
+    /// which is the only place the question "is this an identity that could
+    /// have failed here" has an answer. The journal decoder stays tolerant so
+    /// replay folds; it is never the thing that assigns a bit to a fresh
+    /// verdict. Refusing an un-internable name here is what keeps ADR-0178's
+    /// forgiveness bound bounded: an identity outside the sealed vocabulary
+    /// would extend a member's repair loop by one more novel failure that
+    /// costs no roll.
+    UndeclaredVerifier {
+        /// The identities the verdict named that the bloom's manifest does not
+        /// declare, in the set's canonical order.
+        undeclared: Vec<String>,
+        /// The vocabulary the bloom actually sealed, so the refusal states the
+        /// alternative instead of sending its reader to a file in a tree.
+        declared: Vec<String>,
+    },
     /// A surface-request or plain-decline verdict arrived against a stage that
     /// runs no construct-family lane (ADR-0207). Only Construct / Refine /
     /// Reconcile dispatch `construct.implement`, so only they can decline for
@@ -204,6 +224,121 @@ fn verifier_failure_refusal(stage: StageId, upload: &UploadedEvidence) -> Option
         verdict: upload.verdict,
         failed_verifiers: upload.observation.failed_verifiers,
     })
+}
+
+// ADR-0215's intake-strict half: every identity a verdict names has to be one
+// the bloom's own sealed vocabulary declares, interned at the position that
+// vocabulary assigned.
+//
+// The JSON evidence path still has the names in hand
+// (`LaneObservation::failed_verifier_names`). Interning them here against the
+// sealed manifest is what stops a subset of appended identities being
+// re-keyed onto the first free compiled-past bit. The Actions mask path
+// carries no names: those bits were already written by the lane's compiled
+// vocabulary, and the existing position check is the door.
+//
+// The manifest is read off the order's flattened registry rather than from a
+// compiled copy, because the whole point of the record is that the vocabulary
+// belongs to the tree the bloom sealed and not to this binary. A bloom that
+// sealed none — every bloom from before ADR-0215 — is judged against
+// `PipelineManifest::compiled()`, the vocabulary it actually ran under, exactly
+// as its record folds against that value. An entry the store cannot read is the
+// same answer for a different reason: the seal door already refused a manifest
+// the host could not resolve, so a missing row here is a corrupt store rather
+// than a bloom with a different vocabulary, and inventing an undeclared-identity
+// refusal out of it would wedge members over a storage fault.
+fn intern_uploaded(
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    upload: &UploadedEvidence,
+) -> Result<Result<UploadedEvidence, IntakeRefusal>, IntakeError> {
+    let names = &upload.observation.failed_verifier_names;
+    let failed = upload.observation.failed_verifiers;
+    if names.is_empty() && failed.is_empty() {
+        return Ok(Ok(upload.clone()));
+    }
+    let manifest = sealed_manifest(store, record)?;
+    let interned = if names.is_empty() {
+        undeclared_set(&manifest, failed)
+    } else {
+        let interned = names.iter().filter_map(|name| manifest.intern(name)).collect::<VerifyFailureSet>();
+        let undeclared = names.iter().filter(|name| manifest.intern(name).is_none()).cloned().collect::<Vec<_>>();
+        if undeclared.is_empty() {
+            Ok(interned)
+        } else {
+            Err(undeclared_refusal(&manifest, undeclared))
+        }
+    };
+    match interned {
+        Err(refusal) => Ok(Err(refusal)),
+        Ok(failed_verifiers) => {
+            let mut upload = upload.clone();
+            upload.observation.failed_verifiers = failed_verifiers;
+            Ok(Ok(upload))
+        }
+    }
+}
+
+fn intern_and_bind(
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    upload: &UploadedEvidence,
+) -> Result<Result<(UploadedEvidence, Evidence), IntakeRefusal>, IntakeError> {
+    let upload = match intern_uploaded(store, record, upload)? {
+        Err(refusal) => return Ok(Err(refusal)),
+        Ok(upload) => upload,
+    };
+    let observed = StageResult { subject: upload.subject, verdict: upload.verdict, detail: upload.detail };
+    match normalize_stage_result(&record.displayed_digest, &observed) {
+        Ok(evidence) => Ok(Ok((upload, evidence))),
+        Err(InwardError::DigestMismatch { displayed, claimed }) => {
+            Ok(Err(IntakeRefusal::DigestMismatch { displayed, claimed }))
+        }
+    }
+}
+
+fn undeclared_set(manifest: &PipelineManifest, failed: VerifyFailureSet) -> Result<VerifyFailureSet, IntakeRefusal> {
+    let undeclared = manifest.undeclared_verifiers(failed);
+    if undeclared.is_empty() {
+        return Ok(failed);
+    }
+    Err(undeclared_refusal(manifest, undeclared))
+}
+
+fn undeclared_refusal(manifest: &PipelineManifest, undeclared: Vec<String>) -> IntakeRefusal {
+    IntakeRefusal::UndeclaredVerifier { undeclared, declared: manifest.identities().map(String::from).collect() }
+}
+
+// The lane vocabulary `record`'s bloom sealed, or the compiled one when it
+// sealed none.
+fn sealed_manifest(store: &mut dyn StoreBackend, record: &DispatchRecord) -> Result<PipelineManifest, IntakeError> {
+    let Some(address) = record.configs.address::<PipelineManifest>() else {
+        return Ok(PipelineManifest::compiled());
+    };
+    let Some((_, bytes, _)) = store.lookup_config(address.as_bytes())? else {
+        return Ok(unreadable(address, "no stored row"));
+    };
+    Ok(from_bytes::<PipelineManifest>(&bytes).unwrap_or_else(|error| unreadable(address, &error.to_string())))
+}
+
+// The compiled vocabulary, said out loud: a bloom whose sealed manifest this
+// host cannot re-read is judged against the wrong vocabulary, and the one thing
+// that must not happen is for it to be judged silently.
+//
+// Not a refusal, deliberately. The seal door already refused a manifest the host
+// could not resolve, so reaching here means the row went missing after the seal
+// — a corrupt store rather than a bloom with a vocabulary of its own — and
+// turning a storage fault into an undeclared-identity refusal would wedge every
+// member of that bloom on it.
+fn unreadable(address: Digest, why: &str) -> PipelineManifest {
+    tracing::warn!(
+        target: "aether_chassis_bloomery::intake",
+        address = %address.to_hex(),
+        why,
+        "the order names a sealed pipeline manifest this store cannot read; judging its verdict against the compiled \
+         vocabulary",
+    );
+    PipelineManifest::compiled()
 }
 
 /// Decompose a failing aggregate verdict's findings against the bloom's
@@ -746,14 +881,10 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     if let Some(refusal) = out_of_stage_refusal(record.stage, upload) {
         return Ok(AdmitDecision::Refused(refusal));
     }
-    let observed = StageResult { subject: upload.subject, verdict: upload.verdict, detail: upload.detail };
-    let evidence = match normalize_stage_result(&record.displayed_digest, &observed) {
-        Ok(evidence) => evidence,
-        // A mismatch is a lie about which digest the evidence names; refuse and
-        // leave the order live so the honest worker can still deliver.
-        Err(InwardError::DigestMismatch { displayed, claimed }) => {
-            return Ok(AdmitDecision::Refused(IntakeRefusal::DigestMismatch { displayed, claimed }));
-        }
+    let interned = intern_and_bind(store, &record, upload)?;
+    let (upload, evidence) = match interned.as_ref() {
+        Err(refusal) => return Ok(AdmitDecision::Refused(refusal.clone())),
+        Ok((upload, evidence)) => (upload, evidence.clone()),
     };
     // A pre-bloom scoping run (ADR-0208, #5304) routes before the member-stage
     // ladder, because it is not on that ladder at all: it names no bloom, so
