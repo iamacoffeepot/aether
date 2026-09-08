@@ -83,8 +83,7 @@ mod engine {
     /// `aether.fleet.list` — ask the engines cap (`aether.fleet`) to
     /// enumerate every engine it currently supervises. Fieldless
     /// request; the reply is a [`ListEnginesResult`]. Issue 763 P4.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-    #[kind(name = "aether.fleet.list")]
+    #[aether_data::kind(name = "aether.fleet.list", default)]
     pub struct ListEngines {}
 
     /// One supervised engine, as reported in a [`ListEnginesResult`].
@@ -153,8 +152,7 @@ mod engine {
     /// `aether.fleet.list_result` — reply to [`ListEngines`]: every
     /// engine the cap supervises right now, plus a bounded sidecar of the
     /// engines that recently left and why. Issue 763 P4.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.fleet.list_result")]
+    #[aether_data::kind(name = "aether.fleet.list_result")]
     pub struct ListEnginesResult {
         pub engines: Vec<EngineDescriptor>,
         /// The recently-died ring: the last few engines that left the
@@ -213,8 +211,7 @@ mod engine {
     /// single-host) so the engine comes up with those components already
     /// loading — no follow-up `load_component` round-trips. `None` boots
     /// a bare engine, the pre-existing behaviour.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.fleet.spawn")]
+    #[aether_data::kind(name = "aether.fleet.spawn")]
     pub struct SpawnEngine {
         pub selector: BinarySelector,
         pub args: Vec<String>,
@@ -233,8 +230,7 @@ mod engine {
     /// with `engine_id = Some(_)` also leaves a matching `SpawnFailed`
     /// entry in [`ListEnginesResult`]'s `recently_died` ring, so a caller
     /// can correlate and reap. On `Err` no child process is left running.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.fleet.spawn_result")]
+    #[aether_data::kind(name = "aether.fleet.spawn_result")]
     pub enum SpawnEngineResult {
         Ok { engine_id: String, rpc_port: u16 },
         Err { engine_id: Option<String>, error: String },
@@ -248,16 +244,14 @@ mod engine {
     /// substrate it forked and self-shuts-down. `engine_id` is the
     /// plain UUID string from [`SpawnEngineResult`] /
     /// [`ListEnginesResult`].
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.fleet.terminate")]
+    #[aether_data::kind(name = "aether.fleet.terminate")]
     pub struct TerminateEngine {
         pub engine_id: String,
     }
 
     /// Reply to [`TerminateEngine`]. Issue 763 P4. `Err` is for an
     /// `engine_id` that doesn't parse or names no supervised engine.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.fleet.terminate_result")]
+    #[aether_data::kind(name = "aether.fleet.terminate_result")]
     pub enum TerminateEngineResult {
         Ok,
         Err { error: String },
@@ -334,8 +328,7 @@ mod engine {
     /// pin. Adding this field changes the kind schema, so fleet and MCP
     /// must ship the same release — it is JSON defaulting, not old kind-id
     /// compatibility. Reply: [`UploadBinaryResult`].
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.fleet.upload_binary")]
+    #[aether_data::kind(name = "aether.fleet.upload_binary")]
     pub struct UploadBinary {
         pub staged_path: String,
         pub name: Option<String>,
@@ -349,8 +342,7 @@ mod engine {
     /// at it, if any. `Err` carries a free-form reason — an unreadable
     /// `staged_path`, or a `--describe` that failed or didn't yield a
     /// parseable manifest.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.fleet.upload_binary_result")]
+    #[aether_data::kind(name = "aether.fleet.upload_binary_result")]
     pub enum UploadBinaryResult {
         Ok { hash: String, name: Option<String> },
         Err { error: String },
@@ -366,8 +358,7 @@ mod engine {
     /// is the live, name-pointed registry only), and `limit` caps the page
     /// after filtering (`None` defaults to 20; `Some(0)` returns no entries).
     /// Reply: [`ListEngineBinariesResult`].
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-    #[kind(name = "aether.fleet.list_binaries")]
+    #[aether_data::kind(name = "aether.fleet.list_binaries", default)]
     pub struct ListEngineBinaries {
         pub chassis: Option<String>,
         pub caps: Vec<String>,
@@ -381,8 +372,7 @@ mod engine {
     /// [`BinaryEntry`] carrying its hash, optional name, and `--describe`
     /// manifest. `total_matched` is counted after attribute/history filtering
     /// and before the requested limit is applied.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.fleet.list_binaries_result")]
+    #[aether_data::kind(name = "aether.fleet.list_binaries_result")]
     pub struct ListEngineBinariesResult {
         pub binaries: Vec<BinaryEntry>,
         pub total_matched: u32,
@@ -489,8 +479,7 @@ mod engine {
     /// changes the kind schema, so fleet and MCP must ship the same
     /// release — it is JSON defaulting, not old kind-id compatibility.
     /// Reply: [`UploadComponentResult`].
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.fleet.upload_component")]
+    #[aether_data::kind(name = "aether.fleet.upload_component")]
     pub struct UploadComponent {
         pub staged_path: String,
         pub name: Option<String>,
@@ -503,8 +492,7 @@ mod engine {
     /// identical bytes returns the same hash) and the `name` now pointing
     /// at it, if any. `Err` carries a free-form reason — an unreadable
     /// `staged_path` or a wasm whose manifest can't be parsed.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.fleet.upload_component_result")]
+    #[aether_data::kind(name = "aether.fleet.upload_component_result")]
     pub enum UploadComponentResult {
         Ok { hash: String, name: Option<String> },
         Err { error: String },
@@ -515,8 +503,7 @@ mod engine {
     /// only on an exact stored hash; names are never resolved. `pinned:
     /// true` is pin; `pinned: false` is unpin of the explicit flag only —
     /// a name still protects the hash. Reply: [`SetArtifactPinnedResult`].
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.fleet.set_artifact_pinned")]
+    #[aether_data::kind(name = "aether.fleet.set_artifact_pinned")]
     pub struct SetArtifactPinned {
         pub hash: String,
         pub pinned: bool,
@@ -526,8 +513,7 @@ mod engine {
     /// sidecar write succeeded. An unknown hash is `Err`; a persistence
     /// failure is `Err` and leaves prior protection unchanged. Equal
     /// in-memory state still requires a successful persist.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.fleet.set_artifact_pinned_result")]
+    #[aether_data::kind(name = "aether.fleet.set_artifact_pinned_result")]
     pub enum SetArtifactPinnedResult {
         Ok { hash: String, pinned: bool },
         Err { error: String },
@@ -538,8 +524,7 @@ mod engine {
     /// 1956). aether-mcp calls this hub-local before forwarding a
     /// `LoadComponent` to the target substrate, so the resolve hop keeps the
     /// load seam path-free. Reply: [`ResolveComponentResult`].
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.fleet.resolve_component")]
+    #[aether_data::kind(name = "aether.fleet.resolve_component")]
     pub struct ResolveComponent {
         pub selector: ComponentSelector,
     }
@@ -554,8 +539,7 @@ mod engine {
     /// reason — a selector that resolves to no stored component, or an
     /// attribute query matching more than one (a clean ambiguity error).
     #[allow(clippy::large_enum_variant)]
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.fleet.resolve_component_result")]
+    #[aether_data::kind(name = "aether.fleet.resolve_component_result")]
     pub enum ResolveComponentResult {
         Ok {
             hash: String,
@@ -585,8 +569,7 @@ mod engine {
     /// name-pointed registry only), and `limit` caps the page after filtering
     /// (`None` defaults to 20; `Some(0)` returns no entries). Reply:
     /// [`ListComponentBinariesResult`].
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-    #[kind(name = "aether.fleet.list_components")]
+    #[aether_data::kind(name = "aether.fleet.list_components", default)]
     pub struct ListComponentBinaries {
         pub namespace: Option<String>,
         pub handled_kind: Option<aether_data::KindId>,
@@ -599,8 +582,7 @@ mod engine {
     /// [`ComponentEntry`] carrying its hash, optional name, and the manifest
     /// read from the wasm. `total_matched` is counted after attribute/history
     /// filtering and before the requested limit is applied.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.fleet.list_components_result")]
+    #[aether_data::kind(name = "aether.fleet.list_components_result")]
     pub struct ListComponentBinariesResult {
         pub components: Vec<ComponentEntry>,
         pub total_matched: u32,
@@ -652,8 +634,7 @@ mod control_plane {
     /// `aether.kinds` custom section (ADR-0028) — the substrate
     /// reads it directly and the loader doesn't need to declare
     /// anything. Substrate replies with `LoadResult`.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.component.load")]
+    #[aether_data::kind(name = "aether.component.load")]
     pub struct LoadComponent {
         #[serde(with = "aether_data::bytes")]
         pub wasm: Vec<u8>,
@@ -690,8 +671,7 @@ mod control_plane {
     /// [`LoadComponent`]: production load callers keep the established
     /// `aether.component.load` root placement, while `SubstrateHarness`
     /// scenarios use this request to construct nested component topologies.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.component.load_under")]
+    #[aether_data::kind(name = "aether.component.load_under")]
     pub struct LoadComponentUnder {
         pub parent: String,
         pub load: LoadComponent,
@@ -703,8 +683,7 @@ mod control_plane {
     /// receive-side capabilities parsed from `aether.kinds.inputs`
     /// (ADR-0033). `Err` carries the failure reason — kind-descriptor
     /// conflict, invalid WASM, name conflict, etc.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.component.load_result")]
+    #[aether_data::kind(name = "aether.component.load_result")]
     pub enum LoadResult {
         Ok { mailbox_id: aether_data::MailboxId, name: String, capabilities: ComponentCapabilities },
         Err { error: String },
@@ -810,16 +789,14 @@ mod control_plane {
 
     /// `aether.component.drop` — remove a component from the
     /// substrate and invalidate its mailbox id. Reply: `DropResult`.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.component.drop")]
+    #[aether_data::kind(name = "aether.component.drop")]
     pub struct DropComponent {
         pub mailbox_id: aether_data::MailboxId,
     }
 
     /// Reply to `DropComponent`. `Ok` on success; `Err` if the
     /// mailbox was unknown, wasn't a component, or already dropped.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.component.drop_result")]
+    #[aether_data::kind(name = "aether.component.drop_result")]
     pub enum DropResult {
         Ok,
         Err { error: String },
@@ -830,8 +807,7 @@ mod control_plane {
     /// splice is structural: there is no drain phase and no drain
     /// timeout. Kind vocabulary rides in the wasm's `aether.kinds`
     /// custom section (ADR-0028). Reply: `ReplaceResult`.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.component.replace")]
+    #[aether_data::kind(name = "aether.component.replace")]
     pub struct ReplaceComponent {
         pub mailbox_id: aether_data::MailboxId,
         #[serde(with = "aether_data::bytes")]
@@ -864,8 +840,7 @@ mod control_plane {
     /// Reply to `ReplaceComponent`. Carries the new component's
     /// advertised capabilities on `Ok` so the hub's cached state
     /// reflects the swapped binary; `Err` carries a free-form reason.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.component.replace_result")]
+    #[aether_data::kind(name = "aether.component.replace_result")]
     pub enum ReplaceResult {
         Ok { capabilities: ComponentCapabilities },
         Err { error: String },
@@ -880,8 +855,7 @@ mod control_plane {
     /// (ADR-0116) polls this to learn deterministically when a requested
     /// component is loaded and registered at its lineage address, instead
     /// of inferring liveness by proxy. Reply: `ListComponentsResult`.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-    #[kind(name = "aether.component.list")]
+    #[aether_data::kind(name = "aether.component.list", default)]
     pub struct ListComponents {}
 
     /// Reply to `ListComponents` (issue 2020): the ADR-0099 lineage name of
@@ -891,8 +865,7 @@ mod control_plane {
     /// (ADR-0099), and routing is the substrate's job (a caller addresses by
     /// `recipient_name` and the substrate resolves it), so the handle has no
     /// use at the caller.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.component.list_result")]
+    #[aether_data::kind(name = "aether.component.list_result")]
     pub struct ListComponentsResult {
         pub names: Vec<String>,
     }
@@ -906,8 +879,7 @@ mod control_plane {
     /// a mailbox id to its spawner — the substrate is the only process that
     /// always holds the live loaded set, so it owns the answer. Reply:
     /// `DescribeComponentResult`.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.component.describe")]
+    #[aether_data::kind(name = "aether.component.describe")]
     pub struct DescribeComponent {
         /// The component's ADR-0099 lineage name (e.g.
         /// `aether.embedded:aether.camera`), as returned by
@@ -918,8 +890,7 @@ mod control_plane {
     /// Reply to `DescribeComponent` (iamacoffeepot/aether#2421): the full
     /// `ComponentCapabilities` on `Ok`, or a free-form reason on `Err` (no
     /// component registered at that lineage name).
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.component.describe_result")]
+    #[aether_data::kind(name = "aether.component.describe_result")]
     pub enum DescribeComponentResult {
         Ok { capabilities: ComponentCapabilities },
         Err { error: String },
@@ -978,8 +949,7 @@ mod control_plane {
     /// `CaptureFrameResult::Ok`. `None` means "no similarity check".
     ///
     /// Reply: `CaptureFrameResult`.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.render.capture_frame")]
+    #[aether_data::kind(name = "aether.render.capture_frame")]
     pub struct CaptureFrame {
         /// Explicit desktop render target. `None` is reserved for a
         /// surfaceless runtime such as `SubstrateHarness`; a windowed
@@ -1022,8 +992,7 @@ mod control_plane {
     /// (0 = identical, 1 = maximally different).
     /// `similarity_pass` is `true` when `similarity_score <=
     /// SimilarityCheck.threshold` (iamacoffeepot/aether#1780).
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.render.capture_frame_result")]
+    #[aether_data::kind(name = "aether.render.capture_frame_result")]
     pub enum CaptureFrameResult {
         Ok {
             #[serde(with = "aether_data::bytes")]
@@ -1325,8 +1294,7 @@ mod control_plane {
     /// auto-clamped sphere subdivision) on an otherwise-successful
     /// load. Whole-mesh atomic-replace semantics are preserved: a
     /// failed load leaves the prior cached triangles intact.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.mesh.load_result")]
+    #[aether_data::kind(name = "aether.mesh.load_result")]
     pub struct MeshLoadResult {
         pub ok: bool,
         pub namespace: String,
@@ -1349,8 +1317,7 @@ mod control_plane {
     /// `aether-kinds` is `no_std` + `alloc` and the `Schema` derive
     /// encodes `BTreeMap` as `SchemaType::Map` (it rejects `HashMap`);
     /// the keyed-by-instance-name semantics are identical.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.scene.load_result")]
+    #[aether_data::kind(name = "aether.scene.load_result")]
     pub struct SceneLoadResult {
         pub ok: bool,
         pub namespace: String,
@@ -1419,8 +1386,7 @@ mod control_plane {
     ///   `Some(n)` returns only entries with `sequence > n`.
     /// - `contains: None` applies no content filter; `Some(s)` returns
     ///   only entries whose message contains `s` (case-sensitive).
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.log.tail")]
+    #[aether_data::kind(name = "aether.log.tail")]
     pub struct LogTail {
         pub max: u32,
         pub min_level: Option<u8>,
@@ -1439,8 +1405,7 @@ mod control_plane {
     /// or poll more often. `entries[i].origin` is `None` — the
     /// responder IS the origin; client-side merge code stamps it if
     /// aggregating across actors.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.log.tail_result")]
+    #[aether_data::kind(name = "aether.log.tail_result")]
     pub enum LogTailResult {
         Ok { entries: Vec<LogEntry>, next_since: u64, truncated_before: Option<u64> },
         Err { error: String },
@@ -1485,8 +1450,7 @@ mod control_plane {
     /// - `kind: None` returns every handler row the actor declares;
     ///   `Some(id)` returns only that one handler's row (or an empty
     ///   `rows` if the actor has no such handler).
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.cost.tail")]
+    #[aether_data::kind(name = "aether.cost.tail")]
     pub struct CostTail {
         pub kind: Option<aether_data::KindId>,
     }
@@ -1496,8 +1460,7 @@ mod control_plane {
     /// set), in unspecified order. `Err` carries a free-form reason
     /// (the actor had no stamped slots / cost cache — a substrate
     /// invariant violation in practice).
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.cost.tail_result")]
+    #[aether_data::kind(name = "aether.cost.tail_result")]
     pub enum CostTailResult {
         Ok { rows: Vec<CostRow> },
         Err { error: String },
@@ -1531,8 +1494,7 @@ mod control_plane {
     /// fail fast.
     ///
     /// Reply: `AdvanceResult`.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.substrate_harness.advance")]
+    #[aether_data::kind(name = "aether.substrate_harness.advance")]
     pub struct Advance {
         pub ticks: u32,
         pub delta_micros: u32,
@@ -1544,8 +1506,7 @@ mod control_plane {
     /// outcome can extend it without widening the kind). `Err`
     /// carries a free-form reason: chassis doesn't support advance,
     /// dispatcher wedged mid-advance, etc.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.substrate_harness.advance_result")]
+    #[aether_data::kind(name = "aether.substrate_harness.advance_result")]
     pub enum AdvanceResult {
         Ok { ticks_completed: u32 },
         Err { error: String },

@@ -33,8 +33,7 @@ pub enum ArtifactsError {
 /// as metadata and does not validate their existence — derivation-DAG
 /// integrity is a reducer invariant over the journal (ADR-0149), not a
 /// byte-store gate. Reply: [`PutResult`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.artifacts.put")]
+#[aether_data::kind(name = "aether.artifacts.put")]
 pub struct Put {
     #[serde(with = "aether_data::bytes")]
     pub bytes: Vec<u8>,
@@ -44,8 +43,7 @@ pub struct Put {
 /// Reply to [`Put`]. `Ok` carries the sha256 hex `digest` the bytes stored
 /// under; `Err` carries an [`ArtifactsError`] — `AdapterError` when the bytes
 /// could not be persisted.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.artifacts.put_result")]
+#[aether_data::kind(name = "aether.artifacts.put_result")]
 pub enum PutResult {
     Ok { digest: String },
     Err { error: ArtifactsError },
@@ -54,8 +52,7 @@ pub enum PutResult {
 /// `aether.artifacts.get` — look up an artifact by its content `digest` and
 /// reply the bytes plus its recorded derivation-DAG parents. Reply:
 /// [`GetResult`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.artifacts.get")]
+#[aether_data::kind(name = "aether.artifacts.get")]
 pub struct Get {
     pub digest: String,
 }
@@ -64,8 +61,7 @@ pub struct Get {
 /// domain context. `Ok` carries the full bytes and the recorded `parents`;
 /// `Err` carries an [`ArtifactsError`] — `NotFound` for an absent digest,
 /// `AdapterError` for a disk read failure of an indexed entry.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.artifacts.get_result")]
+#[aether_data::kind(name = "aether.artifacts.get_result")]
 pub enum GetResult {
     Ok {
         digest: String,
@@ -81,8 +77,7 @@ pub enum GetResult {
 
 /// A REST artifact range. `decoded` asks the reply route to resolve a known
 /// kind from the full bytes; otherwise `bytes` is already the requested slice.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.artifacts.get_range")]
+#[aether_data::kind(name = "aether.artifacts.get_range")]
 pub struct GetRange {
     /// Content digest, 64 hex characters.
     pub digest: String,
@@ -97,8 +92,7 @@ pub struct GetRange {
 }
 
 /// Reply to [`GetRange`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.artifacts.get_range_result")]
+#[aether_data::kind(name = "aether.artifacts.get_range_result")]
 pub enum GetRangeResult {
     /// The artifact was found.
     Ok {

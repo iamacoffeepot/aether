@@ -47,7 +47,6 @@ use aether_math::{Rgb, Vec3};
 use aether_mesh::stroke::{self, StrokeParameters, StrokePoint};
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
 use aether_render::{DrawTriangle, RenderCapability, Vertex};
-use serde::{Deserialize, Serialize};
 
 use crate::camera::{CameraComponent, CameraEyeRequest, CameraEyeResult};
 
@@ -92,8 +91,7 @@ pub struct MeshViewer {
     cache: MeshCache,
 }
 
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.mesh.load_context")]
+#[aether_data::kind(name = "aether.kit.mesh.load_context")]
 struct MeshLoadContext {
     reply: Option<ReplyHandle>,
     namespace: String,

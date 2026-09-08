@@ -1,7 +1,5 @@
 //! The mail shapes peers send the puppet.
 
-use serde::{Deserialize, Serialize};
-
 /// Padding the canonical material field was baked with, as a fraction of
 /// the mesh's longest axis on each side.
 pub const DEFAULT_MATERIAL_FIELD_PADDING: f32 = 0.12;
@@ -10,8 +8,7 @@ pub const DEFAULT_MATERIAL_FIELD_PADDING: f32 = 0.12;
 /// (`save`, `assets`, `config`). The load is asynchronous; the cached
 /// drawing is replaced atomically when the bytes arrive, so a failed load
 /// leaves the previous subject on screen rather than blanking it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.puppet.load")]
+#[aether_data::kind(name = "aether.puppet.load", partial_eq)]
 pub struct Load {
     pub namespace: String,
     pub path: String,
@@ -69,8 +66,7 @@ impl Default for Load {
 /// What the subject turned out to be. `bones` is `0` when no rig was asked
 /// for or none was accepted — the one place a refused rig is visible to the
 /// caller rather than only in the log.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.puppet.load_result")]
+#[aether_data::kind(name = "aether.puppet.load_result", eq)]
 pub enum LoadResult {
     Ok { vertices: u32, faces: u32, bones: u32 },
     Err { reason: String },
@@ -80,8 +76,7 @@ pub enum LoadResult {
 ///
 /// The expression supplies the mouth, brows, and eye aperture. It leaves
 /// [`Gaze`] alone, so looking somewhere and feeling something compose.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.puppet.expression")]
+#[aether_data::kind(name = "aether.puppet.expression", eq)]
 pub struct Expression {
     pub name: String,
 }
@@ -91,8 +86,7 @@ pub struct Expression {
 /// Both axes are normalized and clamped to `[-1, 1]`. Positive `x` is
 /// toward her left and positive `y` is up. The lids follow the vertical
 /// axis with the chart's authored upper/lower weights.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.puppet.gaze")]
+#[aether_data::kind(name = "aether.puppet.gaze", copy, default, partial_eq)]
 pub struct Gaze {
     pub x: f32,
     pub y: f32,
@@ -100,15 +94,13 @@ pub struct Gaze {
 
 /// Select one of the chart's named mouth shapes without changing the
 /// expression's brows or eyes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.puppet.viseme")]
+#[aether_data::kind(name = "aether.puppet.viseme", eq)]
 pub struct Viseme {
     pub name: String,
 }
 
 /// Select the eye design the chart draws without changing expression or gaze.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.puppet.eye_archetype")]
+#[aether_data::kind(name = "aether.puppet.eye_archetype", eq)]
 pub struct EyeArchetype {
     pub name: String,
 }
@@ -128,8 +120,7 @@ pub struct EyeArchetype {
 /// roll `[-12, 12]`, jaw `[-12, 12]`, each ear flick `[-22, 22]`, and
 /// each ear twist `[-22.5, 22.5]` degrees. Values outside an arc alias its
 /// nearest endpoint without changing the wire shape.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.puppet.pose")]
+#[aether_data::kind(name = "aether.puppet.pose", copy, default, partial_eq)]
 pub struct Pose {
     /// Turn, about the head pivot, clamped to `[-28, 28]`. Shared with the
     /// neck, so it reads as a neck carrying a head rather than a head
@@ -169,8 +160,7 @@ impl Pose {
 /// rather than a subscribable stream, so a second actor's camera is not
 /// something this one can overhear. Owning it also means she is one
 /// component to boot: load her and she is on screen, framed.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.puppet.look")]
+#[aether_data::kind(name = "aether.puppet.look", copy, default, partial_eq)]
 pub struct Look {
     /// Degrees around her, counterclockwise from facing the camera.
     pub azimuth: f32,

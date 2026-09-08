@@ -15,7 +15,6 @@
 
 use aether_data::{Kind, KindId, MailboxId, Schema};
 use aether_kinds::DeathReason;
-use serde::{Deserialize, Serialize};
 
 /// `aether.fleet.forward` — hand a per-engine proxy
 /// (`aether.fleet.proxy:<id>`) one mail to relay to its substrate
@@ -30,8 +29,7 @@ use serde::{Deserialize, Serialize};
 /// Any reply streams back through the proxy and routes to whoever
 /// sent this `ForwardEnvelope` — the proxy keys reply correlation
 /// off the inbound mail's `Source`.
-#[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.fleet.forward")]
+#[aether_data::kind(name = "aether.fleet.forward")]
 pub struct ForwardEnvelope {
     pub mailbox: MailboxId,
     pub kind: KindId,
@@ -47,8 +45,7 @@ pub struct ForwardEnvelope {
 /// uses for the reader sidecar. The handler pings the substrate and
 /// counts consecutive misses, evicting the engine once the miss
 /// limit is crossed.
-#[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.fleet.heartbeat_tick")]
+#[aether_data::kind(name = "aether.fleet.heartbeat_tick", default)]
 pub struct EngineHeartbeatTick {}
 
 /// `aether.fleet.died` — a per-engine proxy telling the engines
@@ -61,8 +58,7 @@ pub struct EngineHeartbeatTick {}
 /// for an already-removed engine (e.g. one a concurrent
 /// `TerminateEngine` already dropped) is a no-op. `engine_id` is
 /// the plain UUID string, matching `TerminateEngine`.
-#[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.fleet.died")]
+#[aether_data::kind(name = "aether.fleet.died")]
 pub struct EngineDied {
     pub engine_id: String,
     /// Why the proxy is reporting the death, so the cap can record it
@@ -87,8 +83,7 @@ pub struct EngineDied {
 /// stays a bare alarm and the recipe never needs a wire encoding. A
 /// token with no pending entry — the restart was already settled, or the
 /// cap was rebuilt around it — is a silent no-op.
-#[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.fleet.restart_due")]
+#[aether_data::kind(name = "aether.fleet.restart_due", default)]
 pub struct EngineRestartDue {
     pub token: u64,
 }
@@ -99,8 +94,7 @@ pub struct EngineRestartDue {
 /// last-seen-alive time so `ListEnginesResult` can report
 /// `last_heartbeat_age_millis`. Fire-and-forget; an `alive` for an
 /// unknown engine is a no-op. `engine_id` is the plain UUID string.
-#[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.fleet.alive")]
+#[aether_data::kind(name = "aether.fleet.alive")]
 pub struct EngineAlive {
     pub engine_id: String,
 }

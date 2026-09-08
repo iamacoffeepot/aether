@@ -1,7 +1,5 @@
 use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
-use bytemuck::{Pod, Zeroable};
-
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Vec2 {
@@ -27,8 +25,7 @@ pub struct Vec3 {
 /// the four `f32`s in `x, y, z, w` order, the same layout a wgpu
 /// uniform expects, so it encodes/decodes without serialization.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.math.vec4")]
+#[aether_data::kind(name = "aether.math.vec4", pod, partial_eq)]
 pub struct Vec4 {
     pub x: f32,
     pub y: f32,

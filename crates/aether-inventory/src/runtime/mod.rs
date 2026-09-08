@@ -542,12 +542,10 @@ mod tests {
     /// surface ADR-0109 §5 makes `aether.inventory.handlers` carry.
     /// Its `#[actor]` expansion submits a link-time `HandlerEntry`
     /// declaring `ProbeReq -> ProbeReply`.
-    #[derive(serde::Serialize, serde::Deserialize, aether_data::Kind, aether_data::Schema, Debug, Clone)]
-    #[kind(name = "aether.test.inventory_handlers.req")]
+    #[aether_data::kind(name = "aether.test.inventory_handlers.req")]
     struct ProbeReq {}
 
-    #[derive(serde::Serialize, serde::Deserialize, aether_data::Kind, aether_data::Schema, Debug, Clone)]
-    #[kind(name = "aether.test.inventory_handlers.reply")]
+    #[aether_data::kind(name = "aether.test.inventory_handlers.reply")]
     struct ProbeReply {}
 
     struct ReplyProbeCap;

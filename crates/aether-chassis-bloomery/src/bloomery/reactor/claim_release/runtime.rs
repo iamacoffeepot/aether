@@ -52,7 +52,6 @@ use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
-use serde::{Deserialize, Serialize};
 
 use super::{ClaimReleaseReactorCapability, ClaimReleaseReactorSetup};
 
@@ -65,8 +64,7 @@ use crate::store::{SqliteStore, StoreBackend};
 /// The self-addressed wake the poll timer fires each interval; its handler drains
 /// the release topic and runs each release. Zero-field — the timer carries only
 /// the schedule.
-#[derive(Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.bloomery.claim_release.claim_release_tick")]
+#[aether_data::kind(name = "aether.bloomery.claim_release.claim_release_tick", default)]
 pub struct ClaimReleaseTick {}
 
 /// Runtime state for [`ClaimReleaseReactorCapability`]. The shell + store are

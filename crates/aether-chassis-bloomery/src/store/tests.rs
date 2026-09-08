@@ -940,8 +940,7 @@ mod sealed_config {
 
     use crate::store::{StoreBackend, StoreConfigError, resolve_config};
 
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-    #[kind(name = "aether.bloomery.test_lane_config")]
+    #[aether_data::kind(name = "aether.bloomery.test_lane_config", eq)]
     struct LaneConfig {
         lane: String,
     }

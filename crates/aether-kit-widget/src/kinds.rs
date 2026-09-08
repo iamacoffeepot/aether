@@ -45,8 +45,7 @@ use crate::theme::{TextInk, TextRole, Theme};
 /// its [`WidgetDrawList`]. Fieldless: the poll carries no data, because
 /// layout already flowed down at spawn (a child's rect is its parent's to
 /// assign) and only geometry flows back up.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.collect")]
+#[aether_data::kind(name = "aether.kit.widget.collect")]
 pub struct Collect;
 
 /// One added child's identity in a [`ChildrenChanged`] event: its inline
@@ -71,8 +70,7 @@ pub struct MembershipEntry {
 /// despawn as one event with one `removed` entry. It is the discovery signal a
 /// lane observer (the behavior host's tree cache, a debugger) reads to know
 /// what a node contains and when that changed.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.kit.widget.children_changed")]
+#[aether_data::kind(name = "aether.kit.widget.children_changed", eq)]
 pub struct ChildrenChanged {
     pub added: Vec<MembershipEntry>,
     pub removed: Vec<String>,
@@ -456,8 +454,7 @@ impl WidgetDrawItem {
 /// ordinary item. Within that lane it lands at its own slot's position, so a
 /// control that must stand over its own siblings is registered after them.
 /// Empty for the ordinary widget.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[kind(name = "aether.kit.widget.draw_list")]
+#[aether_data::kind(name = "aether.kit.widget.draw_list", partial_eq)]
 pub struct WidgetDrawList {
     /// The measured content size, per axis. A **non-finite** component means
     /// the widget asks for nothing on that axis — a filled tab strip takes
@@ -554,8 +551,7 @@ pub struct ScrollDelta {
 /// `aether.kit.widget.scroll.residual` — the already-converted part of a
 /// scroll request that one container could not consume. A parent applies
 /// these fields directly; it never reverses their sign a second time.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
-#[kind(name = "aether.kit.widget.scroll.residual")]
+#[aether_data::kind(name = "aether.kit.widget.scroll.residual", copy, default, partial_eq)]
 pub struct ScrollResidual {
     pub x_pixels: f32,
     pub y_pixels: f32,
@@ -565,8 +561,7 @@ pub struct ScrollResidual {
 /// consumed movement, and unconsumed residual after a request. `container`
 /// identifies the state-owning actor even when an ancestor transparently
 /// relays this event to the root.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
-#[kind(name = "aether.kit.widget.scroll.outcome")]
+#[aether_data::kind(name = "aether.kit.widget.scroll.outcome", copy, partial_eq)]
 pub struct ScrollOutcome {
     pub container: MailboxId,
     pub offset: ScrollOffset,
@@ -579,8 +574,7 @@ pub struct ScrollOutcome {
 /// `content_extent` is the sole clamp authority; `initial_offset` is clamped
 /// at init; and `content` is one opaque root spawned through the closed
 /// [`WidgetKind`] dispatcher.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[kind(name = "aether.kit.widget.scroll.config")]
+#[aether_data::kind(name = "aether.kit.widget.scroll.config", partial_eq)]
 pub struct ScrollConfig {
     pub viewport_extent: ScrollExtent,
     pub content_extent: ScrollExtent,
@@ -739,8 +733,7 @@ pub enum ScriptRef {
 /// recursive — `wrapped` is a plain [`WidgetKind`] discriminant, and
 /// `WidgetKind::BehaviorHost` is a unit variant that references nothing back,
 /// so the `Schema` derive stays acyclic.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.behavior_host_spec")]
+#[aether_data::kind(name = "aether.kit.behavior_host_spec")]
 pub struct BehaviorHostSpec {
     /// The stock widget the host interposes on.
     pub wrapped: WidgetKind,
@@ -787,8 +780,7 @@ pub struct WidgetChildSpec {
 /// draws in local coordinates; `intrinsic` is the size it reports up;
 /// `children` is its ordered layout table, each carrying its own
 /// pre-encoded config.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.config")]
+#[aether_data::kind(name = "aether.kit.widget.config", default)]
 pub struct WidgetConfig {
     pub root: bool,
     pub chrome: Vec<WidgetDrawItem>,
@@ -830,8 +822,7 @@ impl Default for WidgetControlState {
 
 /// `aether.kit.widget.set_state` — replace a stock widget's external state
 /// without resetting its authored value or other configuration.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.set_state")]
+#[aether_data::kind(name = "aether.kit.widget.set_state")]
 pub struct SetWidgetState {
     pub state: WidgetControlState,
 }
@@ -839,8 +830,7 @@ pub struct SetWidgetState {
 /// `aether.kit.widget.state_changed` — a source-attributed events-up reply
 /// emitted only when a re-sent config or [`SetWidgetState`] changes external
 /// state. The panel uses it to keep routing availability synchronized.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.state_changed")]
+#[aether_data::kind(name = "aether.kit.widget.state_changed")]
 pub struct WidgetStateChanged {
     pub state: WidgetControlState,
 }
@@ -850,8 +840,7 @@ pub struct WidgetStateChanged {
 /// flips. No identity field and no data-down setter: the panel attributes the
 /// source mailbox recorded at spawn. Distinct from [`WidgetStateChanged`],
 /// which carries external visible/enabled/read-only/validation state.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[kind(name = "aether.kit.widget.eligibility_changed")]
+#[aether_data::kind(name = "aether.kit.widget.eligibility_changed", copy, eq)]
 pub struct WidgetEligibilityChanged {
     pub pointer: bool,
     pub keyboard: bool,
@@ -865,8 +854,7 @@ pub struct WidgetEligibilityChanged {
 /// This is the deliberate lane. A widget's `Config` seeds its value at `init`
 /// and never again ([`SliderConfig::initial`]), so a host that wants the value
 /// to move says so here rather than by re-sending a config.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
-#[kind(name = "aether.kit.widget.set_value")]
+#[aether_data::kind(name = "aether.kit.widget.set_value", copy, partial_eq)]
 pub struct SetValue {
     pub value: f32,
 }
@@ -881,8 +869,7 @@ pub struct SetValue {
 /// reformatting or correcting text under someone who is still typing in it.
 /// `false` places the caret at the end of the new string with nothing
 /// selected, which is what replacing the buffer wholesale means.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.kit.widget.set_text")]
+#[aether_data::kind(name = "aether.kit.widget.set_text", eq)]
 pub struct SetText {
     pub text: String,
     pub keep_caret: bool,
@@ -901,8 +888,7 @@ pub struct SetText {
 /// Setting the selection does not report it back: the host asked for it, so it
 /// already knows. Only a reader's own choice emits [`RadioSelected`] and its
 /// siblings.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[kind(name = "aether.kit.widget.set_selection")]
+#[aether_data::kind(name = "aether.kit.widget.set_selection", copy, eq)]
 pub struct SetSelection {
     pub index: Option<u32>,
 }
@@ -910,8 +896,7 @@ pub struct SetSelection {
 /// `aether.kit.widget.set_toggle` — push a toggle's boolean. Handled by the
 /// toggle alone, the one widget whose whole value is a flag. Like the other
 /// setters it is silent: a host-set value emits no [`ToggleChanged`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[kind(name = "aether.kit.widget.set_toggle")]
+#[aether_data::kind(name = "aether.kit.widget.set_toggle", copy, eq)]
 pub struct SetToggle {
     pub on: bool,
 }
@@ -949,8 +934,7 @@ pub struct SetToggle {
 /// `min..=max`, snapped to `step`, starting at `initial`. The consumer maps
 /// the reported `f32` onto its own domain (a `u8` intensity, a preset index).
 /// A `step` of `0` (or less) leaves the value continuous.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.slider.config")]
+#[aether_data::kind(name = "aether.kit.widget.slider.config")]
 pub struct SliderConfig {
     /// The low end of the range. Normalised on arrival, at init and on every
     /// re-sent config alike: a `min` above `max` is the same interval written
@@ -993,8 +977,7 @@ impl Default for SliderConfig {
 ///
 /// A re-sent config restyles and re-caps the field and leaves the buffer, the
 /// caret, and the selection alone; [`SetText`] replaces the contents.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.text_field.config")]
+#[aether_data::kind(name = "aether.kit.widget.text_field.config", default)]
 pub struct TextFieldConfig {
     /// The string the field starts with. A seed: read at `init` and ignored by
     /// every later config.
@@ -1016,8 +999,7 @@ pub struct TextFieldConfig {
 /// A re-sent config restyles the area and resizes its viewport, holding the
 /// buffer, the caret, and the scrolled row window; [`SetText`] replaces the
 /// contents.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.text_area.config")]
+#[aether_data::kind(name = "aether.kit.widget.text_area.config", default)]
 pub struct TextAreaConfig {
     /// The string the area starts with. A seed: read at `init` and ignored by
     /// every later config.
@@ -1037,8 +1019,7 @@ pub struct TextAreaConfig {
 ///
 /// A re-sent config replaces the options and holds the current selection,
 /// re-clamped into the new vector; [`SetSelection`] moves it.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.radio.config")]
+#[aether_data::kind(name = "aether.kit.widget.radio.config", default)]
 pub struct RadioConfig {
     pub options: Vec<String>,
     /// The row selected at boot. A seed: read at `init` and ignored by every
@@ -1328,8 +1309,7 @@ impl From<&str> for VirtualListRow {
 /// row window, both re-clamped into the new vector — so a list that refreshes
 /// under a reader does not jump back to the top. [`SetSelection`] moves the
 /// selection.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.virtual_list.config")]
+#[aether_data::kind(name = "aether.kit.widget.virtual_list.config")]
 pub struct VirtualListConfig {
     pub items: Vec<VirtualListRow>,
     /// The row selected at boot, or `None` for no selection — a list whose
@@ -1527,8 +1507,7 @@ impl From<&str> for DropdownOption {
 /// re-clamped into the new vector; [`SetSelection`] moves it. An open list
 /// closes on a reconfigure — its rows are the vector that just changed — so the
 /// root is handed back the pointer grab through [`DropdownOpenChanged`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.dropdown.config")]
+#[aether_data::kind(name = "aether.kit.widget.dropdown.config", default)]
 pub struct DropdownConfig {
     pub options: Vec<DropdownOption>,
     /// The option chosen at boot, or `None` to show the `placeholder`. A seed,
@@ -1555,8 +1534,7 @@ pub struct DropdownConfig {
 ///
 /// A re-sent config replaces the labels and holds the current tab, re-clamped
 /// into the new vector; [`SetSelection`] moves it.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.tab_strip.config")]
+#[aether_data::kind(name = "aether.kit.widget.tab_strip.config", default)]
 pub struct TabStripConfig {
     pub labels: Vec<String>,
     /// The tab selected at boot. A seed: read at `init` and ignored by every
@@ -1642,8 +1620,7 @@ pub struct Menu {
 /// enabled item activates it ([`MenuBarActivated`]) and closes; Escape or a
 /// press elsewhere closes without activating. The bar is one row high; each
 /// title is sized to its text plus padding.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.menu_bar.config")]
+#[aether_data::kind(name = "aether.kit.widget.menu_bar.config", default)]
 pub struct MenuBarConfig {
     pub menus: Vec<Menu>,
     pub theme: Theme,
@@ -1700,8 +1677,7 @@ pub enum ButtonTone {
 
 /// `aether.kit.widget.button.config` — a momentary push button showing
 /// `label`, firing [`ButtonActivated`] on a press-then-release-inside.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.button.config")]
+#[aether_data::kind(name = "aether.kit.widget.button.config", default)]
 pub struct ButtonConfig {
     pub label: String,
     /// How loudly this verb asks to be pressed. [`ButtonEmphasis::Filled`] —
@@ -1723,8 +1699,7 @@ pub struct ButtonConfig {
 ///
 /// A re-sent config relabels and restyles the switch and holds its flag;
 /// [`SetToggle`] flips it.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.toggle.config")]
+#[aether_data::kind(name = "aether.kit.widget.toggle.config", default)]
 pub struct ToggleConfig {
     pub label: String,
     /// Which way the switch starts. A seed: read at `init` and ignored by every
@@ -1741,8 +1716,7 @@ pub struct ToggleConfig {
 ///
 /// A re-sent config replaces the options and holds the current one, re-clamped
 /// into the new vector; [`SetSelection`] moves it.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.segmented.config")]
+#[aether_data::kind(name = "aether.kit.widget.segmented.config", default)]
 pub struct SegmentedConfig {
     pub options: Vec<String>,
     /// The segment selected at boot. A seed: read at `init` and ignored by
@@ -1760,8 +1734,7 @@ pub struct SegmentedConfig {
 /// committed value into the new range. The edit buffer is left alone unless
 /// that clamp actually moved the value, so re-bounding a field does not eat a
 /// half-typed number; [`SetValue`] sets one on purpose.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.numeric.config")]
+#[aether_data::kind(name = "aether.kit.widget.numeric.config")]
 pub struct NumericConfig {
     pub min: f32,
     pub max: f32,
@@ -1789,8 +1762,7 @@ impl Default for NumericConfig {
 
 /// `aether.kit.widget.label.config` — static, non-interactive `text`. A label
 /// is not focus-eligible (the root's focus register skips it).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.label.config")]
+#[aether_data::kind(name = "aether.kit.widget.label.config", default)]
 pub struct LabelConfig {
     pub text: String,
     /// Which step of the type scale the text is set at; `Body` unless the
@@ -1839,8 +1811,7 @@ pub enum ImageFit {
 /// lifecycle remains owned by the consumer that created `texture_id` through
 /// `aether.render`. Natural dimensions drive fit arithmetic and the inherited
 /// `WidgetDrawList::intrinsic` channel; they do not resize the parent slot.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.image.config")]
+#[aether_data::kind(name = "aether.kit.widget.image.config")]
 pub struct ImageConfig {
     pub texture_id: u32,
     pub natural_width_pixels: f32,
@@ -1871,8 +1842,7 @@ impl Default for ImageConfig {
 /// the final value when the drag releases (or an arrow-key nudge lands), so a
 /// consumer can throttle expensive work to committed values while still
 /// previewing the drag.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.slider.changed")]
+#[aether_data::kind(name = "aether.kit.widget.slider.changed")]
 pub struct SliderChanged {
     pub value: f32,
     pub committed: bool,
@@ -1880,24 +1850,21 @@ pub struct SliderChanged {
 
 /// `aether.kit.widget.text.committed` — the shared text-control value-up
 /// event. A text field emits it on Enter; a text area emits it on Ctrl+Enter.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.text.committed")]
+#[aether_data::kind(name = "aether.kit.widget.text.committed")]
 pub struct TextCommitted {
     pub text: String,
 }
 
 /// `aether.kit.widget.radio.selected` — a radio group's value-up event,
 /// carrying the newly selected option's zero-based `index`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.radio.selected")]
+#[aether_data::kind(name = "aether.kit.widget.radio.selected")]
 pub struct RadioSelected {
     pub index: u32,
 }
 
 /// `aether.kit.widget.virtual_list.selected` — a virtual list's changed
 /// selection, attributed by the parent from the sending child's mailbox.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.virtual_list.selected")]
+#[aether_data::kind(name = "aether.kit.widget.virtual_list.selected")]
 pub struct VirtualListSelected {
     pub index: u32,
 }
@@ -1912,8 +1879,7 @@ pub struct VirtualListSelected {
 /// list's selection where it was, so "remove the third skill" costs one press
 /// rather than select-then-remove — which is the whole reason a verb sits on
 /// the row instead of under the list.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[kind(name = "aether.kit.widget.virtual_list.activated")]
+#[aether_data::kind(name = "aether.kit.widget.virtual_list.activated", copy, eq)]
 pub struct VirtualListActivated {
     /// The row the verb hangs on, into the config's `items`.
     pub index: u32,
@@ -1947,8 +1913,7 @@ pub struct VirtualListActivated {
 /// It is not a selection and it does not become one. Hovering a row says the
 /// reader is looking at it — the tooltip a list of items owes them — and
 /// nothing about what they have chosen.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
-#[kind(name = "aether.kit.widget.virtual_list.hover")]
+#[aether_data::kind(name = "aether.kit.widget.virtual_list.hover", copy, partial_eq)]
 pub struct VirtualListHover {
     pub index: Option<u32>,
     pub x: f32,
@@ -1960,21 +1925,18 @@ pub struct VirtualListHover {
 /// `aether.kit.widget.button.activated` — a button's value-up event, fired once
 /// per completed press-then-release-inside. Fieldless: the click carries no
 /// data, and which button clicked is the root's `source_mailbox` attribution.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.button.activated")]
+#[aether_data::kind(name = "aether.kit.widget.button.activated")]
 pub struct ButtonActivated;
 
 /// `aether.kit.widget.toggle.changed` — a toggle's value-up event.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.toggle.changed")]
+#[aether_data::kind(name = "aether.kit.widget.toggle.changed")]
 pub struct ToggleChanged {
     pub on: bool,
 }
 
 /// `aether.kit.widget.segmented.selected` — a segmented control's value-up
 /// event carrying the newly selected zero-based `index`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.segmented.selected")]
+#[aether_data::kind(name = "aether.kit.widget.segmented.selected")]
 pub struct SegmentedSelected {
     pub index: u32,
 }
@@ -1982,8 +1944,7 @@ pub struct SegmentedSelected {
 /// `aether.kit.widget.numeric.changed` — a numeric editor's value-up event.
 /// Preview edits carry `committed: false`; Enter, blur, and step-key changes
 /// carry `committed: true`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.numeric.changed")]
+#[aether_data::kind(name = "aether.kit.widget.numeric.changed")]
 pub struct NumericChanged {
     pub value: f32,
     pub committed: bool,
@@ -1991,8 +1952,7 @@ pub struct NumericChanged {
 
 /// `aether.kit.widget.dropdown.selected` — the dropdown's current choice
 /// changed to `index`. Emitted only on an actual change.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[kind(name = "aether.kit.widget.dropdown.selected")]
+#[aether_data::kind(name = "aether.kit.widget.dropdown.selected", copy, eq)]
 pub struct DropdownSelected {
     pub index: u32,
 }
@@ -2001,8 +1961,7 @@ pub struct DropdownSelected {
 /// its list. The root answers `open: true` by granting the sender the pointer
 /// grab ([`crate::focus::Focus::begin_grab`]) so a press anywhere reaches it,
 /// and `open: false` by ending the grab.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[kind(name = "aether.kit.widget.dropdown.open_changed")]
+#[aether_data::kind(name = "aether.kit.widget.dropdown.open_changed", copy, eq)]
 pub struct DropdownOpenChanged {
     pub open: bool,
 }
@@ -2027,8 +1986,7 @@ pub struct DropdownOpenChanged {
 /// anything. The overlay is offset by its slot's origin and never clipped or
 /// moved, so the rectangle is where the row really draws. It is all zeroes when
 /// `index` is `None`, which is the event that says to take the tooltip down.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
-#[kind(name = "aether.kit.widget.dropdown.hover")]
+#[aether_data::kind(name = "aether.kit.widget.dropdown.hover", copy, partial_eq)]
 pub struct DropdownHover {
     pub index: Option<u32>,
     pub x: f32,
@@ -2039,16 +1997,14 @@ pub struct DropdownHover {
 
 /// `aether.kit.widget.tab_strip.selected` — the selected tab changed to
 /// `index`. Emitted only on an actual change.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[kind(name = "aether.kit.widget.tab_strip.selected")]
+#[aether_data::kind(name = "aether.kit.widget.tab_strip.selected", copy, eq)]
 pub struct TabStripSelected {
     pub index: u32,
 }
 
 /// `aether.kit.widget.menu_bar.activated` — the item `item` of the menu
 /// `menu` (both indices into the config) was activated.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[kind(name = "aether.kit.widget.menu_bar.activated")]
+#[aether_data::kind(name = "aether.kit.widget.menu_bar.activated", copy, eq)]
 pub struct MenuBarActivated {
     pub menu: u32,
     pub item: u32,
@@ -2057,8 +2013,7 @@ pub struct MenuBarActivated {
 /// `aether.kit.widget.menu_bar.open_changed` — a menu opened (`open: true`,
 /// the root grants the sender the pointer grab) or every menu closed
 /// (`open: false`, the root ends it). Reported once per edge.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[kind(name = "aether.kit.widget.menu_bar.open_changed")]
+#[aether_data::kind(name = "aether.kit.widget.menu_bar.open_changed", copy, eq)]
 pub struct MenuBarOpenChanged {
     pub open: bool,
 }
@@ -2069,8 +2024,7 @@ pub struct MenuBarOpenChanged {
 ///
 /// A dialog is re-framed, not re-configured, to resize: the host's splitters
 /// write the frame. Re-send the config to rename it or to change the floor.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.dialog.config")]
+#[aether_data::kind(name = "aether.kit.widget.dialog.config", default)]
 pub struct DialogConfig {
     /// The one line naming what the reader opened, set at
     /// [`TextRole::Heading`]. An empty title draws no title row at all — the
@@ -2102,8 +2056,7 @@ pub struct DialogConfig {
 /// *drawn* — which is the assigned frame grown to the minimum the title
 /// needs — so the host can hand it to its peers as the rectangle they are
 /// occluded by, and hang its resize splitters on the edges the reader sees.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
-#[kind(name = "aether.kit.widget.dialog.placed")]
+#[aether_data::kind(name = "aether.kit.widget.dialog.placed", copy, default, partial_eq)]
 pub struct DialogPlaced {
     pub frame: PlacementBounds,
     pub body: PlacementBounds,
@@ -2134,8 +2087,7 @@ pub enum SplitterAxis {
 /// The widget's assigned [`WidgetFrame`] is the
 /// hit strip; the lit mark is two logical pixels inside it, so the target can
 /// be as generous as the host likes without the affordance becoming a column.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.splitter.config")]
+#[aether_data::kind(name = "aether.kit.widget.splitter.config", default)]
 pub struct SplitterConfig {
     pub axis: SplitterAxis,
     pub min_pixels: f32,
@@ -2175,8 +2127,7 @@ pub struct SplitterConfig {
 /// into the configured range, streamed while the pointer drags. There is no
 /// preview/commit split: a region resize is applied as it happens, which is
 /// the whole feedback the gesture has.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
-#[kind(name = "aether.kit.widget.splitter.changed")]
+#[aether_data::kind(name = "aether.kit.widget.splitter.changed", copy, partial_eq)]
 pub struct SplitterChanged {
     pub position_pixels: f32,
 }
@@ -2187,8 +2138,7 @@ pub struct SplitterChanged {
 /// `aether.window.set_cursor` with the axis's resize icon; on one where the
 /// gesture is already obvious, do nothing. A widget never sets the cursor
 /// itself.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[kind(name = "aether.kit.widget.splitter.hover")]
+#[aether_data::kind(name = "aether.kit.widget.splitter.hover", copy, eq)]
 pub struct SplitterHover {
     pub entered: bool,
 }
@@ -2216,8 +2166,7 @@ pub enum ToastSeverity {
 /// after [`ToastConfig::lifetime_frames`] frames. An empty `text` raises
 /// nothing, because a plate with no line on it is a flash a reader cannot
 /// read.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.toast.notice")]
+#[aether_data::kind(name = "aether.kit.widget.toast.notice", default)]
 pub struct ToastNotice {
     pub severity: ToastSeverity,
     pub text: String,
@@ -2241,8 +2190,7 @@ const DEFAULT_LIFETIME_FRAMES: u32 = 240;
 /// The widget's assigned [`WidgetFrame`] is the
 /// region: notices stack down from its top edge at its width, so a host puts
 /// notices where it wants them by placing the slot.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.toast.config")]
+#[aether_data::kind(name = "aether.kit.widget.toast.config")]
 pub struct ToastConfig {
     /// How many notices stand at once. Zero means the region is a sink: it
     /// accepts notices and shows none, which is what a screen with the region
@@ -2287,8 +2235,7 @@ impl Default for ToastConfig {
 /// view being drawn under the notices) reports that rectangle without
 /// re-deriving the stack's geometry. Emitted on the edge only, never every
 /// frame.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
-#[kind(name = "aether.kit.widget.toast.region_changed")]
+#[aether_data::kind(name = "aether.kit.widget.toast.region_changed", copy, partial_eq)]
 pub struct ToastRegionChanged {
     pub standing: u32,
     pub height_pixels: f32,
@@ -2419,8 +2366,7 @@ impl TooltipSection {
 /// — or re-send a shorter card. The widget only reports the number, because
 /// choosing the words is exactly the host's knowledge the tooltip deliberately
 /// does not hold.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.tooltip.shed")]
+#[aether_data::kind(name = "aether.kit.widget.tooltip.shed", default)]
 pub struct TooltipShed {
     pub dropped: u32,
 }
@@ -2436,8 +2382,7 @@ pub struct TooltipShed {
 ///
 /// Hidden (`state.visible = false`) or sectionless, it draws nothing — which
 /// is how a host says the pointer has moved on.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.tooltip.config")]
+#[aether_data::kind(name = "aether.kit.widget.tooltip.config", default)]
 pub struct TooltipConfig {
     pub sections: Vec<TooltipSection>,
     /// The widest the text may run before it wraps. `0` (the default) takes
@@ -2488,8 +2433,7 @@ pub struct TooltipConfig {
 /// draw and to map a forwarded pointer position into its local space; the
 /// root keeps the same rect in its layout table to offset the child's draws
 /// and to hit-test pointer input.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.frame")]
+#[aether_data::kind(name = "aether.kit.widget.frame")]
 pub struct WidgetFrame {
     pub x: f32,
     pub y: f32,
@@ -2504,8 +2448,7 @@ pub struct WidgetFrame {
 /// **focus ring only for keyboard focus** — the platform's focus-visible
 /// rule: a person who just clicked a tab already knows where focus is, and
 /// a box around it reads as a second, unasked-for state.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[kind(name = "aether.kit.widget.focus_gained")]
+#[aether_data::kind(name = "aether.kit.widget.focus_gained", copy, eq)]
 pub struct FocusGained {
     pub keyboard: bool,
 }
@@ -2513,20 +2456,17 @@ pub struct FocusGained {
 /// `aether.kit.widget.focus_lost` — the root tells a child it no longer holds
 /// keyboard focus, so the child stops drawing its focus ring and caret.
 /// Fieldless.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.focus_lost")]
+#[aether_data::kind(name = "aether.kit.widget.focus_lost")]
 pub struct FocusLost;
 
 /// `aether.kit.widget.hover_gained` — the root tells a pointer-eligible child
 /// that the pointer has entered its live hit rectangle. Fieldless.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.hover_gained")]
+#[aether_data::kind(name = "aether.kit.widget.hover_gained")]
 pub struct HoverGained;
 
 /// `aether.kit.widget.hover_lost` — the root tells the previously hovered
 /// child that the pointer left its live hit rectangle. Fieldless.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.hover_lost")]
+#[aether_data::kind(name = "aether.kit.widget.hover_lost")]
 pub struct HoverLost;
 
 /// A fixed editor region in window pixel coordinates.
@@ -2597,8 +2537,7 @@ pub struct RegionSpec {
 
 /// `aether.kit.widget.editor.config` — ordered peer regions routed by an
 /// input-only [`EditorShell`](crate::EditorShell).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.editor.config")]
+#[aether_data::kind(name = "aether.kit.widget.editor.config", default)]
 pub struct EditorConfig {
     pub regions: Vec<RegionSpec>,
 }
@@ -2619,8 +2558,7 @@ const fn owns_input_by_default() -> bool {
 /// [`WidgetKind::Scroll`] row takes its exact width and height from the decoded
 /// [`ScrollConfig::viewport_extent`]; other children keep their existing
 /// theme/intrinsic row sizing.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.panel.config")]
+#[aether_data::kind(name = "aether.kit.widget.panel.config")]
 pub struct PanelConfig {
     pub x: f32,
     pub y: f32,

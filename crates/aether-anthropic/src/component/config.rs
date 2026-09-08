@@ -34,8 +34,7 @@ pub const DEFAULT_CLI_BINARY: &str = "claude";
 /// boots [`AnthropicComponentConfig::default()`] — no key, so
 /// `aether.anthropic.messages.send` replies `Unauthorized` while
 /// `aether.anthropic.cli.send` still routes through `aether.process`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.anthropic.config")]
+#[aether_data::kind(name = "aether.anthropic.config")]
 pub struct AnthropicComponentConfig {
     /// Anthropic Messages API key placed on the `x-api-key` header of each
     /// `aether.http.fetch`. `None` (or `disabled`) leaves the Messages
@@ -79,8 +78,7 @@ pub enum SendPath {
 /// caller-minted `request_id` echoed on both reply arms, the requested `model`
 /// (the parse fallback + the `model_used` echo for the CLI path), and the
 /// resolved `timeout_millis` (the elapsed a `TimedOut` CLI run reports).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.anthropic.request_context")]
+#[aether_data::kind(name = "aether.anthropic.request_context")]
 pub struct RequestContext {
     pub reply: Option<ReplyHandle>,
     pub path: SendPath,

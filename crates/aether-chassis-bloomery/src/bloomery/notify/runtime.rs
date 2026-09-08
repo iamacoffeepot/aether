@@ -35,7 +35,6 @@ use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
-use serde::{Deserialize, Serialize};
 
 use super::taxonomy::{Volume, notify_events};
 use super::{NotifyReactorCapability, NotifyReactorSetup};
@@ -47,8 +46,7 @@ use crate::store::{SqliteStore, StoreBackend};
 /// The self-addressed wake the poll timer fires each interval; its handler asks
 /// the control core for the live document. Zero-field — the timer carries only
 /// the schedule.
-#[derive(Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.bloomery.notify.notify_tick")]
+#[aether_data::kind(name = "aether.bloomery.notify.notify_tick", default)]
 pub struct NotifyTick {}
 
 /// Runtime state for [`NotifyReactorCapability`]. The sink + store are `Some`

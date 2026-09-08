@@ -17,8 +17,6 @@
 //! `aether_kinds::descriptors::all()` for the test substrate's registry
 //! walk.
 
-use serde::{Deserialize, Serialize};
-
 // The actors are substrate-typed; the module's own gate keeps them out of a
 // shipped build. Both are the un-split `type State = Self` shape — the fixture
 // form the ADR-0122 split reserves for test-only actors — so their runtime
@@ -34,19 +32,13 @@ use std::time::Duration;
 
 /// Echo request kind — the test driver sends one of these; the echo
 /// actor replies with a [`TestEchoReply`] carrying the same `value`.
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
-)]
-#[kind(name = "aether.rpc.test.echo_request")]
+#[aether_data::kind(name = "aether.rpc.test.echo_request", copy, default, eq)]
 pub struct TestEchoRequest {
     pub value: u64,
 }
 
 /// Echo reply kind — the echo actor's response to a [`TestEchoRequest`].
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
-)]
-#[kind(name = "aether.rpc.test.echo_reply")]
+#[aether_data::kind(name = "aether.rpc.test.echo_reply", copy, default, eq)]
 pub struct TestEchoReply {
     pub value: u64,
 }
@@ -82,10 +74,7 @@ impl NativeActor for TestEchoActor {
 /// (iamacoffeepot/aether#1031) end-to-end: the chain must stay open across
 /// the spawn so the RPC `Call`'s settlement subscription only fires after
 /// the deferred reply.
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
-)]
-#[kind(name = "aether.rpc.test.deferred_echo_request")]
+#[aether_data::kind(name = "aether.rpc.test.deferred_echo_request", copy, default, eq)]
 pub struct DeferredEchoRequest {
     pub value: u64,
 }
@@ -93,10 +82,7 @@ pub struct DeferredEchoRequest {
 /// Deferred-echo reply — the worker thread lands this on the actor's own
 /// mailbox (the loopback result mail), and the actor re-replies the same
 /// shape to the original caller.
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
-)]
-#[kind(name = "aether.rpc.test.deferred_echo_reply")]
+#[aether_data::kind(name = "aether.rpc.test.deferred_echo_reply", copy, default, eq)]
 pub struct DeferredEchoReply {
     pub value: u64,
 }

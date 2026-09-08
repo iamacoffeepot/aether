@@ -281,8 +281,7 @@ pub struct RigBone {
 }
 
 /// The validated in-memory form of `rig.txt`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.puppet.rig_descriptor")]
+#[aether_data::kind(name = "aether.puppet.rig_descriptor", partial_eq)]
 pub struct RigDescriptor {
     pub bones: Vec<RigBone>,
     /// How much of the head's rotation the neck takes, so a turn reads as
@@ -466,8 +465,7 @@ fn descriptor_bone<'a>(
 /// `data` keeps the dense little-endian `f32` rows from the authored `NumPy`
 /// array behind the declared bytes contract. [`Skin::from_kinds`] decodes the
 /// blob once into aligned floats; the pose loop never reads transport bytes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.puppet.rig_weights")]
+#[aether_data::kind(name = "aether.puppet.rig_weights", eq)]
 pub struct RigWeights {
     pub vertices: u32,
     pub bones: u32,

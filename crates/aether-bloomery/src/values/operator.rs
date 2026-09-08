@@ -125,8 +125,7 @@ impl ContentAddressed for OperatorRepair {
 /// configuration kind — its address in the bloom-wide registry is what gives a
 /// memberless bloom a distinct identity, because two empty specs over one base
 /// would otherwise collide on [`BloomSpec`](crate::BloomSpec)'s digest.
-#[derive(aether_data::Kind, aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[kind(name = "aether.bloomery.operator_proposal")]
+#[aether_data::kind(name = "aether.bloomery.operator_proposal", eq)]
 pub struct OperatorProposal {
     /// The candidate the operator supplied: the tree returned evidence binds,
     /// and the commit the verifying lane checks out.

@@ -28,8 +28,7 @@ use crate::ids::BloomId;
 /// member choose the ceiling that admits its own bloom. Micro-USD because a
 /// float is not `Eq` and this value is sealed, the same reason
 /// [`StudyCost::cost_micro_usd`](super::StudyCost::cost_micro_usd) is.
-#[derive(aether_data::Kind, aether_data::Schema, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-#[kind(name = "aether.bloomery.spend_ceiling")]
+#[aether_data::kind(name = "aether.bloomery.spend_ceiling", default, eq)]
 pub struct SpendCeiling {
     /// Cap on the whole window's summed spend. `None` is uncapped.
     pub window_micro_usd: Option<u64>,

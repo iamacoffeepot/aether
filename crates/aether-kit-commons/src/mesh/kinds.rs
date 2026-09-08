@@ -8,7 +8,6 @@
 //! geometry with no wireframe.
 
 use alloc::string::String;
-use serde::{Deserialize, Serialize};
 
 /// `aether.kit.mesh.load` — instruct the mesh viewer to load and display
 /// the file at `namespace://path`. The viewer dispatches on the
@@ -16,8 +15,7 @@ use serde::{Deserialize, Serialize};
 /// mesher; `.obj` runs through the OBJ parser. Subsequent `Load`
 /// mails replace the cached mesh. Fire-and-forget; errors surface
 /// in `engine_logs`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.mesh.load")]
+#[aether_data::kind(name = "aether.kit.mesh.load")]
 pub struct LoadMesh {
     /// Short namespace prefix (no `://`), e.g. `"save"`, `"assets"`.
     pub namespace: String,

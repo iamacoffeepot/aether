@@ -38,8 +38,7 @@ use serde::{Deserialize, Serialize};
 /// §4). The variants preserve the family shape so the client can
 /// expand / prehash a `Bounded` range or `Declared` domain locally
 /// the same way the substrate's static reverse map does at boot.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.inventory.param_kind")]
+#[aether_data::kind(name = "aether.inventory.param_kind")]
 pub enum ParamKindWire {
     /// Finite inclusive integer range (`aether-worker-{0..=255}`).
     /// The client enumerates `lo..=hi`, substitutes each value into
@@ -90,8 +89,7 @@ pub struct TemplateEntryWire {
 /// compile-time reverse-lookup manifest (ADR-0088 §6). Empty payload;
 /// the request *is* the signal. Mailed to the `"aether.inventory"`
 /// mailbox; reply: [`ManifestResult`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.inventory.manifest")]
+#[aether_data::kind(name = "aether.inventory.manifest")]
 pub struct Manifest {}
 
 /// Reply to [`Manifest`] (ADR-0088 §6). Carries every link-time
@@ -105,8 +103,7 @@ pub struct Manifest {}
 ///
 /// No `Err` arm: the reply reads a process-global link-time table, so
 /// there is no failure mode to report.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.inventory.manifest_result")]
+#[aether_data::kind(name = "aether.inventory.manifest_result")]
 pub struct ManifestResult {
     pub names: Vec<NameEntryWire>,
     pub templates: Vec<TemplateEntryWire>,
@@ -120,8 +117,7 @@ pub struct ManifestResult {
 /// then asks the substrate only for dynamic-instance ids it can't
 /// compute. Mailed to the `"aether.inventory"` mailbox; reply:
 /// [`ResolveResult`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.inventory.resolve")]
+#[aether_data::kind(name = "aether.inventory.resolve")]
 pub struct Resolve {
     pub ids: Vec<String>,
 }
@@ -148,8 +144,7 @@ pub struct ResolvedName {
 ///
 /// No `Err` arm: a miss is `name: None` per entry, so the batch itself
 /// has no failure mode to report.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.inventory.resolve_result")]
+#[aether_data::kind(name = "aether.inventory.resolve_result")]
 pub struct ResolveResult {
     pub resolved: Vec<ResolvedName>,
 }
@@ -158,8 +153,7 @@ pub struct ResolveResult {
 /// abbreviated actor address inside the selected engine. The engine registry
 /// owns abbreviation expansion, canonical validation, liveness, and the final
 /// mailbox id; external clients must not fold the supplied string themselves.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.inventory.resolve_address")]
+#[aether_data::kind(name = "aether.inventory.resolve_address")]
 pub struct ResolveAddress {
     pub address: String,
 }
@@ -171,8 +165,7 @@ pub struct ResolveAddress {
 /// than duplicating the substrate's internal address-resolution error enum.
 /// It exists — where the sibling [`ListKindsResult`] over the same live
 /// `Registry` has none — because this is a lookup, and a lookup can miss.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.inventory.resolve_address_result")]
+#[aether_data::kind(name = "aether.inventory.resolve_address_result", eq)]
 pub enum ResolveAddressResult {
     Ok { mailbox_id: aether_data::MailboxId, canonical_path: String },
     Err { error: String },
@@ -190,8 +183,7 @@ pub enum ResolveAddressResult {
 /// cache after a `load_component` registers a component's own
 /// kinds — the substrate's `Registry` is the single source of
 /// truth, projected onto the wire by the inventory cap.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.inventory.kinds")]
+#[aether_data::kind(name = "aether.inventory.kinds")]
 pub struct ListKinds {}
 
 /// Reply to [`ListKinds`] (ADR-0091). One [`KindDescriptorWire`] per
@@ -206,8 +198,7 @@ pub struct ListKinds {}
 /// the same live `Registry`: this is an enumeration, which cannot miss —
 /// an empty vocabulary is an empty list. A lookup can miss, so
 /// `ResolveAddress` carries the failure arm and `ListKinds` does not.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.inventory.kinds_result")]
+#[aether_data::kind(name = "aether.inventory.kinds_result")]
 pub struct ListKindsResult {
     pub kinds: Vec<KindDescriptorWire>,
 }
@@ -241,8 +232,7 @@ pub struct HandlerEntryWire {
 /// the way `describe_component` surfaces a wasm component's — the
 /// reply contract for the caps the driver leans on most
 /// (`aether.fs`, `aether.render`, `aether.audio`).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.inventory.handlers")]
+#[aether_data::kind(name = "aether.inventory.handlers")]
 pub struct ListHandlers {}
 
 /// Reply to [`ListHandlers`] (ADR-0109 §5). One [`HandlerEntryWire`]
@@ -253,8 +243,7 @@ pub struct ListHandlers {}
 ///
 /// No `Err` arm: the reply reads a process-global link-time table, so
 /// there is no failure mode to report.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.inventory.handlers_result")]
+#[aether_data::kind(name = "aether.inventory.handlers_result")]
 pub struct HandlersResult {
     pub handlers: Vec<HandlerEntryWire>,
 }

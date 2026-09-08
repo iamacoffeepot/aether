@@ -281,20 +281,17 @@ mod tests {
     use super::*;
     use aether_data::{MailboxId, Source, SourceAddr};
 
-    #[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
-    #[kind(name = "test.request_context")]
+    #[aether_data::kind(name = "test.request_context", partial_eq)]
     struct TestContext {
         value: u32,
     }
 
-    #[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
-    #[kind(name = "test.other_request_context")]
+    #[aether_data::kind(name = "test.other_request_context", partial_eq)]
     struct OtherContext {
         value: u32,
     }
 
-    #[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
-    #[kind(name = "test.source_request_context")]
+    #[aether_data::kind(name = "test.source_request_context", partial_eq)]
     struct SourceContext {
         source: Source,
     }

@@ -151,8 +151,7 @@ impl ScriptedUpload {
 /// The payload is the wire bytes of a [`ScriptedUpload`], following the
 /// opaque-bytes convention the `aether.bloomery.admit` ingress uses: the value
 /// vocabulary stays out of the wire schema, and only this crate decodes it.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.bloomery.testing.scripted_evidence")]
+#[aether_data::kind(name = "aether.bloomery.testing.scripted_evidence")]
 pub struct ScriptedEvidence {
     /// The scripted upload's canonical `aether_data::wire` bytes.
     #[serde(with = "aether_data::bytes")]
@@ -166,8 +165,7 @@ pub struct ScriptedEvidence {
 /// binding (a scenario that read the wrong order), while `Err` is the harness
 /// itself faulting (a decode, a store read). Collapsing them would make a
 /// scripting mistake and a coordinator defect look identical.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.bloomery.testing.scripted_evidence_result")]
+#[aether_data::kind(name = "aether.bloomery.testing.scripted_evidence_result")]
 pub enum ScriptedEvidenceResult {
     /// The broker admitted the verdict. `idempotency_key` is the key the
     /// admitted event carries, which names the route the broker chose
