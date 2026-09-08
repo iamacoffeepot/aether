@@ -46,8 +46,8 @@
 // glob below.
 use crate::kinds::{EngineAlive, EngineDied, EngineRestartDue};
 use aether_kinds::{
-    ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine, TerminateEngine,
-    UploadBinary, UploadComponent,
+    ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SetArtifactPinned, SpawnEngine,
+    TerminateEngine, UploadBinary, UploadComponent,
 };
 use aether_rpc::RouteEnvelope;
 #[cfg(test)]
@@ -176,17 +176,17 @@ mod tests {
     // for fixture wiring — reference id derivation, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
     use super::runtime::{
-        EngineEntry, FleetServerState, FleetSpawnContext, PendingEngine, ProxySpawnOutcome, SpawnOrigin, SpawnRecipe,
-        Supervision, spawn_args,
+        EngineEntry, FleetServerState, FleetSpawnContext, ProxySpawnOutcome, SpawnOrigin, SpawnRecipe, Supervision,
+        spawn_args,
     };
     use super::{FleetConfig, FleetServer, ReplyCells, ReplySink, RestartPolicy};
     use crate::kinds::{EngineAlive, EngineDied};
-    use crate::store::{ArtifactStore, DEFAULT_DISK_BUDGET_BYTES};
+    use crate::store::{ArtifactKind, ArtifactStore, DEFAULT_DISK_BUDGET_BYTES, StoredManifest};
     use aether_actor::Addressable;
     use aether_data::{EngineId, Kind, MailboxId, Uuid, mailbox_id_from_name};
     use aether_kinds::descriptors;
     use aether_kinds::{
-        BinarySelector, DeathReason, ListEngines, SpawnEngine, SpawnEngineResult, TerminateEngine,
+        BinaryManifest, BinarySelector, DeathReason, ListEngines, SpawnEngine, SpawnEngineResult, TerminateEngine,
         TerminateEngineResult,
     };
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
@@ -242,8 +242,17 @@ mod tests {
     /// the same fixture serves both the historical death-is-terminal
     /// reducers and the restart ones.
     fn lifecycle_state(restart_policy: Option<RestartPolicy>) -> (FleetServerState, PathBuf) {
+        lifecycle_state_under_budget(restart_policy, DEFAULT_DISK_BUDGET_BYTES)
+    }
+
+    /// [`lifecycle_state`] over a store small enough that an upload
+    /// forces eviction, for the runtime-hold tests (issue 5686).
+    fn lifecycle_state_under_budget(
+        restart_policy: Option<RestartPolicy>,
+        disk_budget_bytes: u64,
+    ) -> (FleetServerState, PathBuf) {
         let root = PathBuf::from(isolated_store_dir());
-        let store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("test lifecycle store opens");
+        let store = ArtifactStore::open(&root, disk_budget_bytes).expect("test lifecycle store opens");
         let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
         (
             FleetServerState {
@@ -322,7 +331,7 @@ mod tests {
         let (mut state, root) = lifecycle_state(None);
         let engine_id = EngineId(Uuid::from_u128(1));
         let rpc_port = 40_680;
-        state.pending_engines.insert(engine_id, PendingEngine { rpc_port, early_death: None });
+        state.begin_pending_spawn(engine_id, rpc_port, test_recipe().hash);
 
         assert!(state.engines.is_empty(), "a prepared proxy is not yet supervised");
         let reply = state
@@ -360,7 +369,7 @@ mod tests {
             supervision: Supervision::new(test_recipe()),
             origin: SpawnOrigin::Requested,
         };
-        state.pending_engines.insert(engine_id, PendingEngine { rpc_port, early_death: None });
+        state.begin_pending_spawn(engine_id, rpc_port, test_recipe().hash);
 
         state.observe_engine_death(
             engine_id,
@@ -402,7 +411,7 @@ mod tests {
         let (mut state, root) = lifecycle_state(None);
         let engine_id = EngineId(Uuid::from_u128(3));
         let rpc_port = 40_682;
-        state.pending_engines.insert(engine_id, PendingEngine { rpc_port, early_death: None });
+        state.begin_pending_spawn(engine_id, rpc_port, test_recipe().hash);
 
         let reply = state
             .settle_pending_spawn(
@@ -625,7 +634,7 @@ mod tests {
     fn a_committed_engine_retains_the_recipe_its_spawn_carried() {
         let (mut state, root) = lifecycle_state(None);
         let engine_id = EngineId(Uuid::from_u128(0xA3));
-        state.pending_engines.insert(engine_id, PendingEngine { rpc_port: 7100, early_death: None });
+        state.begin_pending_spawn(engine_id, 7100, test_recipe().hash);
 
         state
             .settle_pending_spawn(
@@ -641,6 +650,145 @@ mod tests {
 
         let entry = state.engines.get(&engine_id).expect("an applied spawn is supervised");
         assert_eq!(entry.supervision.recipe, test_recipe(), "the spawn's recipe rides onto the committed engine");
+
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Store `bytes` as an unnamed, unpinned binary in the state's own
+    /// artifact store and return its content hash — an entry nothing but a
+    /// runtime hold can protect from the budget.
+    fn store_binary(state: &mut FleetServerState, bytes: &[u8]) -> String {
+        state
+            .store
+            .upload(
+                bytes,
+                ArtifactKind::Binary,
+                StoredManifest::Binary(BinaryManifest {
+                    chassis: "headless".to_owned(),
+                    caps: vec!["aether.rpc.server".to_owned()],
+                    git_sha: "deadbee".to_owned(),
+                    profile: "debug".to_owned(),
+                    target: "x86_64-unknown-linux-gnu".to_owned(),
+                    env_keys: vec!["AETHER_RPC_PORT".to_owned()],
+                    argv_flags: vec!["rpc-port".to_owned()],
+                }),
+                None,
+            )
+            .expect("test setup: the artifact store accepts an upload")
+    }
+
+    /// Settle a staged birth as an authoritative apply, committing the
+    /// engine on a recipe naming `hash`.
+    fn settle_applied(state: &mut FleetServerState, engine_id: EngineId, rpc_port: u16, hash: &str) {
+        let recipe = SpawnRecipe { hash: hash.to_owned(), args: Vec::new(), boot_manifest: None };
+        let reply = state
+            .settle_pending_spawn(
+                FleetSpawnContext {
+                    engine_id,
+                    rpc_port,
+                    supervision: Supervision::new(recipe),
+                    origin: SpawnOrigin::Requested,
+                },
+                ProxySpawnOutcome::Applied(MailboxId(u64::from(rpc_port))),
+            )
+            .expect("the matching completion settles");
+        assert!(matches!(reply, SpawnEngineResult::Ok { .. }), "test setup: the staged birth commits");
+    }
+
+    /// Drive one engine through the real commit path — staged birth, then
+    /// authoritative apply — so it is supervised exactly the way `on_spawn`
+    /// leaves it rather than inserted into the table by hand.
+    fn commit_engine(state: &mut FleetServerState, engine_id: EngineId, rpc_port: u16, hash: &str) {
+        state.begin_pending_spawn(engine_id, rpc_port, hash.to_owned());
+        settle_applied(state, engine_id, rpc_port, hash);
+    }
+
+    /// An `upload_binary` repointing a name leaves the previously-named
+    /// hash unnamed and unpinned — and therefore the *first* LRU candidate
+    /// — while an engine forked from it is still running. Supervision has
+    /// to hold its own binary, and it has to hold it from the staged birth
+    /// on: the pending window spans mail turns, so an upload lands inside
+    /// it (issue 5686).
+    #[test]
+    fn a_binary_stays_held_from_the_staged_birth_through_the_commit() {
+        // A budget holding two 12-byte entries but not three, so every
+        // upload past the second forces exactly one eviction.
+        let (mut state, root) = lifecycle_state_under_budget(None, 30);
+        let held = store_binary(&mut state, b"engine-aaaaa");
+        let sibling = store_binary(&mut state, b"sibling-bbbb");
+        let engine_id = EngineId(Uuid::from_u128(0xB1));
+
+        state.begin_pending_spawn(engine_id, 7200, held.clone());
+        store_binary(&mut state, b"upload-ccccc");
+        assert!(state.store.contains(&held), "a staged birth's binary is not a reclaim candidate");
+        assert!(!state.store.contains(&sibling), "its unheld sibling is reclaimed in its place");
+
+        settle_applied(&mut state, engine_id, 7200, &held);
+        store_binary(&mut state, b"upload-ddddd");
+        assert!(state.store.contains(&held), "the commit carries the hold onto the supervised engine");
+
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Two engines can be forked from one binary, so the hold cannot be a
+    /// flag one death clears: it is derived from every lineage still able
+    /// to replay the recipe. Both halves matter — a release on the first
+    /// death would strand the survivor, and no release at all would leak
+    /// every binary the hub ever ran.
+    #[test]
+    fn a_binary_is_released_only_once_the_last_engine_running_it_is_gone() {
+        let (mut state, root) = lifecycle_state_under_budget(None, 30);
+        let held = store_binary(&mut state, b"engine-aaaaa");
+        let sibling = store_binary(&mut state, b"sibling-bbbb");
+        let first = EngineId(Uuid::from_u128(0xB2));
+        let second = EngineId(Uuid::from_u128(0xB3));
+
+        commit_engine(&mut state, first, 7300, &held);
+        commit_engine(&mut state, second, 7301, &held);
+
+        state.observe_engine_death(first, DeathReason::Crashed { detail: "connection closed".to_owned() });
+        store_binary(&mut state, b"upload-ccccc");
+        assert!(state.store.contains(&held), "one engine leaving does not release a binary another is running");
+        assert!(!state.store.contains(&sibling), "the unheld sibling is reclaimed instead");
+
+        assert!(state.retire_engine(second).is_some(), "the surviving engine is supervised");
+        store_binary(&mut state, b"upload-ddddd");
+        assert!(!state.store.contains(&held), "the last engine leaving returns its binary to the candidates");
+
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A restart owns no process while its backoff runs, so the filed
+    /// recipe is the only thing left holding the binary it is about to
+    /// re-fork. Lose the hold there and the re-fork resolves nothing and
+    /// the engine stays dead — the one window where a crash loop and a
+    /// name repoint can end a lineage that supervision promised to
+    /// recover.
+    #[test]
+    fn a_restart_waiting_out_its_backoff_keeps_holding_its_binary() {
+        let (mut state, root) = lifecycle_state_under_budget(Some(restart_policy(5)), 30);
+        let held = store_binary(&mut state, b"engine-aaaaa");
+        let sibling = store_binary(&mut state, b"sibling-bbbb");
+        let engine_id = EngineId(Uuid::from_u128(0xB4));
+        commit_engine(&mut state, engine_id, 7400, &held);
+
+        let crashed = DeathReason::Crashed { detail: "connection closed".to_owned() };
+        let super::runtime::EngineDeathDisposition::LiveRemoved(supervision) =
+            state.observe_engine_death(engine_id, crashed.clone())
+        else {
+            panic!("a supervised engine's death evicts it");
+        };
+        assert!(
+            state.consider_restart(&engine_id.0.to_string(), &crashed, *supervision),
+            "an armed policy files the restart this test is about",
+        );
+
+        store_binary(&mut state, b"upload-ccccc");
+        assert!(state.store.contains(&held), "the filed restart holds its binary across the backoff");
+        assert!(!state.store.contains(&sibling), "the unheld sibling is reclaimed instead");
 
         drop(state);
         let _ = fs::remove_dir_all(root);

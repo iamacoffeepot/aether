@@ -25,7 +25,7 @@ use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{decode_png, not_all_black};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_kit_commons::camera::CameraDestroy;
+use aether_kit_commons::camera::{CameraComponent, CameraDestroy};
 use aether_render::ViewProjection;
 
 // Force linkage of `aether-kit-commons`'s `inventory::submit!` `KindDescriptor`
@@ -41,20 +41,11 @@ use aether_kit_commons as _;
 use std::fs;
 use std::path::Path;
 
-/// Component name passed to `LoadComponent`. The full mailbox address
-/// the substrate registers is `aether.embedded:cam`
-/// (issue 634 Phase 4 PR 1) — bare `"cam"` is not addressable. Camera
-/// tests don't currently send any mail to the loaded trampoline by
-/// address, so only the load-time name matters here.
+/// Component name passed to `LoadComponent`, and the name
+/// `HarnessOp::loaded::<CameraComponent>` renders the addressable
+/// `/`-joined lineage from (ADR-0099 §4) — bare `"cam"` is not
+/// addressable.
 const COMPONENT_NAME: &str = "cam";
-
-/// The `/`-rendered lineage a loaded component registers at (ADR-0099
-/// §4): the component host `aether.component` `/`-joined to the
-/// trampoline node — exactly what `LoadResult.name` reports.
-fn component_address() -> String {
-    use aether_actor::Addressable;
-    format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, COMPONENT_NAME)
-}
 
 /// Load `aether-kit-commons`'s pre-built wasm into the harness, selecting the
 /// `camera` export (ADR-0096; the kit is defaultless per ADR-0138, so
@@ -160,10 +151,10 @@ fn camera_destroy_main_keeps_substrate_alive() {
         harness.observed_kinds(),
     );
 
-    // Drop the only camera the component was bootstrapped with (agents
-    // address loaded components at the trampoline's full name,
-    // `aether.embedded:NAME`, per issue 634 Phase 4), then
-    // advance and capture.
+    // Drop the only camera the component was bootstrapped with —
+    // `HarnessOp::loaded` renders the trampoline's full name from the
+    // component identity, since the bare namespace is not addressable —
+    // then advance and capture.
     //
     // Survivability: the chassis still renders its clear pass after
     // the active camera was removed. If the component panicked or the
@@ -171,7 +162,10 @@ fn camera_destroy_main_keeps_substrate_alive() {
     // all-black.
     let result = harness
         .execute(vec![
-            ("destroy", HarnessOp::send_and_settle(component_address(), &CameraDestroy { name: "main".to_owned() })),
+            (
+                "destroy",
+                HarnessOp::loaded::<CameraComponent>(COMPONENT_NAME).send(&CameraDestroy { name: "main".to_owned() }),
+            ),
             ("post", HarnessOp::advance(5)),
             ("snap", HarnessOp::capture()),
         ])

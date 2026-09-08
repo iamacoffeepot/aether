@@ -230,7 +230,27 @@ HarnessOp::actor::<SyntheticWindowCapability>().send(&SubscribeWindow {
 ```
 
 The constructor accepts only root identities and `send` compiles only when the
-actor handles that direct kind. Once a root `CreateWindow` operation has
+actor handles that direct kind.
+
+A loaded wasm component gets the same sender from `HarnessOp::loaded`, which
+renders its ADR-0099 lineage address from the component identity and the name
+the scenario loaded it under — `HarnessOp::loaded_default` when the load took
+the actor's own namespace:
+
+```rust,ignore
+HarnessOp::loaded::<CameraComponent>("cam").send(&CameraDestroy { name: "main".to_owned() });
+```
+
+The bound there is the `Embedded` resolver, so a root capability is a compile
+error on `loaded` and a component is one on `actor`. That keeps the address a
+scenario sends to derived from the identity instead of rebuilt as
+`format!("aether.component/aether.embedded:{name}")` per test file, where
+writing the bare namespace by mistake costs an unknown-recipient drop at run
+time. For the surfaces that take a name rather than an operation — `log_tail`,
+a `CaptureWithMails` bundle recipient, an assertion against `LoadResult::Ok.name`
+— read the same string off the sender with `address()`.
+
+Once a root `CreateWindow` operation has
 settled, send an id-less control to its addressed child. Derive the boundary
 address from the manager identity rather than copying its namespace literal:
 

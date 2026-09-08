@@ -37,9 +37,10 @@ pub struct PackedComponent {
     /// Optional export selector (ADR-0096).
     pub export: Option<String>,
     /// Optional instance count (issue 2626): fan this entry out into N
-    /// autoload components, named `{base}-{index}`, at expansion time
-    /// (`autoload::expand_replicas`). `None` (or the historical absence of
-    /// this field) keeps today's one-instance behaviour.
+    /// autoload components at expansion time (`autoload::expand_replicas`),
+    /// replica 0 named for the bare base and the rest `{base}-{index}`.
+    /// `None` (or the historical absence of this field) keeps today's
+    /// one-instance behaviour.
     pub replicas: Option<u32>,
 }
 
@@ -104,8 +105,9 @@ pub struct ManifestComponent {
     #[serde(default)]
     pub export: Option<String>,
     /// Optional instance count (issue 2626): expanded into N autoload
-    /// components at read time, one shared config, names `{base}-{index}`.
-    /// `replicas: 0` is a hard config error, not a silent no-op.
+    /// components at read time, one shared config, replica 0 named for the
+    /// bare base and the rest `{base}-{index}`. `replicas: 0` is a hard
+    /// config error, not a silent no-op.
     #[serde(default)]
     pub replicas: Option<u32>,
 }

@@ -91,10 +91,14 @@ impl ComponentHostNativeExt for NativeActorMailbox<'_, ComponentHostCapability> 
 /// resolved peer without changing the call site or consulting a registry.
 ///
 /// `ctx.peer::<R>()` names the default-named instance — what a load with
-/// no `name` registers as. A component loaded under an explicit name (or
-/// a `replicas` fan-out, whose instances are all `{base}-{index}`) is
+/// no `name` registers as. A component loaded under an explicit name is
 /// named at the send site through [`PeerCtxExt::peer_named`], because a
 /// bare type cannot identify an instance — load names are runtime facts.
+///
+/// A `replicas` fan-out is reachable by both verbs: replica 0 claims the
+/// bare base name, so `peer::<R>()` reaches it whenever the base is `R`'s
+/// own namespace, and the later replicas `{base}-{index}` are named
+/// through `peer_named` (iamacoffeepot/aether#5727).
 ///
 /// This trait carries no resolution of its own: both verbs delegate to the
 /// typed ctx path selected by [`Embedded`]. The explicit
