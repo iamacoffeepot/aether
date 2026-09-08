@@ -1,7 +1,7 @@
 # ADR-0216: The Line Ends In A Reader That Files What It Will Not Fix
 
-- **Status:** Provisional
-- **Date:** 2026-09-08
+- **Status:** Accepted
+- **Date:** 2026-09-09
 
 ## Context
 
