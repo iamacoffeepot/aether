@@ -536,16 +536,67 @@ impl SqliteStore {
     pub fn load_statement_words(&self, digest: Digest) -> Result<Option<Vec<u8>>, CommissionError> {
         Ok(load_statement(&self.conn, digest)?.map(|statement| statement.words))
     }
+
+    /// The whole stored statement at `digest`, decoded from the exact bytes
+    /// written.
+    ///
+    /// [`load_statement_words`](Self::load_statement_words) answers what a
+    /// commission says; this answers *how it is grounded* — the provenance and
+    /// the derivation parents a reader-filed commission carries (ADR-0216 §3),
+    /// which is the whole difference between a machine's proposal and a
+    /// person's instruction and is invisible in the words alone.
+    ///
+    /// # Errors
+    /// A store fault, or canonical bytes that no longer decode as a statement.
+    pub fn load_statement(&self, digest: Digest) -> Result<Option<Statement>, CommissionError> {
+        load_statement(&self.conn, digest)
+    }
 }
 
 fn create_commission(conn: &mut Connection, id: &WorkpieceId, intent: &Statement) -> Result<Digest, CommissionError> {
+    insert_commission(conn, id, intent)?.ok_or_else(|| CommissionError::DuplicateCommission(id.0.clone()))
+}
+
+/// File an open, unapproved commission the coordinator derived rather than an
+/// operator authored (ADR-0216 §3), answering whether a row was written.
+///
+/// The same insert the authenticated route makes, reached from the coordinator
+/// side and differing in exactly one thing: a taken id is `Ok(false)` rather
+/// than a refusal. The reader's filing ids are a function of each finding's own
+/// content address, so a re-admitted read re-derives the ids it already filed —
+/// which is a no-op, not a conflict, and must not fail the admission that
+/// carried it.
+///
+/// It writes no revision and no approval, and there is no door here that could:
+/// what makes a commission sealable is a frozen revision plus a signed Approve
+/// statement, and both are the operator's, through their own routes.
+pub(super) fn file_derived_commission(
+    conn: &mut Connection,
+    id: &WorkpieceId,
+    intent: &Statement,
+) -> Result<bool, CommissionError> {
+    Ok(insert_commission(conn, id, intent)?.is_some())
+}
+
+/// The insert both commission doors share: the head row, its intent statement,
+/// and the replica projection, in one transaction. `None` when the id is taken.
+///
+/// One implementation because a filed finding has to be an *ordinary*
+/// commission — the same row shape, the same statement table, the same replica
+/// enqueue — or the estate would grow a second kind of commission that the
+/// reader, the console, and the seal door each have to learn about separately.
+fn insert_commission(
+    conn: &mut Connection,
+    id: &WorkpieceId,
+    intent: &Statement,
+) -> Result<Option<Digest>, CommissionError> {
     let intent_digest = digest_of(intent);
     let intent_bytes = encode_statement(intent);
     let txn = conn.transaction()?;
     let exists: Option<String> =
         txn.query_row("SELECT id FROM commissions WHERE id = ?1", [&id.0], |row| row.get(0)).optional()?;
     if exists.is_some() {
-        return Err(CommissionError::DuplicateCommission(id.0.clone()));
+        return Ok(None);
     }
     txn.execute(
         "INSERT INTO commissions (id, intent, current_revision, current_ordinal, status) VALUES (?1, ?2, NULL, NULL, ?3)",
@@ -562,7 +613,7 @@ fn create_commission(conn: &mut Connection, id: &WorkpieceId, intent: &Statement
     )?;
     enqueue_projection(&txn, &id.0)?;
     txn.commit()?;
-    Ok(intent_digest)
+    Ok(Some(intent_digest))
 }
 
 fn write_revision(

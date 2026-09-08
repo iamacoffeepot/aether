@@ -15,6 +15,7 @@ use std::fmt::Write as _;
 
 use super::admission_key::AdmissionKey;
 use super::dispatch::DispatchRecord;
+use super::retrospect::file_retrospect_findings;
 use crate::bloomery::findings::{FindingsDecomposition, decompose_findings};
 use crate::bloomery::triage::{TriageVerdict, triage_note, triage_repair};
 use crate::store::{OutstandingOrder, StoreBackend};
@@ -931,6 +932,11 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
 /// - A bounced repair lap (#4959) re-threads its finding with a section naming
 ///   what it failed to touch — otherwise the next lap reads the identical prose
 ///   and repeats itself until the budget is gone.
+/// - A bloom-level reader's findings are filed as open, unapproved commissions
+///   (ADR-0216): the one write that lane gets. Here rather than in the event
+///   builder above because it is a store write, not a fact — a filing is keyed
+///   by workpiece and the journal is keyed by bloom, the same reason a scoping
+///   run's ledger is not a `Fact` either.
 /// - The lap's capture diff is dropped either way: it has been read, and the
 ///   order it belongs to is spent.
 fn persist_consumed(
@@ -977,6 +983,11 @@ fn persist_consumed(
         persist_aggregate_verify_findings(store, record, upload)?;
     } else if record.stage == StageId::AggregateReview && upload.verdict != StageVerdict::ExecutorFault {
         persist_aggregate_findings(store, record, upload, aggregate_findings)?;
+    } else if record.stage == StageId::Study && upload.verdict != StageVerdict::ExecutorFault {
+        // A faulted read reached no verdict, so whatever rode its observation is
+        // not a judgement about anything — the same reason an aggregate review's
+        // fault writes no findings and clears none.
+        file_retrospect_findings(store, record, upload)?;
     }
     Ok(())
 }

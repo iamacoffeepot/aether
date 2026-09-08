@@ -481,6 +481,24 @@ impl ScenarioHarness {
             .expect("the commission store reads")
     }
 
+    /// A second handle on the commission store this coordinator writes.
+    ///
+    /// The store is a file, and the coordinator's own handle is behind its
+    /// capability, so a scenario that needs the *commission* side — what the
+    /// ADR-0216 reader filed, and what each door answers when asked to approve
+    /// or seal it — opens its own the way
+    /// [`author_scope_revision`](Self::author_scope_revision) already does.
+    /// Reading and writing through the real backend rather than through a
+    /// harness projection is the point: the refusals a scenario asserts are the
+    /// production ones.
+    ///
+    /// # Panics
+    /// The commission store could not be opened.
+    #[must_use]
+    pub fn commission_store(&self) -> SqliteStore {
+        SqliteStore::open(&self.store_path).expect("the commission store opens")
+    }
+
     /// Seal a single-member bloom on the observed mainline and return its id.
     ///
     /// # Panics

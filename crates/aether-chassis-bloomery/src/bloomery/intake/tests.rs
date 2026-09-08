@@ -11,10 +11,10 @@ use std::sync::{Arc, Mutex};
 use aether_bloomery::{
     BloomDraft, BloomId, BloomRecord, CandidateRef, CompositionParents, Conclusion, ConfigRegistry, Decision, Digest,
     Event, Evidence, EvidenceKind, EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey,
-    LaneObservation, Membership, NetworkProfile, Nonce, Observation, Outcome, Provenance, ResolvedConfigs, Snapshot,
-    SpendWindow, StageCatalog, StageId, StageVerdict, Statement, StudyCall, StudyCost, SuppressionRequest,
-    SurfacePathRequest, SurfaceRequest, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder,
-    WorkpieceId, reduce,
+    LaneObservation, Membership, NetworkProfile, Nonce, Observation, Outcome, Provenance, ResolvedConfigs,
+    RetrospectClaim, Snapshot, SpendWindow, StageCatalog, StageId, StageVerdict, Statement, StudyCall, StudyCost,
+    SuppressionRequest, SurfacePathRequest, SurfaceRequest, Transformation, VerifyFailure, VerifyFailureSet,
+    WorkHandle, WorkOrder, WorkpieceId, reduce,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
@@ -653,6 +653,11 @@ fn claim_for_carries_the_whole_observation() {
             paths: vec!["crates/collided/src/lib.rs".into()],
             bound: vec!["crates/collided/**".into()],
         }),
+        retrospect_findings: vec![RetrospectClaim {
+            title: "the drain re-reads a parked entry".to_owned(),
+            body: "the ack prefix stops short, so the next tick re-selects it".to_owned(),
+            surface: vec!["crates/aether-chassis-bloomery/**".into()],
+        }],
     };
     let name = NameEvidenceClaims::attempt_artifact_name(
         &nonce,
