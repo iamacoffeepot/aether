@@ -124,6 +124,26 @@ impl MenuBarWidget {
         measured.unwrap_or_else(|| even_split_widths(self.menus.len(), self.frame.width, self.theme.space(1)))
     }
 
+    /// The width the row of titles actually needs, and a row's height.
+    ///
+    /// The bar already measures every title to lay the row out
+    /// ([`Self::title_widths`]); this is that measurement reported up instead
+    /// of only consumed, so a host docks the bar at the width its own menus
+    /// ask for rather than at a guess that either wastes the pane or splits
+    /// the titles evenly and cuts the long one.
+    ///
+    /// `None` until the theme font's metrics land — `title_widths` answers an
+    /// even split until then, which is the interim layout for a frame or two
+    /// and not a width anything should be sized from.
+    fn intrinsic(&self) -> Option<[f32; 2]> {
+        self.font_metrics.resolved()?;
+        let gap = self.theme.space(1);
+        let widths = self.title_widths();
+        let gaps: f32 = widths.iter().skip(1).map(|_| gap).sum();
+
+        Some([widths.iter().sum::<f32>() + gaps, self.theme.row_height])
+    }
+
     /// The title under a window-pixel pointer position. The bar holds the
     /// pointer grab while a menu is open, so every window position reaches it
     /// and the row's own vertical extent has to be part of the test.
@@ -601,13 +621,16 @@ impl WasmActor for MenuBarWidget {
     }
 
     /// Reply the bar's local draw: the row of titles as ordinary items, the
-    /// open menu's plate as overlay.
+    /// open menu's plate as overlay, and the width its own titles ask a layout
+    /// for.
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()).with_overlay(self.overlay_items()));
+        reply_draw(ctx, &self.state, || {
+            WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic()).with_overlay(self.overlay_items())
+        });
     }
 }
 

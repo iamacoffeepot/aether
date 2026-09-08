@@ -156,6 +156,31 @@ impl SegmentedWidget {
         )
     }
 
+    /// The width at which no option elides, and a row's height.
+    ///
+    /// The buckets are a fixed `width / options.len()`, so the width that
+    /// shows every option whole is the *widest* option's run plus a `pad`
+    /// either side, taken that many times — sizing to the sum of the
+    /// individual labels would still cut the long one, because the long one
+    /// only ever gets its equal share.
+    ///
+    /// The control already measures each run to decide what to elide
+    /// ([`Self::option_run`]); this is the same measurement reported up
+    /// instead of only consumed, so a host lays out a row of choices from what
+    /// they say rather than from a guessed width that clips the longest one.
+    ///
+    /// `None` until the theme font's metrics land, the same pre-measurement
+    /// silence the button and the numeric keep: a slot sized from the
+    /// per-character approximation would be resized the moment the real
+    /// advances arrived.
+    fn intrinsic(&self) -> Option<[f32; 2]> {
+        let metrics = self.font_metrics.resolved()?;
+        let size = self.theme.label_size_pixels;
+        let widest =
+            self.options.iter().map(|option| measured_text_width(metrics, option, size)).fold(0.0_f32, f32::max);
+        Some([self.options.len() as f32 * self.theme.pad.mul_add(2.0, widest), self.theme.row_height])
+    }
+
     /// The control's local draw: one fill per bucket, a hairline between
     /// adjacent buckets, each option's run inside its own bucket, and the
     /// shared control outlines.
@@ -330,7 +355,7 @@ impl WasmActor for SegmentedWidget {
 
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()));
+        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic()));
     }
 }
 
