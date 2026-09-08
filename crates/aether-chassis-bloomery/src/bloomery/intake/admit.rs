@@ -533,6 +533,19 @@ fn thread_triage_note(
     store.record_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0, &threaded)
 }
 
+/// The admission event for the whole-bloom mechanical verdict — a bloom-level
+/// order, no member axis and no implication: a compiler names no owners, so the
+/// reducer re-opens every member on a failure.
+///
+/// Named beside [`base_verify_event`] and [`study_event`] rather than inlined,
+/// so the stage ladder in [`admit_uploaded`] reads as one arm per stage.
+fn aggregate_verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
+    Event {
+        idempotency_key: AdmissionKey::AggregateVerify.of(&record.nonce.0),
+        fact: Fact::AggregateVerifyCompleted { bloom: record.bloom, passed: verdict_passed(upload.verdict), evidence },
+    }
+}
+
 /// The admission event for the bloom-level reader's result (ADR-0216) — a
 /// bloom-level order, no member axis, and no implication: a retrospective names
 /// no owner the reducer could route to, because the bloom it read has landed.
@@ -863,17 +876,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
             event
         }
     } else if record.stage == StageId::AggregateVerify {
-        // The whole-bloom mechanical verdict — a bloom-level order, no member
-        // axis and no implication: a compiler names no owners, so the reducer
-        // re-opens every member on a failure.
-        Event {
-            idempotency_key: AdmissionKey::AggregateVerify.of(&record.nonce.0),
-            fact: Fact::AggregateVerifyCompleted {
-                bloom: record.bloom,
-                passed: verdict_passed(upload.verdict),
-                evidence,
-            },
-        }
+        aggregate_verify_event(&record, upload, evidence)
     } else if record.stage == StageId::BaseVerify {
         base_verify_event(&record, upload, evidence)
     } else if record.stage == StageId::Study {
