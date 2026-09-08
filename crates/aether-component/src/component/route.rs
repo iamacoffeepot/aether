@@ -31,6 +31,24 @@ pub trait ComponentHostWasmExt {
     /// (`sender` + inline registry), so its sends stamp the same origin
     /// (issue 1987).
     fn loaded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R>;
+
+    /// [`loaded`](Self::loaded) for the default-named instance — the load name
+    /// `R` already declares.
+    ///
+    /// The `&str` parameter is what made callers declare a `const` beside the
+    /// call site duplicating the peer's own `NAMESPACE`, a second naming
+    /// authority the compiler cannot check against the first
+    /// (iamacoffeepot/aether#5720). Where the name *is* the type's, there is
+    /// nothing for such a const to hold.
+    ///
+    /// From a component's receive ctx prefer [`PeerCtxExt::peer`], which says
+    /// "my host's instance of `R`" without naming the host either. Reach for
+    /// this one where code deliberately holds a component-host mailbox and
+    /// wants the fold to start from *that* host rather than from the caller's
+    /// own parent.
+    fn loaded_default<R: Addressable<Resolver = Embedded>>(&self) -> WasmActorMailbox<'_, R> {
+        self.loaded::<R>(R::NAMESPACE)
+    }
 }
 
 impl ComponentHostWasmExt for WasmActorMailbox<'_, ComponentHostCapability> {
