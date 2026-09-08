@@ -16,9 +16,11 @@ examples.
 A capability lives in its own `aether-<cap>` crate, named for the mailbox it
 owns. A crate of its own keeps the capability off its neighbours'
 reverse-dependency closure, so a change to it reruns only the tests that
-actually depend on it. A cap crate carries its own feature ladder —
+actually depend on it. A cap crate normally carries its own feature ladder —
 `default = ["runtime"]`, with a `runtime` feature gating the substrate-typed
-half and the marker face compiling under `default-features = false` — and each
+half and the marker face compiling under `default-features = false`; a
+native-only cap no guest can address is exempt (see
+[Feature ladder](#feature-ladder)) — and each
 downstream crate depends directly on the cap crate it uses, never through a
 re-export facade (a facade would put every downstream back in the cap's
 reverse-dependency closure).
@@ -173,6 +175,14 @@ Common gates are:
 - native-target gates for provider/subprocess code that has no useful wasm
   marker face.
 
+A cap no wasm guest can address carries no ladder at all. `aether-rpc` (the TCP
+transport) and `aether-fleet` (fork+exec and sockets) are native-only: there is
+no marker build to preserve, so their dependencies are flat and unconditional and
+neither declares a `runtime` feature. The exemption is narrow — it is the absence
+of any guest that can name the identity, not the presence of a heavy backend, and
+each crate's manifest states that reason where a reader meets the flat
+dependency list.
+
 Feature presence is not chassis presence. Verify builder composition and live
 `describe_handlers` before promising availability.
 
@@ -200,6 +210,61 @@ Marker-only guest builds usually do not need the resolved config type. Gate and
 re-export it at the runtime tier that owns it. A no-config capability can use
 `()`, while a named empty config can preserve a likely future composition seam;
 follow the neighboring chassis pattern deliberately.
+
+### One actor, one config
+
+An actor's `type Config` is a single `#[derive(aether_substrate::Config)]`
+struct. `ConfigMember` admits no hand-written impls, so a composite that nests
+two config structs to carry both their knobs does not compile — that is the
+design holding, not an obstacle to route around. When a cap needs another knob,
+the sanctioned moves are: add a field to the existing config, pinning
+`#[config(env = "…")]` when the struct's `env_prefix` reads wrong for it; pass it
+as the `params` argument of `with_actor_configured` when it is composer-computed
+construction input rather than an operator-resolvable knob; or give it a cap of
+its own.
+
+A crate may still carry a second derive-`Config` when no actor receives it.
+`aether-rpc` holds two: `RpcServerConfig` is `RpcServerCapability`'s
+`type Config`, while `FrameSizeConfig` resolves off the same source stack and is
+installed into `aether-codec`'s frame cap at boot, reaching no `init`. The
+one-config rule binds `type Config`, not the file count in a crate.
+
+### Where the config struct lives
+
+Three placements are in use. They are one rule — the struct sits at the tier that
+owns it:
+
+| Placement | When | Current |
+|---|---|---|
+| crate-root `config.rs` | the crate's one config, visible to the marker face too | `fs/`, `process/` |
+| `runtime/config.rs` | only the runtime half ever names it | `audio/`, `render/`, `lifecycle/` |
+| beside its actor in a cluster subdirectory | the crate hosts several actors | `http/client/`, `http/server/`, `rpc/server/`, `fleet/server/` |
+
+The `#[cfg_attr(feature = "runtime", …)]` gate follows the placement, not the
+crate. A file that also compiles on the wasm marker build gates each derive and
+each `#[config(…)]` attribute itself; a file reached only through
+`#[cfg(feature = "runtime")] mod runtime;` is already gated once at the module,
+and repeating the gate per item is noise that reads as a rule someone forgot
+elsewhere. That is the whole difference between `fs` / `http` / `process`
+carrying `cfg_attr` and `audio` / `render` / `lifecycle` deriving bare. `rpc` and
+`fleet` carry neither, having no marker build to preserve — see
+[Feature ladder](#feature-ladder).
+
+### Chassis-owned boot knobs are not cap config
+
+A knob named after a capability does not thereby belong to that capability's
+crate. `WindowConfig` lives in `aether-chassis`, not `aether-window`, because no
+actor in `aether-window` receives it — every window runtime declares
+`type Config = ()`. It is the desktop chassis's own boot knob group (window mode
+and title, application name, wireframe), named by the fleet-wide config registry
+in `boot` and the shared CLI roots in `cli`, and lowered by the winit driver and
+the render surface. Moving it into the cap crate would hand that crate a config
+nothing in it reads.
+
+`aether-fs`'s `NamespaceRoots` is the counter-case decided by the same test: the
+shared CLI roots name it too, but `FsCapability` is what receives it at `init`,
+so it stays in the cap crate. Ask which crate's code receives the resolved value,
+not which crate's name appears in the knob.
 
 ## Fail-fast unsupported actors
 

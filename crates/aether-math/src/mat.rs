@@ -111,10 +111,14 @@ impl Mat4 {
     /// every wgpu/GLSL `mat4x4<f32>` uniform expects. Use this when
     /// embedding a matrix in a mail payload or uploading to a GPU
     /// uniform buffer; bytes upload verbatim with no transpose.
+    ///
+    /// `const`, so a flattened matrix can itself be a `const` item —
+    /// how the render path states its identity camera uniform without
+    /// hand-writing sixteen floats.
     #[inline]
     #[must_use]
-    pub fn to_cols_array(&self) -> [f32; 16] {
-        let [c0, c1, c2, c3] = self.cols;
+    pub const fn to_cols_array(&self) -> [f32; 16] {
+        let [c0, c1, c2, c3] = &self.cols;
         [
             c0.x, c0.y, c0.z, c0.w, //
             c1.x, c1.y, c1.z, c1.w, //

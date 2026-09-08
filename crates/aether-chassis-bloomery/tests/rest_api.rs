@@ -29,8 +29,8 @@ use aether_bloomery::testing::{digest, event};
 use aether_bloomery::{
     AgentProfile, ApprovalPolicy, ApprovalRule, AuthorityDoor, BloomDraft, BloomId, CapabilityLedger, ClaimRefKind,
     ConfigKind, ConfigRegistry, ContentAddressed, Digest, DispatchPayload, Evidence, EvidenceKind, Harness, KeyId,
-    Membership, MetricsSeat, NamedPath, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease, PathOrigin,
-    Provenance, ReasoningEffort, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting,
+    Membership, MetricsSeat, ModelOverride, NamedPath, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease,
+    PathOrigin, Provenance, ReasoningEffort, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting,
     ScopeVerifyInput, SignatureEnvelope, StageCatalog, StageId, Statement, Tier, ToolPolicy, Topic, WorkpieceId,
     authorization_message, digest_of, verify_scope,
 };
@@ -738,6 +738,8 @@ fn assert_single_above_auto_seal(http_port: u16) {
     assert_eq!(status, 422, "above-auto with no stored approval fails closed: {body:?}");
     assert!(body["error"].as_str().unwrap_or("").contains("no stored approval"), "{body:?}");
 
+    assert_configured_above_auto_member_is_refused(http_port);
+
     let revision = seed_commission(http_port, "wp-signed", &["crates/aether-data/**"]);
     let draft_id = patch_draft(http_port, &serde_json::to_value(valid_draft("wp-signed", revision)).unwrap());
     let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{draft_id}/seal"), &seal_body());
@@ -751,6 +753,54 @@ fn assert_single_above_auto_seal(http_port: u16) {
     assert_eq!(members.len(), 1, "one sealed member");
     assert_eq!(members[0]["workpiece"], "wp-signed");
     assert_eq!(members[0]["approval"]["kind"], "Approval", "the above-auto member carries a gate-formed approval");
+}
+
+/// Case (e) of the deferred-verify seal, and the whole of issue #5561: an
+/// above-auto member that seals its own model override is refused.
+///
+/// The stored statement an above-auto member presents is signed over its
+/// `scope_revision` and nothing else — `signed_approval` signs the revision
+/// digest as its own words, and the commission store indexes the approval row by
+/// that digest. The approval the door forms from it binds `Membership::subject`,
+/// which ADR-0174 widened to carry the member's configuration registry precisely
+/// so that "an operator still cannot change which model runs for an approved
+/// workpiece without re-approval".
+///
+/// Nothing joined the two. A member registry is chosen when the draft is
+/// patched, long after the commission was approved, so the signature could not
+/// have covered it — yet the door minted evidence saying it did. Pre-fix this
+/// seal admits `200`, and the sealed bloom's receipt reads "approved" over a
+/// model choice no signer ever saw. Post-fix the door refuses and names the
+/// configuration it cannot get an authorization for.
+///
+/// The override is authored for real through `POST /configs` rather than pointed
+/// at an invented address, so the pre-fix path is the exploit rather than an
+/// unrelated unresolvable-config refusal.
+fn assert_configured_above_auto_member_is_refused(http_port: u16) {
+    let revision = seed_commission(http_port, "wp-configured", &["crates/aether-data/**"]);
+    let override_value = ModelOverride { reasoning_effort: Some(ReasoningEffort::Max), ..ModelOverride::default() };
+    let (status, authored) = send_json(
+        http_port,
+        "POST",
+        "/configs",
+        &serde_json::json!({
+            "kind": "aether.bloomery.model_override",
+            "value": serde_json::to_value(&override_value).unwrap(),
+        }),
+    );
+    assert_eq!(status, 200, "the override authors before the draft names it: {authored:?}");
+
+    let mut draft = valid_draft("wp-configured", revision);
+    draft.proposals[0].configs.insert::<ModelOverride>(digest_at(&authored["digest"]));
+    draft.proposals[0].approval.subject = draft.proposals[0].subject();
+    let draft_id = patch_draft(http_port, &serde_json::to_value(&draft).unwrap());
+
+    let (status, body) = send_json(http_port, "POST", &format!("/drafts/{draft_id}/seal"), &seal_body());
+    assert_eq!(status, 422, "a scope signature must not authorize member configuration (ADR-0174): {body:?}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("model_override"),
+        "the refusal names the configuration the signature cannot cover: {body:?}",
+    );
 }
 
 /// Case (d) of the deferred-verify seal: a mixed draft with an auto member

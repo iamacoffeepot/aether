@@ -693,6 +693,37 @@ fn resolve_seal_memberships(
                 return Err(error_response(422, &format!("member {member} is incomplete: {reason:?} ({refusal})")));
             }
             Decision::RequiresStatement(tier) => {
+                // The signature this member is about to present is authored over
+                // its `scope_revision` and nothing else: `signed_approval` signs
+                // the revision digest as its own words, and the commission store
+                // indexes the approval row by that same digest. The approval the
+                // door then forms binds `Membership::subject` — workpiece,
+                // revision, *and* the member's configuration registry (ADR-0174
+                // §The member subject). A member that seals its own
+                // configuration is therefore asking a scope signature to
+                // authorize bytes its signer never saw, which is exactly the
+                // "receipt that reads approved over a model nobody approved"
+                // that widening the binding was meant to prevent (issue #5561).
+                //
+                // Refused rather than reinterpreted, because nothing in the
+                // current approval shape can express consent to it: the member
+                // registry is chosen when the draft is patched, long after the
+                // commission was approved, so there is no signature over it to
+                // demand. Fail closed here beside the two bloom-wide-only
+                // refusals in `gate_and_admit`, which draw the same line for the
+                // same reason. An `auto` member is untouched: its approval is
+                // minted by the sealed policy from that very subject, so
+                // authority and receipt name the same bytes.
+                if let Some((kind, _)) = proposal.configs.entries().next() {
+                    return Err(error_response(
+                        422,
+                        &format!(
+                            "member {member} seals its own {kind} configuration but is approved above auto by a \
+                             statement signed over its scope revision alone; that signature cannot authorize the \
+                             configuration ADR-0174 binds into the member subject, so seal fails closed"
+                        ),
+                    ));
+                }
                 // Above-auto: consume the member projection's signed statement, run
                 // the two synchronous pre-checks (subject + author signature), and
                 // queue it for the async signature verify. A missing or

@@ -6,6 +6,8 @@
 
 use super::{ContentStore, EvictionPolicy, Selector, hash_hex, now_nanos};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::{env, fs, process};
 
@@ -80,6 +82,33 @@ fn lru_budget_evicts_the_oldest_unnamed_unpinned_entry() {
     assert!(store.contains(&h_named), "a named entry is never evicted");
     assert!(store.contains(&h_pinned), "a pinned entry is never evicted");
     assert!(!store.contains(&h_plain), "the oldest unnamed, unpinned entry is evicted first");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// A runtime hold is the third eviction protection, and it has to be both
+/// halves: an entry nothing names and nobody pinned survives while it is
+/// held, and returns to the candidates the moment the hold is dropped. The
+/// hub derives its hold set from the engines it supervises (issue 5686),
+/// so a protection that never released would strand every binary any
+/// engine ever ran, and one that never protected would let a `default`
+/// repoint evict a running engine's bytes.
+#[test]
+fn a_held_entry_is_spared_until_the_hold_is_dropped() {
+    let root = temp_root("holds");
+    // A budget that holds two 11-byte entries but not three, so each
+    // trigger upload forces exactly one eviction.
+    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::LruBudget(30)).expect("open store");
+    let held = store.upload(b"held-aaaaaa", meta("a"), None).expect("upload lands");
+    let sibling = store.upload(b"filler-bbbb", meta("a"), None).expect("upload lands");
+    store.set_holds(HashSet::from([held.clone()]));
+
+    store.upload(b"trigger-ccc", meta("a"), None).expect("upload lands");
+    assert!(store.contains(&held), "a held entry is spared even unnamed and unpinned");
+    assert!(!store.contains(&sibling), "the younger unheld sibling is evicted in its place");
+
+    store.set_holds(HashSet::new());
+    store.upload(b"trigger-ddd", meta("a"), None).expect("upload lands");
+    assert!(!store.contains(&held), "dropping the hold returns the entry to the eviction candidates");
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -370,5 +399,221 @@ fn refresh_adopts_a_peer_pinned_entry_as_protected() {
 
     assert_eq!(first.entry_count(), 1, "every unpinned entry was reclaimed to hold the budget");
     assert!(first.contains(&pinned), "the peer's pin came across with the entry and protected it from eviction");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Occupy the sidecar path with a directory so `atomic_write`'s rename
+/// fails. Permissions are not used: root bypasses them. Only the
+/// test-owned path under `root` is touched.
+fn sidecar_path(root: &Path, hash: &str) -> PathBuf {
+    root.join("entries").join(format!("{hash}.manifest"))
+}
+
+fn occupy_sidecar_as_dir(root: &Path, hash: &str) {
+    let path = sidecar_path(root, hash);
+    if path.is_file() {
+        fs::remove_file(&path).expect("remove the real sidecar so the path can become a directory");
+    }
+    fs::create_dir_all(&path).expect("sidecar target is a directory");
+}
+
+fn restore_writable_sidecar_path(root: &Path, hash: &str) {
+    let path = sidecar_path(root, hash);
+    if path.is_dir() {
+        fs::remove_dir_all(&path).expect("remove the sabotaged sidecar directory");
+    }
+}
+
+/// Tripwire: an unnamed `pin: true` upload must record protection in its
+/// first sidecar, before eviction. Budget 0 (and a body larger than that
+/// budget) would otherwise reclaim the entry on the same call.
+#[test]
+fn unnamed_pin_true_survives_budget_zero() {
+    let root = temp_root("pin-budget0");
+    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::LruBudget(0)).expect("open store");
+    let pinned = store.upload_with_pin(b"pinned-body-larger-than-zero", meta("p"), None, true).expect("pinned upload");
+    assert!(store.contains(&pinned), "an unnamed pin:true upload survives a zero budget");
+
+    let plain = store.upload_with_pin(b"plain-body-larger-than-zero", meta("u"), None, false).expect("unpinned upload");
+    assert!(!store.contains(&plain), "an unnamed unpinned upload is evictable under a zero budget");
+    assert!(store.contains(&pinned), "the pinned sibling is still protected after the unpinned upload");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Tripwire: `pin: true` on a dedup must persist before *that* upload's
+/// eviction. Seed without pressure, reopen under budget 0 (open itself
+/// does not evict), then dedup-pin while already over budget.
+#[test]
+fn dedup_pin_true_upgrades_before_eviction() {
+    let root = temp_root("dedup-pin");
+    let bytes = b"shared-aa";
+    let hash = {
+        let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
+        store.upload_with_pin(bytes, meta("a"), None, false).expect("seed without pressure")
+    };
+
+    let mut store: ContentStore<Meta> =
+        ContentStore::open(&root, EvictionPolicy::LruBudget(0)).expect("reopen budget 0");
+    assert!(store.contains(&hash), "open does not evict; the unpinned seed is still indexed under a zero budget");
+    let again = store
+        .upload_with_pin(bytes, meta("a"), None, true)
+        .expect("dedup pin:true faces same-call zero-budget pressure");
+    assert_eq!(again, hash);
+    assert!(store.contains(&hash), "pin must persist before this upload's eviction");
+    drop(store);
+
+    let mut reopened: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::LruBudget(0)).expect("reopen");
+    assert!(reopened.contains(&hash), "the durable pin is still indexed after reopen under a zero budget");
+    reopened.upload_with_pin(b"trigger-bbbbbbbb", meta("t"), None, false).expect("trigger");
+    assert!(reopened.contains(&hash), "the durable pin survives another reopen and a later eviction");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Tripwire: `pin: false` is not unpin. Re-uploading pinned bytes without
+/// asking for a pin must leave the durable flag in place across reopen.
+#[test]
+fn pin_false_reupload_preserves_an_existing_pin() {
+    let root = temp_root("pin-false-keep");
+    let bytes = b"keep-me-aa";
+    let hash = {
+        let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
+        let hash = store.upload_with_pin(bytes, meta("a"), None, true).expect("pinned upload");
+        let again = store.upload_with_pin(bytes, meta("a"), None, false).expect("pin:false reupload");
+        assert_eq!(again, hash);
+        hash
+    };
+    let mut reopened: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::LruBudget(0)).expect("reopen");
+    assert!(reopened.contains(&hash), "pin:false must not clear an existing pin across reopen");
+    reopened.upload_with_pin(b"trigger-bbbbbbbb", meta("t"), None, false).expect("trigger");
+    assert!(reopened.contains(&hash), "the preserved pin still protects after reopen eviction");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn try_set_pinned_unknown_hash_is_false() {
+    let root = temp_root("pin-unknown");
+    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
+    let result = store.try_set_pinned("not-a-stored-hash", true).expect("unknown hash is not an IO error");
+    assert!(!result, "an unknown hash returns Ok(false)");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Tripwire: operator pin/unpin must survive close/reopen because the
+/// sidecar is the authority, not the handle that set the flag.
+#[test]
+fn try_set_pinned_survives_reopen_for_pin_and_unpin() {
+    let root = temp_root("try-pin-reopen");
+    let (h_pinned, h_released) = {
+        let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
+        let h_pinned = store.upload_with_pin(b"pinned-aaaa", meta("a"), None, false).expect("upload");
+        let h_released = store.upload_with_pin(b"released-aa", meta("b"), None, false).expect("upload");
+        assert!(store.try_set_pinned(&h_pinned, true).expect("pin persists"));
+        assert!(store.try_set_pinned(&h_released, true).expect("pin before unpin"));
+        assert!(store.try_set_pinned(&h_released, false).expect("unpin persists"));
+        (h_pinned, h_released)
+    };
+
+    let mut reopened: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::LruBudget(20)).expect("reopen");
+    // The released entry is unnamed and unpinned, so it is eligible. A
+    // trigger upload over a budget that cannot hold every entry evicts
+    // the oldest eligible candidate. `get` bumps recency; it does not
+    // make an entry LRU.
+    reopened.upload_with_pin(b"trigger-ccc", meta("t"), None, false).expect("trigger");
+    assert!(reopened.contains(&h_pinned), "a persisted pin still protects after reopen");
+    assert!(!reopened.contains(&h_released), "a persisted unpin returns the entry to the candidates");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Tripwire: legacy `set_pinned` may leave memory true after a failed
+/// sidecar write. Durable `try_set_pinned(true)` must still persist
+/// (and fail while the path is blocked) rather than shortcut on equal
+/// in-memory state.
+#[test]
+fn try_set_pinned_does_not_shortcut_equal_in_memory_state() {
+    let root = temp_root("pin-equal-state");
+    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
+    let hash = store.upload_with_pin(b"plain-aaaa", meta("a"), None, false).expect("upload");
+    occupy_sidecar_as_dir(store.root(), &hash);
+
+    assert!(store.set_pinned(&hash, true), "legacy set_pinned returns true after mutating memory");
+    store.try_set_pinned(&hash, true).expect_err("durable pin must still persist even when memory is already true");
+
+    restore_writable_sidecar_path(store.root(), &hash);
+    assert!(
+        store.try_set_pinned(&hash, true).expect("repair allows persist despite memory already true"),
+        "equal in-memory state still writes the sidecar"
+    );
+    drop(store);
+
+    let mut reopened: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::LruBudget(0)).expect("reopen");
+    assert!(reopened.contains(&hash), "the equal-state persist restored the entry");
+    reopened.upload_with_pin(b"trigger-bbbbbbbb", meta("t"), None, false).expect("trigger");
+    assert!(reopened.contains(&hash), "reopen confirms the sidecar actually recorded the pin");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Tripwire: a pin persistence failure is observable and must not claim
+/// success or change in-memory protection. Occupying the sidecar path
+/// with a directory forces `atomic_write` to fail without relying on
+/// permissions root can bypass.
+#[test]
+fn try_set_pinned_failure_leaves_in_memory_state_unchanged() {
+    let root = temp_root("pin-fail");
+    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::LruBudget(20)).expect("open store");
+    let hash = store.upload_with_pin(b"plain-aaaa", meta("a"), None, false).expect("upload");
+    occupy_sidecar_as_dir(store.root(), &hash);
+
+    let err = store.try_set_pinned(&hash, true).expect_err("a directory sidecar target is a persistence failure");
+    assert!(err.raw_os_error().is_some() || err.kind() != io::ErrorKind::Other, "the failure is an IO category: {err}");
+
+    store.upload_with_pin(b"trigger-bbbbbbbb", meta("t"), None, false).expect("trigger");
+    assert!(!store.contains(&hash), "a failed pin must leave the entry evictable");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Tripwire: a failed unpin must keep prior protection, including in
+/// memory, so a persistence miss cannot silently expose a pinned fixture.
+#[test]
+fn try_set_unpin_failure_keeps_prior_protection() {
+    let root = temp_root("unpin-fail");
+    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::LruBudget(20)).expect("open store");
+    let hash = store.upload_with_pin(b"pinned-aaaa", meta("a"), None, true).expect("pinned upload");
+    occupy_sidecar_as_dir(store.root(), &hash);
+
+    store.try_set_pinned(&hash, false).expect_err("a directory sidecar target is a persistence failure");
+    store.upload_with_pin(b"trigger-bbbbbbbb", meta("t"), None, false).expect("trigger");
+    assert!(store.contains(&hash), "a failed unpin must keep the in-memory pin");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Tripwire: a new `pin: true` upload whose sidecar cannot persist must
+/// not return a hash or point a name at content the store cannot pin.
+#[test]
+fn pin_true_new_upload_write_failure_does_not_return_a_hash() {
+    let root = temp_root("pin-new-fail");
+    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
+    let bytes = b"never-pinned";
+    let hash = hash_hex(bytes);
+    occupy_sidecar_as_dir(store.root(), &hash);
+
+    let result = store.upload_with_pin(bytes, meta("x"), Some("svc".to_owned()), true);
+    assert!(result.is_err(), "a pin:true sidecar failure must not succeed: {result:?}");
+    assert!(!store.contains(&hash), "the failed pin upload leaves the hash unindexed");
+    assert_eq!(store.name_for(&hash), None, "no name is pointed at an unpinned failed upload");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Tripwire: a dedup `pin: true` that cannot persist must not return a
+/// successful pinned hash or repoint a name.
+#[test]
+fn dedup_pin_true_failure_does_not_repoint_a_name() {
+    let root = temp_root("dedup-pin-fail");
+    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
+    let hash = store.upload_with_pin(b"shared-bytes", meta("a"), None, false).expect("first upload");
+    occupy_sidecar_as_dir(store.root(), &hash);
+
+    let result = store.upload_with_pin(b"shared-bytes", meta("a"), Some("svc".to_owned()), true);
+    assert!(result.is_err(), "a failed dedup pin must not succeed: {result:?}");
+    assert_eq!(store.name_for(&hash), None, "a failed dedup pin must not repoint a name");
     let _ = fs::remove_dir_all(&root);
 }

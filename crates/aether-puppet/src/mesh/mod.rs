@@ -16,7 +16,7 @@
 
 pub mod bvh;
 
-use aether_math::{Rigid, Vec3};
+use aether_math::{Aabb, Rigid, Vec3};
 
 use crate::deform::Skin;
 use bvh::{Bvh, SilhouetteBvh};
@@ -594,10 +594,12 @@ impl Mesh {
     }
 }
 
+/// The mesh's bounds as the loose `(min, max)` pair the mesh stores.
+/// An empty position list gives the inverted bounds of [`Aabb::EMPTY`],
+/// which reads as empty rather than as a box spanning the whole space.
 fn bounds_of(positions: &[Vec3]) -> (Vec3, Vec3) {
-    positions.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), p| {
-        (Vec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z)), Vec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z)))
-    })
+    let bounds = Aabb::from_points(positions);
+    (bounds.min, bounds.max)
 }
 
 fn mean_edge_length(positions: &[Vec3], faces: &[[u32; 3]]) -> f32 {

@@ -19,6 +19,8 @@
 //! wgpu a second way through `aether-text` -> `aether-render`, so hub
 //! and headless link it too. Decoupling them is future work.
 
+use std::slice;
+
 mod capture;
 mod material;
 mod pipeline;
@@ -31,6 +33,8 @@ mod targets;
 // `aether-render` (which depends on this crate) can score captures without a
 // dependency cycle. `pub` so the capture harness re-exports it unchanged.
 pub mod visual;
+
+use aether_math::Mat4;
 
 pub use capture::{CaptureMeta, encode_png, finish_capture, map_capture_rgba, prepare_capture_copy};
 pub use material::{
@@ -108,12 +112,7 @@ pub const COPY_ROW_ALIGN: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
 
 /// 4×4 identity matrix in column-major order — what the camera
 /// uniform holds before the first `aether.view_projection` mail arrives.
-pub const IDENTITY_VIEW_PROJ: [f32; 16] = [
-    1.0, 0.0, 0.0, 0.0, //
-    0.0, 1.0, 0.0, 0.0, //
-    0.0, 0.0, 1.0, 0.0, //
-    0.0, 0.0, 0.0, 1.0, //
-];
+pub const IDENTITY_VIEW_PROJ: [f32; 16] = Mat4::IDENTITY.to_cols_array();
 
 fn vertex_layout(array_stride: u64, attributes: &'static [wgpu::VertexAttribute]) -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout { array_stride, step_mode: wgpu::VertexStepMode::Vertex, attributes }
@@ -134,6 +133,71 @@ fn fragment_state<'a>(
         compilation_options: wgpu::PipelineCompilationOptions::default(),
         targets,
     }
+}
+
+/// Everything one pipeline in the [`render_pipeline`] shape differs from its
+/// siblings by. Eight knobs across six call sites in three modules, so they
+/// are named at each site rather than ordered.
+struct RenderPipelineSpec<'a> {
+    label: &'a str,
+    layout: &'a wgpu::PipelineLayout,
+    shader: &'a wgpu::ShaderModule,
+    /// The fragment entry point. The vertex entry is always `vs_main` — every
+    /// pipeline built here shares its stage's one vertex function.
+    fragment_entry: &'a str,
+    vertex_layout: &'a wgpu::VertexBufferLayout<'a>,
+    color_format: wgpu::TextureFormat,
+    blend: wgpu::BlendState,
+    /// The depth-stencil state the pass tests against, or `None` for the
+    /// overlay pipelines, which draw over an already-resolved world pass with
+    /// no depth interaction at all.
+    depth: Option<wgpu::DepthStencilState>,
+}
+
+/// One triangle-list render pipeline in the shape the material pass
+/// ([`material`], ADR-0140) and the overlay pass ([`quad`] / [`shape`],
+/// ADR-0105 / ADR-0213) both draw through: CCW winding, no culling, filled,
+/// multisampled at [`MSAA_SAMPLE_COUNT`], and one colour target of the spec's
+/// format composited under its blend.
+fn render_pipeline(device: &wgpu::Device, spec: RenderPipelineSpec<'_>) -> wgpu::RenderPipeline {
+    let fragment_targets = [Some(color_target_state(spec.color_format, spec.blend))];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(spec.label),
+        layout: Some(spec.layout),
+        vertex: wgpu::VertexState {
+            module: spec.shader,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: slice::from_ref(spec.vertex_layout),
+        },
+        fragment: Some(fragment_state(spec.shader, spec.fragment_entry, &fragment_targets)),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            // Overlay and material geometry is authored in a fixed winding and
+            // shouldn't be culled by face orientation.
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: spec.depth,
+        multisample: wgpu::MultisampleState { count: MSAA_SAMPLE_COUNT, ..wgpu::MultisampleState::default() },
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// A shader module for one overlay stage: [`OVERLAY_PROJECTION_WGSL`] followed
+/// by `body`. Concatenated at build time rather than copied into each `.wgsl`,
+/// so the `Viewport` uniform and the Screen/World projection every overlay
+/// stage shares are written once (ADR-0105 / ADR-0213).
+fn overlay_shader_module(device: &wgpu::Device, label: &str, body: &str) -> wgpu::ShaderModule {
+    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(format!("{OVERLAY_PROJECTION_WGSL}\n{body}").into()),
+    })
 }
 
 /// `pos vec3 + color vec3` interleaved vertex layout the shared
@@ -186,3 +250,11 @@ fn load_color_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassColorAttac
 /// pipelines that share the vertex layout (wireframe overlay, etc.)
 /// can reach for this directly.
 pub const MAIN_SHADER_WGSL: &str = include_str!("shader.wgsl");
+
+/// The overlay pass's shared vertex-stage projection: the `Viewport` uniform
+/// and `overlay_clip_position`, the Screen/World branch every overlay stage
+/// projects a vertex through (ADR-0105 / ADR-0213).
+/// [`overlay_shader_module`] prepends it to each stage's own source, so the
+/// projection is stated once and a change to it cannot land in one stage
+/// alone.
+const OVERLAY_PROJECTION_WGSL: &str = include_str!("overlay_projection.wgsl");

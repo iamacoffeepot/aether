@@ -131,6 +131,16 @@ fn validate_manifest(manifest: &BinaryManifest, raw: &serde_json::Value) -> Resu
     Ok(())
 }
 
+/// Path-free persistence error for pin/unpin sidecar writes. Names the
+/// operation and the IO category (plus an OS code when the host supplies
+/// one). Does not include `io::Error` Display or store paths.
+pub fn persist_pin_error(operation: &str, err: &io::Error) -> String {
+    err.raw_os_error().map_or_else(
+        || format!("{operation}: {:?}", err.kind()),
+        |code| format!("{operation}: {:?} (os error {code})", err.kind()),
+    )
+}
+
 /// Ingest the binary at `path` into `store` content-addressed,
 /// capturing its manifest via a one-time `<path> --describe` fork
 /// (ADR-0115, issue 1953). Shared by the `on_upload_binary` handler and
@@ -138,12 +148,17 @@ fn validate_manifest(manifest: &BinaryManifest, raw: &serde_json::Value) -> Resu
 /// or a human-readable error for an unreadable path, a `--describe`
 /// that failed / yielded no parseable manifest, or a store write that
 /// didn't land. Idempotent — identical bytes dedup to the same hash.
-pub fn ingest_binary(store: &mut ArtifactStore, path: &str, name: Option<String>) -> Result<String, String> {
+/// Bootstrap callers pass `pin: false`.
+pub fn ingest_binary(store: &mut ArtifactStore, path: &str, name: Option<String>, pin: bool) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| format!("reading binary path {path:?}: {e}"))?;
     let manifest = describe_binary(path)?;
-    store
-        .upload(&bytes, ArtifactKind::Binary, StoredManifest::Binary(manifest), name)
-        .map_err(|e| format!("storing binary {path:?} in the artifact store: {e}"))
+    store.upload_with_pin(&bytes, ArtifactKind::Binary, StoredManifest::Binary(manifest), name, pin).map_err(|e| {
+        if pin {
+            persist_pin_error("pinning uploaded binary", &e)
+        } else {
+            format!("storing binary {path:?} in the artifact store: {e}")
+        }
+    })
 }
 
 /// Bootstrap-ingest each chassis bin in `paths` into `store`, naming
@@ -156,7 +171,7 @@ pub fn ingest_binary(store: &mut ArtifactStore, path: &str, name: Option<String>
 pub fn bootstrap_ingest(store: &mut ArtifactStore, paths: &HashSet<String>) {
     for path in paths {
         let name = Path::new(path).file_stem().and_then(|stem| stem.to_str()).map(str::to_owned);
-        match ingest_binary(store, path, name) {
+        match ingest_binary(store, path, name, false) {
             Ok(hash) => tracing::info!(
                 target: "aether_substrate::fleet_server",
                 path = path.as_str(),
@@ -178,13 +193,43 @@ pub fn bootstrap_ingest(store: &mut ArtifactStore, paths: &HashSet<String>) {
 /// no execution step. Returns the stored content hash, or a
 /// human-readable error for an unreadable path, an unparseable wasm, or
 /// a store write that didn't land. Idempotent — identical bytes dedup to
-/// the same hash.
-pub fn ingest_component(store: &mut ArtifactStore, path: &str, name: Option<String>) -> Result<String, String> {
+/// the same hash. Bootstrap-equivalent callers pass `pin: false`.
+pub fn ingest_component(
+    store: &mut ArtifactStore,
+    path: &str,
+    name: Option<String>,
+    pin: bool,
+) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| format!("reading component path {path:?}: {e}"))?;
     let manifest = component_manifest(&bytes).map_err(|e| format!("reading component manifest from {path:?}: {e}"))?;
-    store
-        .upload(&bytes, ArtifactKind::Component, StoredManifest::Component(manifest), name)
-        .map_err(|e| format!("storing component {path:?} in the artifact store: {e}"))
+    store.upload_with_pin(&bytes, ArtifactKind::Component, StoredManifest::Component(manifest), name, pin).map_err(
+        |e| {
+            if pin {
+                persist_pin_error("pinning uploaded component", &e)
+            } else {
+                format!("storing component {path:?} in the artifact store: {e}")
+            }
+        },
+    )
+}
+
+/// Persist an operator pin/unpin on an exact stored content hash.
+/// `Ok` is the hash and the requested flag after a successful sidecar
+/// write. Unknown hashes and persistence failures are `Err`; a failed
+/// unpin leaves prior protection in place.
+pub fn set_artifact_pinned(store: &mut ArtifactStore, hash: &str, pinned: bool) -> Result<(String, bool), String> {
+    match store.try_set_pinned(hash, pinned) {
+        Ok(true) => Ok((hash.to_owned(), pinned)),
+        Ok(false) => Err(format!("no stored artifact has hash {hash:?}")),
+        Err(e) => Err(persist_pin_error(
+            if pinned {
+                "pinning artifact"
+            } else {
+                "unpinning artifact"
+            },
+            &e,
+        )),
+    }
 }
 
 /// Resolve a [`ComponentSelector`] against `store` to its wasm bytes +

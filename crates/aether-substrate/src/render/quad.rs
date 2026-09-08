@@ -18,8 +18,8 @@
 
 use super::shape::{SHAPE_VERTEX_BUFFER_BYTES, ShapePipeline, build_shape_pipeline};
 use super::targets::Targets;
+use aether_math::Rect2;
 use std::iter;
-use std::slice;
 
 /// Bytes per expanded quad vertex: `anchor vec3<f32>` (12) +
 /// `offset_px vec2<f32>` (8) + `uv vec2<f32>` (8) + `tint vec4<f32>`
@@ -223,17 +223,13 @@ fn build_sampler(device: &wgpu::Device, label: &'static str, filter: wgpu::Filte
 // Single boot path: layouts, sampler, uniform, pipeline, vertex buffer
 // all tied together, mirroring `build_main_pipeline`. Splitting would
 // thread the same handles around without saving readability.
-#[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn build_quad_pipeline(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
     texture_bindings: &TextureBindings,
 ) -> QuadPipeline {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("aether quad shader"),
-        source: wgpu::ShaderSource::Wgsl(QUAD_SHADER_WGSL.into()),
-    });
+    let shader = super::overlay_shader_module(device, "aether quad shader", QUAD_SHADER_WGSL);
 
     let viewport_bind_group_layout =
         super::uniform_bind_group_layout(device, "quad viewport bind group layout", QUAD_UNIFORM_BYTES);
@@ -278,40 +274,23 @@ pub fn build_quad_pipeline(
 
     // One pipeline per blend. Everything else — layout, shader, vertex
     // layout, depth, multisample — is shared, so the pair costs a second
-    // pipeline object and nothing at record time but a rebind.
+    // pipeline object and nothing at record time but a rebind. Overlay quads
+    // draw on top of the world pass with no depth interaction at all (the
+    // main pass already resolved depth), so neither takes a depth state.
     let build = |label, blend| {
-        let fragment_targets = [Some(super::color_target_state(color_format, blend))];
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: slice::from_ref(&vertex_layout),
+        super::render_pipeline(
+            device,
+            super::RenderPipelineSpec {
+                label,
+                layout: &pipeline_layout,
+                shader: &shader,
+                fragment_entry: "fs_main",
+                vertex_layout: &vertex_layout,
+                color_format,
+                blend,
+                depth: None,
             },
-            fragment: Some(super::fragment_state(&shader, "fs_main", &fragment_targets)),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                // Quads are authored as two triangles in a fixed winding;
-                // overlay UI shouldn't be culled by face orientation.
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            // Overlay quads draw on top of the world pass with no depth
-            // interaction at all — the main pass already resolved depth.
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: super::MSAA_SAMPLE_COUNT,
-                ..wgpu::MultisampleState::default()
-            },
-            multiview_mask: None,
-            cache: None,
-        })
+        )
     };
     let straight = build("aether quad pipeline", wgpu::BlendState::ALPHA_BLENDING);
     let premultiplied = build("aether quad premultiplied pipeline", wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
@@ -729,21 +708,16 @@ pub fn record_quad_overlay_pass(
     }
 }
 
-#[allow(clippy::cast_precision_loss)]
+/// The scissor rect a draw's optional clip names, or `None` when the
+/// clip covers no pixel of the target and the draw should be skipped.
+/// An absent clip is the whole target.
+///
+/// `aether-render`'s observation sink applies the same contract through
+/// the same [`Rect2::clamp_to_pixels`], so a harness-reported batch and
+/// a GPU-recorded one cannot disagree about what survives.
 fn clamped_scissor(clip: Option<[f32; 4]>, target_width: u32, target_height: u32) -> Option<[u32; 4]> {
     let Some([x, y, width, height]) = clip else {
         return Some([0, 0, target_width, target_height]);
     };
-    if !x.is_finite() || !y.is_finite() || !width.is_finite() || !height.is_finite() {
-        return None;
-    }
-    let min_x = x.max(0.0).min(target_width as f32).floor();
-    let min_y = y.max(0.0).min(target_height as f32).floor();
-    let max_x = (x + width).max(0.0).min(target_width as f32).ceil();
-    let max_y = (y + height).max(0.0).min(target_height as f32).ceil();
-    if max_x <= min_x || max_y <= min_y {
-        return None;
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    Some([min_x as u32, min_y as u32, (max_x - min_x) as u32, (max_y - min_y) as u32])
+    Rect2::from_xywh(x, y, width, height).clamp_to_pixels(target_width, target_height)
 }

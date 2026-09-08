@@ -6,9 +6,8 @@
 
 use super::quad::CompositeBlend;
 use super::targets::Targets;
-use super::{DEPTH_FORMAT, MSAA_SAMPLE_COUNT, Pipeline};
+use super::{DEPTH_FORMAT, Pipeline};
 use crate::render::TextureBindings;
-use std::slice;
 
 pub const MATERIAL_VERTEX_STRIDE: u64 = 20;
 pub const MATERIAL_VERTICES_PER_RECT: usize = 6;
@@ -75,36 +74,33 @@ pub fn build_material_pipelines(
         immediate_size: 0,
     });
 
-    let textured = material_pipeline(
-        device,
-        &shader,
-        &textured_layout,
-        "aether textured material pipeline",
-        color_format,
-        "fs_textured",
-        &vertex_layout,
-        wgpu::BlendState::ALPHA_BLENDING,
-    );
-    let textured_premultiplied = material_pipeline(
-        device,
-        &shader,
-        &textured_layout,
+    // The three differ by layout, fragment entry, and blend; everything else —
+    // the vertex layout, the shader, and the depth state — is shared.
+    let build = |label, layout, fragment_entry, blend| {
+        super::render_pipeline(
+            device,
+            super::RenderPipelineSpec {
+                label,
+                layout,
+                shader: &shader,
+                fragment_entry,
+                vertex_layout: &vertex_layout,
+                color_format,
+                blend,
+                depth: Some(material_depth()),
+            },
+        )
+    };
+    let textured =
+        build("aether textured material pipeline", &textured_layout, "fs_textured", wgpu::BlendState::ALPHA_BLENDING);
+    let textured_premultiplied = build(
         "aether textured material premultiplied pipeline",
-        color_format,
+        &textured_layout,
         "fs_textured",
-        &vertex_layout,
         wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
     );
-    let coverage = material_pipeline(
-        device,
-        &shader,
-        &coverage_layout,
-        "aether coverage material pipeline",
-        color_format,
-        "fs_coverage",
-        &vertex_layout,
-        wgpu::BlendState::ALPHA_BLENDING,
-    );
+    let coverage =
+        build("aether coverage material pipeline", &coverage_layout, "fs_coverage", wgpu::BlendState::ALPHA_BLENDING);
 
     let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("aether material vertex buffer"),
@@ -196,51 +192,17 @@ fn material_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     super::vertex_layout(MATERIAL_VERTEX_STRIDE, ATTRIBUTES)
 }
 
-// Seven descriptor knobs plus the blend, all of them things one
-// pipeline differs from its sibling by; a struct for the three call
-// sites in this module would name them twice and clarify nothing.
-#[allow(clippy::too_many_arguments)]
-fn material_pipeline(
-    device: &wgpu::Device,
-    shader: &wgpu::ShaderModule,
-    layout: &wgpu::PipelineLayout,
-    label: &'static str,
-    color_format: wgpu::TextureFormat,
-    fragment_entry: &'static str,
-    vertex_layout: &wgpu::VertexBufferLayout<'_>,
-    blend: wgpu::BlendState,
-) -> wgpu::RenderPipeline {
-    let fragment_targets = [Some(super::color_target_state(color_format, blend))];
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(label),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: Some("vs_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: slice::from_ref(vertex_layout),
-        },
-        fragment: Some(super::fragment_state(shader, fragment_entry, &fragment_targets)),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None,
-            polygon_mode: wgpu::PolygonMode::Fill,
-            unclipped_depth: false,
-            conservative: false,
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: Some(false),
-            depth_compare: Some(wgpu::CompareFunction::LessEqual),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState { count: MSAA_SAMPLE_COUNT, ..wgpu::MultisampleState::default() },
-        multiview_mask: None,
-        cache: None,
-    })
+/// The material pass's depth state: it tests against the depth buffer the main
+/// pass wrote so world geometry occludes a material rect, and writes none of
+/// its own so overlapping rects composite in submission order.
+fn material_depth() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: DEPTH_FORMAT,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
 }
 
 pub fn material_params_offset(index: usize) -> Option<u32> {
