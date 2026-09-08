@@ -29,7 +29,6 @@
 use std::fs;
 
 use aether_actor::Addressable;
-use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::keycode::{KEY_DOWN, KEY_TAB};

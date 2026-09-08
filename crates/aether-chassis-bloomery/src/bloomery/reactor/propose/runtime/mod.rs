@@ -25,8 +25,8 @@ use aether_bloomery::{
     Admit, BloomDraft, BloomSpec, ConfigKind, ConfigRegistry, Correspondence, Digest, Event, Fact, Forecast,
     IdempotencyKey, OperatorProposal, ProposalPayload, SharedCorrespondence, Topic, WorkpieceId, digest_of, encode_hex,
 };
+use aether_data::MailboxId;
 use aether_data::wire::{from_bytes, to_vec};
-use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;

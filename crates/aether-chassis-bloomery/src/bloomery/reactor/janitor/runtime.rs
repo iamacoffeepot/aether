@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use aether_actor::runtime;
 use aether_bloomery::BloomId;
-use aether_data::{Kind, MailboxId};
+use aether_data::MailboxId;
 use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;

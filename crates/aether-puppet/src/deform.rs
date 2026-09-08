@@ -960,7 +960,7 @@ pub(crate) fn npy(values: &[f32], shape: (usize, usize)) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    use aether_data::{Kind, Schema, SchemaType};
+    use aether_data::SchemaType;
 
     use crate::feature::{FeatureClass, Pen, SurfacePoint};
     use crate::weld;

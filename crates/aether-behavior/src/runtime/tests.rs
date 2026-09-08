@@ -1,7 +1,5 @@
 use alloc::string::String;
 
-use aether_data::Kind;
-
 use super::{BehaviorCtx, MirrorStore, run_filter};
 use crate::envelope::{EffectTarget, Verdict};
 

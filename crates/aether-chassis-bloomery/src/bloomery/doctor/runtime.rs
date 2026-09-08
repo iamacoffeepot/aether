@@ -14,7 +14,7 @@ use aether_bloomery::{
     WorkpieceId, decode_recorded_decisions, decode_recorded_event, is_active_unlanded,
 };
 use aether_bloomery_github::GitObjectId;
-use aether_data::{Kind, MailboxId};
+use aether_data::MailboxId;
 use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;

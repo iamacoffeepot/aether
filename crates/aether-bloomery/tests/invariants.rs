@@ -27,7 +27,6 @@ use aether_bloomery::{
     VerifyFailureSet, grade, reduce,
 };
 use aether_bloomery::{BloomRecord, WorkpieceId};
-use aether_data::Kind;
 use aether_data::wire::to_vec;
 use common::{
     claim, digest, draft, draft_with_catalog, event, membership, observing, sealed_and_resolved, splice_bloom, step,
@@ -4089,9 +4088,7 @@ mod sealed_config {
         BloomDraft, ConfigKind, ConfigRegistry, Event, Fact, IdempotencyKey, Membership, Outcome, ResolvedConfigs,
         SealError, Snapshot, SpendWindow, Unproducible, reduce,
     };
-    use aether_data::Kind;
     use aether_data::wire::to_vec;
-    use serde::{Deserialize, Serialize};
 
     use crate::common::{approved, digest, membership};
 

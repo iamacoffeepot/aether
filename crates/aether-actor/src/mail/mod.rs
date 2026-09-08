@@ -384,7 +384,7 @@ mod tests {
     use aether_data::KindId as DataKindId;
     use alloc::string::String;
     use alloc::vec::Vec;
-    use serde::{Deserialize, Serialize};
+    use serde::Serialize;
 
     /// Hand-rolled `Kind` with a stable test sentinel id so the
     /// decode tests can fabricate mismatched `Mail` frames without

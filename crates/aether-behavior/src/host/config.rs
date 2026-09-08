@@ -13,7 +13,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_data::{Kind, KindId, Schema};
+use aether_data::{KindId, Schema};
 use serde::{Deserialize, Serialize};
 
 /// The wrapped child the host interposes on: the child actor's type tag

@@ -13,7 +13,6 @@ use super::runtime::{
 };
 use aether_bloomery::persisted::DECISIONS;
 use aether_bloomery::{MembershipMutation, OutboxPayload, Topic, ViewDocument, WorkpieceId, decode_row, encode_row};
-use aether_data::Kind;
 
 fn memory() -> SqliteStore {
     SqliteStore::open(":memory:").unwrap()
@@ -931,9 +930,8 @@ fn the_newest_candidate_hash_is_keyed_by_workpiece_not_bloom() {
 // it resolves is the contract and which kind is incidental.
 mod sealed_config {
     use aether_bloomery::{ConfigKind, ConfigRegistry, ConfigScopes, config_address};
-    use aether_data::Kind;
     use aether_data::wire::to_vec;
-    use serde::{Deserialize, Serialize};
+    use serde::Serialize;
 
     use super::memory;
     use aether_bloomery::ConfigResolveError;
@@ -1060,7 +1058,6 @@ mod pre_migration_price_table {
         IdempotencyKey, Membership, Outcome, PriceTable, ResolvedConfigs, SealedPriceTable, Snapshot, WorkpieceId,
         config_address,
     };
-    use aether_data::Kind;
     use aether_data::wire::{from_bytes, to_vec};
     use serde::Serialize;
 
@@ -1627,7 +1624,6 @@ mod schema_digest_migration {
         ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, Decisions, Digest, Event, Fact, IdempotencyKey,
         Outcome, SpendCeiling, decode_recorded_decisions, decode_recorded_event,
     };
-    use aether_data::Kind;
     use aether_data::wire::to_vec;
 
     use super::{SqliteStore, StoreBackend, write};

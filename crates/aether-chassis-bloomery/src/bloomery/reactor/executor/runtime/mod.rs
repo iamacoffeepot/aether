@@ -53,8 +53,8 @@ use aether_bloomery::{
 };
 use aether_bloomery_git::command;
 use aether_bloomery_github::{GitObjectId, candidate_ref_name, member_checkpoint_ref_name, short_hex};
+use aether_data::MailboxId;
 use aether_data::wire::{from_bytes, to_vec};
-use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;

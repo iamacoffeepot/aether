@@ -2,8 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use aether_data::Kind;
-
 /// `POST /archive` — run the between-blooms archive pass.
 #[aether_data::kind(name = "aether.bloomery.janitor.archive_records", default)]
 pub struct ArchiveRecords {}

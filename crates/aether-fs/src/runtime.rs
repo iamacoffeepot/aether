@@ -784,7 +784,6 @@ mod tests {
     // the shared input/output kind wired through the `double` transform.
 
     use aether_data::transform;
-    use serde::{Deserialize, Serialize};
 
     /// Structured number kind — the fetch-fold fixtures' transform
     /// input + output. The extra `tag: u32` makes the `{ u64, u32 }`
@@ -837,7 +836,6 @@ mod tests {
     }
 
     use super::super::{FsFetch, FsFetchError, FsFetchResult, FsFoldError};
-    use aether_data::Kind;
     use aether_substrate::transform::TransformRegistry;
 
     /// Unit test: `on_fetch` with empty transforms returns raw file bytes.

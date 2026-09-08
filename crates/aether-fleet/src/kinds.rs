@@ -13,7 +13,7 @@
 //! are the MCP harness's RPC protocol, and `aether-mcp` consumes them
 //! while being barred from depending on a cap crate.
 
-use aether_data::{Kind, KindId, MailboxId, Schema};
+use aether_data::{KindId, MailboxId};
 use aether_kinds::DeathReason;
 
 /// `aether.fleet.forward` — hand a per-engine proxy

@@ -1,6 +1,6 @@
 //! `aether.rpc` mail kinds owned by the RPC server capability (ADR-0121).
 
-use aether_data::{Kind, KindId, MailboxId, Schema};
+use aether_data::{KindId, MailboxId};
 
 /// `aether.rpc.inbound_ready` — sidecar accept / read thread →
 /// `RpcServerCapability` dispatcher wake. Issue 750. Mirrors the

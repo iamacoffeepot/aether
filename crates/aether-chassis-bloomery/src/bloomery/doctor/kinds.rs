@@ -5,8 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use aether_data::Kind;
-
 use super::{CheckResult, DoctorReport};
 
 /// One invariant row on the doctor snapshot wire. Always positional; not a Kind.
