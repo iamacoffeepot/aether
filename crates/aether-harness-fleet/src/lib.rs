@@ -392,7 +392,7 @@ impl FleetHarness {
         let replies = self.call(
             None,
             "aether.fleet",
-            &UploadBinary { staged_path: staged_path.to_owned(), name: name.map(str::to_owned) },
+            &UploadBinary { staged_path: staged_path.to_owned(), name: name.map(str::to_owned), pin: false },
         );
         let payload = single_reply(&replies, "UploadBinary");
         UploadBinaryResult::decode_from_bytes(&payload).expect("undecodable UploadBinaryResult")
@@ -416,7 +416,7 @@ impl FleetHarness {
         let replies = self.call(
             None,
             "aether.fleet",
-            &UploadComponent { staged_path: staged_path.to_owned(), name: name.map(str::to_owned) },
+            &UploadComponent { staged_path: staged_path.to_owned(), name: name.map(str::to_owned), pin: false },
         );
         let payload = single_reply(&replies, "UploadComponent");
         UploadComponentResult::decode_from_bytes(&payload).expect("undecodable UploadComponentResult")

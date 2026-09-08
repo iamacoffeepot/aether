@@ -20,8 +20,9 @@ use super::{ConfigKind, config_address};
 use crate::digest::digest_of;
 use crate::ids::StageId;
 use crate::values::{
-    AgentProfile, AgentSelection, ApprovalPolicy, ApprovalRule, Harness, LongContextBand, ModelOverride, PriceRates,
-    PriceTable, ReasoningEffort, StageBinding, StageCatalog, StageOverride, Tier, ToolPolicy,
+    AgentProfile, AgentSelection, ApprovalPolicy, ApprovalRule, Harness, LongContextBand, ModelOverride,
+    ModelProcessInstructions, PriceRates, PriceTable, ReasoningEffort, StageBinding, StageCatalog, StageOverride, Tier,
+    ToolPolicy,
 };
 
 // Tripwire: the sealed registry address and the typed re-derivation must be
@@ -122,4 +123,24 @@ fn sealed_config_kinds_share_one_address_across_encoders() {
     };
     assert_encoders_agree(&catalog);
     assert_eq!(digest_of(&catalog), catalog.address());
+
+    assert_encoders_agree(&ModelProcessInstructions {
+        conventions: String::from("conventions"),
+        construct: String::from("construct"),
+        review: String::from("review"),
+        scope: String::from("scope"),
+        subject_unspecified: String::from("subject unspecified"),
+        subject_at_commit: String::from("subject at commit"),
+        seeded_state: String::from("seeded state"),
+        construct_lint_repair: String::from("lint repair"),
+        review_candidate_working_tree: String::from("working tree"),
+        review_candidate_committed: String::from("committed range"),
+        review_composition_contract: String::from("composition"),
+        scope_emission: String::from("emission"),
+        aggregate_full_pass: String::from("full pass"),
+        aggregate_delta_confirm: String::from("delta confirm"),
+        attribute_findings: String::from("attribute"),
+        fold_conflict_contract: String::from("fold conflict"),
+        composition_refine_order: String::from("refine order"),
+    });
 }

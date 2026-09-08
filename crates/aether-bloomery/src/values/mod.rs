@@ -24,6 +24,7 @@ mod narrowing;
 mod operator;
 mod orphan_claim;
 mod price;
+mod process_instructions;
 mod profile;
 mod proof;
 mod question;
@@ -85,6 +86,7 @@ pub use orphan_claim::{
     ORPHAN_CLAIM_RELEASE_WORDS, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord,
 };
 pub use price::{LongContextBand, PriceRates, PriceTable, SealedPriceTable};
+pub use process_instructions::{ModelProcessInstructions, ModelProcessInstructionsError};
 pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use proof::{VerifiedTree, VerifyGateSet, VerifyProof, VerifyReuse};
 pub use question::Question;

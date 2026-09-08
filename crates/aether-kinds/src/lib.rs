@@ -329,12 +329,18 @@ mod engine {
     /// sha256-hashes the bytes, dedups against the existing store, forks
     /// `staged_path --describe` to capture its [`BinaryManifest`], and
     /// stores both. `name`, when set, points that human-readable name at
-    /// the resulting hash. Reply: [`UploadBinaryResult`].
+    /// the resulting hash. `pin` records durable explicit eviction
+    /// protection; `false` (the JSON default) never clears an existing
+    /// pin. Adding this field changes the kind schema, so fleet and MCP
+    /// must ship the same release — it is JSON defaulting, not old kind-id
+    /// compatibility. Reply: [`UploadBinaryResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.fleet.upload_binary")]
     pub struct UploadBinary {
         pub staged_path: String,
         pub name: Option<String>,
+        #[serde(default)]
+        pub pin: bool,
     }
 
     /// Reply to [`UploadBinary`] (ADR-0115, issue 1953). `Ok` carries the
@@ -478,12 +484,18 @@ mod engine {
     /// straight from the wasm (no execution step — `aether.kinds.inputs` +
     /// `aether.namespace` + the `producers` section), and stores both.
     /// `name`, when set, points that human-readable name at the resulting
-    /// hash. Reply: [`UploadComponentResult`].
+    /// hash. `pin` records durable explicit eviction protection; `false`
+    /// (the JSON default) never clears an existing pin. Adding this field
+    /// changes the kind schema, so fleet and MCP must ship the same
+    /// release — it is JSON defaulting, not old kind-id compatibility.
+    /// Reply: [`UploadComponentResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.fleet.upload_component")]
     pub struct UploadComponent {
         pub staged_path: String,
         pub name: Option<String>,
+        #[serde(default)]
+        pub pin: bool,
     }
 
     /// Reply to [`UploadComponent`] (ADR-0116, issue 1956). `Ok` carries the
@@ -495,6 +507,29 @@ mod engine {
     #[kind(name = "aether.fleet.upload_component_result")]
     pub enum UploadComponentResult {
         Ok { hash: String, name: Option<String> },
+        Err { error: String },
+    }
+
+    /// `aether.fleet.set_artifact_pinned` — set or clear durable explicit
+    /// eviction protection on one stored content hash (ADR-0115). Operates
+    /// only on an exact stored hash; names are never resolved. `pinned:
+    /// true` is pin; `pinned: false` is unpin of the explicit flag only —
+    /// a name still protects the hash. Reply: [`SetArtifactPinnedResult`].
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.fleet.set_artifact_pinned")]
+    pub struct SetArtifactPinned {
+        pub hash: String,
+        pub pinned: bool,
+    }
+
+    /// Reply to [`SetArtifactPinned`]. `Ok` is returned only after the
+    /// sidecar write succeeded. An unknown hash is `Err`; a persistence
+    /// failure is `Err` and leaves prior protection unchanged. Equal
+    /// in-memory state still requires a successful persist.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.fleet.set_artifact_pinned_result")]
+    pub enum SetArtifactPinnedResult {
+        Ok { hash: String, pinned: bool },
         Err { error: String },
     }
 
