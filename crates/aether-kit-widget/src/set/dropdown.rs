@@ -46,8 +46,8 @@ use aether_text::FontMetricsResult;
 
 use crate::set::{
     ActivationArms, WidgetDefaults, accept_font_metrics_result, apply_text_theme, clamp_optional_index,
-    clamp_optional_selection, elide_to_width, measured_text_width, pump_text_font_metrics, push_control_outlines,
-    push_rect_border, quad, reply_if_hidden, text_origin_y,
+    clamp_optional_selection, elide_to_width, measured_text_width, plate, pump_text_font_metrics,
+    push_control_outlines, quad, raised_plate, reply_if_hidden, ring, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
@@ -449,7 +449,15 @@ impl DropdownWidget {
         let size = self.theme.label_size_pixels;
 
         let mut items = Vec::new();
-        items.push(quad(0.0, 0.0, width, height, self.theme.fill(self.theme.surface_raised, theme_state)));
+        items.push(plate(
+            &self.theme,
+            0.0,
+            0.0,
+            width,
+            height,
+            Some(self.theme.fill(self.theme.surface_raised, theme_state)),
+            None,
+        ));
         let (text, ink) = self.closed_row_text();
         let run = self.closed_row_run(text);
         if !run.is_empty() {
@@ -492,7 +500,7 @@ impl DropdownWidget {
         let list_height = rows as f32 * row_height;
         let first_index = self.first_row();
         let mut items = Vec::with_capacity(rows.saturating_mul(2).saturating_add(5));
-        items.push(quad(0.0, top, width, list_height, self.theme.surface_raised));
+        items.push(raised_plate(&self.theme, 0.0, top, width, list_height, self.theme.surface_raised, None));
         for (row_offset, option) in self.options[first_index..first_index + rows].iter().enumerate() {
             let index = first_index + row_offset;
             let row_y = (row_offset as f32).mul_add(row_height, top);
@@ -527,7 +535,7 @@ impl DropdownWidget {
                 clip: None,
             });
         }
-        push_rect_border(&mut items, 0.0, top, width, list_height, 1.0, self.theme.outline);
+        items.push(ring(&self.theme, 0.0, top, width, list_height, self.theme.stroke_width_pixels, self.theme.outline));
         items
     }
 }
@@ -979,7 +987,10 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 WidgetDrawItem::Text { text, .. } => Some(text.as_str()),
-                WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+                WidgetDrawItem::Quad { .. }
+                | WidgetDrawItem::TexturedQuad { .. }
+                | WidgetDrawItem::Shape { .. }
+                | WidgetDrawItem::Triangle { .. } => None,
             })
             .collect()
     }

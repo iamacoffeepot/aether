@@ -433,7 +433,9 @@ mod tests {
             .map(|item| match item {
                 WidgetDrawItem::Quad { x, .. }
                 | WidgetDrawItem::TexturedQuad { x, .. }
-                | WidgetDrawItem::Text { x, .. } => *x,
+                | WidgetDrawItem::Text { x, .. }
+                | WidgetDrawItem::Shape { x, .. } => *x,
+                WidgetDrawItem::Triangle { a, .. } => a.x,
             })
             .collect();
         assert_eq!(
@@ -532,7 +534,10 @@ mod tests {
         for item in &flat.items {
             let (x, tag, clip) = match item {
                 WidgetDrawItem::Quad { x, color, clip, .. } => (*x, color.r, *clip),
-                WidgetDrawItem::TexturedQuad { .. } | WidgetDrawItem::Text { .. } => {
+                WidgetDrawItem::TexturedQuad { .. }
+                | WidgetDrawItem::Text { .. }
+                | WidgetDrawItem::Shape { .. }
+                | WidgetDrawItem::Triangle { .. } => {
                     unreachable!("test builds only solid quads")
                 }
             };
@@ -593,7 +598,10 @@ mod tests {
                 .iter()
                 .map(|item| match item {
                     WidgetDrawItem::Quad { color, .. } => color.r,
-                    WidgetDrawItem::TexturedQuad { .. } | WidgetDrawItem::Text { .. } => {
+                    WidgetDrawItem::TexturedQuad { .. }
+                    | WidgetDrawItem::Text { .. }
+                    | WidgetDrawItem::Shape { .. }
+                    | WidgetDrawItem::Triangle { .. } => {
                         unreachable!("test builds only solid quads")
                     }
                 })
@@ -638,7 +646,10 @@ mod tests {
             .iter()
             .map(|item| match item {
                 WidgetDrawItem::Quad { color, .. } => color.r,
-                WidgetDrawItem::TexturedQuad { .. } | WidgetDrawItem::Text { .. } => {
+                WidgetDrawItem::TexturedQuad { .. }
+                | WidgetDrawItem::Text { .. }
+                | WidgetDrawItem::Shape { .. }
+                | WidgetDrawItem::Triangle { .. } => {
                     unreachable!("test builds only solid quads")
                 }
             })
