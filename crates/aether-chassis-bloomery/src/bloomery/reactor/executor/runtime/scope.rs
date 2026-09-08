@@ -30,7 +30,7 @@
 use aether_bloomery::{BloomId, ConfigRegistry, Digest, Topic, WorkHandle, control::ScopeDispatchPayload};
 use aether_data::wire::from_bytes;
 
-use crate::bloomery::ExecutorShell;
+use crate::bloomery::executor::ExecutorPort;
 use crate::bloomery::intake::{DispatchRecord, dispatch_and_record, dispatch_nonce};
 use crate::bloomery::outbox::TopicOutbox;
 use crate::store::StoreBackend;
@@ -62,7 +62,7 @@ pub(super) fn scope_run_bloom() -> Digest {
 /// drain returns.
 pub(super) fn drain_and_dispatch_scope(
     store: &mut dyn StoreBackend,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
     let entries = store.drain_topic(Topic::ScopeDispatch)?;
