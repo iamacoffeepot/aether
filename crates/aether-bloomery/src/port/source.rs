@@ -174,7 +174,8 @@ pub enum ClaimOutcome {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ClaimReleaseOutcome {
     /// The expected holder held the ref and it was released — CAS to a
-    /// tombstone (the linearization point), then the name-only cleanup delete.
+    /// tombstone (the linearization point), then an expected-sha cleanup delete
+    /// that spares a replacement claim which reacquired the name in between.
     Released,
     /// The typed ref does not exist, or was already tombstoned by an interrupted
     /// release. Idempotent terminal success.
@@ -196,7 +197,7 @@ pub enum ClaimHolder {
     Held(BloomId),
     /// The ref points at the all-zero tombstone commit an interrupted
     /// `release_seal` left after its CAS-to-tombstone linearized but its
-    /// name-only cleanup delete did not run — a sweep-me marker, not a holder.
+    /// cleanup delete did not run — a sweep-me marker, not a holder.
     Tombstoned,
 }
 
@@ -447,7 +448,7 @@ pub trait SourceBackend {
 
     /// Release `bloom`'s claim refs — the member `workpieces` plus the admission
     /// ref — each by a fast-forward CAS to a tombstone commit (the linearization
-    /// point) followed by a name-only cleanup delete (ADR-0150 §The claim
+    /// point) followed by an expected-sha cleanup delete (ADR-0150 §The claim
     /// registry, amended PR #3539). The CAS read-guard retires the check-then-
     /// delete TOCTOU: a ref held by another bloom is spared and reported as
     /// [`ClaimOutcome::Held`], never deleted.
@@ -498,7 +499,7 @@ pub trait SourceBackend {
     ///
     /// - **Tombstone sweep** — `expected_holder` is `None`: a
     ///   [`Tombstoned`](ClaimHolder::Tombstoned) ref is deleted (finishing an
-    ///   interrupted release's name-only cleanup), and a non-tombstoned ref is
+    ///   interrupted release's cleanup), and a non-tombstoned ref is
     ///   spared as [`ClaimReleaseOutcome::Changed`] rather than touched. Safe for
     ///   any instance — a tombstone *is* the released state.
     /// - **Stranded-drop release** — `expected_holder` is `Some(bloom)`: a ref
