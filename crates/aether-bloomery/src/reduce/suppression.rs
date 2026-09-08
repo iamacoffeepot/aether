@@ -125,7 +125,7 @@ pub(super) fn reduce_suppression_disposition(
         *bloom,
         workpiece,
         member.scope_revision,
-        progress,
+        &progress,
         DispatchTargets { subject: candidate.tree, checkout: candidate.checkout },
         Some(candidate.tree),
         SealedLine::of(record, member),

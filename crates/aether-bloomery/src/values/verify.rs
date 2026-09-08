@@ -425,16 +425,18 @@ const VERIFY_FAILURE_NAMES: [&str; 10] = [
 ///
 /// The mask is 16 bits and this binary compiles ten of them, so six slots
 /// cover every identity a sealed vocabulary may still append.
-const DECLARED_SLOTS: usize = MAX_VERIFIER_IDENTITIES - VerifyFailure::ALL.len();
+const DECLARED_SLOT_COUNT: usize = 6;
+const DECLARED_SLOT_LIMIT: u8 = 6;
 
-const _: () = assert!(DECLARED_SLOTS == (POSITION_COUNT - COMPILED_POSITIONS) as usize);
+const _: () = assert!(DECLARED_SLOT_COUNT == MAX_VERIFIER_IDENTITIES - VerifyFailure::ALL.len());
+const _: () = assert!(DECLARED_SLOT_LIMIT == POSITION_COUNT - COMPILED_POSITIONS);
 
 /// An unused sidecar slot. Position 0 is [`VerifyFailure::Preflight`]'s bit, so
 /// a vacant entry is never read as a declared member; [`VerifyFailureSet`]
 /// walks only `declared_len` slots.
 const VACANT: DeclaredIdentity = DeclaredIdentity { position: 0, name: IdentityName::EMPTY };
 
-const VACANT_DECLARED: [DeclaredIdentity; DECLARED_SLOTS] = [VACANT; DECLARED_SLOTS];
+const VACANT_DECLARED: [DeclaredIdentity; DECLARED_SLOT_COUNT] = [VACANT; DECLARED_SLOT_COUNT];
 
 /// A deduplicated verifier-failure set with one canonical order and mask.
 ///
@@ -462,7 +464,7 @@ const VACANT_DECLARED: [DeclaredIdentity; DECLARED_SLOTS] = [VACANT; DECLARED_SL
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VerifyFailureSet {
     mask: u16,
-    declared: [DeclaredIdentity; DECLARED_SLOTS],
+    declared: [DeclaredIdentity; DECLARED_SLOT_COUNT],
     declared_len: u8,
 }
 
@@ -639,7 +641,7 @@ impl VerifyFailureSet {
     /// Insert `identity` in position order, or keep the existing occupant of
     /// that bit.
     const fn push_declared(mut self, identity: DeclaredIdentity) -> Self {
-        if self.declared_len >= DECLARED_SLOTS as u8 {
+        if self.declared_len >= DECLARED_SLOT_LIMIT {
             return self;
         }
         let mut index = 0;

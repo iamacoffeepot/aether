@@ -137,7 +137,7 @@ pub(super) fn reduce_composition_narrowed(
         *bloom,
         &workpiece,
         record.spec.base(),
-        composition_progress(StageId::Refine, attempt, subject),
+        &composition_progress(StageId::Refine, attempt, subject),
         DispatchTargets { subject: subject.tree, checkout: subject.checkout },
         Some(subject.tree),
         narrowed_line(record),

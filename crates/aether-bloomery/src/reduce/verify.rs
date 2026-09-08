@@ -192,7 +192,7 @@ fn counted_verdict(
         bloom,
         workpiece,
         member.scope_revision,
-        progress,
+        &progress,
         targets,
         SealedLine::of(record, member),
     ));
@@ -282,7 +282,7 @@ fn repeated_over_one_tree(
         bloom,
         workpiece,
         member.scope_revision,
-        progress,
+        &progress,
         targets,
         SealedLine::of(record, member),
     ));
@@ -361,7 +361,7 @@ fn unjudged_verify(
         bloom,
         workpiece,
         member.scope_revision,
-        progress,
+        &progress,
         targets,
         SealedLine::of(record, member),
     ));

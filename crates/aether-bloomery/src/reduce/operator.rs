@@ -349,7 +349,7 @@ pub(super) fn reduce_operator_repair(snapshot: &Snapshot, bloom: &BloomId, repai
         *bloom,
         &repair.workpiece,
         member.scope_revision,
-        progress,
+        &progress,
         DispatchTargets { subject: repair.candidate.tree, checkout: repair.candidate.checkout },
         Some(repair.candidate.tree),
         SealedLine::of(record, member),

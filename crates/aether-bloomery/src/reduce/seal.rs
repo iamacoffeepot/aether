@@ -839,7 +839,7 @@ fn verify_reentry(
         bloom,
         &member.workpiece,
         member.scope_revision,
-        StageProgress {
+        &StageProgress {
             stage: StageId::Verify,
             attempts: 1,
             candidate: Some(candidate),

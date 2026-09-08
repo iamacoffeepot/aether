@@ -144,7 +144,7 @@ pub(super) fn reduce_grant_attempts(
         *bloom,
         workpiece,
         member.scope_revision,
-        progress,
+        &progress,
         (targets, construct_checkpoint_base),
         candidate.map(|current| current.tree),
         SealedLine::of(record, member),
