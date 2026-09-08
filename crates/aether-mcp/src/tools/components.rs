@@ -5,7 +5,7 @@ use super::ids::{resolve_handled_kind, static_kind_name};
 use super::render::{frame_size_aware_error, internal, internal_msg, json, project_capabilities};
 use super::{COMPONENT_CAP, FLEET_CAP, Mcp};
 use crate::args::{
-    ListBinariesArgs, ListComponentsArgs, LoadComponentArgs, ReplaceComponentArgs, UploadBinaryArgs,
+    ArtifactPinArgs, ListBinariesArgs, ListComponentsArgs, LoadComponentArgs, ReplaceComponentArgs, UploadBinaryArgs,
     UploadComponentArgs,
 };
 use aether_codec::frame::max_frame_size;
@@ -13,7 +13,8 @@ use aether_data::{EngineId, Kind, SchemaType, wire};
 use aether_kinds::{
     BinaryEntry, ComponentCapabilities, ComponentEntry, KindDescriptorWire, ListComponentBinaries,
     ListComponentBinariesResult, ListEngineBinaries, ListEngineBinariesResult, LoadComponent, LoadResult,
-    ReplaceComponent, ReplaceResult, UploadBinary, UploadBinaryResult, UploadComponent, UploadComponentResult,
+    ReplaceComponent, ReplaceResult, SetArtifactPinned, SetArtifactPinnedResult, UploadBinary, UploadBinaryResult,
+    UploadComponent, UploadComponentResult, replica_load_name,
 };
 use rmcp::ErrorData as McpError;
 use serde::Serialize;
@@ -142,8 +143,8 @@ pub(super) fn selector_with_explicit_export(selector: &str, export: Option<&str>
     format!("{module}@{export}")
 }
 
-/// Resolve the base name a `replicas` fan-out derives its `{base}-{index}`
-/// names from (issue 2626), using the same precedence the component host
+/// Resolve the base name a `replicas` fan-out derives its instance names
+/// from (issue 2626), using the same precedence the component host
 /// itself applies at load: caller `name` > `export` > default actor
 /// namespace. `None` when none of the three is available — the caller
 /// turns that into a clean tool error naming what to set. Shared by
@@ -158,11 +159,14 @@ pub(super) fn replica_base_name(
     name.or(export).or(default_namespace).map(str::to_owned)
 }
 
-/// Derive the `{base}-{index}` name set a `replicas` fan-out registers
-/// under: every instance suffixed, no bare-name special case for index 0,
-/// so `replicas: 1` differs from an omitted field only by the `-0` suffix.
+/// Derive the name set a `replicas` fan-out registers under, through the
+/// shared [`replica_load_name`] rule the chassis fan-out also applies:
+/// replica 0 claims the bare `base`, later replicas `{base}-{index}`. The
+/// bare instance is what a bare-type `ctx.peer::<R>()` in a peer component
+/// resolves to (iamacoffeepot/aether#5727), and it makes `replicas: 1`
+/// identical to an omitted field.
 pub(super) fn replica_names(base: &str, replicas: u32) -> Vec<String> {
-    (0..replicas).map(|index| format!("{base}-{index}")).collect()
+    (0..replicas).map(|index| replica_load_name(base, index)).collect()
 }
 
 pub(super) fn replicas_reply(
@@ -344,7 +348,10 @@ pub(super) async fn upload_binary(mcp: &Mcp, args: UploadBinaryArgs) -> Result<S
     // reading the bytes (unlike load_component).
     let reply = mcp
         .session
-        .call_one(local_envelope(FLEET_CAP, &UploadBinary { staged_path: args.staged_path, name: args.name }))
+        .call_one(local_envelope(
+            FLEET_CAP,
+            &UploadBinary { staged_path: args.staged_path, name: args.name, pin: args.pin },
+        ))
         .await
         .map_err(internal)?;
     match UploadBinaryResult::decode_from_bytes(&reply.payload) {
@@ -381,7 +388,10 @@ pub(super) async fn upload_component(mcp: &Mcp, args: UploadComponentArgs) -> Re
     // pulls the bytes back from the store).
     let reply = mcp
         .session
-        .call_one(local_envelope(FLEET_CAP, &UploadComponent { staged_path: args.staged_path, name: args.name }))
+        .call_one(local_envelope(
+            FLEET_CAP,
+            &UploadComponent { staged_path: args.staged_path, name: args.name, pin: args.pin },
+        ))
         .await
         .map_err(internal)?;
     match UploadComponentResult::decode_from_bytes(&reply.payload) {
@@ -389,6 +399,26 @@ pub(super) async fn upload_component(mcp: &Mcp, args: UploadComponentArgs) -> Re
         Some(UploadComponentResult::Err { error }) => Err(internal_msg(&error)),
         None => Err(internal_msg("undecodable UploadComponentResult")),
     }
+}
+
+async fn set_artifact_pinned(mcp: &Mcp, hash: String, pinned: bool) -> Result<String, McpError> {
+    let reply =
+        mcp.session.call_one(local_envelope(FLEET_CAP, &SetArtifactPinned { hash, pinned })).await.map_err(internal)?;
+    match SetArtifactPinnedResult::decode_from_bytes(&reply.payload) {
+        Some(SetArtifactPinnedResult::Ok { hash, pinned }) => {
+            json(&serde_json::json!({ "hash": hash, "pinned": pinned }))
+        }
+        Some(SetArtifactPinnedResult::Err { error }) => Err(internal_msg(&error)),
+        None => Err(internal_msg("undecodable SetArtifactPinnedResult")),
+    }
+}
+
+pub(super) async fn pin_artifact(mcp: &Mcp, args: ArtifactPinArgs) -> Result<String, McpError> {
+    set_artifact_pinned(mcp, args.hash, true).await
+}
+
+pub(super) async fn unpin_artifact(mcp: &Mcp, args: ArtifactPinArgs) -> Result<String, McpError> {
+    set_artifact_pinned(mcp, args.hash, false).await
 }
 
 pub(super) async fn list_components(mcp: &Mcp, args: ListComponentsArgs) -> Result<String, McpError> {

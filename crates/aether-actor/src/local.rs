@@ -62,6 +62,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 /// stores `Box<RefCell<T>>` erased as `Box<dyn Any + Send>`: `Send` so a
 /// host slot map can move with its actor between worker threads (ADR-0087);
 /// trivially satisfied on the single-threaded guest.
+#[derive(Default)]
 pub struct ActorSlots {
     by_type: RefCell<BTreeMap<TypeId, Box<dyn Any + Send>>>,
 }
@@ -121,12 +122,6 @@ impl ActorSlots {
         let cell = unsafe { &*cell_ptr };
         let borrow = cell.borrow();
         f(&borrow)
-    }
-}
-
-impl Default for ActorSlots {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

@@ -45,8 +45,8 @@
 //!
 //! The store survives a `restart-hub` because the root persists across the
 //! hub child's restart. The disk budget is enforced by LRU eviction over
-//! entries that are neither pinned nor named — a named or pinned entry is
-//! kept regardless of recency. Both protections are on disk: a name in
+//! entries that are neither pinned, named, nor held by live supervision —
+//! a named, pinned, or held entry is kept regardless of recency. Both protections are on disk: a name in
 //! `names.json`, a pin in the entry's own sidecar, so neither lapses when
 //! the supervised hub restarts.
 
@@ -54,6 +54,7 @@ mod manifest;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashSet;
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -148,11 +149,8 @@ impl ArtifactStore {
     }
 
     /// Ingest `bytes` content-addressed, recording `manifest` and
-    /// (optionally) pointing `name` at the resulting hash. A re-upload of
-    /// identical bytes dedups: the bytes aren't rewritten and the same
-    /// hash comes back, but a fresh `name` still repoints. Returns the
-    /// sha256 hex the bytes stored under. Runs LRU eviction afterward to
-    /// hold the disk budget.
+    /// (optionally) pointing `name` at the resulting hash. Equivalent to
+    /// [`upload_with_pin`](Self::upload_with_pin) with `pin: false`.
     ///
     /// # Errors
     ///
@@ -166,7 +164,28 @@ impl ArtifactStore {
         manifest: StoredManifest,
         name: Option<String>,
     ) -> io::Result<String> {
-        self.inner.upload(bytes, StoredEntry { kind, manifest }, name)
+        self.upload_with_pin(bytes, kind, manifest, name, false)
+    }
+
+    /// Ingest `bytes` content-addressed, recording `manifest` and
+    /// (optionally) pointing `name` at the resulting hash. `pin: true`
+    /// records durable eviction protection before this call's eviction;
+    /// `pin: false` never clears an existing pin.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] when the artifact can't be
+    /// persisted, or when a `pin: true` dedup cannot persist the pin.
+    /// Nothing is indexed as a successful pin and no name is repointed.
+    pub fn upload_with_pin(
+        &mut self,
+        bytes: &[u8],
+        kind: ArtifactKind,
+        manifest: StoredManifest,
+        name: Option<String>,
+        pin: bool,
+    ) -> io::Result<String> {
+        self.inner.upload_with_pin(bytes, StoredEntry { kind, manifest }, name, pin)
     }
 
     /// Pin (or unpin) an entry by hash, protecting it from eviction
@@ -183,6 +202,29 @@ impl ArtifactStore {
     #[allow(dead_code)]
     pub fn pin(&mut self, hash: &str) -> bool {
         self.inner.pin(hash)
+    }
+
+    /// Persist a pin (or unpin) sidecar-first, then update memory.
+    /// `Ok(false)` means no stored entry has `hash`. `Err` is a sidecar
+    /// write failure; in-memory protection is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] when the sidecar cannot be
+    /// written.
+    pub fn try_set_pinned(&mut self, hash: &str, pinned: bool) -> io::Result<bool> {
+        self.inner.try_set_pinned(hash, pinned)
+    }
+
+    /// Replace the set of content hashes live supervision holds against
+    /// eviction (issue 5686). The engines cap re-derives the whole set
+    /// from the engines it supervises — committed, pending, and waiting
+    /// out a restart backoff — so a binary in use is never a reclaim
+    /// candidate, whatever a concurrent upload does to the name that
+    /// resolved it. Holds are process-lifetime and independent of the
+    /// operator's durable pin.
+    pub fn set_holds(&mut self, holds: HashSet<String>) {
+        self.inner.set_holds(holds);
     }
 
     /// Enumerate the stored binaries matching `filter` as
