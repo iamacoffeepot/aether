@@ -340,10 +340,16 @@ impl PipelineManifest {
     /// lands on bit 10 even when this vocabulary declared it at 11. Each
     /// retained name takes the position this manifest actually declared; a
     /// name this vocabulary does not carry keeps the decoded identity so the
-    /// row still folds. Idempotent on a set already interned here.
+    /// row still folds. A declared bit with no retained name stays at its
+    /// recorded position: re-interning renames what it can name and never
+    /// drops a bit. Idempotent on a set already interned here.
     #[must_use]
     pub fn intern_set(&self, failures: VerifyFailureSet) -> VerifyFailureSet {
-        failures.named().map(|failure| self.intern(failure.as_str()).unwrap_or(failure)).collect()
+        failures
+            .named()
+            .map(|failure| self.intern(failure.as_str()).unwrap_or(failure))
+            .collect::<VerifyFailureSet>()
+            .union(failures.unnamed())
     }
 
     /// Whether this vocabulary declares `failure` — the same identity at the

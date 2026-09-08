@@ -564,6 +564,17 @@ impl VerifyFailureSet {
         )
     }
 
+    /// The bits this set names that [`named`](Self::named) cannot spell.
+    ///
+    /// Compiled members always have names. A declared position with no sidecar
+    /// name — a [`from_mask`](Self::from_mask) construction — is still a failure
+    /// at that position, and re-interning keeps it there rather than dropping it.
+    #[must_use]
+    pub fn unnamed(self) -> Self {
+        let named_positions_mask = self.named().fold(0u16, |mask, failure| mask | failure.bit());
+        Self { mask: self.mask & !named_positions_mask, declared: VACANT_DECLARED, declared_len: 0 }
+    }
+
     /// Every position this set names, in canonical order, whether or not this
     /// binary compiles a name for it.
     ///
@@ -844,6 +855,18 @@ mod tests {
         assert_eq!(manifest.intern_set(decoded_a), live_a);
         assert_eq!(manifest.intern_set(decoded_b), live_b);
         assert_eq!(live_b.positions().collect::<Vec<_>>(), [11]);
+    }
+
+    #[test]
+    fn intern_set_keeps_an_unnamed_declared_bit_at_its_recorded_position() {
+        // from_mask builds a mask-only set: bit 10, no sidecar name. intern_set
+        // used to rebuild from named() and drop that bit, so a live Actions-mask
+        // verdict at an appended identity folded as if it never failed.
+        let mut manifest = PipelineManifest::compiled();
+        manifest.verifiers.identities.push(String::from("verify.a"));
+        let unnamed = VerifyFailureSet::from_mask("0400").expect("bit 10 is a four-hex mask");
+        let interned = manifest.intern_set(unnamed);
+        assert_eq!(interned.positions().collect::<Vec<_>>(), [10]);
     }
 
     #[test]
