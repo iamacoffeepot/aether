@@ -1926,7 +1926,7 @@ fn order_params<'a>(
         &order.configs,
         &order.profile,
         deadline,
-        lifecycle,
+        &lifecycle,
     ]
 }
 
