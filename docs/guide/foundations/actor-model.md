@@ -539,8 +539,9 @@ a nested or replacement host therefore moves both peer routes without a host
 lookup or call-site change. These paths accept only
 `Addressable<Resolver = Embedded>` recipients; root (`One`), caller-relative
 (`Many`), and spawned embedded (`EmbeddedMany`) actor types describe different
-placements. Replicas such as `camera-0` and `camera-1` have no default-named
-instance and are reached with `peer_named`.
+placements. A `replicas` fan-out names replica 0 for the bare base and the rest
+`camera-1`, `camera-2`, …, so `peer::<Camera>()` reaches replica 0 when the base
+is the type's own namespace and `peer_named` reaches any particular replica.
 
 The explicit component-host route remains useful when code already holds that
 host mailbox: `loaded_default::<Camera>()` folds `Camera::NAMESPACE` from the
