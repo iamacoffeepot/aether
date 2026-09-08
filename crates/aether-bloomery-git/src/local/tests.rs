@@ -10,16 +10,17 @@ use std::thread;
 use aether_bloomery::control::{ReconcileOp, reconcile_op};
 use aether_bloomery::testing::{digest, membership};
 use aether_bloomery::{
-    BackendObjectId, BloomDraft, BloomId, BloomRecord, BloomStatus, ClaimOutcome, Correspondence, CorrespondenceError,
-    Digest, IntegrateOutcome, LandOutcome, SharedCorrespondence, Snapshot, SourceBackend, WorkpieceId,
+    BackendObjectId, BloomDraft, BloomId, BloomRecord, BloomStatus, ClaimOutcome, ClaimRefKind, ClaimReleaseOutcome,
+    Correspondence, CorrespondenceError, Digest, IntegrateOutcome, LandOutcome, SharedCorrespondence, Snapshot,
+    SourceBackend, WorkpieceId,
 };
 
 use super::LocalGitData;
 use crate::MainlineRef;
-use crate::client::{GitDataApi, GitDataError, MergeResult, RefTxnOp};
+use crate::client::{GitCommit, GitDataApi, GitDataError, GitRef, MergeResult, RefTxnOp};
 use crate::command::run_stdin;
 use crate::correspondence::GitObjectId;
-use crate::source::{EMPTY_TREE, GitSource};
+use crate::source::{EMPTY_TREE, GitSource, render_claim_message, render_tombstone_message};
 
 struct MapCorrespondence {
     pairs: Mutex<HashMap<Digest, BackendObjectId>>,
@@ -424,6 +425,156 @@ fn claim_ref(workpiece: &str) -> String {
 
 fn git_source(local: LocalGitData) -> GitSource<LocalGitData> {
     GitSource::new(local, MapCorrespondence::new(), true, MainlineRef::default())
+}
+
+/// A real [`LocalGitData`] carrying a one-shot concurrent reacquisition: once
+/// the armed call on the named ref has run, a replacement claimant force-moves
+/// that ref to its own claim commit. Every ref op still goes to the temporary
+/// repository, so the cleanup delete that follows meets git's own expected-old
+/// compare rather than an in-memory model of it. Clone-shared so a test can arm
+/// the same seam the [`GitSource`] under test is holding.
+#[derive(Clone)]
+struct Reacquired {
+    local: LocalGitData,
+    after_read: Arc<Mutex<Option<(String, String)>>>,
+    after_swap: Arc<Mutex<Option<(String, String)>>>,
+}
+
+impl Reacquired {
+    fn new(local: LocalGitData) -> Self {
+        Self { local, after_read: Arc::new(Mutex::new(None)), after_swap: Arc::new(Mutex::new(None)) }
+    }
+
+    /// Reacquire `name` at `sha` once the sweep's ref read has returned — the
+    /// window between reading a lingering tombstone and finishing its cleanup.
+    fn arm_after_read(&self, name: &str, sha: &str) {
+        *self.after_read.lock().expect("arm") = Some((name.to_owned(), sha.to_owned()));
+    }
+
+    /// Reacquire `name` at `sha` once the tombstone compare-and-swap has landed
+    /// — the window between a release linearizing and its cleanup delete.
+    fn arm_after_swap(&self, name: &str, sha: &str) {
+        *self.after_swap.lock().expect("arm") = Some((name.to_owned(), sha.to_owned()));
+    }
+
+    fn fire(&self, arm: &Mutex<Option<(String, String)>>, name: &str) {
+        let mut arm = arm.lock().expect("arm");
+        if arm.as_ref().is_none_or(|(armed, _)| armed != name) {
+            return;
+        }
+        let (armed, sha) = arm.take().expect("armed");
+        self.local.update_ref(&armed, &sha, true).expect("the replacement claimant acquires the name");
+    }
+}
+
+impl GitDataApi for Reacquired {
+    fn get_ref(&self, name: &str) -> Result<Option<GitRef>, GitDataError> {
+        let read = self.local.get_ref(name);
+        self.fire(&self.after_read, name);
+        read
+    }
+
+    fn compare_and_swap_ref(&self, name: &str, sha: &str, expected: &str) -> Result<GitRef, GitDataError> {
+        let swapped = self.local.compare_and_swap_ref(name, sha, expected);
+        self.fire(&self.after_swap, name);
+        swapped
+    }
+
+    fn create_ref(&self, name: &str, sha: &str) -> Result<GitRef, GitDataError> {
+        self.local.create_ref(name, sha)
+    }
+
+    fn update_ref(&self, name: &str, sha: &str, force: bool) -> Result<GitRef, GitDataError> {
+        self.local.update_ref(name, sha, force)
+    }
+
+    fn delete_ref(&self, name: &str) -> Result<(), GitDataError> {
+        self.local.delete_ref(name)
+    }
+
+    fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GitDataError> {
+        self.local.list_matching_refs(prefix)
+    }
+
+    fn get_commit(&self, sha: &str) -> Result<GitCommit, GitDataError> {
+        self.local.get_commit(sha)
+    }
+
+    fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GitDataError> {
+        self.local.create_commit(message, tree, parents)
+    }
+
+    fn is_ancestor(&self, ancestor: &str, commit: &str) -> Result<bool, GitDataError> {
+        self.local.is_ancestor(ancestor, commit)
+    }
+
+    fn merge(&self, base: &str, head: &str, message: &str) -> Result<MergeResult, GitDataError> {
+        self.local.merge(base, head, message)
+    }
+
+    fn transact_refs(&self, ops: &[RefTxnOp]) -> Result<(), GitDataError> {
+        self.local.transact_refs(ops)
+    }
+}
+
+#[test]
+fn complete_release_spares_a_claim_that_reacquired_the_ref_after_the_tombstone() {
+    // Tripwire: the cleanup delete that follows the tombstone compare-and-swap
+    // must carry the tombstone sha. A name-only delete erases a replacement
+    // claimant that won the name in the swap -> delete window; git refuses the
+    // stale compare instead, so the live claim stands.
+    let (_root, local) = open_temp();
+    let client = Reacquired::new(local.clone());
+    let source = GitSource::new(client.clone(), MapCorrespondence::new(), true, MainlineRef::default());
+    let owner = BloomId(digest(1));
+    let workpiece = WorkpieceId("wp-1".into());
+    assert_eq!(source.claim_seal(&owner, from_ref(&workpiece)).expect("acquire"), ClaimOutcome::Acquired);
+
+    let replacement = local
+        .create_commit(&render_claim_message(&BloomId(digest(2))), EMPTY_TREE, &[])
+        .expect("the replacement's own claim commit")
+        .sha;
+    client.arm_after_swap(&claim_ref("wp-1"), &replacement);
+
+    assert_eq!(
+        source.complete_release(Some(&owner), &ClaimRefKind::Workpiece(workpiece)).expect("release"),
+        ClaimReleaseOutcome::Released,
+        "our own release still linearized on its tombstone swap"
+    );
+    assert_eq!(ref_sha(&local, &claim_ref("wp-1")), replacement, "the replacement claim survives the cleanup");
+}
+
+#[test]
+fn a_tombstone_sweep_spares_a_claim_that_reacquired_the_ref_after_the_read() {
+    // Tripwire: the same guard on the holder-agnostic sweep. It reads a
+    // lingering tombstone and finishes the interrupted cleanup, so a claim that
+    // reused the name since that read must lose the compare, not the ref.
+    let (_root, local) = open_temp();
+    let client = Reacquired::new(local.clone());
+    let source = GitSource::new(client.clone(), MapCorrespondence::new(), true, MainlineRef::default());
+    let owner = BloomId(digest(1));
+    let workpiece = WorkpieceId("wp-1".into());
+    assert_eq!(source.claim_seal(&owner, from_ref(&workpiece)).expect("acquire"), ClaimOutcome::Acquired);
+
+    // The state an interrupted release leaves: its swap to the tombstone
+    // linearized, its cleanup delete never ran.
+    let held = ref_sha(&local, &claim_ref("wp-1"));
+    let tombstone =
+        local.create_commit(&render_tombstone_message(), EMPTY_TREE, from_ref(&held)).expect("tombstone").sha;
+    local.compare_and_swap_ref(&claim_ref("wp-1"), &tombstone, &held).expect("the release linearized");
+
+    let replacement = local
+        .create_commit(&render_claim_message(&BloomId(digest(2))), EMPTY_TREE, &[])
+        .expect("the replacement's own claim commit")
+        .sha;
+    client.arm_after_read(&claim_ref("wp-1"), &replacement);
+
+    assert_eq!(
+        source.complete_release(None, &ClaimRefKind::Workpiece(workpiece)).expect("sweep"),
+        ClaimReleaseOutcome::AlreadyAbsent,
+        "the holder this sweep was authorized against is gone either way"
+    );
+    assert_eq!(ref_sha(&local, &claim_ref("wp-1")), replacement, "the replacement claim survives the sweep");
 }
 
 #[test]
