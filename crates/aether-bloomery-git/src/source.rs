@@ -1547,8 +1547,8 @@ mod tests {
     }
 
     use crate::client::{GitDataApi, GitDataError};
+    use crate::fixture::FakeGithub;
     use crate::short_hex;
-    use crate::testing::FakeGithub;
 
     // The Git-object view of a recorded correspondence — the same forward
     // resolution plus adapter-edge conversion the port itself performs, so an

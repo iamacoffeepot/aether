@@ -2,8 +2,9 @@
 //!
 //! Repository machinery that is not GitHub-specific — the git-data trait and
 //! its ref/commit operations, [`GitSource`], [`GitObjectId`], [`MainlineRef`],
-//! the source error types, and the in-process fake that exercises them — lives
-//! here so a fleet-local source authority does not depend on a crate named
+//! the source error types, and the in-process [`fixture`] repository they run
+//! against — lives here so a fleet-local source authority does not depend on a
+//! crate named
 //! `github`. The GitHub REST/projection adapter (`aether-bloomery-github`)
 //! depends *inward* on this crate and re-exports the shared vocabulary.
 //!
@@ -27,13 +28,9 @@ pub fn short_hex(digest: &Digest) -> String {
     encode_hex(&digest.as_bytes()[..6])
 }
 
-// The workflow-dispatch input key the in-process fake reads. Kept as a module
-// so the moved `testing.rs` can keep `use crate::executor::INPUT_NONCE` after
-// the extraction; the GitHub executor still owns the public constant.
-//
-// Behind the same cfg as its one reader, so a lib-scoped build does not compile
-// a constant nothing in it can reach (#5411).
-#[cfg(any(test, feature = "testing"))]
+// The workflow-dispatch input key the in-process fixture reads. Kept as a
+// module so `fixture.rs` can keep `use crate::executor::INPUT_NONCE` after the
+// extraction; the GitHub executor still owns the public constant.
 mod executor {
     pub const INPUT_NONCE: &str = "nonce";
 }
@@ -41,15 +38,13 @@ mod executor {
 pub mod client;
 pub mod command;
 pub mod correspondence;
+pub mod fixture;
 pub mod local;
 pub mod mainline;
 pub mod marker;
 pub mod replica;
 pub mod roll;
 pub mod source;
-
-#[cfg(any(test, feature = "testing"))]
-pub mod testing;
 
 pub use client::{
     ActionsApi, Artifact, ChecksState, Comment, CommissionProjectionApi, GitCommit, GitDataApi, GitDataError, GitRef,

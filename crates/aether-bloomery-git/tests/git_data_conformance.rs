@@ -10,9 +10,9 @@ use std::process::Command;
 use std::slice::from_ref;
 
 use aether_bloomery_git::client::{GitDataApi, GitDataError, RefTxnOp};
+use aether_bloomery_git::fixture::FakeGithub;
 use aether_bloomery_git::local::LocalGitData;
 use aether_bloomery_git::source::EMPTY_TREE;
-use aether_bloomery_git::testing::FakeGithub;
 
 fn init_bare(path: &Path) {
     let status = Command::new("git").args(["init", "--bare", "-b", "main"]).arg(path).status().expect("git init");

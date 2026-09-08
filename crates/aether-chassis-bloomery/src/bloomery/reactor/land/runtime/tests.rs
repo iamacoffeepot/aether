@@ -15,7 +15,7 @@ use aether_bloomery::{
     IdempotencyKey, LandPayload, Observation, Outcome, Provenance, SourceReplicaPayload, StageId, Statement, Topic,
     Withdrawal, WithdrawalCause, WorkpieceId, decode_row,
 };
-use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
     GitObjectId, GitSource, GithubLanding, LandingSource, MainlineRef, PullRequestApi, short_hex, to_hex,
 };

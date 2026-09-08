@@ -54,7 +54,9 @@ impl SourceShell {
         Self { backend, correspondence: None }
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    /// Mount a source backend over a correspondence handle the caller already
+    /// holds — the trial-mode path, where the fixture repository is both the
+    /// backend and the correspondence store (#4871).
     #[must_use]
     pub fn new_with_correspondence(
         backend: Arc<dyn HostSource + Send + Sync>,
@@ -393,7 +395,7 @@ impl SourceShell {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use aether_bloomery::{BackendObjectId, SharedCorrespondence};
-    use aether_bloomery_github::testing::FakeGithub;
+    use aether_bloomery_github::fixture::FakeGithub;
     use aether_bloomery_github::{GitObjectId, GitSource, MainlineRef};
 
     use super::{Arc, BloomId, Digest, IntegrateOutcome, LandOutcome, Snapshot, SourceError, SourceShell};

@@ -519,7 +519,7 @@ mod tests {
         view_of,
     };
     use aether_bloomery_github::{
-        GithubProjection, ReplicaError, SourceReplica, commission_floor_title, landing_branch, testing::FakeGithub,
+        GithubProjection, ReplicaError, SourceReplica, commission_floor_title, fixture::FakeGithub, landing_branch,
     };
     use aether_data::wire::{from_bytes, to_vec};
     use aether_data::{MailId, MailboxId, Source};

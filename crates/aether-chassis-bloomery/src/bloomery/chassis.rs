@@ -125,10 +125,6 @@ fn correspondence_store(
     github_connection: &GithubConnectionConfig,
     store_path: &str,
 ) -> Result<SharedCorrespondence, BootError> {
-    #[cfg(not(any(test, feature = "testing")))]
-    let _ = github_connection;
-
-    #[cfg(any(test, feature = "testing"))]
     if github_connection.uses_fixture() {
         return Ok(Arc::new(github_connection.shared_fixture()));
     }
@@ -142,7 +138,6 @@ fn source_shell(
     coordinator: &CoordinatorConfig,
     correspondence: SharedCorrespondence,
 ) -> Result<SourceShell, BootError> {
-    #[cfg(any(test, feature = "testing"))]
     if github.uses_fixture() {
         return Ok(github.fixture_source(coordinator.mainline(), correspondence));
     }
@@ -166,7 +161,6 @@ fn landing_source(
     coordinator: &CoordinatorConfig,
     correspondence: SharedCorrespondence,
 ) -> Result<Arc<dyn aether_bloomery_github::LandingSource>, BootError> {
-    #[cfg(any(test, feature = "testing"))]
     if github.uses_fixture() {
         return Ok(github.fixture_landing(coordinator.mainline(), correspondence));
     }
@@ -198,7 +192,6 @@ fn land_reactor_source(
 
 #[cfg(feature = "github")]
 fn projection_shell(github: &GithubConnectionConfig, configured: bool) -> Result<Option<ProjectionShell>, BootError> {
-    #[cfg(any(test, feature = "testing"))]
     if github.uses_fixture() {
         return Ok(Some(ProjectionShell::new(Arc::new(aether_bloomery_github::GithubProjection::new(
             github.shared_fixture(),
@@ -246,6 +239,12 @@ fn github_cadence_secs(coordinator: &CoordinatorConfig, configured: bool) -> u64
 /// forks exactly that binary with its cwd inside the live checkout (#4842).
 /// A local authority's remote is an absolute path, never origin, so the
 /// hermetic publication path is the one this refuse exists to protect.
+///
+/// The build-shape term survives the fixture's promotion to a runtime mode
+/// (#4871). It is no longer the only guard — a coordinator in trial mode
+/// refuses origin on the runtime term whatever it was built with — but a
+/// test-featured binary that somehow reached a live checkout is refused
+/// before its configuration is consulted at all, and that is worth keeping.
 #[cfg(feature = "github")]
 fn candidate_publication(
     github: &GithubConnectionConfig,
@@ -876,7 +875,7 @@ mod tests {
     use std::sync::Arc;
 
     use aether_bloomery::SharedCorrespondence;
-    use aether_bloomery_github::testing::FakeGithub;
+    use aether_bloomery_github::fixture::FakeGithub;
     use clap::Parser as _;
 
     use super::{

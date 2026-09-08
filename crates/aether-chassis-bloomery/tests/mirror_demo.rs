@@ -23,7 +23,7 @@ use aether_bloomery::testing::{digest, membership};
 use aether_bloomery::{
     BloomDraft, Decisions, Event, Fact, IdempotencyKey, ResolvedConfigs, Snapshot, SpendWindow, reduce, view_of,
 };
-use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
+use aether_bloomery_github::{GithubProjection, fixture::FakeGithub};
 use aether_chassis_bloomery::bloomery::ProjectionShell;
 use aether_chassis_bloomery::store::{JournalWrite, SqliteStore, StoreBackend};
 use aether_data::wire::{from_bytes, to_vec};
