@@ -31,13 +31,14 @@ use aether_actor::runtime;
 // inward for its `StoreCapability` handlers (issue #3497).
 use aether_bloomery::persisted::{DECISIONS, EVENT, kind_named};
 use aether_bloomery::{
-    CommissionStatus, Commit, CommitResult, ConfigRecord, Decision, Digest, JournalRecord, LoadConfigs,
+    CommissionStatus, Commit, CommitResult, ConfigRecord, Decision, Digest, Event, JournalRecord, LoadConfigs,
     LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal,
     ReplayJournalResult, ScopeRevision, Statement, SuppressionRequest, Topic, WorkpieceId, decode_recorded_decisions,
     decode_recorded_event, schema_digest,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_kinds::descriptors;
+use std::collections::HashSet;
 use std::iter::repeat_n;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -670,6 +671,19 @@ pub trait StoreBackend: Send {
     /// is a statement about one entry — its neighbours were acked on their own
     /// merits, and a prefix reset would re-run them too.
     fn redeliver_outbox(&mut self, topic: &str, sequence: u64) -> rusqlite::Result<bool>;
+    /// Persist a completed [`Event`] batch against one undelivered outbox row so a
+    /// later redrive can admit those results without repeating the external
+    /// effect. Keyed by outbox sequence and event ordinal, not a new wire
+    /// envelope. Empty batches, duplicate idempotency keys, a missing or
+    /// wrong-topic row, an already-delivered row, and a conflicting replacement
+    /// all refuse; an identical ordered replay is a no-op. Does not journal
+    /// and does not ack.
+    fn record_outbox_results(&mut self, topic: &str, sequence: u64, events: &[Event]) -> rusqlite::Result<()>;
+    /// The recorded result batch for an exact outbox topic and sequence, or
+    /// `None` when that row exists and has no sidecar. Unknown and wrong-topic
+    /// sequences refuse by name. Delivered rows remain readable. Corruption or
+    /// an unknown writing schema refuse rather than looking absent.
+    fn outbox_results(&mut self, topic: &str, sequence: u64) -> rusqlite::Result<Option<Vec<Event>>>;
     /// Whether the journal holds a row under any of `keys` — the "has this been
     /// accounted for" read (#4956).
     ///
@@ -994,7 +1008,11 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
 /// with no backfill — an undrained pre-adoption row reads back `NULL` and is
 /// the positional identity. Adopted topics write their current identity in
 /// the same transaction as the bytes.
-const SCHEMA_VERSION: i64 = 18;
+///
+/// `19` is the outbox-result sidecar (`outbox_results`). Added empty with no
+/// backfill — an existing outbox row has no result until a reactor records
+/// one, and inventing a batch would attest an effect no reactor completed.
+const SCHEMA_VERSION: i64 = 19;
 
 /// Historical TEXT stamp written beside v2 decisions rows before the digest
 /// column existed. Kept only so migration 17 can map it onto the v2 digest.
@@ -1179,6 +1197,12 @@ fn migrate_schema(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()>
         migration.execute_batch("ALTER TABLE outbox ADD COLUMN payload_schema TEXT;")?;
     }
 
+    // Version 19: the outbox-result sidecar. Added empty with no backfill —
+    // an existing outbox row has no invented results.
+    if !has_table(migration, "outbox_results")? {
+        migration.execute_batch(OUTBOX_RESULTS_TABLE)?;
+    }
+
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
@@ -1303,6 +1327,31 @@ fn unstamped_row_refusal(sequence: u64) -> rusqlite::Error {
     )
 }
 
+fn sqlite_fail(message: String) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(SqliteFfiError::new(SQLITE_ERROR), Some(message))
+}
+
+fn outbox_sequence_column(sequence: u64) -> rusqlite::Result<i64> {
+    i64::try_from(sequence)
+        .map_err(|_| sqlite_fail(format!("outbox sequence {sequence} does not fit the store's integer column")))
+}
+
+fn outbox_ordinal_column(ordinal: usize) -> rusqlite::Result<i64> {
+    i64::try_from(ordinal)
+        .map_err(|_| sqlite_fail(format!("outbox result ordinal {ordinal} does not fit the store's integer column")))
+}
+
+fn load_outbox_row(conn: &Connection, sequence: i64) -> rusqlite::Result<Option<(String, bool)>> {
+    conn.query_row("SELECT topic, delivered FROM outbox WHERE sequence = ?1", rusqlite::params![sequence], |row| {
+        Ok((row.get(0)?, row.get::<_, i64>(1)? != 0))
+    })
+    .optional()
+}
+
+fn encode_outbox_result(event: &Event) -> rusqlite::Result<Vec<u8>> {
+    to_vec(event).map_err(|error| sqlite_fail(format!("outbox result event did not encode: {error}")))
+}
+
 /// The tables that carry an order row, and so carry its deadline: the live one
 /// and the ADR-0151 parked one. Both are migrated, and each on its own gate.
 const ORDER_BEARING_TABLES: [&str; 2] = ["outstanding_orders", "parked_question"];
@@ -1338,6 +1387,13 @@ CREATE TABLE IF NOT EXISTS outbox (
     payload   BLOB NOT NULL,
     delivered INTEGER NOT NULL DEFAULT 0,
     payload_schema TEXT
+);
+CREATE TABLE IF NOT EXISTS outbox_results (
+    sequence     INTEGER NOT NULL,
+    ordinal      INTEGER NOT NULL,
+    event        BLOB NOT NULL,
+    event_schema BLOB NOT NULL,
+    PRIMARY KEY (sequence, ordinal)
 );
 CREATE TABLE IF NOT EXISTS outstanding_orders (
     nonce                TEXT PRIMARY KEY,
@@ -1512,6 +1568,19 @@ CREATE TABLE IF NOT EXISTS candidate_hash (
     recorded_unix_millis INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS candidate_hash_by_bloom ON candidate_hash (bloom);
+";
+
+/// Completed [`Event`] batches keyed by outbox sequence and event ordinal.
+/// Column order is load-bearing from row one. Empty on creation; a reactor
+/// records a batch after the effect completes.
+const OUTBOX_RESULTS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS outbox_results (
+    sequence     INTEGER NOT NULL,
+    ordinal      INTEGER NOT NULL,
+    event        BLOB NOT NULL,
+    event_schema BLOB NOT NULL,
+    PRIMARY KEY (sequence, ordinal)
+);
 ";
 
 /// The per-member construct session a same-member refine resumes (#5177).
@@ -2422,6 +2491,83 @@ impl StoreBackend for SqliteStore {
             rusqlite::params![sequence, topic],
         )?;
         Ok(moved > 0)
+    }
+
+    fn record_outbox_results(&mut self, topic: &str, sequence: u64, events: &[Event]) -> rusqlite::Result<()> {
+        if events.is_empty() {
+            return Err(sqlite_fail("outbox results batch is empty".to_owned()));
+        }
+        if events.len() != events.iter().map(|event| &event.idempotency_key).collect::<HashSet<_>>().len() {
+            return Err(sqlite_fail("outbox results batch repeats an idempotency key".to_owned()));
+        }
+
+        let schema = EVENT.current_digest();
+        let encoded = events.iter().map(encode_outbox_result).collect::<rusqlite::Result<Vec<_>>>()?;
+        let sequence_column = outbox_sequence_column(sequence)?;
+
+        let tx = self.conn.transaction()?;
+        let (found_topic, delivered) = load_outbox_row(&tx, sequence_column)?
+            .ok_or_else(|| sqlite_fail(format!("outbox sequence {sequence} does not exist")))?;
+        if found_topic != topic {
+            return Err(sqlite_fail(format!("outbox sequence {sequence} is topic `{found_topic}`, not `{topic}`")));
+        }
+        if delivered {
+            return Err(sqlite_fail(format!("outbox sequence {sequence} on topic `{topic}` is already delivered")));
+        }
+
+        let existing = {
+            let mut stmt = tx.prepare("SELECT event FROM outbox_results WHERE sequence = ?1 ORDER BY ordinal")?;
+            stmt.query_map(rusqlite::params![sequence_column], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<Vec<u8>>>>()?
+        };
+        if existing == encoded {
+            return Ok(());
+        }
+        if !existing.is_empty() {
+            return Err(sqlite_fail(format!("outbox sequence {sequence} already records a different result batch")));
+        }
+
+        for (ordinal, event) in encoded.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO outbox_results (sequence, ordinal, event, event_schema) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    sequence_column,
+                    outbox_ordinal_column(ordinal)?,
+                    event,
+                    schema.as_bytes().as_slice(),
+                ],
+            )?;
+        }
+        tx.commit()
+    }
+
+    fn outbox_results(&mut self, topic: &str, sequence: u64) -> rusqlite::Result<Option<Vec<Event>>> {
+        let sequence_column = outbox_sequence_column(sequence)?;
+        let (found_topic, _) = load_outbox_row(&self.conn, sequence_column)?
+            .ok_or_else(|| sqlite_fail(format!("outbox sequence {sequence} does not exist")))?;
+        if found_topic != topic {
+            return Err(sqlite_fail(format!("outbox sequence {sequence} is topic `{found_topic}`, not `{topic}`")));
+        }
+
+        let rows = {
+            let mut stmt = self.conn.prepare(
+                "SELECT ordinal, event, event_schema FROM outbox_results WHERE sequence = ?1 ORDER BY ordinal",
+            )?;
+            stmt.query_map(rusqlite::params![sequence_column], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        rows.into_iter()
+            .map(|(ordinal, bytes, schema)| {
+                decode_recorded_event(&bytes, Some(schema.as_slice()))
+                    .map_err(|error| sqlite_fail(format!("outbox sequence {sequence} result {ordinal} {error}")))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map(Some)
     }
 
     fn journal_holds_any(&mut self, keys: &[String]) -> rusqlite::Result<bool> {
