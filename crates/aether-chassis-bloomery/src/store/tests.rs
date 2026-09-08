@@ -933,7 +933,6 @@ mod sealed_config {
     use aether_bloomery::{ConfigKind, ConfigRegistry, ConfigScopes, config_address};
     use aether_data::Kind;
     use aether_data::wire::to_vec;
-    use serde::Serialize;
 
     use super::memory;
     use aether_bloomery::ConfigResolveError;
