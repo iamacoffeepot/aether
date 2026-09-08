@@ -15,7 +15,7 @@ use crate::actor::native::mailbox::NativeActorMailbox;
 use super::NativeCtx;
 
 /// The receiver-addressing methods shared verbatim by [`NativeCtx`] and
-/// [`NativeInitCtx`]: both hold the same `binding`, so `actor` /
+/// [`NativeInitCtx`](super::NativeInitCtx): both hold the same `binding`, so `actor` /
 /// `resolve_actor` / `actor_at` resolve identically. Emitting them from
 /// one source keeps the two ctxs from drifting and means the bodies are
 /// not a `DuplicatedCode` clone (ADR-0099 §5 / issue 1431).

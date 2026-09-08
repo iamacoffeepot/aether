@@ -42,7 +42,7 @@ use super::{SpawnError, Subname};
 /// which is correct only before the ADR-0165 owner seal. Both constructors are
 /// crate-internal, so the only builders that reach outside the substrate come
 /// from those chassis entry points; handler code holds a
-/// [`HandlerSpawnBuilder`] instead and can reach nothing but the staged
+/// [`HandlerSpawnBuilder`](super::HandlerSpawnBuilder) instead and can reach nothing but the staged
 /// terminals.
 pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor> {
     pub(in crate::actor::native::spawn) spawner: Arc<Spawner>,

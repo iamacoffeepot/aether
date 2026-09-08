@@ -12,7 +12,6 @@ use std::time::Duration;
 use crate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use crate::mail::MailboxId;
 use crate::runtime::lifecycle::FatalAbortRecord;
-use crate::scheduler::Drainable;
 
 use super::{InstancedSlotEntry, Spawner};
 
@@ -34,7 +33,7 @@ impl Spawner {
     /// workers can drain the close cycles we just queued.
     ///
     /// Issue 714: the original implementation polled
-    /// [`Drainable::is_closed`] every 2 ms with a
+    /// [`Drainable::is_closed`](crate::scheduler::Drainable::is_closed) every 2 ms with a
     /// `timeout`-bounded loop. Under nextest contention the worker that
     /// observed the wake could be scheduled out long enough that the
     /// 2 s deadline elapsed before the close cycle ran, surfacing as
@@ -144,7 +143,7 @@ mod tests {
     use crate::mail::mailer::Mailer;
     use crate::mail::registry::Registry;
     use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
-    use crate::scheduler::{BatchBudget, CycleResult, Pool, PoolConfig, SlotState, WakeHandle};
+    use crate::scheduler::{BatchBudget, CycleResult, Drainable, Pool, PoolConfig, SlotState, WakeHandle};
 
     use super::*;
 

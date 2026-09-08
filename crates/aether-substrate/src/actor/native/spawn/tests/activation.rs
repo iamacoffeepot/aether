@@ -225,7 +225,7 @@ fn successful_prepared_activation_enters_ordinary_dispatch_once() {
 /// `SubnameRetired`, and the parent's key comes back at the child's own
 /// close path rather than at chassis teardown. Issue 4152's two
 /// independent regressions, in the order a caller meets them: the live
-/// key rode the child's binding inside [`Spawner::instanced_slots`],
+/// key rode the child's binding inside `Spawner::instanced_slots`,
 /// which only `shutdown_instanced` ever empties, so the re-stage was
 /// rejected locally as `SubnameInUse` and one table entry leaked per
 /// dead child; and the owner then rejected the birth on its surviving
