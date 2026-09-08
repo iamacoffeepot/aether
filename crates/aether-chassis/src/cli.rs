@@ -198,6 +198,46 @@ pub fn meta_flags() -> BTreeSet<String> {
     overlay_flags::<ChassisMeta>()
 }
 
+/// Wire a chassis CLI root to the composition layer (issue #5734): emit its
+/// [`ChassisCli`] impl over the root's flattened [`ChassisMeta`] field, plus the
+/// ADR-0156 §5 flag-parity test over the overlays it names.
+///
+/// ```ignore
+/// chassis_cli!(HeadlessCli { CommonOverlay, TickOverlay });
+/// ```
+///
+/// The overlay list in the invocation is a **second, independent spelling** of
+/// the root's `#[command(flatten)]` fields — that is the whole point of the
+/// test: the expected set is built from the list written here, the actual set
+/// is read out of clap's view of the declared struct, so a dropped or stale
+/// flatten fails honestly instead of silently removing a flag. A root that
+/// flattens nothing but its meta flags passes an empty list.
+#[macro_export]
+macro_rules! chassis_cli {
+    ($root:ty { $($overlay:ty),* $(,)? }) => {
+        impl $crate::cli::ChassisCli for $root {
+            fn meta(&self) -> &$crate::cli::ChassisMeta {
+                &self.meta
+            }
+        }
+
+        /// Root checkability (ADR-0156 §5): the hand-written root's long-flag
+        /// set must equal the union of its composed overlays' flags plus the
+        /// meta flags.
+        #[cfg(test)]
+        #[test]
+        fn chassis_root_flags_equal_composed_overlay_set() {
+            let mut expected = $crate::cli::meta_flags();
+            $(expected.extend($crate::cli::overlay_flags::<$overlay>());)*
+            assert_eq!(
+                $crate::cli::long_flags(&<$root as ::clap::CommandFactory>::command()),
+                expected,
+                "the root's flags must equal the union of the overlays it composes plus the meta flags",
+            );
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::HttpOverlay;

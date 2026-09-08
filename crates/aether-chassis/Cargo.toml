@@ -42,6 +42,10 @@ aether-inventory = { path = "../aether-inventory", features = ["runtime"] }
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
+# The shared chassis-binary entry point (`chassis_main!`) returns the same
+# `anyhow::Result` every chassis `main` did when it spelled the flow itself,
+# so the prelude, env, boot, and run errors keep landing in one report.
+anyhow = { workspace = true }
 # CLI roots (ADR-0090 unit d): clap Parser structs + per-cap overlay
 # flattening; each overlay assembles a partial confique Layer.
 clap = { workspace = true }

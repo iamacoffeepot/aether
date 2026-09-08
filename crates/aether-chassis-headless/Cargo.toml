@@ -43,7 +43,6 @@ aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 clap = { workspace = true }
-anyhow = { workspace = true }
 # `--describe` prints the BinaryManifest as JSON (ADR-0115).
 serde_json = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
