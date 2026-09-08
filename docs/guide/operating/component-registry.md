@@ -127,15 +127,18 @@ name and `describe_kinds` for its exact live schema.
 
 ### Replicas
 
-`replicas: N` performs N sequential loads with shared wasm/config and names each
-instance `{base}-{index}`. The base is selected from explicit load name, export,
-or default entry namespace in that order. The result carries one shared
-capabilities block and an `instances` list of ids/names.
+`replicas: N` performs N sequential loads with shared wasm/config. Replica 0 is
+named for the bare `base` and each later instance `{base}-{index}`. The base is
+selected from explicit load name, export, or default entry namespace in that
+order, so a fan-out over the default namespace leaves replica 0 reachable from a
+co-hosted component's bare-type `ctx.peer::<R>()`, and `replicas: 1` loads
+exactly what an omitted field loads. The result carries one shared capabilities
+block and an `instances` list of ids/names.
 
 A replica fan-out is not transactional. If replica K fails, instances before K
 remain live and the error says how many loaded. The failed call does not return
 the successful prefix's `instances` records or mailbox ids. Their lineage names
-follow the deterministic suffix rule, but the current public listing surface
+follow the deterministic naming rule, but the current public listing surface
 does not recover their ids. On a task-owned engine, terminate and start clean.
 On a shared engine, stop and report the partial prefix rather than guessing ids
 or retrying into occupied names.

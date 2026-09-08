@@ -609,10 +609,41 @@ mod engine {
 
 mod control_plane {
     use alloc::collections::BTreeMap;
+    use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
 
     use serde::{Deserialize, Serialize};
+
+    /// The [`LoadComponent`] `name` that instance `index` of a
+    /// `replicas: N` fan-out claims (issue 2626).
+    ///
+    /// Replica 0 claims the bare `base`; every later replica claims
+    /// `{base}-{index}`. The bare instance is what makes a replicated
+    /// component reachable by bare-type peer addressing at all
+    /// (iamacoffeepot/aether#5727): `ctx.peer::<R>()` folds `R::NAMESPACE`
+    /// beneath the caller's host, so a fan-out that suffixed *every*
+    /// instance registered nothing at the name the compile-time resolver
+    /// computes and every bare-type send to it silently missed. Suffixing
+    /// from 1 also makes `replicas: 1` load exactly what an omitted field
+    /// loads, and leaves `peer_named::<R>("{base}-2")` naming one replica
+    /// exactly.
+    ///
+    /// The rule lives here, beside the kind whose `name` field carries it,
+    /// because two independent producers must agree on it byte for byte:
+    /// `aether-chassis`'s boot-manifest / package fan-out registers these
+    /// names, and `aether-mcp` predicts them both to name each
+    /// `load_component` replica and to poll `spawn_substrate` boot
+    /// readiness. A divergence between the two is a boot wait that never
+    /// finds the name it is waiting for.
+    #[must_use]
+    pub fn replica_load_name(base: &str, index: u32) -> String {
+        if index == 0 {
+            String::from(base)
+        } else {
+            format!("{base}-{index}")
+        }
+    }
 
     /// `aether.component.load` — request the substrate load a WASM
     /// component into a freshly allocated mailbox. Carries the raw
@@ -1539,5 +1570,23 @@ mod control_plane {
         pub output_tokens: u32,
         pub wall_clock_millis: u32,
         pub cost_micros: Option<u64>,
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::replica_load_name;
+
+        /// Replica 0 claims the bare base name and later replicas claim the
+        /// `-{index}` suffix. The bug this catches is a fan-out that suffixes
+        /// index 0 again: the load then registers nothing at the name
+        /// `ctx.peer::<R>()` folds from `R::NAMESPACE`, and every bare-type
+        /// send to the replicated component silently misses
+        /// (iamacoffeepot/aether#5727).
+        #[test]
+        fn replica_zero_claims_the_bare_base_name() {
+            assert_eq!(replica_load_name("handler", 0), "handler");
+            assert_eq!(replica_load_name("handler", 1), "handler-1");
+            assert_eq!(replica_load_name("handler", 2), "handler-2");
+        }
     }
 }

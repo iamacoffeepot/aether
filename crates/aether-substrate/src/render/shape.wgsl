@@ -2,22 +2,11 @@
 // box expanded to one quad grown by its shadow extent; the fragment
 // stage evaluates a rounded-box signed distance per pixel and composes
 // shadow under fill under stroke, each edge anti-aliased over one
-// `fwidth`. The vertex stage shares the quad overlay's two paths: Screen
-// vertices supply an absolute pixel position in `offset_px`; World
-// vertices transform `anchor` through `view_proj` and apply `offset_px`
-// as a clip-space pixel offset. The output is premultiplied, and the
-// pipeline composites it with premultiplied blending.
-
-struct Viewport {
-    // Column-major view-projection matrix used by the World path.
-    view_proj: mat4x4<f32>,
-    // Width and height of the render target in pixels.
-    size: vec2<f32>,
-    _pad: vec2<f32>,
-}
-
-@group(0) @binding(0)
-var<uniform> viewport: Viewport;
+// `fwidth`. The vertex stage runs the quad overlay's own projection —
+// `overlay_clip_position`, prepended from `overlay_projection.wgsl` at
+// pipeline build — so Screen and World shapes land exactly where Screen and
+// World quads do. The output is premultiplied, and the pipeline composites it
+// with premultiplied blending.
 
 struct VertexInput {
     // World-space anchor (World path) or (0,0,0) unused (Screen path).
@@ -78,30 +67,9 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.shadow_offset = in.shadow_offset;
     out.uv_rect = in.uv_rect;
     out.texture_premultiplied = in.texture_premultiplied;
-
-    if in.is_screen != 0u {
-        // Pixel (0,0) top-left => clip (-1, 1); pixel (w,h) bottom-right
-        // => clip (1, -1).
-        let ndc_x = in.offset_px.x / viewport.size.x * 2.0 - 1.0;
-        let ndc_y = 1.0 - in.offset_px.y / viewport.size.y * 2.0;
-        out.clip_pos = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
-    } else {
-        var clip = viewport.view_proj * vec4<f32>(in.anchor, 1.0);
-        if clip.w <= 0.0 {
-            out.clip_pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
-            return out;
-        }
-        // Negative k => Pixels mode (constant on-screen size); positive
-        // k => Distance mode (shrinks with depth). Same rule as the quad
-        // overlay.
-        var k = in.params.w;
-        if k < 0.0 {
-            k = clip.w;
-        }
-        clip.x += in.offset_px.x / viewport.size.x * 2.0 * k;
-        clip.y -= in.offset_px.y / viewport.size.y * 2.0 * k;
-        out.clip_pos = clip;
-    }
+    // The world scale factor rides `params.w` here rather than its own
+    // attribute, so it is unpacked at the call instead of in the block.
+    out.clip_pos = overlay_clip_position(in.anchor, in.offset_px, in.params.w, in.is_screen);
     return out;
 }
 

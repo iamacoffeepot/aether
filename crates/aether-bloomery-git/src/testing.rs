@@ -571,7 +571,7 @@ impl FakeGithub {
 
     /// Point claim ref `name` at a fresh tombstone commit (empty tree +
     /// `Bloom-Id: tombstone`) — the ref state an interrupted `release_seal`
-    /// leaves after its CAS-to-tombstone linearized but its name-only cleanup
+    /// leaves after its CAS-to-tombstone linearized but its cleanup
     /// delete never ran.
     pub fn seed_claim_tombstone(&self, name: &str) {
         let sha = self.seed_commit_with_message(&render_tombstone_message(), EMPTY_TREE);

@@ -14,7 +14,7 @@ use aether_kinds::{
     BinaryEntry, ComponentCapabilities, ComponentEntry, KindDescriptorWire, ListComponentBinaries,
     ListComponentBinariesResult, ListEngineBinaries, ListEngineBinariesResult, LoadComponent, LoadResult,
     ReplaceComponent, ReplaceResult, SetArtifactPinned, SetArtifactPinnedResult, UploadBinary, UploadBinaryResult,
-    UploadComponent, UploadComponentResult,
+    UploadComponent, UploadComponentResult, replica_load_name,
 };
 use rmcp::ErrorData as McpError;
 use serde::Serialize;
@@ -143,8 +143,8 @@ pub(super) fn selector_with_explicit_export(selector: &str, export: Option<&str>
     format!("{module}@{export}")
 }
 
-/// Resolve the base name a `replicas` fan-out derives its `{base}-{index}`
-/// names from (issue 2626), using the same precedence the component host
+/// Resolve the base name a `replicas` fan-out derives its instance names
+/// from (issue 2626), using the same precedence the component host
 /// itself applies at load: caller `name` > `export` > default actor
 /// namespace. `None` when none of the three is available — the caller
 /// turns that into a clean tool error naming what to set. Shared by
@@ -159,11 +159,14 @@ pub(super) fn replica_base_name(
     name.or(export).or(default_namespace).map(str::to_owned)
 }
 
-/// Derive the `{base}-{index}` name set a `replicas` fan-out registers
-/// under: every instance suffixed, no bare-name special case for index 0,
-/// so `replicas: 1` differs from an omitted field only by the `-0` suffix.
+/// Derive the name set a `replicas` fan-out registers under, through the
+/// shared [`replica_load_name`] rule the chassis fan-out also applies:
+/// replica 0 claims the bare `base`, later replicas `{base}-{index}`. The
+/// bare instance is what a bare-type `ctx.peer::<R>()` in a peer component
+/// resolves to (iamacoffeepot/aether#5727), and it makes `replicas: 1`
+/// identical to an omitted field.
 pub(super) fn replica_names(base: &str, replicas: u32) -> Vec<String> {
-    (0..replicas).map(|index| format!("{base}-{index}")).collect()
+    (0..replicas).map(|index| replica_load_name(base, index)).collect()
 }
 
 pub(super) fn replicas_reply(
