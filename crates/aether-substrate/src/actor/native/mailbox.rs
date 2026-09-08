@@ -17,7 +17,7 @@
 
 use core::marker::PhantomData;
 
-use aether_actor::{Addressable, ChildOf, HandlesKind, Instanced};
+use aether_actor::{Addressable, ChildOf, HandlesKind, Instanced, MailboxForward};
 use aether_data::{Kind, MailId, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
@@ -276,6 +276,31 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
         let mail_id = self.send_tracked(payload);
         self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
         mail_id
+    }
+}
+
+// The native half of `aether_actor::MailboxForward` — the shim a capability's
+// sender facade sits on. The trait is declared in `aether-actor` beside the
+// wasm handles; these two impls belong here because `aether-substrate` owns the
+// native handles. Together the four make a cap's facade one blanket impl over
+// `MailboxForward<TheCap>` instead of one hand-written impl per handle shape.
+impl<R: Addressable> MailboxForward<R> for NativeActorMailbox<'_, R> {
+    fn forward<K>(&self, payload: &K)
+    where
+        R: HandlesKind<K>,
+        K: Kind,
+    {
+        self.send(payload);
+    }
+}
+
+impl<R: Addressable, C: Kind> MailboxForward<R> for NativeActorMailboxWithContext<'_, '_, R, C> {
+    fn forward<K>(&self, payload: &K)
+    where
+        R: HandlesKind<K>,
+        K: Kind,
+    {
+        let _ = self.send(payload);
     }
 }
 

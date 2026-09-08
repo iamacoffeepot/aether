@@ -61,13 +61,6 @@
 pub mod kinds;
 pub use kinds::*;
 
-// Handler-signature kinds must be importable at file root because
-// `#[actor]` emits `impl HandlesKind<K> for X {}` markers against the
-// identity (always-on, outside the runtime gate). The audio kinds resolve
-// through the `kinds` glob above; `ReadResult` is an `aether.fs` kind (a
-// different cap) the audio cap receives as the track-load reply.
-use aether_fs::ReadResult;
-
 // `AudioConfig` rides through file root for chassis-bin consumers
 // that build it from env (`from_env`) and pass it to
 // `with_actor::<AudioCapability>(cfg)`. The config seam now lives under

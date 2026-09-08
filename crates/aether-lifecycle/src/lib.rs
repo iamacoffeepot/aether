@@ -1,7 +1,7 @@
 //! `aether.lifecycle` cap (ADR-0082). The non-generic capability the
 //! chassis drives one frame at a time.
 //!
-//! The chassis owns cadence: it sends [`LifecycleAdvance`] once per
+//! The chassis owns cadence: it sends [`LifecycleAdvance`](aether_kinds::LifecycleAdvance) once per
 //! frame. The cap owns everything else — the lifecycle graph (a data
 //! graph of `{ stage_kind, next, optional quit }` edges, in
 //! `mod graph`), the subscriber table keyed by stage kind and
@@ -13,7 +13,7 @@
 //! `NAMESPACE` is wasm-reachable: a component subscribes a stage via
 //! `ctx.actor::<LifecycleCapability>().subscribe::<Render>()`.
 //!
-//! On each [`LifecycleAdvance`] the cap:
+//! On each [`LifecycleAdvance`](aether_kinds::LifecycleAdvance) the cap:
 //!
 //! 1. Broadcasts the current state's signal to every subscriber
 //!    registered for that stage kind. Stage kinds are empty ZSTs, so
@@ -21,7 +21,7 @@
 //!    subscriber needs rides its own mail (e.g. the camera publishes
 //!    `view_proj` to `aether.render`).
 //! 2. Subscribes the settlement registry on the broadcast's chain
-//!    root and defers the state-pointer mutation to [`Settled`]
+//!    root and defers the state-pointer mutation to [`Settled`](aether_kinds::trace::Settled)
 //!    (ADR-0082 §6) — so cadence couples to actual subscriber drain
 //!    time. When no settlement registry is wired (a registry-less test
 //!    harness) it falls back to fire-and-advance.
@@ -39,7 +39,7 @@
 //! It is a pure leaf — no other capability depends on it, so capabilities
 //! keeps no `aether-lifecycle` dependency (no facade).
 //!
-//! The `aether.lifecycle.*` mail kinds ([`LifecycleAdvance`], the
+//! The `aether.lifecycle.*` mail kinds ([`LifecycleAdvance`](aether_kinds::LifecycleAdvance), the
 //! subscribe family, the stage-signal ZSTs) stay in `aether-kinds`: they
 //! are substrate protocol vocabulary many actors address rather than a
 //! cap-internal detail, so this crate only references them.
@@ -48,25 +48,6 @@
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the
 // decoded bytes so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
-
-use aether_kinds::trace::Settled;
-// `MonitorNotice` rides the handled-kind list like the subscribe family:
-// the `#[actor]` macro emits its always-on `HandlesKind` marker for the
-// runtime half's ADR-0079 vacate/close purge handler.
-use aether_kinds::{
-    LifecycleAdvance, LifecycleSubscribe, LifecycleSubscribeSelf, LifecycleUnsubscribe, LifecycleUnsubscribeAll,
-    LifecycleUnsubscribeSelf, MonitorNotice, Quit,
-};
-// `LifecycleSubscribeResult` rides the native gate (not `runtime`): the
-// `#[actor]` macro's ADR-0109 `HandlerEntry` inventory submission —
-// emitted on every native build, runtime or not — names the subscribe
-// handlers' reply kind `::ID`, so a transport-only build must see it.
-// `LifecycleAdvanceComplete` is the reply of the two `#[handler::manual]`
-// arms, which declare no manifest reply kind, so it is named only by the
-// runtime handler bodies and lives in `mod runtime` behind the `runtime`
-// gate.
-#[cfg(not(target_family = "wasm"))]
-use aether_kinds::LifecycleSubscribeResult;
 
 use aether_actor::actor;
 
@@ -96,7 +77,7 @@ pub use runtime::{LifecycleConfig, LifecycleConfigLayer, LifecycleOverlay, Lifec
 /// runtime. The state-bearing runtime (`LifecycleCapabilityState` in
 /// `mod runtime`, which owns the data graph, subscriber table, fan-out,
 /// and settlement gating) lives behind the one `feature = "runtime"`
-/// gate; the chassis only feeds the cap [`LifecycleAdvance`] cadence.
+/// gate; the chassis only feeds the cap [`LifecycleAdvance`](aether_kinds::LifecycleAdvance) cadence.
 #[actor(singleton, root)]
 pub struct LifecycleCapability;
 

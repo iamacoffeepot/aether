@@ -2,7 +2,7 @@
 //! connection. Owns a `TcpStream` (split for read/write) and a
 //! sidecar read thread that loops on blocking `read()`. The read
 //! thread pushes byte chunks (or an EOF / error signal) over an
-//! mpsc and fires a [`SessionDataReady`] mail at this actor's own
+//! mpsc and fires a [`SessionDataReady`](crate::kinds::SessionDataReady) mail at this actor's own
 //! mailbox; the dispatcher drains them.
 //!
 //! Writes go directly from the dispatcher thread (`on_session_write`
@@ -25,13 +25,7 @@
 //! `SessionClosed`; observer-less sessions preserve the previous
 //! drop-on-the-floor behavior.
 
-// Handler-signature kinds need to be importable at file root for
-// the `#[actor]`-emitted `HandlesKind` markers against the identity
-// (always-on, outside the `feature = "runtime"` gate).
-use super::{
-    TcpCapability, TcpListenerActor,
-    kinds::{SessionClose, SessionDataReady, SessionWrite},
-};
+use super::{TcpCapability, TcpListenerActor};
 
 /// `aether.tcp.session` **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`), the

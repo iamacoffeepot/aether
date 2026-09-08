@@ -40,14 +40,6 @@
 // (ADR-0130); the per-request kinds (streaming, websocket, settlement,
 // reply interception) live on the dispatch shard identity in `shard`.
 use crate::kinds::HttpInboundReady;
-use crate::kinds::{
-    RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf, UnregisterRoutesAll,
-};
-// `MonitorNotice` rides the handled-kind list like the registration
-// family: the `#[actor]` macro emits its always-on `HandlesKind` marker
-// for the runtime half's ADR-0079 vacate/close route-purge handler.
-use aether_kinds::MonitorNotice;
-
 // Default bind address. Loopback per ADR-0108 §6 — binding a public
 // interface is an explicit operator choice.
 /// Default `bind_addr` when unset: loopback, OS-assigned port (ADR-0108 §6).

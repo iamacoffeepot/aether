@@ -11,11 +11,11 @@
 //! - **`init`** dials the substrate's `RpcServerCapability` via
 //!   `RpcClient::connect` and spawns the reader sidecar. The
 //!   handshake's `HelloAck` identity is kept on `conn.server`.
-//! - **`on_forward`** ([`ForwardEnvelope`]) wraps the `mailbox`,
+//! - **`on_forward`** ([`ForwardEnvelope`](crate::kinds::ForwardEnvelope)) wraps the `mailbox`,
 //!   `kind`, and `payload` into an RPC `Call` and writes it down the
 //!   connection. The inbound mail's `Source` is parked under the
 //!   wire `cid` so the eventual reply can route back to the sender.
-//! - **`on_inbound_ready`** ([`RpcInboundReady`]) is the reader
+//! - **`on_inbound_ready`** ([`RpcInboundReady`](aether_rpc::RpcInboundReady)) is the reader
 //!   sidecar's wake: it drains `conn.inbound`, lifting `ReplyEvent`
 //!   frames back to the parked `Source` (correlation preserved,
 //!   mirroring `Mailer::send_reply`), dropping the `in_flight` entry on
@@ -37,17 +37,6 @@
 //! addressing markers stay in the identity file, while the state, handlers,
 //! and `Drop` live behind
 //! `runtime`.
-
-// Handler-signature kinds must be importable at file root — the
-// `#[actor]` macro emits `impl HandlesKind<K>` markers always-on against
-// the identity, so they reference these kinds from here.
-use crate::kinds::{EngineHeartbeatTick, ForwardEnvelope};
-use aether_kinds::TerminateEngine;
-// `RpcInboundReady` is owned by the RPC server cap (ADR-0121); the proxy
-// shares the wake-mail kind. Imported at file root for the always-on
-// `HandlesKind<RpcInboundReady>` marker.
-use crate::server::FleetServer;
-use aether_rpc::RpcInboundReady;
 
 // The proxy's implementation, split along its seams (ADR-0121):
 // `config` (the init config + heartbeat tuning), `connect` (the

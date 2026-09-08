@@ -36,15 +36,6 @@
 // bytes so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
 
-// Handler-signature kinds must be importable at file root because
-// `#[actor]` emits `impl HandlesKind<K> for X {}` markers against the
-// identity (always-on, outside the runtime gate). The `aether.text` mail
-// kinds (ADR-0121) live in `kinds` and re-export here; `ReadResult` comes
-// from the `aether.fs` cap, and `CreateTextureResult` from the render cap —
-// both are replies the text cap receives.
-use aether_fs::ReadResult;
-use aether_render::CreateTextureResult;
-
 // ADR-0121: the cap owns its mail kinds. Always-on + wasm-safe (only
 // `aether-data` + `serde`), re-exported so callers address them as
 // `aether_text::DrawText`.

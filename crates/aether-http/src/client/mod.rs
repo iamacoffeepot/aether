@@ -24,14 +24,9 @@ pub use config::HttpConfig;
 #[cfg(feature = "runtime")]
 pub use config::{HttpConfigLayer, HttpOverlay};
 
-// Handler-signature kinds resolve at file root through this import —
-// `#[actor]` emits the `impl HandlesKind<K> for X {}` markers always-on
-// against the identity (outside the `feature = "runtime"` gate), so they
-// reference `Fetch` from here. `HttpMethod` is named by `HttpMailboxExt`.
+// `Fetch` / `HttpMethod` are the payload `HttpMailboxExt` assembles.
 use crate::kinds::{Fetch, HttpMethod};
-use aether_actor::WasmActorMailbox;
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-use aether_substrate::actor::native::NativeActorMailbox;
+use aether_actor::MailboxForward;
 
 /// Default response-body cap when `AETHER_HTTP_MAX_BODY_BYTES` is
 /// unset. 16MB matches ADR-0043 §3.
@@ -75,38 +70,28 @@ pub const DEFAULT_MAX_IN_FLIGHT_TOTAL: usize = 32;
 /// no-options cases that don't benefit from spelling out a five-
 /// field struct.
 ///
-/// Impl'd for both transports `ctx.actor::<HttpCapability>()` can
-/// return:
-///
-/// - [`WasmActorMailbox<HttpCapability>`] — always-on, for
-///   wasm-component callers.
-/// - [`NativeActorMailbox<'_, HttpCapability>`] — native cap-to-cap
-///   sends, gated on `#[cfg(not(target_family = "wasm"))]`.
-pub trait HttpMailboxExt {
+/// Blanket-impl'd over [`MailboxForward<HttpCapability>`], so it reaches every
+/// handle `ctx.actor::<HttpCapability>()` can return — the wasm and native
+/// mailboxes and their typed request-context adapters alike — from one set of
+/// bodies.
+pub trait HttpMailboxExt: MailboxForward<HttpCapability> {
     /// Mail `aether.http.fetch { request_id: 0, url, method: Get, headers: [], body: [], timeout_ms: None }`
     /// to the cap. Uses the chassis default timeout.
-    fn get(&self, url: &str);
+    fn get(&self, url: &str) {
+        self.forward(&Fetch {
+            request_id: 0,
+            url: url.into(),
+            method: HttpMethod::Get,
+            headers: Vec::new(),
+            body: Vec::new(),
+            timeout_ms: None,
+        });
+    }
 
     /// Mail `aether.http.fetch { request_id: 0, url, method: Post, headers: [], body, timeout_ms: None }`
     /// to the cap. Uses the chassis default timeout.
-    fn post(&self, url: &str, body: &[u8]);
-}
-
-impl HttpMailboxExt for WasmActorMailbox<'_, HttpCapability> {
-    //noinspection DuplicatedCode
-    fn get(&self, url: &str) {
-        self.send(&Fetch {
-            request_id: 0,
-            url: url.into(),
-            method: HttpMethod::Get,
-            headers: Vec::new(),
-            body: Vec::new(),
-            timeout_ms: None,
-        });
-    }
-    //noinspection DuplicatedCode
     fn post(&self, url: &str, body: &[u8]) {
-        self.send(&Fetch {
+        self.forward(&Fetch {
             request_id: 0,
             url: url.into(),
             method: HttpMethod::Post,
@@ -117,31 +102,7 @@ impl HttpMailboxExt for WasmActorMailbox<'_, HttpCapability> {
     }
 }
 
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-impl HttpMailboxExt for NativeActorMailbox<'_, HttpCapability> {
-    //noinspection DuplicatedCode
-    fn get(&self, url: &str) {
-        self.send(&Fetch {
-            request_id: 0,
-            url: url.into(),
-            method: HttpMethod::Get,
-            headers: Vec::new(),
-            body: Vec::new(),
-            timeout_ms: None,
-        });
-    }
-    //noinspection DuplicatedCode
-    fn post(&self, url: &str, body: &[u8]) {
-        self.send(&Fetch {
-            request_id: 0,
-            url: url.into(),
-            method: HttpMethod::Post,
-            headers: Vec::new(),
-            body: body.to_vec(),
-            timeout_ms: None,
-        });
-    }
-}
+impl<T: MailboxForward<HttpCapability>> HttpMailboxExt for T {}
 
 /// `aether.http` cap **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`),
@@ -158,8 +119,8 @@ pub struct HttpCapability;
 // off disk, lifts the `NAMESPACE` + `#[handler]` kinds out of the
 // `#[runtime] impl NativeActor` there, and emits the always-on identity
 // markers (`Addressable`, `HandlesKind<Fetch>`, the name-inventory entry)
-// against this struct. The handler kind those markers name (`Fetch`) is
-// imported at file root above.
+// against this struct, carrying that module's own imports so `Fetch` resolves
+// there.
 use aether_actor::actor;
 
 // The runtime half — the whole `aether_substrate`- / `ureq`-typed surface

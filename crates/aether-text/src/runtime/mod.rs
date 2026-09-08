@@ -648,7 +648,10 @@ mod tests {
     use super::super::*;
     use super::atlas::{ATLAS_SIZE, GlyphKey, GlyphSlot};
     use super::layout::build_font_metrics;
-    use super::{Arc, CreateTexture, NativeCtx, QuadSpace, Read, Source, TextCapabilityState, UpdateTexture};
+    use super::{
+        Arc, CreateTexture, CreateTextureResult, NativeCtx, QuadSpace, Read, ReadResult, Source, TextCapabilityState,
+        UpdateTexture,
+    };
     use aether_data::{Kind, MailId, SessionToken, SourceAddr, Uuid};
     use aether_fs::{FsError, NamespaceAddr};
     use aether_math::Rgba;

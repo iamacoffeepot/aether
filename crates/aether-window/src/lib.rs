@@ -22,17 +22,12 @@ pub(crate) use kinds::{RetireWindow, WindowForwardContext};
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use aether_actor::validate_namespace_segment;
-use aether_actor::{HandlesKind, Publishes, WasmActorMailbox, WasmActorMailboxWithContext, actor};
+use aether_actor::{MailboxForward, Publishes, actor};
 use aether_data::{Kind, MailboxId};
-#[cfg(any(feature = "desktop", feature = "synthetic"))]
-use aether_kinds::MonitorNotice;
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
     WindowSize,
 };
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-use aether_substrate::actor::native::{NativeActorMailbox, NativeActorMailboxWithContext};
-
 /// The one declaration of the `aether.window` mailbox name.
 ///
 /// Every implementation identity — headless, `desktop`, `synthetic` — reads
@@ -116,16 +111,8 @@ impl Publishes<WindowOpened> for WindowCapability {}
 impl Publishes<WindowClosed> for WindowCapability {}
 impl Publishes<WindowMenuActivated> for WindowCapability {}
 
-trait WindowManagerMailboxForward {
-    fn forward<K>(&self, payload: &K)
-    where
-        WindowCapability: HandlesKind<K>,
-        K: Kind;
-}
-
 /// Sender-side convenience methods for manager-owned window operations.
-#[allow(private_bounds)]
-pub trait WindowManagerMailboxExt: WindowManagerMailboxForward + Sized {
+pub trait WindowManagerMailboxExt: MailboxForward<WindowCapability> + Sized {
     /// Request every live window in ascending id order.
     fn list(&self) {
         self.forward(&ListWindows);
@@ -178,18 +165,10 @@ pub trait WindowManagerMailboxExt: WindowManagerMailboxForward + Sized {
     }
 }
 
-impl<T: WindowManagerMailboxForward> WindowManagerMailboxExt for T {}
-
-trait WindowMailboxForward {
-    fn forward<K>(&self, payload: &K)
-    where
-        WindowInstance: HandlesKind<K>,
-        K: Kind;
-}
+impl<T: MailboxForward<WindowCapability>> WindowManagerMailboxExt for T {}
 
 /// Sender-side convenience methods for one resolved window endpoint.
-#[allow(private_bounds)]
-pub trait WindowMailboxExt: WindowMailboxForward + Sized {
+pub trait WindowMailboxExt: MailboxForward<WindowInstance> + Sized {
     /// Request closure of this window.
     fn close(&self) {
         self.forward(&CloseWindow);
@@ -226,91 +205,7 @@ pub trait WindowMailboxExt: WindowMailboxForward + Sized {
     }
 }
 
-impl<T: WindowMailboxForward> WindowMailboxExt for T {}
-
-impl WindowManagerMailboxForward for WasmActorMailbox<'_, WindowCapability> {
-    fn forward<K>(&self, payload: &K)
-    where
-        WindowCapability: HandlesKind<K>,
-        K: Kind,
-    {
-        self.send(payload);
-    }
-}
-
-impl<C: Kind> WindowManagerMailboxForward for WasmActorMailboxWithContext<'_, '_, WindowCapability, C> {
-    fn forward<K>(&self, payload: &K)
-    where
-        WindowCapability: HandlesKind<K>,
-        K: Kind,
-    {
-        let _ = self.send(payload);
-    }
-}
-
-impl WindowMailboxForward for WasmActorMailbox<'_, WindowInstance> {
-    fn forward<K>(&self, payload: &K)
-    where
-        WindowInstance: HandlesKind<K>,
-        K: Kind,
-    {
-        self.send(payload);
-    }
-}
-
-impl<C: Kind> WindowMailboxForward for WasmActorMailboxWithContext<'_, '_, WindowInstance, C> {
-    fn forward<K>(&self, payload: &K)
-    where
-        WindowInstance: HandlesKind<K>,
-        K: Kind,
-    {
-        let _ = self.send(payload);
-    }
-}
-
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-impl WindowManagerMailboxForward for NativeActorMailbox<'_, WindowCapability> {
-    fn forward<K>(&self, payload: &K)
-    where
-        WindowCapability: HandlesKind<K>,
-        K: Kind,
-    {
-        self.send(payload);
-    }
-}
-
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-impl<C: Kind> WindowManagerMailboxForward for NativeActorMailboxWithContext<'_, '_, WindowCapability, C> {
-    fn forward<K>(&self, payload: &K)
-    where
-        WindowCapability: HandlesKind<K>,
-        K: Kind,
-    {
-        let _ = self.send(payload);
-    }
-}
-
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-impl WindowMailboxForward for NativeActorMailbox<'_, WindowInstance> {
-    fn forward<K>(&self, payload: &K)
-    where
-        WindowInstance: HandlesKind<K>,
-        K: Kind,
-    {
-        self.send(payload);
-    }
-}
-
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-impl<C: Kind> WindowMailboxForward for NativeActorMailboxWithContext<'_, '_, WindowInstance, C> {
-    fn forward<K>(&self, payload: &K)
-    where
-        WindowInstance: HandlesKind<K>,
-        K: Kind,
-    {
-        let _ = self.send(payload);
-    }
-}
+impl<T: MailboxForward<WindowInstance>> WindowMailboxExt for T {}
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 fn validate_window_name(name: &str) -> Result<(), String> {
@@ -333,10 +228,11 @@ pub use kinds::InjectWindowEvent;
 mod tests {
     use super::{
         CloseWindow, FocusWindow, ListWindows, RequestWindowRedraw, SetWindowCursor, SetWindowMenu, SetWindowMode,
-        SetWindowTitle, WasmActorMailbox, WasmActorMailboxWithContext, WindowCapability, WindowInstance,
-        WindowMailboxExt, WindowManagerMailboxExt,
+        SetWindowTitle, WindowCapability, WindowInstance, WindowMailboxExt, WindowManagerMailboxExt,
     };
-    use aether_actor::{Addressable, HandlesKind};
+    use aether_actor::{Addressable, HandlesKind, WasmActorMailbox, WasmActorMailboxWithContext};
+    #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+    use aether_substrate::actor::native::{NativeActorMailbox, NativeActorMailboxWithContext};
 
     fn assert_facade<T: WindowMailboxExt>() {}
     fn assert_manager_facade<T: WindowManagerMailboxExt>() {}
@@ -358,11 +254,10 @@ mod tests {
     #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
     #[test]
     fn neutral_facade_is_available_to_native_senders() {
-        assert_facade::<super::NativeActorMailbox<'static, WindowInstance>>();
-        assert_facade::<super::NativeActorMailboxWithContext<'static, 'static, WindowInstance, ListWindows>>();
-        assert_manager_facade::<super::NativeActorMailbox<'static, WindowCapability>>();
-        assert_manager_facade::<super::NativeActorMailboxWithContext<'static, 'static, WindowCapability, ListWindows>>(
-        );
+        assert_facade::<NativeActorMailbox<'static, WindowInstance>>();
+        assert_facade::<NativeActorMailboxWithContext<'static, 'static, WindowInstance, ListWindows>>();
+        assert_manager_facade::<NativeActorMailbox<'static, WindowCapability>>();
+        assert_manager_facade::<NativeActorMailboxWithContext<'static, 'static, WindowCapability, ListWindows>>();
     }
 
     #[test]

@@ -27,16 +27,6 @@
 
 use aether_actor::actor;
 
-// The handled-kind types the `#[actor(singleton)]` dispatch table references —
-// the `aether.bloomery.{admit,query}` ingress plus the store / source reply kinds
-// each of the cap's handlers folds, and this cap's own observer wake. Imported
-// here (like the store / api caps) so the always-on identity markers resolve
-// without the `runtime` runtime module.
-use aether_bloomery::control::{
-    Admit, AdmitResult, ClaimResult, CommitResult, CompleteReleaseResult, EnumerateClaimsResult, LoadConfigsResult,
-    MetricsQuery, ObserveMainlineResult, Query, ReplayJournalResult, SpendQuery,
-};
-
 pub mod kinds;
 pub use kinds::ObserveTick;
 

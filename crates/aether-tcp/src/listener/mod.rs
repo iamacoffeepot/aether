@@ -12,13 +12,7 @@
 //! The accept returns, sees the flag, breaks; the dispatcher thread
 //! (in `unwire`) joins the accept thread.
 
-// Handler-signature kinds must be importable at file root because
-// `#[actor]` emits `impl HandlesKind<K> for X {}` markers against the
-// identity (always-on, outside the `feature = "runtime"` gate).
-use super::{
-    TcpCapability,
-    kinds::{Close, ConnectionReady},
-};
+use super::TcpCapability;
 
 /// `aether.tcp.listener` **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`), the

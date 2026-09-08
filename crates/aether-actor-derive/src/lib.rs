@@ -14,6 +14,7 @@ mod asset;
 mod diagnostics;
 mod handler_parse;
 mod handler_set;
+mod kind_imports;
 mod manifest;
 mod native_expand;
 mod opts;

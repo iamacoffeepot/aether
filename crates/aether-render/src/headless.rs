@@ -6,18 +6,6 @@
 
 use aether_actor::actor;
 
-// The handler-argument and reply kinds the emitted `HandlesKind` markers lift
-// verbatim from the runtime module's signatures must resolve at this file's
-// root.
-use aether_kinds::CaptureFrame;
-
-use crate::kinds::{
-    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DestroyGeometry, DestroyTexture,
-    DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawShapes, DrawTexturedQuads, DrawTriangle,
-    ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult,
-    UpdateGeometry, UpdateTexture, ViewProjection,
-};
-
 /// `HeadlessRenderCapability` **identity** (ADR-0122 identity/runtime
 /// split). The chassis-without-GPU companion to [`crate::RenderCapability`],
 /// claiming the same `aether.render` mailbox so desktop-designed

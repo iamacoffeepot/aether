@@ -4,7 +4,7 @@
 //! `FleetProxy` actors — the engine-management surface of the
 //! forward-model architecture (issue 763). Three handlers:
 //!
-//! - **`on_spawn`** ([`SpawnEngine`]) picks a free localhost port,
+//! - **`on_spawn`** ([`SpawnEngine`](aether_kinds::SpawnEngine)) picks a free localhost port,
 //!   fork+execs the substrate binary with the port addressed as
 //!   `--rpc-port` argv (ADR-0162; the child's environment is constructed
 //!   from an allowlist at fork, never inherited, so no `AETHER_*` key
@@ -12,8 +12,8 @@
 //!   it. The proxy owns the forked child from there — startup-dial
 //!   retry, kill-on-failed-boot, kill-on-drop. Reply:
 //!   `SpawnEngineResult`.
-//! - **`on_list`** ([`ListEngines`]) reports every supervised engine.
-//! - **`on_terminate`** ([`TerminateEngine`]) forwards the kind to the
+//! - **`on_list`** ([`ListEngines`](aether_kinds::ListEngines)) reports every supervised engine.
+//! - **`on_terminate`** ([`TerminateEngine`](aether_kinds::TerminateEngine)) forwards the kind to the
 //!   engine's proxy (which terminates its substrate's process group
 //!   and self-shuts-down)
 //!   and drops the table entry. Reply: `TerminateEngineResult`.
@@ -39,17 +39,6 @@
 // decoded bytes so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
 
-// Handler-signature kinds must be importable at file root — the
-// `#[actor]` macro emits `impl HandlesKind<K>` markers always-on against
-// the identity, so they reference these kinds from here. The per-handler
-// reply kinds those markers also name arrive through the `use runtime::*`
-// glob below.
-use crate::kinds::{EngineAlive, EngineDied, EngineRestartDue};
-use aether_kinds::{
-    ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SetArtifactPinned, SpawnEngine,
-    TerminateEngine, UploadBinary, UploadComponent,
-};
-use aether_rpc::RouteEnvelope;
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
 
@@ -96,14 +85,13 @@ pub struct FleetServer;
 // the handler/init ctx, the runtime state, the artifact/fleet helpers — lives
 // in the `runtime` module below; the `#[actor] impl` reaches all of it through
 // the single `use runtime::*` glob.
-// The handler-signature kinds (`ListEngines` / `SpawnEngine` / …) stay
-// always-on at file root — the always-on `HandlesKind<K>` markers name them.
 use aether_actor::actor;
 
-// The `runtime` module is this cap's private runtime-half namespace; the impl
-// reaches all of it (state, ctx types, artifact/fleet helpers, result kinds)
-// through this single seam, so the glob is intentional rather than a few dozen
-// one-line imports.
+// The `runtime` module is this cap's private runtime-half namespace. The
+// `#[actor]`-emitted markers carry their own imports, so what is left reaching
+// through this seam is the `#[cfg(test)]` `ReplySink` below (state, ctx types,
+// reply kinds) — one glob rather than a dozen one-line imports.
+#[cfg(test)]
 #[allow(clippy::wildcard_imports)]
 use runtime::*;
 

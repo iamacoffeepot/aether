@@ -83,12 +83,6 @@ pub use session::TcpSessionActor;
 #[cfg(feature = "runtime")]
 pub use config::{TcpListenerConfig, TcpSessionConfig};
 
-// `MonitorNotice` stays importable at file root because the `#[actor]`
-// macro emits an always-on `HandlesKind<MonitorNotice>` marker against
-// the identity below (the runtime half handles the listener-fleet
-// monitor notices).
-use aether_kinds::MonitorNotice;
-
 /// `aether.tcp` cap **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`), the
 /// per-handler `HandlesKind` markers, and the singleton name-inventory entry,
