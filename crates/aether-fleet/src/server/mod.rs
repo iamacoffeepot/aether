@@ -4,7 +4,7 @@
 //! `FleetProxy` actors — the engine-management surface of the
 //! forward-model architecture (issue 763). Three handlers:
 //!
-//! - **`on_spawn`** ([`SpawnEngine`]) picks a free localhost port,
+//! - **`on_spawn`** ([`SpawnEngine`](aether_kinds::SpawnEngine)) picks a free localhost port,
 //!   fork+execs the substrate binary with the port addressed as
 //!   `--rpc-port` argv (ADR-0162; the child's environment is constructed
 //!   from an allowlist at fork, never inherited, so no `AETHER_*` key
@@ -12,8 +12,8 @@
 //!   it. The proxy owns the forked child from there — startup-dial
 //!   retry, kill-on-failed-boot, kill-on-drop. Reply:
 //!   `SpawnEngineResult`.
-//! - **`on_list`** ([`ListEngines`]) reports every supervised engine.
-//! - **`on_terminate`** ([`TerminateEngine`]) forwards the kind to the
+//! - **`on_list`** ([`ListEngines`](aether_kinds::ListEngines)) reports every supervised engine.
+//! - **`on_terminate`** ([`TerminateEngine`](aether_kinds::TerminateEngine)) forwards the kind to the
 //!   engine's proxy (which terminates its substrate's process group
 //!   and self-shuts-down)
 //!   and drops the table entry. Reply: `TerminateEngineResult`.

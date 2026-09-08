@@ -11,7 +11,7 @@
 //! - **`init`** dials the substrate's `RpcServerCapability` via
 //!   `RpcClient::connect` and spawns the reader sidecar. The
 //!   handshake's `HelloAck` identity is kept on `conn.server`.
-//! - **`on_forward`** ([`ForwardEnvelope`]) wraps the `mailbox`,
+//! - **`on_forward`** ([`ForwardEnvelope`](crate::kinds::ForwardEnvelope)) wraps the `mailbox`,
 //!   `kind`, and `payload` into an RPC `Call` and writes it down the
 //!   connection. The inbound mail's `Source` is parked under the
 //!   wire `cid` so the eventual reply can route back to the sender.
