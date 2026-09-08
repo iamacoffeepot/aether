@@ -28,6 +28,7 @@ mod affected;
 mod bins;
 mod bloom;
 mod build_wasm;
+mod bump;
 mod cargo;
 mod dev_component;
 mod dist;
@@ -46,6 +47,7 @@ use crate::affected::AffectedArgs;
 use crate::bins::BinsArgs;
 use crate::bloom::BloomArgs;
 use crate::build_wasm::BuildWasmArgs;
+use crate::bump::BumpArgs;
 use crate::dev_component::DevComponentArgs;
 use crate::dist::DistArgs;
 use crate::docs::DocsArgs;
@@ -105,6 +107,10 @@ enum Commands {
     /// Append one field write to a `scope.fill` run's call log. The value
     /// arrives by file so multi-paragraph prose survives the transport.
     Scope(ScopeArgs),
+    /// Move `[workspace.package] version` and re-lock every workspace the
+    /// move invalidates — the root plus each excluded crate carrying its
+    /// own lockfile (issue 5718).
+    Bump(BumpArgs),
     /// Print the chassis-binary inventory (`inventory::CHASSIS_BINS`) so a
     /// script or workflow reads the shipped binary names instead of
     /// re-spelling them (issue 5707).
@@ -125,6 +131,7 @@ fn main() -> Result<()> {
         Commands::Bloom(args) => bloom::run(&args),
         Commands::Symbols(args) => symbols::run(&args),
         Commands::Scope(args) => scope::run(&args),
+        Commands::Bump(args) => bump::run(&args),
         Commands::Bins(args) => bins::run(&args),
     }
 }

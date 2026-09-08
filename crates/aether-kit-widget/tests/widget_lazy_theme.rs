@@ -4,7 +4,7 @@
 //! `WidgetPanel` fans style across an empty child list until the first Tick
 //! spawns it; `ScrollWidget` used to drop the same mail until its first
 //! Collect. Color scenarios send the update first, then capture the first
-//! Collect and read the child's committed solid-plate tint. The font scenario
+//! Collect and read the child's committed shape-plate fill. The font scenario
 //! delivers `LoadFontResult` before spawn and asserts resident glyph quads
 //! after rasterization priming, so a dropped restyle cannot hide behind
 //! retained pending state.
@@ -29,7 +29,7 @@ use aether_kit_widget::{
     WidgetKind,
 };
 use aether_math::Rgba;
-use aether_render::{DrawTexturedQuads, WHITE_TEXTURE_ID};
+use aether_render::{DrawShapes, WHITE_TEXTURE_ID};
 use aether_text::{LoadFont, LoadFontResult, TextCapability};
 
 const PANEL_X: f32 = 10.0;
@@ -94,25 +94,28 @@ fn scroll_child(
     }
 }
 
-fn solid_for<'a>(snapshot: &'a [DrawTexturedQuads], clip: &ClipRect) -> &'a DrawTexturedQuads {
-    snapshot
+/// The shape batch a row's chrome lands in (ADR-0213): a widget plate is a
+/// filled `Shape`, not a white-textured quad, so a restyle is read off the
+/// shape snapshot rather than the overlay one.
+fn shapes_for<'a>(shapes: &'a [DrawShapes], clip: &ClipRect) -> &'a DrawShapes {
+    shapes
         .iter()
-        .find(|batch| batch.texture_id == WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(clip))
-        .unwrap_or_else(|| panic!("missing solid batch for {clip:?}; snapshot: {snapshot:?}"))
+        .find(|batch| batch.clip.as_ref() == Some(clip))
+        .unwrap_or_else(|| panic!("missing shape batch for {clip:?}; shapes: {shapes:?}"))
 }
 
-fn assert_row_fill(snapshot: &[DrawTexturedQuads], clip: &ClipRect, color: Rgba, message: &str) {
-    let batch = solid_for(snapshot, clip);
+fn assert_row_fill(shapes: &[DrawShapes], clip: &ClipRect, color: Rgba, message: &str) {
+    let batch = shapes_for(shapes, clip);
     assert!(
-        batch.quads.iter().any(|quad| quad.tint == color),
+        batch.shapes.iter().any(|shape| shape.fill == Some(color)),
         "{message}; wanted {color:?} in {clip:?}; batch: {batch:?}",
     );
 }
 
-fn assert_row_lacks_fill(snapshot: &[DrawTexturedQuads], clip: &ClipRect, color: Rgba, message: &str) {
-    let batch = solid_for(snapshot, clip);
+fn assert_row_lacks_fill(shapes: &[DrawShapes], clip: &ClipRect, color: Rgba, message: &str) {
+    let batch = shapes_for(shapes, clip);
     assert!(
-        batch.quads.iter().all(|quad| quad.tint != color),
+        batch.shapes.iter().all(|shape| shape.fill != Some(color)),
         "{message}; did not want {color:?} in {clip:?}; batch: {batch:?}",
     );
 }
@@ -204,7 +207,7 @@ fn early_set_theme_restyles_the_first_collect_plate() {
     send_theme(&mut harness, accent_theme(RESTYLE_RED));
     capture_first_collect(&mut harness);
 
-    let snapshot = harness.committed_overlay_snapshot();
+    let snapshot = harness.committed_shape_snapshot();
     let clip = row_clip(PANEL_Y);
     assert_row_fill(
         &snapshot,
@@ -234,7 +237,7 @@ fn early_theme_updates_latest_win_on_the_first_collect() {
     send_theme(&mut harness, accent_theme(RESTYLE_BLUE));
     capture_first_collect(&mut harness);
 
-    let snapshot = harness.committed_overlay_snapshot();
+    let snapshot = harness.committed_shape_snapshot();
     let clip = row_clip(PANEL_Y);
     assert_row_fill(
         &snapshot,
@@ -267,7 +270,7 @@ fn first_collect_keeps_explicit_child_themes_when_nothing_was_fanned() {
     );
     capture_first_collect(&mut harness);
 
-    let snapshot = harness.committed_overlay_snapshot();
+    let snapshot = harness.committed_shape_snapshot();
     let first = row_clip(PANEL_Y);
     let second = row_clip(PANEL_Y + row_height() + Theme::DEFAULT.gap);
     assert_row_fill(
@@ -315,7 +318,7 @@ fn nested_scroll_forwards_early_theme_before_the_first_collect() {
     send_theme(&mut harness, accent_theme(RESTYLE_RED));
     capture_first_collect(&mut harness);
 
-    let snapshot = harness.committed_overlay_snapshot();
+    let snapshot = harness.committed_shape_snapshot();
     let clip = row_clip(PANEL_Y);
     assert_row_fill(
         &snapshot,

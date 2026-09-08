@@ -26,11 +26,17 @@ use std::time::Instant;
 /// Asserts the child's `MailboxId` lands in the chassis's
 /// `ActorRegistry` as a Live entry, and that the parent-pre-loaded
 /// `after_init` mail dispatches as the child's first envelope.
+///
+/// Tripwire: the completion arm addresses the newborn child by its rendered
+/// lineage name through `send_to_named`. That name is depth-2, so a
+/// `send_to_named` that flat-hashes its argument resolves an id nothing
+/// registered and the mail warn-drops instead of arriving (the third element
+/// of `child_received` disappears).
 #[test]
 fn ctx_spawn_child_routes_through_handler() {
     use crate::actor::native::spawn::Subname;
     use crate::mail::registry::MailboxEntry;
-    use aether_actor::HandlesKind;
+    use aether_actor::{HandlesKind, MailSender};
     use aether_data::Kind;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -145,6 +151,10 @@ fn ctx_spawn_child_routes_through_handler() {
                 match &done.output().result {
                     Ok(()) => {
                         state.spawn_count.fetch_add(1, AtomicOrdering::SeqCst);
+                        ctx.send_to_named::<Ping>(
+                            "test.spawn_child.parent/test.spawn_child.child:0",
+                            &Ping { tag: 44 },
+                        );
                     }
                     Err(crate::SpawnError::SubnameInUse { .. }) => {
                         state.failure_count.fetch_add(1, AtomicOrdering::SeqCst);
@@ -193,9 +203,10 @@ fn ctx_spawn_child_routes_through_handler() {
     handler.enqueue(registry::test_owned_dispatch(<Hatch as Kind>::ID, &conflict, 1));
 
     let deadline = Instant::now() + Duration::from_millis(500);
-    while (child_received.lock().unwrap().len() < 2
+    while (child_received.lock().unwrap().len() < 3
         || spawn_count.load(AtomicOrdering::SeqCst) < 1
-        || failure_count.load(AtomicOrdering::SeqCst) < 1)
+        || failure_count.load(AtomicOrdering::SeqCst) < 1
+        || mailer.trace_handle().settlement_counter().live_roots() != 0)
         && Instant::now() < deadline
     {
         thread::sleep(Duration::from_millis(5));
@@ -217,8 +228,9 @@ fn ctx_spawn_child_routes_through_handler() {
     );
     assert_eq!(
         child_received.lock().unwrap().as_slice(),
-        [42, 43],
-        "the explicit bootstrap prefix precedes same-flush child mail"
+        [42, 43, 44],
+        "the explicit bootstrap prefix precedes same-flush child mail, and the rendered lineage \
+         name the completion arm sent to resolves to the same child"
     );
 
     // Child is Live in the chassis's actor registry under the

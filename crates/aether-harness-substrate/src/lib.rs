@@ -70,10 +70,8 @@
 //! `aether-harness-substrate-capture`'s `RenderHarnessBuilderExt::with_render`
 //! and a wgpu adapter, which is why they are not in the example above.
 
-pub mod cap;
 pub mod chassis;
 mod diagnostics;
-pub mod events;
 mod execute;
 mod harness;
 #[cfg(test)]
@@ -81,11 +79,8 @@ mod mail_latency;
 pub mod perf;
 mod poll_config;
 pub mod pump_stats;
-mod settlement_config;
 pub mod test_helpers;
-pub mod unsupported_cap;
 
-pub use cap::{SubstrateHarnessCapParams, SubstrateHarnessCapability};
 pub use chassis::{
     CaptureOutcome, ComposeFn, FrameHook, RenderHookWiring, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
     SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS,
@@ -97,11 +92,5 @@ pub use execute::{
 pub use harness::{
     DEFAULT_HEIGHT, DEFAULT_WIDTH, HookFactory, SubstrateHarness, SubstrateHarnessBuilder, SubstrateHarnessError,
 };
-// The derive-emitted `SettlementConfigLayer` rides along for the chassis
-// config-dump registry (`chassis_known_keys`), which enumerates every
-// knob's `META`; the `SettlementOverlay` rides along so the chassis CLI roots
-// can flatten `--settlement-cap-secs` into `--help` (issue 3882).
 pub use poll_config::{PollConfig, PollConfigLayer, PollOverlay};
 pub use pump_stats::PumpStats;
-pub use settlement_config::{SettlementConfig, SettlementConfigLayer, SettlementOverlay};
-pub use unsupported_cap::UnsupportedSubstrateHarnessCapability;
