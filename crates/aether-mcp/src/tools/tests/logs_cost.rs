@@ -39,8 +39,8 @@ async fn actor_logs_bad_engine_id_is_tool_error() {
     let mcp = connect_mcp(port);
     let result = mcp
         .actor_logs(Parameters(ActorLogsArgs {
-            engine_id: "not-a-uuid".to_owned(),
-            mailbox_name: "aether.audio".to_owned(),
+            engine_id: Some("not-a-uuid".to_owned()),
+            address: "aether.audio".to_owned(),
             max: None,
             level: None,
             since: None,
@@ -56,7 +56,7 @@ async fn actor_logs_bad_engine_id_is_tool_error() {
 /// site's helper instead (the substrate-side synthesized-Err
 /// routing is covered in `aether-substrate`'s mailer tests).
 #[test]
-fn actor_logs_err_message_names_mailbox() {
+fn actor_logs_err_message_names_address() {
     let msg = actor_logs_err_message("aether.nope", "mailbox mbx-0000-0000-0000 not registered");
     assert!(msg.contains("aether.nope"), "names the mailbox: {msg}");
     assert!(msg.contains("not registered"), "carries the cause: {msg}");
@@ -71,8 +71,8 @@ async fn actor_cost_bad_engine_id_is_tool_error() {
     let mcp = connect_mcp(port);
     let result = mcp
         .actor_cost(Parameters(ActorCostArgs {
-            engine_id: "not-a-uuid".to_owned(),
-            mailbox_name: "aether.audio".to_owned(),
+            engine_id: Some("not-a-uuid".to_owned()),
+            address: "aether.audio".to_owned(),
             kind_id: None,
         }))
         .await;
@@ -87,8 +87,8 @@ async fn actor_logs_bad_level_is_tool_error() {
     let mcp = connect_mcp(port);
     let result = mcp
         .actor_logs(Parameters(ActorLogsArgs {
-            engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
-            mailbox_name: "aether.audio".to_owned(),
+            engine_id: Some("00000000-0000-0000-0000-000000000001".to_owned()),
+            address: "aether.audio".to_owned(),
             max: None,
             level: Some("verbose".to_owned()),
             since: None,
@@ -129,8 +129,8 @@ async fn actor_logs_and_cost_route_to_the_engine_resolved_mailbox_id() {
     let engine_id = Uuid::from_u128(0x4057).to_string();
 
     mcp.actor_logs(Parameters(ActorLogsArgs {
-        engine_id: engine_id.clone(),
-        mailbox_name: "aether.test://probe".to_owned(),
+        engine_id: Some(engine_id.clone()),
+        address: "aether.test://probe".to_owned(),
         max: None,
         level: None,
         since: None,
@@ -139,8 +139,8 @@ async fn actor_logs_and_cost_route_to_the_engine_resolved_mailbox_id() {
     .await
     .expect("actor logs resolves and returns");
     mcp.actor_cost(Parameters(ActorCostArgs {
-        engine_id,
-        mailbox_name: "aether.test://probe".to_owned(),
+        engine_id: Some(engine_id),
+        address: "aether.test://probe".to_owned(),
         kind_id: None,
     }))
     .await

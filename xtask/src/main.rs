@@ -26,6 +26,7 @@
 
 mod affected;
 mod bloom;
+mod build_wasm;
 mod cargo;
 mod dev_component;
 mod dist;
@@ -42,6 +43,7 @@ use clap::{Parser, Subcommand};
 
 use crate::affected::AffectedArgs;
 use crate::bloom::BloomArgs;
+use crate::build_wasm::BuildWasmArgs;
 use crate::dev_component::DevComponentArgs;
 use crate::dist::DistArgs;
 use crate::docs::DocsArgs;
@@ -62,6 +64,11 @@ struct Cli {
 enum Commands {
     /// Watch, build, upload, and hot-reload one component on an explicit engine.
     DevComponent(DevComponentArgs),
+    /// Cross-build the component wasm the scenario tests' `require_wasm`
+    /// gate looks for — `dist` without the chassis binaries. Named in the
+    /// gate's own failure text, so it is the one command a reader who hit
+    /// a missing artifact is told to run.
+    BuildWasm(BuildWasmArgs),
     /// Build component wasm + chassis bins into `dist/` with a manifest.
     Dist(DistArgs),
     /// Pin hand-written documentation against the surface it mirrors.
@@ -102,6 +109,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::DevComponent(args) => dev_component::run(&args),
+        Commands::BuildWasm(args) => build_wasm::run(&args),
         Commands::Dist(args) => dist::run(&args),
         Commands::Docs(args) => docs::run(&args),
         Commands::Fixtures(args) => fixtures::run(&args),
