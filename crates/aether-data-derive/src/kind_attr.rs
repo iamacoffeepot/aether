@@ -265,22 +265,26 @@ mod tests {
         assert!(rendered.contains("\"test.named\""), "got: {rendered}");
     }
 
+    fn parse_error(attr: &proc_macro2::TokenStream, why: &str) -> String {
+        parse_args(attr).err().expect(why).to_string()
+    }
+
     #[test]
     fn rejects_missing_name() {
-        let err = parse_args(&quote! { eq }).expect_err("a nameless kind must not compile");
-        assert!(err.to_string().contains("name"), "got: {err}");
+        let err = parse_error(&quote! { eq }, "a nameless kind must not compile");
+        assert!(err.contains("name"), "got: {err}");
     }
 
     #[test]
     fn rejects_unknown_option() {
-        let err = parse_args(&quote! { name = "test.x", ordered }).expect_err("unknown options must not compile");
-        assert!(err.to_string().contains("derive(Trait"), "error must list the accepted options, got: {err}");
+        let err = parse_error(&quote! { name = "test.x", ordered }, "unknown options must not compile");
+        assert!(err.contains("derive(Trait"), "error must list the accepted options, got: {err}");
     }
 
     #[test]
     fn rejects_eq_with_partial_eq() {
-        let err = parse_args(&quote! { name = "test.x", eq, partial_eq }).expect_err("redundant pair must not compile");
-        assert!(err.to_string().contains("implies"), "got: {err}");
+        let err = parse_error(&quote! { name = "test.x", eq, partial_eq }, "redundant pair must not compile");
+        assert!(err.contains("implies"), "got: {err}");
     }
 
     #[test]
