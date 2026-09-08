@@ -340,6 +340,12 @@ struct PendingRun {
     preferred: Option<usize>,
     // Which band this dispatch queues in, from the stage its order names.
     priority: DispatchPriority,
+    // The bloom this dispatch belongs to, hex-encoded for `--bloom`. `None`
+    // when the order row named none.
+    bloom_hex: Option<String>,
+    // The landing-receipt digest this dispatch's evidence binds, hex-encoded
+    // for `--receipt`. Present whenever the order named a subject input.
+    receipt_hex: Option<String>,
 }
 
 impl PendingRun {
@@ -372,6 +378,8 @@ impl PendingRun {
             resume,
             workpiece: self.workpiece.as_deref(),
             stage: self.stage,
+            bloom: self.bloom_hex.as_deref(),
+            receipt: self.receipt_hex.as_deref(),
         }
     }
 }
@@ -1025,6 +1033,7 @@ impl LocalExecutor {
         // sealed and the receipt attests. An order that carries none names no
         // model, and the child falls back to the operator's ambient default.
         let profile = is_model_lane.then_some(order.transformation.model.as_ref()).flatten();
+        let subject = evidence_subject(&order.transformation);
 
         Ok(PendingRun {
             nonce,
@@ -1040,13 +1049,15 @@ impl LocalExecutor {
             // (the critic judges the candidate against it), mirroring the
             // model/effort gate.
             task: is_model_lane.then_some(order.transformation.description.clone()).flatten(),
-            subject: evidence_subject(&order.transformation),
+            subject,
             gates,
             workpiece,
             stage,
             slug,
             preferred,
             priority,
+            bloom_hex: identity.as_ref().map(|identity| aether_bloomery::encode_hex(&identity.bloom)),
+            receipt_hex: Some(hex_digest(&subject)),
         })
     }
 
@@ -3455,7 +3466,7 @@ fn parse_claimed_subject(bytes: &[u8]) -> Option<Digest> {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use aether_bloomery::SCOPE_FILL_COMMAND;
+    use aether_bloomery::{RETROSPECT_READ_COMMAND, SCOPE_FILL_COMMAND};
 
     use super::{LaneGates, usable_target_base};
 
@@ -3466,6 +3477,17 @@ mod tests {
         // this lane a candidate gate it can never satisfy, and every run would
         // fail with `produced_candidate: false`.
         let gates = LaneGates::of(SCOPE_FILL_COMMAND);
+        assert!(!gates.is_construct);
+        assert!(!gates.is_verify);
+    }
+
+    #[test]
+    fn the_reader_lane_is_neither_construct_nor_verify() {
+        // Tripwire: `is_verify` is a `starts_with("verify.")` prefix test; a
+        // later widening that swept `retrospect.` into the construct arm would
+        // give this lane a candidate gate it can never satisfy, and every read
+        // would fail with `produced_candidate: false`.
+        let gates = LaneGates::of(RETROSPECT_READ_COMMAND);
         assert!(!gates.is_construct);
         assert!(!gates.is_verify);
     }

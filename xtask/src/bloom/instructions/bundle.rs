@@ -8,7 +8,9 @@
 //! `include_str!` constants the `construct.implement`, `review.critic` and
 //! `scope.fill` lanes assemble their prompts from, plus the curated lane
 //! context every one of them inlines. Nothing is retyped, so those four cannot
-//! drift from what the lanes run.
+//! drift from what the lanes run. The two reader fields are authored here
+//! (there was no in-repo original) and the `retrospect.read` lane imports them
+//! by reference the same way.
 //!
 //! The rest are **framing texts** the lanes and the coordinator build with
 //! `format!` at assembly time, interpolating a commit, a package list, or a
@@ -196,7 +198,7 @@ composed tree builds. Do not reopen finished member work; repair at the seam.";
 /// never run, so there is no in-repo original to import. The bloom id, the
 /// receipt digest, and the landed range are context slots, never interpolated
 /// into this text.
-const RETROSPECT: &str = "\
+pub const RETROSPECT: &str = "\
 You are the reader at the end of the line. A bloom has landed: its members were built, reviewed, verified, woven, \
 and merged, and the range it landed is checked out for you. Read what it left behind and file the work it will not \
 fix.
@@ -236,7 +238,7 @@ in what you actually read, and small enough to be one member of a future bloom."
 /// `scope_emission`, and the contract
 /// [`RetrospectFinding::normalize`](aether_bloomery::RetrospectFinding::normalize)
 /// judges. Authored here for the same reason [`RETROSPECT`] is.
-const RETROSPECT_FINDING_CONTRACT: &str = "\
+pub const RETROSPECT_FINDING_CONTRACT: &str = "\
 Emit your findings as the top-level `retrospect_findings` array of this lane's evidence — a JSON array of objects, \
 each one work order:
 

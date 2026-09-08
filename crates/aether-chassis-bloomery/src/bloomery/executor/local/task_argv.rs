@@ -34,6 +34,8 @@ pub(super) const VALUE_TAKING_FLAGS: &[&str] = &[
     "--task",
     "--resume",
     "--seeded",
+    "--bloom",
+    "--receipt",
 ];
 
 /// Whether `flag` is a work-order flag whose next argv word is its value.

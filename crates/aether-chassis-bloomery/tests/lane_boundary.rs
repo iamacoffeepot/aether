@@ -23,13 +23,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs, thread};
 
 use aether_bloomery::{
-    BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_MEMBER_COMMAND, VerifyFailure,
-    VerifyFailureSet,
+    BloomId, BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, CommissionStatus, RETROSPECT_READ_COMMAND,
+    REVIEW_CRITIC_COMMAND, VERIFY_MEMBER_COMMAND, VerifyFailure, VerifyFailureSet,
 };
 use aether_chassis_bloomery::bloomery::admits_lane_key;
 use aether_chassis_bloomery::bloomery::mock_lane::{FOREIGN_SESSION_ID, LaneMode, LaneRun, LaneScript, read_ledger};
-use aether_chassis_bloomery::store::{SqliteStore, StoreBackend};
-use aether_harness_bloomery::{HarnessBuilder, HarnessRoots, LaneHarness, while_pumping};
+use aether_chassis_bloomery::store::{CommissionBackend, SqliteStore, StoreBackend};
+use aether_harness_bloomery::{HarnessBuilder, HarnessRoots, LaneHarness, Reader, ScenarioHarness, while_pumping};
 use aether_substrate::pid_lock::is_pid_alive;
 
 /// Whether the bloom's single member has come to rest either way — resolved, or
@@ -54,6 +54,10 @@ fn ran_under(mode: LaneMode) -> LaneHarness {
     harness
 }
 
+fn wait_until_the_reader_has_answered(harness: &mut ScenarioHarness, bloom: BloomId) {
+    harness.pump_until("the reader answers", |harness| !harness.study_verdicts(bloom).is_empty());
+}
+
 #[test]
 fn a_bloom_whose_lanes_all_pass_resolves_its_member() {
     // The green path, end to end below the spawn seam: a construct lane writes
@@ -73,6 +77,28 @@ fn a_bloom_whose_lanes_all_pass_resolves_its_member() {
         "the construct lane ran as a real subprocess: {commands:?}",
     );
     assert!(commands.contains(&VERIFY_MEMBER_COMMAND.to_owned()), "the verify lane ran too: {commands:?}");
+}
+
+#[test]
+fn a_landed_bloom_is_read_and_its_findings_are_filed() {
+    // The reader lane below the spawn seam: a real `retrospect.read` child
+    // writes `retrospect_findings`, intake admits `StudyCompleted { passed:
+    // true }`, and the two claims the mock stamped become open commissions.
+    // The reader is off by default (ADR-0216 §4), so a scenario about the
+    // read itself turns it on.
+    let mut harness =
+        HarnessBuilder::lane(&LaneScript::all_passing()).reader(Reader::On).start("lane-boundary-harness");
+    let bloom = harness.settle("the bloom lands", |bloom| bloom.status == BloomStatus::Landed);
+    wait_until_the_reader_has_answered(&mut harness, bloom.id);
+
+    assert_eq!(harness.study_verdicts(bloom.id), vec![true], "intake admits StudyCompleted {{ passed: true }}");
+    let commands: Vec<String> = harness.ledger().into_iter().map(|run| run.command).collect();
+    assert!(
+        commands.contains(&RETROSPECT_READ_COMMAND.to_owned()),
+        "the reader ran as a real subprocess: {commands:?}",
+    );
+    let filed = harness.commission_store().list(Some(CommissionStatus::Open)).expect("the commission store lists");
+    assert_eq!(filed.len(), 2, "one open commission per finding: {filed:?}");
 }
 
 #[test]
