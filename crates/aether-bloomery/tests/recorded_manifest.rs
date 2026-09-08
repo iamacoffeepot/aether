@@ -11,9 +11,9 @@
 mod common;
 
 use aether_bloomery::{
-    BloomDraft, ConfigRegistry, Decision, Decisions, Evidence, EvidenceKind, Fact, Outcome, PipelineManifest,
-    ResolutionClaim, ResolvedConfigs, Snapshot, SpendWindow, StageId, VERIFY_MEMBER_COMMAND, VerifyFailure,
-    VerifyGateSet, reduce,
+    BloomDraft, ConfigKind, ConfigRegistry, Decision, Decisions, Evidence, EvidenceKind, Fact, Outcome,
+    PipelineManifest, ResolutionClaim, ResolvedConfigs, Snapshot, SpendWindow, StageId, VERIFY_MEMBER_COMMAND,
+    VerifyFailure, VerifyGateSet, reduce,
 };
 use aether_data::Kind;
 use aether_data::wire::to_vec;
