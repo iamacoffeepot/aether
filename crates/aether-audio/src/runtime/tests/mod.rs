@@ -17,7 +17,7 @@ use super::voice::{
 };
 use super::*;
 use aether_data::{MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
-use aether_fs::FsError;
+use aether_fs::{FsError, NamespaceAddr};
 use aether_substrate::actor::native::binding::NativeBinding;
 use aether_substrate::testing::{
     assert_next_send_kind, boot_authority, decode_session_reply, decode_session_reply_with_session,

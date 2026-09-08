@@ -95,9 +95,8 @@ impl<C: Kind> FsRequestForwarder for NativeActorMailboxWithContext<'_, '_, FsCap
 ///
 /// Lifts the cap-shaped methods (`read(ns, path)`, `write(ns, path,
 /// bytes)`, ...) one indirection above the raw
-/// `.send(&Read { ns, path })` so component code stops reconstructing
-/// the kind struct (and the `.into()` conversions on every field) at
-/// every call site. The cap module owns receive-side
+/// `.send(&Read { addr })` so component code stops assembling the kind
+/// struct and its [`NamespaceAddr`] at every call site. The cap module owns receive-side
 /// ([`FsCapability`]) AND send-side ([`FsMailboxExt`]) so future
 /// kind additions land both surfaces in one place.
 ///
@@ -115,11 +114,10 @@ impl<C: Kind> FsRequestForwarder for NativeActorMailboxWithContext<'_, '_, FsCap
 ///
 /// All methods are fire-and-forget. Replies arrive as
 /// `aether.fs.read_result` / `aether.fs.write_result` /
-/// `aether.fs.delete_result` / `aether.fs.list_result`. Echoed
-/// `namespace` + `path` (or `prefix`) fields provide readable domain
-/// context; duplicate-safe one-shot matching uses a typed context bound
-/// with `.with_context(&context)` and recovered with `take_context`
-/// (ADR-0139).
+/// `aether.fs.delete_result` / `aether.fs.list_result`. The echoed
+/// `addr` provides readable domain context; duplicate-safe one-shot
+/// matching uses a typed context bound with `.with_context(&context)`
+/// and recovered with `take_context` (ADR-0139).
 ///
 /// Contextual facade calls intentionally discard the request id. Call
 /// the contextual adapter's generic `send` directly when the minted
@@ -134,28 +132,27 @@ impl<C: Kind> FsRequestForwarder for NativeActorMailboxWithContext<'_, '_, FsCap
 /// since `send` is an inherent method on the underlying mailbox type.
 #[allow(private_bounds)]
 pub trait FsMailboxExt: FsRequestForwarder {
-    /// Mail `aether.fs.read { namespace, path }` to the cap.
+    /// Mail `aether.fs.read { addr }` to the cap.
     fn read(&self, namespace: impl Into<String>, path: impl Into<String>) {
-        self.forward(&Read { namespace: namespace.into(), path: path.into() });
+        self.forward(&Read { addr: NamespaceAddr::new(namespace, path) });
     }
 
-    /// Mail `aether.fs.write { namespace, path, bytes }` to the cap.
-    /// The reply echoes `namespace` + `path` only (bytes are omitted
-    /// from the echo so a megabyte write doesn't produce a megabyte
-    /// reply).
+    /// Mail `aether.fs.write { addr, bytes }` to the cap. The reply
+    /// echoes `addr` only (bytes are omitted from the echo so a
+    /// megabyte write doesn't produce a megabyte reply).
     fn write(&self, namespace: impl Into<String>, path: impl Into<String>, bytes: impl Into<Vec<u8>>) {
-        self.forward(&Write { namespace: namespace.into(), path: path.into(), bytes: bytes.into() });
+        self.forward(&Write { addr: NamespaceAddr::new(namespace, path), bytes: bytes.into() });
     }
 
-    /// Mail `aether.fs.delete { namespace, path }` to the cap.
+    /// Mail `aether.fs.delete { addr }` to the cap.
     fn delete(&self, namespace: impl Into<String>, path: impl Into<String>) {
-        self.forward(&Delete { namespace: namespace.into(), path: path.into() });
+        self.forward(&Delete { addr: NamespaceAddr::new(namespace, path) });
     }
 
-    /// Mail `aether.fs.list { namespace, prefix }` to the cap. The
-    /// reply enumerates entries under the prefix.
+    /// Mail `aether.fs.list { addr }` to the cap. `addr.path` is the
+    /// prefix; the reply enumerates entries under it.
     fn list(&self, namespace: impl Into<String>, prefix: impl Into<String>) {
-        self.forward(&List { namespace: namespace.into(), prefix: prefix.into() });
+        self.forward(&List { addr: NamespaceAddr::new(namespace, prefix) });
     }
 
     /// Mail `aether.fs.copy { from, to }` to the cap. `from` is a raw
@@ -164,10 +161,7 @@ pub trait FsMailboxExt: FsRequestForwarder {
     /// the wire. The reply echoes `from` + `to` without bytes, so a
     /// large-file copy produces a small ack.
     fn copy(&self, from: impl Into<String>, to_namespace: impl Into<String>, to_path: impl Into<String>) {
-        self.forward(&Copy {
-            from: from.into(),
-            to: NamespaceAddr { namespace: to_namespace.into(), path: to_path.into() },
-        });
+        self.forward(&Copy { from: from.into(), to: NamespaceAddr::new(to_namespace, to_path) });
     }
 }
 
