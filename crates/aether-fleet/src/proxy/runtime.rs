@@ -13,8 +13,8 @@
 use super::{FleetProxy, FleetProxyConfig};
 pub use crate::kinds::{EngineAlive, EngineDied};
 use crate::kinds::{EngineHeartbeatTick, ForwardEnvelope};
+pub use aether_actor::root_mailbox;
 use aether_actor::runtime;
-pub use aether_actor::{Addressable, root_mailbox};
 pub use aether_data::{EngineId, Kind, KindId, MailboxId};
 pub use aether_kinds::DeathReason;
 use aether_kinds::TerminateEngine;

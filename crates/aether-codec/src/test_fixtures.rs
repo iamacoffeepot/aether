@@ -15,7 +15,7 @@ use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
 /// body, never on which mailbox an id names, so the arms take an id with the
 /// right tag rather than hashing a namespace they do not route to.
 pub fn sample_mailbox_id() -> aether_data::MailboxId {
-    aether_data::MailboxId(aether_data::with_tag(aether_data::Tag::Mailbox, 0x0c0d_ec00_1d))
+    aether_data::MailboxId(aether_data::with_tag(aether_data::Tag::Mailbox, 0x0c0d_ec00_001d))
 }
 
 /// A `NamedField` holding a single `Scalar(ty)` shape under `name`.

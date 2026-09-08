@@ -12,6 +12,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use aether_actor::Addressable;
 use aether_data::{Kind, MailId};
 use aether_harness_substrate::{
     ExecutionError, FrameHook, HarnessOp, RenderHookWiring, SubstrateHarness, SubstrateHarnessBuilder,

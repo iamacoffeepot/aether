@@ -388,7 +388,7 @@ mod tests {
     /// nothing recomputes it from a name — so it carries the tag bits and
     /// nothing else.
     fn mailbox_id() -> String {
-        aether_data::MailboxId(aether_data::with_tag(aether_data::Tag::Mailbox, 0x0eca_de00_1d)).to_string()
+        aether_data::MailboxId(aether_data::with_tag(Tag::Mailbox, 0x0eca_de00_001d)).to_string()
     }
 
     #[derive(Debug, Parser)]
