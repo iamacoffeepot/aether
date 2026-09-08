@@ -454,6 +454,29 @@ impl TextEditState {
         self.preedit.clear();
         self.preedit_cursor = None;
     }
+
+    /// Replace the committed text from outside the editor — a host pushing a
+    /// value down rather than a reader typing one.
+    ///
+    /// `keep_caret` decides what happens to where the reader was: `true` keeps
+    /// the caret and the selection, each floored to a `char` boundary of the
+    /// new string and clamped to its end, so correcting text under someone
+    /// still typing in it does not throw them to the end; `false` collapses the
+    /// caret at the end of the new string, which is what replacing a buffer
+    /// wholesale means. Any in-flight composition ends either way: it was being
+    /// composed against text that is now gone.
+    pub fn replace_value(&mut self, text: String, keep_caret: bool) {
+        let (anchor, caret) = (self.anchor, self.caret);
+        self.text = text;
+        self.clear_composition();
+        if keep_caret {
+            self.anchor = floor_boundary(&self.text, anchor);
+            self.caret = floor_boundary(&self.text, caret);
+        } else {
+            self.anchor = self.text.len();
+            self.caret = self.text.len();
+        }
+    }
 }
 
 /// One caret stop in a laid-out single line: a `char`-boundary byte offset and

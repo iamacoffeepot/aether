@@ -34,7 +34,7 @@ use crate::bloomery::doctor::KitReport;
 use crate::bloomery::driver::BloomeryDriverCapability;
 #[cfg(feature = "github")]
 use crate::bloomery::{
-    CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, DoctorBoard, DoctorReactorCapability,
+    CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, DoctorReactorCapability,
     DoctorReactorSetup, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig,
     IntegrateReactorCapability, IntegrateReactorSetup, JanitorReactorCapability, JanitorReactorSetup,
     LandReactorCapability, LandReactorSetup, LaneProgram, MirrorReactorCapability, MirrorReactorSetup, NotifyConfig,
@@ -118,7 +118,6 @@ struct BloomeryActorSetups {
     source: SourceSetup,
     correspondence: SharedCorrespondence,
     pusher: Arc<dyn CandidatePush>,
-    doctor_board: DoctorBoard,
 }
 
 #[cfg(feature = "github")]
@@ -323,7 +322,6 @@ fn doctor_setup(
     coordinator: &CoordinatorConfig,
     poll_interval_secs: u64,
     source_configured: bool,
-    board: DoctorBoard,
 ) -> DoctorReactorSetup {
     DoctorReactorSetup {
         source: source_configured.then(|| source.clone()),
@@ -332,7 +330,6 @@ fn doctor_setup(
         store_path: coordinator.store_path.clone(),
         worktree_base: coordinator.local_worktree_base.clone(),
         poll_interval_secs,
-        board,
     }
 }
 
@@ -362,7 +359,6 @@ fn actor_setups(
     let executor_correspondence = mounted_correspondence(executor.as_ref(), &correspondence);
     let repo = coordinator.lane_repository();
     let (pusher, publish_candidate) = candidate_publication(github, coordinator, repo.clone());
-    let doctor_board = DoctorBoard::default();
     let github_poll_interval_secs = github_cadence_secs(coordinator, configured);
 
     Ok(BloomeryActorSetups {
@@ -434,12 +430,10 @@ fn actor_setups(
             coordinator,
             github_poll_interval_secs,
             source_configured,
-            doctor_board.clone(),
         ),
         source: SourceSetup { shell: source, claims_enabled: source_configured, mainline: coordinator.mainline() },
         correspondence,
         pusher,
-        doctor_board,
     })
 }
 
@@ -821,7 +815,6 @@ impl BootableChassis for BloomeryChassis {
                 archive_base: coordinator.archive_base.clone(),
                 artifacts_root,
                 control_token: coordinator.http_control_token,
-                doctor: Some(setups.doctor_board),
             }))
     }
     #[cfg(not(feature = "github"))]
@@ -1066,6 +1059,60 @@ mod tests {
             &NotifyConfig::default(),
         )
         .expect("github is a valid authority");
+    }
+
+    fn actor_setups_for(github: &GithubConnectionConfig, local_lane_enabled: bool) -> super::BloomeryActorSetups {
+        actor_setups(
+            github,
+            &CoordinatorConfig {
+                authority_backend: "github".into(),
+                store_path: ":memory:".into(),
+                local_lane_enabled,
+                ..CoordinatorConfig::default()
+            },
+            &SessionConfig::default(),
+            &NotifyConfig::default(),
+        )
+        .expect("actor setups resolve under github authority")
+    }
+
+    // Tripwire: compose mounts the executor through `actor_setups` (#5591). A
+    // copied boolean helper used to disagree with that factory on a selected
+    // fixture with the local lane off. These cases call the factory and inspect
+    // the assembled shell, not a mirrored predicate.
+    #[test]
+    fn actor_setups_mounts_the_executor_from_the_production_gate() {
+        let unconfigured =
+            GithubConnectionConfig { api_base: "http://127.0.0.1:1".into(), ..GithubConnectionConfig::default() };
+        let unconfigured_missing = ["GITHUB_TOKEN", "AETHER_GITHUB_OWNER", "AETHER_GITHUB_REPO"];
+
+        let local_on = actor_setups_for(&unconfigured, true);
+        assert!(local_on.executor.executor.is_some(), "unconfigured + local enabled still mounts");
+        assert!(local_on.executor.correspondence.is_some(), "a mounted executor keeps correspondence");
+        assert_eq!(local_on.executor.disabled_missing, unconfigured_missing);
+
+        let local_off = actor_setups_for(&unconfigured, false);
+        assert!(local_off.executor.executor.is_none(), "unconfigured + local disabled has nothing to mount");
+        assert!(local_off.executor.correspondence.is_none(), "an unmounted executor carries no correspondence");
+        assert_eq!(local_off.executor.disabled_missing, unconfigured_missing);
+
+        let fixture = GithubConnectionConfig { github_backend: "fixture".into(), ..GithubConnectionConfig::default() };
+        assert!(!fixture.missing_connection_knobs().is_empty(), "a fixture still names empty PAT knobs");
+        let fixture_setup = actor_setups_for(&fixture, false);
+        assert!(fixture_setup.executor.executor.is_some(), "a selected fixture mounts even with the local lane off");
+        assert!(fixture_setup.executor.correspondence.is_some(), "a mounted fixture keeps correspondence");
+
+        let configured = GithubConnectionConfig {
+            token: "t".into(),
+            owner: "octo".into(),
+            repo: "shadow".into(),
+            api_base: "http://127.0.0.1:1".into(),
+            ..GithubConnectionConfig::default()
+        };
+        let configured_setup = actor_setups_for(&configured, false);
+        assert!(configured_setup.executor.executor.is_some(), "a configured PAT mounts with the local lane off");
+        assert!(configured_setup.executor.correspondence.is_some(), "a mounted PAT keeps correspondence");
+        assert!(configured_setup.executor.disabled_missing.is_empty(), "configured PAT names no missing knobs");
     }
 
     #[test]

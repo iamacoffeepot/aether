@@ -44,6 +44,17 @@
 pub mod kinds;
 pub use kinds::*;
 
+// Commission transact-mail kinds are always-on (ADR-0122): `#[actor]` emits
+// `HandlesKind` markers against these types even when the SQLite backend is stripped.
+mod commission_kinds;
+pub use commission_kinds::{
+    CancelCommission, CancelCommissionResult, CreateCommission, CreateCommissionResult, EnqueueScopeRun,
+    EnqueueScopeRunResult, ListCommissions, ListCommissionsResult, ListedCommission, LoadCommission,
+    LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult, RecordCommissionProjection,
+    RecordCommissionProjectionResult, ReopenCommission, ReopenCommissionResult, WriteScopeRevision,
+    WriteScopeRevisionResult,
+};
+
 // The control-plane transact-mails the wasm control actor drives are defined in
 // `aether-bloomery` (cycle avoidance — issue #3497), but they are part of the
 // `aether.store.*` surface a store client uses, so re-export them here at the
@@ -84,13 +95,7 @@ pub use adr::{AdrBackend, AdrError, AdrView};
 #[cfg(feature = "runtime")]
 mod commission;
 #[cfg(feature = "runtime")]
-pub use commission::{
-    CancelCommission, CancelCommissionResult, CommissionBackend, CommissionError, CommissionHead, CommissionView,
-    CreateCommission, CreateCommissionResult, EnqueueScopeRun, EnqueueScopeRunResult, ListCommissions,
-    ListCommissionsResult, ListedCommission, LoadCommission, LoadCommissionResult, RecordCommissionApproval,
-    RecordCommissionApprovalResult, RecordCommissionProjection, RecordCommissionProjectionResult, ReopenCommission,
-    ReopenCommissionResult, RevisionEvidence, WriteScopeRevision, WriteScopeRevisionResult,
-};
+pub use commission::{CommissionBackend, CommissionError, CommissionHead, CommissionView, RevisionEvidence};
 
 // Reading the reducer's per-member answers (which members resolved, which
 // bloom resolved a workpiece) back out of the journal.

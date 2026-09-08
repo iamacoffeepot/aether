@@ -76,7 +76,7 @@ pub mod virtual_list;
 
 pub use button::ButtonWidget;
 pub use defaults::WidgetDefaults;
-pub use dialog::{DialogConfig, DialogPlaced, DialogWidget};
+pub use dialog::DialogWidget;
 pub use dropdown::DropdownWidget;
 pub use image::ImageWidget;
 pub use label::LabelWidget;
@@ -87,13 +87,13 @@ pub use popover::Popover;
 pub use radio::RadioGroupWidget;
 pub use segmented::SegmentedWidget;
 pub use slider::SliderWidget;
-pub use splitter::{SplitterAxis, SplitterConfig, SplitterHover, SplitterMoved, SplitterWidget};
+pub use splitter::SplitterWidget;
 pub use tab_strip::TabStripWidget;
 pub use text_area::TextAreaWidget;
 pub use text_field::TextFieldWidget;
-pub use toast::{ToastConfig, ToastNotice, ToastRegionChanged, ToastSeverity, ToastWidget};
+pub use toast::ToastWidget;
 pub use toggle::ToggleWidget;
-pub use tooltip::{TooltipConfig, TooltipIcon, TooltipLine, TooltipSection, TooltipShed, TooltipWidget};
+pub use tooltip::TooltipWidget;
 pub use virtual_list::VirtualListWidget;
 
 use alloc::string::String;
@@ -107,6 +107,7 @@ use aether_kinds::keycode::{
 };
 use aether_kinds::{CachedFontMetrics, Modifiers, MouseButton, MouseButtonRelease, mouse_button};
 use aether_math::Rgba;
+use aether_render::{ScreenVertex, ShapeShadow, ShapeStroke, ShapeTexture};
 use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, TextCapability};
 
 use crate::state::{InteractionState, emit_state_changed};
@@ -223,9 +224,9 @@ pub(super) enum EditCommand {
 /// Whether the platform's editing-chord modifier is held. Both `ctrl` and
 /// `meta` count, always: Cmd is the chord on macOS and Ctrl everywhere else,
 /// and a widget cannot ask which platform its window is on — the substrate
-/// reports the physical modifiers and nothing more. Accepting either is what
-/// the owner's Cmd+A note asks for, and it costs nothing, because no control in
-/// the set binds the two modifiers to different meanings.
+/// reports the physical modifiers and nothing more. Accepting either is what a
+/// reader on either platform expects, and it costs nothing, because no control
+/// in the set binds the two modifiers to different meanings.
 fn edit_chord(modifiers: Modifiers) -> bool {
     modifiers.ctrl || modifiers.meta
 }
@@ -469,9 +470,9 @@ fn measured_text_width(metrics: &CachedFontMetrics, text: &str, size_pixels: f32
 /// `width`-wide frame, never left of the frame's own left edge.
 ///
 /// Centering is the whole rule: the margins either side are equal at every
-/// width, which is what a reader checks first and what the owner's
-/// asymmetric-Remove-button note was about. Clamping the origin to `pad` — the
-/// earlier rule — looked harmless but broke exactly that, because a frame
+/// width, which is the first thing a reader checks on a label in a button.
+/// Clamping the origin to `pad` — the earlier rule — looked harmless but broke
+/// exactly that, because a frame
 /// narrower than `text_width + 2 * pad` got a full pad on the left and
 /// whatever was left over on the right. `pad` is therefore what the button's
 /// *intrinsic width* reserves ([`ButtonWidget`]'s
@@ -513,11 +514,33 @@ fn apply_static_control_state(ctx: &WasmCtx<'_>, state: &mut InteractionState, n
 }
 
 fn clamp_option_index(index: u32, len: usize) -> usize {
+    clamp_selection(index as usize, len)
+}
+
+/// The selection a widget already holds, pulled back into an option vector that
+/// has just been replaced under it. The same rule a config seed gets, applied
+/// to the live value instead — which is what makes a re-sent config safe: the
+/// choice survives, it just cannot point past the end of the new vector.
+fn clamp_selection(selected: usize, len: usize) -> usize {
     if len == 0 {
         0
     } else {
-        (index as usize).min(len - 1)
+        selected.min(len - 1)
     }
+}
+
+/// [`clamp_option_index`] for the widgets whose selection can be absent — the
+/// dropdown and the virtual list. `None` asks for no selection and stays none;
+/// an empty vector clears one.
+fn clamp_optional_index(index: Option<u32>, len: usize) -> Option<usize> {
+    clamp_optional_selection(usize::try_from(index?).ok(), len)
+}
+
+/// [`clamp_selection`] for those same two: the choice they already hold,
+/// resolved against a vector that has just been replaced under it.
+fn clamp_optional_selection(selected: Option<usize>, len: usize) -> Option<usize> {
+    let selected = selected?;
+    (len > 0).then(|| selected.min(len - 1))
 }
 
 /// Discharge the hidden-widget branch of the always-reply compositing
@@ -551,30 +574,143 @@ fn reply_with_draw_items(
     }
 }
 
-/// A flat-colored quad in a widget's own local coordinates — the shared
-/// constructor the widgets build their chrome from.
+/// A flat-colored rectangle in a widget's own local coordinates — the
+/// shared constructor the widgets build their square-cornered chrome
+/// from: a rule, a seam, a caret, a selection band, a hover overlay.
+/// A [`WidgetDrawItem::Shape`] at radius zero with a fill and nothing
+/// else, which is the whole of what a flat rect ever was (ADR-0213).
 pub(crate) fn quad(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> WidgetDrawItem {
-    WidgetDrawItem::Quad { x, y, width, height, color, clip: None }
+    shape(x, y, width, height, 0.0, Some(color), None)
 }
 
-/// Push a `thickness`-pixel border ring around the `width` × `height` local
-/// rect whose top-left is `(x, y)` — four thin quads (top, bottom, left,
-/// right). The offset form is what an overlay plate needs: a dropdown's list
-/// and a menu's items are rings around a rect the widget's own origin is not
-/// the corner of.
-pub(crate) fn push_rect_border(
-    items: &mut Vec<WidgetDrawItem>,
+/// A stadium in a widget's own local coordinates: the box rounded by half
+/// its shorter side, which is the radius the shape primitive draws a fully
+/// round end at (ADR-0213) — a toggle's track, a scroll thumb, a pill.
+pub(crate) fn stadium(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    fill: Option<Rgba>,
+    stroke: Option<(f32, Rgba)>,
+) -> WidgetDrawItem {
+    shape(x, y, width, height, width.min(height) * 0.5, fill, stroke)
+}
+
+/// A circle in a widget's own local coordinates: the [`stadium`] of a
+/// square box `size` on a side — a toggle's knob, a radio's marker, a
+/// status dot.
+pub(crate) fn disc(x: f32, y: f32, size: f32, fill: Option<Rgba>, stroke: Option<(f32, Rgba)>) -> WidgetDrawItem {
+    stadium(x, y, size, size, fill, stroke)
+}
+
+/// The unclipped, unshadowed [`WidgetDrawItem::Shape`] every constructor
+/// above lands on, with the corner radius stated outright rather than
+/// taken from the theme.
+fn shape(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    corner_radius: f32,
+    fill: Option<Rgba>,
+    stroke: Option<(f32, Rgba)>,
+) -> WidgetDrawItem {
+    WidgetDrawItem::Shape {
+        x,
+        y,
+        width,
+        height,
+        corner_radius,
+        fill,
+        stroke: stroke.map(|(width_pixels, color)| ShapeStroke { width_pixels, color }),
+        shadow: None,
+        texture: None,
+        clip: None,
+    }
+}
+
+/// A rounded box at the theme's radius drawing `texture` inside its fill,
+/// tinted by `tint` (iamacoffeepot/aether#5709) — the image widget's face.
+/// The same radius the plates beside it take, so a thumbnail is not the one
+/// square corner in a rounded set, and the edge is anti-aliased on the GPU
+/// rather than cut by a clip.
+pub(crate) fn picture(theme: &Theme, frame: [f32; 4], texture: ShapeTexture, tint: Rgba) -> WidgetDrawItem {
+    let [x, y, width, height] = frame;
+    WidgetDrawItem::Shape {
+        x,
+        y,
+        width,
+        height,
+        corner_radius: theme.corner_radius_pixels,
+        fill: Some(tint),
+        stroke: None,
+        shadow: None,
+        texture: Some(texture),
+        clip: None,
+    }
+}
+
+/// A rounded box in a widget's own local coordinates at the theme's corner
+/// radius (ADR-0213): `fill` under an optional inside `stroke` of
+/// `(thickness, color)`, no shadow. The constructor every plate, field, and
+/// button face is built from — one item where a fill and four stroke quads
+/// used to be, with an edge that lands on one anti-aliased pixel row at any
+/// fractional position.
+pub(crate) fn plate(
+    theme: &Theme,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    fill: Option<Rgba>,
+    stroke: Option<(f32, Rgba)>,
+) -> WidgetDrawItem {
+    shape(x, y, width, height, theme.corner_radius_pixels, fill, stroke)
+}
+
+/// A plate that **stands over** what is under it — a dialog, a tooltip, a
+/// dropdown's open list, a menu, a toast, a hover reveal: `fill` with the
+/// theme's shadow under it and, when `edge` is given, its edge stroked in
+/// that colour at the theme's hairline. A plate whose rows are filled over
+/// it passes `None` and draws a [`ring`] after the rows instead, so the edge
+/// stays on top. The shadow is the lift ADR-0213 gives the design to spend;
+/// it covers nothing (the root's hole cutting reads the fill box alone), so
+/// the glyphs it falls across show through it as they should.
+pub(crate) fn raised_plate(
+    theme: &Theme,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    fill: Rgba,
+    edge: Option<Rgba>,
+) -> WidgetDrawItem {
+    let mut item = plate(theme, x, y, width, height, Some(fill), edge.map(|edge| (theme.stroke_width_pixels, edge)));
+    if let WidgetDrawItem::Shape { shadow, .. } = &mut item {
+        *shadow = Some(ShapeShadow {
+            blur_pixels: theme.shadow_blur_pixels,
+            offset: theme.shadow_offset_pixels,
+            color: theme.shadow,
+        });
+    }
+    item
+}
+
+/// A `thickness`-pixel ring just inside the `width` × `height` local rect
+/// whose top-left is `(x, y)`, at the theme's corner radius and with no fill
+/// — a focus ring, a validation ring, an outlined control's edge. It covers
+/// nothing, so a ring drawn over a field never cuts the field's own text.
+pub(crate) fn ring(
+    theme: &Theme,
     x: f32,
     y: f32,
     width: f32,
     height: f32,
     thickness: f32,
     color: Rgba,
-) {
-    items.push(quad(x, y, width, thickness, color));
-    items.push(quad(x, y + height - thickness, width, thickness, color));
-    items.push(quad(x, y, thickness, height, color));
-    items.push(quad(x + width - thickness, y, thickness, height, color));
+) -> WidgetDrawItem {
+    plate(theme, x, y, width, height, None, Some((thickness, color)))
 }
 
 /// The wash a control with **no plate of its own** answers the pointer with.
@@ -593,15 +729,19 @@ pub(crate) fn pointer_wash(theme: &Theme, state: ThemeState) -> Option<Rgba> {
     }
 }
 
-/// Push a `thickness`-pixel border ring around the whole `width` × `height`
-/// local rect. A focused widget draws this from `theme.accent` so the focus
-/// ring reads without the root holding any per-widget-type visual knowledge.
-pub(crate) fn push_border(items: &mut Vec<WidgetDrawItem>, width: f32, height: f32, thickness: f32, color: Rgba) {
-    push_rect_border(items, 0.0, 0.0, width, height, thickness, color);
+/// Push a `thickness`-pixel ring around the whole `width` × `height` local
+/// rect. A focused widget draws this from `theme.accent` so the focus ring
+/// reads without the root holding any per-widget-type visual knowledge.
+pub(crate) fn push_border(
+    items: &mut Vec<WidgetDrawItem>,
+    theme: &Theme,
+    width: f32,
+    height: f32,
+    thickness: f32,
+    color: Rgba,
+) {
+    items.push(ring(theme, 0.0, 0.0, width, height, thickness, color));
 }
-
-/// The hairline a button's outline is stroked at.
-pub(crate) const BUTTON_STROKE_THICKNESS: f32 = 1.0;
 
 /// The three inks one (emphasis, tone) pair resolves to: the plate under the
 /// label, the stroke around it, and the label's own colour. `None` is a part
@@ -619,18 +759,18 @@ pub(crate) struct ButtonInk {
 /// a filled verb is a saturated plate, a tonal one a quiet plate at a fixed
 /// contrast step off the surface ([`Theme::tonal`]), an outlined one no plate
 /// and a stroke that clears the same step ([`Theme::edge`]), and a text one
-/// neither. Two ranks that resolve to the same face are the owner's round-11
-/// note 4 — a `Change gem` and a `×` on one row that read alike — so the ranks
-/// are separated by *structure* (plate / stroke / nothing) before colour, and
+/// neither. Two ranks that resolve to the same face defeat the ladder — two
+/// verbs on one row at different emphases that read alike — so the ranks are
+/// separated by *structure* (plate / stroke / nothing) before colour, and
 /// the two that carry colour are separated from their background by measured
 /// contrast rather than by a fixed mix.
 ///
 /// The one rule worth stating: on the quiet emphases a *neutral* verb reads in
 /// the primary ink, not in the accent. The accent is the primary action's token
 /// (`designing-a-screen.md` §6), and a screen whose four secondary verbs are
-/// all lettered in it has spent the token again — which is the owner's "a
-/// single yellow button for everything" in a thinner form. A danger verb keeps
-/// its colour at every rank, because what it destroys does not get quieter.
+/// all lettered in it has spent the token again — one accent for everything,
+/// in a thinner form. A danger verb keeps its colour at every rank, because
+/// what it destroys does not get quieter.
 pub(crate) fn button_ink(theme: &Theme, emphasis: ButtonEmphasis, tone: ButtonTone) -> ButtonInk {
     let role = match tone {
         ButtonTone::Neutral => theme.accent,
@@ -735,24 +875,10 @@ pub(crate) fn push_button_face(
     metrics: Option<&CachedFontMetrics>,
 ) {
     let ink = button_ink(theme, face.emphasis, face.tone);
-    match ink.plate {
-        Some(plate) => items.push(quad(face.x, face.y, face.width, face.height, theme.fill(plate, theme_state))),
-        None => {
-            if let Some(wash) = pointer_wash(theme, theme_state) {
-                items.push(quad(face.x, face.y, face.width, face.height, wash));
-            }
-        }
-    }
-    if let Some(stroke) = ink.stroke {
-        push_rect_border(
-            items,
-            face.x,
-            face.y,
-            face.width,
-            face.height,
-            BUTTON_STROKE_THICKNESS,
-            theme.fill(stroke, theme_state),
-        );
+    let fill = ink.plate.map_or_else(|| pointer_wash(theme, theme_state), |plate| Some(theme.fill(plate, theme_state)));
+    let stroke = ink.stroke.map(|stroke| (theme.stroke_width_pixels, theme.fill(stroke, theme_state)));
+    if fill.is_some() || stroke.is_some() {
+        items.push(plate(theme, face.x, face.y, face.width, face.height, fill, stroke));
     }
     if let Some((run, run_x)) = button_run(face.label, face.width, theme, metrics) {
         items.push(WidgetDrawItem::Text {
@@ -767,18 +893,15 @@ pub(crate) fn push_button_face(
     }
 }
 
-/// The most rows [`push_triangle`] builds an arrow from. An arrow this size is
-/// a handful of pixels tall, so the cap only bounds a pathological frame.
-const TRIANGLE_MAX_ROWS: usize = 16;
-
-/// Push a solid isoceles triangle, built from horizontal quad rows, centered
-/// on `center_x` and filling the `width` × `height` box whose top is `top_y`.
-/// `pointing_up` puts the apex at the top.
+/// Push a solid isoceles triangle centered on `center_x` and filling the
+/// `width` × `height` box whose top is `top_y`. `pointing_up` puts the apex
+/// at the top.
 ///
-/// A triangle rather than a `▲` glyph because the kit's draw list has no
-/// polygon and the theme's font is whatever the consumer loaded — asking it for
-/// an arrowhead is asking for a missing-glyph box on the one control whose
-/// whole point is being clickable.
+/// A triangle rather than a `▲` glyph because the theme's font is whatever
+/// the consumer loaded — asking it for an arrowhead is asking for a
+/// missing-glyph box on the one control whose whole point is being
+/// clickable. One [`WidgetDrawItem::Triangle`] the render cap rasterizes at
+/// any orientation, where a stack of quad rows used to approximate it.
 pub(crate) fn push_triangle(
     items: &mut Vec<WidgetDrawItem>,
     center_x: f32,
@@ -791,27 +914,24 @@ pub(crate) fn push_triangle(
     if !(width > 0.0 && height > 0.0) {
         return;
     }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let rows = (height.ceil() as usize).clamp(1, TRIANGLE_MAX_ROWS);
-    #[allow(clippy::cast_precision_loss)]
-    let row_height = height / rows as f32;
-    for row in 0..rows {
-        #[allow(clippy::cast_precision_loss)]
-        let center_fraction = (row as f32 + 0.5) / rows as f32;
-        let fraction = if pointing_up {
-            center_fraction
-        } else {
-            1.0 - center_fraction
-        };
-        let row_width = width * fraction;
-        #[allow(clippy::cast_precision_loss)]
-        let y = row_height.mul_add(row as f32, top_y);
-        items.push(quad(center_x - row_width * 0.5, y, row_width, row_height, color));
-    }
+    let corner = |x: f32, y: f32| ScreenVertex { x, y, color };
+    let half = width * 0.5;
+    let (base_y, apex_y) = if pointing_up {
+        (top_y + height, top_y)
+    } else {
+        (top_y, top_y + height)
+    };
+    items.push(WidgetDrawItem::Triangle {
+        a: corner(center_x - half, base_y),
+        b: corner(center_x + half, base_y),
+        c: corner(center_x, apex_y),
+        clip: None,
+    });
 }
 
 fn push_inset_border(
     items: &mut Vec<WidgetDrawItem>,
+    theme: &Theme,
     width: f32,
     height: f32,
     inset: f32,
@@ -820,10 +940,7 @@ fn push_inset_border(
 ) {
     let inner_width = inset.mul_add(-2.0, width).max(0.0);
     let inner_height = inset.mul_add(-2.0, height).max(0.0);
-    items.push(quad(inset, inset, inner_width, thickness, color));
-    items.push(quad(inset, inset + inner_height - thickness, inner_width, thickness, color));
-    items.push(quad(inset, inset, thickness, inner_height, color));
-    items.push(quad(inset + inner_width - thickness, inset, thickness, inner_height, color));
+    items.push(ring(theme, inset, inset, inner_width, inner_height, thickness, color));
 }
 
 /// Draw validation and focus as orthogonal outlines. Validation owns the outer
@@ -842,11 +959,12 @@ pub(super) fn push_control_outlines(
 ) {
     let validation = state.validation_color(theme);
     if let Some(color) = validation {
-        push_border(items, width, height, 2.0, color);
+        push_border(items, theme, width, height, 2.0, color);
     }
     if state.focus_visible() {
         push_inset_border(
             items,
+            theme,
             width,
             height,
             if validation.is_some() {
@@ -919,17 +1037,12 @@ fn single_line_edit_draw_items(edit: &SingleLineEdit<'_>) -> Vec<WidgetDrawItem>
     // Everything the reader typed lives inside the value's own box, never in
     // the gutter beside it (round-4 note 6).
     let content_clip = edit.content_clip();
-    let content_quad = |x: f32, y: f32, quad_width: f32, quad_height: f32, color: Rgba| WidgetDrawItem::Quad {
-        x,
-        y,
-        width: quad_width,
-        height: quad_height,
-        color,
-        clip: content_clip,
+    let content_quad = |x: f32, y: f32, quad_width: f32, quad_height: f32, color: Rgba| {
+        quad(x, y, quad_width, quad_height, color).with_clip(content_clip)
     };
 
     let mut items = Vec::new();
-    items.push(quad(0.0, 0.0, width, height, single_line_box_fill(theme, theme_state)));
+    items.push(plate(theme, 0.0, 0.0, width, height, Some(single_line_box_fill(theme, theme_state)), None));
     if let Some(span) = displayed.selection_span {
         let x0 = pad + prefix_width(span.start_byte);
         let x1 = pad + prefix_width(span.end_byte);
@@ -1161,8 +1274,8 @@ pub fn text_origin_y(row_top: f32, row_height: f32, size_pixels: f32) -> f32 {
 /// How wide the kit lets a hover reveal or a tooltip run before it wraps, in
 /// body characters. A reading measure, not a limit the content chose: past
 /// roughly this the eye loses the line it is on coming back from the right
-/// edge, and a plate that is one enormously long line is exactly the "breaks
-/// up weirdly" the owner saw.
+/// edge, and a plate that is one enormously long line reads as text that broke
+/// up rather than as a box.
 pub const REVEAL_WRAP_CHARS: usize = 40;
 
 /// The pixel width [`REVEAL_WRAP_CHARS`] comes to at `size_pixels`, by the
@@ -1260,8 +1373,7 @@ pub struct WrappedLine {
 /// starts at the margin and every continuation is inset by `indent_pixels`,
 /// wrapping that much earlier so the right edge stays where it was. A wrapped
 /// entry then reads as one entry rather than as two — which is what a stat
-/// line on a hover card needs, and is ordinary typography (the studio's
-/// gap 18).
+/// line on a hover card needs, and is ordinary typography.
 ///
 /// `0.0` is exactly [`wrap_to_width`]. A `\n` starts a new paragraph, so the
 /// line after an author's own break is a first line again, not a continuation.
@@ -1384,9 +1496,8 @@ pub(crate) fn overflow_reveal_items(plate: &RevealPlate<'_>, measure: &dyn Fn(&s
         return Vec::new();
     }
 
-    let mut items = Vec::with_capacity(5 + lines.len());
-    items.push(quad(0.0, 0.0, plate_width, plate_height, theme.surface_raised));
-    push_border(&mut items, plate_width, plate_height, 1.0, theme.outline);
+    let mut items = Vec::with_capacity(1 + lines.len());
+    items.push(raised_plate(theme, 0.0, 0.0, plate_width, plate_height, theme.surface_raised, Some(theme.outline)));
     for (index, line) in lines.into_iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let row_top = index as f32 * row_height;
@@ -1446,10 +1557,10 @@ fn even_split_widths(count: usize, width: f32, gap: f32) -> Vec<f32> {
 /// This is the sizing a row of cells that owns its whole frame wants: a
 /// filled tab strip divides the bar between its tabs, so there is no width
 /// left over to leave blank, but dividing it *evenly* ignores what is in each
-/// cell. At the studio's own pane that put `Build` in a share three times
-/// wider than the word and elided `Equipment` to `Equipm…` in the share
-/// beside it — a row with room for every label cutting one of them, which is
-/// the one thing §5 of the screen-design method forbids outright.
+/// cell. An even split puts a short label in a share three times wider than
+/// the word and elides a long one to `Equipm…` in the share beside it — a row
+/// with room for every label cutting one of them, which is the one thing §5 of
+/// the screen-design method forbids outright.
 ///
 /// So content comes first and the slack is the only thing shared: each cell
 /// gets its measured run plus its pads, and every cell then takes an equal
@@ -1532,6 +1643,27 @@ mod tests {
     use super::*;
     use aether_kinds::WindowId;
 
+    #[test]
+    fn a_requested_selection_is_none_for_empty_and_clamped_for_nonempty() {
+        assert_eq!(clamp_optional_index(Some(0), 0), None);
+        assert_eq!(clamp_optional_index(None, 5), None, "no selection asked for is no selection");
+        assert_eq!(clamp_optional_index(Some(0), 1), Some(0));
+        assert_eq!(clamp_optional_index(Some(99), 5), Some(4));
+        assert_eq!(clamp_optional_index(Some(u32::MAX), usize::MAX), Some(u32::MAX as usize));
+    }
+
+    #[test]
+    fn a_held_selection_survives_a_shorter_vector_by_moving_to_its_last_entry() {
+        // Tripwire: this is what makes a re-sent config safe. A widget whose
+        // option vector shrinks under it must keep a choice, not lose one, and
+        // must never index past the end of what it now holds.
+        assert_eq!(clamp_selection(4, 6), 4);
+        assert_eq!(clamp_selection(4, 2), 1);
+        assert_eq!(clamp_selection(4, 0), 0, "an empty vector has only the zeroth slot to name");
+        assert_eq!(clamp_optional_selection(Some(4), 2), Some(1));
+        assert_eq!(clamp_optional_selection(Some(4), 0), None, "an empty vector is no selection at all");
+    }
+
     /// A fixed-advance measure, so a wrap point is arithmetic a reader can
     /// check: every character is `MONO_ADVANCE` pixels wide.
     const MONO_ADVANCE: f32 = 10.0;
@@ -1577,7 +1709,9 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 WidgetDrawItem::Text { text, .. } => Some(text.as_str()),
-                WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+                WidgetDrawItem::TexturedQuad { .. }
+                | WidgetDrawItem::Shape { .. }
+                | WidgetDrawItem::Triangle { .. } => None,
             })
             .collect()
     }
@@ -1592,7 +1726,7 @@ mod tests {
         assert!(overflow_reveal_items(&plate(&theme, ""), &mono).is_empty(), "an empty run has nothing to reveal");
 
         let overflows = overflow_reveal_items(&plate(&theme, "far too long to fit"), &mono);
-        let WidgetDrawItem::Quad { x, y, height, .. } = overflows[0] else {
+        let WidgetDrawItem::Shape { x, y, height, .. } = overflows[0] else {
             panic!("the plate leads with its fill");
         };
         assert_eq!((x, y, height), (0.0, 0.0, 24.0), "the plate starts at the widget's own origin, one line tall");
@@ -1617,7 +1751,7 @@ mod tests {
         }
         assert_eq!(lines.join(" "), text, "wrapping loses no word and adds none");
 
-        let WidgetDrawItem::Quad { width, height, .. } = items[0] else {
+        let WidgetDrawItem::Shape { width, height, .. } = items[0] else {
             panic!("the plate leads with its fill");
         };
         let longest = lines.iter().copied().map(mono).fold(0.0_f32, f32::max);

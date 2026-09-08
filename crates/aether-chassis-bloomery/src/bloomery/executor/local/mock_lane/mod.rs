@@ -23,7 +23,7 @@
 //! [`TransformRunner`]: super::TransformRunner
 
 use std::path::Path;
-use std::{env, error, fmt, io, thread};
+use std::{env, error, fmt, io, process, thread};
 
 pub mod argv;
 pub mod evidence;
@@ -127,6 +127,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I, worktree: &Path) -> Result<i
             task: args.task.clone(),
             worktree: Some(worktree.display().to_string()),
             env: inherited_env_names(),
+            process_id: Some(process::id()),
         },
     )?;
 
@@ -169,8 +170,8 @@ pub fn run_process() -> Result<i32, MockLaneError> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "a fixture that cannot set up its files reports it by panicking")]
 mod tests {
-    use std::fs;
     use std::path::{Path, PathBuf};
+    use std::{fs, process};
 
     use aether_bloomery::{CONSTRUCT_IMPLEMENT_COMMAND, StageId, VERIFY_CHECK_COMMAND, VERIFY_MEMBER_COMMAND};
 
@@ -250,6 +251,21 @@ mod tests {
         let ledger = read_ledger(base.path()).unwrap();
         assert_eq!(ledger.len(), 1);
         assert_eq!(ledger[0].nonce, "n-1");
+    }
+
+    #[test]
+    fn a_run_records_the_current_process_id_before_it_acts() {
+        // Tripwire: deadline-reaping scenarios probe the recorded identity with
+        // is_pid_alive. A missing or zero id cannot stand in for a live child,
+        // so the mock must write this process's id, not a placeholder.
+        let base = tempfile::tempdir().unwrap();
+        let (args, worktree) = dispatch(base.path(), VERIFY_CHECK_COMMAND, "n-1");
+
+        run(args, &worktree).unwrap();
+
+        let ledger = read_ledger(base.path()).unwrap();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].process_id, Some(process::id()), "the mock records this process's id before it acts");
     }
 
     #[test]

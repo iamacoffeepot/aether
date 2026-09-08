@@ -31,13 +31,13 @@ use aether_substrate::runtime::lifecycle;
 use aether_substrate::{Chassis, HubOutbound, Mailer, chassis::frame_loop, mail::MailboxId};
 
 use aether_chassis::next_chassis_correlation;
-use aether_chassis::{RenderSizeConfig, resolve_teardown_budget};
+use aether_chassis::resolve_teardown_budget;
 use aether_harness_substrate::{
-    SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS,
-    events::{self, ChassisEvent},
+    DEFAULT_HEIGHT, DEFAULT_WIDTH, SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS,
 };
 use aether_render::{Frame, RenderCapability, RenderCapabilityState, RenderParams, RenderTuningConfig};
 use aether_substrate::render::VERTEX_BUFFER_BYTES;
+use aether_substrate_harness_cap::events::{self, ChassisEvent};
 use crossbeam_channel::{Receiver, Sender};
 
 /// Cumulative patience cap for the per-frame advance settlement gate,
@@ -45,6 +45,59 @@ use crossbeam_channel::{Receiver, Sender};
 /// `frame_loop::DRAIN_BUDGET`; a starved-but-healthy chain resolves before
 /// this cap, a genuine wedge exhausts it (issue #1305).
 const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
+
+/// Render-size knob for this binary (`AETHER_SUBSTRATE_HARNESS_SIZE=WxH`):
+/// a `#[derive(aether_substrate::Config)]` struct resolved `from_env()` and
+/// lowered to `(u32, u32)` by [`Self::to_size`]. Binary-side because the
+/// in-process harness sizes through its builder, not process env — issue #5706
+/// moved it here from `aether-chassis`, whose only reason to hold it was the
+/// harness dependency this binary owns anyway.
+///
+/// The explicit `env =` pin is belt-and-suspenders against a future field
+/// rename, matching how `ActorRingConfig` pins its historical keys.
+#[derive(Clone, Debug, Default, aether_substrate::Config)]
+#[config(env_prefix = "AETHER_SUBSTRATE_HARNESS", cli_prefix = "substrate-harness")]
+pub struct RenderSizeConfig {
+    /// Offscreen render width and height in pixels; unset falls back to 800x600.
+    ///
+    /// Render dimensions for the offscreen wgpu surface, given as
+    /// `width x height`. Falls back to `800x600` on missing/unparseable
+    /// input with a warn log.
+    #[config(env = "AETHER_SUBSTRATE_HARNESS_SIZE")]
+    pub size: Option<String>,
+}
+
+impl RenderSizeConfig {
+    /// Lower the resolved knob to `(width, height)` pixels: missing env var,
+    /// missing `x` separator, non-numeric parts, or a zero dimension all fall
+    /// back to [`DEFAULT_WIDTH`] × [`DEFAULT_HEIGHT`] with a `warn` log.
+    #[must_use]
+    pub fn to_size(&self) -> (u32, u32) {
+        let Some(raw) = self.size.as_deref() else {
+            return (DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        };
+        if let Some((w, h)) = raw.split_once('x') {
+            match (w.parse::<u32>(), h.parse::<u32>()) {
+                (Ok(w), Ok(h)) if w > 0 && h > 0 => (w, h),
+                _ => {
+                    tracing::warn!(
+                        target: "aether_chassis_harness::boot",
+                        value = %raw,
+                        "AETHER_SUBSTRATE_HARNESS_SIZE unparseable — falling back to default",
+                    );
+                    (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+                }
+            }
+        } else {
+            tracing::warn!(
+                target: "aether_chassis_harness::boot",
+                value = %raw,
+                "AETHER_SUBSTRATE_HARNESS_SIZE missing 'x' separator — falling back to default",
+            );
+            (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+        }
+    }
+}
 
 fn main() -> anyhow::Result<()> {
     let (events_tx, events_rx) = events::channel();

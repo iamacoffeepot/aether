@@ -57,12 +57,11 @@
 use std::collections::BTreeSet;
 
 use aether_fs::NamespaceRootsOverlay;
-use aether_harness_substrate::SettlementOverlay;
 use aether_http::{HttpOverlay, HttpServerOverlay};
 use aether_lifecycle::LifecycleOverlay;
 use aether_process::ProcessOverlay;
 use aether_rpc::RpcServerOverlay;
-use aether_substrate::config::{ConfigError, ConfigSources, StageArgv};
+use aether_substrate::config::{ConfigError, ConfigSources, SettlementOverlay, StageArgv};
 use clap::Args;
 
 use crate::boot::{

@@ -17,12 +17,12 @@ use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
 use aether_math::Rgba;
 
 use crate::set::defaults::WidgetDefaults;
-use crate::set::{ActivationArms, push_control_outlines, quad, reply_if_hidden, text_origin_y};
+use crate::set::{ActivationArms, disc, push_control_outlines, reply_if_hidden, stadium, text_origin_y};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
 use crate::{
-    Collect, SetWidgetState, ToggleChanged, ToggleConfig, WidgetControlState, WidgetDrawItem, WidgetDrawList,
-    WidgetFrame,
+    Collect, SetToggle, SetWidgetState, ToggleChanged, ToggleConfig, WidgetControlState, WidgetDrawItem,
+    WidgetDrawList, WidgetFrame,
 };
 
 /// A boolean switch with a track, knob, and optional label.
@@ -132,14 +132,23 @@ impl ToggleWidget {
         };
         let state = self.state.theme_state(self.pressed());
 
+        // A stadium track and a round knob: a radius of half the height is
+        // what the shape primitive draws a circle at (ADR-0213).
         let mut items = Vec::new();
-        items.push(quad(0.0, track_y, track_width, track_height, self.theme.fill(self.track_color(), state)));
-        items.push(quad(
+        items.push(stadium(
+            0.0,
+            track_y,
+            track_width,
+            track_height,
+            Some(self.theme.fill(self.track_color(), state)),
+            None,
+        ));
+        items.push(disc(
             knob_x,
             track_y + 2.0,
             knob_size,
-            knob_size,
-            self.theme.fill(self.knob_color(), self.state.supporting_theme_state(false)),
+            Some(self.theme.fill(self.knob_color(), self.state.supporting_theme_state(false))),
+            None,
         ));
 
         if !self.label.is_empty() {
@@ -196,18 +205,31 @@ impl WasmActor for ToggleWidget {
         })
     }
 
+    /// Relabel and restyle in place from a re-sent config. `initial` seeds the
+    /// switch only at `init`, so this holds the flag; [`SetToggle`] flips it.
+    /// A live press arm survives too — the switch the reader is pressing is
+    /// still the switch they pressed — and only becoming unavailable cancels
+    /// it, through [`Self::apply_control_state`].
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: ToggleConfig) {
         self.label = config.label;
-        self.on = config.initial;
         self.theme = config.theme;
-        self.clear_arms();
         self.apply_control_state(ctx, config.state);
     }
 
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
+    }
+
+    /// Push the flag from the host. Silent — no [`ToggleChanged`], since the
+    /// host set what it would be told about. Any live arm is cancelled: the
+    /// press that armed it would otherwise complete against a value the reader
+    /// never saw.
+    #[handler::single]
+    fn on_set_toggle(&mut self, _ctx: &mut WasmCtx<'_>, set: SetToggle) {
+        self.on = set.on;
+        self.clear_arms();
     }
 
     #[handler::single]
@@ -270,12 +292,12 @@ mod tests {
         }
     }
 
-    /// The track's fill and the knob's, in draw order — the first two quads
-    /// the toggle pushes, before any outline.
+    /// The track's fill and the knob's, in draw order — the first two
+    /// filled shapes the toggle pushes, before any outline.
     fn track_and_knob(switch: &ToggleWidget) -> (Rgba, Rgba) {
         let items = switch.draw_items();
         let mut fills = items.iter().filter_map(|item| match item {
-            WidgetDrawItem::Quad { color, .. } => Some(*color),
+            WidgetDrawItem::Shape { fill: Some(color), .. } => Some(*color),
             _ => None,
         });
         (fills.next().expect("the track is drawn first"), fills.next().expect("the knob is drawn on it"))

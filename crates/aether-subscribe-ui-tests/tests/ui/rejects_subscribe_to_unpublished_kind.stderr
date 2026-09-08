@@ -1,0 +1,58 @@
+error[E0277]: `HeadlessWindowCapability` does not publish `Tick`
+ --> tests/ui/rejects_subscribe_to_unpublished_kind.rs:7:25
+  |
+7 |     windows.subscribe::<Tick>(WindowSelector::All);
+  |                         ^^^^ subscribing here would store a row that never fires
+  |
+  = help: the trait `Publishes<Tick>` is not implemented for `HeadlessWindowCapability`
+  = note: an event with no matching subscriber is dropped at its source, so a subscription on the wrong capability fails silently at run time — it is refused here instead
+  = note: frame-lifecycle stages (`Tick`, `Render`, `Present`, `InitCaps`, `InitComponents`, `Shutdown`) come from `LifecycleCapability`: `ctx.actor::<LifecycleCapability>().subscribe::<Tick>()`
+  = note: window device events (`Key`, `KeyRelease`, `MouseMove`, `MouseButton`, `MouseButtonRelease`, `MouseWheel`, `WindowSize`, `TextInput`, `ImePreedit`, `Modifiers`) and window lifecycle (`WindowOpened`, `WindowClosed`, `WindowMenuActivated`) come from `WindowCapability`: `ctx.actor::<WindowCapability>().subscribe::<Key>(WindowSelector::All)`
+  = help: `HeadlessWindowCapability` implements trait `Publishes<K>`:
+            Publishes<ImePreedit>
+            Publishes<Key>
+            Publishes<KeyRelease>
+            Publishes<Modifiers>
+            Publishes<MouseButton>
+            Publishes<MouseButtonRelease>
+            Publishes<MouseMove>
+            Publishes<MouseWheel>
+            Publishes<TextInput>
+            Publishes<WindowClosed>
+            Publishes<WindowMenuActivated>
+            Publishes<WindowOpened>
+            Publishes<WindowSize>
+note: required by a bound in `aether_window::WindowManagerMailboxExt::subscribe`
+ --> $WORKSPACE/crates/aether-window/src/lib.rs
+  |
+  |     fn subscribe<K: Kind>(&self, selector: WindowSelector)
+  |        --------- required by a bound in this associated function
+  |     where
+  |         WindowCapability: Publishes<K>,
+  |                           ^^^^^^^^^^^^ required by this bound in `WindowManagerMailboxExt::subscribe`
+
+error[E0277]: `LifecycleCapability` does not publish `Key`
+  --> tests/ui/rejects_subscribe_to_unpublished_kind.rs:11:27
+   |
+11 |     lifecycle.subscribe::<Key>();
+   |                           ^^^ subscribing here would store a row that never fires
+   |
+   = help: the trait `Publishes<Key>` is not implemented for `LifecycleCapability`
+   = note: an event with no matching subscriber is dropped at its source, so a subscription on the wrong capability fails silently at run time — it is refused here instead
+   = note: frame-lifecycle stages (`Tick`, `Render`, `Present`, `InitCaps`, `InitComponents`, `Shutdown`) come from `LifecycleCapability`: `ctx.actor::<LifecycleCapability>().subscribe::<Tick>()`
+   = note: window device events (`Key`, `KeyRelease`, `MouseMove`, `MouseButton`, `MouseButtonRelease`, `MouseWheel`, `WindowSize`, `TextInput`, `ImePreedit`, `Modifiers`) and window lifecycle (`WindowOpened`, `WindowClosed`, `WindowMenuActivated`) come from `WindowCapability`: `ctx.actor::<WindowCapability>().subscribe::<Key>(WindowSelector::All)`
+   = help: `LifecycleCapability` implements trait `Publishes<K>`:
+             Publishes<InitCaps>
+             Publishes<InitComponents>
+             Publishes<Present>
+             Publishes<Render>
+             Publishes<Tick>
+             Publishes<aether_kinds::Shutdown>
+note: required by a bound in `aether_lifecycle::LifecycleMailboxExt::subscribe`
+  --> $WORKSPACE/crates/aether-lifecycle/src/subscribers.rs
+   |
+   |     fn subscribe<K: Kind>(&self)
+   |        --------- required by a bound in this associated function
+   |     where
+   |         LifecycleCapability: Publishes<K>,
+   |                              ^^^^^^^^^^^^ required by this bound in `LifecycleMailboxExt::subscribe`

@@ -27,10 +27,9 @@ use aether_substrate::{Chassis, Mailer, RingCapacities, SchedulerTuning, Substra
 use aether_trace::TraceDispatchCapability;
 use aether_window::SyntheticWindowCapability;
 
-use super::cap::{SubstrateHarnessCapParams, SubstrateHarnessCapability};
-use super::events::EventSender;
 use aether_lifecycle::{LifecycleConfig, frame_lifecycle_params};
 use aether_substrate::mail::registry::MailDispatch;
+use aether_substrate_harness_cap::{SubstrateHarnessCapParams, SubstrateHarnessCapability, events::EventSender};
 use std::io;
 
 /// Wire-stable `EngineInfo.workers` value (ADR-0038: post actor-per-

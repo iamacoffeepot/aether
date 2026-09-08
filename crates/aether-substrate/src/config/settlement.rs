@@ -1,7 +1,13 @@
-//! The settlement-patience knob (issue 2062), rehomed beside its
-//! primary consumer — the harness's settlement gates — by the crate
-//! extraction (issue #3765). The chassis bundle re-imports it for the
-//! teardown-budget resolution, so one knob covers both.
+//! The settlement-patience knob (issue 2062), beside the other resolved
+//! substrate knobs ([`RingCapacities`](super::RingCapacities),
+//! [`SchedulerTuning`](super::SchedulerTuning)) it shares a boot seam with.
+//!
+//! It configures the substrate's settlement gate, so every consumer of that
+//! gate reads one knob: the chassis teardown budget
+//! (`aether_chassis::resolve_teardown_budget`), the hub's own teardown
+//! resolution, and the `SubstrateHarness` settlement waits. It lived in
+//! `aether-harness-substrate` until issue #5706, which is what put a
+//! 13k-line test crate in every shipped chassis binary's dependency graph.
 
 use std::time::Duration;
 
@@ -12,7 +18,7 @@ use std::time::Duration;
 /// this.
 const DEFAULT_SETTLEMENT_CAP_SECS: u64 = 300;
 
-/// Settlement-patience backstop knob (issue 2062). The harness's settlement
+/// Settlement-patience backstop knob (issue 2062). The settlement
 /// gates block on the settlement signal and treat this cap as a generous
 /// deadlock/livelock backstop, not the 30 s wall-clock correctness gate
 /// that false-fired under `nextest --workspace` saturation (a healthy-but-

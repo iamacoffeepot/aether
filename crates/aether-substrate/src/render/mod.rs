@@ -24,6 +24,7 @@ mod material;
 mod pipeline;
 mod program;
 mod quad;
+mod shape;
 mod targets;
 // ADR-0161 §Decision 4: the `FrameCheck` verdict + similarity scorer, rehomed
 // here from `aether-harness-substrate-capture` so the pumped render runtime in
@@ -47,10 +48,15 @@ pub use program::{
     record_program_pass,
 };
 pub use quad::{
-    CompositeBlend, OverlayDraw, QUAD_UNIFORM_BYTES, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE,
+    CompositeBlend, OverlayDraw, OverlaySource, QUAD_UNIFORM_BYTES, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE,
     QUAD_VERTICES_PER_QUAD, QUAD_VERTICES_PER_TRIANGLE, QuadPipeline, RealizedTexture, TextureBindings,
     build_quad_pipeline, build_texture_bindings, push_screen_quad_vertices, push_screen_triangle_vertices,
-    push_world_quad_vertices, realize_texture, realize_writable_texture, record_quad_overlay_pass, upload_texture_full,
+    push_world_quad_vertices, push_world_triangle_vertices, realize_texture, realize_writable_texture,
+    record_quad_overlay_pass, upload_texture_full,
+};
+pub use shape::{
+    SHAPE_VERTEX_BUFFER_BYTES, SHAPE_VERTEX_STRIDE, SHAPE_VERTICES_PER_SHAPE, ShapeParams, push_screen_shape_vertices,
+    push_world_shape_vertices,
 };
 pub use targets::{Targets, record_resolve_pass};
 

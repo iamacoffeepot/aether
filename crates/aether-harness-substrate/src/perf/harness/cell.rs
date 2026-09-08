@@ -6,9 +6,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aether_actor::Addressable;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::trace::{TraceRingEntry, TraceTail, TraceTailResult};
 use aether_kinds::{LifecycleSubscribe, LifecycleSubscribeResult, Tick};
+use aether_lifecycle::LifecycleCapability;
 use aether_substrate::Subname;
 use aether_substrate::scheduler::{handoff_cost_nanos, reset_handoff_to_boot_seed};
 use aether_trace::walk::fold_nodes;
@@ -245,7 +247,7 @@ pub fn run_cell(
     // Subscribe the source to the `Tick` lifecycle stage so
     // `advance` broadcasts a tick to it each frame (ADR-0082).
     let sub_req = LifecycleSubscribe { stage: Tick::ID.0, mailbox: ticksrc_id().0 }.encode_into_bytes();
-    match tb.send_bytes_and_await("aether.lifecycle", LifecycleSubscribe::ID, sub_req) {
+    match tb.send_bytes_and_await(<LifecycleCapability as Addressable>::NAMESPACE, LifecycleSubscribe::ID, sub_req) {
         Ok(reply) => match LifecycleSubscribeResult::decode_from_bytes(&reply) {
             Some(LifecycleSubscribeResult::Ok) => {}
             other => {

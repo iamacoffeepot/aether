@@ -9,14 +9,13 @@
 //!
 //! ADR-0041 substrate file I/O. Request kinds on the `"aether.fs"`
 //! mailbox (read / write / copy / delete / list), paired 1:1 with
-//! reply kinds that carry a structured `FsError` on failure. All
-//! structured because every request carries `String` namespace/path
-//! fields and writes carry `Vec<u8>` bytes.
+//! reply kinds that carry a structured `FsError` on failure.
 //!
-//! `namespace` is the logical prefix without the `://`: mail carries
-//! `"save"`, not `"save://"`. Paths are relative to the namespace
-//! root; `..` and absolute prefixes are rejected at the adapter
-//! boundary as `FsError::Forbidden`.
+//! Every request and reply addresses its file through one
+//! [`NamespaceAddr`] — `{ namespace, path }` — rather than a loose pair
+//! of `String` fields per kind, and each reply enum owns a `from_op`
+//! constructor that folds an adapter `Result` into its `Ok` / `Err`
+//! arms so the echo is written once per family member.
 
 use aether_data::{KindId, TransformId};
 use serde::{Deserialize, Serialize};
@@ -37,37 +36,79 @@ pub enum FsError {
     AdapterError(String),
 }
 
+/// A logical file address the substrate resolves through the adapter
+/// registry: the `namespace` prefix without the `://` (mail carries
+/// `"save"`, not `"save://"`) and a `path` relative to that namespace's
+/// root. Every `aether.fs.*` request and reply addresses a file this
+/// way — the family has one addressing shape, not a loose `namespace` +
+/// `path` pair per kind.
+///
+/// `..` and a leading `/` are rejected at the adapter boundary as
+/// `Forbidden`; a namespace that was never registered replies
+/// `UnknownNamespace`, and a read-only one (`assets`) replies
+/// `Forbidden` to a write.
+///
+/// `aether.fs.list` addresses a *prefix* rather than a file through the
+/// same type: its `path` is matched as a prefix under the namespace
+/// root, and an empty `path` lists the root. The addressing is
+/// identical — only what the verb does with it differs — so `List`
+/// takes no special case.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+pub struct NamespaceAddr {
+    pub namespace: String,
+    pub path: String,
+}
+
+impl NamespaceAddr {
+    /// Build an address from anything that converts into the two
+    /// strings — the sender-side shorthand `FsMailboxExt` and every
+    /// asset-loading cap reach for.
+    #[must_use]
+    pub fn new(namespace: impl Into<String>, path: impl Into<String>) -> Self {
+        Self { namespace: namespace.into(), path: path.into() }
+    }
+}
+
 /// `aether.fs.read` — request the substrate read a file and reply
 /// with its bytes. Mailed to the `"aether.fs"` mailbox; reply
 /// lands via `reply_mail` as `ReadResult`.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.read")]
 pub struct Read {
-    pub namespace: String,
-    pub path: String,
+    pub addr: NamespaceAddr,
 }
 
-/// Reply to `Read`. Both arms echo the `namespace` + `path` from
-/// the originating `Read` as domain context and for compatibility
-/// with callers that group by file identity. A caller that can have
-/// duplicate in-flight reads for the same path should use the
-/// request id returned by `send_tracked` and match it against
-/// `ctx.in_reply_to()` instead. `Ok` carries the full file contents;
-/// `Err` carries an `FsError` variant.
+/// Reply to `Read`. Both arms echo the `addr` from the originating
+/// `Read` as domain context and for compatibility with callers that
+/// group by file identity. A caller that can have duplicate in-flight
+/// reads for the same address should use the request id returned by
+/// `send_tracked` and match it against `ctx.in_reply_to()` instead.
+/// `Ok` carries the full file contents; `Err` carries an `FsError`
+/// variant.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.read_result")]
 pub enum ReadResult {
     Ok {
-        namespace: String,
-        path: String,
+        addr: NamespaceAddr,
         #[serde(with = "aether_data::bytes")]
         bytes: Vec<u8>,
     },
     Err {
-        namespace: String,
-        path: String,
+        addr: NamespaceAddr,
         error: FsError,
     },
+}
+
+impl ReadResult {
+    /// Fold an adapter read into the reply, echoing the address on
+    /// both arms. The one place the `Ok`/`Err` split is written.
+    #[must_use]
+    pub fn from_op(addr: NamespaceAddr, read: Result<Vec<u8>, FsError>) -> Self {
+        match read {
+            Ok(bytes) => Self::Ok { addr, bytes },
+            Err(error) => Self::Err { addr, error },
+        }
+    }
 }
 
 /// `aether.fs.write` — request the substrate write `bytes` to
@@ -78,37 +119,35 @@ pub enum ReadResult {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.write")]
 pub struct Write {
-    pub namespace: String,
-    pub path: String,
+    pub addr: NamespaceAddr,
     #[serde(with = "aether_data::bytes")]
     pub bytes: Vec<u8>,
 }
 
-/// Reply to `Write`. Both arms echo `namespace` + `path` as domain
-/// context; the request's `bytes` field is *not* echoed so the reply
-/// payload stays small even when the write was megabytes. Duplicate
-/// in-flight writes to the same path should be matched by
-/// `send_tracked` / `ctx.in_reply_to()`. `Err` carries an `FsError`
-/// — `Forbidden` for read-only namespaces (e.g. `assets://`),
-/// `AdapterError` for disk-full / permission / rename failures.
+/// Reply to `Write`. Both arms echo `addr` as domain context; the
+/// request's `bytes` field is *not* echoed so the reply payload stays
+/// small even when the write was megabytes. Duplicate in-flight writes
+/// to the same address should be matched by `send_tracked` /
+/// `ctx.in_reply_to()`. `Err` carries an `FsError` — `Forbidden` for
+/// read-only namespaces (e.g. `assets://`), `AdapterError` for
+/// disk-full / permission / rename failures.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.write_result")]
 pub enum WriteResult {
-    Ok { namespace: String, path: String },
-    Err { namespace: String, path: String, error: FsError },
+    Ok { addr: NamespaceAddr },
+    Err { addr: NamespaceAddr, error: FsError },
 }
 
-/// Destination address for `aether.fs.copy`: a logical namespace
-/// path the substrate resolves through the write adapter registry.
-/// Only writable namespaces (`save`, `config`) accept a copy; a
-/// read-only namespace (`assets`) replies `Forbidden` and an unknown
-/// namespace replies `UnknownNamespace`. `path` is relative to the
-/// namespace root — `..` and leading `/` are rejected at the adapter
-/// boundary as `Forbidden`, the same rule that governs `aether.fs.write`.
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-pub struct NamespaceAddr {
-    pub namespace: String,
-    pub path: String,
+impl WriteResult {
+    /// Fold an adapter write into the reply, echoing the address on
+    /// both arms.
+    #[must_use]
+    pub fn from_op(addr: NamespaceAddr, write: Result<(), FsError>) -> Self {
+        match write {
+            Ok(()) => Self::Ok { addr },
+            Err(error) => Self::Err { addr, error },
+        }
+    }
 }
 
 /// `aether.fs.copy` — copy a file from a raw host filesystem path
@@ -142,6 +181,18 @@ pub enum CopyResult {
     Err { from: String, to: NamespaceAddr, error: FsError },
 }
 
+impl CopyResult {
+    /// Fold a host-read-then-adapter-write into the reply, echoing
+    /// both endpoints on both arms.
+    #[must_use]
+    pub fn from_op(from: String, to: NamespaceAddr, copy: Result<(), FsError>) -> Self {
+        match copy {
+            Ok(()) => Self::Ok { from, to },
+            Err(error) => Self::Err { from, to, error },
+        }
+    }
+}
+
 /// `aether.fs.delete` — request the substrate remove a file.
 /// Missing files surface as `NotFound` (not silent success) so
 /// callers that care about the distinction can tell; callers
@@ -149,47 +200,69 @@ pub enum CopyResult {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.delete")]
 pub struct Delete {
-    pub namespace: String,
-    pub path: String,
+    pub addr: NamespaceAddr,
 }
 
-/// Reply to `Delete`. Both arms echo `namespace` + `path` as domain
-/// context. Duplicate in-flight deletes for the same path should be
-/// matched by `send_tracked` / `ctx.in_reply_to()`. `Ok` on
-/// successful removal; `Err` on any adapter-reported failure,
-/// including `NotFound` for a file that wasn't there to delete.
+/// Reply to `Delete`. Both arms echo `addr` as domain context.
+/// Duplicate in-flight deletes for the same address should be matched
+/// by `send_tracked` / `ctx.in_reply_to()`. `Ok` on successful
+/// removal; `Err` on any adapter-reported failure, including
+/// `NotFound` for a file that wasn't there to delete.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.delete_result")]
 pub enum DeleteResult {
-    Ok { namespace: String, path: String },
-    Err { namespace: String, path: String, error: FsError },
+    Ok { addr: NamespaceAddr },
+    Err { addr: NamespaceAddr, error: FsError },
 }
 
-/// `aether.fs.list` — enumerate entries under `prefix` in
-/// `namespace`. Shallow (no recursion) and prefix-filtered —
-/// callers that want a tree walk paginate themselves. Empty
-/// `prefix` lists the namespace root. Reply: `ListResult`.
+impl DeleteResult {
+    /// Fold an adapter delete into the reply, echoing the address on
+    /// both arms.
+    #[must_use]
+    pub fn from_op(addr: NamespaceAddr, delete: Result<(), FsError>) -> Self {
+        match delete {
+            Ok(()) => Self::Ok { addr },
+            Err(error) => Self::Err { addr, error },
+        }
+    }
+}
+
+/// `aether.fs.list` — enumerate entries under `addr`. Shallow (no
+/// recursion) and prefix-filtered: `addr.path` is matched as a prefix
+/// under the namespace root rather than opened as a file, and an empty
+/// `addr.path` lists the root. Callers that want a tree walk paginate
+/// themselves. Reply: `ListResult`.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.list")]
 pub struct List {
-    pub namespace: String,
-    pub prefix: String,
+    pub addr: NamespaceAddr,
 }
 
-/// Reply to `List`. Both arms echo the originating `namespace` +
-/// `prefix` as domain context. Duplicate in-flight lists for the same
-/// prefix should be matched by `send_tracked` / `ctx.in_reply_to()`.
-/// `Ok` carries the matching entry
-/// names — bare file/dir names, not fully-qualified paths — so the
-/// caller composes `{prefix}{entry}` when turning an entry back
-/// into a read. Empty `entries` means "namespace exists, nothing
-/// matched"; `Err { UnknownNamespace }` means the namespace itself
-/// wasn't registered.
+/// Reply to `List`. Both arms echo the originating `addr` as domain
+/// context. Duplicate in-flight lists for the same prefix should be
+/// matched by `send_tracked` / `ctx.in_reply_to()`. `Ok` carries the
+/// matching entry names — bare file/dir names, not fully-qualified
+/// paths — so the caller composes `{addr.path}{entry}` when turning an
+/// entry back into a read. Empty `entries` means "namespace exists,
+/// nothing matched"; `Err { UnknownNamespace }` means the namespace
+/// itself wasn't registered.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.list_result")]
 pub enum ListResult {
-    Ok { namespace: String, prefix: String, entries: Vec<String> },
-    Err { namespace: String, prefix: String, error: FsError },
+    Ok { addr: NamespaceAddr, entries: Vec<String> },
+    Err { addr: NamespaceAddr, error: FsError },
+}
+
+impl ListResult {
+    /// Fold an adapter list into the reply, echoing the address on
+    /// both arms.
+    #[must_use]
+    pub fn from_op(addr: NamespaceAddr, list: Result<Vec<String>, FsError>) -> Self {
+        match list {
+            Ok(entries) => Self::Ok { addr, entries },
+            Err(error) => Self::Err { addr, error },
+        }
+    }
 }
 
 // `aether.fs.fetch` — the fs actor's transform-pipeline verb (issue
@@ -271,26 +344,24 @@ pub enum FsFetchError {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.fetch")]
 pub struct FsFetch {
-    pub namespace: String,
-    pub path: String,
+    pub addr: NamespaceAddr,
     /// Ordered list of transforms to apply. Each `TransformId` names
     /// a link-time `#[transform]` entry (ADR-0048); the chain is
     /// validated for linear composition before any compute runs.
     pub transforms: Vec<TransformId>,
 }
 
-/// Reply to `FsFetch`. Both arms echo `namespace` + `path` as domain
-/// context. Duplicate in-flight fetches for the same path should be
-/// matched by `send_tracked` / `ctx.in_reply_to()`. `Ok` carries the
-/// folded output bytes (`data`) and the `output_kind` of the last
-/// transform (`None` when `transforms` was empty, i.e. a raw-read).
-/// `Err` carries a structured `FsFetchError`.
+/// Reply to `FsFetch`. Both arms echo `addr` as domain context.
+/// Duplicate in-flight fetches for the same address should be matched
+/// by `send_tracked` / `ctx.in_reply_to()`. `Ok` carries the folded
+/// output bytes (`data`) and the `output_kind` of the last transform
+/// (`None` when `transforms` was empty, i.e. a raw-read). `Err`
+/// carries a structured `FsFetchError`.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.fetch_result")]
 pub enum FsFetchResult {
     Ok {
-        namespace: String,
-        path: String,
+        addr: NamespaceAddr,
         /// `None` when the transform list was empty (raw read);
         /// `Some(k)` is the output kind of the last transform in
         /// the chain.
@@ -301,8 +372,20 @@ pub enum FsFetchResult {
         data: Vec<u8>,
     },
     Err {
-        namespace: String,
-        path: String,
+        addr: NamespaceAddr,
         error: FsFetchError,
     },
+}
+
+impl FsFetchResult {
+    /// Fold a read-then-transform pipeline into the reply, echoing the
+    /// address on both arms. `Ok` carries the folded bytes and the
+    /// last transform's output kind.
+    #[must_use]
+    pub fn from_op(addr: NamespaceAddr, fetch: Result<(Option<KindId>, Vec<u8>), FsFetchError>) -> Self {
+        match fetch {
+            Ok((output_kind, data)) => Self::Ok { addr, output_kind, data },
+            Err(error) => Self::Err { addr, error },
+        }
+    }
 }

@@ -29,7 +29,7 @@ use core::marker::PhantomData;
 use core::ptr;
 
 use crate::actor::native::mailbox::NativeActorMailbox;
-use aether_data::{Kind, KindId, MailId, MailboxId, RequestId, mailbox_id_from_name};
+use aether_data::{Kind, KindId, MailId, MailboxId, RequestId, mailbox_id_from_path};
 
 use crate::actor::monitor::{MonitorHandle, notify_alias_departures, notify_departure};
 use crate::actor::native::binding::NativeBinding;
@@ -43,9 +43,7 @@ use super::NativeActor;
 use crate::actor::native::InheritCtx;
 use crate::actor::native::RootCtx;
 use crate::actor::native::envelope::Envelope;
-use crate::actor::native::offload::blocking::{
-    DeferredCompletion, DeferredReply, DispatchId, IntoDeferredReply, Pending, TaskDone,
-};
+use crate::actor::native::offload::blocking::{DeferredCompletion, DeferredReply, DispatchId, Pending, TaskDone};
 use crate::actor::native::offload::thread;
 use crate::chassis::inbox::InboundMail;
 use crate::mail::SourceAddr;
@@ -704,20 +702,6 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
         id
     }
 
-    /// Continue an existing deferred chain through another registry batch
-    /// without releasing or reacquiring its settlement hold.
-    pub fn continue_registry_batch<R, C>(&mut self, owed: R, batch: RegistryBatch, context: C) -> DispatchId
-    where
-        R: IntoDeferredReply,
-        C: Send + 'static,
-    {
-        let (hold, reply_to) = owed.into_deferred_reply().into_parts();
-        let completion = self.binding.dispatch_arm(hold, reply_to, context);
-        let id = completion.dispatch_id();
-        self.binding.stage_owner_batch(batch, completion);
-        id
-    }
-
     /// Capture the current root as a reply this actor still owes, directing
     /// the eventual terminal reply to an explicitly carried target. The
     /// returned [`DeferredReply`] keeps the caller's chain open until it is
@@ -811,20 +795,6 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
         } else {
             None
         }
-    }
-
-    /// Kind of the context stored for the request this inbound reply answers,
-    /// leaving it stored. Returns `None` for ordinary mail and unmatched
-    /// replies.
-    ///
-    /// A handler that serves several context kinds from one reply kind probes
-    /// with this and only then commits to the matching
-    /// [`Self::take_context`]; a wrong guess would otherwise consume another
-    /// subsystem's context. Actor dispatch is serialized, so no other handler
-    /// can consume the entry between the probe and the take.
-    #[must_use]
-    pub fn in_reply_context_kind(&self) -> Option<KindId> {
-        self.binding.request_context_kind(self.in_reply_to()?)
     }
 
     /// Recover and remove the typed context for the request this inbound reply
@@ -1412,10 +1382,12 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
     // Runtime-name send escape hatch (the `Resolver::send_to_named` contract):
     // the recipient name is supplied at runtime, no compile-time `R` to resolve.
     #[allow(clippy::disallowed_methods)]
+    // the runtime-name routing path itself — resolves the written name by the same
+    // ADR-0099 §4 parse → fold the registry does, so a lineage address routes
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.binding.push_envelope_buffered(
-            mailbox_id_from_name(name).0,
+            mailbox_id_from_path(name).0,
             K::ID.0,
             &bytes,
             1,
@@ -1450,9 +1422,10 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
     //noinspection DuplicatedCode
     // Runtime-name detached escape hatch — the `send_to_named` counterpart.
     #[allow(clippy::disallowed_methods)]
+    // the runtime-name routing path itself — same ADR-0099 §4 parse → fold as `send_to_named`
     fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.binding.push_envelope_buffered(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, None, None);
+        self.binding.push_envelope_buffered(mailbox_id_from_path(name).0, K::ID.0, &bytes, 1, None, None);
     }
 
     //noinspection DuplicatedCode
@@ -1764,30 +1737,6 @@ mod tests {
         assert_eq!(ctx.take_context::<NativeRequestContext>(), None);
     }
 
-    /// The ctx probe keys off the inbound reply's correlation id and leaves the
-    /// context stored, so a handler can route on the kind and still take it.
-    /// Ordinary mail carries no answered request, so it probes to `None`.
-    #[test]
-    fn native_ctx_in_reply_context_kind_probes_without_consuming() {
-        use crate::testing::bare_substrate;
-
-        let (_registry, mailer) = bare_substrate();
-        let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF12)));
-        binding.store_request_context(RequestId(77), &NativeRequestContext { value: 9 });
-
-        let reply_source = Source::with_correlation(SourceAddr::None, 77);
-        let ctx = NativeCtx::new(&binding, reply_source, MailId::NONE, MailId::NONE);
-        assert_eq!(ctx.in_reply_context_kind(), Some(NativeRequestContext::ID));
-        assert_eq!(ctx.in_reply_context_kind(), Some(NativeRequestContext::ID), "the probe does not consume");
-
-        let mut ctx = NativeCtx::new(&binding, reply_source, MailId::NONE, MailId::NONE);
-        assert_eq!(ctx.take_context::<NativeRequestContext>(), Some(NativeRequestContext { value: 9 }));
-
-        let caller_source = Source::with_correlation(SourceAddr::Component(MailboxId(0xC0)), 77);
-        let ordinary = NativeCtx::new(&binding, caller_source, MailId::NONE, MailId::NONE);
-        assert_eq!(ordinary.in_reply_context_kind(), None, "ordinary mail answers no request");
-    }
-
     #[test]
     fn native_actor_mailbox_send_with_context_stores_by_minted_correlation() {
         use crate::testing::bare_substrate;
@@ -1817,8 +1766,8 @@ mod tests {
         use std::sync::mpsc;
 
         let (registry, mailer) = bare_substrate();
-        let parent = aether_data::mailbox_id_from_path("test.native.parent");
-        let current = aether_data::mailbox_id_from_path("test.native.parent/test.native.caller");
+        let parent = mailbox_id_from_path("test.native.parent");
+        let current = mailbox_id_from_path("test.native.parent/test.native.caller");
         let recipient = EmbeddedPeer::resolve(parent.0, ());
         let (tx, rx) = mpsc::channel::<Envelope>();
         registry
@@ -1860,8 +1809,8 @@ mod tests {
         use std::sync::mpsc;
 
         let (registry, mailer) = bare_substrate();
-        let parent = aether_data::mailbox_id_from_path("test.native.keyed_parent");
-        let current = aether_data::mailbox_id_from_path("test.native.keyed_parent/test.native.keyed_caller");
+        let parent = mailbox_id_from_path("test.native.keyed_parent");
+        let current = mailbox_id_from_path("test.native.keyed_parent/test.native.keyed_caller");
         let current_target = CurrentKeyedPeer::resolve(current.0, "current");
         let parent_target = ParentKeyedPeer::resolve(parent.0, "parent");
         let (current_tx, current_rx) = mpsc::channel::<Envelope>();

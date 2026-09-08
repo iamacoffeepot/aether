@@ -63,6 +63,8 @@ pub struct ScrollWidget {
     scroll_focus: Focus,
     content: Option<ScrollContent>,
     spawned: bool,
+    /// Live `SetTheme` that arrived before the content root existed.
+    pending_theme: Option<SetTheme>,
 }
 
 #[must_use]
@@ -197,15 +199,14 @@ impl ScrollWidget {
             return;
         }
         self.spawned = true;
-        let Some(spawned) = spawn_widget_child::<Self>(
-            ctx,
-            &self.content_spec,
-            ChildLayout::Content { assigned_extent: self.content_extent },
-        ) else {
+        let Some(spawned) =
+            spawn_widget_child(ctx, &self.content_spec, ChildLayout::Content { assigned_extent: self.content_extent })
+        else {
             return;
         };
+        let content_id = spawned.id;
         self.composite.register_slot(
-            spawned.id,
+            content_id,
             self.local_content_origin(),
             Some(viewport_clip(self.viewport_extent)),
             &self.content_spec.subname,
@@ -213,6 +214,11 @@ impl ScrollWidget {
         );
         self.content = Some(ScrollContent::new(&spawned));
         self.sync_layout(ctx);
+        // Replay before the first Collect so a nested content cascade sees the
+        // latest theme on the same FIFO drain.
+        if let Some(set) = self.pending_theme.take() {
+            ctx.send_to(content_id, &set);
+        }
     }
 
     fn local_content_origin(&self) -> Vec2 {
@@ -345,6 +351,7 @@ impl WasmActor for ScrollWidget {
             scroll_focus: Focus::new(),
             content: None,
             spawned: false,
+            pending_theme: None,
         })
     }
 
@@ -369,10 +376,14 @@ impl WasmActor for ScrollWidget {
 
     /// Relay a live theme or font update to the retained content root. Nested
     /// scroll actors apply the same rule, so style follows the actor tree.
+    /// An update that beats the first Collect is kept and replayed to a
+    /// successfully spawned content root before that Collect.
     #[handler::single]
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
         if let Some(content) = &self.content {
             ctx.send_to(content.id, &set);
+        } else {
+            self.pending_theme = Some(set);
         }
     }
 
@@ -440,6 +451,7 @@ mod tests {
             scroll_focus: Focus::new(),
             content,
             spawned,
+            pending_theme: None,
         }
     }
 

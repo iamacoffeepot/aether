@@ -16,7 +16,7 @@ use crate::kinds::{
     SetMasterGain, SetMasterGainResult, SetReverbSend, SetReverbSendResult, SetSenderGain, SetSenderGainResult,
     StopTrack,
 };
-use aether_fs::FsMailboxExt;
+use aether_fs::{FsMailboxExt, NamespaceAddr};
 
 impl AudioCapabilityState {
     pub fn handle_note_on(&mut self, ctx: &mut NativeCtx<'_>, mail: NoteOn) {
@@ -174,19 +174,20 @@ impl AudioCapabilityState {
             return;
         };
         match mail {
-            ReadResult::Ok { namespace, path, bytes } => match context {
+            ReadResult::Ok { addr, bytes } => match context {
                 track @ AudioLoadContext::Track { .. } => {
-                    self.start_track_decode(ctx, track, namespace, path, bytes);
+                    self.start_track_decode(ctx, track, addr.namespace, addr.path, bytes);
                 }
                 AudioLoadContext::Instrument { source } => {
-                    self.on_sfz_loaded(ctx, source, namespace, path, &bytes);
+                    self.on_sfz_loaded(ctx, source, addr.namespace, addr.path, &bytes);
                 }
                 AudioLoadContext::Sample { assembly_id, slot } => {
                     self.on_sample_loaded(ctx, assembly_id, slot, bytes);
                 }
             },
-            ReadResult::Err { namespace, path, error } => {
+            ReadResult::Err { addr, error } => {
                 let reason = format!("file read failed: {error:?}");
+                let NamespaceAddr { namespace, path } = addr;
                 match context {
                     AudioLoadContext::Track { source, lane, .. } => {
                         ctx.reply_to(source, &PlayTrackResult::Err { namespace, path, lane, error: reason });

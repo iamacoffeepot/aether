@@ -31,10 +31,10 @@ use aether_kinds::{
     Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, ReplaceComponent,
     ReplaceResult, Tick, WindowId,
 };
-use aether_kit_widget::set::{DialogConfig, SplitterAxis, SplitterConfig, ToastConfig, TooltipConfig, TooltipSection};
 use aether_kit_widget::{
-    DropdownConfig, Menu, MenuBarConfig, MenuItem, PanelConfig, TabStripConfig, Theme, WidgetChildSpec,
-    WidgetControlState, WidgetFrame, WidgetKind,
+    DialogConfig, DropdownConfig, Menu, MenuBarConfig, MenuItem, PanelConfig, SplitterAxis, SplitterConfig,
+    TabStripConfig, Theme, ToastConfig, TooltipConfig, TooltipSection, WidgetChildSpec, WidgetControlState,
+    WidgetFrame, WidgetKind,
 };
 
 const DEFAULT_STEM: &str = "aether_kit_widget";
@@ -83,7 +83,7 @@ fn release(x: f32, y: f32) -> MouseButtonRelease {
 fn dropdown_config() -> DropdownConfig {
     DropdownConfig {
         options: vec!["Alpha".into(), "Beta".into()],
-        initial_selected_index: Some(0),
+        initial: Some(0),
         placeholder: String::new(),
         open_row_count: 4,
         theme: Theme::DEFAULT,
@@ -94,7 +94,7 @@ fn dropdown_config() -> DropdownConfig {
 fn tab_strip_config() -> TabStripConfig {
     TabStripConfig {
         labels: vec!["One".to_owned(), "Two".to_owned()],
-        initial_index: 0,
+        initial: 0,
         theme: Theme::DEFAULT,
         ..TabStripConfig::default()
     }

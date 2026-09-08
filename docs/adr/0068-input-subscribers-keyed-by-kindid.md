@@ -66,6 +66,8 @@ input_subscribers: HashMap<KindId, BTreeSet<MailboxId>>,
 
 Fan-out call sites in the desktop and headless chassis rewrite from `subscribers[InputStream::Tick]` to `subscribers[Tick::ID]`, sourced from the kind type's compile-time `<K as Kind>::ID`.
 
+> **Superseded grammar (2026-09).** `#[kind(...)]` accepts exactly one key today — `name = "…"`, a string literal — and `Kind::IS_INPUT` does not exist; the substrate derives input subscription from the component's `aether.kinds.inputs` manifest (issue #403). The accepted attribute and naming grammar is `docs/guide/systems/mail-and-kinds.md`; the `input` flag below is the original proposal, kept as the record of the decision.
+
 `Kind::IS_INPUT = true` becomes structurally load-bearing: it's the flag that means "this kind has a subscriber set." Adding a new input kind reduces to:
 
 1. Define the kind type with `#[kind(name = "...", input)]`.

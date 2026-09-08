@@ -22,8 +22,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 use super::SqliteStore;
 use super::membership;
 
-mod kinds;
-pub use kinds::{
+pub use super::commission_kinds::{
     CancelCommission, CancelCommissionResult, CreateCommission, CreateCommissionResult, EnqueueScopeRun,
     EnqueueScopeRunResult, ListCommissions, ListCommissionsResult, ListedCommission, LoadCommission,
     LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult, RecordCommissionProjection,

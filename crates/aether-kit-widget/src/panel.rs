@@ -33,11 +33,11 @@
 //!   up — and emits the whole panel as contiguous equal-clip solid batches
 //!   (plus text) from one root render sender.
 //! - **Value.** Each value-up event (`SliderChanged` / `TextCommitted` /
-//!   `RadioSelected` / `VirtualListSelected` / `VirtualListAction` /
+//!   `RadioSelected` / `VirtualListSelected` / `VirtualListActivated` /
 //!   `VirtualListHover` / `DropdownHover` /
-//!   `ButtonClicked` / `ToggleChanged` /
+//!   `ButtonActivated` / `ToggleChanged` /
 //!   `SegmentedSelected` / `NumericChanged` / `DropdownSelected` /
-//!   `TabSelected`), attributed by
+//!   `TabStripSelected`), attributed by
 //!   `ctx.source_mailbox()`, is the seam a real editor translates into
 //!   world-knob driver mail; the reference logs it.
 //! - **Grab.** `DropdownOpenChanged` is the one events-up kind the root
@@ -49,7 +49,10 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use aether_actor::{ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{
+    ActorInitError, Addressable, ErasedWasmActor, Manual, ModuleChild, Sends, Subname, WasmActor, WasmCtx, WasmInitCtx,
+    actor,
+};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::keycode::KEY_TAB;
 use aether_kinds::mouse_button;
@@ -73,13 +76,14 @@ use crate::set::{
 };
 use crate::theme::{SetTheme, TextRole, Theme};
 use crate::{
-    ButtonClicked, ButtonConfig, Collect, DropdownConfig, DropdownHover, DropdownOpenChanged, DropdownSelected,
-    FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig, MenuBarConfig, MenuItemActivated,
-    MenuOpenChanged, NumericChanged, NumericConfig, PanelConfig, RadioConfig, RadioSelected, ScrollConfig,
+    ButtonActivated, ButtonConfig, Collect, DropdownConfig, DropdownHover, DropdownOpenChanged, DropdownSelected,
+    FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig, MenuBarActivated, MenuBarConfig,
+    MenuBarOpenChanged, NumericChanged, NumericConfig, PanelConfig, RadioConfig, RadioSelected, ScrollConfig,
     ScrollExtent, ScrollOutcome, ScrollResidual, ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged,
-    SliderConfig, TabSelected, TabStripConfig, TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig,
-    ToggleChanged, ToggleConfig, VirtualListAction, VirtualListConfig, VirtualListHover, VirtualListSelected, Widget,
-    WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
+    SliderConfig, TabStripConfig, TabStripSelected, TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig,
+    ToggleChanged, ToggleConfig, VirtualListActivated, VirtualListConfig, VirtualListHover, VirtualListSelected,
+    Widget, WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetEligibilityChanged, WidgetFrame,
+    WidgetKind, WidgetStateChanged,
 };
 use crate::{FrameDischarge, decode_nested_widget_config};
 use crate::{accept_open_child_list, emit, flush_membership};
@@ -99,7 +103,7 @@ pub enum ChildLayout {
 }
 
 impl ChildLayout {
-    fn row_height_pixels(self) -> f32 {
+    pub(crate) fn row_height_pixels(self) -> f32 {
         match self {
             Self::Panel { row_height_pixels } => row_height_pixels,
             Self::Content { assigned_extent } => assigned_extent.height_pixels,
@@ -184,9 +188,12 @@ pub struct WidgetPanel {
     scroll_focus: Focus,
     children: Vec<ChildRef>,
     spawned: bool,
+    /// A live `SetTheme` or resolved `LoadFontResult` arrived before children existed.
+    pending_style: bool,
     /// The total stack height, for the background chrome; set at spawn.
     panel_height: f32,
-    /// Latest modifier state, used by panel-owned forward/reverse Tab routing.
+    /// Latest modifier state: Tab direction, and the chord fanned to a child
+    /// that just gained focus.
     modifiers: Modifiers,
 }
 
@@ -228,7 +235,7 @@ impl WidgetPanel {
             // from any arm (an undecodable config, a spawn failure, or a
             // rejected container) skips the slot entirely so the stack
             // stays honest.
-            let placed = spawn_widget_child::<Self>(ctx, spec, ChildLayout::Panel { row_height_pixels: row });
+            let placed = spawn_widget_child(ctx, spec, ChildLayout::Panel { row_height_pixels: row });
             let Some(placed) = placed else {
                 continue;
             };
@@ -246,6 +253,12 @@ impl WidgetPanel {
         }
 
         self.panel_height = y - self.config.y;
+        // Replay only a live update that beat the first Tick. Spawning with no such
+        // update must keep each child's own config theme.
+        if self.pending_style {
+            self.fan_theme(ctx);
+            self.pending_style = false;
+        }
     }
 
     /// Record one spawned child's rect into the composite (as its draw offset,
@@ -309,9 +322,20 @@ impl WidgetPanel {
     }
 
     /// Re-fan the live theme to every child (after a font stamp or a restyle).
-    fn fan_theme(&self, ctx: &mut WasmCtx<'_>) {
+    fn fan_theme<M: aether_actor::ReplyMode>(&self, ctx: &mut WasmCtx<'_, M>) {
         for child in &self.children {
             ctx.send_to(child.id, &SetTheme { theme: self.theme.clone() });
+        }
+    }
+
+    /// Adopt a live style change now, and either fan it immediately or keep it
+    /// until the first successful spawn so the FIFO drain applies it before Collect.
+    fn retain_or_fan_theme<M: aether_actor::ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, M>) {
+        if self.spawned {
+            self.fan_theme(ctx);
+            self.pending_style = false;
+        } else {
+            self.pending_style = true;
         }
     }
 
@@ -327,14 +351,11 @@ impl WidgetPanel {
 /// Decode, spawn, and derive one panel child's static/dynamic routing profile.
 /// Keeping this dispatch out of `ensure_spawned` leaves the layout loop focused
 /// on ordering and placement.
-pub fn spawn_widget_child<P>(
+pub fn spawn_widget_child(
     ctx: &mut WasmCtx<'_, Manual>,
     spec: &WidgetChildSpec,
     layout: ChildLayout,
-) -> Option<SpawnedChild>
-where
-    P: WasmActor,
-{
+) -> Option<SpawnedChild> {
     let row = layout.row_height_pixels();
     match spec.kind {
         WidgetKind::Label
@@ -342,18 +363,18 @@ where
         | WidgetKind::Slider
         | WidgetKind::Radio
         | WidgetKind::TextField
-        | WidgetKind::TextArea => spawn_content_child::<P>(ctx, spec, row),
-        WidgetKind::Button => spawn_button_child::<P>(ctx, spec, row),
-        WidgetKind::VirtualList => spawn_virtual_list_child::<P>(ctx, spec, row),
+        | WidgetKind::TextArea => spawn_content_child(ctx, spec, row),
+        WidgetKind::Button => spawn_button_child(ctx, spec, row),
+        WidgetKind::VirtualList => spawn_virtual_list_child(ctx, spec, row),
         WidgetKind::Toggle
         | WidgetKind::Segmented
         | WidgetKind::Numeric
         | WidgetKind::Dropdown
         | WidgetKind::TabStrip
-        | WidgetKind::MenuBar => spawn_row_control_child::<P>(ctx, spec, row),
+        | WidgetKind::MenuBar => spawn_row_control_child(ctx, spec, row),
         WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
-        WidgetKind::Composite => spawn_composite_child::<P>(ctx, spec, layout, row),
-        WidgetKind::Scroll => spawn_scroll_child::<P>(ctx, spec, layout),
+        WidgetKind::Composite => spawn_composite_child(ctx, spec, layout, row),
+        WidgetKind::Scroll => spawn_scroll_child(ctx, spec, layout),
     }
 }
 
@@ -363,14 +384,10 @@ where
 /// [`spawn_row_control_child`] does: the exhaustive dispatcher above stays a
 /// dispatcher, and a reader looking for one kind's profile finds every
 /// sibling profile beside it.
-fn spawn_content_child<P: WasmActor>(
-    ctx: &mut WasmCtx<'_, Manual>,
-    spec: &WidgetChildSpec,
-    row: f32,
-) -> Option<SpawnedChild> {
+fn spawn_content_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
     match spec.kind {
         WidgetKind::Label => decode_child::<LabelConfig>(spec).and_then(|config| {
-            let id = spawn::<P, LabelWidget>(ctx, &spec.subname, &config)?;
+            let id = spawn::<LabelWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 id,
                 width_pixels: None,
@@ -390,7 +407,7 @@ fn spawn_content_child<P: WasmActor>(
             })
         }),
         WidgetKind::Image => decode_child::<ImageConfig>(spec).and_then(|config| {
-            let id = spawn::<P, ImageWidget>(ctx, &spec.subname, &config)?;
+            let id = spawn::<ImageWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 id,
                 width_pixels: None,
@@ -405,7 +422,7 @@ fn spawn_content_child<P: WasmActor>(
             })
         }),
         WidgetKind::Slider => decode_child::<SliderConfig>(spec).and_then(|config| {
-            let id = spawn::<P, SliderWidget>(ctx, &spec.subname, &config)?;
+            let id = spawn::<SliderWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 id,
                 width_pixels: None,
@@ -421,7 +438,7 @@ fn spawn_content_child<P: WasmActor>(
         }),
         WidgetKind::Radio => decode_child::<RadioConfig>(spec).and_then(|config| {
             let height = row * config.options.len() as f32;
-            let id = spawn::<P, RadioGroupWidget>(ctx, &spec.subname, &config)?;
+            let id = spawn::<RadioGroupWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 id,
                 width_pixels: None,
@@ -436,7 +453,7 @@ fn spawn_content_child<P: WasmActor>(
             })
         }),
         WidgetKind::TextField => decode_child::<TextFieldConfig>(spec).and_then(|config| {
-            let id = spawn::<P, TextFieldWidget>(ctx, &spec.subname, &config)?;
+            let id = spawn::<TextFieldWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 id,
                 width_pixels: None,
@@ -452,7 +469,7 @@ fn spawn_content_child<P: WasmActor>(
         }),
         WidgetKind::TextArea => decode_child::<TextAreaConfig>(spec).and_then(|config| {
             let height = row * config.rows.max(1) as f32;
-            let id = spawn::<P, TextAreaWidget>(ctx, &spec.subname, &config)?;
+            let id = spawn::<TextAreaWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 id,
                 width_pixels: None,
@@ -470,13 +487,9 @@ fn spawn_content_child<P: WasmActor>(
     }
 }
 
-fn spawn_button_child<P: WasmActor>(
-    ctx: &mut WasmCtx<'_, Manual>,
-    spec: &WidgetChildSpec,
-    row: f32,
-) -> Option<SpawnedChild> {
+fn spawn_button_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
     let config = decode_child::<ButtonConfig>(spec)?;
-    let id = spawn::<P, ButtonWidget>(ctx, &spec.subname, &config)?;
+    let id = spawn::<ButtonWidget>(ctx, &spec.subname, &config)?;
     Some(SpawnedChild {
         id,
         width_pixels: None,
@@ -491,16 +504,12 @@ fn spawn_button_child<P: WasmActor>(
     })
 }
 
-fn spawn_virtual_list_child<P: WasmActor>(
-    ctx: &mut WasmCtx<'_, Manual>,
-    spec: &WidgetChildSpec,
-    row: f32,
-) -> Option<SpawnedChild> {
+fn spawn_virtual_list_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
     let config = decode_child::<VirtualListConfig>(spec)?;
     let profile = virtual_list_profile(&spec.subname, row, &config)?;
     let state = config.state.clone();
     let host_scroll_strip_units = host_scroll_strip_units(&config);
-    spawn::<P, VirtualListWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+    spawn::<VirtualListWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
         id,
         width_pixels: None,
         height_pixels: profile.height,
@@ -529,7 +538,8 @@ fn host_scroll_strip_units(config: &VirtualListConfig) -> Option<u8> {
 /// column stays inside the panel and the track drawn in it is neither clipped
 /// away nor unreachable by a press. A strip that is not a positive, finite
 /// number, or one wider than the assignment, reserves nothing.
-fn content_frame(assigned: &WidgetFrame, strip_pixels: f32) -> WidgetFrame {
+#[must_use]
+pub fn content_frame(assigned: &WidgetFrame, strip_pixels: f32) -> WidgetFrame {
     let strip = if strip_pixels.is_finite() && (0.0..=assigned.width).contains(&strip_pixels) {
         strip_pixels
     } else {
@@ -560,7 +570,7 @@ fn virtual_list_height(row_height: f32, visible_row_count: u32) -> Option<f32> {
     (height.is_finite() && height >= 0.0).then_some(height)
 }
 
-fn spawn_composite_child<P: WasmActor>(
+fn spawn_composite_child(
     ctx: &mut WasmCtx<'_, Manual>,
     spec: &WidgetChildSpec,
     layout: ChildLayout,
@@ -576,7 +586,7 @@ fn spawn_composite_child<P: WasmActor>(
     }
     decode_nested_widget_config(spec).and_then(|config| {
         let intrinsic = config.intrinsic;
-        spawn::<P, Widget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+        spawn::<Widget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
             id,
             width_pixels: intrinsic.and_then(|extent| (extent[0].is_finite() && extent[0] >= 0.0).then_some(extent[0])),
             height_pixels: intrinsic
@@ -593,7 +603,7 @@ fn spawn_composite_child<P: WasmActor>(
     })
 }
 
-fn spawn_scroll_child<P: WasmActor>(
+fn spawn_scroll_child(
     ctx: &mut WasmCtx<'_, Manual>,
     spec: &WidgetChildSpec,
     layout: ChildLayout,
@@ -612,7 +622,7 @@ fn spawn_scroll_child<P: WasmActor>(
             return None;
         }
         let viewport = config.viewport_extent;
-        spawn::<P, ScrollWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+        spawn::<ScrollWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
             id,
             width_pixels: Some(viewport.width_pixels),
             height_pixels: viewport.height_pixels,
@@ -630,14 +640,10 @@ fn spawn_scroll_child<P: WasmActor>(
 /// Spawn the one-row control children. Keeping their mechanical decode/spawn
 /// profiles together prevents the main exhaustive dispatcher from becoming a
 /// second long-form implementation surface.
-fn spawn_row_control_child<P: WasmActor>(
-    ctx: &mut WasmCtx<'_, Manual>,
-    spec: &WidgetChildSpec,
-    row: f32,
-) -> Option<SpawnedChild> {
+fn spawn_row_control_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
     match spec.kind {
         WidgetKind::Toggle => decode_child::<ToggleConfig>(spec).and_then(|config| {
-            spawn::<P, ToggleWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            spawn::<ToggleWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
@@ -651,7 +657,7 @@ fn spawn_row_control_child<P: WasmActor>(
             })
         }),
         WidgetKind::Segmented => decode_child::<SegmentedConfig>(spec).and_then(|config| {
-            spawn::<P, SegmentedWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            spawn::<SegmentedWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
@@ -665,7 +671,7 @@ fn spawn_row_control_child<P: WasmActor>(
             })
         }),
         WidgetKind::Numeric => decode_child::<NumericConfig>(spec).and_then(|config| {
-            spawn::<P, NumericWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            spawn::<NumericWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
@@ -679,7 +685,7 @@ fn spawn_row_control_child<P: WasmActor>(
             })
         }),
         WidgetKind::Dropdown => decode_child::<DropdownConfig>(spec).and_then(|config| {
-            spawn::<P, DropdownWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            spawn::<DropdownWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
@@ -693,7 +699,7 @@ fn spawn_row_control_child<P: WasmActor>(
             })
         }),
         WidgetKind::TabStrip => decode_child::<TabStripConfig>(spec).and_then(|config| {
-            spawn::<P, TabStripWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            spawn::<TabStripWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
@@ -707,7 +713,7 @@ fn spawn_row_control_child<P: WasmActor>(
             })
         }),
         WidgetKind::MenuBar => decode_child::<MenuBarConfig>(spec).and_then(|config| {
-            spawn::<P, MenuBarWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            spawn::<MenuBarWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
@@ -789,7 +795,7 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
             WidgetKind::Radio,
             RadioConfig {
                 options: vec![String::from("Low"), String::from("Medium"), String::from("High")],
-                initial_index: 0,
+                initial: 0,
                 theme: theme.clone(),
                 state: WidgetControlState::default(),
             }
@@ -816,50 +822,50 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
 }
 
 /// Send a focus transition down: `FocusLost` to the child that lost focus,
-/// `FocusGained` to the one that gained it.
-/// `keyboard` rides on the gain so the child knows whether to draw its
-/// ring (see [`FocusGained`]).
-fn apply_focus<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, transition: FocusTransition, keyboard: bool) {
+/// then `FocusGained` and the panel's latest [`Modifiers`] to the one that
+/// gained it. Lost still goes first. `keyboard` rides on the gain so the
+/// child knows whether to draw its ring (see [`FocusGained`]).
+fn apply_focus(sends: &mut Sends<'_>, transition: FocusTransition, keyboard: bool, modifiers: Modifiers) {
     let FocusTransition { previous, next } = transition;
     if let Some(prev) = previous {
-        ctx.send_to(prev, &FocusLost);
+        sends.send_to(prev, &FocusLost);
     }
     if let Some(gained) = next {
-        ctx.send_to(gained, &FocusGained { keyboard });
+        sends.send_to(gained, &FocusGained { keyboard });
+        sends.send_to(gained, &modifiers);
     }
 }
 
 /// Send hover edges lost-before-gained so sibling crossings cannot leave two
 /// controls hovered during the breadth-first drain.
-fn apply_hover<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, transition: HoverTransition) {
+fn apply_hover(sends: &mut Sends<'_>, transition: HoverTransition) {
     let HoverTransition { previous, next } = transition;
     if let Some(previous) = previous {
-        ctx.send_to(previous, &HoverLost);
+        sends.send_to(previous, &HoverLost);
     }
     if let Some(next) = next {
-        ctx.send_to(next, &HoverGained);
+        sends.send_to(next, &HoverGained);
     }
 }
 
-fn apply_availability<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, effects: AvailabilityEffects) {
+fn apply_availability(sends: &mut Sends<'_>, effects: AvailabilityEffects, modifiers: Modifiers) {
     if let Some(hover) = effects.hover {
-        apply_hover(ctx, hover);
+        apply_hover(sends, hover);
     }
     if let Some(focus) = effects.focus {
-        apply_focus(ctx, focus, false);
+        apply_focus(sends, focus, false, modifiers);
     }
 }
 
 /// Spawn one inline widget under the caller's actual logical actor type,
 /// logging and dropping the slot on failure.
-fn spawn<P, A>(ctx: &mut WasmCtx<'_, Manual>, subname: &str, config: &A::Config) -> Option<MailboxId>
+fn spawn<A>(ctx: &mut WasmCtx<'_, Manual>, subname: &str, config: &A::Config) -> Option<MailboxId>
 where
-    P: WasmActor,
-    A: aether_actor::ChildOf<P> + aether_actor::Instanced + WasmActor + aether_actor::ErasedWasmActor,
-    <A as WasmActor>::State: aether_actor::ErasedWasmActor,
+    A: ModuleChild + ErasedWasmActor,
+    <A as WasmActor>::State: ErasedWasmActor,
 {
-    match ctx.spawn_inline_child::<P, A>(Subname::Named(subname), config) {
-        Ok(id) => Some(id),
+    match ctx.spawn_inline::<A>(Subname::Named(subname), config) {
+        Ok(child) => Some(child.id()),
         Err(error) => {
             tracing::warn!(
                 target: "aether_kit_widget",
@@ -891,10 +897,10 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         MenuBarConfig::ID.0,
         SliderChanged::ID.0,
         TextCommitted::ID.0,
-        ButtonClicked::ID.0,
+        ButtonActivated::ID.0,
         RadioSelected::ID.0,
         VirtualListSelected::ID.0,
-        VirtualListAction::ID.0,
+        VirtualListActivated::ID.0,
         VirtualListHover::ID.0,
         ToggleChanged::ID.0,
         SegmentedSelected::ID.0,
@@ -902,15 +908,16 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         DropdownSelected::ID.0,
         DropdownOpenChanged::ID.0,
         DropdownHover::ID.0,
-        TabSelected::ID.0,
-        MenuItemActivated::ID.0,
-        MenuOpenChanged::ID.0,
+        TabStripSelected::ID.0,
+        MenuBarActivated::ID.0,
+        MenuBarOpenChanged::ID.0,
         FocusGained::ID.0,
         FocusLost::ID.0,
         HoverGained::ID.0,
         HoverLost::ID.0,
         crate::SetWidgetState::ID.0,
         WidgetStateChanged::ID.0,
+        WidgetEligibilityChanged::ID.0,
         crate::ChildrenChanged::ID.0,
         ScrollOutcome::ID.0,
         ScrollResidual::ID.0,
@@ -1124,6 +1131,7 @@ impl WasmActor for WidgetPanel {
             scroll_focus: Focus::new(),
             children: Vec::new(),
             spawned: false,
+            pending_style: false,
             panel_height: 0.0,
             modifiers: Modifiers::default(),
         })
@@ -1212,7 +1220,7 @@ impl WasmActor for WidgetPanel {
             }
             let focusable = self.focus.focus_hit_test(press.x, press.y);
             if let Some(transition) = self.focus.set_focus(focusable) {
-                apply_focus(ctx, transition, false);
+                apply_focus(&mut ctx.sends(), transition, false, self.modifiers);
             }
             hit
         } else {
@@ -1236,7 +1244,7 @@ impl WasmActor for WidgetPanel {
         if release.button == mouse_button::LEFT
             && let Some(transition) = self.focus.release_capture(release.x, release.y)
         {
-            apply_hover(ctx, transition);
+            apply_hover(&mut ctx.sends(), transition);
         }
     }
 
@@ -1250,7 +1258,7 @@ impl WasmActor for WidgetPanel {
         if self.focus.grabbed().is_none()
             && let Some(transition) = self.focus.update_hover(moved.x, moved.y)
         {
-            apply_hover(ctx, transition);
+            apply_hover(&mut ctx.sends(), transition);
         }
         if let Some(child) = self.focus.pointer_target(moved.x, moved.y) {
             ctx.send_to(child, &moved);
@@ -1278,7 +1286,7 @@ impl WasmActor for WidgetPanel {
                 FocusDirection::Forward
             };
             if let Some(transition) = self.focus.move_focus(direction) {
-                apply_focus(ctx, transition, true);
+                apply_focus(&mut ctx.sends(), transition, true, self.modifiers);
             }
             return;
         }
@@ -1330,7 +1338,21 @@ impl WasmActor for WidgetPanel {
             return;
         };
         let effects = self.focus.update_availability(source, &changed.state);
-        apply_availability(ctx, effects);
+        apply_availability(&mut ctx.sends(), effects, self.modifiers);
+    }
+
+    /// Keep content-derived pointer/keyboard eligibility synchronized. Source
+    /// attribution identifies the panel slot, including a behavior host that
+    /// forwarded the wrapped widget's event.
+    #[handler::manual]
+    fn on_widget_eligibility_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: WidgetEligibilityChanged) {
+        let Some(source) = ctx.source_mailbox() else {
+            return;
+        };
+        let effects = self
+            .focus
+            .update_eligibility(source, FocusEligibility { pointer: changed.pointer, keyboard: changed.keyboard });
+        apply_availability(&mut ctx.sends(), effects, self.modifiers);
     }
 
     /// Observe one descendant scroll container's exact typed outcome. The
@@ -1420,7 +1442,7 @@ impl WasmActor for WidgetPanel {
         tracing::info!(
             target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
-            selected_index = selected.selected_index,
+            index = selected.index,
             "widget virtual list selected",
         );
     }
@@ -1433,13 +1455,13 @@ impl WasmActor for WidgetPanel {
     /// # Agent
     /// A child's reply; not useful to send manually.
     #[handler::manual]
-    fn on_virtual_list_action(&mut self, ctx: &mut WasmCtx<'_, Manual>, action: VirtualListAction) {
+    fn on_virtual_list_activated(&mut self, ctx: &mut WasmCtx<'_, Manual>, action: VirtualListActivated) {
         tracing::info!(
             target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
-            row_index = action.row_index,
-            action_index = action.action_index,
-            "widget virtual list action",
+            index = action.index,
+            action = action.action,
+            "widget virtual list activated",
         );
     }
 
@@ -1455,7 +1477,7 @@ impl WasmActor for WidgetPanel {
         tracing::info!(
             target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
-            row = hover.row,
+            index = hover.index,
             "widget virtual list hover",
         );
     }
@@ -1474,7 +1496,7 @@ impl WasmActor for WidgetPanel {
         tracing::info!(
             target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
-            option = hover.option,
+            index = hover.index,
             "widget dropdown hover",
         );
     }
@@ -1484,11 +1506,11 @@ impl WasmActor for WidgetPanel {
     /// # Agent
     /// A child's reply; not useful to send manually.
     #[handler::manual]
-    fn on_button_clicked(&mut self, ctx: &mut WasmCtx<'_, Manual>, _clicked: ButtonClicked) {
+    fn on_button_activated(&mut self, ctx: &mut WasmCtx<'_, Manual>, _clicked: ButtonActivated) {
         tracing::info!(
             target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
-            "widget button clicked",
+            "widget button activated",
         );
     }
 
@@ -1544,7 +1566,7 @@ impl WasmActor for WidgetPanel {
     /// A menu bar opened a menu or closed every menu — the same grab handshake
     /// as a dropdown's list.
     #[handler::manual]
-    fn on_menu_open_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: MenuOpenChanged) {
+    fn on_menu_bar_open_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: MenuBarOpenChanged) {
         let Some(source) = ctx.source_mailbox() else {
             return;
         };
@@ -1557,24 +1579,24 @@ impl WasmActor for WidgetPanel {
 
     /// A menu item's activation. The map-editor seam; the reference logs it.
     #[handler::manual]
-    fn on_menu_item_activated(&mut self, ctx: &mut WasmCtx<'_, Manual>, activated: MenuItemActivated) {
+    fn on_menu_bar_activated(&mut self, ctx: &mut WasmCtx<'_, Manual>, activated: MenuBarActivated) {
         tracing::info!(
             target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
             menu = activated.menu,
             item = activated.item,
-            "widget menu item activated",
+            "widget menu bar activated",
         );
     }
 
     /// A tab strip's selection. The map-editor seam; the reference logs it.
     #[handler::manual]
-    fn on_tab_selected(&mut self, ctx: &mut WasmCtx<'_, Manual>, selected: TabSelected) {
+    fn on_tab_strip_selected(&mut self, ctx: &mut WasmCtx<'_, Manual>, selected: TabStripSelected) {
         tracing::info!(
             target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
             index = selected.index,
-            "widget tab selected",
+            "widget tab strip selected",
         );
     }
 
@@ -1597,7 +1619,7 @@ impl WasmActor for WidgetPanel {
         match result {
             LoadFontResult::Ok { font_id, .. } => {
                 self.theme.font_id = font_id;
-                self.fan_theme(ctx);
+                self.retain_or_fan_theme(ctx);
             }
             LoadFontResult::Err { error, .. } => {
                 tracing::warn!(target: "aether_kit_widget", %error, "panel font load failed");
@@ -1609,7 +1631,7 @@ impl WasmActor for WidgetPanel {
     #[handler::single]
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
         self.theme = set.theme;
-        self.fan_theme(ctx);
+        self.retain_or_fan_theme(ctx);
     }
 }
 
@@ -1740,6 +1762,7 @@ mod behavior_tests {
         let mirrored = behavior_mirror_kinds();
         assert!(mirrored.contains(&ScrollOutcome::ID.0));
         assert!(mirrored.contains(&ScrollResidual::ID.0));
+        assert!(mirrored.contains(&WidgetEligibilityChanged::ID.0));
     }
 
     // Tripwire: a wrapped widget's profile is the unwrapped one, field for

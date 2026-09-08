@@ -279,17 +279,22 @@ pub trait CommissionProjectionApi {
 /// backend is exercised with no token or network.
 ///
 /// Ref names are the short `heads/…` form (no leading `refs/`); the client
-/// prepends `refs/` only where the create endpoint requires the full form.
+/// prepends `refs/` where REST create and GraphQL `updateRefs` require the full
+/// form.
 ///
 /// The decided semantics below are the contract `LocalGitData` and `FakeGithub`
-/// share (the crate's `tests/` conformance suite). The GitHub REST adapter is
-/// not a third target: it speaks HTTP status codes rather than git's wordings,
-/// its [`transact_refs`](Self::transact_refs) is a sequential best-effort
-/// rollback (same-ref batches are not refused; a batch delete of an absent ref
-/// is `Ok`), and a missing compare object is a transport/`Command` status
-/// rather than [`GitDataError::MissingObject`]. Those divergences are the
-/// reason the fleet-local backend exists (ADR-0199); they are not silently
-/// papered over here.
+/// share (the crate's `tests/` conformance suite). The GitHub adapter is not a
+/// third target of that suite: ordinary blob/tree/commit/ref CRUD still speaks
+/// REST status codes rather than git's wordings, and a missing compare object
+/// is a transport/`Command` status rather than [`GitDataError::MissingObject`].
+/// [`compare_and_swap_ref`](Self::compare_and_swap_ref) and
+/// [`transact_refs`](Self::transact_refs) go through one GraphQL `updateRefs`
+/// mutation; compare losses, missing refs, and missing objects the mutation
+/// rejects surface as opaque [`GitDataError::Command`], never as success and
+/// never as the typed [`GitDataError::RefConflict`] /
+/// [`GitDataError::MissingObject`] Local and Fake return. Those divergences
+/// are the reason the fleet-local backend exists (ADR-0199); they are not
+/// silently papered over here.
 ///
 /// [#3465]: https://github.com/iamacoffeepot/aether/issues/3465
 pub trait GitDataApi {
