@@ -294,7 +294,7 @@ mod tests {
     fn gates_each_name_by_the_least_gated_place_that_names_it() {
         let selected = select(
             "use crate::kinds::{Read, ReadResult, Shared};",
-            vec![
+            &[
                 demand(vec![quote! { #[cfg(not(target_family = "wasm"))] }], quote! { ReadResult Shared }),
                 demand(Vec::new(), quote! { Read Shared }),
             ],
