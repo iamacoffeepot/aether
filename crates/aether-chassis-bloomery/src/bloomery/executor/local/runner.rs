@@ -94,6 +94,12 @@ pub struct RunSpec<'a> {
     /// backend has no order row. Distinct from [`Self::command`]: Construct
     /// and Refine share a command.
     pub stage: Option<StageId>,
+    /// The bloom the `retrospect.read` lane is reading (`--bloom`). `None` on
+    /// every other command, and on a study whose order row did not name one.
+    pub bloom: Option<&'a str>,
+    /// The landing-receipt digest the `retrospect.read` lane binds its findings
+    /// to (`--receipt`). `None` on every other command.
+    pub receipt: Option<&'a str>,
 }
 
 /// A running (or finished) transform child — the lifecycle the backend maps onto

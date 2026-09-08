@@ -998,7 +998,7 @@ fn in_process_env(
         poll_interval_secs: builder.poll_interval_secs,
         local_lane_enabled: scripted,
         local_lane_commands: if scripted {
-            "construct.,review.,verify.".to_owned()
+            "construct.,review.,verify.,retrospect.".to_owned()
         } else {
             defaults.local_lane_commands
         },
@@ -1104,7 +1104,7 @@ impl ForkedLaneSettings<'_> {
             (String::from("AETHER_ARTIFACTS_ROOT"), self.artifacts_root.to_owned()),
             (String::from("AETHER_BLOOMERY_LANE_PROGRAM"), self.lane_program.to_owned()),
             (String::from("AETHER_GITHUB_LOCAL_WORKTREE_BASE"), self.worktree_base.to_owned()),
-            (String::from("AETHER_GITHUB_LOCAL_LANE_COMMANDS"), String::from("construct.,review.,verify.")),
+            (String::from("AETHER_GITHUB_LOCAL_LANE_COMMANDS"), String::from("construct.,review.,verify.,retrospect.")),
             (String::from("AETHER_GITHUB_POLL_INTERVAL_SECS"), self.poll_interval_secs.to_string()),
             (String::from("AETHER_GITHUB_CAS_LAND_ENABLED"), self.cas_land_enabled.to_string()),
             (String::from("AETHER_GITHUB_BACKEND"), String::from("fixture")),

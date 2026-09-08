@@ -18,6 +18,9 @@
 //!   natively rather than delegating to `.claude/skills/implement`. Unlike the
 //!   verify lane it needs a credential, so it runs **worker-side** (BYO); the
 //!   coordinator never sees it.
+//! - The **bloom-level reader** (`retrospect.read`, ADR-0216) — reads what a
+//!   bloom landed and stamps `retrospect_findings` as untrusted claims. It
+//!   never writes to the tree.
 
 mod claude;
 pub mod construct;
@@ -32,6 +35,7 @@ mod lint_check;
 mod messages;
 mod muse;
 mod peak_memory;
+pub mod retrospect;
 pub mod review;
 mod review_mcp;
 mod review_reports;
@@ -52,6 +56,7 @@ use crate::cargo::write_json_pretty;
 use crate::transform::construct::CONSTRUCT_IMPLEMENT;
 use crate::transform::lane::Resumed;
 use crate::transform::peak_memory::PeakMemory;
+use crate::transform::retrospect::RETROSPECT_READ;
 use crate::transform::review::REVIEW_CRITIC;
 use crate::transform::review_reports::REVIEW_REPORT;
 use crate::transform::sccache::{CompilerCache, Counters};
@@ -61,7 +66,7 @@ use crate::transform::verify::{Excused, Position, SuppressionRequest, VERIFY_BAS
 #[derive(Args, Clone)]
 pub struct TransformArgs {
     /// Typed command id — a `verify.*` mechanical id, `construct.implement`,
-    /// `review.critic`, or `scope.fill`.
+    /// `review.critic`, `scope.fill`, or `retrospect.read`.
     command: String,
     /// Directory evidence bytes are written to (created if missing).
     #[arg(long)]
@@ -81,9 +86,20 @@ pub struct TransformArgs {
     /// `review.critic` lane's diff source, threaded from the work order's
     /// `diff_base`. Absent names the working-tree contract every member lane
     /// runs under; present names the committed range `<diff-base>..HEAD` an
-    /// aggregate review judges. Ignored by every other lane.
+    /// aggregate review judges. `retrospect.read` uses it as the sealed base of
+    /// the landed range. Ignored by every other lane.
     #[arg(long)]
     diff_base: Option<String>,
+    /// The bloom the `retrospect.read` lane is reading (ADR-0216) — a
+    /// `## Bloom` context slot, never interpolated into the instruction text.
+    /// Ignored by every other lane.
+    #[arg(long)]
+    bloom: Option<String>,
+    /// The landing-receipt digest the `retrospect.read` lane binds its findings
+    /// to (ADR-0216) — a `## Receipt digest` context slot. Ignored by every
+    /// other lane.
+    #[arg(long)]
+    receipt: Option<String>,
     /// Which agent CLI the model lanes fork — the harness the coordinator
     /// resolved from the stage's sealed `AgentProfile` (#4578). Ignored by the
     /// verify lane, which runs a compiler. Absent when the coordinator resolved
@@ -99,11 +115,12 @@ pub struct TransformArgs {
     /// resolved effort, #3511). Ignored by the verify lane.
     #[arg(long)]
     effort: Option<String>,
-    /// The advisory, human-readable work-order description the
-    /// `construct.implement` lane names in its prompt's `## Task` section (#3595)
-    /// — the operator-supplied text the coordinator persisted at seal and the
-    /// executor threaded onto the dispatch. Absent when none was persisted (a
-    /// subject-only prompt); ignored by the verify lane.
+    /// The advisory, human-readable work-order description the model lanes name
+    /// in the prompt's `## Task` section (#3595) — the operator-supplied text
+    /// the coordinator persisted at seal and the executor threaded onto the
+    /// dispatch. Absent when none was persisted (a subject-only prompt);
+    /// ignored by the verify lane. `retrospect.read` carries none: its subject
+    /// is the landed range, named in context sections rather than a task.
     #[arg(long)]
     task: Option<String>,
     /// The harness session a retry lap resumes, in whatever the resolved
@@ -500,6 +517,9 @@ pub fn run(args: &TransformArgs) -> Result<()> {
     }
     if args.command == SCOPE_FILL_COMMAND {
         return scope::run_scope(args);
+    }
+    if args.command == RETROSPECT_READ {
+        return retrospect::run_retrospect(args);
     }
     if args.command == REVIEW_REPORT {
         return review_mcp::serve(&args.out);

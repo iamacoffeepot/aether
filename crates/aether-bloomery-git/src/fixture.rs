@@ -1134,7 +1134,8 @@ fn reject_bad_name(name: &str) -> Result<(), GitDataError> {
 
 /// The sha a commit over `tree` with `parents` takes: a real object in `repo`
 /// when the fake is backed by one, the synthetic hash otherwise. The one place
-/// the two modes part company, so `create_commit` and `merge` cannot drift.
+/// the two modes part company, so `create_commit`, `merge`, and
+/// `squash_merge_pull_request` cannot drift.
 fn mint_commit(repo: Option<&Path>, message: &str, tree: &str, parents: &[String]) -> Result<String, GitDataError> {
     repo.map_or_else(
         || Ok(commit_sha(message, tree, parents)),
@@ -1367,32 +1368,51 @@ impl PullRequestApi for FakeGithub {
     }
 
     fn squash_merge_pull_request(&self, number: u64, expected_head_sha: &str) -> Result<PullMergeResult, GithubError> {
-        let mut state = self.lock();
-        let Some(pull) = state.pull_requests.iter().find(|pull| pull.number == number).cloned() else {
-            return Err(GithubError::Status { status: 404, body: format!("no pull request {number}") });
+        let pull = {
+            let state = self.lock();
+            let Some(pull) = state.pull_requests.iter().find(|pull| pull.number == number).cloned() else {
+                return Err(GithubError::Status { status: 404, body: format!("no pull request {number}") });
+            };
+            // The endpoint's own compare-and-swap. Modelled rather than assumed,
+            // because it is the guard the landing acceptance rests on: a caller
+            // that checked the head itself and then merged unguarded would pass
+            // every test that skipped this and still lose the race in production.
+            if pull.head_sha != expected_head_sha {
+                return Ok(PullMergeResult::Refused {
+                    status: 409,
+                    detail: format!("head is {}, not {expected_head_sha}", pull.head_sha),
+                });
+            }
+            if pull.state != PullRequestState::Open {
+                return Ok(PullMergeResult::Refused { status: 405, detail: "pull request is not open".to_owned() });
+            }
+            pull
         };
-        // The endpoint's own compare-and-swap. Modelled rather than assumed,
-        // because it is the guard the landing acceptance rests on: a caller
-        // that checked the head itself and then merged unguarded would pass
-        // every test that skipped this and still lose the race in production.
-        if pull.head_sha != expected_head_sha {
-            return Ok(PullMergeResult::Refused {
-                status: 409,
-                detail: format!("head is {}, not {expected_head_sha}", pull.head_sha),
-            });
-        }
-        if pull.state != PullRequestState::Open {
-            return Ok(PullMergeResult::Refused { status: 405, detail: "pull request is not open".to_owned() });
-        }
 
         // A squash produces a commit neither branch carried, so the fake mints
         // one rather than reusing the head — the same distinction
         // `merge_pull_request` exists to preserve for the hand-merge path.
+        // Backed by an object repo the mint is a real `git commit-tree`, because
+        // the bloom-level reader checks the landed squash out with `git worktree
+        // add` and a synthetic sha is a name that database never holds.
         let message = format!("squash {}", pull.head_sha);
-        let merge_commit_sha = commit_sha(&message, EMPTY_TREE, &[]);
         let base = format!("heads/{}", strip_heads(&pull.base));
-        let parents = state.refs.get(&base).cloned().into_iter().collect();
-        state.commits.insert(merge_commit_sha.clone(), StoredCommit { tree: EMPTY_TREE.to_owned(), message, parents });
+        let (parents, repo) = {
+            let state = self.lock();
+            (state.refs.get(&base).cloned().into_iter().collect::<Vec<_>>(), state.object_repo.clone())
+        };
+        let mint_fault = |error: GitDataError| GithubError::Status { status: 500, body: error.to_string() };
+        let (merge_commit_sha, tree) = match repo.as_deref() {
+            Some(repo) => {
+                let tree = self.get_commit(&pull.head_sha).map_err(mint_fault)?.tree;
+                let sha = mint_commit(Some(repo), &message, &tree, &parents).map_err(mint_fault)?;
+                (sha, tree)
+            }
+            None => (commit_sha(&message, EMPTY_TREE, &[]), EMPTY_TREE.to_owned()),
+        };
+
+        let mut state = self.lock();
+        state.commits.insert(merge_commit_sha.clone(), StoredCommit { tree, message, parents });
         // The base branch moves, as it does on the real surface. A fake that
         // merged without moving it would let a test assert a landing while
         // mainline still stood where the bloom sealed.
@@ -1644,7 +1664,7 @@ mod object_repo_tests {
     use std::process::Command;
     use std::{fs, slice};
 
-    use super::{FakeGithub, GitDataApi, MergeResult};
+    use super::{FakeGithub, GitDataApi, MergeResult, NewPullRequest, PullMergeResult, PullRequestApi};
     use crate::LocalGitData;
 
     fn git(dir: &Path, args: &[&str]) -> String {
@@ -1691,6 +1711,38 @@ mod object_repo_tests {
             foreign.message, "base",
             "a foreign commit's message is read back — claim classification depends on complete messages"
         );
+    }
+
+    #[test]
+    fn a_squash_merge_is_an_object_the_repository_resolves() {
+        // Tripwire: the bloom-level reader checks the landed squash out with a
+        // real `git worktree add`. A synthetic sha is a name that database never
+        // holds, so the local backend refuses the dispatch and the study never
+        // runs (#5836).
+        let (dir, fake, head) = repo_backed();
+        let tree = git(dir.path(), &["rev-parse", "HEAD:"]);
+        let proposed = fake.create_commit("the fold", &tree, slice::from_ref(&head)).unwrap();
+        fake.seed_ref("heads/main", &head);
+        fake.seed_ref("heads/land", &proposed.sha);
+        let pull = fake
+            .create_pull_request(&NewPullRequest {
+                title: "land".into(),
+                body: String::new(),
+                head: "land".into(),
+                base: "main".into(),
+            })
+            .unwrap();
+
+        let PullMergeResult::Merged { merge_commit_sha } =
+            fake.squash_merge_pull_request(pull.number, &proposed.sha).unwrap()
+        else {
+            panic!("expected Merged");
+        };
+
+        assert_eq!(git(dir.path(), &["cat-file", "-t", &merge_commit_sha]), "commit");
+        assert_eq!(git(dir.path(), &["rev-parse", &format!("{merge_commit_sha}^")]), head);
+        assert_eq!(git(dir.path(), &["rev-parse", &format!("{merge_commit_sha}^{{tree}}")]), tree);
+        assert_ne!(merge_commit_sha, proposed.sha, "a squash mints a new commit rather than reusing the head");
     }
 
     #[test]
