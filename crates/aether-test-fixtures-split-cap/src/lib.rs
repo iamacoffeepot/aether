@@ -10,6 +10,11 @@
 
 use aether_actor::actor;
 
+// The two kinds below keep the explicit derive: rewriting them onto
+// `#[aether_data::kind(..., pod)]` would leave the crate with no textual
+// mention of `bytemuck`, which the attribute still reaches through
+// `::bytemuck::Pod` — a `cargo-machete` suppression for two fixture kinds.
+
 /// A cast-shaped mail kind the cap handles. `Pod`/`Zeroable` so it needs no
 /// serde; defined here in the identity so the lifted `HandlesKind<Ping>` marker
 /// resolves feature-off.

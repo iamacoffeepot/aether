@@ -32,12 +32,24 @@
 //! pin along with the code it existed to check. A literal cannot drift; the
 //! ledger test (`tests/golden_decisions/schema_digests.rs`) holds each literal
 //! against the append-only digest history, and the frozen type copies that
-//! remain (`decisions_v1`) exist only to *decode* rows whose wire layout
-//! differs structurally from today's.
+//! remain (`decisions_v1`, `process_instructions_pre_reader`) exist only to
+//! *decode* rows whose wire layout differs structurally from today's.
+//!
+//! # Two read entry points, one upcast list
+//!
+//! A journal column has a hand-written read entry point per kind
+//! ([`decode_recorded_decisions`], [`decode_recorded_event`]), so it passes its
+//! typed decoders to [`decode_persisted`] at the call site. Sealed
+//! configuration has a single generic read serving every config kind, with no
+//! call site that knows which kind it is decoding, so a config kind's upcast
+//! carries a [`PersistedUpcast::reshape`] rewriter into current-shape bytes and
+//! resolves through [`decode_reshaped`]. Both walk the same
+//! [`PersistedKind::upcasts`] list under the same digest rules.
 
 mod rendering;
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
 use std::sync::OnceLock;
@@ -45,18 +57,24 @@ use std::sync::OnceLock;
 use aether_data::Kind;
 use aether_data::Schema;
 use aether_data::schema::SchemaType;
-use aether_data::wire::{Error as WireError, from_bytes};
+use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 use serde::de::DeserializeOwned;
 
 use crate::digest::{Digest, encode_hex, schema_digest};
 use crate::reduce::decisions_v1::DecisionsV1;
 use crate::reduce::{Decisions, Event};
-use crate::values::{ApprovalPolicy, ModelOverride, PriceTable, SpendCeiling, StageCatalog};
+use crate::values::process_instructions_pre_reader::ModelProcessInstructionsPreReader;
+use crate::values::{ApprovalPolicy, ModelOverride, ModelProcessInstructions, PriceTable, SpendCeiling, StageCatalog};
 
 pub use rendering::{RenderError, render_schema};
 
 /// Decoder from a prior persisted shape into the current value.
 type UpcastFn<T> = fn(&[u8]) -> Result<T, WireError>;
+
+/// Rewriter from a prior persisted shape into the current shape's canonical
+/// wire bytes — the decoder a generic read entry point can carry in the
+/// registry instead of taking at the call site.
+pub type ReshapeFn = fn(&[u8]) -> Result<Vec<u8>, WireError>;
 
 /// Kind name persisted for journaled [`Decisions`].
 pub const DECISIONS_KIND: &str = "decisions";
@@ -84,7 +102,8 @@ pub struct PersistedKind {
     /// The pre-column identity an absent recorded digest names.
     pub bootstrap: Bootstrap,
     /// Prior shapes this entry can carry forward, oldest first, in lockstep
-    /// with the `upcasts` decoder array the read entry point passes.
+    /// with the `upcasts` decoder array a per-kind read entry point passes —
+    /// or, for a generic one, with each entry's own [`PersistedUpcast::reshape`].
     pub upcasts: &'static [PersistedUpcast],
     current: OnceLock<Digest>,
 }
@@ -96,6 +115,10 @@ pub struct PersistedUpcast {
     /// ledger in `tests/golden_decisions/fixtures/schema-digests.txt`) into a
     /// literal that no change to live code can move (#5500).
     pub digest: Digest,
+    /// How [`decode_reshaped`] carries a row of this shape forward. `None` for
+    /// a kind whose read entry point passes its own decoders to
+    /// [`decode_persisted`] — the journal columns.
+    pub reshape: Option<ReshapeFn>,
 }
 
 impl PersistedKind {
@@ -165,45 +188,83 @@ pub fn decode_persisted<T: DeserializeOwned>(
     bytes: &[u8],
     upcasts: &[UpcastFn<T>],
 ) -> Result<T, PersistedSchemaError> {
-    let current = kind.current_digest();
-    match recorded {
-        Some(found) if found == current.as_bytes() => from_bytes(bytes).map_err(PersistedSchemaError::Decode),
-        None => decode_bootstrap(kind, bytes, upcasts),
-        Some(found) => decode_upcast(kind, found, bytes, upcasts, current),
-    }
-}
-
-fn decode_bootstrap<T: DeserializeOwned>(
-    kind: &PersistedKind,
-    bytes: &[u8],
-    upcasts: &[UpcastFn<T>],
-) -> Result<T, PersistedSchemaError> {
-    match kind.bootstrap {
-        Bootstrap::Current => from_bytes(bytes).map_err(PersistedSchemaError::Decode),
-        Bootstrap::Upcast(index) => upcasts
+    match recorded_shape(kind, recorded)? {
+        RecordedShape::Current => from_bytes(bytes).map_err(PersistedSchemaError::Decode),
+        RecordedShape::Prior(index) => upcasts
             .get(index)
-            .ok_or_else(|| PersistedSchemaError::NoUpcast {
-                kind: kind.name,
-                found: String::from("absent"),
-                current: kind.current_digest(),
-            })
+            .ok_or_else(|| no_upcast(kind, recorded))
             .and_then(|decode| decode(bytes).map_err(PersistedSchemaError::Decode)),
     }
 }
 
-fn decode_upcast<T: DeserializeOwned>(
+/// Decode persisted `bytes` under `recorded` through the rewriters the registry
+/// carries, for a kind whose read entry point is generic (ADR-0187).
+///
+/// The typed twin of [`decode_persisted`] for the one caller that cannot name
+/// its kind at the call site: sealed configuration resolves through a single
+/// generic read, so a prior shape is carried forward by
+/// [`PersistedUpcast::reshape`] rewriting the row into current-shape bytes,
+/// which then decode as `T` the ordinary way.
+///
+/// # Errors
+///
+/// [`PersistedSchemaError::Decode`] when the bytes do not decode as the shape
+/// the recorded digest named, and [`PersistedSchemaError::NoUpcast`] when this
+/// binary has no rewriter for that digest.
+pub fn decode_reshaped<T: DeserializeOwned>(
     kind: &PersistedKind,
-    found: &[u8],
+    recorded: Option<&[u8]>,
     bytes: &[u8],
-    upcasts: &[UpcastFn<T>],
-    current: Digest,
 ) -> Result<T, PersistedSchemaError> {
-    for (prior, decode) in kind.upcasts.iter().zip(upcasts.iter()) {
-        if found == prior.digest.as_bytes() {
-            return decode(bytes).map_err(PersistedSchemaError::Decode);
-        }
+    match recorded_shape(kind, recorded)? {
+        RecordedShape::Current => from_bytes(bytes).map_err(PersistedSchemaError::Decode),
+        RecordedShape::Prior(index) => kind
+            .upcasts
+            .get(index)
+            .and_then(|prior| prior.reshape)
+            .ok_or_else(|| no_upcast(kind, recorded))
+            .and_then(|reshape| reshape(bytes).map_err(PersistedSchemaError::Decode))
+            .and_then(|current| from_bytes(&current).map_err(PersistedSchemaError::Decode)),
     }
-    Err(PersistedSchemaError::NoUpcast { kind: kind.name, found: encode_hex(found), current })
+}
+
+/// Which shape the identity stamped beside a row names.
+enum RecordedShape {
+    /// The shape this binary writes.
+    Current,
+    /// [`PersistedKind::upcasts`] at this index.
+    Prior(usize),
+}
+
+fn recorded_shape(kind: &PersistedKind, recorded: Option<&[u8]>) -> Result<RecordedShape, PersistedSchemaError> {
+    let current = kind.current_digest();
+    match recorded {
+        Some(found) if found == current.as_bytes() => Ok(RecordedShape::Current),
+        None => match kind.bootstrap {
+            Bootstrap::Current => Ok(RecordedShape::Current),
+            Bootstrap::Upcast(index) => Ok(RecordedShape::Prior(index)),
+        },
+        Some(found) => kind
+            .upcasts
+            .iter()
+            .position(|prior| found == prior.digest.as_bytes())
+            .map(RecordedShape::Prior)
+            .ok_or_else(|| no_upcast(kind, recorded)),
+    }
+}
+
+/// Refuse `recorded`, naming the identity found and the one this binary writes.
+///
+/// Reached both when no registered upcast claims the digest and when one does
+/// but the read path carries no decoder for it — a registry entry out of
+/// lockstep with its entry point. Both are the same thing to a caller: the row
+/// names a shape this binary cannot read.
+fn no_upcast(kind: &PersistedKind, recorded: Option<&[u8]>) -> PersistedSchemaError {
+    PersistedSchemaError::NoUpcast {
+        kind: kind.name,
+        found: recorded.map_or_else(|| String::from("absent"), encode_hex),
+        current: kind.current_digest(),
+    }
 }
 
 /// The stamp on journaled decisions rows written in the frozen v1 shape
@@ -221,6 +282,11 @@ pub const DECISIONS_PRE_PROPOSE_DIGEST: Digest =
 /// appended `Fact::ProposeChange`.
 pub const EVENT_PRE_PROPOSE_DIGEST: Digest =
     Digest::pinned("0e7389945913e33b12660db11903787e58ce5f1f7f6e19fe64b72d6266d93117");
+
+/// The stamp on sealed model-process instruction bundles written before
+/// ADR-0216 appended `retrospect` and `retrospect_finding_contract`.
+pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
+    Digest::pinned("c0a9677ad8116334fe7b217401fb5f14b06965ae33af4add641f685c5768f3e6");
 
 /// Decode journaled [`Decisions`] under the writing-schema digest stamped
 /// beside them (ADR-0187).
@@ -257,6 +323,13 @@ fn upcast_event_pre_propose(bytes: &[u8]) -> Result<Event, WireError> {
     from_bytes(bytes)
 }
 
+/// Pre-ADR-0216 bundles carry seventeen fields where today's decoder reads
+/// nineteen, so the row is decoded through its frozen shape and re-encoded
+/// with both reader fields empty.
+fn reshape_instructions_pre_reader(bytes: &[u8]) -> Result<Vec<u8>, WireError> {
+    to_vec(&ModelProcessInstructions::from(from_bytes::<ModelProcessInstructionsPreReader>(bytes)?))
+}
+
 /// Decode a journaled [`Event`] under the writing-schema digest stamped beside
 /// it (ADR-0187).
 ///
@@ -274,8 +347,8 @@ pub static DECISIONS: PersistedKind = PersistedKind {
     schema: &<Decisions as Schema>::SCHEMA,
     bootstrap: Bootstrap::Upcast(0),
     upcasts: &[
-        PersistedUpcast { digest: DECISIONS_V1_DIGEST },
-        PersistedUpcast { digest: DECISIONS_PRE_PROPOSE_DIGEST },
+        PersistedUpcast { digest: DECISIONS_V1_DIGEST, reshape: None },
+        PersistedUpcast { digest: DECISIONS_PRE_PROPOSE_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };
@@ -285,7 +358,7 @@ pub static EVENT: PersistedKind = PersistedKind {
     name: EVENT_KIND,
     schema: &<Event as Schema>::SCHEMA,
     bootstrap: Bootstrap::Current,
-    upcasts: &[PersistedUpcast { digest: EVENT_PRE_PROPOSE_DIGEST }],
+    upcasts: &[PersistedUpcast { digest: EVENT_PRE_PROPOSE_DIGEST, reshape: None }],
     current: OnceLock::new(),
 };
 
@@ -304,6 +377,28 @@ pub static MODEL_OVERRIDE: PersistedKind = PersistedKind {
     schema: &<ModelOverride as Schema>::SCHEMA,
     bootstrap: Bootstrap::Current,
     upcasts: &[],
+    current: OnceLock::new(),
+};
+
+/// The [`PersistedKind`] for the sealed [`ModelProcessInstructions`] bundle.
+///
+/// The first config kind to carry an upcast: ADR-0216 appended the reader's two
+/// instruction fields, and without the pre-reader shape registered here every
+/// bundle sealed under ADR-0214 would resolve as
+/// [`ConfigResolveError::NoUpcast`](crate::values::ConfigResolveError::NoUpcast).
+///
+/// The kind postdates the config column's schema-digest migration, so every row
+/// of it was stamped as it was written and the bootstrap arm never fires. It is
+/// [`Bootstrap::Current`] because no unstamped era exists for this kind to name,
+/// not because an absent stamp is known to be today's shape.
+pub static MODEL_PROCESS_INSTRUCTIONS: PersistedKind = PersistedKind {
+    name: ModelProcessInstructions::NAME,
+    schema: &<ModelProcessInstructions as Schema>::SCHEMA,
+    bootstrap: Bootstrap::Current,
+    upcasts: &[PersistedUpcast {
+        digest: MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST,
+        reshape: Some(reshape_instructions_pre_reader),
+    }],
     current: OnceLock::new(),
 };
 
@@ -335,8 +430,16 @@ pub static STAGE_CATALOG: PersistedKind = PersistedKind {
 };
 
 /// Every kind this binary persists. The fixture walks this table.
-pub static PERSISTED_KINDS: &[&PersistedKind] =
-    &[&DECISIONS, &EVENT, &APPROVAL_POLICY, &MODEL_OVERRIDE, &PRICE_TABLE, &SPEND_CEILING, &STAGE_CATALOG];
+pub static PERSISTED_KINDS: &[&PersistedKind] = &[
+    &DECISIONS,
+    &EVENT,
+    &APPROVAL_POLICY,
+    &MODEL_OVERRIDE,
+    &MODEL_PROCESS_INSTRUCTIONS,
+    &PRICE_TABLE,
+    &SPEND_CEILING,
+    &STAGE_CATALOG,
+];
 
 /// The registry entry whose [`PersistedKind::name`] is `name`, if any.
 #[must_use]

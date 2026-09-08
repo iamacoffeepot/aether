@@ -9,7 +9,6 @@
 //! (`pub use kinds::*`), so `aether_audio::NoteOn`
 //! resolves for callers.
 
-use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
 /// Start a note playing on the desktop chassis's MIDI synth (ADR-0039).
@@ -29,8 +28,7 @@ use serde::{Deserialize, Serialize};
 /// property of the voice, not part of the voice key, so a `NoteOff`
 /// carries none. Fire-and-forget; no reply.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.audio.note_on")]
+#[aether_data::kind(name = "aether.audio.note_on", pod, default, eq)]
 pub struct NoteOn {
     pub pitch: u8,
     pub velocity: u8,
@@ -49,8 +47,7 @@ pub struct NoteOn {
 /// between envelope release and late note-offs). Fire-and-forget; no
 /// reply.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.audio.note_off")]
+#[aether_data::kind(name = "aether.audio.note_off", pod, default, eq)]
 pub struct NoteOff {
     pub pitch: u8,
     pub instrument_id: u8,
@@ -64,8 +61,7 @@ pub struct NoteOff {
 /// Desktop-only: headless and hub chassis reply with an
 /// `unsupported on <chassis>` error. Fire-and-forget in the happy path.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.audio.set_master_gain")]
+#[aether_data::kind(name = "aether.audio.set_master_gain", pod, default, partial_eq)]
 pub struct SetMasterGain {
     pub gain: f32,
 }
@@ -75,8 +71,7 @@ pub struct SetMasterGain {
 /// callers that sent `1.5` learn they got `1.0`. `Err` fires on
 /// chassis without an audio device (headless, hub) or when audio
 /// was disabled at boot via `AETHER_AUDIO_DISABLE`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.audio.set_master_gain_result")]
+#[aether_data::kind(name = "aether.audio.set_master_gain_result")]
 pub enum SetMasterGainResult {
     Ok { applied_gain: f32 },
     Err { error: String },
@@ -92,8 +87,7 @@ pub enum SetMasterGainResult {
 /// Desktop-only: headless and hub chassis reply with an
 /// `unsupported on <chassis>` error. Fire-and-forget in the happy path.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.audio.set_reverb_send")]
+#[aether_data::kind(name = "aether.audio.set_reverb_send", pod, default, partial_eq)]
 pub struct SetReverbSend {
     pub send: f32,
 }
@@ -103,8 +97,7 @@ pub struct SetReverbSend {
 /// callers that sent `1.5` learn they got `1.0`. `Err` fires on
 /// chassis without an audio device (headless, hub) or when audio
 /// was disabled at boot via `AETHER_AUDIO_DISABLE`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.audio.set_reverb_send_result")]
+#[aether_data::kind(name = "aether.audio.set_reverb_send_result")]
 pub enum SetReverbSendResult {
     Ok { applied_send: f32 },
     Err { error: String },
@@ -120,8 +113,7 @@ pub enum SetReverbSendResult {
 /// already-sounding voices on the next render block, mirroring
 /// `set_master_gain`. Desktop-only: headless and hub chassis reply `Err`.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.audio.set_sender_gain")]
+#[aether_data::kind(name = "aether.audio.set_sender_gain", pod, default, partial_eq)]
 pub struct SetSenderGain {
     pub gain: f32,
 }
@@ -131,8 +123,7 @@ pub struct SetSenderGain {
 /// that sent `5.0` learns it got `4.0`. `Err` fires on chassis without an
 /// audio device (headless, hub) or when audio was disabled at boot via
 /// `AETHER_AUDIO_DISABLE`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.audio.set_sender_gain_result")]
+#[aether_data::kind(name = "aether.audio.set_sender_gain_result")]
 pub enum SetSenderGainResult {
     Ok { applied_gain: f32 },
     Err { error: String },
@@ -179,8 +170,7 @@ pub struct ScheduledEvent {
 /// synth converts each `at_millis` to an absolute due frame at receipt
 /// and fires the events sample-accurately inside its render loop.
 /// Desktop-only — chassis without an audio device reply `Err`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.audio.schedule")]
+#[aether_data::kind(name = "aether.audio.schedule")]
 pub struct Schedule {
     pub events: Vec<ScheduledEvent>,
 }
@@ -191,8 +181,7 @@ pub struct Schedule {
 /// reason — an over-cap batch size, an over-horizon `at_millis`, or a
 /// chassis without an audio device — loud rather than logged-and-
 /// dropped (ADR-0104).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.audio.schedule_result")]
+#[aether_data::kind(name = "aether.audio.schedule_result")]
 pub enum ScheduleResult {
     Ok { accepted: u32 },
     Err { error: String },
@@ -225,8 +214,7 @@ pub enum ScheduleResult {
 /// is exactly the unlaned behavior. Isolation is cooperative, not
 /// enforced — a sender that names another's `(sender, lane)` collides
 /// deliberately, which is the right strength inside one trust domain.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.audio.play_track")]
+#[aether_data::kind(name = "aether.audio.play_track")]
 pub struct PlayTrack {
     pub namespace: String,
     pub path: String,
@@ -244,8 +232,7 @@ pub struct PlayTrack {
 /// chassis without an audio device. A bad path comes back loud rather
 /// than logged-and-dropped because it is the common agent failure
 /// (ADR-0103 §2).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.audio.play_track_result")]
+#[aether_data::kind(name = "aether.audio.play_track_result")]
 pub enum PlayTrackResult {
     Ok { namespace: String, path: String, lane: Option<String> },
     Err { namespace: String, path: String, lane: Option<String>, error: String },
@@ -260,8 +247,7 @@ pub enum PlayTrackResult {
 /// Releases through a short (~5 millisecond) linear fade to avoid a
 /// click. Stopping a track that isn't playing is a no-op, matching
 /// `note_off`. Fire-and-forget; no reply.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.audio.stop_track")]
+#[aether_data::kind(name = "aether.audio.stop_track")]
 pub struct StopTrack {
     pub namespace: String,
     pub path: String,
@@ -286,8 +272,7 @@ pub struct StopTrack {
 /// depend on load order and do not survive a restart (ADR-0103 §4).
 /// Reply: `LoadInstrumentResult`. Desktop-only — chassis without an
 /// audio device reply `Err` (ADR-0103 §7).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.audio.load_instrument")]
+#[aether_data::kind(name = "aether.audio.load_instrument")]
 pub struct LoadInstrument {
     pub namespace: String,
     pub path: String,
@@ -302,8 +287,7 @@ pub struct LoadInstrument {
 /// human-readable reason — a typo'd path (the fs error), a malformed
 /// `.sfz` or sample (the parse / decode error), or a chassis without
 /// an audio device — loud rather than logged-and-dropped (ADR-0103 §2).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.audio.load_instrument_result")]
+#[aether_data::kind(name = "aether.audio.load_instrument_result")]
 pub enum LoadInstrumentResult {
     Ok { instrument_id: u8, name: String, resident_bytes: u64 },
     Err { namespace: String, path: String, error: String },

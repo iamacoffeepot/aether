@@ -45,7 +45,7 @@ use self::atlas::{ATLAS_SIZE, Atlas, AtlasEntry, GlyphKey, GlyphSlot};
 /// resident. `load_font` and the `font_metrics` grab share the
 /// `aether.fs` fetch + parse path; this rides along so the completion
 /// arm replies in the caller's shape.
-#[derive(Clone, Copy, serde::Serialize, serde::Deserialize, aether_data::Schema)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, aether_data::Schema)]
 pub enum PendingReply {
     /// Reply `LoadFontResult` — the original `load_font` caller.
     LoadFont,
@@ -57,8 +57,7 @@ pub enum PendingReply {
 /// Context stored under the `aether.fs.read` request correlation while a
 /// font load is in flight. Carries the original requester so the deferred
 /// reply lands on the caller, plus the shape that reply takes.
-#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Clone, Copy)]
-#[kind(name = "aether.text.font_load_context")]
+#[aether_data::kind(name = "aether.text.font_load_context", copy)]
 pub struct FontLoadContext {
     pub source: Source,
     pub reply: PendingReply,

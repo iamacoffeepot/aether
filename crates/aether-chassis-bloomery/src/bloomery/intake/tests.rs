@@ -36,6 +36,7 @@ use crate::bloomery::{
     ExecutorPortError, ExecutorShell, LocalExecutorError, OutstandingDispatch, ReconcileLanes, ReconcileReport,
     RoutingExecutor,
 };
+use crate::bloomery::{authorize_instructions, reference_instructions};
 use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
 
 const WORKFLOW: &str = "bloomery-transform.yml";
@@ -693,6 +694,9 @@ fn a_rate_limited_arm_does_not_withhold_another_arms_finished_result() {
     actions_record.transformation.command = "verify.clippy".to_owned();
     let mut local_record = dispatch_record("n-local", bloom, &workpiece, scope_revision, candidate);
     local_record.transformation.command = "construct.implement".to_owned();
+    // A model lane presents a validated instruction bundle before it may
+    // dispatch (ADR-0214); this test is about which arm a handle routes to.
+    local_record.configs = authorize_instructions(&mut store, &reference_instructions());
     let handles = vec![
         dispatch_and_record(&shell, &mut store, &actions_record, NOW_UNIX_MILLIS).unwrap(),
         dispatch_and_record(&shell, &mut store, &local_record, NOW_UNIX_MILLIS).unwrap(),

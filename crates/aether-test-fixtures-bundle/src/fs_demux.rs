@@ -18,14 +18,12 @@ use aether_test_fixtures_kinds::{
 const CONTEXT_A_PAYLOAD: u32 = 11;
 const CONTEXT_B_PAYLOAD: u32 = 29;
 
-#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]
-#[kind(name = "aether.test_fixtures.fs_demux_context_a")]
+#[aether_data::kind(name = "aether.test_fixtures.fs_demux_context_a", no_serde)]
 struct FsDemuxContextA {
     payload: u32,
 }
 
-#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]
-#[kind(name = "aether.test_fixtures.fs_demux_context_b")]
+#[aether_data::kind(name = "aether.test_fixtures.fs_demux_context_b", no_serde)]
 struct FsDemuxContextB {
     payload: u32,
 }

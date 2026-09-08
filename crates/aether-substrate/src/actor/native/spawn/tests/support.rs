@@ -26,15 +26,13 @@ use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::{Pool, PoolConfig, PoolHandle};
 use crate::testing::boot_authority;
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "test.activation.poke")]
+#[aether_data::kind(name = "test.activation.poke", copy)]
 pub(super) struct ActivationPoke;
 
 /// Drives the probe down its ordinary self-close path — the handler flips
 /// the shutdown flag its dispatcher slot polls, exactly as a production
 /// actor that retires itself does.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "test.activation.close")]
+#[aether_data::kind(name = "test.activation.close", copy)]
 pub(super) struct ActivationClose;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -11,6 +11,7 @@ use aether_bloomery_github::{ExecutorError, GithubError};
 use aether_data::wire::to_vec;
 
 use crate::bloomery::executor::{ExecutorPortError, ExecutorShell, LocalExecutorError};
+use crate::bloomery::provenance::{ProvenanceRefusal, admit_model_dispatch, gated, journal_refusal};
 use crate::store::{OutstandingOrder, RecordOutcome, StoreBackend};
 
 /// The idempotency nonce a drained outbox entry dispatches under.
@@ -176,6 +177,10 @@ pub enum DispatchError {
     Submit(ExecutorPortError),
     /// The registry write faulted, so nothing was submitted.
     Store(rusqlite::Error),
+    /// The instruction-provenance gate refused the dispatch before anything was
+    /// recorded or submitted (ADR-0149, ADR-0214). Nothing reached a worker and
+    /// no order exists.
+    Provenance(ProvenanceRefusal),
 }
 
 impl fmt::Display for DispatchError {
@@ -183,6 +188,7 @@ impl fmt::Display for DispatchError {
         match self {
             Self::Submit(error) => write!(f, "work-order submit failed: {error}"),
             Self::Store(error) => write!(f, "dispatch-record write failed: {error}"),
+            Self::Provenance(refusal) => write!(f, "instruction provenance refused the dispatch: {refusal}"),
         }
     }
 }
@@ -192,6 +198,7 @@ impl Error for DispatchError {
         match self {
             Self::Submit(error) => Some(error),
             Self::Store(error) => Some(error),
+            Self::Provenance(refusal) => Some(refusal),
         }
     }
 }
@@ -207,9 +214,14 @@ impl DispatchError {
     /// transport/decode/pagination faults, `NoRunForNonce`, the rest of the
     /// local-lane arm (worktree/io/evidence, other spawn faults), and a
     /// post-submit registry write fault.
+    ///
+    /// A provenance refusal answers for itself: an unauthorized or unresolvable
+    /// instruction bundle is immutable content and an immutable authorization
+    /// set, so only the store-fault arm of it can clear on a retry.
     #[must_use]
     pub fn is_permanent(&self) -> bool {
         match self {
+            Self::Provenance(refusal) => refusal.is_permanent(),
             Self::Submit(ExecutorPortError::Actions(ExecutorError::Github(GithubError::Status { status, .. }))) => {
                 (400..500).contains(status) && *status != 429
             }
@@ -240,16 +252,32 @@ impl DispatchError {
 /// deadline starts at the *record*, which is now also the earlier of the two
 /// steps: the sealed allowance covers the submit as well.
 ///
+/// **Gates first.** Every model lane goes through here, which is what makes this
+/// the one place instruction provenance can be enforced *by construction*
+/// (ADR-0149 §The value vocabulary, ADR-0214): a dispatch whose pinned
+/// instruction bundle is missing, altered, incomplete, or unauthorized is refused
+/// before an order row exists and before anything reaches a worker, and the
+/// refusal is parked for the reactor to journal as the host fault it is. A future
+/// dispatch site cannot acquire a model lane without passing here, so the gate
+/// cannot be forgotten at a call site.
+///
 /// # Errors
-/// [`DispatchError::Store`] if the registry write faulted (nothing was
-/// submitted), or [`DispatchError::Submit`] if the executor refused the
-/// dispatch (the registry row is removed again first).
+/// [`DispatchError::Provenance`] if the instruction-provenance gate refused
+/// (nothing was recorded or submitted), [`DispatchError::Store`] if the registry
+/// write faulted (nothing was submitted), or [`DispatchError::Submit`] if the
+/// executor refused the dispatch (the registry row is removed again first).
 pub fn dispatch_and_record(
     shell: &ExecutorShell,
     store: &mut dyn StoreBackend,
     record: &DispatchRecord,
     now_unix_millis: u64,
 ) -> Result<WorkHandle, DispatchError> {
+    if gated(&record.transformation.command)
+        && let Err(refusal) = admit_model_dispatch(store, record)
+    {
+        journal_refusal(store, record, &refusal);
+        return Err(DispatchError::Provenance(refusal));
+    }
     record_dispatch_at(store, record, now_unix_millis).map_err(DispatchError::Store)?;
     shell.submit(&record.to_order()).map_err(|error| {
         // Nothing reached the worker lane, so the row describes a dispatch that

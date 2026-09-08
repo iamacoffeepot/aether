@@ -87,8 +87,14 @@ aether-harness-substrate = { path = "../aether-harness-substrate" }
 # `confique` via the `#[derive(confique::Config)]` on the config layer, `clap`
 # via the `#[derive(clap::Args)]` the same derive emits on the `*Overlay`
 # struct. Both are false positives: the deps are real and runtime-gated.
+#
+# `bytemuck` is the same class through a different macro. The cast-shaped
+# real-time trigger kinds declare `#[aether_data::kind(..., pod)]`, whose
+# expansion emits `::bytemuck::Pod` / `::bytemuck::Zeroable`, so the crate
+# reaches bytemuck only through a macro-emitted path and names it nowhere in
+# source. The dependency is real: dropping it stops the crate compiling.
 [package.metadata.cargo-machete]
-ignored = ["clap", "confique"]
+ignored = ["clap", "confique", "bytemuck"] # aether-suppression-request: bytemuck is used only through the #[aether_data::kind] expansion, invisible to a source-only scan
 
 [lints]
 workspace = true

@@ -19,7 +19,7 @@
 use aether_bloomery::{BloomId, BloomStatus, Digest, Fact, Outcome, StageId};
 use aether_chassis_bloomery::bloomery::{ScriptedUpload, ScriptedVerdict};
 use aether_chassis_bloomery::store::OutstandingOrder;
-use aether_harness_bloomery::{FixtureHarness, captured, digest, draft, member, passed, verdict};
+use aether_harness_bloomery::{FixtureHarness, captured, digest, member, passed, verdict};
 
 /// The workpiece the wedged member covers, and the one the successor recovers.
 const WORKPIECE: &str = "wp";
@@ -38,7 +38,7 @@ fn failed(order: &OutstandingOrder) -> ScriptedUpload {
 /// scenario is about, and the spec it needs is three public calls: the base the
 /// coordinator will accept, the member, and the sealed draft.
 fn supersede(harness: &mut FixtureHarness, predecessor: BloomId, scope_revision: Digest) -> BloomId {
-    let successor = draft(harness.view().mainline, &[member(WORKPIECE, scope_revision)]);
+    let successor = harness.successor_draft(&[member(WORKPIECE, scope_revision)]);
     let id = successor.id();
 
     match harness.admit("recover-the-wedged-member", Fact::Supersede { predecessor, successor }) {

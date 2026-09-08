@@ -142,5 +142,7 @@ fn sealed_config_kinds_share_one_address_across_encoders() {
         attribute_findings: String::from("attribute"),
         fold_conflict_contract: String::from("fold conflict"),
         composition_refine_order: String::from("refine order"),
+        retrospect: String::from("retrospect"),
+        retrospect_finding_contract: String::from("finding contract"),
     });
 }

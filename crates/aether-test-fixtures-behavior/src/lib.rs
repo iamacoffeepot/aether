@@ -8,13 +8,10 @@
 //! between a twin and its widget original is a decode mismatch the #2688 scenario
 //! trips on loudly (the clamp assertion fails), not a compile error.
 
-use serde::{Deserialize, Serialize};
-
 /// Twin of `aether_kit_widget::SliderChanged` — the value-up event the
 /// scripts intercept. Same wire name and field shape as
 /// `crates/aether-kit-widget/src/kinds.rs`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.slider.changed")]
+#[aether_data::kind(name = "aether.kit.widget.slider.changed")]
 pub struct SliderChanged {
     pub value: f32,
     pub committed: bool,
@@ -24,8 +21,7 @@ pub struct SliderChanged {
 /// lane, which the scripts reuse as an observable effect (`ctx.panel().emit`)
 /// to surface their authored `count` where the panel logs it. Same wire name
 /// and field shape as `crates/aether-kit-widget/src/kinds.rs`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.radio.selected")]
+#[aether_data::kind(name = "aether.kit.widget.radio.selected")]
 pub struct RadioSelected {
     pub index: u32,
 }

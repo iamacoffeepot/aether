@@ -23,8 +23,10 @@ mod model_override;
 mod narrowing;
 mod operator;
 mod orphan_claim;
+mod pipeline;
 mod price;
 mod process_instructions;
+pub(crate) mod process_instructions_pre_reader;
 mod profile;
 mod proof;
 mod question;
@@ -84,6 +86,11 @@ pub use operator::{
 };
 pub use orphan_claim::{
     ORPHAN_CLAIM_RELEASE_WORDS, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord,
+};
+pub use pipeline::{
+    DeclaredEvidence, DeclaredLanes, DeclaredVerifiers, EVIDENCE_ENVELOPE_VERSION, LaneEntrypoint,
+    MAX_VERIFIER_IDENTITIES, PIPELINE_MANIFEST_PATH, PIPELINE_MANIFEST_VERSION, PipelineManifest,
+    PipelineManifestError,
 };
 pub use price::{LongContextBand, PriceRates, PriceTable, SealedPriceTable};
 pub use process_instructions::{ModelProcessInstructions, ModelProcessInstructionsError};
