@@ -78,8 +78,10 @@ pub struct DeadRecord {
 /// not the caller's `BinarySelector`. A bare name or attribute query
 /// resolves against whatever the store holds *now*, so replaying it could
 /// silently restart a crashed engine onto a different binary than the one
-/// that crashed; the hash cannot. The hash is still re-resolved at
-/// restart time, because the store's LRU may have evicted it since.
+/// that crashed; the hash cannot. The hash is still re-resolved at restart
+/// time — a recipe names content, not a materialized path — and the store
+/// is told to hold it for as long as the lineage can still replay it
+/// (issue 5686), so the content it names is there to resolve.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpawnRecipe {
     /// Content hash of the binary this engine was forked from.
@@ -240,6 +242,13 @@ pub struct EngineEntry {
 /// route, and terminate cannot observe a reservation as a supervised engine.
 pub struct PendingEngine {
     pub rpc_port: u16,
+    /// Content hash of the binary this birth was forked from. The recipe
+    /// itself rides the staged birth's [`FleetSpawnContext`], which is not
+    /// state this cap can read, so the hash is kept here — it is what
+    /// [`FleetServerState::refresh_binary_holds`] needs to keep the store
+    /// from reclaiming a binary an engine is already running while its
+    /// supervision is still committing.
+    pub hash: String,
     /// A Live proxy can report its death from the activation catch-up wake
     /// before the parent's later task completion runs. Latch only the first
     /// report so completion cannot install a corpse or duplicate its death.
@@ -396,6 +405,63 @@ pub struct FleetServerState {
 }
 
 impl FleetServerState {
+    /// Re-derive which stored binaries supervision is currently running
+    /// and hand the set to the store, which spares them from LRU eviction
+    /// (issue 5686).
+    ///
+    /// Without this the only protections are a name and an operator pin,
+    /// and neither covers a running engine: `upload_binary` repointing
+    /// `default` at fresh bytes leaves the previously-named hash unnamed
+    /// and immediately reclaimable *while an engine forked from it is
+    /// still alive* — and a restart of that engine then finds no recipe to
+    /// replay. The operator's pin stays the operator's: supervision never
+    /// sets or clears it, so the two protections cannot overwrite each
+    /// other.
+    ///
+    /// Every lineage state that owes a re-fork is a holder — a committed
+    /// engine, a birth still staging, and a restart waiting out its
+    /// backoff — so a lineage stays protected across the gaps where it
+    /// owns no live process. Deriving the whole set from those three maps
+    /// is what makes several engines sharing one hash correct without a
+    /// reference count: the hash leaves the set exactly when the last of
+    /// them is gone.
+    ///
+    /// Called at each supervision transition rather than before each
+    /// ingest. The cap is single-threaded and the store evicts only inside
+    /// an upload handler, so no reclaim can observe the set between the
+    /// transitions of one handler's turn.
+    fn refresh_binary_holds(&mut self) {
+        self.store.set_holds(
+            self.engines
+                .values()
+                .map(|entry| entry.supervision.recipe.hash.clone())
+                .chain(self.pending_engines.values().map(|pending| pending.hash.clone()))
+                .chain(self.pending_restarts.values().map(|supervision| supervision.recipe.hash.clone()))
+                .collect(),
+        );
+    }
+
+    /// Reserve the pending row for a staged proxy birth and hold the
+    /// binary it was forked from. The one entry point into
+    /// [`FleetServerState::pending_engines`], shared by the requested-spawn
+    /// and restart paths so neither can register a birth the store does
+    /// not know is running.
+    pub fn begin_pending_spawn(&mut self, engine_id: EngineId, rpc_port: u16, hash: String) {
+        let replaced = self.pending_engines.insert(engine_id, PendingEngine { rpc_port, hash, early_death: None });
+        debug_assert!(replaced.is_none(), "fresh engine ids cannot replace a pending spawn");
+        self.refresh_binary_holds();
+    }
+
+    /// Drop a supervised engine at the operator's request, releasing the
+    /// hold on its binary, and hand back the entry so the caller can record
+    /// the death and forward the terminate. `None` when no engine has that
+    /// id.
+    pub fn retire_engine(&mut self, engine_id: EngineId) -> Option<EngineEntry> {
+        let entry = self.engines.remove(&engine_id)?;
+        self.refresh_binary_holds();
+        Some(entry)
+    }
+
     /// Push a [`DeadRecord`] onto the recently-died ring, evicting the
     /// oldest entry once the ring is full (issue 1906).
     pub fn record_death(&mut self, engine_id: String, rpc_port: u16, reason: DeathReason) {
@@ -451,6 +517,9 @@ impl FleetServerState {
         let token = self.next_restart_token;
         self.next_restart_token += 1;
         self.pending_restarts.insert(token, supervision);
+        // The lineage owns no process across the backoff, so this is the
+        // one window where only the filed recipe holds its binary.
+        self.refresh_binary_holds();
         tracing::warn!(
             target: "aether_substrate::fleet_server",
             engine_id = %engine_id,
@@ -523,11 +592,14 @@ impl FleetServerState {
         let hash = supervision.recipe.hash.clone();
 
         // Re-resolve rather than trusting a path captured at spawn time:
-        // the store's LRU may have evicted this content since, in which
-        // case the recipe is no longer runnable and the engine simply
-        // stays dead. Its death is already recorded — there is no engine
-        // id for this attempt, so there is nothing honest to key a second
-        // record on.
+        // the recipe carries the content hash, not a materialized path, so
+        // the store is asked again where those bytes are. The filed
+        // restart held the hash across the backoff (issue 5686), so LRU
+        // cannot have reclaimed it; a peer handle on the same root still
+        // can, and then the recipe is no longer runnable and the engine
+        // simply stays dead. Its death is already recorded — there is no
+        // engine id for this attempt, so there is nothing honest to key a
+        // second record on.
         let Some(artifact) = resolve_selector(&mut self.store, &hash_selector(&hash)) else {
             tracing::error!(
                 target: "aether_substrate::fleet_server",
@@ -584,8 +656,7 @@ impl FleetServerState {
 
         match staged {
             Ok(_) => {
-                let replaced = self.pending_engines.insert(engine_id, PendingEngine { rpc_port, early_death: None });
-                debug_assert!(replaced.is_none(), "fresh engine ids cannot replace a pending spawn");
+                self.begin_pending_spawn(engine_id, rpc_port, hash);
                 tracing::warn!(
                     target: "aether_substrate::fleet_server",
                     engine_id = %engine_id.0,
@@ -623,7 +694,7 @@ impl FleetServerState {
         let pending = self.pending_engines.remove(&engine_id)?;
         debug_assert_eq!(pending.rpc_port, rpc_port, "spawn completion must match its pending engine");
 
-        Some(match outcome {
+        let reply = match outcome {
             ProxySpawnOutcome::Rejected(error) => self.fail_spawn(engine_id, rpc_port, error),
             ProxySpawnOutcome::Applied(proxy_mailbox) => {
                 if let Some(reason) = pending.early_death {
@@ -645,7 +716,13 @@ impl FleetServerState {
                     SpawnEngineResult::Ok { engine_id: engine_id.0.to_string(), rpc_port }
                 }
             }
-        })
+        };
+
+        // The birth left `pending_engines` either way: it is a committed
+        // engine holding its own binary now, or it is over and the hold
+        // its reservation carried is released.
+        self.refresh_binary_holds();
+        Some(reply)
     }
 
     /// Reconcile a proxy death against pending and committed supervision.
@@ -662,6 +739,10 @@ impl FleetServerState {
         }
         if let Some(entry) = self.engines.remove(&engine_id) {
             self.record_death(engine_id.0.to_string(), entry.rpc_port, reason);
+            // The corpse no longer runs its binary. A restart filed by the
+            // caller takes the hold back the same turn, before anything can
+            // reclaim it.
+            self.refresh_binary_holds();
             return EngineDeathDisposition::LiveRemoved(Box::new(entry.supervision));
         }
         EngineDeathDisposition::Unknown
@@ -858,9 +939,7 @@ impl NativeActor for FleetServer {
 
             match result {
                 Ok(_) => {
-                    let replaced =
-                        state.pending_engines.insert(engine_id, PendingEngine { rpc_port, early_death: None });
-                    debug_assert!(replaced.is_none(), "fresh engine ids cannot replace a pending spawn");
+                    state.begin_pending_spawn(engine_id, rpc_port, recipe.hash.clone());
                     return;
                 }
                 Err((e, returned)) => {
@@ -967,7 +1046,7 @@ impl NativeActor for FleetServer {
             }
         };
 
-        let Some(entry) = state.engines.remove(&engine_id) else {
+        let Some(entry) = state.retire_engine(engine_id) else {
             return TerminateEngineResult::Err { error: format!("no supervised engine {}", mail.engine_id) };
         };
 
@@ -1099,6 +1178,10 @@ impl NativeActor for FleetServer {
     fn on_restart_due(state: &mut Self::State, ctx: &mut NativeCtx<'_, Single, Self>, mail: EngineRestartDue) {
         if let Some(supervision) = state.pending_restarts.remove(&mail.token) {
             state.restart_engine(ctx, supervision);
+            // The filed restart is no longer pending: it either became a
+            // staged birth that took the hold on its binary, or it failed
+            // and the lineage is over, releasing it.
+            state.refresh_binary_holds();
         }
     }
 

@@ -94,8 +94,10 @@ unpinned history entry is eligible. `pin_artifact` / `unpin_artifact` (and
 `upload_component(pin: true)`) record or drop durable explicit protection on an
 exact content hash — names are never resolved. `pin: false` on upload is not
 unpin. There is still no delete or unname operation. Component runtime
-protection of stored artifacts is not provided here. Issue 5686 is binary
-supervision only and does not cover component runtime leases. Fleet and MCP
+protection of stored artifacts is not provided here: the hub holds the binary
+of every engine it supervises (issue 5686), but it does not supervise a loaded
+component, so a component's stored wasm is protected by a name or a pin alone.
+Fleet and MCP
 must ship the same release: the `pin` field changes the typed upload kind
 schema.
 

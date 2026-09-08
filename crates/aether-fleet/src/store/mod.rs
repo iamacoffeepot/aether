@@ -45,8 +45,8 @@
 //!
 //! The store survives a `restart-hub` because the root persists across the
 //! hub child's restart. The disk budget is enforced by LRU eviction over
-//! entries that are neither pinned nor named — a named or pinned entry is
-//! kept regardless of recency. Both protections are on disk: a name in
+//! entries that are neither pinned, named, nor held by live supervision —
+//! a named, pinned, or held entry is kept regardless of recency. Both protections are on disk: a name in
 //! `names.json`, a pin in the entry's own sidecar, so neither lapses when
 //! the supervised hub restarts.
 
@@ -54,6 +54,7 @@ mod manifest;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashSet;
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -213,6 +214,17 @@ impl ArtifactStore {
     /// written.
     pub fn try_set_pinned(&mut self, hash: &str, pinned: bool) -> io::Result<bool> {
         self.inner.try_set_pinned(hash, pinned)
+    }
+
+    /// Replace the set of content hashes live supervision holds against
+    /// eviction (issue 5686). The engines cap re-derives the whole set
+    /// from the engines it supervises — committed, pending, and waiting
+    /// out a restart backoff — so a binary in use is never a reclaim
+    /// candidate, whatever a concurrent upload does to the name that
+    /// resolved it. Holds are process-lifetime and independent of the
+    /// operator's durable pin.
+    pub fn set_holds(&mut self, holds: HashSet<String>) {
+        self.inner.set_holds(holds);
     }
 
     /// Enumerate the stored binaries matching `filter` as
