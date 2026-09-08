@@ -12,11 +12,18 @@
 //!
 //! # Decode is tolerant, intake is strict
 //!
-//! [`WireDecode`] has no manifest in hand, so it admits any syntactically valid
-//! identity and gives one this binary compiles no name for the next position
-//! above the compiled vocabulary. A malformed name still fails at decode; a
-//! well-formed one the bloom's manifest does not declare fails at admission,
-//! with the bloom — and so the manifest — in hand. That is the trust boundary
+//! [`WireDecode`] has no manifest in hand, so a *journal* row naming an
+//! identity this binary compiles no name for takes the next free declared
+//! position in arrival order. That is replay: the stored bits were assigned
+//! by the coordinator that interned the names against the sealed vocabulary,
+//! and folding the row matters more than spelling an identity this binary
+//! cannot. A malformed name still fails at decode.
+//!
+//! A fresh verdict never uses that intern. Its names arrive in the lane's
+//! evidence JSON, ride to the admission door, and are interned there against
+//! the bloom's sealed [`PipelineManifest`](super::PipelineManifest). A
+//! well-formed name that vocabulary does not declare fails at admission, with
+//! the bloom — and so the manifest — in hand. That is the trust boundary
 //! ADR-0178 already named for the check, moved to where the vocabulary is
 //! recorded rather than compiled.
 //!
@@ -343,9 +350,10 @@ impl<'de> WireDecode<'de> for VerifyFailure {
         let name = String::decode(cursor)?;
         // A lone identity carries no sequence to intern against, so one the
         // compiled vocabulary does not name takes the first declared position.
-        // The real interning is the set decoder's, below — a lone identity is
-        // not a shape any durable row carries, since every recorded verifier
-        // verdict is a set.
+        // Journal replay only: a fresh verdict's names are interned against
+        // the sealed manifest at admission. A lone identity is not a shape
+        // any durable row carries, since every recorded verifier verdict is a
+        // set.
         Self::from_name(&name).or_else(|| Self::declared(COMPILED_POSITIONS, &name)).ok_or(WireError::Message(name))
     }
 }
@@ -416,12 +424,11 @@ const VERIFY_FAILURE_NAMES: [&str; 10] = [
 /// Whether a failed member Verify may be empty is an intake-boundary invariant,
 /// not a property of this reusable value.
 ///
-/// The mask is over *interned positions*, and interning is relative to a
-/// vocabulary: the compiled one for a reader holding no manifest, the bloom's
-/// sealed one for the door that admits a verdict. That is the same relativity
-/// the mask always had against a binary, moved somewhere it is recorded — the
-/// bloom's journaled [`PipelineManifest`](super::PipelineManifest) is what names
-/// a position this binary compiles no name for.
+/// The mask is over interned positions. A journal decoder holding no manifest
+/// recovers compiled names and, for replay, assigns unknown names the next
+/// free declared bit so the row folds. A fresh verdict's bits are assigned
+/// only by the bloom's sealed [`PipelineManifest`](super::PipelineManifest)
+/// at the admission door, while the identity names are still in hand.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
 pub struct VerifyFailureSet(u16);
 
@@ -525,9 +532,13 @@ impl VerifyFailureSet {
     /// identity of that name, or the next declared position this set has not
     /// already spent.
     ///
-    /// Positions are handed out in the order names arrive, which is the order a
-    /// canonical row carries them — so a manifest that appends identities past
-    /// the compiled vocabulary interns them to the positions it declared.
+    /// Journal replay only. A stored row's bits were assigned by the
+    /// coordinator that interned the names against the sealed vocabulary;
+    /// arrival order recovers those positions on a binary that compiles no
+    /// name for them, so the row folds instead of aborting boot. A fresh
+    /// verdict's bits are assigned only by
+    /// [`PipelineManifest::intern`](super::PipelineManifest::intern) at the
+    /// admission door, while the identity names are still in hand.
     fn intern(self, name: &str) -> Option<VerifyFailure> {
         if let Some(compiled) = VerifyFailure::from_name(name) {
             return Some(compiled);

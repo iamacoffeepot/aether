@@ -92,14 +92,15 @@ pub enum IntakeRefusal {
     /// The verdict named a verifier identity the bloom's sealed vocabulary does
     /// not declare (ADR-0215).
     ///
-    /// The strict half of ADR-0215's decode-tolerant / intake-strict move. The
-    /// decoder that read this set held no manifest and admitted any
-    /// syntactically valid identity; this door holds the bloom, and so the
-    /// vocabulary the bloom sealed, which is the only place the question "is
-    /// this an identity that could have failed here" has an answer. Refusing it
-    /// here is what keeps ADR-0178's forgiveness bound bounded: an identity
-    /// outside the sealed vocabulary would extend a member's repair loop by one
-    /// more novel failure that costs no roll.
+    /// The strict half of ADR-0215's decode-tolerant / intake-strict move. A
+    /// fresh verdict's names are interned here against the sealed vocabulary,
+    /// which is the only place the question "is this an identity that could
+    /// have failed here" has an answer. The journal decoder stays tolerant so
+    /// replay folds; it is never the thing that assigns a bit to a fresh
+    /// verdict. Refusing an un-internable name here is what keeps ADR-0178's
+    /// forgiveness bound bounded: an identity outside the sealed vocabulary
+    /// would extend a member's repair loop by one more novel failure that
+    /// costs no roll.
     UndeclaredVerifier {
         /// The identities the verdict named that the bloom's manifest does not
         /// declare, in the set's canonical order.
@@ -226,7 +227,15 @@ fn verifier_failure_refusal(stage: StageId, upload: &UploadedEvidence) -> Option
 }
 
 // ADR-0215's intake-strict half: every identity a verdict names has to be one
-// the bloom's own sealed vocabulary declares.
+// the bloom's own sealed vocabulary declares, interned at the position that
+// vocabulary assigned.
+//
+// The JSON evidence path still has the names in hand
+// (`LaneObservation::failed_verifier_names`). Interning them here against the
+// sealed manifest is what stops a subset of appended identities being
+// re-keyed onto the first free compiled-past bit. The Actions mask path
+// carries no names: those bits were already written by the lane's compiled
+// vocabulary, and the existing position check is the door.
 //
 // The manifest is read off the order's flattened registry rather than from a
 // compiled copy, because the whole point of the record is that the vocabulary
@@ -238,23 +247,38 @@ fn verifier_failure_refusal(stage: StageId, upload: &UploadedEvidence) -> Option
 // the host could not resolve, so a missing row here is a corrupt store rather
 // than a bloom with a different vocabulary, and inventing an undeclared-identity
 // refusal out of it would wedge members over a storage fault.
-fn undeclared_verifier_refusal(
+fn intern_failed_verifiers(
     store: &mut dyn StoreBackend,
     record: &DispatchRecord,
     upload: &UploadedEvidence,
-) -> Result<Option<IntakeRefusal>, IntakeError> {
-    if upload.observation.failed_verifiers.is_empty() {
-        return Ok(None);
+) -> Result<Result<VerifyFailureSet, IntakeRefusal>, IntakeError> {
+    let names = &upload.observation.failed_verifier_names;
+    let failed = upload.observation.failed_verifiers;
+    if names.is_empty() && failed.is_empty() {
+        return Ok(Ok(VerifyFailureSet::EMPTY));
     }
     let manifest = sealed_manifest(store, record)?;
-    let undeclared = manifest.undeclared_verifiers(upload.observation.failed_verifiers);
-    if undeclared.is_empty() {
-        return Ok(None);
+    if names.is_empty() {
+        return Ok(undeclared_set(&manifest, failed));
     }
-    Ok(Some(IntakeRefusal::UndeclaredVerifier {
-        undeclared,
-        declared: manifest.identities().map(String::from).collect(),
-    }))
+    let interned = names.iter().filter_map(|name| manifest.intern(name)).collect::<VerifyFailureSet>();
+    let undeclared = names.iter().filter(|name| manifest.intern(name).is_none()).cloned().collect::<Vec<_>>();
+    if undeclared.is_empty() {
+        return Ok(Ok(interned));
+    }
+    Ok(Err(undeclared_refusal(&manifest, undeclared)))
+}
+
+fn undeclared_set(manifest: &PipelineManifest, failed: VerifyFailureSet) -> Result<VerifyFailureSet, IntakeRefusal> {
+    let undeclared = manifest.undeclared_verifiers(failed);
+    if undeclared.is_empty() {
+        return Ok(failed);
+    }
+    Err(undeclared_refusal(manifest, undeclared))
+}
+
+fn undeclared_refusal(manifest: &PipelineManifest, undeclared: Vec<String>) -> IntakeRefusal {
+    IntakeRefusal::UndeclaredVerifier { undeclared, declared: manifest.identities().map(String::from).collect() }
 }
 
 // The lane vocabulary `record`'s bloom sealed, or the compiled one when it
@@ -829,9 +853,13 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     if let Some(refusal) = out_of_stage_refusal(record.stage, upload) {
         return Ok(AdmitDecision::Refused(refusal));
     }
-    if let Some(refusal) = undeclared_verifier_refusal(store, &record, upload)? {
-        return Ok(AdmitDecision::Refused(refusal));
+    let interned = intern_failed_verifiers(store, &record, upload)?;
+    let mut upload = upload.clone();
+    match interned {
+        Err(refusal) => return Ok(AdmitDecision::Refused(refusal)),
+        Ok(failed_verifiers) => upload.observation.failed_verifiers = failed_verifiers,
     }
+    let upload = &upload;
     let observed = StageResult { subject: upload.subject, verdict: upload.verdict, detail: upload.detail };
     let evidence = match normalize_stage_result(&record.displayed_digest, &observed) {
         Ok(evidence) => evidence,

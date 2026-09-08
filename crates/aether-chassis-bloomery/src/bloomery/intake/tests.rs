@@ -623,6 +623,7 @@ fn claim_for_carries_the_whole_observation() {
         candidate: Some(CandidateRef { tree: Digest::from_bytes([5; 32]), checkout: Digest::from_bytes([6; 32]) }),
         findings: Some("critic findings".into()),
         failed_verifiers: VerifyFailureSet::one(VerifyFailure::Fmt),
+        failed_verifier_names: vec!["verify.fmt".into()],
         cost: Some(StudyCost {
             cost_micro_usd: 7,
             turns: 8,
@@ -1023,9 +1024,8 @@ fn a_verdict_naming_only_the_second_appended_identity_keeps_its_declared_positio
     // A sealed vocabulary with `verify.a` at 10 and `verify.b` at 11, and a
     // verdict naming only `verify.b`, therefore interned `verify.b` at 10 —
     // the first free bit, which the manifest has already given to `verify.a`.
-    // Intake judged the position, not the name: `declares_position(10)` is
-    // true, so the verdict was admitted and the journaled mask named the
-    // wrong identity.
+    // The names ride to this door and intern against the sealed vocabulary,
+    // so the journaled mask keeps `verify.b` at the position it declared.
     let mut store = store();
     let bloom = BloomId(Digest::from_bytes([1; 32]));
     let workpiece = WorkpieceId("wp-rekey".to_owned());
@@ -1053,7 +1053,11 @@ fn a_verdict_naming_only_the_second_appended_identity_keeps_its_declared_positio
         subject: candidate,
         verdict: StageVerdict::VerificationFailed,
         detail: Digest::from_bytes([7; 32]),
-        observation: LaneObservation { failed_verifiers: failures, ..Default::default() },
+        observation: LaneObservation {
+            failed_verifiers: failures,
+            failed_verifier_names: vec!["verify.b".to_owned()],
+            ..Default::default()
+        },
     };
 
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
