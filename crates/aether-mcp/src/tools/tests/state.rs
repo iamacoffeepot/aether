@@ -214,3 +214,21 @@ async fn engine_address_resolver_returns_the_engine_mailbox_without_local_foldin
     drop(calls);
     assert_eq!(request.address, supplied);
 }
+
+/// The shared engine resolver canonicalizes an explicit `engine_id`, so an
+/// uppercase caller spelling matches the lowercase ids `list_engines`
+/// reports. Without it the id a tool echoes back would not match the fleet
+/// row the caller read it from.
+#[tokio::test]
+async fn resolve_engine_canonicalizes_an_explicit_id() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+
+    let (engine, engine_id) = mcp
+        .resolve_engine(Some("ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF"))
+        .await
+        .expect("an uppercase UUID spelling is a valid engine_id");
+
+    assert_eq!(engine_id, "abcdefab-cdef-4abc-8def-abcdefabcdef");
+    assert_eq!(engine.0.to_string(), engine_id, "the echoed spelling is the parsed engine's own");
+}

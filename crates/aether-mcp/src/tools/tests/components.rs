@@ -288,7 +288,7 @@ async fn load_component_unresolvable_selector_is_tool_error() {
     let mcp = connect_mcp(port);
     let result = mcp
         .load_component(Parameters(LoadComponentArgs {
-            engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+            engine_id: Some("00000000-0000-0000-0000-000000000001".to_owned()),
             selector: "no-such-component".to_owned(),
             name: None,
             config: None,
@@ -310,7 +310,7 @@ async fn load_component_replicas_zero_is_tool_error() {
     let mcp = connect_mcp(port);
     let result = mcp
         .load_component(Parameters(LoadComponentArgs {
-            engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+            engine_id: Some("00000000-0000-0000-0000-000000000001".to_owned()),
             selector: "irrelevant".to_owned(),
             name: None,
             config: None,
@@ -343,6 +343,7 @@ fn replicas_reply_shape_is_shared_caps_plus_instances() {
     };
     let reply: serde_json::Value = serde_json::from_str(
         &replicas_reply(
+            "00000000-0000-0000-0000-000000000001",
             &caps,
             &[
                 serde_json::json!({ "mailbox_id": "mbx-a", "name": "svc-0" }),
@@ -355,28 +356,29 @@ fn replicas_reply_shape_is_shared_caps_plus_instances() {
     )
     .expect("replica reply is JSON");
     assert!(reply.get("components").is_none(), "old components array must not appear: {reply}");
+    assert_eq!(reply["engine_id"], "00000000-0000-0000-0000-000000000001", "the reply names its engine: {reply}");
     assert_eq!(reply["instances"].as_array().map(Vec::len), Some(3));
     assert!(reply["instances"][0].get("capabilities").is_none());
     assert_eq!(reply["capabilities"]["handlers"][0]["doc"], "One line.");
 }
 
-/// `replace_component` with a malformed tagged mailbox id is
-/// rejected before any RPC.
+/// `replace_component` with a malformed tagged mailbox address is
+/// rejected before any RPC — the `mbx-` fast path still parses locally
+/// now that `address` also accepts a lineage name.
 #[tokio::test]
-async fn replace_component_bad_mailbox_id_is_tool_error() {
+async fn replace_component_bad_mailbox_address_is_tool_error() {
     let (_chassis, port) = boot_hub();
     let mcp = connect_mcp(port);
     let result = mcp
         .replace_component(Parameters(ReplaceComponentArgs {
-            engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
-            mailbox_id: "not-a-tagged-id".to_owned(),
+            engine_id: Some("00000000-0000-0000-0000-000000000001".to_owned()),
+            address: "mbx-not-a-tagged-id".to_owned(),
             selector: "any-selector".to_owned(),
-            drain_timeout_ms: None,
             config: None,
             config_path: None,
             export: None,
             full: false,
         }))
         .await;
-    assert!(result.is_err(), "a malformed mailbox_id should be a tool error");
+    assert!(result.is_err(), "a malformed mbx- address should be a tool error");
 }
