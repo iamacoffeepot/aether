@@ -2,7 +2,7 @@
 //! connection. Owns a `TcpStream` (split for read/write) and a
 //! sidecar read thread that loops on blocking `read()`. The read
 //! thread pushes byte chunks (or an EOF / error signal) over an
-//! mpsc and fires a [`SessionDataReady`] mail at this actor's own
+//! mpsc and fires a [`SessionDataReady`](crate::kinds::SessionDataReady) mail at this actor's own
 //! mailbox; the dispatcher drains them.
 //!
 //! Writes go directly from the dispatcher thread (`on_session_write`

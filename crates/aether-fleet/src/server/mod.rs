@@ -39,8 +39,6 @@
 // decoded bytes so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
 
-use crate::kinds::{EngineAlive, EngineDied};
-use aether_kinds::{ListEngines, SpawnEngine, TerminateEngine};
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
 
@@ -89,10 +87,11 @@ pub struct FleetServer;
 // the single `use runtime::*` glob.
 use aether_actor::actor;
 
-// The `runtime` module is this cap's private runtime-half namespace; the impl
-// reaches all of it (state, ctx types, artifact/fleet helpers, result kinds)
-// through this single seam, so the glob is intentional rather than a few dozen
-// one-line imports.
+// The `runtime` module is this cap's private runtime-half namespace. The
+// `#[actor]`-emitted markers carry their own imports, so what is left reaching
+// through this seam is the `#[cfg(test)]` `ReplySink` below (state, ctx types,
+// reply kinds) — one glob rather than a dozen one-line imports.
+#[cfg(test)]
 #[allow(clippy::wildcard_imports)]
 use runtime::*;
 

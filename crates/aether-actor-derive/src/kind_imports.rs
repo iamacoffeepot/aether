@@ -236,13 +236,13 @@ mod tests {
         ImportDemand { cfgs, tokens }
     }
 
-    fn select(source: &str, demands: Vec<ImportDemand>) -> Vec<String> {
+    fn select(source: &str, demands: &[ImportDemand]) -> Vec<String> {
         let parsed = syn::parse_file(source).expect("test source parses");
-        select_for_demands(&harvest_kind_imports(&parsed), &demands).into_iter().map(|item| item.to_string()).collect()
+        select_for_demands(&harvest_kind_imports(&parsed), demands).into_iter().map(|item| item.to_string()).collect()
     }
 
     fn selected(source: &str, markers: proc_macro2::TokenStream) -> Vec<String> {
-        select(source, vec![demand(Vec::new(), markers)])
+        select(source, &[demand(Vec::new(), markers)])
     }
 
     // Tripwire: the selection is what keeps the emitted module warning-clean.

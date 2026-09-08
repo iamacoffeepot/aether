@@ -1,9 +1,9 @@
 //! `aether.component` cap (issue 603, renamed in issue 638 phase 3
 //! from `aether.control`). The wasm-component lifecycle endpoint:
-//! receives [`LoadComponent`] mail and spawns a per-component
+//! receives [`LoadComponent`](aether_kinds::LoadComponent) mail and spawns a per-component
 //! `WasmTrampoline` (issue 634 Phase 4 PR 1) addressed at
-//! `aether.embedded:NAME`. [`DropComponent`] and
-//! [`ReplaceComponent`] mail flow through the cap as well — it
+//! `aether.embedded:NAME`. [`DropComponent`](aether_kinds::DropComponent) and
+//! [`ReplaceComponent`](aether_kinds::ReplaceComponent) mail flow through the cap as well — it
 //! forwards each to the addressed trampoline preserving the
 //! original `reply_to`, so the trampoline replies directly to the
 //! agent. The cap holds no per-component bookkeeping; the
