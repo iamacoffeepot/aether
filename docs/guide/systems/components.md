@@ -200,9 +200,9 @@ stages the ordinary component-loader path. The existing `LoadResult` is the
 reply: `Ok.name` carries the canonical nested address
 `PARENT/aether.embedded:worker`, while a missing or non-live parent returns
 `LoadResult::Err`. Loading another component beneath that returned name builds
-another lineage generation. Because `PeerCtxExt::peer` and `peer_named` seed
-resolution from the caller's runtime parent, identical component types can then
-route to the peers in their own explicit or nested scope.
+another lineage generation. Because typed addressing seeds resolution from the
+caller's runtime parent, identical component types can then route to the peers
+in their own explicit or nested scope.
 
 This constructor is test-harness composition infrastructure. Ordinary
 `aether.component.load` retains its established placement beneath

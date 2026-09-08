@@ -1,142 +1,20 @@
-//! Sender-side peer-addressing facades for loaded components —
-//! the "routing" seam of the `aether.component` capability.
+//! The by-name address supplier for loaded components — the "routing" seam
+//! of the `aether.component` capability.
+//!
+//! Senders do not route through this module. A co-hosted actor addresses a
+//! loaded component the way it addresses anything else, by type:
+//! `ctx.actor::<CameraComponent>()` for the default-named instance and
+//! `ctx.resolve_embedded::<CameraComponent>(load_name)` for one loaded under
+//! an explicit name. Both select `Embedded`'s parent scope from the caller's
+//! runtime context, so neither needs this cap's carry — which is why the
+//! sender-side `peer` / `peer_named` / `loaded` facades that once lived here
+//! retired (iamacoffeepot/aether#5790). What remains is the one thing a
+//! sender-side verb cannot supply: the host carry itself, for a caller that
+//! holds no co-hosted ctx.
 
-use aether_actor::{Addressable, Embedded, ReplyMode, Sends, WasmActorMailbox, WasmCtx};
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-use aether_substrate::actor::native::NativeActorMailbox;
+use aether_actor::{Addressable, Embedded};
 
 use super::ComponentHostCapability;
-use crate::trampoline::WasmTrampoline;
-
-/// Sender-side facade for FFI guests addressing a loaded peer
-/// component through [`ComponentHostCapability`].
-///
-/// "Sending mail to a loaded component" isn't a SDK primitive — it
-/// only exists *because* this cap loaded a wasm component and gave it
-/// a trampoline address. So the helper lives here, attached to the
-/// cap's FFI mailbox, mirroring `aether_fs::FsMailboxExt`'s
-/// cap-owned facade pattern (issue 580).
-///
-/// `.loaded::<R>(name)` traverses the declared host-to-trampoline edge, then
-/// exposes that same physical mailbox under the guest recipient type.
-///
-/// `R: Addressable<Resolver = Embedded>` is the peer component's actor type,
-/// supplied by the caller. The trampoline mailbox is physically an embedded
-/// component route, so root, caller-relative, and embedded-many recipients
-/// cannot be retyped onto it. Type-checks at the send site —
-/// `peer.send::<K>(&mail)` compiles only when `R: HandlesKind<K>`.
-pub trait ComponentHostWasmExt {
-    /// Resolve a typed peer-component mailbox for the loaded component
-    /// named `name`. The resolved handle inherits this handle's ctx binding
-    /// (`sender` + inline registry), so its sends stamp the same origin
-    /// (issue 1987).
-    fn loaded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R>;
-
-    /// [`loaded`](Self::loaded) for the default-named instance — the load name
-    /// `R` already declares.
-    ///
-    /// The `&str` parameter is what made callers declare a `const` beside the
-    /// call site duplicating the peer's own `NAMESPACE`, a second naming
-    /// authority the compiler cannot check against the first
-    /// (iamacoffeepot/aether#5720). Where the name *is* the type's, there is
-    /// nothing for such a const to hold.
-    ///
-    /// From a component's receive ctx prefer [`PeerCtxExt::peer`], which says
-    /// "my host's instance of `R`" without naming the host either. Reach for
-    /// this one where code deliberately holds a component-host mailbox and
-    /// wants the fold to start from *that* host rather than from the caller's
-    /// own parent.
-    fn loaded_default<R: Addressable<Resolver = Embedded>>(&self) -> WasmActorMailbox<'_, R> {
-        self.loaded::<R>(R::NAMESPACE)
-    }
-}
-
-impl ComponentHostWasmExt for WasmActorMailbox<'_, ComponentHostCapability> {
-    fn loaded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R> {
-        let trampoline = self.resolve::<WasmTrampoline>(name);
-        trampoline.at(trampoline.mailbox_id().0)
-    }
-}
-
-/// Sender-side facade for native cap-to-cap callers addressing a
-/// loaded peer component through [`ComponentHostCapability`]. Same
-/// shape as [`ComponentHostWasmExt`] for the native transport — the
-/// returned handle inherits the parent mailbox's `'a` binding ref so
-/// `.send::<K>(&mail)` dispatches through the same `NativeBinding`
-/// without re-threading the ctx.
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-pub trait ComponentHostNativeExt {
-    /// Resolve a typed peer-component mailbox for the loaded component
-    /// named `name`.
-    fn loaded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> NativeActorMailbox<'_, R>;
-}
-
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-impl ComponentHostNativeExt for NativeActorMailbox<'_, ComponentHostCapability> {
-    fn loaded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> NativeActorMailbox<'_, R> {
-        let trampoline = self.resolve::<WasmTrampoline>(name);
-        trampoline.at(trampoline.mailbox_id().0)
-    }
-}
-
-/// The peer verb (iamacoffeepot/aether#4478): addressing a co-hosted
-/// component in one call off the receive ctx, so the send site reads the
-/// way it thinks — "my host's instance of `R`" — for the cost of one
-/// import.
-///
-/// That phrase is the whole contract. Embeddable means host-agnostic
-/// (iamacoffeepot/aether#4479): these verbs promise the peer under
-/// *whatever* embedded the caller. The ctx's runtime parent mailbox is the
-/// routing seed, so moving the same component beneath another host changes the
-/// resolved peer without changing the call site or consulting a registry.
-///
-/// `ctx.peer::<R>()` names the default-named instance — what a load with
-/// no `name` registers as. A component loaded under an explicit name is
-/// named at the send site through [`PeerCtxExt::peer_named`], because a
-/// bare type cannot identify an instance — load names are runtime facts.
-///
-/// A `replicas` fan-out is reachable by both verbs: replica 0 claims the
-/// bare base name, so `peer::<R>()` reaches it whenever the base is `R`'s
-/// own namespace, and the later replicas `{base}-{index}` are named
-/// through `peer_named` (iamacoffeepot/aether#5727).
-///
-/// This trait carries no resolution of its own: both verbs delegate to the
-/// typed ctx path selected by [`Embedded`]. The explicit
-/// [`loaded`](ComponentHostWasmExt::loaded) route remains available to callers
-/// that deliberately hold a component-host mailbox.
-pub trait PeerCtxExt {
-    /// The default-named instance of peer component `R` — the mailbox a
-    /// nameless load of `R`'s module registers.
-    fn peer<R: Addressable<Resolver = Embedded>>(&self) -> WasmActorMailbox<'_, R>;
-
-    /// The instance of peer component `R` loaded under `name`.
-    fn peer_named<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R>;
-}
-
-impl<M: ReplyMode> PeerCtxExt for WasmCtx<'_, M> {
-    fn peer<R: Addressable<Resolver = Embedded>>(&self) -> WasmActorMailbox<'_, R> {
-        self.actor::<R>()
-    }
-
-    fn peer_named<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R> {
-        self.__actor_with_namespace::<R>(name)
-    }
-}
-
-// The peer verbs travel with the ctx's reply-mode-free send view
-// (`ctx.sends()`), so a helper that addresses a co-hosted component takes
-// `&mut Sends<'_>` rather than a `M: ReplyMode` parameter. `Sends` resolves
-// through the same caller-scoped `Embedded` path as the ctx it came from, so
-// both impls name the same peer.
-impl PeerCtxExt for Sends<'_> {
-    fn peer<R: Addressable<Resolver = Embedded>>(&self) -> WasmActorMailbox<'_, R> {
-        self.actor::<R>()
-    }
-
-    fn peer_named<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R> {
-        self.__actor_with_namespace::<R>(name)
-    }
-}
 
 /// Resolve the [`MailboxId`](aether_data::MailboxId) of the embeddable
 /// component loaded under `name`, by folding the instance node
@@ -149,11 +27,14 @@ impl PeerCtxExt for Sends<'_> {
 /// ([`EMBEDDED_SCOPE`](aether_actor::EMBEDDED_SCOPE)); this fn supplies the
 /// `aether.component` carry, read only from its owner
 /// [`ComponentHostCapability`]. Equal by construction to a component's own
-/// `type Resolver = Embedded` and to the by-name verb
-/// [`loaded::<R>(name)`](ComponentHostWasmExt::loaded), so bare-type and
-/// by-name addressing agree. Available on every target — a wasm peer resolves
-/// an embeddable the same way a native one does, no transport branch
-/// (ADR-0029 client-side no-lookup).
+/// `type Resolver = Embedded`, so this and the typed ctx routes
+/// (`ctx.actor::<R>()`, `ctx.resolve_embedded::<R>(name)`) agree whenever the
+/// caller's runtime parent *is* the root component host. Reach for it where no
+/// such ctx exists — a native driver, or a test standing up the address
+/// independently — and pair it with `ctx.actor_at::<R>(id)` / `ctx.send_to` to
+/// send. Available on every target: a wasm peer resolves an embeddable the
+/// same way a native one does, no transport branch (ADR-0029 client-side
+/// no-lookup).
 #[must_use]
 pub fn resolve_embedded(name: &str) -> aether_data::MailboxId {
     use aether_actor::Resolve;

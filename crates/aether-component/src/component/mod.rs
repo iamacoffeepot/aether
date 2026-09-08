@@ -38,11 +38,12 @@
 //!   `state: &mut Self::State`.
 //! - `runtime.rs` — the `feature = "runtime"` half: the state struct, the
 //!   substrate / wasmtime imports, and the free `forward_to_trampoline`.
-//! - `route.rs` — the send-side peer-addressing facades
-//!   ([`ComponentHostWasmExt`], [`ComponentHostNativeExt`],
-//!   [`PeerCtxExt`], [`resolve_embedded`]). Every component-retyping route
-//!   accepts only `Addressable<Resolver = Embedded>` recipients, matching the
-//!   physical trampoline mailbox it exposes.
+//! - `route.rs` — the by-name address supplier [`resolve_embedded`], for a
+//!   caller with no co-hosted ctx to resolve from. A co-hosted actor addresses
+//!   a loaded component by type instead (`ctx.actor::<R>()`, or
+//!   `ctx.resolve_embedded::<R>(load_name)` for an explicit load name), which
+//!   accepts only `Addressable<Resolver = Embedded>` recipients — the
+//!   placement the physical trampoline mailbox has.
 //! - `load.rs` — the `handle_load` sequence as a method on the state; the
 //!   state fields carry `pub` so this sibling reaches
 //!   them.
@@ -53,9 +54,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 mod route;
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-pub use route::ComponentHostNativeExt;
-pub use route::{ComponentHostWasmExt, PeerCtxExt, resolve_embedded};
+pub use route::resolve_embedded;
 
 // `load` (the `handle_load` sequence) and `config` (the `ComponentHostParams`
 // init bundle) now live under the `runtime` directory beside the rest of the
@@ -111,7 +110,7 @@ mod tests {
     use aether_substrate::mail::registry::{Registry, noop_handler};
     use aether_substrate::testing::boot_authority;
 
-    use super::{ComponentHostCapability, ComponentHostWasmExt, PeerCtxExt, resolve_embedded};
+    use super::{ComponentHostCapability, resolve_embedded};
     use crate::trampoline::WasmTrampoline;
 
     struct Guest;
@@ -121,14 +120,15 @@ mod tests {
         type Resolver = Embedded;
     }
 
-    /// A loaded component's id is the ADR-0099 §3 lineage fold over
-    /// `[aether.component, aether.embedded:<name>]`. The loaded facade first
-    /// traverses the declared host-to-trampoline edge, then exposes that same
-    /// mailbox under the guest recipient type. Direct typed resolution, the
-    /// nameless `loaded_default` host route, default and named peer lookup,
-    /// and `resolve_embedded` must agree with it.
+    /// Tripwire: a loaded component's id is the ADR-0099 §3 lineage fold over
+    /// `[aether.component, aether.embedded:<name>]`, and the cap registers its
+    /// trampoline at that id. Bare-type addressing from a co-hosted ctx, the
+    /// named form, the declared host-to-trampoline edge, and this cap's
+    /// by-name `resolve_embedded` must therefore all land on it — a change to
+    /// the fold that misses any one of them splits the address the host
+    /// registers from the address senders compute.
     #[test]
-    fn loaded_composes_the_canonical_trampoline_address() {
+    fn typed_and_by_name_routes_compose_the_canonical_trampoline_address() {
         // The ctx binding (sender + inline registry) is irrelevant to id
         // resolution, so a throwaway registry and a zero sender suffice
         // (issue 1987).
@@ -139,26 +139,21 @@ mod tests {
         registry.set_parent_id(parent.0);
         let host = WasmActorMailbox::<ComponentHostCapability>::__new(parent.0, 0, &registry);
         let name = Guest::NAMESPACE;
-        let camera = host.loaded::<Guest>(name);
-        let default_loaded = host.loaded_default::<Guest>();
         let trampoline = host.resolve::<WasmTrampoline>(name);
         let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(caller.0, &registry, NO_INBOUND_SOURCE);
-        let default_peer = ctx.peer::<Guest>();
-        let named_peer = ctx.peer_named::<Guest>(name);
 
-        assert_eq!(camera.mailbox_id(), trampoline.mailbox_id());
-        assert_eq!(camera.mailbox_id(), resolve_embedded(name));
-        assert_eq!(camera.mailbox_id(), default_loaded.mailbox_id());
-        assert_eq!(camera.mailbox_id(), default_peer.mailbox_id());
-        assert_eq!(camera.mailbox_id(), named_peer.mailbox_id());
+        assert_eq!(ctx.actor::<Guest>().mailbox_id(), trampoline.mailbox_id());
+        assert_eq!(ctx.actor::<Guest>().mailbox_id(), resolve_embedded(name));
+        assert_eq!(ctx.resolve_embedded::<Guest>(name).mailbox_id(), trampoline.mailbox_id());
     }
 
-    /// Peer lookup follows the parent mailbox injected into each runtime
-    /// instance. The same guest type therefore resolves beneath nested host
-    /// instances and changes address when re-parented, while default and named
-    /// loads share one resolver path.
+    /// Tripwire: typed lookup follows the parent mailbox injected into each
+    /// runtime instance, not the caller's own. The same guest type therefore
+    /// resolves beneath nested host instances and changes address when
+    /// re-parented, while the default and named spellings share one resolver
+    /// path.
     #[test]
-    fn peer_lookup_follows_nested_and_reparented_runtime_parents() {
+    fn typed_lookup_follows_nested_and_reparented_runtime_parents() {
         let parent_a = aether_data::mailbox_id_from_path("test.root/test.composite:a");
         let parent_b = aether_data::mailbox_id_from_path("test.root/test.composite:b");
         let caller_a = Embedded::resolve(parent_a.0, "caller", ());
@@ -172,11 +167,17 @@ mod tests {
         let ctx_a: WasmCtx<'_, Manual> = WasmCtx::__new(caller_a.0, &registry_a, NO_INBOUND_SOURCE);
         let ctx_b: WasmCtx<'_, Manual> = WasmCtx::__new(caller_b.0, &registry_b, NO_INBOUND_SOURCE);
 
-        assert_eq!(ctx_a.peer::<Guest>().mailbox_id(), Embedded::resolve(parent_a.0, Guest::NAMESPACE, ()));
-        assert_eq!(ctx_b.peer::<Guest>().mailbox_id(), Embedded::resolve(parent_b.0, Guest::NAMESPACE, ()));
-        assert_eq!(ctx_a.peer_named::<Guest>("camera-7").mailbox_id(), Embedded::resolve(parent_a.0, "camera-7", ()),);
-        assert_eq!(ctx_b.peer_named::<Guest>("camera-7").mailbox_id(), Embedded::resolve(parent_b.0, "camera-7", ()),);
-        assert_ne!(ctx_a.peer::<Guest>().mailbox_id(), ctx_b.peer::<Guest>().mailbox_id());
+        assert_eq!(ctx_a.actor::<Guest>().mailbox_id(), Embedded::resolve(parent_a.0, Guest::NAMESPACE, ()));
+        assert_eq!(ctx_b.actor::<Guest>().mailbox_id(), Embedded::resolve(parent_b.0, Guest::NAMESPACE, ()));
+        assert_eq!(
+            ctx_a.resolve_embedded::<Guest>("camera-7").mailbox_id(),
+            Embedded::resolve(parent_a.0, "camera-7", ())
+        );
+        assert_eq!(
+            ctx_b.resolve_embedded::<Guest>("camera-7").mailbox_id(),
+            Embedded::resolve(parent_b.0, "camera-7", ())
+        );
+        assert_ne!(ctx_a.actor::<Guest>().mailbox_id(), ctx_b.actor::<Guest>().mailbox_id());
     }
 
     /// The external registry boundary expands abbreviated component

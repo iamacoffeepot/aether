@@ -43,12 +43,9 @@ members = [
     "crates/aether-lifecycle",
     "crates/aether-tcp",
     "crates/aether-component",
-    # Dedicated trybuild host for `aether-component`'s route contracts. Keeping
-    # its dev-dependency graph narrow prevents trybuild's generated project from
-    # inheriting the component crate's integration harnesses and wasm fixtures.
-    "crates/aether-component-ui-tests",
     # Dedicated trybuild host for the `Publishes<K>` gate on the lifecycle and
-    # window subscribe surfaces, narrow for the same reason as the line above.
+    # window subscribe surfaces, keeping trybuild's generated project from
+    # inheriting a cap crate's integration harnesses and wasm fixtures.
     "crates/aether-subscribe-ui-tests",
     "crates/aether-http",
     "crates/aether-trace",

@@ -396,16 +396,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-component-ui-tests"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-component",
- "aether-substrate",
- "trybuild",
-]
-
-[[package]]
 name = "aether-data"
 version = "0.3.0-alpha"
 dependencies = [

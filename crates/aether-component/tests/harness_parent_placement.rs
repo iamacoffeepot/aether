@@ -1,8 +1,8 @@
 //! Public `SubstrateHarness` placement coverage for issue #4535.
 //!
 //! The scenario uses only `HarnessOp` plus ordinary `LoadComponent` values to
-//! build two component peer scopes. The fixture caller's real
-//! `PeerCtxExt::peer` send proves the runtime parent selected during explicit
+//! build two component peer scopes. The fixture caller's real bare-type
+//! `ctx.actor::<R>()` send proves the runtime parent selected during explicit
 //! placement is what embedded resolution consumes.
 
 #![allow(

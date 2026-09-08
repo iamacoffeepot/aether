@@ -382,11 +382,10 @@ pub trait Lifecycle<S> {
 /// type-addresses them with `ctx.actor::<R>()`. A singleton hosted inside a
 /// parent resolves from the runtime-retained parent mailbox. For a loaded
 /// component, `ctx.actor::<R>()` selects the default load name
-/// (`R::NAMESPACE`) and a component's `peer_named::<R>(name)` facade supplies
-/// an explicit runtime load name. The component-host's `loaded::<R>(name)`
-/// facade remains the explicit root-host route for callers that already hold
-/// that host mailbox. Replicas remain explicitly named (`base-0`, `base-1`,
-/// …), since no default-named instance exists.
+/// (`R::NAMESPACE`) and `ctx.resolve_embedded::<R>(name)` supplies an explicit
+/// runtime load name to the same fold. Replica 0 claims the bare base name and
+/// the rest are `base-1`, `base-2`, …, so the bare type reaches the first and
+/// the named form reaches any particular one.
 ///
 /// The rendered address itself — `LoadResult.name`, e.g.
 /// `aether.component/aether.embedded:NAME` — is a path of nodes, and every
@@ -396,7 +395,9 @@ pub trait Lifecycle<S> {
 /// runtime-name escape hatch routes. `ctx.resolve_actor::<R>(key)` is
 /// different: it is a typed keyed route available only to [`Instanced`]
 /// actors, and delegates the key plus the resolver-selected current / root /
-/// parent scope to `R::resolve`. The id beside a rendered name
+/// parent scope to `R::resolve`, and `ctx.resolve_embedded::<R>(load_name)` is
+/// its [`Embedded`] counterpart for a component loaded under a non-default
+/// name. The id beside a rendered name
 /// (`LoadResult.mailbox_id`) skips resolution entirely: a caller already
 /// holding one sends to it directly, through the guest's
 /// `ctx.send_to(id, &mail)` or the native `ctx.actor_at::<R>(id)`.

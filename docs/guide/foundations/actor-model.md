@@ -318,9 +318,9 @@ factor out of a handler to *send* something never touches the reply channel,
 yet pinning one class makes it uncallable from the others and staying generic
 means carrying an `M: ReplyMode` parameter it doesn't read. `ctx.sends()` hands
 out `Sends<'_>` — the same addressing and outbound-mail verbs (`send`,
-`send_to`, `actor`, `resolve_actor`, `peer`, the detached family) with the
-marker dropped — so the helper takes `&mut Sends<'_>` and every handler class
-can call it:
+`send_to`, `actor`, `resolve_actor`, `resolve_embedded`, the detached family)
+with the marker dropped — so the helper takes `&mut Sends<'_>` and every
+handler class can call it:
 
 ```rust
 fn announce(sends: &mut Sends<'_>, frame: &Frame) {
@@ -531,25 +531,26 @@ instead. The string is a display rendering of the lineage; the `MailboxId` is
 the fold over the nodes (`mailbox_id_from_path` on the string side), never a
 hash of the joined string.
 
-Typed component-peer addressing selects the logical-parent mailbox retained by
-the runtime. `ctx.actor::<Camera>()` and `peer::<Camera>()` fold the default
-`Camera::NAMESPACE` beneath that parent; `peer_named::<Camera>(load_name)` uses
-an explicit runtime load name beneath the same parent. Moving the caller under
-a nested or replacement host therefore moves both peer routes without a host
-lookup or call-site change. These paths accept only
-`Addressable<Resolver = Embedded>` recipients; root (`One`), caller-relative
-(`Many`), and spawned embedded (`EmbeddedMany`) actor types describe different
-placements. A `replicas` fan-out names replica 0 for the bare base and the rest
-`camera-1`, `camera-2`, …, so `peer::<Camera>()` reaches replica 0 when the base
-is the type's own namespace and `peer_named` reaches any particular replica.
+There is **one addressing verb**: you address a type, and the type declares
+where it lives. `ctx.actor::<Camera>()` reads the resolver `Camera` declares and
+selects the routing seed from it — the root for a capability, the caller's
+runtime parent for a loaded component — so the send site says who it is talking
+to and never where that peer sits. Moving the caller under a nested or
+replacement host moves the route without a host lookup or a call-site change.
 
-The explicit component-host route remains useful when code already holds that
-host mailbox: `loaded_default::<Camera>()` folds `Camera::NAMESPACE` from the
-held host regardless of the caller's own parent, and `loaded::<Camera>(load_name)`
-does the same for an explicit load name. Keep `LoadResult.mailbox_id` for direct by-id
-addressing. `LoadResult.name` is the canonical rendered address for
-external/string addressing — `send_to_named` resolves one — but it is not a
-subname, so do not pass it to `loaded`, `peer_named`, or `resolve_actor`.
+A load name is the one thing the type cannot declare, because it is a runtime
+fact: `ctx.resolve_embedded::<Camera>("camera-1")` names a component loaded
+under an explicit `name`, or one of a `replicas` fan-out (replica 0 claims the
+bare base name, so the bare-type spelling already reaches it when the base is
+the type's own namespace). It accepts only `Addressable<Resolver = Embedded>`
+recipients; root (`One`), caller-relative (`Many`), and spawned embedded
+(`EmbeddedMany`) types describe other placements, and their keyed form is
+`ctx.resolve_actor::<R>(subname)`.
+
+Keep `LoadResult.mailbox_id` for direct by-id addressing. `LoadResult.name` is
+the canonical rendered address for external/string addressing — `send_to_named`
+resolves one — but it is not a subname, so do not pass it to
+`resolve_embedded` or `resolve_actor`.
 
 Because the lineage is the address, two actors collide exactly when they would
 occupy the same position — same parent, same name. The substrate enforces one
@@ -574,26 +575,20 @@ though its implementation type is `TerraEditor`, not
 A capability can also dress up its mail surface with **extension-trait helpers** —
 typed methods on the mailbox handle that stand in for raw kind sends.
 `ctx.actor::<WindowCapability>().subscribe::<Key>(WindowSelector::All)` is one
-(from `WindowManagerMailboxExt`), and the loaded-component lookup just mentioned
-is another (from `ComponentHostWasmExt` in a component, `ComponentHostNativeExt`
-in a capability).
+(from `WindowManagerMailboxExt`), and `aether_fs::FsMailboxExt` is another.
+These name a *kind* the cap already handles; they never name a placement.
 
-In a component, reach for `ctx.peer::<Camera>()` first: it names the
-default-named instance with no string at all, and
-`ctx.peer_named::<Camera>("camera-1")` names an explicit load or a replica
-beside it. Both resolve from the component ctx's runtime parent and return the
-physical trampoline mailbox typed as `Camera`; the trampoline and its loaded
-guest share one mailbox, while the guest type supplies the compile-time
-mail-handling surface.
-
-`ctx.actor::<ComponentHostCapability>().loaded_default::<Camera>()` and its
-by-name sibling `.loaded::<Camera>("camera-1")` are the explicit root-host form,
-following the declared host-to-trampoline edge from the handle they were called
-on rather than from the caller's own parent. Pass a name to either verb only
-when the name is a runtime fact — a `const` beside the call site holding what
-`Camera::NAMESPACE` already declares is a second naming authority nothing
-checks against the first, and the nameless spellings exist so it has nothing to
-hold.
+Both component spellings — `ctx.actor::<Camera>()` and
+`ctx.resolve_embedded::<Camera>("camera-1")` — return the physical trampoline
+mailbox typed as `Camera`: the trampoline and its loaded guest share one
+mailbox, while the guest type supplies the compile-time mail-handling surface. Pass a name only when the
+name is a runtime fact — a `const` beside the call site holding what
+`Camera::NAMESPACE` already declares is a second naming authority nothing checks
+against the first, and the bare-type spelling exists so it has nothing to hold.
+Code with no co-hosted ctx to resolve from — a native driver, a test standing an
+address up independently — gets the same id from
+`aether_component::resolve_embedded(name)`, which folds the load name onto the
+root component host's own carry.
 
 ## One or many: cardinality
 

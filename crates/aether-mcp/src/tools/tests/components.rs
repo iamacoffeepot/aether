@@ -357,7 +357,7 @@ fn replica_base_name_follows_name_export_namespace_precedence() {
 }
 
 /// `replica_names` names replica 0 for the bare base and suffixes the rest,
-/// so a fan-out registers the name a peer's `ctx.peer::<R>()` folds and
+/// so a fan-out registers the name a peer's `ctx.actor::<R>()` folds and
 /// `replicas: 1` loads exactly what an omitted field loads. The bug this
 /// catches is a boot-readiness prediction that drifts from the names the
 /// chassis fan-out actually registers — `spawn_substrate` would then wait
