@@ -311,9 +311,14 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // new gate-set digest; the scripted fold runs its own gates over a
 // single-member weave instead of passing on the member's proof, which is the
 // one added `DispatchAggregateVerify`).
+// Repinned for the ADR-0216 reader: a land now decides the bloom-level
+// `Decision::DispatchStudy` beside the receipt it mints, so the scripted land
+// step carries one more effect. The drift is that single added row in the land
+// step; every prior step is unchanged, and the stream still reaches Landed. An
+// intended, coordinated break, recomputed.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0x22, 0x9f, 0x5f, 0x29, 0xba, 0x6f, 0x20, 0xdd, 0xab, 0x21, 0x25, 0xf9, 0xd2, 0x07, 0x84, 0xec, 0xa5, 0x7d, 0xbf,
-    0x34, 0x0a, 0xb6, 0x31, 0x70, 0x3c, 0x33, 0x7c, 0xb1, 0x4d, 0x54, 0x68, 0x3c,
+    0xbd, 0xd1, 0xb3, 0xd4, 0xb3, 0x3b, 0x5f, 0xbf, 0x7d, 0x6e, 0xec, 0xd6, 0x3d, 0x6a, 0xb9, 0x2e, 0x40, 0x06, 0xda,
+    0xf5, 0x4d, 0x2c, 0xd7, 0xd2, 0x45, 0x7d, 0x3d, 0x7d, 0xab, 0xc4, 0x65, 0xc7,
 ];
 
 #[test]
@@ -340,7 +345,7 @@ fn fact_selector(fact: &Fact) -> u32 {
 fn appended_facts_leave_every_prior_selector_where_the_journal_left_it() {
     let bloom = BloomId(digest(2));
     let evidence = |kind| Evidence { subject: digest(30), kind, detail: digest(60) };
-    let pinned: [(u32, Fact); 10] = [
+    let pinned: [(u32, Fact); 11] = [
         (5, Fact::Land { bloom, new_head: digest(40) }),
         (
             8,
@@ -387,6 +392,7 @@ fn appended_facts_leave_every_prior_selector_where_the_journal_left_it() {
             27,
             Fact::SpliceAssembled { bloom, workpiece: WorkpieceId("alpha".into()), tree: digest(30), head: digest(40) },
         ),
+        (40, Fact::StudyCompleted { bloom, passed: true, evidence: evidence(EvidenceKind::StudyRecord) }),
     ];
 
     for (selector, fact) in pinned {
