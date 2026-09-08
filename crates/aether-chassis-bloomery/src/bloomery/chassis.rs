@@ -758,7 +758,7 @@ impl BootableChassis for BloomeryChassis {
         // journal and compares it against the stamp of one that already exists,
         // so a benchmark run cannot append to live history.
         let store_class = one_store_class(&store, github.uses_fixture())?;
-        store.class = store_class.as_str().to_owned();
+        store_class.as_str().clone_into(&mut store.class);
         // Capture the tier-policy path before `github` is moved into the source
         // cap below; the api cap's pre-seal approve gate loads it at init (#3583).
         let approval_policy_file = coordinator.approval_policy_file.clone();
@@ -883,7 +883,7 @@ impl BootableChassis for BloomeryChassis {
         // No GitHub adapter is linked, so there is no fixture to run a benchmark
         // against and the only class this build can resolve is live.
         let store_class = one_store_class(&store, false)?;
-        store.class = store_class.as_str().to_owned();
+        store_class.as_str().clone_into(&mut store.class);
         let approval_policy_file = coordinator.approval_policy_file.clone();
         let worktree_base = coordinator.local_worktree_base.clone();
         let artifacts_root = coordinator.artifacts_root.clone();

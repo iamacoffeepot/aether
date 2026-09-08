@@ -132,28 +132,26 @@ impl From<rusqlite::Error> for StoreClassError {
 pub(super) fn stamp(conn: &Connection, path: &str, requested: StoreClass) -> Result<(), StoreClassError> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     tx.execute_batch(CLASS_TABLE)?;
-    match read_stamp(&tx)? {
-        Some(recorded) => {
-            let recorded = StoreClass::parse(&recorded)
-                .ok_or_else(|| StoreClassError::Unreadable { path: path.to_owned(), recorded })?;
-            if recorded != requested {
-                return Err(StoreClassError::Mismatch { path: path.to_owned(), recorded, requested });
-            }
+    if let Some(stamped) = read_stamp(&tx)? {
+        let stamped = StoreClass::parse(&stamped)
+            .ok_or_else(|| StoreClassError::Unreadable { path: path.to_owned(), recorded: stamped })?;
+        if stamped != requested {
+            return Err(StoreClassError::Mismatch { path: path.to_owned(), recorded: stamped, requested });
         }
-        None => {
-            let rows = journal_rows(&tx)?;
-            if requested == StoreClass::Trial && rows > 0 {
-                return Err(StoreClassError::LiveHistory { path: path.to_owned(), rows });
-            }
-            write_stamp(&tx, requested)?;
-            tracing::info!(
-                target: "aether_chassis_bloomery::store",
-                path,
-                class = requested.as_str(),
-                rows,
-                "journal class stamped",
-            );
+    } else {
+        let rows = journal_rows(&tx)?;
+        if requested == StoreClass::Trial && rows > 0 {
+            return Err(StoreClassError::LiveHistory { path: path.to_owned(), rows });
         }
+
+        write_stamp(&tx, requested)?;
+        tracing::info!(
+            target: "aether_chassis_bloomery::store",
+            path,
+            class = requested.as_str(),
+            rows,
+            "journal class stamped",
+        );
     }
     tx.commit()?;
     Ok(())
@@ -171,11 +169,15 @@ pub(super) fn recorded(conn: &Connection) -> Result<StoreClass, StoreClassError>
     if !stamp_table_exists(conn)? {
         return Ok(StoreClass::Live);
     }
-    match read_stamp(conn)? {
-        None => Ok(StoreClass::Live),
-        Some(recorded) => StoreClass::parse(&recorded)
-            .ok_or_else(|| StoreClassError::Unreadable { path: conn.path().unwrap_or_default().to_owned(), recorded }),
-    }
+    read_stamp(conn)?.map_or_else(
+        || Ok(StoreClass::Live),
+        |stamped| {
+            StoreClass::parse(&stamped).ok_or_else(|| StoreClassError::Unreadable {
+                path: conn.path().unwrap_or_default().to_owned(),
+                recorded: stamped,
+            })
+        },
+    )
 }
 
 fn stamp_table_exists(conn: &Connection) -> rusqlite::Result<bool> {

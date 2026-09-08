@@ -245,6 +245,7 @@ impl ScenarioHarness {
     ///
     /// # Panics
     /// The journal could not be opened or its class stamp did not read.
+    #[must_use]
     pub fn journal_class(&self) -> StoreClass {
         SqliteStore::open(&self.store_path)
             .expect("the journal opens")
