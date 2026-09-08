@@ -26,8 +26,8 @@ name `lunaris.hud`, and its own peers reach it with
 `const STUDIO_COMPONENT: &str = "lunaris.hud"`. The consequences compound:
 
 - `ctx.peer::<StudioPanel>()` folds `lunaris.studio`, which nothing registers.
-  It compiles clean and warn-drops at delivery. The correct-looking call is the
-  broken one.
+  It compiles clean, and the drop is a host-side `warn` the guest never sees.
+  The correct-looking call is the broken one, silently.
 - A consumer crate now declares a const holding a *different* actor's
   `NAMESPACE`, the second naming authority iamacoffeepot/aether#5720 is
   about, and one its proposed lint would flag as the violation rather than
@@ -57,9 +57,14 @@ Constraints carried in:
   abbreviation grammar is a string-boundary spelling that expands to a
   canonical lineage before hashing; it is not a routing language for Rust
   callers, and no new URI syntax may be invented.
-- **ADR-0038.** `replace_component` swaps a module behind a stable mailbox id.
-  Substitution *of the same load* is already solved; substitution *by a
-  different actor type* is not.
+- **ADR-0038.** `replace_component` swaps a module behind a stable mailbox id,
+  and with an explicit `export` it accepts a replacement whose `NAMESPACE`
+  differs from the incumbent's, promoting the trampoline's type tag
+  (`resolve_replace_target` in
+  `crates/aether-component/src/trampoline/runtime/replace.rs`). Substitution at
+  a fixed address is therefore already possible, destructively and in place;
+  what it cannot do is let the two coexist or give the substitute an address of
+  its own.
 - **ADR-0136.** A route key can hold a member set that instances opt into
   together. That mechanism is route-level and load-spreading, and its
   precedent worth carrying is the opt-in: sharing a key is something both ends
@@ -99,7 +104,9 @@ ctx.role::<BuildScreen>().send(&PushPlan { .. });
 caller's retained logical parent, byte for byte the operation
 `ctx.peer::<R>()` performs with `R::NAMESPACE`. This adds no resolution path,
 no registry read, and no wire field. It is `peer_named` with the `&str`
-replaced by a type both ends read from a single owner.
+replaced by a type both ends read from a single owner, and it lands on the
+same `__actor_with_namespace` seam, which means both of that seam's impls
+(`WasmCtx` and `Sends`) gain the verb together.
 
 The kind bound is the role's. `send::<K>` compile-checks `Role: HandlesKind<K>`
 against the required set the role declares, not against whichever
@@ -121,12 +128,19 @@ the claimant handles every kind the role requires. That is the check the
 `&str` workaround cannot express, and it is the reason a role is worth more
 than a shared const.
 
-At load, the claim publishes a routing alias from the role's folded position to
+At load, the claim publishes an alias route from the role's folded position to
 the claimant's own `MailboxId`. One live mailbox, one handler, one identity;
-the role position is an additional inbound address, not a second actor. The
-alias is subject to the existing one-claimant-per-position rule: a second claim
-of the same role under the same parent is a load error, the same `NameConflict`
-a duplicate load name already produces.
+the role position is an additional inbound address, not a second actor. Alias
+routes are an existing registry record, not a new one: `RouteLifecycle::Alias`
+already carries an id that owns no actor slot and follows another actor's
+endpoint, with its own name-conflict check and idempotent republication
+(`crates/aether-substrate/src/mail/registry/mailbox/alias.rs`, ADR-0114 §2).
+Today they are confined to inline-cluster children; a role widens who may
+publish one.
+
+The claim is subject to the existing one-claimant-per-position rule: a second
+claim of the same role under the same parent is a load error, the same
+`NameConflict` a duplicate load name already produces.
 
 ### 4. The claimant keeps its own identity
 
@@ -173,19 +187,20 @@ the claim.
 - No new resolution mechanism. Role resolution is the ADR-0099 fold over a
   namespace a type owns, so the no-lookup invariant, the wire format, and the
   external address grammar are all untouched.
-- A substitute is swappable without a module swap. Where ADR-0038's
-  `replace_component` requires the replacement to be the same load, a role
-  lets a different actor type in a different module take the position.
+- Substitution stops being destructive. `replace_component` reaches a
+  NAMESPACE-mismatched implementation at a fixed address only by consuming the
+  incumbent in place; a role lets both be loaded, each addressable by its own
+  type, with the claim deciding which one the position resolves to.
 
 ### Negative
 
 - A third identity to name. A role is a type someone must place in a crate both
   sides depend on, and getting that placement wrong reintroduces a dependency
   edge the split was meant to avoid.
-- The registry gains an alias concept. An id can now resolve to a mailbox whose
-  primary name is different, which every reverse-mapping surface (inventory,
-  `actor_logs` addressing, trace rendering) has to render honestly rather than
-  as two actors.
+- The alias route widens. It exists, but only inline-cluster children publish
+  one today; letting a load publish one means every reverse-mapping surface
+  (inventory, `actor_logs` addressing, trace rendering) has to render a role
+  position honestly rather than as a second actor.
 - The macro gains two forms (`role`, `claims(...)`) and the compile-time proof
   that a claimant covers a role's required kinds, which is real macro work.
 - One more way to spell an address. `peer`, `peer_named`, `loaded`,
@@ -257,11 +272,15 @@ the claim.
   to protect, and it would have to be reachable from guest code across the FFI
   boundary. Aliasing at registration buys the same behavior with the fold
   unchanged.
-- **Reuse `replace_component` (ADR-0038).** It is the existing substitution
-  mechanism and it does not fit: it swaps a module behind one mailbox and
-  requires the replacement to be a drop-in for the same load, so a different
-  actor type from a different module cannot use it. The loaded name also stays
-  the incumbent's, which leaves the bare-type miss exactly where it is.
+- **Reuse `replace_component` (ADR-0038).** The closest existing mechanism,
+  and closer than it first looks: with an explicit `export` it already installs
+  a replacement whose `NAMESPACE` differs from the incumbent's at the
+  incumbent's id and name. It still does not fit. It is destructive and
+  one-way, so the two implementations cannot coexist for a side-by-side
+  migration or a runtime switch; it needs a live incumbent to replace, so it
+  cannot express a position nobody has filled yet; and the address keeps the
+  incumbent's name, so the substitute is still unreachable by its own type and
+  the bare-type miss is exactly where it was.
 - **Reuse ADR-0136 shared target sets, or iamacoffeepot/aether#5727's
   base-name claim for `replicas`.** Both are many-actors-one-address, but
   for spreading load over
