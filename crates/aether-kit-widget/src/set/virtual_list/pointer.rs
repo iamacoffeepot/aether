@@ -6,10 +6,11 @@
 
 use aether_actor::WasmCtx;
 
+use crate::VirtualListHover;
+use crate::set::placement::PlacementBounds;
 use crate::set::virtual_list::VirtualListWidget;
 use crate::set::virtual_list::actions::RowActionIndex;
 use crate::set::virtual_list::scroll_bar::ScrollBar;
-use crate::{VirtualListHover, WidgetFrame};
 
 /// What a left press inside the list lands on.
 ///
@@ -58,15 +59,8 @@ impl VirtualListWidget {
             return;
         };
 
-        let row =
-            next.and_then(|row| self.row_frame(row)).unwrap_or(WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 });
-        parent.send(&VirtualListHover {
-            index: next.and_then(|row| u32::try_from(row).ok()),
-            x: row.x,
-            y: row.y,
-            width: row.width,
-            height: row.height,
-        });
+        let frame = next.and_then(|row| self.row_frame(row)).map_or_else(PlacementBounds::default, |row| (&row).into());
+        parent.send(&VirtualListHover { index: next.and_then(|row| u32::try_from(row).ok()), frame });
     }
 
     /// The verb under a point, if the point is on one. Consulted *before* the

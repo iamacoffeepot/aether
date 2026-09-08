@@ -16,7 +16,7 @@
 //! It owns the **chrome and the geometry**: the plate, the title row set at
 //! [`TextRole::Heading`] and measured, the hairline under it, the minimum
 //! size that keeps the title from clipping, and the body rectangle left over.
-//! It reports that geometry up as [`DialogPlaced`] so the host can frame its
+//! It reports that geometry up as [`WidgetPlaced`] so the host can frame its
 //! slot children inside the body and hand the plate to its peers as an
 //! occluder.
 //!
@@ -79,7 +79,7 @@ use crate::set::{
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{TextRole, Theme};
-use crate::{Collect, DialogConfig, DialogPlaced, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
+use crate::{Collect, DialogConfig, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetPlaced};
 
 /// The plate's inset, in spacing units — two, which is the least a control
 /// inside a plate may sit from its edge.
@@ -97,9 +97,9 @@ pub struct DialogWidget {
     theme: Theme,
     frame: WidgetFrame,
     state: InteractionState,
-    /// The geometry last reported up, so [`DialogPlaced`] is an edge and not
+    /// The geometry last reported up, so [`WidgetPlaced`] is an edge and not
     /// a mail every frame.
-    placed: Option<DialogPlaced>,
+    placed: Option<WidgetPlaced>,
     /// Single-flight exact metrics for the active theme font: the title's
     /// measured width is the plate's own width floor.
     font_metrics: FontMetricsAdapter,
@@ -165,7 +165,7 @@ impl DialogWidget {
     /// The plate as drawn: the assigned frame, grown from its top-left to the
     /// minimum. It grows rather than clipping because the alternative is a
     /// title cut in half — and the host is told what it took
-    /// ([`DialogPlaced`]), so a plate that grew past its region is visible to
+    /// ([`WidgetPlaced`]), so a plate that grew past its region is visible to
     /// the one thing that can move it.
     fn plate(&self) -> PlacementBounds {
         let [min_width, min_height] = self.min_size();
@@ -188,14 +188,14 @@ impl DialogWidget {
     }
 
     /// The geometry this frame stands on.
-    fn placement(&self) -> DialogPlaced {
-        DialogPlaced { frame: self.plate(), body: self.body() }
+    fn placement(&self) -> WidgetPlaced {
+        WidgetPlaced { frame: self.plate(), content: self.body() }
     }
 
     /// The placement to report up, or `None` when it has not moved since the
     /// last report — the host re-frames its children off this, and doing that
     /// every frame for a plate that did not move is a relayout per tick.
-    fn take_placement_change(&mut self) -> Option<DialogPlaced> {
+    fn take_placement_change(&mut self) -> Option<WidgetPlaced> {
         let placed = self.placement();
         if self.placed == Some(placed) {
             return None;
@@ -259,7 +259,7 @@ impl WidgetDefaults for DialogWidget {
 }
 
 /// A modal's plate. Spawned inline by a panel root with a [`DialogConfig`];
-/// reports [`DialogPlaced`] whenever the plate or its body moves.
+/// reports [`WidgetPlaced`] whenever the plate or its body moves.
 ///
 /// # Agent
 /// Not loaded directly — the root spawns it as an inline child, frames it
@@ -469,7 +469,7 @@ mod tests {
         widget.frame.width = 420.0;
         let moved = widget.take_placement_change().expect("a resized plate reports again");
         assert_eq!(moved.frame.width, 420.0);
-        assert_eq!(moved.body.width, widget.pad().mul_add(-2.0, 420.0));
+        assert_eq!(moved.content.width, widget.pad().mul_add(-2.0, 420.0));
         assert_eq!(widget.take_placement_change(), None);
     }
 

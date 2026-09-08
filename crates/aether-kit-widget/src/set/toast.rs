@@ -52,6 +52,7 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
+use crate::set::placement::PlacementBounds;
 use crate::set::{
     WidgetDefaults, accept_font_metrics_result, approx_text_width, measured_text_width, pump_text_font_metrics, quad,
     raised_plate, reply_draw, text_origin_y, widget_chrome, wrap_to_width,
@@ -60,8 +61,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{TextRole, Theme};
 use crate::{
-    Collect, SetWidgetState, ToastConfig, ToastNotice, ToastRegionChanged, ToastSeverity, WidgetDrawItem,
-    WidgetDrawList, WidgetFrame,
+    Collect, SetWidgetState, ToastConfig, ToastNotice, ToastSeverity, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    WidgetPlaced,
 };
 
 impl ToastSeverity {
@@ -203,13 +204,17 @@ impl ToastWidget {
         ((heights.len() - 1) as f32).mul_add(self.theme.space(1), heights.iter().sum::<f32>())
     }
 
-    /// What the region owes its host after a change: how many notices stand
-    /// and how far down they reach.
-    fn region_changed(&self) -> ToastRegionChanged {
-        ToastRegionChanged {
-            standing: u32::try_from(self.standing.len()).unwrap_or(u32::MAX),
-            height_pixels: self.stack_height(),
-        }
+    /// What the region owes its host after a change: the region it was given,
+    /// and the part of it the standing stack actually covers.
+    ///
+    /// The covered rectangle is the point of the report — a host that has to
+    /// tell another actor what is hidden (a tree view being drawn under the
+    /// notices) hands this on without re-deriving the stack's geometry. It is
+    /// zero-height when nothing stands, which is also how a host reads "the
+    /// region is clear".
+    fn placement(&self) -> WidgetPlaced {
+        let frame = PlacementBounds::from(&self.frame).sane();
+        WidgetPlaced { frame, content: PlacementBounds { height: self.stack_height(), ..frame } }
     }
 
     /// Raise a notice: newest on top, oldest off the end when the cap is
@@ -295,13 +300,13 @@ impl ToastWidget {
 /// to carry a colour, narrow enough to stay an edge rather than a column.
 const BAR_UNIT_RATIO: f32 = 0.75;
 
-/// Emit a region-changed report when a mutation actually changed the stack.
-fn report(ctx: &WasmCtx<'_>, changed: bool, region: ToastRegionChanged) {
+/// Emit the region's placement when a mutation actually changed the stack.
+fn report(ctx: &WasmCtx<'_>, changed: bool, placed: WidgetPlaced) {
     if !changed {
         return;
     }
     if let Some(parent) = ctx.parent() {
-        parent.send(&region);
+        parent.send(&placed);
     }
 }
 
@@ -314,7 +319,7 @@ impl WidgetDefaults for ToastWidget {
 
 /// The toast region. Spawned inline by a panel root with a [`ToastConfig`];
 /// anything mails it a [`ToastNotice`], and it reports
-/// [`ToastRegionChanged`] up as its stack grows and shrinks.
+/// [`WidgetPlaced`] up as its stack grows and shrinks.
 ///
 /// # Agent
 /// Not loaded directly — the root spawns it as an inline child. Its lineage
@@ -348,7 +353,7 @@ impl WasmActor for ToastWidget {
     #[handler::single]
     fn on_notice(&mut self, ctx: &mut WasmCtx<'_>, notice: ToastNotice) {
         let changed = self.raise(notice);
-        report(ctx, changed, self.region_changed());
+        report(ctx, changed, self.placement());
     }
 
     /// Re-configure the region in place. A smaller cap takes effect at once —
@@ -365,7 +370,7 @@ impl WasmActor for ToastWidget {
         let changed = self.standing.len() != before;
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
-        report(ctx, changed, self.region_changed());
+        report(ctx, changed, self.placement());
         if self.state.replace(config.state) {
             emit_state_changed(ctx, &self.state);
         }
@@ -382,7 +387,7 @@ impl WasmActor for ToastWidget {
         }
         if !self.state.is_available() {
             let changed = self.clear();
-            report(ctx, changed, self.region_changed());
+            report(ctx, changed, self.placement());
         }
     }
 
@@ -402,7 +407,7 @@ impl WasmActor for ToastWidget {
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         let expired = self.age();
-        report(ctx, expired, self.region_changed());
+        report(ctx, expired, self.placement());
         reply_draw(ctx, &self.state, || WidgetDrawList::overlay(self.overlay_items()));
     }
 }
@@ -581,13 +586,17 @@ mod tests {
             assert!(toasts.raise(notice(&alloc::format!("notice {index}"))));
         }
         let heights = toasts.plate_heights();
-        let reported = toasts.region_changed();
-        assert_eq!(reported.standing, 3);
+        let reported = toasts.placement();
         let stacked = toasts.theme.space(1).mul_add(2.0, heights.iter().sum::<f32>());
-        assert!((reported.height_pixels - stacked).abs() < f32::EPSILON, "{reported:?} vs {stacked}");
+        assert!((reported.content.height - stacked).abs() < f32::EPSILON, "{reported:?} vs {stacked}");
+        assert_eq!(
+            (reported.content.x, reported.content.y, reported.content.width),
+            (reported.frame.x, reported.frame.y, reported.frame.width),
+            "the covered rectangle is the region's own column",
+        );
 
         assert!(toasts.clear());
-        assert_eq!(toasts.region_changed(), ToastRegionChanged { standing: 0, height_pixels: 0.0 });
+        assert_eq!(toasts.placement().content.height, 0.0, "a cleared region covers nothing");
     }
 
     #[test]

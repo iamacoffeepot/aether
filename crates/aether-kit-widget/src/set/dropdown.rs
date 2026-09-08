@@ -13,7 +13,7 @@
 //! `open_row_count` option rows below it in its **overlay**
 //! ([`WidgetDrawList::overlay`]) so the list escapes the slot clip and lands
 //! over every ordinary draw of the cluster. While open it asks the root for
-//! the pointer grab through [`crate::DropdownOpenChanged`], so a press anywhere on
+//! the pointer grab through [`crate::WidgetOpenChanged`], so a press anywhere on
 //! the window reaches it: a press on a row selects and closes, any other
 //! press closes without a change. The current row is drawn in the selection
 //! role, never the accent — a chosen thing is a state, not a button.
@@ -44,6 +44,7 @@ use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease, MouseMove};
 use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
+use crate::set::placement::PlacementBounds;
 use crate::set::{
     ActivationArms, WidgetDefaults, accept_font_metrics_result, apply_text_theme, clamp_optional_index,
     clamp_optional_selection, elide_to_width, measured_text_width, plate, pump_text_font_metrics,
@@ -53,8 +54,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 use crate::{
-    Collect, DropdownConfig, DropdownHover, DropdownOpenChanged, DropdownOption, DropdownSelected, FocusLost,
-    HoverLost, SetSelection, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, DropdownConfig, DropdownHover, DropdownOption, DropdownSelected, FocusLost, HoverLost, SetSelection,
+    SetWidgetState, WidgetDismiss, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetOpenChanged,
 };
 
 /// Which way a keyboard step moves the highlighted row of an open list.
@@ -92,7 +93,7 @@ impl DropdownEffects {
             parent.send(&DropdownSelected { index });
         }
         if let Some(open) = self.open_changed {
-            parent.send(&DropdownOpenChanged { open });
+            parent.send(&WidgetOpenChanged { open });
         }
     }
 }
@@ -213,19 +214,10 @@ impl DropdownWidget {
         let Some(parent) = ctx.parent() else {
             return;
         };
-        let row = next.and_then(|index| self.option_row_frame(index)).unwrap_or(WidgetFrame {
-            x: 0.0,
-            y: 0.0,
-            width: 0.0,
-            height: 0.0,
-        });
-        parent.send(&DropdownHover {
-            index: next.and_then(|index| u32::try_from(index).ok()),
-            x: row.x,
-            y: row.y,
-            width: row.width,
-            height: row.height,
-        });
+        let frame = next
+            .and_then(|index| self.option_row_frame(index))
+            .map_or_else(PlacementBounds::default, |row| (&row).into());
+        parent.send(&DropdownHover { index: next.and_then(|index| u32::try_from(index).ok()), frame });
     }
 
     /// Open the list on the current choice. Refused for a read-only or
@@ -580,7 +572,7 @@ impl WidgetDefaults for DropdownWidget {
 
 /// A dropdown. Spawned inline by a panel root with a [`DropdownConfig`];
 /// reports [`crate::DropdownSelected`] on a change of choice,
-/// [`crate::DropdownOpenChanged`] as its list opens and closes, and
+/// [`crate::WidgetOpenChanged`] as its list opens and closes, and
 /// [`DropdownHover`] as the option under the pointer in the open list changes.
 ///
 /// # Agent
@@ -744,6 +736,18 @@ impl WasmActor for DropdownWidget {
         if self.arms.release_key(self.state.can_mutate(), release.code) {
             self.toggle().emit(ctx);
         }
+        self.settle_hovered_option(ctx);
+    }
+
+    /// Put the list away without choosing anything — the host's own Escape.
+    /// A closed dropdown does nothing and stays silent.
+    ///
+    /// # Agent
+    /// Send to a dropdown whose list must go away because something else took
+    /// the screen; the choice it already holds is untouched.
+    #[handler::single]
+    fn on_dismiss(&mut self, ctx: &mut WasmCtx<'_>, _dismiss: WidgetDismiss) {
+        self.dismiss().emit(ctx);
         self.settle_hovered_option(ctx);
     }
 
