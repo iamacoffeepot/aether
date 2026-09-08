@@ -9,7 +9,7 @@
 //! person can find. Each title is sized to its text plus padding; a press
 //! on a title opens that menu's items in the widget's overlay
 //! ([`crate::WidgetDrawList::overlay`]) below the title, under the root's
-//! pointer grab ([`crate::MenuBarOpenChanged`]); while open, the pointer moving
+//! pointer grab ([`crate::WidgetOpenChanged`]); while open, the pointer moving
 //! over another title opens that one instead. A press on an enabled item
 //! activates it ([`crate::MenuBarActivated`]) and closes; Escape or a press
 //! elsewhere closes without activating. Items advertise their accelerator
@@ -40,8 +40,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{Theme, ThemeState};
 use crate::{
-    Collect, FocusLost, HoverLost, Menu, MenuBarActivated, MenuBarConfig, MenuBarOpenChanged, MenuItem, SetWidgetState,
-    WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, FocusLost, HoverLost, Menu, MenuBarActivated, MenuBarConfig, MenuItem, SetWidgetState, WidgetDismiss,
+    WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetOpenChanged,
 };
 
 /// Thickness, in pixels, of the plate's outline ring and of an item divider.
@@ -77,7 +77,7 @@ impl MenuBarEffects {
             parent.send(&activated);
         }
         if let Some(open) = self.open_changed {
-            parent.send(&MenuBarOpenChanged { open });
+            parent.send(&WidgetOpenChanged { open });
         }
     }
 }
@@ -482,7 +482,7 @@ impl WidgetDefaults for MenuBarWidget {
 
 /// A menu bar. Spawned inline by a panel root with a [`MenuBarConfig`];
 /// reports [`crate::MenuBarActivated`] on an activation and
-/// [`crate::MenuBarOpenChanged`] as its menus open and close.
+/// [`crate::WidgetOpenChanged`] as its menus open and close.
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send
@@ -618,6 +618,17 @@ impl WasmActor for MenuBarWidget {
             }
             _ => {}
         }
+    }
+
+    /// Put every menu away without activating anything — the host's own
+    /// Escape. A bar with nothing open does nothing and stays silent.
+    ///
+    /// # Agent
+    /// Send to a bar whose open menu must go away because something else took
+    /// the screen.
+    #[handler::single]
+    fn on_dismiss(&mut self, ctx: &mut WasmCtx<'_>, _dismiss: WidgetDismiss) {
+        self.dismiss().emit(ctx);
     }
 
     /// Reply the bar's local draw: the row of titles as ordinary items, the

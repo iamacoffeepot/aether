@@ -93,7 +93,7 @@ widget sends can misreport it.
   control the reader is pressing or dragging is still the control they took
   hold of — and only becoming disabled or hidden cancels one. The two
   consequences a reconfigure does carry, because the surface under them
-  changed: a dropdown closes an open list (reported as `DropdownOpenChanged
+  changed: a dropdown closes an open list (reported as `WidgetOpenChanged
   { open: false }`, so the root takes its pointer grab back), and a splitter's
   re-send ends a live drag.
 
@@ -188,9 +188,15 @@ One rule per axis, so a name can be guessed rather than looked up.
   text controls, which share `aether.kit.widget.text.committed` because they
   emit the identical value), and `.activated` for a verb that was pressed
   (button, menu bar, a virtual list's row verb). Reports that are neither a
-  value nor a verb keep their own descriptive suffix — `.hover`, `.placed`,
-  `.open_changed`, `.region_changed`, `.shed` — because "changed" would say
-  less about them, not more.
+  value nor a verb keep their own descriptive suffix — `.hover`, `.shed` —
+  because "changed" would say less about them, not more.
+- **A report every widget of a class makes is one kind under
+  `aether.kit.widget.` directly**, not one per widget. Every overlay-bearing
+  widget reports `aether.kit.widget.open_changed { open }` and takes
+  `aether.kit.widget.dismiss`; every widget that stands a plate somewhere
+  reports `aether.kit.widget.placed { frame, content }`. A per-widget kind
+  there bought nothing — the root's handler for it is byte-identical across
+  widgets — and cost a new handler every time the set grew.
 - **The Rust type is the wire name minus its dots**: `slider.changed` is
   `SliderChanged`, `tab_strip.selected` is `TabStripSelected`,
   `menu_bar.activated` is `MenuBarActivated`. The exceptions are stated rather
@@ -646,11 +652,11 @@ right item only while every item is realized. The list says it instead:
 #[handler::manual]
 fn on_virtual_list_hover(&mut self, ctx: &mut WasmCtx<'_, Manual>, hover: VirtualListHover) {
     // `hover.index` is into the config's `items`, or `None` once the pointer
-    // has left the rows; `hover.x/y/width/height` is that row's plate.
+    // has left the rows; `hover.frame` is that row's plate.
 }
 ```
 
-`VirtualListHover { index: Option<u32>, x, y, width, height }` is sent whenever
+`VirtualListHover { index: Option<u32>, frame }` is sent whenever
 that answer **changes** — from a pointer move, a wheel, a thumb drag, or a
 fresh item vector arriving under a still pointer — and is attributed by
 `ctx.source_mailbox()` like every other value-up event. The rectangle is the
@@ -958,12 +964,12 @@ scrolls the realized window. The dropdown says it instead:
 ```rust
 #[handler::manual]
 fn on_dropdown_hover(&mut self, ctx: &mut WasmCtx<'_, Manual>, hover: DropdownHover) {
-    // `hover.index` indexes the config's `options`; `x`/`y`/`width`/`height`
-    // are that row's rectangle in window pixels.
+    // `hover.index` indexes the config's `options`; `hover.frame` is that
+    // row's rectangle in window pixels.
 }
 ```
 
-`DropdownHover { index: Option<u32>, x, y, width, height }` is sent whenever
+`DropdownHover { index: Option<u32>, frame }` is sent whenever
 the answer **changes** — a pointer move, an arrow key scrolling the window
 under a still pointer, the list closing — and is attributed by
 `ctx.source_mailbox()` like every other value-up event. `None` is the pointer
@@ -983,7 +989,7 @@ and `DropdownSelected` still reports what they take.
 While the list is open every left press is the dropdown's: a press on a row
 takes that option and closes, a press anywhere else closes without a change.
 `DropdownSelected { index }` reports only an actual change of choice, and
-`DropdownOpenChanged { open }` reports each open and close edge exactly once —
+`WidgetOpenChanged { open }` reports each open and close edge exactly once —
 including the close that focus loss, a re-sent config, or becoming disabled or
 read-only forces. An empty option vector, a zero-row list, and a read-only or
 unavailable dropdown never open at all.
@@ -1032,7 +1038,7 @@ to try again. A press anywhere else, a title included, closes without
 activating, which is what makes pressing the open title read as the toggle it
 looks like.
 
-`MenuBarOpenChanged { open }` reports each open and close edge exactly once —
+`WidgetOpenChanged { open }` reports each open and close edge exactly once —
 including the close that Escape, focus loss, a re-sent config, or becoming
 unavailable forces, and *excluding* a switch from one menu to another, which is
 not a new open edge and does not disturb the grab the root already holds. A
@@ -1183,11 +1189,12 @@ draw and before the hidden-widget branch, so a hidden region still runs its
 clock down instead of saving up a stack of stale refusals; a region that
 becomes unavailable drops what it was holding.
 
-`ToastRegionChanged { standing, height_pixels }` reports the edge — one
-arrived, one aged out, the cap pushed one off — and never every frame. The
-height is how far down the region the stack reaches, which is the rectangle a
-host passes to whatever else is drawing under the notices (a tree view being
-told what is covered) without re-deriving the geometry. The plates draw in the
+`WidgetPlaced { frame, content }` reports the edge — one arrived, one aged
+out, the cap pushed one off — and never every frame. `frame` is the region the
+widget was given and `content` the part of it the stack actually covers, which
+is the rectangle a host passes to whatever else is drawing under the notices (a
+tree view being told what is covered) without re-deriving the geometry. A
+zero-height `content` is the region standing clear. The plates draw in the
 overlay, so within the cluster the root's clip subtraction already keeps the
 glyphs under them from printing through.
 
@@ -1312,10 +1319,10 @@ rules already occupy). An empty `title` draws no title row and no rule at all,
 so a confirmation with nothing to name is a bare frame rather than a rule with
 nothing above it.
 
-`DialogPlaced { frame, body }` reports the geometry up, in the same window
+`WidgetPlaced { frame, content }` reports the geometry up, in the same window
 pixels the frame was assigned in, **whenever it changes and never every
 frame** — the host re-frames its children off this mail, and sending it every
-collect is a relayout per tick. `body` is the rectangle inside the chrome: it
+collect is a relayout per tick. `content` is the rectangle inside the chrome: it
 is where the host frames its own slot children, so they land under the title
 rather than over it. `frame` is the plate *as drawn*, which is the assigned
 frame grown to the minimum the title needs, so the host can hand it to its
@@ -1810,10 +1817,13 @@ The overlay's counterpart on the input side is the
 **modal pointer grab**: `Focus::begin_grab(child)` routes every pointer event
 to that child until `end_grab`, outranking drag capture, and hover edges are
 suppressed while it holds so nothing under the overlay lights up. The widget
-asks for the grab by reporting `DropdownOpenChanged { open: true }` — or
-`MenuBarOpenChanged { open: true }`, which the root answers the same way — and
-gives it back with `open: false`; that is why the close edge is reported for
-every way a list or a menu can close, including focus loss. Without the grab a
+asks for the grab by reporting `WidgetOpenChanged { open: true }` — one kind
+for every overlay-bearing widget, so the root's handshake does not grow a
+handler per widget — and gives it back with `open: false`; that is why the
+close edge is reported for every way a list or a menu can close, including
+focus loss. `WidgetDismiss` is the data-down half: it tells a widget to put
+its overlay away without choosing anything, which is what a host sends when
+something else takes the screen. Without the grab a
 press that lands outside the widget's own rect would go to whatever is under
 it, and the open list would have no way to learn it should close.
 

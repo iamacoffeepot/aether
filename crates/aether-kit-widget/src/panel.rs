@@ -40,8 +40,8 @@
 //!   `TabStripSelected`), attributed by
 //!   `ctx.source_mailbox()`, is the seam a real editor translates into
 //!   world-knob driver mail; the reference logs it.
-//! - **Grab.** `DropdownOpenChanged` is the one events-up kind the root
-//!   answers itself: an open list takes the modal pointer grab
+//! - **Grab.** `WidgetOpenChanged` is the one events-up kind the root
+//!   answers itself: an open list or menu takes the modal pointer grab
 //!   (`Focus::begin_grab`) so every press reaches it wherever it lands, and
 //!   the close gives it back.
 
@@ -77,14 +77,14 @@ use crate::set::{
 };
 use crate::theme::{SetTheme, TextRole, Theme};
 use crate::{
-    ButtonActivated, ButtonConfig, Collect, DropdownConfig, DropdownHover, DropdownOpenChanged, DropdownSelected,
-    FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig, MenuBarActivated, MenuBarConfig,
-    MenuBarOpenChanged, NumericChanged, NumericConfig, PanelConfig, RadioConfig, RadioSelected, ScrollConfig,
-    ScrollExtent, ScrollOutcome, ScrollResidual, ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged,
-    SliderConfig, TabStripConfig, TabStripSelected, TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig,
-    ToggleChanged, ToggleConfig, VirtualListActivated, VirtualListConfig, VirtualListHover, VirtualListSelected,
-    Widget, WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetEligibilityChanged, WidgetFrame,
-    WidgetKind, WidgetStateChanged,
+    ButtonActivated, ButtonConfig, Collect, DropdownConfig, DropdownHover, DropdownSelected, FocusGained, FocusLost,
+    HoverGained, HoverLost, ImageConfig, LabelConfig, MenuBarActivated, MenuBarConfig, NumericChanged, NumericConfig,
+    PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome, ScrollResidual, ScrollWidget,
+    SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig, TabStripConfig, TabStripSelected, TextAlign,
+    TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig, VirtualListActivated,
+    VirtualListConfig, VirtualListHover, VirtualListSelected, Widget, WidgetChildSpec, WidgetClipRect,
+    WidgetControlState, WidgetDrawList, WidgetEligibilityChanged, WidgetFrame, WidgetKind, WidgetOpenChanged,
+    WidgetStateChanged,
 };
 use crate::{FrameDischarge, decode_nested_widget_config};
 use crate::{accept_open_child_list, emit, flush_membership};
@@ -923,11 +923,10 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         SegmentedSelected::ID.0,
         NumericChanged::ID.0,
         DropdownSelected::ID.0,
-        DropdownOpenChanged::ID.0,
         DropdownHover::ID.0,
         TabStripSelected::ID.0,
         MenuBarActivated::ID.0,
-        MenuBarOpenChanged::ID.0,
+        WidgetOpenChanged::ID.0,
         FocusGained::ID.0,
         FocusLost::ID.0,
         HoverGained::ID.0,
@@ -1564,26 +1563,15 @@ impl WasmActor for WidgetPanel {
         );
     }
 
-    /// A dropdown's list opened or closed. Not a value event: the root answers
-    /// it by granting or ending the modal pointer grab, so a press anywhere on
-    /// the window reaches the open list — the one input fact a widget cannot
-    /// arrange for itself.
+    /// A child raised or put away an overlay — a dropdown's list, a menu
+    /// bar's menu. Not a value event: the root answers it by granting or
+    /// ending the modal pointer grab, so a press anywhere on the window
+    /// reaches the open thing — the one input fact a widget cannot arrange for
+    /// itself. One handler for every overlay-bearing widget, because the
+    /// handshake does not vary by widget and a root that implemented it for
+    /// one kind and not the next left that one open with no grab.
     #[handler::manual]
-    fn on_dropdown_open_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: DropdownOpenChanged) {
-        let Some(source) = ctx.source_mailbox() else {
-            return;
-        };
-        if changed.open {
-            self.focus.begin_grab(source);
-        } else if self.focus.grabbed() == Some(source) {
-            self.focus.end_grab();
-        }
-    }
-
-    /// A menu bar opened a menu or closed every menu — the same grab handshake
-    /// as a dropdown's list.
-    #[handler::manual]
-    fn on_menu_bar_open_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: MenuBarOpenChanged) {
+    fn on_widget_open_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: WidgetOpenChanged) {
         let Some(source) = ctx.source_mailbox() else {
             return;
         };

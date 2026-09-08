@@ -605,7 +605,7 @@ mod tests {
     #[test]
     fn an_unavailable_grab_holder_drops_the_grab_instead_of_re_arming_when_it_returns() {
         // Tripwire: a dropdown disabled while its list is open emits its
-        // `WidgetStateChanged` before its `DropdownOpenChanged { open: false }`,
+        // `WidgetStateChanged` before its `WidgetOpenChanged { open: false }`,
         // so the panel's `grabbed() == Some(source)` close handshake compares
         // against an already-filtered `None` and never calls `end_grab`. A grab
         // still stored re-activates the moment the child is re-enabled, and
