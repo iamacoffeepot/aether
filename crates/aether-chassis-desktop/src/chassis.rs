@@ -17,7 +17,6 @@ use std::sync::Arc;
 use aether_audio::AudioCapability;
 use aether_clipboard::{ClipboardCapability, ClipboardParams};
 use aether_component::ComponentHostParams;
-use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
 use aether_http::HttpServerCapability;
 use aether_lifecycle::{LifecycleCapability, frame_lifecycle_params};
 use aether_render::RenderTuningConfig;
@@ -26,6 +25,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{BootableChassis, composed};
 use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot};
+use aether_substrate_harness_cap::UnsupportedSubstrateHarnessCapability;
 use winit::event_loop::EventLoop;
 
 use aether_chassis::{WindowConfig, apply_manifest_window_settings};

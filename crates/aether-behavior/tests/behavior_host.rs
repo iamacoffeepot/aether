@@ -121,7 +121,7 @@ fn load_panel_with_host(harness: &mut SubstrateHarness, kit_wasm: &[u8], script:
 fn load_panel_with_radio_host(harness: &mut SubstrateHarness, kit_wasm: &[u8]) {
     let wrapped_config = RadioConfig {
         options: vec!["First".to_owned(), "Second".to_owned(), "Third".to_owned()],
-        initial_index: 0,
+        initial: 0,
         theme: Theme::DEFAULT,
         state: WidgetControlState::default(),
     }

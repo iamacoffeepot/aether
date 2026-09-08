@@ -9,7 +9,7 @@
 //! `SubstrateHarness::builder().namespace_roots(...)` rather than env-var
 //! mutation (issue 464).
 
-use aether_fs::{Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult};
+use aether_fs::{Delete, DeleteResult, FsError, List, ListResult, NamespaceAddr, Read, ReadResult, Write, WriteResult};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 
@@ -23,7 +23,7 @@ fn boot_bench() -> SubstrateHarness {
 
 /// `aether.fs.write` followed by `aether.fs.read` round-trips the
 /// bytes through the local-file adapter (ADR-0041). Both replies
-/// echo the originating namespace + path for correlation; the read
+/// echo the originating address for correlation; the read
 /// reply also carries the bytes verbatim.
 #[test]
 fn fs_write_then_read_round_trips_in_save_namespace() {
@@ -38,30 +38,33 @@ fn fs_write_then_read_round_trips_in_save_namespace() {
                 "write",
                 HarnessOp::send_and_await_reply(
                     FS_MAILBOX,
-                    &Write { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone(), bytes: payload.clone() },
+                    &Write {
+                        addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), path.clone()),
+                        bytes: payload.clone(),
+                    },
                 ),
             ),
             (
                 "read",
                 HarnessOp::send_and_await_reply(
                     FS_MAILBOX,
-                    &Read { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone() },
+                    &Read { addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), path.clone()) },
                 ),
             ),
         ])
         .expect("write + read");
 
     match result.reply::<WriteResult>("write").expect("decode WriteResult") {
-        WriteResult::Ok { namespace, path: echoed_path } => {
-            assert_eq!(namespace, FS_NAMESPACE_SAVE);
-            assert_eq!(echoed_path, path);
+        WriteResult::Ok { addr } => {
+            assert_eq!(addr.namespace, FS_NAMESPACE_SAVE);
+            assert_eq!(addr.path, path);
         }
         WriteResult::Err { error, .. } => panic!("write failed: {error:?}"),
     }
     match result.reply::<ReadResult>("read").expect("decode ReadResult") {
-        ReadResult::Ok { namespace, path: echoed_path, bytes } => {
-            assert_eq!(namespace, FS_NAMESPACE_SAVE);
-            assert_eq!(echoed_path, path);
+        ReadResult::Ok { addr, bytes } => {
+            assert_eq!(addr.namespace, FS_NAMESPACE_SAVE);
+            assert_eq!(addr.path, path);
             assert_eq!(bytes, payload);
         }
         ReadResult::Err { error, .. } => panic!("read failed: {error:?}"),
@@ -84,19 +87,25 @@ fn fs_delete_removes_written_file() {
                 "write",
                 HarnessOp::send_and_await_reply(
                     FS_MAILBOX,
-                    &Write { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone(), bytes: vec![1, 2, 3] },
+                    &Write {
+                        addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), path.clone()),
+                        bytes: vec![1, 2, 3],
+                    },
                 ),
             ),
             (
                 "delete",
                 HarnessOp::send_and_await_reply(
                     FS_MAILBOX,
-                    &Delete { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone() },
+                    &Delete { addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), path.clone()) },
                 ),
             ),
             (
                 "read",
-                HarnessOp::send_and_await_reply(FS_MAILBOX, &Read { namespace: FS_NAMESPACE_SAVE.to_owned(), path }),
+                HarnessOp::send_and_await_reply(
+                    FS_MAILBOX,
+                    &Read { addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), path) },
+                ),
             ),
         ])
         .expect("write + delete + read");
@@ -126,14 +135,14 @@ fn fs_list_returns_written_path() {
                 "write",
                 HarnessOp::send_and_await_reply(
                     FS_MAILBOX,
-                    &Write { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone(), bytes: vec![0] },
+                    &Write { addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), path.clone()), bytes: vec![0] },
                 ),
             ),
             (
                 "list",
                 HarnessOp::send_and_await_reply(
                     FS_MAILBOX,
-                    &List { namespace: FS_NAMESPACE_SAVE.to_owned(), prefix: String::new() },
+                    &List { addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), String::new()) },
                 ),
             ),
         ])
@@ -158,7 +167,9 @@ fn fs_read_unknown_path_returns_not_found() {
             "read",
             HarnessOp::send_and_await_reply(
                 FS_MAILBOX,
-                &Read { namespace: FS_NAMESPACE_SAVE.to_owned(), path: "nonexistent-do-not-create.bin".to_owned() },
+                &Read {
+                    addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), "nonexistent-do-not-create.bin".to_owned()),
+                },
             ),
         )])
         .expect("read");

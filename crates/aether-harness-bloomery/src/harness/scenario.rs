@@ -872,7 +872,7 @@ fn in_process_env(
     BloomeryEnv {
         rpc_port: 0,
         http_port: 0,
-        store: StoreConfig { path: store_path.to_owned() },
+        store: StoreConfig { path: store_path.to_owned(), ..StoreConfig::default() },
         artifacts: ArtifactsConfig { root: Some(artifacts_root.to_owned()) },
         github,
         // No webhook path, so the notification reactor mounts disabled (#5166):
@@ -998,6 +998,10 @@ impl ScenarioHarness {
 
     /// Wake the executor reactor until the coordinator holds exactly `count`
     /// outstanding orders.
+    ///
+    /// Does not wake the integrate reactor. A still-pending integrate receipt
+    /// holds later integrate rows on that topic; wait with [`Self::pump_until`]
+    /// while a later row's fold side-effect must stay armed.
     ///
     /// # Panics
     /// The coordinator dispatched more than `count` orders, or nothing inside the step budget.

@@ -8,7 +8,7 @@
 //! embedder's `run_frame` loop processes the event and replies via
 //! outbound when the requested ticks finish.
 //!
-//! Companion: [`UnsupportedSubstrateHarnessCapability`](super::unsupported_cap::UnsupportedSubstrateHarnessCapability)
+//! Companion: [`UnsupportedSubstrateHarnessCapability`](crate::unsupported_cap::UnsupportedSubstrateHarnessCapability)
 //! claims the same mailbox on desktop / headless and replies `Err` so
 //! agents fail fast. Mirrors the pattern from
 //! `RenderCapability` / `HeadlessRenderCapability`.
@@ -23,16 +23,18 @@
 // identity always-on, outside the `feature = "runtime"` gate.
 use aether_kinds::Advance;
 
-// `EventSender` is a bundle-local channel sender (not an
-// `aether_substrate` type), so the always-on config carries it at file
-// root.
+// `EventSender` is a crate-local channel sender, but the events it carries
+// name `aether_substrate::Source` as their reply target, so the channel and
+// the params that hold it ride the `runtime` gate with the rest of the
+// substrate-typed surface.
+#[cfg(feature = "runtime")]
 use crate::events::EventSender;
 
 /// Composer-supplied params for [`SubstrateHarnessCapability`] (ADR-0156 §3
 /// `Params` channel). Carries the `EventSender` the embedder loop reads on, so
 /// the handler can hand the embedder a request + reply target — construction
-/// wiring, not an operator-resolvable knob. Always-on at file root — it names
-/// no `aether_substrate` type.
+/// wiring, not an operator-resolvable knob.
+#[cfg(feature = "runtime")]
 pub struct SubstrateHarnessCapParams {
     pub events: EventSender,
 }

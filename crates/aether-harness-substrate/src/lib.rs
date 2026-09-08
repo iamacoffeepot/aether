@@ -19,11 +19,59 @@
 //! factory (ADR-0161) from `aether-harness-substrate-capture`, which boots
 //! the pumped `aether.render` slot, so this crate never depends on
 //! aether-render or wgpu.
+//!
+//! # Driving one
+//!
+//! A scenario is a labelled sequence of [`HarnessOp`]s handed to
+//! [`SubstrateHarness::execute`], which returns an [`ExecutionResult`] you
+//! read back by label. This example is the one `CLAUDE.md` points at, and it
+//! runs — so the vocabulary in the instructions cannot drift off the API:
+//!
+//! ```
+//! use aether_actor::Addressable;
+//! use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+//! use aether_window::{
+//!     CreateWindow, CreateWindowResult, ListWindows, ListWindowsResult, WindowCapability, WindowMode,
+//!     WindowSizeRequest, WindowSpec,
+//! };
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut harness = SubstrateHarness::builder().size(320, 240).build()?;
+//!
+//! let spec = WindowSpec {
+//!     name: "main".to_owned(),
+//!     title: "example".to_owned(),
+//!     mode: WindowMode::Windowed,
+//!     size: Some(WindowSizeRequest { width: 320, height: 240 }),
+//! };
+//!
+//! let result = harness.execute(vec![
+//!     ("open", HarnessOp::send_and_await_reply(WindowCapability::NAMESPACE, &CreateWindow { spec })),
+//!     ("warm", HarnessOp::advance(2)),
+//!     ("windows", HarnessOp::send_and_await_reply(WindowCapability::NAMESPACE, &ListWindows)),
+//! ])?;
+//!
+//! assert!(matches!(result.reply::<CreateWindowResult>("open")?, CreateWindowResult::Ok { .. }));
+//!
+//! let ListWindowsResult::Ok { windows } = result.reply::<ListWindowsResult>("windows")? else {
+//!     panic!("the window created above should be listed");
+//! };
+//! assert_eq!(windows.len(), 1);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The other ops compose the same way: [`HarnessOp::send_and_settle`] waits
+//! for a whole causal chain rather than one reply,
+//! [`HarnessOp::poll_until`] re-probes to a wall-clock budget for an effect
+//! no chain here can settle, and [`HarnessOp::capture`] /
+//! [`HarnessOp::capture_with_mails`] read a frame back as PNG bytes through
+//! [`ExecutionResult::captured`] — those two need the render hook wired by
+//! `aether-harness-substrate-capture`'s `RenderHarnessBuilderExt::with_render`
+//! and a wgpu adapter, which is why they are not in the example above.
 
-pub mod cap;
 pub mod chassis;
 mod diagnostics;
-pub mod events;
 mod execute;
 mod harness;
 #[cfg(test)]
@@ -31,11 +79,8 @@ mod mail_latency;
 pub mod perf;
 mod poll_config;
 pub mod pump_stats;
-mod settlement_config;
 pub mod test_helpers;
-pub mod unsupported_cap;
 
-pub use cap::{SubstrateHarnessCapParams, SubstrateHarnessCapability};
 pub use chassis::{
     CaptureOutcome, ComposeFn, FrameHook, RenderHookWiring, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
     SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS,
@@ -47,11 +92,5 @@ pub use execute::{
 pub use harness::{
     DEFAULT_HEIGHT, DEFAULT_WIDTH, HookFactory, SubstrateHarness, SubstrateHarnessBuilder, SubstrateHarnessError,
 };
-// The derive-emitted `SettlementConfigLayer` rides along for the chassis
-// config-dump registry (`chassis_known_keys`), which enumerates every
-// knob's `META`; the `SettlementOverlay` rides along so the chassis CLI roots
-// can flatten `--settlement-cap-secs` into `--help` (issue 3882).
 pub use poll_config::{PollConfig, PollConfigLayer, PollOverlay};
 pub use pump_stats::PumpStats;
-pub use settlement_config::{SettlementConfig, SettlementConfigLayer, SettlementOverlay};
-pub use unsupported_cap::UnsupportedSubstrateHarnessCapability;

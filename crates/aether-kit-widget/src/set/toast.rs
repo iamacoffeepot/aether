@@ -8,16 +8,14 @@
 
 //! The toast region: the one place a refusal or a confirmation appears.
 //!
-//! The owner's round-2 note 28 is three complaints in one — "refusals need
-//! their own place they pop up that indicates like, red or orange … the place
-//! where it is relative to other elements is not obvious, and it lingers way
-//! too long — should go away after a certain amount of time". So a notice is
-//! not drawn where there happened to be room: it goes to **one region** the
-//! reader learns once, it is coloured by what it is, and it leaves on its
-//! own. Round-3 notes 11 and 12 are the two corrections that followed —
-//! "toaster text cuts off too soon, not large enough, can be fatter
-//! vertically" (so a notice **wraps** at the region's width and the plate
-//! grows down, instead of eliding), and "color of toaster tab (yellow) is the
+//! Three rules, and a notice drawn without any of them is worse than no
+//! notice at all. A notice is not drawn where there happened to be room: it
+//! goes to **one region** the reader learns once, it is coloured by what it
+//! is, and it leaves on its own after a bounded time. Two corrections follow
+//! from them: a notice **wraps** at the region's width and the plate grows
+//! down rather than eliding (a cut-off refusal says less than nothing), and
+//! the severity colour is its own token — a notice in the accent claims to be
+//! the primary action, so the bar reads in `info` / `warning` / `error` and
 //! same as … everything else, so it's non-indicative" (so the severity bar is
 //! [`Theme::info`] / [`Theme::warning`] / [`Theme::error`] and never the
 //! accent).
@@ -53,33 +51,18 @@ use core::mem;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_math::Rgba;
 use aether_text::FontMetricsResult;
-use serde::{Deserialize, Serialize};
 
 use crate::set::{
     WidgetDefaults, accept_font_metrics_result, apply_text_theme, approx_text_width, measured_text_width,
-    pump_text_font_metrics, push_rect_border, quad, reply_if_hidden, text_origin_y, wrap_to_width,
+    pump_text_font_metrics, quad, raised_plate, reply_if_hidden, text_origin_y, wrap_to_width,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, TextRole, Theme};
-use crate::{Collect, SetWidgetState, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
-
-/// What a notice is: a report, a caution, or a failure. The three are drawn
-/// in three colours that mean those three things and nothing else — the
-/// severity is the whole reason a notice region beats a line of text
-/// wherever there was room.
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ToastSeverity {
-    /// It worked, or here is something you asked to be told. A cool blue-grey
-    /// bar ([`Theme::info`]).
-    #[default]
-    Info,
-    /// It worked partly, or it will not work for long. An orange bar
-    /// ([`Theme::warning`]).
-    Warning,
-    /// It did not work. A red bar ([`Theme::error`]).
-    Error,
-}
+use crate::{
+    Collect, SetWidgetState, ToastConfig, ToastNotice, ToastRegionChanged, ToastSeverity, WidgetDrawItem,
+    WidgetDrawList, WidgetFrame,
+};
 
 impl ToastSeverity {
     /// The ink this severity's bar is drawn in. Never `accent`: the primary
@@ -93,93 +76,8 @@ impl ToastSeverity {
     }
 }
 
-/// `aether.kit.widget.toast.notice` — raise one transient notice in the
-/// region. Send it to the toast widget from anywhere: the region stacks it
-/// newest-first, wraps it at the region's width, and drops it on its own
-/// after [`ToastConfig::lifetime_frames`] frames. An empty `text` raises
-/// nothing, because a plate with no line on it is a flash a reader cannot
-/// read.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.kit.widget.toast.notice")]
-pub struct ToastNotice {
-    pub severity: ToastSeverity,
-    pub text: String,
-}
-
-/// `aether.kit.widget.toast.config` — the region transient notices appear
-/// in. `max_standing` is how many stand at once before the oldest leaves to
-/// make room, and `lifetime_frames` is how long each one stays, counted in
-/// the root's per-frame `Collect`s (240 at the desktop's sixty a second is
-/// four seconds — long enough to read a line, short enough that a stale
-/// refusal is never mistaken for a description of the screen).
-///
-/// The widget's assigned [`WidgetFrame`] is the
-/// region: notices stack down from its top edge at its width, so a host puts
-/// notices where it wants them by placing the slot.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.toast.config")]
-pub struct ToastConfig {
-    /// How many notices stand at once. Zero means the region is a sink: it
-    /// accepts notices and shows none, which is what a screen with the region
-    /// switched off should do rather than growing an unbounded backlog.
-    pub max_standing: u32,
-    /// How many `Collect` frames a notice stands for before it leaves. Zero
-    /// keeps every notice until the cap pushes it out.
-    pub lifetime_frames: u32,
-    /// The type step a notice's line is set at. [`TextRole::Body`] — the
-    /// reading size, which is what the region drew before this field existed —
-    /// unless a host asks for another.
-    ///
-    /// Round-4 note 15 is one word long: "toast text can be larger." The size
-    /// is a *theme* fact, not a toast fact — the kit has one type scale and a
-    /// widget names its step on it rather than carrying a pixel size of its
-    /// own — so the region takes a role and the theme resolves it. The whole
-    /// plate follows: the line box, the wrap measure, and therefore how far
-    /// down the region the stack reaches.
-    #[serde(default)]
-    pub role: TextRole,
-    pub theme: Theme,
-    #[serde(default)]
-    pub state: WidgetControlState,
-}
-
-impl Default for ToastConfig {
-    fn default() -> Self {
-        Self {
-            max_standing: DEFAULT_MAX_STANDING,
-            lifetime_frames: DEFAULT_LIFETIME_FRAMES,
-            role: TextRole::default(),
-            theme: Theme::default(),
-            state: WidgetControlState::default(),
-        }
-    }
-}
-
-/// `aether.kit.widget.toast.region_changed` — the standing stack changed:
-/// one arrived, one aged out, or the cap pushed one off the end. `standing`
-/// is how many are up now and `height_pixels` how far down the region they
-/// reach, so a host that has to tell another actor what is covered (a tree
-/// view being drawn under the notices) reports that rectangle without
-/// re-deriving the stack's geometry. Emitted on the edge only, never every
-/// frame.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
-#[kind(name = "aether.kit.widget.toast.region_changed")]
-pub struct ToastRegionChanged {
-    pub standing: u32,
-    pub height_pixels: f32,
-}
-
-/// How many notices stand at once by default. A fourth would be a column of
-/// text down the primary view; the oldest leaves to make room.
-const DEFAULT_MAX_STANDING: u32 = 3;
-
-/// How many frames a notice stands for by default — four seconds at sixty a
-/// second.
-const DEFAULT_LIFETIME_FRAMES: u32 = 240;
-
-/// The plate's padding, in spacing units — the owner asked for one unit
-/// around the line, and a notice is one line's worth of chrome or it is a
-/// dialog.
+/// The plate's padding, in spacing units — one unit around the line. A notice
+/// is one line's worth of chrome or it is a dialog.
 const PAD_UNITS: u8 = 1;
 
 /// How far clear of the severity bar the line starts, in spacing units.
@@ -196,9 +94,6 @@ const TEXT_INSET_UNITS: u8 = 2;
 
 /// How tall one wrapped line's box is, as a multiple of its own type size.
 const LINE_LEADING: f32 = 1.4;
-
-/// The hairline a plate's ring is drawn at.
-const RING_THICKNESS: f32 = 1.0;
 
 /// One notice, standing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,9 +178,8 @@ impl ToastWidget {
         self.size_pixels() * LINE_LEADING
     }
 
-    /// One notice wrapped to the region's width. Never elided: the round-3
-    /// note is that a cut-off notice says less than nothing, so the plate
-    /// grows downward instead.
+    /// One notice wrapped to the region's width. Never elided: a cut-off
+    /// notice says less than nothing, so the plate grows downward instead.
     fn wrapped(&self, notice: &Standing) -> Vec<String> {
         wrap_to_width(&notice.text, self.text_width_budget(), |run| self.text_width(run))
     }
@@ -367,9 +261,16 @@ impl ToastWidget {
         let mut items = Vec::new();
         let mut top = 0.0;
         for (notice, height) in self.standing.iter().zip(self.plate_heights()) {
-            items.push(quad(0.0, top, width, height, self.theme.surface_raised));
+            items.push(raised_plate(
+                &self.theme,
+                0.0,
+                top,
+                width,
+                height,
+                self.theme.surface_raised,
+                Some(self.theme.outline),
+            ));
             items.push(quad(0.0, top, bar, height, notice.severity.bar_ink(&self.theme)));
-            push_rect_border(&mut items, 0.0, top, width, height, RING_THICKNESS, self.theme.outline);
             let mut line_top = top + pad;
             for line in self.wrapped(notice) {
                 items.push(WidgetDrawItem::Text {
@@ -534,6 +435,7 @@ impl WasmActor for ToastWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WidgetControlState;
 
     fn region(max_standing: usize, lifetime_frames: u32) -> ToastWidget {
         ToastWidget {
@@ -724,10 +626,9 @@ mod tests {
         let tops: Vec<f32> = items
             .iter()
             .filter_map(|item| match item {
-                // The plate's own fill: full region width and taller than the
-                // hairline rows of its ring.
-                WidgetDrawItem::Quad { x, y, width, height, .. }
-                    if (*width - toasts.frame.width).abs() < f32::EPSILON && *x == 0.0 && *height > RING_THICKNESS =>
+                // The plate itself: the one full-region-width shape a notice draws.
+                WidgetDrawItem::Shape { x, y, width, .. }
+                    if (*width - toasts.frame.width).abs() < f32::EPSILON && *x == 0.0 =>
                 {
                     Some(*y)
                 }

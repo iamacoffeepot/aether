@@ -16,7 +16,7 @@ use aether_substrate::chassis::error::BootError;
 use crate::headless::HeadlessRenderCapability;
 use crate::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DestroyGeometry, DestroyTexture,
-    DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawSolidQuads, DrawTexturedQuads, DrawTriangle,
+    DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawShapes, DrawTexturedQuads, DrawTriangle,
     ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult,
     UpdateGeometry, UpdateTexture, ViewProjection,
 };
@@ -113,7 +113,7 @@ impl NativeActor for HeadlessRenderCapability {
         _ctx: &mut NativeCtx<'_>,
         _mail: CreateGeometry,
     ) -> CreateGeometryResult {
-        CreateGeometryResult::Err { reason: "unsupported on headless chassis — no GPU".to_owned() }
+        CreateGeometryResult::Err { error: "unsupported on headless chassis — no GPU".to_owned() }
     }
 
     /// `UpdateGeometry` lands here as a no-op (ADR-0171) for the same
@@ -132,15 +132,15 @@ impl NativeActor for HeadlessRenderCapability {
     #[handler::single]
     fn on_draw_textured_quads(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawTexturedQuads) {}
 
-    /// `DrawSolidQuads` lands here as a no-op for the same reason
+    /// `DrawScreenTriangles` lands here as a no-op for the same reason
     /// as `on_draw_textured_quads`.
     #[handler::single]
-    fn on_draw_solid_quads(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawSolidQuads) {}
-
-    /// `DrawScreenTriangles` lands here as a no-op for the same reason
-    /// as `on_draw_solid_quads`.
-    #[handler::single]
     fn on_draw_screen_triangles(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawScreenTriangles) {}
+
+    /// `DrawShapes` lands here as a no-op (ADR-0213) for the same reason
+    /// as `on_draw_screen_triangles`.
+    #[handler::single]
+    fn on_draw_shapes(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawShapes) {}
 
     /// `DrawMaterialTextured` lands here as a no-op for the same
     /// reason as `on_draw_textured_quads`.
@@ -162,7 +162,7 @@ impl NativeActor for HeadlessRenderCapability {
         _ctx: &mut NativeCtx<'_>,
         _mail: ProgramRegister,
     ) -> ProgramRegisterResult {
-        ProgramRegisterResult::Err { reason: "unsupported on headless chassis — no GPU".to_owned() }
+        ProgramRegisterResult::Err { error: "unsupported on headless chassis — no GPU".to_owned() }
     }
 
     /// `ProgramDispatch` lands here as a no-op (ADR-0170) for the same
@@ -262,10 +262,10 @@ mod headless_tests {
             },
         );
         match result {
-            CreateGeometryResult::Err { reason } => {
+            CreateGeometryResult::Err { error } => {
                 assert!(
-                    reason.contains("headless"),
-                    "headless create_geometry reason should name the chassis; got {reason}",
+                    error.contains("headless"),
+                    "headless create_geometry error should name the chassis; got {error}",
                 );
             }
             CreateGeometryResult::Ok { .. } => {

@@ -12,18 +12,17 @@ use crate::set::virtual_list::draw::ROW_RULE_THICKNESS;
 use crate::set::virtual_list::rows::{RowBands, VisibleRowWindow};
 use crate::set::{ButtonFace, approx_text_width, button_face_width, push_button_face, quad};
 use crate::theme::ThemeState;
-use crate::{RowAction, VirtualListAction, VirtualListRow, WidgetDrawItem};
+use crate::{RowAction, VirtualListActivated, VirtualListRow, WidgetDrawItem};
 
 /// How much clear space stands between the verb block and the text columns
 /// beside it, in spacing units. One — the same gap the trailing column keeps,
 /// so a row of two columns and a block of verbs reads as three things in a row.
 ///
 /// Nothing stands between one verb and the next: they are **flush**, and the
-/// last one ends on the row's own right edge rather than on its right pad
-/// (round-12 note 1).
+/// last one ends on the row's own right edge rather than on its right pad.
 const ACTION_BLOCK_GAP_UNITS: u8 = 1;
 
-/// One verb of one row, addressed the way [`VirtualListAction`] reports it: an
+/// One verb of one row, addressed the way [`VirtualListActivated`] reports it: an
 /// index into the item vector, and an index into that row's own actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RowActionIndex {
@@ -59,7 +58,7 @@ impl VirtualListWidget {
             return;
         };
         if let Some(parent) = ctx.parent() {
-            parent.send(&VirtualListAction { row_index, action_index });
+            parent.send(&VirtualListActivated { index: row_index, action: action_index });
         }
     }
 
@@ -83,8 +82,8 @@ impl VirtualListWidget {
     /// The whole verb block one row carries: every verb, edge to edge. `0.0`
     /// for a row with no verbs.
     ///
-    /// Nothing is added between them — the owner's round-12 note 1, "flush
-    /// means touching" — so a two-verb block is exactly its two faces wide.
+    /// Nothing is added between them — flush means touching — so a two-verb
+    /// block is exactly its two faces wide.
     fn actions_width(&self, row: &VirtualListRow) -> f32 {
         row.actions.iter().map(|action| self.action_width(action)).sum()
     }
@@ -131,13 +130,12 @@ impl VirtualListWidget {
     /// Where each verb of one row stands. The block is right-aligned against
     /// the **row's own right edge** — not its right pad — and the verbs run
     /// left to right in the order they were written, touching, so the last one
-    /// written is the one on the edge: the owner's `[Change gem][x]`, with the
-    /// `×` outermost and nothing after it.
+    /// written is the one on the edge — `[Change][×]`, with the destructive
+    /// verb outermost and nothing after it.
     ///
-    /// Round 11 read "flush" as one spacing unit between the verbs and the
-    /// block sitting on the row's right pad; round-12 note 1 says the pad and
-    /// the gaps both go, so a pressable face runs to the row's edge and the
-    /// pair reads as one block of verbs rather than two loose controls.
+    /// Flush is literal: neither a gap between the verbs nor the row's right
+    /// pad stands in the block, so a pressable face runs to the row's edge and
+    /// the pair reads as one block of verbs rather than two loose controls.
     /// A verb stands on the row's **first line** rather than over its whole
     /// height: a row with a note is two lines of one entry, and a face drawn
     /// down both of them would read as a control over the sentence too.
@@ -273,7 +271,7 @@ mod tests {
             .draw_items()
             .into_iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { x, width, color, .. }
+                WidgetDrawItem::Shape { x, width, fill: Some(color), .. }
                     if width == ROW_RULE_THICKNESS && color == widget.theme.edge() =>
                 {
                     Some(x)

@@ -8,8 +8,8 @@
 use aether_chassis::boot::{ActorRingOverlay, RegistryQueueOverlay, SchedulerTuningOverlay, env_only_after_help};
 use aether_chassis::cli::{ChassisCli, ChassisMeta};
 use aether_fleet::FleetOverlay;
-use aether_harness_substrate::SettlementOverlay;
 use aether_rpc::RpcServerOverlay;
+use aether_substrate::config::SettlementOverlay;
 use clap::Parser;
 
 /// Hub chassis CLI root — coordinator-only, no full-stack caps.
@@ -77,8 +77,8 @@ mod tests {
     use aether_chassis::boot::{ActorRingOverlay, RegistryQueueOverlay, SchedulerTuningOverlay};
     use aether_chassis::cli::{long_flags, meta_flags, overlay_flags};
     use aether_fleet::FleetOverlay;
-    use aether_harness_substrate::SettlementOverlay;
     use aether_rpc::RpcServerOverlay;
+    use aether_substrate::config::SettlementOverlay;
     use clap::CommandFactory;
 
     #[test]

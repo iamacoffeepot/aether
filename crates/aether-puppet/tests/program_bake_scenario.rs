@@ -310,7 +310,7 @@ fn create_geometry<const CLASS_COUNT: usize>(
         .expect("create_geometry sequence");
     match created.reply::<CreateGeometryResult>("create_geometry").expect("decode CreateGeometryResult") {
         CreateGeometryResult::Ok { geometry_id } => geometry_id,
-        CreateGeometryResult::Err { reason } => panic!("create_geometry failed: {reason}"),
+        CreateGeometryResult::Err { error } => panic!("create_geometry failed: {error}"),
     }
 }
 
@@ -320,7 +320,7 @@ fn register(harness: &mut SubstrateHarness, mail: &ProgramRegister) -> u32 {
         .expect("register sequence");
     match registered.reply::<ProgramRegisterResult>("register").expect("decode ProgramRegisterResult") {
         ProgramRegisterResult::Ok { program_id } => program_id,
-        ProgramRegisterResult::Err { reason } => panic!("register failed: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("register failed: {error}"),
     }
 }
 

@@ -9,9 +9,9 @@
 //! person can find. Each title is sized to its text plus padding; a press
 //! on a title opens that menu's items in the widget's overlay
 //! ([`crate::WidgetDrawList::overlay`]) below the title, under the root's
-//! pointer grab ([`crate::MenuOpenChanged`]); while open, the pointer moving
+//! pointer grab ([`crate::MenuBarOpenChanged`]); while open, the pointer moving
 //! over another title opens that one instead. A press on an enabled item
-//! activates it ([`crate::MenuItemActivated`]) and closes; Escape or a press
+//! activates it ([`crate::MenuBarActivated`]) and closes; Escape or a press
 //! elsewhere closes without activating. Items advertise their accelerator
 //! at the right edge in muted ink; the accelerator itself is the root's to
 //! honour.
@@ -33,14 +33,14 @@ use aether_text::FontMetricsResult;
 
 use crate::set::{
     WidgetDefaults, accept_font_metrics_result, apply_text_theme, approx_text_width, even_split_widths,
-    measured_text_width, pump_text_font_metrics, push_control_outlines, push_rect_border, quad, reply_if_hidden,
+    measured_text_width, pump_text_font_metrics, push_control_outlines, quad, raised_plate, reply_if_hidden, ring,
     slot_at_local_x, slot_left, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, Theme, ThemeState};
 use crate::{
-    Collect, FocusLost, HoverLost, Menu, MenuBarConfig, MenuItem, MenuItemActivated, MenuOpenChanged, SetWidgetState,
+    Collect, FocusLost, HoverLost, Menu, MenuBarActivated, MenuBarConfig, MenuBarOpenChanged, MenuItem, SetWidgetState,
     WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
@@ -54,7 +54,7 @@ const HAIRLINE_THICKNESS: f32 = 1.0;
 /// handlers own the sending and the tests own nothing but the logic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct MenuBarEffects {
-    activated: Option<MenuItemActivated>,
+    activated: Option<MenuBarActivated>,
     open_changed: Option<bool>,
 }
 
@@ -77,7 +77,7 @@ impl MenuBarEffects {
             parent.send(&activated);
         }
         if let Some(open) = self.open_changed {
-            parent.send(&MenuOpenChanged { open });
+            parent.send(&MenuBarOpenChanged { open });
         }
     }
 }
@@ -388,7 +388,7 @@ impl MenuBarWidget {
         let pad = self.theme.pad;
         let last = menu.items.len().saturating_sub(1);
         let mut items = Vec::with_capacity(menu.items.len().saturating_mul(3).saturating_add(5));
-        items.push(quad(left, top, width, plate_height, self.theme.surface_raised));
+        items.push(raised_plate(&self.theme, left, top, width, plate_height, self.theme.surface_raised, None));
 
         let mut row_top = top;
         for (index, item) in menu.items.iter().enumerate() {
@@ -430,7 +430,7 @@ impl MenuBarWidget {
             row_top += self.item_extent(item, index == last);
         }
 
-        push_rect_border(&mut items, left, top, width, plate_height, HAIRLINE_THICKNESS, self.theme.outline);
+        items.push(ring(&self.theme, left, top, width, plate_height, HAIRLINE_THICKNESS, self.theme.outline));
         items
     }
 }
@@ -476,8 +476,8 @@ impl WidgetDefaults for MenuBarWidget {
 }
 
 /// A menu bar. Spawned inline by a panel root with a [`MenuBarConfig`];
-/// reports [`crate::MenuItemActivated`] on an activation and
-/// [`crate::MenuOpenChanged`] as its menus open and close.
+/// reports [`crate::MenuBarActivated`] on an activation and
+/// [`crate::MenuBarOpenChanged`] as its menus open and close.
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send
@@ -650,8 +650,8 @@ fn next_enabled(items: &[MenuItem], from: usize, forward: bool) -> Option<usize>
 /// The activation event for a menu/item pair, or `None` for indices past the
 /// wire's `u32` — unreachable for any authored menu, and silently dropping the
 /// event beats reporting the wrong command.
-fn activation(menu: usize, item: usize) -> Option<MenuItemActivated> {
-    Some(MenuItemActivated { menu: u32::try_from(menu).ok()?, item: u32::try_from(item).ok()? })
+fn activation(menu: usize, item: usize) -> Option<MenuBarActivated> {
+    Some(MenuBarActivated { menu: u32::try_from(menu).ok()?, item: u32::try_from(item).ok()? })
 }
 
 #[cfg(test)]
@@ -711,7 +711,9 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 WidgetDrawItem::Text { text, .. } => Some(text.as_str()),
-                WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+                WidgetDrawItem::TexturedQuad { .. }
+                | WidgetDrawItem::Shape { .. }
+                | WidgetDrawItem::Triangle { .. } => None,
             })
             .collect()
     }
@@ -759,7 +761,7 @@ mod tests {
         let hit = widget.press_while_open(20.0, 44.0 + 24.0);
         assert_eq!(
             hit,
-            MenuBarEffects { activated: Some(MenuItemActivated { menu: 0, item: 1 }), open_changed: Some(false) }
+            MenuBarEffects { activated: Some(MenuBarActivated { menu: 0, item: 1 }), open_changed: Some(false) }
         );
         assert_eq!(widget.open_menu, None);
     }
@@ -847,7 +849,7 @@ mod tests {
         widget.step_item(true);
         assert_eq!(
             widget.activate(widget.highlighted_item.expect("a highlight")),
-            MenuBarEffects { activated: Some(MenuItemActivated { menu: 1, item: 2 }), open_changed: Some(false) }
+            MenuBarEffects { activated: Some(MenuBarActivated { menu: 1, item: 2 }), open_changed: Some(false) }
         );
     }
 

@@ -83,7 +83,7 @@ A transform is not:
 - evidence that every input is safe or cheap;
 - a way around filesystem/network policy.
 
-For example, `aether.fs.fetch` validates a namespace/path and can fold the bytes
+For example, `aether.fs.fetch` validates an `addr` and can fold the bytes
 through a registered transform. The capability still owns trusted file access;
 the transform owns only the value conversion.
 

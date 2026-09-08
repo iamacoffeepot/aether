@@ -5,7 +5,7 @@
 //! The momentary push button (issue 2660).
 //!
 //! A left press inside the button arms it (the root holds the pointer
-//! capture); the matching release fires [`ButtonClicked`] only if it lands
+//! capture); the matching release fires [`ButtonActivated`] only if it lands
 //! back inside — a press-then-release-inside, so a press that drags off and
 //! releases elsewhere cancels. The armed state draws the pressed overlay.
 //!
@@ -54,7 +54,7 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, Theme};
 use crate::{
-    ButtonClicked, ButtonConfig, ButtonEmphasis, ButtonTone, Collect, SetWidgetState, WidgetControlState,
+    ButtonActivated, ButtonConfig, ButtonEmphasis, ButtonTone, Collect, SetWidgetState, WidgetControlState,
     WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
@@ -102,7 +102,7 @@ impl ButtonWidget {
 
     fn emit_click(ctx: &WasmCtx<'_>) {
         if let Some(parent) = ctx.parent() {
-            parent.send(&ButtonClicked);
+            parent.send(&ButtonActivated);
         }
     }
 
@@ -141,7 +141,7 @@ impl WidgetDefaults for ButtonWidget {
 }
 
 /// A push-button widget. Spawned inline by a panel root with a
-/// [`ButtonConfig`]; reports [`ButtonClicked`] up on a completed click.
+/// [`ButtonConfig`]; reports [`ButtonActivated`] up on a completed click.
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
@@ -284,7 +284,7 @@ impl ButtonWidget {
         // Keyboard focus only: the button a pointer just pressed shows its
         // press, and a ring left over from the click says nothing more.
         if self.state.focus_visible() {
-            push_border(&mut items, width, height, 2.0, self.theme.accent);
+            push_border(&mut items, &self.theme, width, height, 2.0, self.theme.accent);
         }
         items
     }
@@ -300,7 +300,7 @@ mod tests {
     use crate::set::ELLIPSIS;
 
     use crate::WidgetControlState;
-    use crate::set::{BUTTON_STROKE_THICKNESS, KeyboardArm, button_run, centered_text_x, measured_text_width};
+    use crate::set::{KeyboardArm, button_run, centered_text_x, measured_text_width};
 
     /// The label run and local x this button draws — the shared
     /// [`button_run`] rule against the button's own frame, theme and metrics,
@@ -458,26 +458,28 @@ mod tests {
     /// wash a plateless rank shows the pointer. `None` when it draws neither.
     fn plate(button: &ButtonWidget) -> Option<Rgba> {
         button.draw_items().iter().find_map(|item| match item {
-            WidgetDrawItem::Quad { width, height, color, .. }
+            WidgetDrawItem::Shape { width, height, fill, .. }
                 if *width == button.frame.width && *height == button.frame.height =>
             {
-                Some(*color)
+                *fill
             }
             _ => None,
         })
     }
 
-    /// The hairline rows of a button's stroke — the quads that are neither
-    /// the full-frame plate nor as thick as the focus ring.
+    /// The hairline stroke of a button's face — the full-frame shape's
+    /// inside stroke, at the theme's hairline rather than the focus ring's.
     fn stroke(button: &ButtonWidget) -> Vec<Rgba> {
         button
             .draw_items()
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { width, height, color, .. }
-                    if (*width == BUTTON_STROKE_THICKNESS || *height == BUTTON_STROKE_THICKNESS) =>
+                WidgetDrawItem::Shape { width, height, stroke: Some(stroke), .. }
+                    if *width == button.frame.width
+                        && *height == button.frame.height
+                        && stroke.width_pixels == button.theme.stroke_width_pixels =>
                 {
-                    Some(*color)
+                    Some(stroke.color)
                 }
                 _ => None,
             })
@@ -489,9 +491,13 @@ mod tests {
         button
             .draw_items()
             .iter()
-            .map(|item| match item {
-                WidgetDrawItem::Quad { color, .. } | WidgetDrawItem::Text { color, .. } => *color,
-                WidgetDrawItem::TexturedQuad { tint, .. } => *tint,
+            .flat_map(|item| match item {
+                WidgetDrawItem::Text { color, .. } => vec![*color],
+                WidgetDrawItem::TexturedQuad { tint, .. } => vec![*tint],
+                WidgetDrawItem::Shape { fill, stroke, .. } => {
+                    fill.iter().copied().chain(stroke.as_ref().map(|stroke| stroke.color)).collect()
+                }
+                WidgetDrawItem::Triangle { a, .. } => vec![a.color],
             })
             .collect()
     }

@@ -487,7 +487,15 @@ mod tests {
     /// the scope narrows instead of failing open and the pre-build question is
     /// actually asked. Derived rather than assumed: the test below refuses to
     /// pass on a narrowing that never happened.
-    const DIST_CONSUMING_LEAF: &str = "aether-chassis-desktop";
+    ///
+    /// Was `aether-chassis-desktop` until this crate stopped shipping
+    /// `aether-harness-substrate` inside every chassis binary: desktop
+    /// qualified only through that normal dependency, and once it went the
+    /// remaining deps name no harness and no wasm source, so desktop's closure
+    /// correctly stopped asking for the pre-build. `aether-chassis-hub` states
+    /// the same shape honestly — it dev-deps `aether-harness-fleet`, which
+    /// forks the dist-resolved chassis binary through `dist/manifest.json`.
+    const DIST_CONSUMING_LEAF: &str = "aether-chassis-hub";
 
     /// A crate whose closure reads nothing the pre-build produces — the shape
     /// every member of a coordinator-side wave has.

@@ -196,7 +196,7 @@ fn play_track_happy_path_replies_ok_and_starts_a_track() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut read_ctx,
-        ReadResult::Ok { namespace: "assets".to_owned(), path: "track.wav".to_owned(), bytes: wav },
+        ReadResult::Ok { addr: NamespaceAddr::new("assets", "track.wav"), bytes: wav },
     );
     // The decode worker runs off-thread and pushes the completion
     // wake; route it through the cap's #[handler(task)] arm.
@@ -242,7 +242,7 @@ fn play_track_echoes_lane_through_result_and_track_start() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut read_ctx,
-        ReadResult::Ok { namespace: "assets".to_owned(), path: "track.wav".to_owned(), bytes: wav },
+        ReadResult::Ok { addr: NamespaceAddr::new("assets", "track.wav"), bytes: wav },
     );
     drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
 
@@ -282,7 +282,7 @@ fn play_track_missing_file_replies_err_with_fs_error() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut read_ctx,
-        ReadResult::Err { namespace: "assets".to_owned(), path: "missing.wav".to_owned(), error: FsError::NotFound },
+        ReadResult::Err { addr: NamespaceAddr::new("assets", "missing.wav"), error: FsError::NotFound },
     );
 
     match decode_session_reply::<PlayTrackResult>(&rx) {

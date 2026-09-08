@@ -14,11 +14,12 @@ use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_math::Rgba;
+use aether_render::{QuadBlend, ShapeTexture};
 
-use crate::set::apply_static_control_state;
+use crate::set::{apply_static_control_state, picture};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::{SetTheme, Theme};
-use crate::{Collect, ImageConfig, ImageFit, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
+use crate::{Collect, ImageConfig, ImageFit, SetWidgetState, WidgetDrawList, WidgetFrame};
 
 /// Pure fit output. Destination fields are widget-local pixels; UV fields are
 /// normalized texture coordinates. Keeping each semantic named avoids the
@@ -191,19 +192,30 @@ impl ImageWidget {
             content_height: None,
             intrinsic,
             overlay: Vec::new(),
-            items: vec![WidgetDrawItem::TexturedQuad {
-                texture_id: self.texture_id,
-                x: placement.destination_x_pixels,
-                y: placement.destination_y_pixels,
-                width: placement.destination_width_pixels,
-                height: placement.destination_height_pixels,
-                u0: placement.uv_left,
-                v0: placement.uv_top,
-                u1: placement.uv_right,
-                v1: placement.uv_bottom,
-                tint: self.theme.fill(self.tint, self.state.theme_state(false)),
-                clip: None,
-            }],
+            // The image takes the theme's corner radius like every other
+            // face in the set (iamacoffeepot/aether#5709): the texture is
+            // sampled inside the rounded fill's coverage, so a thumbnail is
+            // not the one square corner among rounded plates.
+            items: vec![picture(
+                &self.theme,
+                [
+                    placement.destination_x_pixels,
+                    placement.destination_y_pixels,
+                    placement.destination_width_pixels,
+                    placement.destination_height_pixels,
+                ],
+                ShapeTexture {
+                    texture_id: self.texture_id,
+                    u0: placement.uv_left,
+                    v0: placement.uv_top,
+                    u1: placement.uv_right,
+                    v1: placement.uv_bottom,
+                    // A consumer-uploaded image, like every other
+                    // `create_texture` caller stages.
+                    blend: QuadBlend::Straight,
+                },
+                self.theme.fill(self.tint, self.state.theme_state(false)),
+            )],
         }
     }
 
@@ -294,8 +306,8 @@ impl WasmActor for ImageWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::WidgetControlState;
     use crate::theme::ThemeState;
+    use crate::{WidgetControlState, WidgetDrawItem};
 
     fn image(fit: ImageFit) -> ImageWidget {
         ImageWidget {
@@ -460,7 +472,7 @@ mod tests {
         first_consumer_texture.texture_id = 0;
         assert!(matches!(
             first_consumer_texture.draw_list().items[0],
-            WidgetDrawItem::TexturedQuad { texture_id: 0, .. }
+            WidgetDrawItem::Shape { texture: Some(ShapeTexture { texture_id: 0, .. }), .. }
         ));
     }
 
@@ -480,8 +492,8 @@ mod tests {
         assert!(widget.state.replace(disabled));
         let disabled = widget.draw_list();
         assert_eq!(disabled.items.len(), 1);
-        let WidgetDrawItem::TexturedQuad { tint, .. } = disabled.items[0] else {
-            panic!("image emits one textured quad")
+        let WidgetDrawItem::Shape { fill: Some(tint), texture: Some(_), .. } = disabled.items[0] else {
+            panic!("image emits one textured shape")
         };
         assert_eq!(tint, Theme::DEFAULT.fill(Rgba::WHITE, ThemeState::Disabled));
     }
@@ -514,13 +526,13 @@ mod tests {
         assert_eq!(list.items.len(), 1);
         assert!(matches!(
             list.items[0],
-            WidgetDrawItem::TexturedQuad {
-                texture_id: 19,
+            WidgetDrawItem::Shape {
                 x: 30.0,
                 y: 7.5,
                 width: 30.0,
                 height: 45.0,
-                tint,
+                fill: Some(tint),
+                texture: Some(ShapeTexture { texture_id: 19, .. }),
                 ..
             } if tint == replacement_tint
         ));

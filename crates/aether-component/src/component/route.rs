@@ -1,7 +1,7 @@
 //! Sender-side peer-addressing facades for loaded components —
 //! the "routing" seam of the `aether.component` capability.
 
-use aether_actor::{Addressable, Embedded, ReplyMode, WasmActorMailbox, WasmCtx};
+use aether_actor::{Addressable, Embedded, ReplyMode, Sends, WasmActorMailbox, WasmCtx};
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
@@ -31,6 +31,24 @@ pub trait ComponentHostWasmExt {
     /// (`sender` + inline registry), so its sends stamp the same origin
     /// (issue 1987).
     fn loaded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R>;
+
+    /// [`loaded`](Self::loaded) for the default-named instance — the load name
+    /// `R` already declares.
+    ///
+    /// The `&str` parameter is what made callers declare a `const` beside the
+    /// call site duplicating the peer's own `NAMESPACE`, a second naming
+    /// authority the compiler cannot check against the first
+    /// (iamacoffeepot/aether#5720). Where the name *is* the type's, there is
+    /// nothing for such a const to hold.
+    ///
+    /// From a component's receive ctx prefer [`PeerCtxExt::peer`], which says
+    /// "my host's instance of `R`" without naming the host either. Reach for
+    /// this one where code deliberately holds a component-host mailbox and
+    /// wants the fold to start from *that* host rather than from the caller's
+    /// own parent.
+    fn loaded_default<R: Addressable<Resolver = Embedded>>(&self) -> WasmActorMailbox<'_, R> {
+        self.loaded::<R>(R::NAMESPACE)
+    }
 }
 
 impl ComponentHostWasmExt for WasmActorMailbox<'_, ComponentHostCapability> {
@@ -92,6 +110,21 @@ pub trait PeerCtxExt {
 }
 
 impl<M: ReplyMode> PeerCtxExt for WasmCtx<'_, M> {
+    fn peer<R: Addressable<Resolver = Embedded>>(&self) -> WasmActorMailbox<'_, R> {
+        self.actor::<R>()
+    }
+
+    fn peer_named<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R> {
+        self.__actor_with_namespace::<R>(name)
+    }
+}
+
+// The peer verbs travel with the ctx's reply-mode-free send view
+// (`ctx.sends()`), so a helper that addresses a co-hosted component takes
+// `&mut Sends<'_>` rather than a `M: ReplyMode` parameter. `Sends` resolves
+// through the same caller-scoped `Embedded` path as the ctx it came from, so
+// both impls name the same peer.
+impl PeerCtxExt for Sends<'_> {
     fn peer<R: Addressable<Resolver = Embedded>>(&self) -> WasmActorMailbox<'_, R> {
         self.actor::<R>()
     }

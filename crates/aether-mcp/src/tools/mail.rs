@@ -7,13 +7,14 @@ use rmcp::ErrorData as McpError;
 
 use crate::args::{
     MailSpec, MailStatus, ReplyEventJson, ReplyProjection, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse,
+    TraceFormat,
 };
 
 use super::envelope::{engine_envelope, engine_envelope_by_id};
-use super::ids::{mail_id_to_json, parse_engine_id, render_compact_tree};
+use super::ids::{mail_id_to_json, render_compact_tree};
 use super::render::{internal, internal_msg, json};
 use super::reply::{decode_reply_events, decode_traced_ack, project_replies, strip_ack};
-use super::{AWAIT_TIMEOUT_CAP_MS, AWAIT_TIMEOUT_DEFAULT_MS, Mcp};
+use super::{AWAIT_TIMEOUT_CAP_MILLIS, AWAIT_TIMEOUT_DEFAULT_MILLIS, Mcp};
 
 pub(super) async fn send_mail(mcp: &Mcp, args: SendMailArgs) -> Result<String, McpError> {
     let fire_and_forget = args.fire_and_forget;
@@ -82,7 +83,7 @@ pub(super) async fn settle_mail_item(
 }
 
 pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Result<String, McpError> {
-    let engine = parse_engine_id(&args.engine_id)?;
+    let (engine, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
     // Encode the batch before sending — a bad spec produces a
     // clean invalid-params error and never touches the wire.
     // Same shape `CaptureFrame` carries: `Vec<NamedMail>` with
@@ -94,7 +95,8 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
         .encode_mail_bundle(engine, &args.mails)
         .await
         .map_err(|e| McpError::invalid_params(format!("send_mail_traced batch: {e}"), None))?;
-    let timeout_ms = args.settlement_timeout_ms.unwrap_or(AWAIT_TIMEOUT_DEFAULT_MS).min(AWAIT_TIMEOUT_CAP_MS);
+    let timeout_millis =
+        args.settlement_timeout_millis.unwrap_or(AWAIT_TIMEOUT_DEFAULT_MILLIS).min(AWAIT_TIMEOUT_CAP_MILLIS);
     let dispatch_envelope = engine_envelope(engine, TRACE_MAILBOX_NAME, &DispatchTraced { mails });
 
     // Fire-and-forget: write the dispatch without awaiting the chain
@@ -105,11 +107,12 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
     if args.fire_and_forget {
         let (events, ack_timed_out) = mcp
             .session
-            .call_collecting(dispatch_envelope, Duration::from_millis(u64::from(timeout_ms)))
+            .call_collecting(dispatch_envelope, Duration::from_millis(u64::from(timeout_millis)))
             .await
             .map_err(internal)?;
         if ack_timed_out {
             return json(&SendMailTracedResponse {
+                engine_id,
                 status: "timeout".into(),
                 root: None,
                 mails: None,
@@ -126,6 +129,7 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
             mail_id_to_json(root, cache.get(&engine))
         };
         return json(&SendMailTracedResponse {
+            engine_id,
             status: "dispatched".into(),
             root: Some(root_json),
             mails: None,
@@ -142,11 +146,12 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
     // replies) instead of `call_one`'s single-event discard.
     let (events, ack_timed_out) = mcp
         .session
-        .call_collecting(dispatch_envelope, Duration::from_millis(u64::from(timeout_ms)))
+        .call_collecting(dispatch_envelope, Duration::from_millis(u64::from(timeout_millis)))
         .await
         .map_err(internal)?;
     if ack_timed_out {
         return json(&SendMailTracedResponse {
+            engine_id,
             status: "timeout".into(),
             root: None,
             mails: None,
@@ -160,15 +165,16 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
     let replies = decode_reply_events(strip_ack(&events), &engine_kinds, None);
     let root = decode_traced_ack(&events)?;
 
-    finish_traced_dispatch(mcp, engine, root, replies, args.full).await
+    finish_traced_dispatch(mcp, engine, engine_id, root, replies, args.format).await
 }
 
 async fn finish_traced_dispatch(
     mcp: &Mcp,
     engine: EngineId,
+    engine_id: String,
     root: MailId,
     replies: Vec<ReplyEventJson>,
-    full: bool,
+    format: TraceFormat,
 ) -> Result<String, McpError> {
     // Round 2: reconstruct the tree by a guided walk over the
     // per-actor trace rings (ADR-0086 Phase 3b). Seed at
@@ -205,17 +211,16 @@ async fn finish_traced_dispatch(
             // chassis mailbox — a static name).
             let mails = mcp.render_mail_nodes(engine, mails).await;
             let node_count = mails.len();
-            let (mails, tree) = if full {
-                (Some(mails), None)
-            } else {
-                let tree = render_compact_tree(&mails);
-                (None, Some(tree))
+            let (mails, tree) = match format {
+                TraceFormat::Nodes => (Some(mails), None),
+                TraceFormat::Tree => (None, Some(render_compact_tree(&mails))),
             };
             let root = {
                 let cache = mcp.names.lock().expect("reverse-name cache mutex is never poisoned");
                 mail_id_to_json(root, cache.get(&engine))
             };
             json(&SendMailTracedResponse {
+                engine_id,
                 status: "settled".into(),
                 root: Some(root),
                 mails,

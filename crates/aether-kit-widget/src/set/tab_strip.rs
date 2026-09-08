@@ -25,10 +25,9 @@
 //!
 //! Those chips are one of the two shapes a strip takes
 //! ([`TabStripConfig::style`]). The other is [`TabStripStyle::Filled`] —
-//! Material 3's primary tabs, and the owner's round-8 note 14: "the tab
-//! buttons are good but they don't feel like typical tabs … like they aren't
-//! small buttons in the section but buttons that take the space and feel more
-//! dominant." A filled strip divides its whole frame between its tabs with
+//! Material 3's primary tabs, for a strip that should read as the top edge of
+//! the section it switches rather than as small buttons placed on it. A
+//! filled strip divides its whole frame between its tabs with
 //! nothing between them — each keeping its own label plus its pads and the
 //! leftover shared equally, so a row with room for every word cuts none of
 //! them and the widest tab is the first to give width up when the room runs
@@ -61,16 +60,16 @@ use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
 use crate::set::{
-    WidgetDefaults, accept_font_metrics_result, apply_text_theme, centered_text_x, clamp_option_index, elide_to_width,
-    even_split_widths, fit_row_widths, measured_text_width, pointer_wash, pump_text_font_metrics,
+    WidgetDefaults, accept_font_metrics_result, apply_text_theme, centered_text_x, clamp_option_index, clamp_selection,
+    elide_to_width, even_split_widths, fit_row_widths, measured_text_width, pointer_wash, pump_text_font_metrics,
     push_control_outlines, quad, release_left, reply_if_hidden, slot_at_local_x, spread_row_widths, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, Theme, ThemeState};
 use crate::{
-    Collect, HoverLost, SetWidgetState, TabSelected, TabStripConfig, TabStripStyle, WidgetControlState, WidgetDrawItem,
-    WidgetDrawList, WidgetFrame,
+    Collect, HoverLost, SetSelection, SetWidgetState, TabStripConfig, TabStripSelected, TabStripStyle,
+    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 /// Thickness, in pixels, of the selected tab's bottom-edge underline — the
@@ -140,8 +139,8 @@ impl TabStripWidget {
     /// strip's own frame, so padding a label off its tab's left edge *is*
     /// centering it and no tab is laid out past the frame's right edge.
     ///
-    /// The fit is what the owner's note was about. A strip narrower than its
-    /// tabs used to lay them out at their natural widths regardless, which
+    /// The fit is the point. A strip narrower than its tabs used to lay them
+    /// out at their natural widths regardless, which
     /// does not widen the strip — it runs the last tab off the right edge for
     /// the root's slot clip to slice, so `Search` alone lost the padding to
     /// the right of its run while every tab before it looked right.
@@ -274,7 +273,7 @@ impl TabStripWidget {
         if let Some(parent) = ctx.parent() {
             #[allow(clippy::cast_possible_truncation)]
             let index = selected as u32;
-            parent.send(&TabSelected { index });
+            parent.send(&TabStripSelected { index });
         }
     }
 }
@@ -309,12 +308,12 @@ impl WidgetDefaults for TabStripWidget {
 }
 
 /// A tab strip. Spawned inline by a panel root with a [`TabStripConfig`];
-/// reports [`TabSelected`] on a change of tab.
+/// reports [`TabStripSelected`] on a change of tab.
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send
-/// it its `TabStripConfig` again to replace the labels or the selection in
-/// place.
+/// it its `TabStripConfig` again to replace the labels or the style in place —
+/// that holds the current tab. Send it [`SetSelection`] to move the tab.
 #[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for TabStripWidget {
     type Config = TabStripConfig;
@@ -323,7 +322,7 @@ impl WasmActor for TabStripWidget {
     fn init(config: TabStripConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         let desired_font_id = config.theme.font_id;
         Ok(TabStripWidget {
-            selected_index: clamp_option_index(config.initial_index, config.labels.len()),
+            selected_index: clamp_option_index(config.initial, config.labels.len()),
             labels: config.labels,
             style: config.style,
             theme: config.theme,
@@ -343,10 +342,13 @@ impl WasmActor for TabStripWidget {
 
     /// Replace the labels / selection / theme in place from a re-sent config,
     /// and request metrics for the new theme font.
+    /// Replace the labels / style / theme in place, re-clamping the selection
+    /// into the new vector. `initial` seeds the strip only at `init`;
+    /// [`SetSelection`] moves the tab.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: TabStripConfig) {
-        self.selected_index = clamp_option_index(config.initial_index, config.labels.len());
         self.labels = config.labels;
+        self.selected_index = clamp_selection(self.selected_index, self.labels.len());
         self.style = config.style;
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
@@ -360,6 +362,16 @@ impl WasmActor for TabStripWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
+    }
+
+    /// Push the current tab from the host, clamped into the labels. Silent —
+    /// no [`TabStripSelected`]. A `None` index is ignored: a strip of tabs always
+    /// has one selected.
+    #[handler::single]
+    fn on_set_selection(&mut self, _ctx: &mut WasmCtx<'_>, set: SetSelection) {
+        if let Some(index) = set.index {
+            self.selected_index = clamp_option_index(index, self.labels.len());
+        }
     }
 
     /// Install a font-metrics reply; the next `Collect` lays the tabs out
@@ -661,7 +673,7 @@ mod tests {
         items
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { x, width, height, .. } if *height == strip.frame.height => {
+                WidgetDrawItem::Shape { x, width, height, .. } if *height == strip.frame.height => {
                     Some((x.max(0.0), (x + width).min(strip.frame.width)))
                 }
                 _ => None,
@@ -757,7 +769,7 @@ mod tests {
             .draw_items()
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { x, width, height, color, .. } if *height == strip.frame.height => {
+                WidgetDrawItem::Shape { x, width, height, fill: Some(color), .. } if *height == strip.frame.height => {
                     Some((*x, *width, *color))
                 }
                 _ => None,
@@ -773,7 +785,9 @@ mod tests {
             .draw_items()
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { x, y, width, height, color, .. } if *height < strip.frame.height => {
+                WidgetDrawItem::Shape { x, y, width, height, fill: Some(color), .. }
+                    if *height < strip.frame.height =>
+                {
                     Some((*y, *x, *width, *height, *color))
                 }
                 _ => None,
@@ -983,7 +997,7 @@ mod tests {
     fn re_selecting_the_pressed_tab_reports_nothing_but_still_presses_it() {
         // Frame x is 10 and the pre-metrics split is even, so local 5 is tab 0.
         let mut strip = strip(3, 0);
-        assert_eq!(strip.select_at(15.0), None, "no change, no TabSelected");
+        assert_eq!(strip.select_at(15.0), None, "no change, no TabStripSelected");
         assert_eq!(strip.pressed_tab, Some(0));
     }
 
@@ -998,8 +1012,11 @@ mod tests {
         let (tabs, underlines): (Vec<_>, Vec<_>) = items
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { y, height, color, .. } => Some((*y, *height, *color)),
-                WidgetDrawItem::Text { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+                WidgetDrawItem::Shape { y, height, fill: Some(color), .. } => Some((*y, *height, *color)),
+                WidgetDrawItem::Text { .. }
+                | WidgetDrawItem::TexturedQuad { .. }
+                | WidgetDrawItem::Shape { fill: None, .. }
+                | WidgetDrawItem::Triangle { .. } => None,
             })
             .partition(|(_, height, _)| *height == strip.frame.height);
         assert_eq!(tabs.len(), 3, "one full-height fill per tab");

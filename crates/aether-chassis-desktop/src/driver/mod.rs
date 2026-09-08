@@ -415,7 +415,7 @@ impl DriverCapability for DesktopDriverCapability {
         // `boot_pumped_actor` recovers each at Start. `aether.render` is no
         // longer claimed by a pooled `RenderCapability` on desktop.
         ctx.claim_driver_mailbox(DesktopWindowCapability::NAMESPACE)?;
-        ctx.claim_driver_mailbox("aether.render")
+        ctx.claim_driver_mailbox(<RenderCapability as Addressable>::NAMESPACE)
     }
 
     /// ADR-0156 §4: the window boot knobs (`AETHER_WINDOW_MODE` /

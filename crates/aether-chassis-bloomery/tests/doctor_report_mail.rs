@@ -30,7 +30,7 @@ fn a_foreign_rpc_snapshot_does_not_overwrite_the_doctors_last_report() {
     let env = BloomeryEnv {
         rpc_port,
         http_port,
-        store: StoreConfig { path: store_path.clone() },
+        store: StoreConfig { path: store_path.clone(), ..StoreConfig::default() },
         artifacts: ArtifactsConfig { root: Some(artifacts_root.clone()) },
         github: GithubConnectionConfig::default(),
         notify: NotifyConfig::default(),
