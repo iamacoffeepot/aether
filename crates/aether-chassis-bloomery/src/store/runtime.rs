@@ -409,6 +409,25 @@ pub trait StoreBackend: Send {
     /// never reaches this call at all.
     fn lookup_config(&mut self, digest: &[u8]) -> rusqlite::Result<Option<StoredConfigRow>>;
 
+    /// Replace the set of model-process instruction bundles this host operator
+    /// authorizes as process policy (ADR-0214), keyed by config address.
+    ///
+    /// Replaced rather than merged, because the set states what the host
+    /// authorizes *now*: an operator who removes a bundle from the boot policy
+    /// has withdrawn it, and a merge would leave a withdrawn bundle standing for
+    /// the life of the store. Seeded at boot from the coordinator's own
+    /// configuration, which is what puts authorization outside the reach of the
+    /// material under examination — nothing a bloom, a request, or a candidate
+    /// carries can reach this table.
+    ///
+    /// Separate from the `config` table on purpose: storing a bundle's content
+    /// is not authorizing it (ADR-0214 §Model-process instructions are explicit
+    /// configuration), so the two questions are two rows in two tables.
+    fn set_authorized_instructions(&mut self, digests: &[Vec<u8>]) -> rusqlite::Result<()>;
+
+    /// Whether this host authorizes the bundle at `digest` as process policy.
+    fn instructions_authorized(&mut self, digest: &[u8]) -> rusqlite::Result<bool>;
+
     /// Every stored configuration, in address order — the whole-table read the
     /// control core fills its resolved set from (ADR-0174).
     ///
@@ -1512,6 +1531,9 @@ CREATE TABLE IF NOT EXISTS config (
     bytes  BLOB NOT NULL,
     schema_digest BLOB
 );
+CREATE TABLE IF NOT EXISTS authorized_instructions (
+    digest BLOB PRIMARY KEY
+);
 CREATE TABLE IF NOT EXISTS review_findings (
     bloom     BLOB NOT NULL,
     workpiece TEXT NOT NULL,
@@ -1946,6 +1968,22 @@ impl StoreBackend for SqliteStore {
         })?;
         // The digest is the primary key, so there is at most one row.
         rows.next().transpose()
+    }
+
+    fn set_authorized_instructions(&mut self, digests: &[Vec<u8>]) -> rusqlite::Result<()> {
+        let transaction = self.conn.transaction()?;
+        transaction.execute("DELETE FROM authorized_instructions", [])?;
+        for digest in digests {
+            transaction.execute(
+                "INSERT OR REPLACE INTO authorized_instructions (digest) VALUES (?1)",
+                rusqlite::params![digest],
+            )?;
+        }
+        transaction.commit()
+    }
+
+    fn instructions_authorized(&mut self, digest: &[u8]) -> rusqlite::Result<bool> {
+        self.conn.prepare("SELECT 1 FROM authorized_instructions WHERE digest = ?1")?.exists(rusqlite::params![digest])
     }
 
     fn record_dispatch_description(

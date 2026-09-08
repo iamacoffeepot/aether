@@ -36,8 +36,7 @@ use aether_component::ComponentHostCapability;
 /// handler to its reply route through the ADR-0139 request-context table (a
 /// serializable `Source`, unlike the native reply guard). [`answer_deferred`]
 /// recovers it and answers the original request.
-#[derive(Kind, aether_data::Schema, serde::Serialize, serde::Deserialize)]
-#[kind(name = "aether.http.deferred_source")]
+#[aether_data::kind(name = "aether.http.deferred_source")]
 #[doc(hidden)]
 pub struct DeferredSource {
     /// The original HTTP requester (the server), correlation included.

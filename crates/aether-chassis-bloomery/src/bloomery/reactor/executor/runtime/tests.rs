@@ -36,10 +36,11 @@ use aether_substrate::mail::registry::Registry;
 use super::strand::readopt_stranded_dispatches;
 use super::{
     BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState, GitCandidatePush,
-    NameEvidenceClaims, Stores, TickClock, TrackedHandle, backoff_delay, candidate_push_at, default_candidate_push,
-    dispatch_origin, drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_dispatch_scope, drain_and_redispatch,
-    fold_drain_backoff, is_silent, is_stale, next_backoff, observe_heartbeat, push_admitted_candidates,
-    seed_dispatches, seed_tracked, select_stale_handles, silence_from, timeout_verdict,
+    NameEvidenceClaims, Stores, TickClock, TrackedHandle, admitted_candidate_pushes, backoff_delay, candidate_push_at,
+    default_candidate_push, dispatch_origin, drain_and_dispatch, drain_and_dispatch_aggregate,
+    drain_and_dispatch_scope, drain_and_redispatch, fold_drain_backoff, is_silent, is_stale, journal_publications,
+    next_backoff, observe_heartbeat, seed_dispatches, seed_tracked, select_stale_handles, silence_from,
+    timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -51,8 +52,10 @@ use crate::bloomery::open_scope_run;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::{CoordinatorConfig, GithubConnectionConfig};
 use crate::bloomery::{
-    ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, UnconfiguredActionsBackend,
+    ExecutorPort, ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle,
+    UnconfiguredActionsBackend,
 };
+use crate::bloomery::{authorize_instructions, reference_instructions};
 use crate::session::SessionConfig;
 use crate::store::{
     CANDIDATE_HASH_OCCASION_SEAL, CommissionBackend, JournalWrite, OutstandingOrder, SqliteStore, StoreBackend,
@@ -102,14 +105,25 @@ impl ExecutorBackend for CapturingBackend {
     }
 }
 
-// The inert candidate-push stub for tests that exercise the pull/admit loop
-// without asserting on the push side.
-struct NopPush;
-
-impl CandidatePush for NopPush {
-    fn push(&self, _commit_hex: &str, _target_ref: &str) -> Result<(), String> {
-        Ok(())
-    }
+/// The inline candidate push the production tick no longer performs (#5564):
+/// it queues each capture on the offload and journals the worker's answer.
+/// These tests assert the two steps around the shell-out — which ref a capture
+/// is named for, and what the journal records — so they run them back to back
+/// with the push in between, exactly as the tick's two halves compose.
+fn push_admitted_candidates(
+    store: &mut dyn StoreBackend,
+    admissions: &[Admission],
+    correspondence: Option<&SharedCorrespondence>,
+    pusher: &dyn CandidatePush,
+) {
+    let answered = admitted_candidate_pushes(admissions, correspondence)
+        .into_iter()
+        .map(|capture| {
+            let result = pusher.push(&capture.commit_hex, &capture.target_ref);
+            (capture, result)
+        })
+        .collect();
+    journal_publications(store, answered);
 }
 
 // A recording push seam, for asserting exactly which (commit, ref) pairs the
@@ -210,12 +224,11 @@ fn tick_clock_silent(now_unix_millis: u64, heartbeat_silence_millis: u64) -> Tic
 /// tests on a single instant.
 fn pull_and_admit(
     stores: Stores<'_>,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     claims: NameEvidenceClaims,
     tracked: &mut Vec<TrackedHandle>,
     clock: &TickClock,
     correspondence: Option<&SharedCorrespondence>,
-    pusher: &dyn CandidatePush,
 ) -> Vec<Admit> {
     super::pull_and_admit(
         stores,
@@ -224,8 +237,22 @@ fn pull_and_admit(
         tracked,
         Clocks { tick: clock, now: || clock.now_unix_millis },
         correspondence,
-        pusher,
     )
+    .0
+}
+
+/// The sealed registry a fixture dispatch runs under, with an authorized
+/// instruction bundle underneath whatever the caller sealed (ADR-0214).
+///
+/// Every model lane presents a validated bundle before it may reach a worker, so
+/// a fixture that means to observe a *dispatch* has to be a bloom that pinned
+/// one. The caller's entries win, so a scenario about a `ModelOverride` still
+/// seals exactly the override it authored. The gate's own refusals live in the
+/// provenance suite, not here.
+fn authorized_over(store: &mut SqliteStore, configs: ConfigRegistry) -> ConfigRegistry {
+    let mut sealed = authorize_instructions(store, &reference_instructions());
+    sealed.overlay(configs);
+    sealed
 }
 
 // Enqueue one per-member Construct dispatch on the dispatch topic (the bytes the
@@ -260,6 +287,7 @@ fn enqueue_dispatch_with_configs(
     configs: ConfigRegistry,
 ) -> u64 {
     let payload = DispatchPayload {
+        configs: authorized_over(store, configs),
         // What a real dispatch carries: the profile the bloom's sealed catalog
         // calibrates *this* stage at, resolved by the reducer (ADR-0174).
         profile: StageCatalog::line().profile_for(stage).cloned().expect("the line binds every stage"),
@@ -274,7 +302,6 @@ fn enqueue_dispatch_with_configs(
         ),
         scope_revision,
         candidate: None,
-        configs,
     };
     // A queued dispatch belongs to a live bloom: seal claims the member's
     // membership before enqueuing its order, and the drain reads that claim to
@@ -291,6 +318,7 @@ fn enqueue_dispatch_with_configs(
 // has no member registry, only the bloom's.
 fn enqueue_aggregate_review(store: &mut SqliteStore, bloom: BloomId, workpiece: &str, configs: ConfigRegistry) -> u64 {
     let payload = AggregateReviewPayload {
+        configs: authorized_over(store, configs),
         profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: bloom.0,
         transformation: Transformation::for_aggregate_review(
@@ -300,7 +328,6 @@ fn enqueue_aggregate_review(store: &mut SqliteStore, bloom: BloomId, workpiece: 
             digest(50),
         ),
         pass: ReviewPass::Full,
-        configs,
     };
     store.claim_seal(payload.bloom.as_bytes(), &[workpiece.to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap()
@@ -330,7 +357,7 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
             digest(50),
         ),
         pass: ReviewPass::Full,
-        configs: ConfigRegistry::default(),
+        configs: authorized_over(&mut store, ConfigRegistry::default()),
     };
     // A queued review belongs to a live bloom; the drain reads its membership to
     // tell a live plan from a retired one (#4640).
@@ -384,7 +411,7 @@ fn the_second_aggregate_roll_frames_a_delta_confirm_against_the_frozen_findings(
             digest(50),
         ),
         pass: ReviewPass::DeltaConfirm,
-        configs: ConfigRegistry::default(),
+        configs: authorized_over(&mut store, ConfigRegistry::default()),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
@@ -429,7 +456,7 @@ fn a_fresh_roll_one_aggregate_dispatch_clears_the_stale_frozen_row() {
             digest(50),
         ),
         pass: ReviewPass::Full,
-        configs: ConfigRegistry::default(),
+        configs: authorized_over(&mut store, ConfigRegistry::default()),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
@@ -686,7 +713,7 @@ fn drain_dispatches_the_review_lane_under_its_own_calibrated_profile() {
             digest(50),
         ),
         pass: ReviewPass::Full,
-        configs: ConfigRegistry::default(),
+        configs: authorized_over(&mut store, ConfigRegistry::default()),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
@@ -1007,7 +1034,6 @@ fn pull_and_admit_admits_a_matching_construct_result_as_attempt_completed() {
         &mut tracked,
         &tick_clock(),
         None,
-        &NopPush,
     );
 
     assert_eq!(admits.len(), 1, "the matching result admits");
@@ -1111,15 +1137,7 @@ fn an_overdue_scope_order_terminates_once() {
 }
 
 fn tick(store: &mut SqliteStore, shell: &ExecutorShell, tracked: &mut Vec<TrackedHandle>, now: u64) -> Vec<Admit> {
-    pull_and_admit(
-        Stores { store, artifacts: None },
-        shell,
-        NameEvidenceClaims,
-        tracked,
-        &tick_clock_at(now),
-        None,
-        &NopPush,
-    )
+    pull_and_admit(Stores { store, artifacts: None }, shell, NameEvidenceClaims, tracked, &tick_clock_at(now), None)
 }
 
 #[test]
@@ -1319,7 +1337,7 @@ fn dispatch_aggregate_review(
             digest(50),
         ),
         pass: ReviewPass::Full,
-        configs: ConfigRegistry::default(),
+        configs: authorized_over(store, ConfigRegistry::default()),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
@@ -1441,7 +1459,6 @@ fn a_timeout_details_its_evidence_by_the_address_the_store_filed_the_record_unde
         &mut tracked,
         &tick_clock_at(AT_THE_DEADLINE),
         None,
-        &NopPush,
     );
 
     let evidence = match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
@@ -1626,7 +1643,6 @@ fn seed_tracked_recovers_a_dispatched_order_across_a_restart() {
         &mut tracked,
         &tick_clock(),
         None,
-        &NopPush,
     );
     assert_eq!(admits.len(), 1, "the restart-seeded handle is inspected and its result admitted, not stranded");
     assert!(tracked.is_empty(), "the order is consumed on admit and no longer tracked");
@@ -1674,7 +1690,6 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
         &mut tracked,
         &tick_clock(),
         None,
-        &NopPush,
     );
     assert_eq!(admits.len(), 1, "the completed local run's result admits to the control core");
     assert!(tracked.is_empty(), "the admitted order was consumed");
@@ -3080,7 +3095,6 @@ fn a_local_lane_order_dispatched_before_a_restart_resolves_after_reconciliation(
         &mut tracked,
         &tick_clock(),
         None,
-        &NopPush,
     );
 
     assert_eq!(admits.len(), 1, "the run that finished while the coordinator was down admits after reconciliation");
@@ -3360,7 +3374,6 @@ fn tick_silent(
         tracked,
         &tick_clock_silent(now, SILENCE_MILLIS),
         None,
-        &NopPush,
     )
 }
 
@@ -3378,8 +3391,8 @@ fn pull_silent_now(
         tracked,
         Clocks { tick: &tick_clock_silent(tick_start, SILENCE_MILLIS), now },
         None,
-        &NopPush,
     )
+    .0
 }
 
 fn heartbeat_shell(backend: &Arc<HeartbeatBackend>) -> ExecutorShell {
@@ -3782,4 +3795,230 @@ fn an_inverted_observation_window_skips_heartbeat_and_still_honours_the_deadline
     assert_eq!(backend.cancelled(), vec![nonce.clone()], "the sealed deadline still terminates it");
     assert!(store.lookup_order(&nonce).unwrap().is_none(), "the overdue order is consumed once");
     assert_eq!(admits.len(), 1, "deadline admission fires on the inverted pull whose post-cycle sample is due");
+}
+
+/// The #5564 regression tier: the reactor's adapter calls run on workers, so no
+/// phase of a turn waits on the one in front of it.
+mod offloaded_adapter_calls {
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use aether_bloomery::testing::digest;
+    use aether_bloomery::{
+        BloomId, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, ObservedLaneWrites, Topic, WorkHandle, WorkOrder,
+    };
+    use aether_data::{MailId, MailboxId, Source};
+    use aether_substrate::actor::native::NativeCtx;
+    use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_substrate::testing::fresh_substrate;
+
+    use super::super::offload::{AdapterOffload, MAX_IN_FLIGHT};
+    use super::{
+        CandidatePush, CapturingBackend, NOW_UNIX_MILLIS, NameEvidenceClaims, RecordingPush, Stores,
+        drain_and_dispatch, enqueue_construct_dispatch, pull_and_admit, tick_clock_at, track,
+    };
+    use crate::bloomery::outbox::TopicOutbox;
+    use crate::bloomery::{ExecutorPort, ExecutorPortError, ExecutorShell, Settled};
+    use crate::store::SqliteStore;
+
+    /// A backend whose lane-write sweep parks until the test opens the gate.
+    ///
+    /// That sweep is a `git` shell-out per live lane in production, and it sits
+    /// structurally *before* the deadline sweep in the tick — so it is exactly
+    /// the call whose round trip used to hold everything behind it.
+    #[derive(Default)]
+    struct LatchedSweep {
+        gate: Mutex<bool>,
+        opened: Condvar,
+        swept: Mutex<u32>,
+        cancelled: Mutex<Vec<String>>,
+    }
+
+    impl LatchedSweep {
+        fn open(&self) {
+            *self.gate.lock().unwrap() = true;
+            self.opened.notify_all();
+        }
+
+        fn swept(&self) -> u32 {
+            *self.swept.lock().unwrap()
+        }
+
+        fn cancelled(&self) -> Vec<String> {
+            self.cancelled.lock().unwrap().clone()
+        }
+    }
+
+    impl ExecutorBackend for LatchedSweep {
+        type Error = ExecutorPortError;
+
+        fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+            Ok(WorkHandle::new(order.nonce.clone()))
+        }
+
+        fn inspect(&self, _handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+            Ok(ExecutionStatus::Unknown)
+        }
+
+        fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
+            self.cancelled.lock().unwrap().push(handle.nonce.0.clone());
+            Ok(())
+        }
+
+        fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+            Ok(Vec::new())
+        }
+
+        fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
+            let mut gate = self.gate.lock().unwrap();
+            while !*gate {
+                gate = self.opened.wait(gate).unwrap();
+            }
+            drop(gate);
+            *self.swept.lock().unwrap() += 1;
+            Vec::new()
+        }
+    }
+
+    /// A backend whose per-handle observation parks, for asserting the ceiling.
+    #[derive(Default)]
+    struct LatchedObserve {
+        gate: Mutex<bool>,
+        opened: Condvar,
+    }
+
+    impl LatchedObserve {
+        fn open(&self) {
+            *self.gate.lock().unwrap() = true;
+            self.opened.notify_all();
+        }
+    }
+
+    impl ExecutorBackend for LatchedObserve {
+        type Error = ExecutorPortError;
+
+        fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+            Ok(WorkHandle::new(order.nonce.clone()))
+        }
+
+        fn inspect(&self, _handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+            let mut gate = self.gate.lock().unwrap();
+            while !*gate {
+                gate = self.opened.wait(gate).unwrap();
+            }
+            drop(gate);
+            Ok(ExecutionStatus::Unknown)
+        }
+
+        fn cancel(&self, _handle: &WorkHandle) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// A binding whose self-mailbox is not registered: the completion wake is
+    /// warn-dropped, so these tests drive the turns themselves rather than
+    /// riding the actor loop. What they assert is what a turn can do while a
+    /// call is out, not how the wake is delivered.
+    fn binding() -> Arc<NativeBinding> {
+        let (_registry, mailer) = fresh_substrate();
+        Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x5564)))
+    }
+
+    /// The failure #5564 names, as one assertion: a call a worker is holding
+    /// must not stop the deadline sweep behind it.
+    ///
+    /// The lane-write sweep parks and never answers. It sits before the pull and
+    /// the expiry in the tick, so pre-fix the turn stopped there: `observe_writes`
+    /// ran inline and the sweep behind it was simply never reached, and this loop
+    /// would spin to its budget with no cancel recorded. That is the production
+    /// stall — a lane burning past its wall clock because a `git` call in front of
+    /// the sweep is slow.
+    #[test]
+    fn a_call_a_worker_holds_does_not_stop_the_deadline_sweep() {
+        let mut store = SqliteStore::open(":memory:").unwrap();
+        let bloom = BloomId(digest(1));
+
+        // The order that must expire: dispatched through an immediate shell, so
+        // it is recorded and tracked before the latched one exists.
+        let setup = ExecutorShell::new(Arc::new(CapturingBackend::default()));
+        let (overdue_sequence, _) = enqueue_construct_dispatch(&mut store, bloom, "wp-overdue", 5);
+        let (handles, ack_through, _) = drain_and_dispatch(&mut store, &setup, NOW_UNIX_MILLIS).unwrap();
+        store.ack_topic(Topic::Dispatch, ack_through.expect("the setup dispatch submitted")).unwrap();
+        let mut tracked = track(handles);
+        let overdue_nonce = format!("dispatch-{overdue_sequence}");
+
+        let backend = Arc::new(LatchedSweep::default());
+        let shell = ExecutorShell::new(Arc::clone(&backend));
+        let pusher: Arc<dyn CandidatePush> = Arc::new(RecordingPush::default());
+        let binding = binding();
+        let mut offload = AdapterOffload::new();
+
+        // Well past the order's sealed hour, so the sweep is due.
+        let sweep_at = NOW_UNIX_MILLIS + 7_200_000;
+        let budget = Instant::now() + Duration::from_secs(30);
+        while backend.cancelled().is_empty() && Instant::now() < budget {
+            // Each pass is a poll turn, so each opens its own offload round —
+            // the pacing the production tick applies.
+            offload.open_round();
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            {
+                let port = offload.port(&shell);
+                assert!(
+                    matches!(ExecutorPort::observe_writes(&port), Settled::InFlight),
+                    "the parked sweep never answers, so every turn reads it as in flight",
+                );
+                pull_and_admit(
+                    Stores { store: &mut store, artifacts: None },
+                    &port,
+                    NameEvidenceClaims,
+                    &mut tracked,
+                    &tick_clock_at(sweep_at),
+                    None,
+                );
+            }
+            offload.start_wanted(&mut ctx, &shell, &pusher);
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        assert_eq!(
+            backend.cancelled(),
+            vec![overdue_nonce],
+            "the deadline sweep must terminate the overdue order while the lane-write sweep is still parked",
+        );
+        assert_eq!(backend.swept(), 0, "the parked sweep has not answered, so the deadline sweep ran beside it");
+
+        backend.open();
+    }
+
+    /// The ceiling holds: a turn that asks for more calls than the offload may
+    /// run starts exactly `MAX_IN_FLIGHT` workers and queues the rest for the
+    /// slots they free. Without it a burst of tracked handles would spawn one
+    /// thread each.
+    #[test]
+    fn the_offload_starts_at_most_the_ceiling_of_workers() {
+        let backend = Arc::new(LatchedObserve::default());
+        let shell = ExecutorShell::new(Arc::clone(&backend));
+        let pusher: Arc<dyn CandidatePush> = Arc::new(RecordingPush::default());
+        let binding = binding();
+        let mut offload = AdapterOffload::new();
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+        offload.open_round();
+        {
+            let port = offload.port(&shell);
+            for index in 0..MAX_IN_FLIGHT + 2 {
+                let handle = WorkHandle::new(Nonce(format!("n-{index}")));
+                assert!(matches!(port.observe(&handle), Settled::InFlight), "a first ask is always in flight");
+            }
+        }
+        offload.start_wanted(&mut ctx, &shell, &pusher);
+
+        assert_eq!(offload.in_flight(), MAX_IN_FLIGHT, "the surplus asks wait for a free slot rather than a thread");
+        backend.open();
+    }
 }

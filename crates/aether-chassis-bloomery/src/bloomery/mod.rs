@@ -27,6 +27,8 @@ mod replica;
 mod local_landing;
 pub(crate) mod poll_timer;
 #[cfg(feature = "github")]
+mod provenance;
+#[cfg(feature = "github")]
 mod reactor;
 mod repair;
 #[cfg(feature = "runtime")]
@@ -62,10 +64,10 @@ pub use doctor::{DoctorReactorCapability, DoctorReactorSetup, DoctorReactorState
 pub use driver::{BloomeryDriverCapability, BloomeryDriverRunning};
 #[cfg(feature = "github")]
 pub use executor::{
-    CaptureIdentity, CapturedObjects, DEFAULT_LANE_PROGRAM, ExecutorPortError, ExecutorShell, LaneOccupancy,
-    LaneProgram, LocalExecutor, LocalExecutorError, LocalLane, OrphanedRun, OutstandingDispatch,
-    ProcessTransformRunner, ReconcileLanes, ReconcileReport, RoutingExecutor, RunLifecycle, RunProcess, RunSpec,
-    TransformRunner, UnconfiguredActionsBackend, admits_lane_key, mock_lane,
+    CaptureIdentity, CapturedObjects, DEFAULT_LANE_PROGRAM, ExecutorPort, ExecutorPortError, ExecutorShell,
+    LaneOccupancy, LaneProgram, LocalExecutor, LocalExecutorError, LocalLane, OrphanedRun, OutstandingDispatch,
+    ProcessTransformRunner, ReconcileLanes, ReconcileReport, RoutingExecutor, RunLifecycle, RunObservation, RunProcess,
+    RunSpec, Settled, TransformRunner, UnconfiguredActionsBackend, admits_lane_key, mock_lane,
 };
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 pub use executor::{GroupAbsence, IDENTITY_RECORD, ProcessIdentity, strict_group_absence};
@@ -83,6 +85,12 @@ pub use notify::{
     NotifyReactorState, NotifyTick, Volume, deliver, notify_events, webhook_sink,
 };
 pub use outbox::TopicOutbox;
+#[cfg(feature = "github")]
+pub use provenance::{
+    ProcessPolicy, ProvenanceRefusal, admit_model_dispatch, drain_refusals, gated, journal_refusal, refusal_fault,
+};
+#[cfg(all(feature = "github", any(test, feature = "testing")))]
+pub use provenance::{authorize_instructions, pin_instructions, reference_instructions};
 #[cfg(feature = "github")]
 pub(crate) use reactor::candidate_push_at;
 #[cfg(feature = "github")]

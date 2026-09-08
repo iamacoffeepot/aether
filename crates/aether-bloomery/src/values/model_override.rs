@@ -278,8 +278,10 @@ mod tests {
     // and a key some constructor's command is a model lane is a key validate
     // admits. Review and AggregateReview dispatch `review.critic` (a model lane)
     // even though their binding process is host-position vocabulary that
-    // `is_model_lane` rejects — judging process was the live seal bounce.
-    // Verify and the other mechanical / pre-seal stages stay refused.
+    // `is_model_lane` rejects — judging process was the live seal bounce. The
+    // Study reader is the third of that shape (`retrospect` naming the
+    // position, `retrospect.read` the lane, ADR-0216). Verify and the
+    // mechanical / pre-seal stages stay refused.
     #[test]
     fn admitted_override_keys_are_exactly_the_stages_whose_dispatch_runs_a_model() {
         let line = StageCatalog::line();
@@ -334,12 +336,8 @@ mod tests {
                 Some(Transformation::for_aggregate_verify(&binding, digest, digest, digest).command)
             }
             StageId::BaseVerify => Some(Transformation::for_base_verify(&binding, digest, digest).command),
-            StageId::Sketch
-            | StageId::Scope
-            | StageId::Approve
-            | StageId::Integrate
-            | StageId::Land
-            | StageId::Study => None,
+            StageId::Study => Some(Transformation::for_study_read(&binding, digest, digest, digest).command),
+            StageId::Sketch | StageId::Scope | StageId::Approve | StageId::Integrate | StageId::Land => None,
         }
     }
 

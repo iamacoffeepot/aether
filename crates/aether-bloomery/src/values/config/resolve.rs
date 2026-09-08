@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{ConfigKind, ConfigRegistry, ConfigScopes};
 use crate::digest::{Digest, encode_hex, schema_digest};
-use crate::persisted::{PersistedSchemaError, decode_persisted, kind_named};
+use crate::persisted::{PersistedSchemaError, decode_reshaped, kind_named};
 
 /// Why a sealed configuration could not be produced.
 ///
@@ -111,7 +111,7 @@ pub fn decode_config<K: ConfigKind + DeserializeOwned + Schema>(
     }
     let decoded = kind_named(K::NAME).map_or_else(
         || decode_unnamed_config::<K>(recorded_schema, bytes),
-        |kind| decode_persisted(kind, recorded_schema, bytes, &[]),
+        |kind| decode_reshaped(kind, recorded_schema, bytes),
     );
     decoded.map_err(|error| match error {
         PersistedSchemaError::Decode(_) => ConfigResolveError::Decode { kind: K::NAME },
@@ -268,6 +268,9 @@ mod tests {
     use aether_data::wire::to_vec;
 
     use super::*;
+    use crate::persisted::MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST;
+    use crate::values::ModelProcessInstructions;
+    use crate::values::process_instructions_pre_reader::ModelProcessInstructionsPreReader;
 
     #[aether_data::kind(name = "aether.bloomery.test_resolve_alpha", eq)]
     struct Alpha {
@@ -405,5 +408,34 @@ mod tests {
 
         assert_eq!(configs.resolve::<Alpha>(ConfigScopes::member_of(&member, &bloom)), Ok(Some(inner)));
         assert_eq!(configs.resolve::<Alpha>(ConfigScopes::bloom_wide(&bloom)), Ok(Some(outer)));
+    }
+
+    // Tripwire: ADR-0216 appended two fields to the sealed instruction bundle
+    // and the wire is positional, so a bundle sealed under ADR-0214 carries
+    // seventeen fields where today's decoder reads nineteen and runs out of
+    // bytes. This is the generic config read reaching the registered pre-reader
+    // rewriter — the registry entry alone does not carry a row forward, and
+    // before it every already-sealed bundle resolved as `NoUpcast`.
+    #[test]
+    fn a_pre_reader_instruction_bundle_resolves_through_its_pinned_upcast() {
+        let prior = ModelProcessInstructionsPreReader {
+            conventions: String::from("follow conventions"),
+            composition_refine_order: String::from("refine in composition order"),
+            ..ModelProcessInstructionsPreReader::default()
+        };
+
+        let decoded: ModelProcessInstructions = decode_config(
+            ModelProcessInstructions::NAME,
+            &to_vec(&prior).expect("a pre-reader bundle encodes"),
+            Some(MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST.as_bytes()),
+        )
+        .expect("a bundle stamped c0a9677a… decodes through the pre-reader upcast");
+
+        assert_eq!(decoded.conventions, prior.conventions);
+        assert_eq!(decoded.composition_refine_order, prior.composition_refine_order);
+        assert!(
+            decoded.retrospect.is_empty() && decoded.retrospect_finding_contract.is_empty(),
+            "a pre-reader bundle names no reader instructions, and none may be invented for it"
+        );
     }
 }

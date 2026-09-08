@@ -1,6 +1,13 @@
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
+// The three colour kinds keep the explicit derive: `#[aether_data::kind]`'s
+// `pod` option drops serde, and these do cross the JSON boundary — the
+// `serde_json_shape_is_named_components` tripwire below round-trips `Rgba`
+// through `serde_json`. Naming the bytemuck pair through the attribute's
+// `derive(...)` escape hatch would state the set exactly but leave the crate
+// with no first-party mention of `serde`, trading a shorter attribute for a
+// `cargo-machete` suppression.
 #[repr(C)]
 #[derive(
     Copy,

@@ -355,7 +355,6 @@ dependencies = [
  "aether-substrate",
  "arboard",
  "inventory",
- "serde",
 ]
 
 [[package]]
