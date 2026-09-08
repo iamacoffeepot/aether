@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 #[cfg(feature = "github")]
 use aether_bloomery::SharedCorrespondence;
+use aether_bloomery::StoreClass;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_http::{HttpServerCapability, HttpServerConfig};
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
@@ -570,6 +571,55 @@ fn one_journal_path(
     }
 }
 
+/// The GitHub backend and `AETHER_STORE_CLASS` name one world (ADR-0184).
+///
+/// A coordinator running against the fixture repository is a calibration host,
+/// and its rows belong in a trial store; anything else is live operation. The
+/// class knob exists so that intent can be *stated and checked* — an unset one
+/// takes the backend's answer, and a set one that disagrees is a boot fault
+/// rather than a silent preference for one knob over the other. Refusing here
+/// means a benchmark run whose store knob was corrected but whose backend knob
+/// was not (or the reverse) stops at boot instead of measuring the wrong world.
+fn one_store_class(store: &StoreConfig, uses_fixture: bool) -> Result<StoreClass, ConfigError> {
+    let implied = if uses_fixture {
+        StoreClass::Trial
+    } else {
+        StoreClass::Live
+    };
+    let declared =
+        store.class().map_err(|error| ConfigError::unparseable("AETHER_STORE_CLASS", store.class.as_str(), error))?;
+    if !store.class.trim().is_empty() && declared != implied {
+        return Err(ConfigError::unparseable(
+            "AETHER_STORE_CLASS",
+            store.class.as_str(),
+            SplitStoreClass { declared, implied },
+        ));
+    }
+    Ok(implied)
+}
+
+/// Why a stated journal class that disagrees with the GitHub backend is refused
+/// rather than one of them winning.
+#[derive(Debug)]
+struct SplitStoreClass {
+    declared: StoreClass,
+    implied: StoreClass,
+}
+
+impl fmt::Display for SplitStoreClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "AETHER_STORE_CLASS names {} but AETHER_GITHUB_BACKEND implies {}; trial mode is the fixture backend and \
+             a trial store together (ADR-0184), so set both or neither",
+            self.declared.as_str(),
+            self.implied.as_str(),
+        )
+    }
+}
+
+impl Error for SplitStoreClass {}
+
 /// Why two journal-path flags that disagree are refused rather than opening
 /// two stores.
 #[derive(Debug)]
@@ -700,7 +750,15 @@ impl BootableChassis for BloomeryChassis {
         if LaneProgram::parse(&env.coordinator.local_lane_program) == LaneProgram::default() {
             KitReport::inspect().log_at_boot();
         }
-        let BloomeryEnv { rpc_port, http_port, store, artifacts, github, notify, coordinator, session, signing } = env;
+        let BloomeryEnv { rpc_port, http_port, mut store, artifacts, github, notify, coordinator, session, signing } =
+            env;
+        // Trial mode is one mode, not two knobs (ADR-0184): the journal's class
+        // follows the GitHub backend, and a class stated on its own knob has to
+        // agree with it. The store capability then stamps this into a fresh
+        // journal and compares it against the stamp of one that already exists,
+        // so a benchmark run cannot append to live history.
+        let store_class = one_store_class(&store, github.uses_fixture())?;
+        store.class = store_class.as_str().to_owned();
         // Capture the tier-policy path before `github` is moved into the source
         // cap below; the api cap's pre-seal approve gate loads it at init (#3583).
         let approval_policy_file = coordinator.approval_policy_file.clone();
@@ -734,6 +792,7 @@ impl BootableChassis for BloomeryChassis {
             .with_actor::<ControlCore>(ControlSetup {
                 poll_interval_secs: coordinator.poll_interval_secs,
                 artifacts_root: coordinator.artifacts_root,
+                store_class,
             })
             .with_actor_configured::<ArtifactsCapability>((), artifacts)
             .with_actor::<MirrorReactorCapability>(setups.mirror)
@@ -820,7 +879,11 @@ impl BootableChassis for BloomeryChassis {
     fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Result<Builder<Self>, BootError> {
         env.coordinator.authority()?;
         KitReport::inspect().log_at_boot();
-        let BloomeryEnv { rpc_port, http_port, store, artifacts, coordinator, session, signing } = env;
+        let BloomeryEnv { rpc_port, http_port, mut store, artifacts, coordinator, session, signing } = env;
+        // No GitHub adapter is linked, so there is no fixture to run a benchmark
+        // against and the only class this build can resolve is live.
+        let store_class = one_store_class(&store, false)?;
+        store.class = store_class.as_str().to_owned();
         let approval_policy_file = coordinator.approval_policy_file.clone();
         let worktree_base = coordinator.local_worktree_base.clone();
         let artifacts_root = coordinator.artifacts_root.clone();
@@ -838,6 +901,7 @@ impl BootableChassis for BloomeryChassis {
             .with_actor::<ControlCore>(ControlSetup {
                 poll_interval_secs: coordinator.poll_interval_secs,
                 artifacts_root: coordinator.artifacts_root,
+                store_class,
             })
             .with_actor_configured::<ArtifactsCapability>((), artifacts)
             .with_actor_configured::<SessionPoolCapability>((), session)

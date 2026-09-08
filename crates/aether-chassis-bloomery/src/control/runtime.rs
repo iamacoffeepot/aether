@@ -50,8 +50,8 @@ use aether_bloomery::control::{
 use aether_bloomery::{
     BloomId, BloomStatus, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, DAYS_CAP, Decision,
     Decisions, Digest, Event, EvidenceKind, Fact, IdempotencyKey, METRICS_DEFAULT_LIMIT, METRICS_MAX_LIMIT,
-    MetricsLedger, OperatorRepairError, Outcome, Question, ResolvedConfigs, Snapshot, SpendWindow, StudyRecord,
-    Unproducible, ViewDocument, decode_recorded_decisions, decode_recorded_event, encode_row, grade,
+    MetricsLedger, OperatorRepairError, Outcome, Question, ResolvedConfigs, Snapshot, SpendWindow, StoreClass,
+    StudyRecord, Unproducible, ViewDocument, decode_recorded_decisions, decode_recorded_event, encode_row, grade,
     is_active_unlanded, measure, reduce, view_of, why_of, window_label,
 };
 
@@ -173,6 +173,12 @@ pub struct ControlCoreState {
     /// commit — so accumulating it costs one call beside `Snapshot::apply` and
     /// re-deriving it would cost a second whole-journal read per request.
     calibration: CalibrationLedger,
+    /// Which world the journal this core folds records (ADR-0184). A boot fact
+    /// the store capability already proved against the journal's own stamp, so
+    /// it is carried rather than re-read, and it rides onto every rendered
+    /// capability ledger — a benchmark run's cells must never be readable as
+    /// measurements of the estate's own operation.
+    store_class: StoreClass,
     /// Cost / timing / throughput fold, beside the snapshot and the
     /// calibration ledger. Rebuilt on journal replay; extended on each admit.
     metrics: MetricsLedger,
@@ -251,6 +257,7 @@ impl NativeActor for ControlCore {
         Ok(ControlCoreState {
             snapshot: Snapshot::default(),
             calibration: CalibrationLedger::default(),
+            store_class: config.store_class,
             metrics: MetricsLedger::default(),
             configs: ResolvedConfigs::default(),
             spend: SpendWindow::default(),
@@ -875,7 +882,7 @@ impl NativeActor for ControlCore {
             QuerySelector::Why { digest } => why_response(&state.snapshot, &digest),
             QuerySelector::Release { digest } => release_response(&state.snapshot, &digest),
             QuerySelector::Calibration => {
-                calibration_response(&state.calibration, &state.snapshot, state.artifacts.as_mut())
+                calibration_response(&state.calibration, state.store_class, &state.snapshot, state.artifacts.as_mut())
             }
         };
         inbound.reply(&result);
@@ -1180,12 +1187,13 @@ impl ControlCoreState {
 /// guessed price.
 fn calibration_response(
     ledger: &CalibrationLedger,
+    store_class: StoreClass,
     snapshot: &Snapshot,
     artifacts: Option<&mut ArtifactsCapabilityState>,
 ) -> QueryResult {
     let records = load_study_records(artifacts, snapshot);
     let document = CalibrationDocument {
-        ledger: ledger.report(|digest| records.get(digest).copied()),
+        ledger: ledger.report(store_class, |digest| records.get(digest).copied()),
         study: grade(snapshot, |digest| records.get(digest).copied()),
     };
     match to_vec(&document) {

@@ -9,6 +9,7 @@
 //! writer the WAL journal wants.
 
 use super::StoreCapability;
+use super::class::{self, StoreClassError};
 use super::commission::{
     CancelCommission, CancelCommissionResult, CommissionBackend, CommissionError, CreateCommission,
     CreateCommissionResult, EnqueueScopeRun, EnqueueScopeRunResult, ListCommissions, ListCommissionsResult,
@@ -33,12 +34,14 @@ use aether_bloomery::persisted::{DECISIONS, EVENT, kind_named};
 use aether_bloomery::{
     CommissionStatus, Commit, CommitResult, ConfigRecord, Decision, Digest, Event, JournalRecord, LoadConfigs,
     LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal,
-    ReplayJournalResult, ScopeRevision, Statement, SuppressionRequest, Topic, WorkpieceId, decode_recorded_decisions,
-    decode_recorded_event, schema_digest,
+    ReplayJournalResult, ScopeRevision, Statement, StoreClass, SuppressionRequest, Topic, WorkpieceId,
+    decode_recorded_decisions, decode_recorded_event, schema_digest,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_kinds::descriptors;
 use std::collections::HashSet;
+use std::error::Error as StdError;
+use std::fmt;
 use std::iter::repeat_n;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -830,19 +833,24 @@ impl SqliteStore {
         Ok(Self { conn, holds_journal: false })
     }
 
-    /// Open `path` as its sole coordinator generation, or refuse because
-    /// another live one already holds it.
+    /// Open `path` as its sole coordinator generation under `class`, or refuse
+    /// because the journal belongs to the other world or another live
+    /// generation already holds it.
     ///
-    /// The claim is taken *before* the migrations run, so a refused open
-    /// leaves the journal exactly as it was found — never migrated, never
-    /// written. A holder whose process is gone is stale: the claim is taken
-    /// over with a log line rather than locking a crashed generation's journal
-    /// against its own restart.
+    /// Both gates run *before* the migrations, so a refused open leaves the
+    /// journal unmigrated. The claim is taken first, because it is the gate
+    /// that answers "is anyone else already here" and a second generation must
+    /// not write even a class stamp into a journal it cannot have; a class
+    /// refusal then releases the claim it took, so a journal refused for
+    /// belonging to the other world carries nothing this process left behind.
+    /// A holder whose process is gone is stale: the claim is taken over with a
+    /// log line rather than locking a crashed generation's journal against its
+    /// own restart.
     ///
     /// # Errors
-    /// A live holder already claimed the journal, or the claim could not be
-    /// read or written.
-    pub fn open_as_holder(path: &str) -> Result<Self, JournalHolderError> {
+    /// A live holder already claimed the journal, it records a different
+    /// [`StoreClass`], or the claim or stamp could not be read or written.
+    pub fn open_as_holder(path: &str, class: StoreClass) -> Result<Self, JournalOpenError> {
         let started = Instant::now();
         let mut conn = connect(path).inspect_err(|error| log_holder_open_sqlite_failure("connect", started, error))?;
         holder::claim(&conn, path).inspect_err(|error| {
@@ -850,8 +858,70 @@ impl SqliteStore {
                 log_holder_open_sqlite_failure("claim", started, sqlite);
             }
         })?;
+        class::stamp(&conn, path, class).inspect_err(|error| {
+            holder::release(&conn);
+            if let StoreClassError::Sqlite(sqlite) = error {
+                log_holder_open_sqlite_failure("class", started, sqlite);
+            }
+        })?;
         migrate(&mut conn).inspect_err(|error| log_holder_open_sqlite_failure("migrate", started, error))?;
         Ok(Self { conn, holds_journal: true })
+    }
+
+    /// The class this journal records (ADR-0184) — [`StoreClass::Live`] for
+    /// every store written before the stamp existed.
+    ///
+    /// # Errors
+    /// The stamp could not be read, or records a name outside the vocabulary.
+    pub fn journal_class(&self) -> Result<StoreClass, StoreClassError> {
+        class::recorded(&self.conn)
+    }
+}
+
+/// Why a claiming open refused (`SqliteStore::open_as_holder`): which of its
+/// two gates said no, so an operator reads "this is the wrong journal" and
+/// "someone else is already here" as the different problems they are.
+#[derive(Debug)]
+pub enum JournalOpenError {
+    /// The journal belongs to the other world (ADR-0184).
+    Class(StoreClassError),
+    /// A live coordinator generation already holds the journal.
+    Holder(JournalHolderError),
+}
+
+impl fmt::Display for JournalOpenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Class(error) => error.fmt(f),
+            Self::Holder(error) => error.fmt(f),
+        }
+    }
+}
+
+impl StdError for JournalOpenError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Class(error) => Some(error),
+            Self::Holder(error) => Some(error),
+        }
+    }
+}
+
+impl From<StoreClassError> for JournalOpenError {
+    fn from(error: StoreClassError) -> Self {
+        Self::Class(error)
+    }
+}
+
+impl From<JournalHolderError> for JournalOpenError {
+    fn from(error: JournalHolderError) -> Self {
+        Self::Holder(error)
+    }
+}
+
+impl From<rusqlite::Error> for JournalOpenError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Holder(JournalHolderError::Sqlite(error))
     }
 }
 
@@ -3118,8 +3188,10 @@ impl NativeActor for StoreCapability {
     /// booting against the same file is refused here, before its migrations
     /// have touched anything.
     fn init(config: super::StoreConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<StoreCapabilityState, BootError> {
-        let store = SqliteStore::open_as_holder(&config.path).map_err(|error| BootError::Other(Box::new(error)))?;
-        tracing::info!(target: "aether_chassis_bloomery::store", path = %config.path, "store opened (WAL), journal claimed");
+        let class = config.class().map_err(|error| BootError::Other(Box::new(error)))?;
+        let store =
+            SqliteStore::open_as_holder(&config.path, class).map_err(|error| BootError::Other(Box::new(error)))?;
+        tracing::info!(target: "aether_chassis_bloomery::store", path = %config.path, class = class.as_str(), "store opened (WAL), journal claimed");
         Ok(StoreCapabilityState {
             backend: store,
             boot_replay_hold: Duration::from_millis(config.boot_replay_hold_millis),
