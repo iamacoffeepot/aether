@@ -1057,6 +1057,7 @@ impl LocalExecutor {
         let subject = evidence_subject(&order.transformation);
 
         Ok(PendingRun {
+            entrypoint: self.sealed_entrypoint(&nonce),
             nonce,
             command: order.transformation.command.clone(),
             checkout_hex,
@@ -1079,7 +1080,6 @@ impl LocalExecutor {
             priority,
             bloom_hex: identity.as_ref().map(|identity| aether_bloomery::encode_hex(&identity.bloom)),
             receipt_hex: Some(hex_digest(&subject)),
-            entrypoint: self.sealed_entrypoint(&nonce),
         })
     }
 
