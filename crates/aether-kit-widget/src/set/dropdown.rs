@@ -754,8 +754,11 @@ impl WasmActor for DropdownWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
+        // `intrinsic` measures and caches, so it runs before the closure
+        // borrows `self` to build the two lanes.
+        let intrinsic = self.intrinsic();
         reply_draw(ctx, &self.state, || {
-            WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic()).with_overlay(self.overlay_items())
+            WidgetDrawList::items(self.draw_items()).with_intrinsic(intrinsic).with_overlay(self.overlay_items())
         });
     }
 }

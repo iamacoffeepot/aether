@@ -25,7 +25,7 @@ use crate::text_edit::{EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEdi
 use crate::theme::{Theme, ThemeState};
 use crate::{
     Collect, FocusGained, FocusLost, SetText, SetWidgetState, TextAreaConfig, TextCommitted, WidgetControlState,
-    WidgetDrawItem, WidgetFrame,
+    WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
