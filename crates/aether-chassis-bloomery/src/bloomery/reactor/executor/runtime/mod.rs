@@ -94,6 +94,9 @@ mod strand;
 
 use strand::readopt_stranded_dispatches;
 
+mod study;
+use study::drain_and_dispatch_study;
+
 /// The self-addressed wake the poll timer fires each interval; its handler drains
 /// the dispatch topic and pulls matched results. Zero-field — the timer carries
 /// only the schedule.
@@ -185,19 +188,20 @@ impl TrackedHandle {
 /// invariant requires for it. `None` when no verdict in the current vocabulary
 /// states the fact.
 ///
-/// Every dispatched stage — member, `AggregateVerify`, and `AggregateReview` —
-/// is `ExecutorFault`. A deadline is a host observation that rendered no
-/// judgment: the child was cancelled before it judged the subject, which is
-/// the same fact as a missing evidence file or a signal-killed process. The
-/// empty verifier set is required, not optional — a timeout cannot know which
-/// verifier would have failed, and naming one would dispatch a repair lap.
+/// Every dispatched stage — member, `AggregateVerify`, `AggregateReview`, and
+/// the `Study` reader — is `ExecutorFault`. A deadline is a host observation
+/// that rendered no judgment: the child was cancelled before it judged the
+/// subject, which is the same fact as a missing evidence file or a
+/// signal-killed process. The empty verifier set is required, not optional — a
+/// timeout cannot know which verifier would have failed, and naming one would
+/// dispatch a repair lap.
 ///
 /// Exhaustive over [`StageId`] rather than wildcarded. `None` here means the
 /// order never terminates. The stages that reach it are never dispatched to an
 /// executor at all — the pre-line stages, the per-member `Review` the member
 /// walk does not enter (`StageCatalog::MEMBER_LINE` ends at `Verify`), and the
-/// bloom-level tail the coordinator performs itself — so no order carries one
-/// and none can expire. A wildcard reads a stage that later becomes
+/// bloom-level positions the coordinator performs itself — so no order carries
+/// one and none can expire. A wildcard reads a stage that later becomes
 /// dispatchable into that group silently; naming every variant makes it a
 /// compile error instead.
 fn timeout_verdict(stage: StageId) -> Option<(StageVerdict, VerifyFailureSet)> {
@@ -213,13 +217,13 @@ fn timeout_verdict(stage: StageId) -> Option<(StageVerdict, VerifyFailureSet)> {
         // terminate: without an arm here `terminate_live_order` cancels the
         // child and bails, the registry row survives, and every later sweep
         // re-selects a run nobody is waiting for.
-        | StageId::Scope => Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
-        StageId::Sketch
-        | StageId::Approve
-        | StageId::Review
-        | StageId::Integrate
-        | StageId::Land
-        | StageId::Study => None,
+        | StageId::Scope
+        // And the bloom-level reader (ADR-0216), which used to sit in the
+        // never-dispatched group below. It has one attempt and no budget, so
+        // the fault this admits is the whole account of the read: the bloom is
+        // already landed, and what expires with the order is its study.
+        | StageId::Study => Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
+        StageId::Sketch | StageId::Approve | StageId::Review | StageId::Integrate | StageId::Land => None,
     }
 }
 
@@ -593,7 +597,7 @@ fn fold_submitted_drain(
 /// handles and transient failure into the tracking and backoff the tick shares.
 ///
 /// Split out of `on_dispatch_tick` so the tick body stays inside its line
-/// budget. The five drains are one phase of the tick — what a reader needs from
+/// budget. The drains are one phase of the tick — what a reader needs from
 /// them there is that they all happen and all feed the same two pieces of
 /// state, which is exactly what the call site now says.
 fn drain_dispatch_topics(
@@ -641,6 +645,12 @@ fn drain_dispatch_topics(
     // on the same shared handle tracking and backoff window.
     let redispatched = drain_and_redispatch(store, executor, now_unix_millis);
     fold_submitted_drain(tracked, backoff, store, Topic::Redispatch, "redispatch", redispatched);
+    // Drain + submit the bloom-level readers a landing decided (ADR-0216).
+    // Last of the submitting drains because it is last on the line: its
+    // subject only exists once a bloom has landed, so nothing else this tick
+    // can be waiting behind it.
+    let studies = drain_and_dispatch_study(store, executor, now_unix_millis);
+    fold_submitted_drain(tracked, backoff, store, Topic::Study, "study", studies);
 }
 
 /// Record the newest usable heartbeat from this cycle's pending inspects and

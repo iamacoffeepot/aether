@@ -44,8 +44,8 @@ use aether_bloomery::control::{
     MemberClaimReleasePayload, MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView, ObserveMainline,
     ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, ProposalPayload, Query, QueryResult,
     QuerySelector, ReconcileOp, RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, SpendQuery,
-    SpendQueryResult, SplicePayload, Topic, TransferSeal, held_to_seal_error, held_to_supersede_error, plan_heals,
-    reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
+    SpendQueryResult, SplicePayload, StudyPayload, Topic, TransferSeal, held_to_seal_error, held_to_supersede_error,
+    plan_heals, reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
 };
 use aether_bloomery::{
     BloomId, BloomStatus, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, DAYS_CAP, Decision,
@@ -1433,7 +1433,8 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::LaneWritesObserved { bloom, .. }
         | Fact::SuppressionDisposition { bloom, .. }
         | Fact::CompositionNarrowed { bloom, .. }
-        | Fact::SurfaceGranted { bloom, .. } => Some(*bloom),
+        | Fact::SurfaceGranted { bloom, .. }
+        | Fact::StudyCompleted { bloom, .. } => Some(*bloom),
         Fact::ObserveMainline { .. }
         | Fact::ObserveMainlineDiverged { .. }
         | Fact::RequestOrphanClaimRelease { .. }
@@ -1531,7 +1532,8 @@ fn collect_decision_blooms(effect: &Decision, into: &mut BTreeSet<BloomId>) {
         | Decision::ReleaseMemberClaimRef { bloom, .. }
         | Decision::MarkBloomWithdrawn { bloom, .. }
         | Decision::RecordAggregateGatePass { bloom, .. }
-        | Decision::RecordRefusal { bloom, .. } => {
+        | Decision::RecordRefusal { bloom, .. }
+        | Decision::DispatchStudy { bloom, .. } => {
             into.insert(*bloom);
         }
         Decision::MarkSuperseded { bloom, by } => {
@@ -1725,6 +1727,7 @@ fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError>
             let payload = ProposalPayload { proposal: proposal.clone(), base: *base };
             Some(to_vec(&payload)?)
         }
+        Decision::DispatchStudy { .. } => study_outbox(effect)?,
         Decision::CancelDispatch { bloom, workpiece } => {
             let payload = CancelDispatchPayload { bloom: bloom.0, workpiece: workpiece.clone() };
             Some(to_vec(&payload)?)
@@ -1815,6 +1818,19 @@ fn aggregate_review_outbox(effect: &Decision) -> Result<Option<Vec<u8>>, WireErr
         bloom: bloom.0,
         transformation: transformation.clone(),
         pass: ReviewPass::from_roll(*roll),
+        configs: configs.clone(),
+    };
+    Ok(Some(to_vec(&payload)?))
+}
+
+fn study_outbox(effect: &Decision) -> Result<Option<Vec<u8>>, WireError> {
+    let Decision::DispatchStudy { bloom, transformation, profile, configs } = effect else {
+        return Ok(None);
+    };
+    let payload = StudyPayload {
+        bloom: bloom.0,
+        transformation: transformation.clone(),
+        profile: profile.clone(),
         configs: configs.clone(),
     };
     Ok(Some(to_vec(&payload)?))

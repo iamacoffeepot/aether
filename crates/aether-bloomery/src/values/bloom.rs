@@ -398,6 +398,25 @@ pub struct LandingReceipt {
     pub new_head: Digest,
 }
 
+impl ContentAddressed for LandingReceipt {
+    const DOMAIN: &'static str = "aether.bloomery.landing_receipt";
+}
+
+impl LandingReceipt {
+    /// The receipt's content address — `bloom.receipt` as a digest.
+    ///
+    /// The `Study` binding consumes that artifact tag (ADR-0216 §1) and every
+    /// dispatched order must pin a digest its returning evidence binds to, so
+    /// the receipt needs an address of its own. It is the whole receipt: the
+    /// bloom, the base it swapped from, and the head it swapped to — which is
+    /// exactly the landed range the reader is asked about, so an address that
+    /// named only the head would not distinguish two landings onto it.
+    #[must_use]
+    pub fn digest(&self) -> Digest {
+        digest_of(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DependencyError, MemberDependency, resolve_member_dependencies};

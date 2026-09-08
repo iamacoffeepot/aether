@@ -480,8 +480,14 @@ fn admits_member_executor_fault(stage: StageId) -> bool {
 /// It becomes a red receipt, which raises the day-level `base_alert` an
 /// operator can act on; refusing it instead leaves every sealed member withheld
 /// with nothing on the view to say why.
+///
+/// The bloom-level reader is the fourth (ADR-0216). A read whose executor never
+/// reached a verdict is exactly the "study missing" case the ADR names, and it
+/// has to be admitted rather than refused: a refusal leaves the order live, and
+/// nothing will ever answer it — the bloom has landed and no retry is bought.
 fn admits_executor_fault(stage: StageId) -> bool {
-    matches!(stage, StageId::AggregateReview | StageId::BaseVerify) || admits_member_executor_fault(stage)
+    matches!(stage, StageId::AggregateReview | StageId::BaseVerify | StageId::Study)
+        || admits_member_executor_fault(stage)
 }
 
 /// The finding a weave repair was dispatched to repair: the composition's own
@@ -525,6 +531,34 @@ fn thread_triage_note(
 ) -> rusqlite::Result<()> {
     let threaded = format!("{finding}\n\n{}", triage_note(named));
     store.record_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0, &threaded)
+}
+
+/// The admission event for the whole-bloom mechanical verdict — a bloom-level
+/// order, no member axis and no implication: a compiler names no owners, so the
+/// reducer re-opens every member on a failure.
+///
+/// Named beside [`base_verify_event`] and [`study_event`] rather than inlined,
+/// so the stage ladder in [`admit_uploaded`] reads as one arm per stage.
+fn aggregate_verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
+    Event {
+        idempotency_key: AdmissionKey::AggregateVerify.of(&record.nonce.0),
+        fact: Fact::AggregateVerifyCompleted { bloom: record.bloom, passed: verdict_passed(upload.verdict), evidence },
+    }
+}
+
+/// The admission event for the bloom-level reader's result (ADR-0216) — a
+/// bloom-level order, no member axis, and no implication: a retrospective names
+/// no owner the reducer could route to, because the bloom it read has landed.
+///
+/// One fact for a verdict and for an executor fault alike, unlike the aggregate
+/// review's pair. Neither retries, neither wedges, and the reducer files both
+/// the same way; what a downstream reader cares about rides `passed` and the
+/// evidence kind.
+fn study_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
+    Event {
+        idempotency_key: AdmissionKey::StudyCompleted.of(&record.nonce.0),
+        fact: Fact::StudyCompleted { bloom: record.bloom, passed: verdict_passed(upload.verdict), evidence },
+    }
 }
 
 /// The bloom-less whole-workspace verdict (ADR-0200): the evidence-binding
@@ -842,19 +876,11 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
             event
         }
     } else if record.stage == StageId::AggregateVerify {
-        // The whole-bloom mechanical verdict — a bloom-level order, no member
-        // axis and no implication: a compiler names no owners, so the reducer
-        // re-opens every member on a failure.
-        Event {
-            idempotency_key: AdmissionKey::AggregateVerify.of(&record.nonce.0),
-            fact: Fact::AggregateVerifyCompleted {
-                bloom: record.bloom,
-                passed: verdict_passed(upload.verdict),
-                evidence,
-            },
-        }
+        aggregate_verify_event(&record, upload, evidence)
     } else if record.stage == StageId::BaseVerify {
         base_verify_event(&record, upload, evidence)
+    } else if record.stage == StageId::Study {
+        study_event(&record, upload, evidence)
     } else {
         // An out-of-line stage never comes from a well-formed dispatch; refuse it
         // rather than folding a non-line result into the member's resolution. The

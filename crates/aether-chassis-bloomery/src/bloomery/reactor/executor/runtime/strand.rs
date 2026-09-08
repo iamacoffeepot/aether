@@ -80,12 +80,22 @@ use crate::bloomery::intake::{AdmissionKey, dispatch_nonce};
 use crate::bloomery::outbox::TopicOutbox;
 use crate::store::StoreBackend;
 
-/// The outbox topics whose entries dispatch under a [`dispatch_nonce`] and
-/// admit under an [`AdmissionKey`] — every topic the executor reactor drains
-/// into a work order.
+/// The outbox topics whose entries dispatch under a [`dispatch_nonce`], admit
+/// under an [`AdmissionKey`], and belong to a bloom this recovery can still
+/// answer for.
 ///
 /// The other reducer topics (land, integration, receipts, claim releases) do not
 /// mint orders, so they have no nonce to strand.
+///
+/// [`Topic::Study`] mints an order and is deliberately absent (ADR-0216). The
+/// last question [`is_stranded`] asks is whether the bloom still holds an active
+/// membership, and the reader is dispatched *at the landing* that released every
+/// one — so a stranded read could only ever be answered `false` here, and
+/// listing it would read as recovery while recovering nothing. Re-queueing it
+/// instead would mean re-deciding a lane with a one-attempt budget after the
+/// only bloom that could refuse it is closed. A read lost to an ill-timed crash
+/// is a study that does not exist, which is the failure mode the ADR accepts by
+/// name: findings are a product, never a gate.
 const ORDER_BEARING_TOPICS: [Topic; 5] =
     [Topic::Dispatch, Topic::AggregateReview, Topic::AggregateVerify, Topic::ScopeDispatch, Topic::BaseVerify];
 

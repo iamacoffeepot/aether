@@ -49,6 +49,11 @@ fn a_signed_proposal_waits_for_the_board_and_lands() {
     assert_eq!(harness.bloom(bloom).status, BloomStatus::Landed);
     let member_head = harness.view().mainline;
 
+    // The landed bloom's reader goes out at its landing (ADR-0216). Answered
+    // here so the only order left below is the proposal bloom's own gate.
+    let study = harness.await_order();
+    harness.upload_admitted(&passed(&study));
+
     let proposal_bloom = await_proposal_bloom(&mut harness);
     let view = harness.bloom(proposal_bloom);
     assert!(view.members.is_empty(), "a proposal bloom has no members: {view:?}");

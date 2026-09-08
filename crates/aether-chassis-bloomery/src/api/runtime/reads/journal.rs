@@ -129,7 +129,8 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
         | Fact::LaneWritesObserved { bloom, .. }
         | Fact::SuppressionDisposition { bloom, .. }
         | Fact::CompositionNarrowed { bloom, .. }
-        | Fact::SurfaceGranted { bloom, .. } => vec![*bloom],
+        | Fact::SurfaceGranted { bloom, .. }
+        | Fact::StudyCompleted { bloom, .. } => vec![*bloom],
         Fact::ObserveMainline { .. }
         | Fact::ObserveMainlineDiverged { .. }
         | Fact::SurfaceOverlap { .. }
