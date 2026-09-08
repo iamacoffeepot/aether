@@ -86,7 +86,7 @@ impl VerifyGateSet {
     /// The gate set the compiled member verify lane runs — [`Self::member_of`]
     /// over [`PipelineManifest::compiled`].
     ///
-    /// [`VerifyFailure::Docs`] is absent from that compiled run list, and that
+    /// [`crate::VerifyFailure::Docs`] is absent from that compiled run list, and that
     /// absence is the whole of what separates this vocabulary from
     /// [`Self::fold`]'s. Documentation correctness is a whole-workspace
     /// property — an intra-doc link resolves across crates, so a member's
@@ -113,7 +113,7 @@ impl VerifyGateSet {
     /// [`Self::base_of`] over [`PipelineManifest::compiled`].
     ///
     /// Identical verifier list, image, and network as [`Self::fold`] in the
-    /// compiled vocabulary — [`VerifyFailure::Docs`] included, which is what
+    /// compiled vocabulary — [`crate::VerifyFailure::Docs`] included, which is what
     /// lets a landing mint a base receipt from a fold proof at all. The
     /// differing command is deliberate: a closure-narrowed proof must not
     /// satisfy the whole-workspace base question.

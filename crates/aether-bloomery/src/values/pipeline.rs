@@ -419,7 +419,7 @@ fn commands(compiled: &[&str]) -> Vec<String> {
 
 /// The declared spelling of each compiled verifier identity, in canonical
 /// order — the order both [`VerifyFailure::ALL`] and a
-/// [`VerifyGateSet`]'s set iterate in.
+/// [`crate::VerifyGateSet`]'s set iterate in.
 fn identities(compiled: impl Iterator<Item = VerifyFailure>) -> Vec<String> {
     compiled.map(|identity| String::from(identity.as_str())).collect()
 }

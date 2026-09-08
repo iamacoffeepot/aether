@@ -39,14 +39,8 @@ fn a_member_verify_runs_the_sealed_manifests_gates() {
     let template = harness.successor_draft(&[member(MEMBER, digest(0x51))]);
     let mut configs = template.configs().clone();
     configs.insert::<PipelineManifest>(derived_manifest(&harness, base));
-    let spec = BloomDraft {
-        proposals: template.members().to_vec(),
-        base,
-        configs,
-        forecast: template.forecast(),
-        ..BloomDraft::default()
-    }
-    .seal();
+    let spec =
+        BloomDraft { proposals: template.members().to_vec(), base, configs, forecast: template.forecast() }.seal();
     let bloom = spec.id();
 
     match harness.admit("seal-against-a-base-that-dropped-a-member-gate", Fact::Seal(spec)) {

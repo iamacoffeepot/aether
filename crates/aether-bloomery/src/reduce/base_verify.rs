@@ -35,10 +35,10 @@ pub(super) fn reduce_base_verify_completed(
     evidence: &Evidence,
     failed: VerifyFailureSet,
 ) -> Decisions {
-    let gate_set = sealed_on_tree(snapshot, base, tree)
-        .next()
-        .map(|(_, record)| VerifyGateSet::base_of(&record.pipeline_manifest).digest())
-        .unwrap_or_else(|| VerifyGateSet::base().digest());
+    let gate_set = sealed_on_tree(snapshot, base, tree).next().map_or_else(
+        || VerifyGateSet::base().digest(),
+        |(_, record)| VerifyGateSet::base_of(&record.pipeline_manifest).digest(),
+    );
     let receipt = BaseReceipt {
         base,
         tree,

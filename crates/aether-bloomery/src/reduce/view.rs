@@ -89,10 +89,10 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
 fn base_alert_of(snapshot: &Snapshot) -> Option<BaseAlertView> {
     let sealed = snapshot.blooms.values().find(|record| record.status == BloomStatus::Sealed);
     let base = sealed.map_or(snapshot.observed, |record| record.spec.base());
-    let receipt = match sealed {
-        Some(record) => snapshot.base_receipt_under(base, VerifyGateSet::base_of(&record.pipeline_manifest).digest()),
-        None => snapshot.base_receipt_for(base),
-    }?;
+    let receipt = sealed.map_or_else(
+        || snapshot.base_receipt_for(base),
+        |record| snapshot.base_receipt_under(base, VerifyGateSet::base_of(&record.pipeline_manifest).digest()),
+    )?;
     let BaseVerdict::Red { evidence, failed } = &receipt.verdict else {
         return None;
     };
