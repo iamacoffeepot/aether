@@ -7,43 +7,64 @@ use aether_kinds::{DescribeComponent, DescribeComponentResult};
 use std::collections::VecDeque;
 use std::fs;
 
-/// `describe_kinds` with no `engine_id` and an empty hub returns the
-/// substrate static inventory. The logical compact result is a non-empty array
-/// of `{name,shape}` objects; target-specific inventories over the generic
-/// response threshold arrive through the documented lossless spill envelope.
+/// A well-formed engine UUID no hub in these fixtures supervises. Every
+/// engine-taking tool now resolves its engine through the shared resolver,
+/// so a static-vocabulary assertion names an engine explicitly: the live
+/// refresh against it fails silently and leaves the prefilled substrate
+/// baseline, which is exactly the snapshot these cases assert over.
+fn unsupervised_engine() -> String {
+    EngineId(Uuid::from_u128(0x5715_0000_0001)).0.to_string()
+}
+
+/// The `kinds` array out of a `describe_kinds` reply, following the
+/// documented lossless spill envelope when the response is over threshold.
+/// Returns the array plus the spill summary when one was taken.
+fn kinds_array(out: &str) -> (Vec<serde_json::Value>, Option<serde_json::Value>) {
+    let result: serde_json::Value = serde_json::from_str(out).expect("describe_kinds result is JSON");
+    if let Some(kinds) = result.get("kinds") {
+        return (kinds.as_array().expect("kinds is an array").clone(), None);
+    }
+    let file = result["file"].as_str().expect("oversized result names its spill file");
+    let bytes = result["bytes"].as_u64().expect("oversized result reports its byte length");
+    assert!(
+        bytes > u64::try_from(response_inline_max_bytes()).expect("response threshold fits u64"),
+        "only an over-threshold response may spill: {result}",
+    );
+    let body = fs::read_to_string(file).expect("spilled describe_kinds response is readable");
+    fs::remove_file(file).expect("remove consumed describe_kinds spill");
+    assert_eq!(u64::try_from(body.len()).expect("response length fits u64"), bytes);
+    let spilled: serde_json::Value = serde_json::from_str(&body).expect("spilled response is the reply object");
+    (spilled["kinds"].as_array().expect("spilled kinds is an array").clone(), Some(result["summary"].clone()))
+}
+
+/// The `families` digest out of a `describe_kinds(families: true)` reply.
+fn families_array(out: &str) -> Vec<serde_json::Value> {
+    let result: serde_json::Value = serde_json::from_str(out).expect("describe_kinds result is JSON");
+    assert!(result.get("kinds").is_none(), "a families digest carries no kinds key: {result}");
+    result["families"].as_array().expect("families is an array").clone()
+}
+
+/// `describe_kinds` against a named engine the hub cannot reach returns the
+/// prefilled substrate baseline: a non-empty `kinds` array of `{name,shape}`
+/// objects under the engine that was asked for. Target-specific inventories
+/// over the generic response threshold arrive through the documented lossless
+/// spill envelope.
 #[tokio::test]
 async fn describe_kinds_returns_the_substrate_inventory() {
     let (_chassis, port) = boot_hub();
     let mcp = connect_mcp(port);
+    let engine_id = unsupervised_engine();
     let out = mcp
         .describe_kinds(Parameters(DescribeKindsArgs {
-            engine_id: None,
+            engine_id: Some(engine_id.clone()),
             families: false,
             names: None,
             prefix: None,
-            full: false,
+            detail: KindDetail::Shape,
         }))
         .await
         .expect("describe_kinds ok");
-    let result: serde_json::Value = serde_json::from_str(&out).expect("describe_kinds result is JSON");
-    let (arr, spill_summary) = result.as_array().map_or_else(
-        || {
-            let file = result["file"].as_str().expect("oversized result names its spill file");
-            let bytes = result["bytes"].as_u64().expect("oversized result reports its byte length");
-            assert!(
-                bytes > u64::try_from(response_inline_max_bytes()).expect("response threshold fits u64"),
-                "only an over-threshold response may spill: {result}",
-            );
-            let body = fs::read_to_string(file).expect("spilled describe_kinds response is readable");
-            fs::remove_file(file).expect("remove consumed describe_kinds spill");
-            assert_eq!(u64::try_from(body.len()).expect("response length fits u64"), bytes);
-            (
-                serde_json::from_str::<Vec<serde_json::Value>>(&body).expect("spilled response is the compact array"),
-                Some(&result["summary"]),
-            )
-        },
-        |arr| (arr.clone(), None),
-    );
+    let (arr, _) = kinds_array(&out);
     assert!(!arr.is_empty(), "describe_kinds should list the substrate vocabulary");
     let first = &arr[0];
     assert!(
@@ -51,10 +72,48 @@ async fn describe_kinds_returns_the_substrate_inventory() {
         "compact entry must carry name and shape, got: {first}",
     );
     assert!(first.get("schema").is_none(), "compact entry must not carry schema, got: {first}");
-    if let Some(summary) = spill_summary {
-        assert_eq!(summary["kind"], "array");
-        assert_eq!(summary["count"].as_u64(), u64::try_from(arr.len()).ok());
-    }
+}
+
+/// The reply names the engine that answered, so an auto-resolved snapshot is
+/// never anonymous. Catches a projection that drops the echo and leaves a
+/// caller unable to tell which engine's vocabulary it just read.
+#[tokio::test]
+async fn describe_kinds_echoes_the_engine_that_answered() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let engine_id = unsupervised_engine();
+    let out = mcp
+        .describe_kinds(Parameters(DescribeKindsArgs {
+            engine_id: Some(engine_id.clone()),
+            families: true,
+            names: None,
+            prefix: None,
+            detail: KindDetail::Shape,
+        }))
+        .await
+        .expect("describe_kinds ok");
+    let result: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(result["engine_id"], engine_id, "the reply names the engine it answered from: {out}");
+}
+
+/// With no `engine_id` and no supervised engine, the shared resolver refuses
+/// rather than silently answering from the static baseline — the pre-0.4
+/// behaviour that changed a reply's provenance with no field saying so.
+#[tokio::test]
+async fn engine_taking_tools_refuse_an_unresolvable_engine() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let error = mcp
+        .describe_kinds(Parameters(DescribeKindsArgs {
+            engine_id: None,
+            families: false,
+            names: None,
+            prefix: None,
+            detail: KindDetail::Shape,
+        }))
+        .await
+        .expect_err("an omitted engine_id with no supervised engine is an error");
+    assert!(error.message.contains("supervises no engine"), "the error names the situation: {}", error.message);
 }
 
 /// `describe_kinds(families=true)` returns a sorted digest rather than
@@ -65,15 +124,15 @@ async fn describe_kinds_families_returns_digest() {
     let mcp = connect_mcp(port);
     let out = mcp
         .describe_kinds(Parameters(DescribeKindsArgs {
-            engine_id: None,
+            engine_id: Some(unsupervised_engine()),
             families: true,
             names: None,
             prefix: None,
-            full: false,
+            detail: KindDetail::Shape,
         }))
         .await
         .expect("families digest succeeds");
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+    let rows = families_array(&out);
     assert!(!rows.is_empty(), "families digest should not be empty");
     for row in &rows {
         assert!(row.get("family").is_some() && row.get("count").is_some(), "digest row shape: {row}");
@@ -94,15 +153,15 @@ async fn describe_kinds_families_with_prefix_digests_subset() {
     let mcp = connect_mcp(port);
     let out = mcp
         .describe_kinds(Parameters(DescribeKindsArgs {
-            engine_id: None,
+            engine_id: Some(unsupervised_engine()),
             families: true,
             names: None,
             prefix: Some("aether.fs".to_owned()),
-            full: false,
+            detail: KindDetail::Shape,
         }))
         .await
         .expect("prefix-filtered families digest succeeds");
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+    let rows = families_array(&out);
     assert!(!rows.is_empty(), "aether.fs should contain at least one family");
     assert!(
         rows.iter().all(|row| row["family"].as_str().is_some_and(|family| family.starts_with("aether.fs"))),
@@ -110,27 +169,27 @@ async fn describe_kinds_families_with_prefix_digests_subset() {
     );
 }
 
-/// `families` is the active selector when `full` is also true, so the
+/// `families` is the active selector even under `detail: "schema"`, so the
 /// digest succeeds and does not grow schema fields.
 #[tokio::test]
-async fn describe_kinds_families_ignores_full() {
+async fn describe_kinds_families_ignores_detail() {
     let (_chassis, port) = boot_hub();
     let mcp = connect_mcp(port);
     let out = mcp
         .describe_kinds(Parameters(DescribeKindsArgs {
-            engine_id: None,
+            engine_id: Some(unsupervised_engine()),
             families: true,
             names: None,
             prefix: None,
-            full: true,
+            detail: KindDetail::Schema,
         }))
         .await
-        .expect("families plus full succeeds as a digest");
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+        .expect("families plus detail:schema succeeds as a digest");
+    let rows = families_array(&out);
     assert!(!rows.is_empty(), "families digest should not be empty");
     assert!(
         rows.iter().all(|row| row.get("family").is_some() && row.get("schema").is_none()),
-        "full is ignored for the family digest: {rows:?}",
+        "detail is ignored for the family digest: {rows:?}",
     );
 }
 
@@ -142,15 +201,15 @@ async fn describe_kinds_prefix_narrows_results() {
     let mcp = connect_mcp(port);
     let out = mcp
         .describe_kinds(Parameters(DescribeKindsArgs {
-            engine_id: None,
+            engine_id: Some(unsupervised_engine()),
             families: false,
             names: None,
             prefix: Some("aether.fs".to_owned()),
-            full: false,
+            detail: KindDetail::Shape,
         }))
         .await
         .expect("describe_kinds ok");
-    let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+    let (arr, _) = kinds_array(&out);
     assert!(!arr.is_empty(), "aether.fs prefix should match at least one kind");
     for entry in &arr {
         let name = entry["name"].as_str().expect("name is a string");
@@ -166,94 +225,104 @@ async fn describe_kinds_names_returns_exact_kind() {
     let mcp = connect_mcp(port);
     let out = mcp
         .describe_kinds(Parameters(DescribeKindsArgs {
-            engine_id: None,
+            engine_id: Some(unsupervised_engine()),
             families: false,
             names: Some(vec!["aether.fs.write".to_owned()]),
             prefix: None,
-            full: false,
+            detail: KindDetail::Shape,
         }))
         .await
         .expect("exact-name lookup succeeds");
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+    let (rows, _) = kinds_array(&out);
     assert_eq!(rows.len(), 1, "exact-name lookup returns one kind: {rows:?}");
     assert_eq!(rows[0]["name"], "aether.fs.write");
     assert!(rows[0].get("shape").is_some() && rows[0].get("schema").is_none(), "compact exact row: {rows:?}");
 }
 
-/// `names` composes with `full` to return only the exact kind's nested
-/// schema.
+/// `names` composes with `detail: "schema"` to return only the exact kind's
+/// nested schema.
 #[tokio::test]
-async fn describe_kinds_names_with_full_returns_exact_schema() {
+async fn describe_kinds_names_with_schema_detail_returns_exact_schema() {
     let (_chassis, port) = boot_hub();
     let mcp = connect_mcp(port);
     let out = mcp
         .describe_kinds(Parameters(DescribeKindsArgs {
-            engine_id: None,
+            engine_id: Some(unsupervised_engine()),
             families: false,
             names: Some(vec!["aether.fs.write".to_owned()]),
             prefix: None,
-            full: true,
+            detail: KindDetail::Schema,
         }))
         .await
-        .expect("exact-name full lookup succeeds");
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
-    assert_eq!(rows.len(), 1, "exact-name full lookup returns one kind: {rows:?}");
+        .expect("exact-name schema lookup succeeds");
+    let (rows, _) = kinds_array(&out);
+    assert_eq!(rows.len(), 1, "exact-name schema lookup returns one kind: {rows:?}");
     assert_eq!(rows[0]["name"], "aether.fs.write");
-    assert!(rows[0].get("schema").is_some() && rows[0].get("shape").is_none(), "full exact row: {rows:?}");
+    assert!(rows[0].get("schema").is_some() && rows[0].get("shape").is_none(), "schema exact row: {rows:?}");
 }
 
-/// `describe_kinds(prefix=..., full=true)` returns objects with a
+/// `describe_kinds(prefix=..., detail="schema")` returns objects with a
 /// `schema` key (the full nested `SchemaType`) and no `shape` key.
 #[tokio::test]
-async fn describe_kinds_prefix_with_full_returns_schema_key() {
+async fn describe_kinds_prefix_with_schema_detail_returns_schema_key() {
     let (_chassis, port) = boot_hub();
     let mcp = connect_mcp(port);
     let out = mcp
         .describe_kinds(Parameters(DescribeKindsArgs {
-            engine_id: None,
+            engine_id: Some(unsupervised_engine()),
             families: false,
             names: None,
             prefix: Some("aether.fs".to_owned()),
-            full: true,
+            detail: KindDetail::Schema,
         }))
         .await
         .expect("describe_kinds ok");
-    let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+    let (arr, _) = kinds_array(&out);
     assert!(!arr.is_empty(), "aether.fs prefix should match at least one kind");
     for entry in &arr {
-        assert!(entry.get("schema").is_some(), "full entry must carry schema, got: {entry}");
-        assert!(entry.get("shape").is_none(), "full entry must not carry shape, got: {entry}");
+        assert!(entry.get("schema").is_some(), "schema entry must carry schema, got: {entry}");
+        assert!(entry.get("shape").is_none(), "schema entry must not carry shape, got: {entry}");
     }
 }
 
-/// Exact names are exclusive with other selectors, and unfiltered full
-/// vocabulary dumps are refused.
+/// Exact names are exclusive with other selectors, and unfiltered
+/// full-schema vocabulary dumps are refused.
 #[tokio::test]
-async fn describe_kinds_rejects_selector_conflicts_and_bare_full() {
+async fn describe_kinds_rejects_selector_conflicts_and_bare_schema_detail() {
     let (_chassis, port) = boot_hub();
     let mcp = connect_mcp(port);
+    let engine_id = unsupervised_engine();
     let cases = [
         (
             "names plus prefix",
             DescribeKindsArgs {
-                engine_id: None,
+                engine_id: Some(engine_id.clone()),
                 families: false,
                 names: Some(vec!["aether.fs.write".to_owned()]),
                 prefix: Some("aether.fs".to_owned()),
-                full: false,
+                detail: KindDetail::Shape,
             },
         ),
         (
             "names plus families",
             DescribeKindsArgs {
-                engine_id: None,
+                engine_id: Some(engine_id.clone()),
                 families: true,
                 names: Some(vec!["aether.fs.write".to_owned()]),
                 prefix: None,
-                full: false,
+                detail: KindDetail::Shape,
             },
         ),
-        ("bare full", DescribeKindsArgs { engine_id: None, families: false, names: None, prefix: None, full: true }),
+        (
+            "bare schema detail",
+            DescribeKindsArgs {
+                engine_id: Some(engine_id),
+                families: false,
+                names: None,
+                prefix: None,
+                detail: KindDetail::Schema,
+            },
+        ),
     ];
     for (label, args) in cases {
         let result = mcp.describe_kinds(Parameters(args)).await;
@@ -269,15 +338,15 @@ async fn describe_kinds_nonmatching_prefix_returns_empty() {
     let mcp = connect_mcp(port);
     let out = mcp
         .describe_kinds(Parameters(DescribeKindsArgs {
-            engine_id: None,
+            engine_id: Some(unsupervised_engine()),
             families: false,
             names: None,
             prefix: Some("zzz.does.not.exist".to_owned()),
-            full: false,
+            detail: KindDetail::Shape,
         }))
         .await
         .expect("describe_kinds returns ok even with no matches");
-    let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+    let (arr, _) = kinds_array(&out);
     assert!(arr.is_empty(), "non-matching prefix should return empty array, got {arr:?}");
 }
 
@@ -316,11 +385,11 @@ async fn describe_kinds_live_path_surfaces_component_defined_kind() {
             families: false,
             names: None,
             prefix: None,
-            full: false,
+            detail: KindDetail::Shape,
         }))
         .await
         .expect("describe_kinds ok with engine_id");
-    let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+    let (arr, _) = kinds_array(&out);
     assert!(
         arr.iter().any(|e| e["name"].as_str() == Some(&component_kind.name)),
         "describe_kinds must surface the component-defined kind from the engine cache; \
@@ -345,8 +414,8 @@ async fn describe_component_reads_the_cache() {
     // live, so the cache is the only source).
     let miss = mcp
         .describe_component(Parameters(DescribeComponentArgs {
-            engine_id: engine_id.to_owned(),
-            component: tagged.clone(),
+            engine_id: Some(engine_id.to_owned()),
+            address: tagged.clone(),
             full: false,
         }))
         .await;
@@ -373,13 +442,16 @@ async fn describe_component_reads_the_cache() {
         .insert((engine, mailbox), seeded);
     let hit = mcp
         .describe_component(Parameters(DescribeComponentArgs {
-            engine_id: engine_id.to_owned(),
-            component: tagged.clone(),
+            engine_id: Some(engine_id.to_owned()),
+            address: tagged.clone(),
             full: false,
         }))
         .await
         .expect("cached component describes");
-    let caps: serde_json::Value = serde_json::from_str(&hit).expect("json");
+    let reply: serde_json::Value = serde_json::from_str(&hit).expect("json");
+    assert_eq!(reply["engine_id"], engine_id, "the reply names the engine it answered from: {hit}");
+    assert_eq!(reply["address"], tagged, "the reply echoes the address asked for: {hit}");
+    let caps = &reply["capabilities"];
     assert!(caps.get("handlers").is_some(), "capabilities shape: {hit}");
     assert!(!caps["handlers"][0]["reply"].is_null(), "the handler's ADR-0109 reply contract is surfaced: {hit}");
     assert_eq!(
@@ -388,14 +460,17 @@ async fn describe_component_reads_the_cache() {
     );
     let hit_full = mcp
         .describe_component(Parameters(DescribeComponentArgs {
-            engine_id: engine_id.to_owned(),
-            component: tagged,
+            engine_id: Some(engine_id.to_owned()),
+            address: tagged,
             full: true,
         }))
         .await
         .expect("full describe keeps multi-line docs");
-    let caps_full: serde_json::Value = serde_json::from_str(&hit_full).expect("json");
-    assert_eq!(caps_full["handlers"][0]["doc"], multi_doc, "full=true keeps the wire doc string: {hit_full}");
+    let reply_full: serde_json::Value = serde_json::from_str(&hit_full).expect("json");
+    assert_eq!(
+        reply_full["capabilities"]["handlers"][0]["doc"], multi_doc,
+        "full=true keeps the wire doc string: {hit_full}"
+    );
 }
 
 #[tokio::test]
@@ -428,14 +503,14 @@ async fn describe_component_uses_the_engine_resolved_id_and_forwards_the_supplie
 
     let output = mcp
         .describe_component(Parameters(DescribeComponentArgs {
-            engine_id: engine.0.to_string(),
-            component: supplied.to_owned(),
+            engine_id: Some(engine.0.to_string()),
+            address: supplied.to_owned(),
             full: false,
         }))
         .await
         .expect("name-addressed describe resolves and forwards");
     let output: serde_json::Value = serde_json::from_str(&output).expect("json");
-    assert_eq!(output["handlers"][0]["name"], "test.by_name");
+    assert_eq!(output["capabilities"]["handlers"][0]["name"], "test.by_name");
     assert!(
         mcp.components.lock().expect("component cache mutex is never poisoned").contains_key(&(engine, engine_answer)),
         "capabilities cache uses the engine-returned id"

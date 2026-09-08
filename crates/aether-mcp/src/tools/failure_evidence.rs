@@ -10,11 +10,12 @@ use tokio::time::{self, Instant};
 use crate::args::{
     ActorCostArgs, ActorFailureEvidence, ActorLogsArgs, CaptureFrameArgs, CollectFailureEvidenceArgs,
     DescribeComponentArgs, DescribeKindsArgs, FailureEvidenceBundle, FailureEvidenceFleet, FailureEvidenceLimits,
-    FailureEvidenceObservation, FrameFailureEvidence, ListEnginesArgs, ListEnginesResponse, NamedFailureEvidence,
+    FailureEvidenceObservation, FrameFailureEvidence, KindDetail, ListEnginesArgs, ListEnginesResponse,
+    NamedFailureEvidence,
 };
 
 use super::Mcp;
-use super::ids::{parse_engine_id, parse_window_id};
+use super::ids::parse_window_id;
 use super::render::internal_msg;
 
 pub(super) const MAX_FAILURE_EVIDENCE_ACTORS: usize = 8;
@@ -33,9 +34,9 @@ pub(super) const MAX_KIND_NAME_BYTES: usize = 256;
 pub(super) enum FailureEvidenceQuery {
     Fleet { engine_id: String },
     Kinds { engine_id: String, names: Vec<String> },
-    Component { engine_id: String, component: String },
-    ActorLogs { engine_id: String, mailbox_name: String, max: u32 },
-    ActorCost { engine_id: String, mailbox_name: String },
+    Component { engine_id: String, address: String },
+    ActorLogs { engine_id: String, address: String, max: u32 },
+    ActorCost { engine_id: String, address: String },
     Frame { engine_id: String, window_id: String, scale: Option<f32>, max_dimension: Option<u32> },
 }
 
@@ -85,28 +86,28 @@ impl FailureEvidenceSource for McpFailureEvidenceSource<'_> {
                             families: false,
                             names: Some(names),
                             prefix: None,
-                            full: true,
+                            detail: KindDetail::Schema,
                         },
                     )
                     .await
                     .map_err(mcp_error_message)?;
                     parse_tool_json("describe_kinds", &body).map(FailureEvidenceValue::Json)
                 }
-                FailureEvidenceQuery::Component { engine_id, component } => {
+                FailureEvidenceQuery::Component { engine_id, address } => {
                     let body = super::describe::describe_component(
                         self.mcp,
-                        DescribeComponentArgs { engine_id, component, full: true },
+                        DescribeComponentArgs { engine_id: Some(engine_id), address, full: true },
                     )
                     .await
                     .map_err(mcp_error_message)?;
                     parse_tool_json("describe_component", &body).map(FailureEvidenceValue::Json)
                 }
-                FailureEvidenceQuery::ActorLogs { engine_id, mailbox_name, max } => {
+                FailureEvidenceQuery::ActorLogs { engine_id, address, max } => {
                     let body = super::logs_cost::actor_logs(
                         self.mcp,
                         ActorLogsArgs {
-                            engine_id,
-                            mailbox_name,
+                            engine_id: Some(engine_id),
+                            address,
                             max: Some(max),
                             level: None,
                             since: None,
@@ -117,10 +118,10 @@ impl FailureEvidenceSource for McpFailureEvidenceSource<'_> {
                     .map_err(mcp_error_message)?;
                     parse_tool_json("actor_logs", &body).map(FailureEvidenceValue::Json)
                 }
-                FailureEvidenceQuery::ActorCost { engine_id, mailbox_name } => {
+                FailureEvidenceQuery::ActorCost { engine_id, address } => {
                     let body = super::logs_cost::actor_cost(
                         self.mcp,
-                        ActorCostArgs { engine_id, mailbox_name, kind_id: None },
+                        ActorCostArgs { engine_id: Some(engine_id), address, kind_id: None },
                     )
                     .await
                     .map_err(mcp_error_message)?;
@@ -155,7 +156,7 @@ pub(super) fn failure_evidence_capture_args(
     max_dimension: Option<u32>,
 ) -> CaptureFrameArgs {
     CaptureFrameArgs {
-        engine_id,
+        engine_id: Some(engine_id),
         window_id,
         mails: Vec::new(),
         after_mails: Vec::new(),
@@ -232,14 +233,21 @@ fn validate_selectors(
     Ok(())
 }
 
+/// Validate every selector the bundle will observe. The engine is resolved
+/// by the shared engine resolver before this runs, so `engine_id` is not
+/// among them.
 pub(super) fn validate_failure_evidence_args(args: &mut CollectFailureEvidenceArgs) -> Result<(), McpError> {
-    args.engine_id = parse_engine_id(&args.engine_id)?.0.to_string();
     validate_text(&args.primary_error, "primary_error", MAX_PRIMARY_ERROR_BYTES)?;
     if let Some(operation) = &args.operation {
         validate_text(operation, "operation", MAX_OPERATION_BYTES)?;
     }
-    validate_selectors(&mut args.actors, "actors", MAX_FAILURE_EVIDENCE_ACTORS, MAX_ADDRESS_BYTES)?;
-    validate_selectors(&mut args.components, "components", MAX_FAILURE_EVIDENCE_COMPONENTS, MAX_ADDRESS_BYTES)?;
+    validate_selectors(&mut args.actor_addresses, "actor_addresses", MAX_FAILURE_EVIDENCE_ACTORS, MAX_ADDRESS_BYTES)?;
+    validate_selectors(
+        &mut args.component_addresses,
+        "component_addresses",
+        MAX_FAILURE_EVIDENCE_COMPONENTS,
+        MAX_ADDRESS_BYTES,
+    )?;
     validate_selectors(&mut args.kinds, "kinds", MAX_FAILURE_EVIDENCE_KINDS, MAX_KIND_NAME_BYTES)?;
     if let Some(frame) = &args.frame {
         parse_window_id(&frame.window_id)?;
@@ -288,6 +296,7 @@ pub(super) fn failure_evidence_result_with_spill(
 }
 
 pub(super) async fn collect_failure_evidence_with_source<S: FailureEvidenceSource>(
+    engine_id: String,
     mut args: CollectFailureEvidenceArgs,
     source: &mut S,
     observation_timeout: Duration,
@@ -299,7 +308,7 @@ pub(super) async fn collect_failure_evidence_with_source<S: FailureEvidenceSourc
 
     let (fleet, _) = run_observation(
         source,
-        FailureEvidenceQuery::Fleet { engine_id: args.engine_id.clone() },
+        FailureEvidenceQuery::Fleet { engine_id: engine_id.clone() },
         deadline,
         observation_timeout,
     )
@@ -310,7 +319,7 @@ pub(super) async fn collect_failure_evidence_with_source<S: FailureEvidenceSourc
     } else {
         let (observation, _) = run_observation(
             source,
-            FailureEvidenceQuery::Kinds { engine_id: args.engine_id.clone(), names: args.kinds },
+            FailureEvidenceQuery::Kinds { engine_id: engine_id.clone(), names: args.kinds },
             deadline,
             observation_timeout,
         )
@@ -318,25 +327,25 @@ pub(super) async fn collect_failure_evidence_with_source<S: FailureEvidenceSourc
         Some(observation)
     };
 
-    let mut components = Vec::with_capacity(args.components.len());
-    for component in args.components {
+    let mut components = Vec::with_capacity(args.component_addresses.len());
+    for address in args.component_addresses {
         let (observation, _) = run_observation(
             source,
-            FailureEvidenceQuery::Component { engine_id: args.engine_id.clone(), component: component.clone() },
+            FailureEvidenceQuery::Component { engine_id: engine_id.clone(), address: address.clone() },
             deadline,
             observation_timeout,
         )
         .await;
-        components.push(NamedFailureEvidence { selector: component, observation });
+        components.push(NamedFailureEvidence { address, observation });
     }
 
-    let mut actors = Vec::with_capacity(args.actors.len());
-    for mailbox_name in args.actors {
+    let mut actors = Vec::with_capacity(args.actor_addresses.len());
+    for address in args.actor_addresses {
         let (logs, _) = run_observation(
             source,
             FailureEvidenceQuery::ActorLogs {
-                engine_id: args.engine_id.clone(),
-                mailbox_name: mailbox_name.clone(),
+                engine_id: engine_id.clone(),
+                address: address.clone(),
                 max: FAILURE_EVIDENCE_LOG_ENTRIES,
             },
             deadline,
@@ -345,12 +354,12 @@ pub(super) async fn collect_failure_evidence_with_source<S: FailureEvidenceSourc
         .await;
         let (cost, _) = run_observation(
             source,
-            FailureEvidenceQuery::ActorCost { engine_id: args.engine_id.clone(), mailbox_name: mailbox_name.clone() },
+            FailureEvidenceQuery::ActorCost { engine_id: engine_id.clone(), address: address.clone() },
             deadline,
             observation_timeout,
         )
         .await;
-        actors.push(ActorFailureEvidence { mailbox_name, logs, cost });
+        actors.push(ActorFailureEvidence { address, logs, cost });
     }
 
     let frame = if let Some(frame) = args.frame {
@@ -358,7 +367,7 @@ pub(super) async fn collect_failure_evidence_with_source<S: FailureEvidenceSourc
         let (observation, frame_images) = run_observation(
             source,
             FailureEvidenceQuery::Frame {
-                engine_id: args.engine_id.clone(),
+                engine_id: engine_id.clone(),
                 window_id: window_id.clone(),
                 scale: frame.scale,
                 max_dimension: frame.max_dimension,
@@ -374,7 +383,7 @@ pub(super) async fn collect_failure_evidence_with_source<S: FailureEvidenceSourc
     };
 
     let bundle = FailureEvidenceBundle {
-        engine_id: args.engine_id,
+        engine_id,
         primary_error: args.primary_error,
         operation: args.operation,
         limits: FailureEvidenceLimits {
@@ -400,7 +409,9 @@ pub(super) async fn collect_failure_evidence(
     mcp: &Mcp,
     args: CollectFailureEvidenceArgs,
 ) -> Result<CallToolResult, McpError> {
+    let (_, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
     collect_failure_evidence_with_source(
+        engine_id,
         args,
         &mut McpFailureEvidenceSource { mcp },
         FAILURE_EVIDENCE_OBSERVATION_TIMEOUT,

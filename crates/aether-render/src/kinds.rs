@@ -370,7 +370,7 @@ pub struct CreateGeometry {
 #[kind(name = "aether.render.create_geometry_result")]
 pub enum CreateGeometryResult {
     Ok { geometry_id: u32 },
-    Err { reason: String },
+    Err { error: String },
 }
 
 /// `aether.render.update_geometry` — replace a previously-created
@@ -953,7 +953,7 @@ pub struct ProgramRegister {
 #[kind(name = "aether.render.program.register_result")]
 pub enum ProgramRegisterResult {
     Ok { program_id: u32 },
-    Err { reason: String },
+    Err { error: String },
 }
 
 /// `aether.render.program.dispatch` — execute a registered program once
@@ -1083,14 +1083,15 @@ pub struct ProgramTimings {
 /// `Absent` means the instrument is not running and says why (no
 /// adapter support, or disabled by configuration); it is not an error
 /// and a caller should read it as "this device cannot answer", not "this
-/// program is free". `Err` is a genuine failure — an unknown
+/// program is free" — hence its payload is `reason`, not the `error`
+/// every failure arm carries. `Err` is a genuine failure — an unknown
 /// `program_id`, or no booted render GPU.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.render.program.timings_result")]
 pub enum ProgramTimingsResult {
     Ok { program_id: u32, rows: Vec<PassTimingRow> },
     Absent { reason: String },
-    Err { reason: String },
+    Err { error: String },
 }
 
 #[cfg(test)]

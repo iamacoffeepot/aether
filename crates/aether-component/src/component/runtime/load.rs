@@ -39,6 +39,9 @@ pub(super) struct PreparedLoad {
     type_tag: Option<u64>,
     actors: Vec<ActorInputs>,
     boot_namespace: Option<String>,
+    /// sha256 hex of `wasm_bytes` — the compiled-module cache key and, for a
+    /// module that declares a boot slot, the boot registry's key.
+    hash: String,
     module: Module,
     wasm_bytes: Arc<[u8]>,
     config: Vec<u8>,
@@ -69,8 +72,13 @@ impl PreparedLoad {
     }
 
     fn boot_plan(&self) -> Option<PreparedBoot> {
-        let namespace = self.boot_namespace.clone()?;
-        Some(PreparedBoot::new(namespace, self.module.clone(), self.actors.clone(), Arc::clone(&self.wasm_bytes)))
+        Some(PreparedBoot::new(
+            self.boot_namespace.clone()?,
+            self.hash.clone(),
+            self.module.clone(),
+            self.actors.clone(),
+            Arc::clone(&self.wasm_bytes),
+        ))
     }
 }
 
@@ -85,13 +93,12 @@ pub(super) struct PreparedBoot {
 }
 
 impl PreparedBoot {
-    fn new(namespace: String, module: Module, actors: Vec<ActorInputs>, wasm_bytes: Arc<[u8]>) -> Self {
+    fn new(namespace: String, hash: String, module: Module, actors: Vec<ActorInputs>, wasm_bytes: Arc<[u8]>) -> Self {
         let capabilities = actors
             .iter()
             .find(|actor| actor.namespace.as_deref() == Some(namespace.as_str()))
             .map(|actor| actor.capabilities.clone())
             .unwrap_or_default();
-        let hash = content_hash_hex(&wasm_bytes);
         Self { hash, namespace, capabilities, module, actors, wasm_bytes }
     }
 
@@ -250,7 +257,10 @@ impl ComponentHostCapabilityState {
             .into_iter()
             .map(|record| record.info)
             .collect();
-        let module = Module::new(&self.engine, &payload.wasm)
+        let hash = content_hash_hex(&wasm_bytes);
+        let module = self
+            .module_cache
+            .compile(&self.engine, &hash, &payload.wasm)
             .map_err(|error| LoadResult::Err { error: format!("invalid wasm module: {error}") })?;
         let name = match payload.name.or(selected_namespace) {
             Some(name) => name,
@@ -272,6 +282,7 @@ impl ComponentHostCapabilityState {
                 type_tag,
                 actors,
                 boot_namespace,
+                hash,
                 module,
                 wasm_bytes,
                 config: payload.config,
@@ -596,13 +607,18 @@ impl ComponentHostCapabilityState {
         }
     }
 
-    fn prepare_replacement_boot(&self, wasm: &[u8]) -> Result<Option<PreparedBoot>, String> {
+    fn prepare_replacement_boot(&mut self, wasm: &[u8]) -> Result<Option<PreparedBoot>, String> {
         let Some(namespace) = kind_manifest::read_boot_namespace_from_bytes(wasm)? else {
             return Ok(None);
         };
         let actors = kind_manifest::read_actor_inputs_from_bytes(wasm)?;
-        let module = Module::new(&self.engine, wasm).map_err(|error| format!("invalid wasm module: {error}"))?;
-        Ok(Some(PreparedBoot::new(namespace, module, actors, Arc::from(wasm))))
+
+        let hash = content_hash_hex(wasm);
+        let module = self
+            .module_cache
+            .compile(&self.engine, &hash, wasm)
+            .map_err(|error| format!("invalid wasm module: {error}"))?;
+        Ok(Some(PreparedBoot::new(namespace, hash, module, actors, Arc::from(wasm))))
     }
 
     fn commit_replacement_boot<M: ReplyMode, A>(
@@ -658,6 +674,7 @@ mod tests {
     use wasmtime::{Engine, Linker};
 
     use super::*;
+    use crate::component::runtime::module_cache::ModuleCache;
 
     fn state() -> ComponentHostCapabilityState {
         let registry = Arc::new(Registry::new());
@@ -673,6 +690,7 @@ mod tests {
             registry_subscription: None,
             last_egressed_inventory: None,
             default_name_counter: 0,
+            module_cache: ModuleCache::default(),
             boot_registry: HashMap::new(),
             pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
