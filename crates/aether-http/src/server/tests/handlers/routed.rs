@@ -223,6 +223,16 @@ pub struct EchoSay {
     pub text: String,
 }
 
+/// Named only by the cfg-disabled `#[http::reply]` on [`DeferRouteHandler`].
+/// This tests module compiles under `cfg(test)`, so the type is stripped;
+/// generated glue that still names it fails compilation. That is the leak
+/// `#[http::router]` used to produce: reply glue was emitted unconditionally
+/// while the method and kind were cfg-gated (the Bloomery no-default-features
+/// chassis could not resolve github-gated `ArchiveRecordsResult` /
+/// `ListArchiveResult`).
+#[cfg(not(test))]
+struct GatedOutReply;
+
 /// A peer cap that answers `EchoAsk` with `EchoSay` — the downstream a
 /// deferred route forwards to and answers on.
 pub struct EchoPeer;
@@ -299,6 +309,13 @@ impl NativeActor for DeferRouteHandler {
 
     /// Map the peer's `EchoSay` reply into the response answered through
     /// the held request obligation.
+    ///
+    /// Literal `#[cfg(test)]` must ride the generated `#[handler::manual]`
+    /// glue (the actor `handler_cfgs` contract). This fixture compiles with
+    /// `cfg(test)`, so the predicate is true and the deferred-route
+    /// end-to-end test still exercises `EchoSay` dispatch through cfg-gated
+    /// glue.
+    #[cfg(test)]
     #[http::reply]
     fn on_say(
         _state: &mut DeferRouteHandlerState,
@@ -306,6 +323,24 @@ impl NativeActor for DeferRouteHandler {
         say: EchoSay,
     ) -> HttpServerResponse {
         HttpServerResponse { status: 200, headers: Vec::new(), body: format!("echoed:{}", say.text).into_bytes() }
+    }
+
+    /// Regression: `syn` does not evaluate `cfg`, so `#[http::router]` used
+    /// to emit `#[handler::manual]` reply glue unconditionally. A
+    /// `#[cfg(not(test))]` reply method then produced glue that named
+    /// [`GatedOutReply`] — a kind that does not exist under `cfg(test)`.
+    /// Both predicates must ride the generated handler so every derived
+    /// reference vanishes with the method; a true-only leak of
+    /// `#[cfg(feature = "runtime")]` would still name the missing kind.
+    #[cfg(feature = "runtime")]
+    #[cfg(not(test))]
+    #[http::reply]
+    fn on_gated_out(
+        _state: &mut DeferRouteHandlerState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        _reply: GatedOutReply,
+    ) -> HttpServerResponse {
+        HttpServerResponse { status: 200, headers: Vec::new(), body: Vec::new() }
     }
 }
 
