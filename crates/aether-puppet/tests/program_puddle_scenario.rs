@@ -189,7 +189,7 @@ fn develop(
         .expect("decode ProgramRegisterResult")
     {
         ProgramRegisterResult::Ok { program_id } => program_id,
-        ProgramRegisterResult::Err { reason } => panic!("register failed: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("register failed: {error}"),
     };
 
     // The output texture drawn texel-for-pixel at the window's top-left:
