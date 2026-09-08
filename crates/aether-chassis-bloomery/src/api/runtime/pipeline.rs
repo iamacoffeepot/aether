@@ -35,6 +35,7 @@ use std::path::Path;
 use aether_bloomery::{
     Correspondence, Digest, PIPELINE_MANIFEST_PATH, PipelineManifest, PipelineManifestError, config_address,
 };
+use aether_data::Kind;
 use aether_data::wire::to_vec;
 
 use super::commission_reader::{blob_text, sealed_commit_hex};
@@ -115,6 +116,7 @@ mod tests {
         PipelineManifestError, config_address,
     };
     use aether_bloomery_git::GitObjectId;
+    use aether_data::Kind;
     use aether_data::wire::to_vec;
     use tempfile::TempDir;
 

@@ -146,7 +146,7 @@ fn schema_of(kind: &str) -> Option<SchemaType> {
 /// would therefore let a draft attest a vocabulary its base does not carry,
 /// which is the attested-but-untrue divergence ADR-0174 exists to remove. So
 /// the entry is derived at draft formation from the base's own
-/// [`PIPELINE_MANIFEST_PATH`](aether_bloomery::PIPELINE_MANIFEST_PATH)
+/// [`PIPELINE_MANIFEST_PATH`]
 /// (ADR-0215, [`pipeline`](super::pipeline)) and can reach a registry no other
 /// way.
 pub(super) fn author_config(body: &[u8]) -> Routed {
