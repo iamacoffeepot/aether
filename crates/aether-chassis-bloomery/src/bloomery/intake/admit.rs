@@ -247,26 +247,54 @@ fn verifier_failure_refusal(stage: StageId, upload: &UploadedEvidence) -> Option
 // the host could not resolve, so a missing row here is a corrupt store rather
 // than a bloom with a different vocabulary, and inventing an undeclared-identity
 // refusal out of it would wedge members over a storage fault.
-fn intern_failed_verifiers(
+fn intern_uploaded(
     store: &mut dyn StoreBackend,
     record: &DispatchRecord,
     upload: &UploadedEvidence,
-) -> Result<Result<VerifyFailureSet, IntakeRefusal>, IntakeError> {
+) -> Result<Result<UploadedEvidence, IntakeRefusal>, IntakeError> {
     let names = &upload.observation.failed_verifier_names;
     let failed = upload.observation.failed_verifiers;
     if names.is_empty() && failed.is_empty() {
-        return Ok(Ok(VerifyFailureSet::EMPTY));
+        return Ok(Ok(upload.clone()));
     }
     let manifest = sealed_manifest(store, record)?;
-    if names.is_empty() {
-        return Ok(undeclared_set(&manifest, failed));
+    let interned = if names.is_empty() {
+        undeclared_set(&manifest, failed)
+    } else {
+        let interned = names.iter().filter_map(|name| manifest.intern(name)).collect::<VerifyFailureSet>();
+        let undeclared = names.iter().filter(|name| manifest.intern(name).is_none()).cloned().collect::<Vec<_>>();
+        if undeclared.is_empty() {
+            Ok(interned)
+        } else {
+            Err(undeclared_refusal(&manifest, undeclared))
+        }
+    };
+    match interned {
+        Err(refusal) => Ok(Err(refusal)),
+        Ok(failed_verifiers) => {
+            let mut upload = upload.clone();
+            upload.observation.failed_verifiers = failed_verifiers;
+            Ok(Ok(upload))
+        }
     }
-    let interned = names.iter().filter_map(|name| manifest.intern(name)).collect::<VerifyFailureSet>();
-    let undeclared = names.iter().filter(|name| manifest.intern(name).is_none()).cloned().collect::<Vec<_>>();
-    if undeclared.is_empty() {
-        return Ok(Ok(interned));
+}
+
+fn intern_and_bind(
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    upload: &UploadedEvidence,
+) -> Result<Result<(UploadedEvidence, Evidence), IntakeRefusal>, IntakeError> {
+    let upload = match intern_uploaded(store, record, upload)? {
+        Err(refusal) => return Ok(Err(refusal)),
+        Ok(upload) => upload,
+    };
+    let observed = StageResult { subject: upload.subject, verdict: upload.verdict, detail: upload.detail };
+    match normalize_stage_result(&record.displayed_digest, &observed) {
+        Ok(evidence) => Ok(Ok((upload, evidence))),
+        Err(InwardError::DigestMismatch { displayed, claimed }) => {
+            Ok(Err(IntakeRefusal::DigestMismatch { displayed, claimed }))
+        }
     }
-    Ok(Err(undeclared_refusal(&manifest, undeclared)))
 }
 
 fn undeclared_set(manifest: &PipelineManifest, failed: VerifyFailureSet) -> Result<VerifyFailureSet, IntakeRefusal> {
@@ -853,21 +881,10 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     if let Some(refusal) = out_of_stage_refusal(record.stage, upload) {
         return Ok(AdmitDecision::Refused(refusal));
     }
-    let interned = intern_failed_verifiers(store, &record, upload)?;
-    let mut upload = upload.clone();
-    match interned {
-        Err(refusal) => return Ok(AdmitDecision::Refused(refusal)),
-        Ok(failed_verifiers) => upload.observation.failed_verifiers = failed_verifiers,
-    }
-    let upload = &upload;
-    let observed = StageResult { subject: upload.subject, verdict: upload.verdict, detail: upload.detail };
-    let evidence = match normalize_stage_result(&record.displayed_digest, &observed) {
-        Ok(evidence) => evidence,
-        // A mismatch is a lie about which digest the evidence names; refuse and
-        // leave the order live so the honest worker can still deliver.
-        Err(InwardError::DigestMismatch { displayed, claimed }) => {
-            return Ok(AdmitDecision::Refused(IntakeRefusal::DigestMismatch { displayed, claimed }));
-        }
+    let interned = intern_and_bind(store, &record, upload)?;
+    let (upload, evidence) = match interned.as_ref() {
+        Err(refusal) => return Ok(AdmitDecision::Refused(refusal.clone())),
+        Ok((upload, evidence)) => (upload, evidence.clone()),
     };
     // A pre-bloom scoping run (ADR-0208, #5304) routes before the member-stage
     // ladder, because it is not on that ladder at all: it names no bloom, so
