@@ -72,8 +72,8 @@ pub use rendering::{RenderError, render_schema};
 type UpcastFn<T> = fn(&[u8]) -> Result<T, WireError>;
 
 /// Rewriter from a prior persisted shape into the current shape's canonical
-/// wire bytes — the [`UpcastFn`] twin a generic read entry point can carry in
-/// the registry instead of taking at the call site.
+/// wire bytes — the decoder a generic read entry point can carry in the
+/// registry instead of taking at the call site.
 pub type ReshapeFn = fn(&[u8]) -> Result<Vec<u8>, WireError>;
 
 /// Kind name persisted for journaled [`Decisions`].
@@ -116,8 +116,8 @@ pub struct PersistedUpcast {
     /// literal that no change to live code can move (#5500).
     pub digest: Digest,
     /// How [`decode_reshaped`] carries a row of this shape forward. `None` for
-    /// a kind whose read entry point passes its own [`UpcastFn`] decoders — the
-    /// journal columns.
+    /// a kind whose read entry point passes its own decoders to
+    /// [`decode_persisted`] — the journal columns.
     pub reshape: Option<ReshapeFn>,
 }
 
