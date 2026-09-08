@@ -15,9 +15,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aether_bloomery::{
     BackendObjectId, BloomId, CandidateRef, CompositionParents, Conclusion, ConfigRegistry, ConfigScopes, Digest,
     EvidenceRef, ExecutionStatus, ExecutorBackend, FoldContribution, LaneObservation, Nonce, ObservedLaneWrites,
-    PriceTable, ResolvedModel, SessionSlug, SharedCorrespondence, StageId, StageVerdict, StudyCost, SuppressionRequest,
-    SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, is_model_lane,
-    narrow_composition,
+    PriceTable, ResolvedModel, RetrospectClaim, SessionSlug, SharedCorrespondence, StageId, StageVerdict, StudyCost,
+    SuppressionRequest, SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId,
+    is_model_lane, narrow_composition,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_git::source::candidate_ref_name;
@@ -2583,6 +2583,10 @@ fn judged_evidence_ref(
             surface_request,
             suppression_requests,
             narrowing,
+            // Read off every lane's evidence, like the suppression channel:
+            // only the reader writes it, and a lane that wrote none yields an
+            // empty set, which is what a read with nothing to file also yields.
+            retrospect_findings: parse_retrospect_findings(bytes),
         },
     }
 }
@@ -3259,6 +3263,48 @@ fn parse_suppression_requests(bytes: &[u8]) -> Vec<(String, u32, String, String)
                         entry.get("lint")?.as_str()?.to_owned(),
                         entry.get("reason")?.as_str()?.to_owned(),
                     ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The evidence's top-level `retrospect_findings` array — the work orders the
+/// bloom-level reader will not fix (ADR-0216), returned as the lane's raw claim
+/// for [`RetrospectFinding::normalize`] to judge.
+///
+/// Presence-driven like [`parse_suppression_requests`], and deliberately *less*
+/// tolerant per entry: a member missing from an entry is read as empty rather
+/// than dropping that entry, because the trust boundary refuses a malformed
+/// emission whole and dropping the broken entry here would hide it from the
+/// refusal. Bytes that do not decode and an absent or non-array channel all
+/// yield nothing, which is the same as a read that found nothing worth filing —
+/// both file nothing, so the conflation costs no information.
+///
+/// [`RetrospectFinding::normalize`]: aether_bloomery::RetrospectFinding::normalize
+fn parse_retrospect_findings(bytes: &[u8]) -> Vec<RetrospectClaim> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Vec::new();
+    };
+    value
+        .get("retrospect_findings")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| RetrospectClaim {
+                    title: entry.get("title").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                    body: entry.get("body").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                    surface: entry
+                        .get("surface")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|globs| {
+                            globs
+                                .iter()
+                                .map(|glob| glob.as_str().unwrap_or_default().to_owned())
+                                .collect::<Vec<String>>()
+                        })
+                        .unwrap_or_default(),
                 })
                 .collect()
         })

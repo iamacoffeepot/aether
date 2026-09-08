@@ -4,7 +4,7 @@
 use aether_bloomery::testing::approved;
 use aether_bloomery::{
     BloomDraft, BloomSpec, CandidateRef, CompositionParents, ConfigRegistry, Digest, Evidence, EvidenceKind,
-    Membership, Nonce, VerifyFailureSet, WorkpieceId,
+    Membership, Nonce, RetrospectClaim, VerifyFailureSet, WorkpieceId,
 };
 use aether_chassis_bloomery::bloomery::{ScriptedUpload, ScriptedVerdict};
 use aether_chassis_bloomery::store::OutstandingOrder;
@@ -62,6 +62,7 @@ pub fn verdict(order: &OutstandingOrder, verdict: ScriptedVerdict) -> ScriptedUp
         cost: None,
         calls: None,
         narrowing: None,
+        retrospect_findings: Vec::new(),
     }
 }
 
@@ -117,4 +118,25 @@ pub fn faulted(order: &OutstandingOrder) -> ScriptedUpload {
 #[must_use]
 pub fn captured(order: &OutstandingOrder, candidate: CandidateRef) -> ScriptedUpload {
     ScriptedUpload { candidate: Some(candidate), ..passed(order) }
+}
+
+/// A reader's verdict carrying the work orders it filed (ADR-0216).
+///
+/// `emitted` is `(title, body, surface globs)` per finding, raw — the claims a
+/// model would have written, not the normalized findings, so a scenario can
+/// emit a malformed one (an empty title, a glob outside the declared-surface
+/// grammar) and watch the trust boundary refuse the whole emission.
+#[must_use]
+pub fn read(order: &OutstandingOrder, emitted: &[(&str, &str, &[&str])]) -> ScriptedUpload {
+    ScriptedUpload {
+        retrospect_findings: emitted
+            .iter()
+            .map(|(title, body, surface)| RetrospectClaim {
+                title: (*title).to_owned(),
+                body: (*body).to_owned(),
+                surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
+            })
+            .collect(),
+        ..passed(order)
+    }
 }

@@ -20,8 +20,8 @@ use alloc::vec::Vec;
 
 use crate::ids::Nonce;
 use crate::values::{
-    CandidateRef, CompositionParents, StudyCall, StudyCost, SuppressionRequest, SurfaceRequest, Transformation,
-    VerifyFailureSet,
+    CandidateRef, CompositionParents, RetrospectClaim, StudyCall, StudyCost, SuppressionRequest, SurfaceRequest,
+    Transformation, VerifyFailureSet,
 };
 
 /// A fully-resolved unit of work to dispatch. The [`Transformation`] already
@@ -182,6 +182,21 @@ pub struct LaneObservation {
     /// every verdict whose diagnostic the member's own delta accounts for, and
     /// from the name-only Actions backend.
     pub narrowing: Option<CompositionParents>,
+    /// The work orders the bloom-level reader will not fix (ADR-0216), read out
+    /// of the evidence's own `retrospect_findings` channel as the lane's raw
+    /// claim for [`RetrospectFinding::normalize`] to judge.
+    ///
+    /// Host-recorded state riding the reference like `surface_request` and
+    /// `suppression_requests`, and for the same reason: a work order is a
+    /// title, a body and a glob list, and an artifact name is not a data
+    /// channel. Its own field rather than the `findings` prose beside it,
+    /// because that channel is threaded verbatim into a later lane's prompt and
+    /// a machine document has no business there. Empty from the name-only
+    /// Actions backend, from every lane that is not the reader, and from a read
+    /// that found nothing worth filing.
+    ///
+    /// [`RetrospectFinding::normalize`]: crate::RetrospectFinding::normalize
+    pub retrospect_findings: Vec<RetrospectClaim>,
 }
 
 /// A reference to one piece of evidence a run uploaded — the transport-level
