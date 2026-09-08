@@ -1,18 +1,17 @@
 use super::bytes::resolve_bytes_params;
 use super::components::{ResolvedComponent, StagedBootManifest};
-use super::ids::parse_mailbox_id;
-use super::ids::{mail_node_to_json, node_reversible_ids};
+use super::ids::{mail_node_to_json, node_reversible_ids, parse_engine_id, parse_mailbox_id};
 use super::{
-    AWAIT_TIMEOUT_DEFAULT_MS, AsyncMutex, ComponentSelector, ComponentSpec, EngineId, EngineMailSpec, EngineNames,
+    AWAIT_TIMEOUT_DEFAULT_MILLIS, AsyncMutex, ComponentSelector, ComponentSpec, EngineId, EngineMailSpec, EngineNames,
     FLEET_CAP, INVENTORY_CAP, Kind, KindDescriptor, KindId, ListKinds, ListKindsResult, MailEnvelope, MailNodeJson,
     MailNodeWire, MailSpec, MailboxAddress, MailboxId, Manifest, ManifestResult, Mcp, McpError, NamedMail, Resolve,
-    ResolveAddress, ResolveAddressResult, ResolveComponent, ResolveComponentResult, ResolveResult, SchemaType, Uuid,
+    ResolveAddress, ResolveAddressResult, ResolveComponent, ResolveComponentResult, ResolveResult, SchemaType,
     component_config_bytes, descriptors, engine_envelope, frame_size_aware_error, internal_msg, local_envelope,
     max_frame_size, reject_zero_replicas, replica_base_name, replica_names, selector_with_explicit_export, tagged_id,
     validate_recipient_scope, wire,
 };
 use aether_data::canonical::kind_id_from_parts;
-use aether_kinds::{DescribeComponent, DescribeComponentResult};
+use aether_kinds::{DescribeComponent, DescribeComponentResult, ListEngines, ListEnginesResult};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,11 +49,11 @@ impl Mcp {
     /// it through the hub, awaiting the substrate's terminal settle and
     /// surfacing the correlated reply events (issue 1242). Returns the
     /// collected reply envelopes plus a `timed_out` flag — the await is
-    /// bounded by [`AWAIT_TIMEOUT_DEFAULT_MS`] so a cap that never
+    /// bounded by [`AWAIT_TIMEOUT_DEFAULT_MILLIS`] so a cap that never
     /// replies returns at the cap rather than hanging.
     pub(super) async fn deliver_one(&self, spec: MailSpec) -> anyhow::Result<DeliveredDirectMail> {
         let prepared = self.prepare_direct_mail(spec).await?;
-        let timeout = Duration::from_millis(u64::from(AWAIT_TIMEOUT_DEFAULT_MS));
+        let timeout = Duration::from_millis(u64::from(AWAIT_TIMEOUT_DEFAULT_MILLIS));
         let (events, timed_out) = self.session.call_collecting(prepared.envelope, timeout).await.map_err(|error| {
             anyhow::anyhow!("delivering mail to canonical recipient `{}`: {error}", prepared.canonical_recipient)
         })?;
@@ -74,6 +73,51 @@ impl Mcp {
         self.session.fire(prepared.envelope).await.map_err(|error| {
             anyhow::anyhow!("firing mail to canonical recipient `{}`: {error}", prepared.canonical_recipient)
         })
+    }
+
+    /// Resolve the engine one tool call targets, uniformly for every
+    /// engine-taking tool. An explicit `engine_id` is parsed; an omitted one
+    /// auto-resolves the sole supervised engine — the standard
+    /// single-substrate harness — and is a clean error with zero or several
+    /// engines rather than a guess or a silent fallback to some other
+    /// snapshot. Returns the id plus its canonical string spelling, which
+    /// every such tool echoes in its reply so an auto-resolved answer names
+    /// the engine that produced it.
+    pub(super) async fn resolve_engine(&self, engine_id: Option<&str>) -> Result<(EngineId, String), McpError> {
+        if let Some(id) = engine_id {
+            let engine = parse_engine_id(id)?;
+            return Ok((engine, engine.0.to_string()));
+        }
+
+        let reply = self
+            .session
+            .call_one(local_envelope(FLEET_CAP, &ListEngines {}))
+            .await
+            .map_err(|error| internal_msg(&format!("resolving the sole supervised engine: {error}")))?;
+        let mut engines = ListEnginesResult::decode_from_bytes(&reply.payload)
+            .ok_or_else(|| internal_msg("undecodable ListEnginesResult"))?
+            .engines;
+
+        match engines.len() {
+            1 => {
+                let only = engines.remove(0).engine_id;
+                let engine = parse_engine_id(&only)?;
+                Ok((engine, engine.0.to_string()))
+            }
+            0 => Err(McpError::invalid_params(
+                "no engine_id given and the hub supervises no engine — spawn_substrate first, \
+                 or name an engine from list_engines"
+                    .to_owned(),
+                None,
+            )),
+            count => Err(McpError::invalid_params(
+                format!(
+                    "no engine_id given and the hub supervises {count} engines — name one \
+                     explicitly (list_engines reports their ids)"
+                ),
+                None,
+            )),
+        }
     }
 
     /// Resolve one operator-supplied address in the selected engine. Tagged
@@ -109,20 +153,20 @@ impl Mcp {
     pub(super) async fn strict_component_snapshot(
         &self,
         engine: EngineId,
-        component: &str,
+        address: &str,
     ) -> anyhow::Result<StrictComponentSnapshot> {
-        if component.starts_with("mbx-") {
-            anyhow::bail!("compare_component_contracts requires a textual component lineage, not a tagged mailbox id");
+        if address.starts_with("mbx-") {
+            anyhow::bail!("compare_component_contracts requires a textual component address, not a tagged mailbox id");
         }
-        let (mailbox_id, canonical_lineage) = self.resolve_engine_address(engine, component).await?;
+        let (mailbox_id, canonical_lineage) = self.resolve_engine_address(engine, address).await?;
         let reply = self
             .session
-            .call_one(engine_envelope(engine, super::COMPONENT_CAP, &DescribeComponent { name: component.to_owned() }))
+            .call_one(engine_envelope(engine, super::COMPONENT_CAP, &DescribeComponent { name: address.to_owned() }))
             .await?;
         let capabilities = match DescribeComponentResult::decode_from_bytes(&reply.payload) {
             Some(DescribeComponentResult::Ok { capabilities }) => capabilities,
-            Some(DescribeComponentResult::Err { error }) => anyhow::bail!("component {component:?}: {error}"),
-            None => anyhow::bail!("component {component:?}: undecodable DescribeComponentResult"),
+            Some(DescribeComponentResult::Err { error }) => anyhow::bail!("component {address:?}: {error}"),
+            None => anyhow::bail!("component {address:?}: undecodable DescribeComponentResult"),
         };
         let kinds = self.refresh_engine_kinds_strict(engine).await?;
         Ok(StrictComponentSnapshot { mailbox_id, canonical_lineage, capabilities, kinds })
@@ -306,11 +350,12 @@ impl Mcp {
     /// ADR-0091 §3) triggers one `aether.inventory.kinds` refresh-and-retry
     /// before the error surfaces.
     pub(super) async fn prepare_direct_mail(&self, spec: MailSpec) -> anyhow::Result<PreparedDirectMail> {
-        let engine = EngineId(
-            Uuid::parse_str(&spec.engine_id).map_err(|e| anyhow::anyhow!("engine_id is not a valid UUID: {e}"))?,
-        );
+        let (engine, _) = self
+            .resolve_engine(spec.engine_id.as_deref())
+            .await
+            .map_err(|error| anyhow::anyhow!("{}", error.message))?;
         let (resolved_mailbox_id, canonical_recipient) =
-            self.resolve_engine_address(engine, &spec.mail.recipient_name).await?;
+            self.resolve_engine_address(engine, &spec.mail.address).await?;
         let params = spec.mail.params.unwrap_or(serde_json::Value::Null);
         let (desc, payload) = self.resolve_and_encode(engine, &spec.mail.kind_name, params).await?;
         Ok(PreparedDirectMail {
@@ -348,7 +393,9 @@ impl Mcp {
                 .await
                 .map_err(|e| anyhow::anyhow!("{e} (kind {})", spec.kind_name))?;
             out.push(NamedMail {
-                recipient_name: spec.recipient_name.clone(),
+                // The wire kind still spells this `recipient_name`; the
+                // tool boundary spells it `address` (issue 5715).
+                recipient_name: spec.address.clone(),
                 kind_name: spec.kind_name.clone(),
                 payload,
                 count: 1,

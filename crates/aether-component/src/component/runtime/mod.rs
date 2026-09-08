@@ -21,7 +21,9 @@ use aether_actor::{RegistryChanged, runtime};
 // `pub` visibility, unchanged by the move.
 mod config;
 mod load;
+mod module_cache;
 
+use self::module_cache::ModuleCache;
 use super::{ComponentHostCapability, LoadResult};
 // `ComponentHostParams` rides up to the cap root through this `pub use`: the
 // cap-root `pub use runtime::ComponentHostParams;` re-export sources it here.
@@ -91,6 +93,10 @@ pub struct ComponentHostCapabilityState {
     /// Monotonic counter for `component_N` default names when an agent passes
     /// `name: None` and the wasm doesn't declare an `aether.namespace`.
     pub default_name_counter: u64,
+    /// The most recently compiled module, so a burst of loads of one artifact
+    /// (`replicas: N`, a boot manifest naming several of its exports) pays
+    /// cranelift once instead of once per load.
+    pub module_cache: ModuleCache,
     /// ADR-0147 module-boot bookkeeping: content hash (sha256 hex of the wasm
     /// bytes) → the module's boot singleton. A module that declares a `boot =`
     /// slot instantiates exactly one boot actor per `(engine, content hash)`;
@@ -208,6 +214,7 @@ impl NativeActor for ComponentHostCapability {
             registry_subscription: None,
             last_egressed_inventory: None,
             default_name_counter: 0,
+            module_cache: ModuleCache::default(),
             boot_registry: HashMap::new(),
             pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
@@ -479,6 +486,7 @@ mod tests {
             registry_subscription: Some(registry.subscribe_inventory::<ComponentHostCapability>(subscriber, mailer)),
             last_egressed_inventory: None,
             default_name_counter: 0,
+            module_cache: ModuleCache::default(),
             boot_registry: HashMap::new(),
             pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),

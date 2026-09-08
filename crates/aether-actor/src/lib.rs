@@ -84,7 +84,7 @@ pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, RegistryChanged, ReplyHandle};
 // `aether_actor::WasmCtx<'_>` / `aether_actor::WasmActor` / etc. without
 // an extra `wasm::` segment.
 pub use wasm::{
-    ActorInitError, ActorTypeTag, ErasedWasmActor, ModuleChild, RelativeMailbox, SpawnError, WasmActor,
+    ActorInitError, ActorTypeTag, ErasedWasmActor, InlineChild, ModuleChild, RelativeMailbox, SpawnError, WasmActor,
     WasmActorMailbox, WasmActorMailboxWithContext, WasmCtx, WasmDispatch, WasmDropCtx, WasmInitCtx, WireCtx,
 };
 

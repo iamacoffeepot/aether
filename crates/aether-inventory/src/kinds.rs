@@ -102,6 +102,9 @@ pub struct Manifest {}
 /// templates locally; `Dynamic` templates resolve per-id via
 /// [`Resolve`]. This is the *authoritative, per-build* inventory —
 /// the served form is always the running substrate's own.
+///
+/// No `Err` arm: the reply reads a process-global link-time table, so
+/// there is no failure mode to report.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.inventory.manifest_result")]
 pub struct ManifestResult {
@@ -142,6 +145,9 @@ pub struct ResolvedName {
 /// caller can correlate without depending on order). An id that fails
 /// to parse as a tagged-id string is reported as `name: None` rather
 /// than aborting the batch — one bad id doesn't sink its siblings.
+///
+/// No `Err` arm: a miss is `name: None` per entry, so the batch itself
+/// has no failure mode to report.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.inventory.resolve_result")]
 pub struct ResolveResult {
@@ -163,6 +169,8 @@ pub struct ResolveAddress {
 /// caching capabilities under the registry's real identity. The failure arm
 /// intentionally carries only the registry's human-readable diagnostic rather
 /// than duplicating the substrate's internal address-resolution error enum.
+/// It exists — where the sibling [`ListKindsResult`] over the same live
+/// `Registry` has none — because this is a lookup, and a lookup can miss.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.inventory.resolve_address_result")]
 pub enum ResolveAddressResult {
@@ -193,6 +201,11 @@ pub struct ListKinds {}
 /// defined kinds (loaded via `aether.component.load`) show up here
 /// alongside the substrate's static vocabulary the moment the load
 /// returns, no separate notification.
+///
+/// No `Err` arm, where the sibling [`ResolveAddressResult`] has one over
+/// the same live `Registry`: this is an enumeration, which cannot miss —
+/// an empty vocabulary is an empty list. A lookup can miss, so
+/// `ResolveAddress` carries the failure arm and `ListKinds` does not.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.inventory.kinds_result")]
 pub struct ListKindsResult {
@@ -237,6 +250,9 @@ pub struct ListHandlers {}
 /// substrate, in link order. The harness folds these per `namespace`
 /// so each native cap reads as a `describe_component`-style handler
 /// list carrying its `In -> Out` reply contract.
+///
+/// No `Err` arm: the reply reads a process-global link-time table, so
+/// there is no failure mode to report.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.inventory.handlers_result")]
 pub struct HandlersResult {

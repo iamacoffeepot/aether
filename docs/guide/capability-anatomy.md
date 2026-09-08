@@ -249,6 +249,15 @@ Do not copy old paths such as a crate-root `test_echo.rs` or `test_chassis.rs`.
 - Runtime state has one actor owner; sidecars return events/results.
 - Every request that promises a reply resolves on success, error, disablement,
   and shutdown.
+- Every reply `Err` arm names its payload `error`. The field is wire-visible —
+  a component and `describe_kinds` both read it — so one spelling holds across
+  every cap. `reason` is reserved for an arm that is not a failure, the way
+  `ProgramTimingsResult::Absent { reason }` reports a device that cannot
+  measure.
+- A `*_result` kind without an `Err` arm says in one line why it cannot fail.
+  Reading a process-global link-time table and enumerating a live registry are
+  both infallible; a lookup against that same registry is not, and carries the
+  `Err` arm.
 - Queues, bytes, timeouts, retries, and callback work are bounded.
 - Every intended chassis installs the real or explicit unsupported actor.
 - Resolved config appears in the appropriate `--print-config` surface.

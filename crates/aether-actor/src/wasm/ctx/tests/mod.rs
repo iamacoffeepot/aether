@@ -1,9 +1,10 @@
 //! Host-build unit tests for the wasm ctx family, and the fixture actors
 //! they share. The fixtures live here so both test modules reach them
 //! through `super::`; the assertions split by subject — `spawn` for child
-//! creation and teardown, `dispatch` for what a ctx reads off the dispatch
-//! it was built for.
+//! creation and teardown, `child` for typed cluster-child resolution, and
+//! `dispatch` for what a ctx reads off the dispatch it was built for.
 
+mod child;
 mod dispatch;
 mod spawn;
 

@@ -81,10 +81,10 @@ Every kind below addresses the `aether.render` mailbox.
 
 | Mail kind | Rust payload | Contract |
 |---|---|---|
-| `aether.render.program.register` | `ProgramRegister { wgsl, bindings, transients, geometries, depth_transients, passes }` | validate + compile; reply `aether.render.program.register_result` / `ProgramRegisterResult` (`Ok { program_id }` / `Err { reason }`) |
+| `aether.render.program.register` | `ProgramRegister { wgsl, bindings, transients, geometries, depth_transients, passes }` | validate + compile; reply `aether.render.program.register_result` / `ProgramRegisterResult` (`Ok { program_id }` / `Err { error }`) |
 | `aether.render.program.dispatch` | `ProgramDispatch { program_id, bindings, geometries, uniforms }` | fire-and-forget; execute once at the next frame record |
 | `aether.render.program.destroy` | `ProgramDestroy { program_id }` | fire-and-forget release, mirroring `destroy_texture` |
-| `aether.render.create_geometry` | `CreateGeometry { layout, vertices, indices }` | validate + stage; reply `aether.render.create_geometry_result` / `CreateGeometryResult` (`Ok { geometry_id }` / `Err { reason }`) |
+| `aether.render.create_geometry` | `CreateGeometry { layout, vertices, indices }` | validate + stage; reply `aether.render.create_geometry_result` / `CreateGeometryResult` (`Ok { geometry_id }` / `Err { error }`) |
 | `aether.render.update_geometry` | `UpdateGeometry { geometry_id, vertices, indices }` | fire-and-forget in-place replacement against the created layout |
 | `aether.render.destroy_geometry` | `DestroyGeometry { geometry_id }` | fire-and-forget release, mirroring `destroy_texture` |
 
@@ -443,7 +443,7 @@ quantities that later math amplifies get a float target.
 ## Register-time validation
 
 Validation happens at register, once, and every failure class replies a
-distinguishable `ProgramRegisterResult::Err { reason }` — a
+distinguishable `ProgramRegisterResult::Err { error }` — a
 bad-but-parseable program replies an error instead of crashing the substrate.
 The classes, in check order:
 
