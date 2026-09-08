@@ -55,13 +55,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use aether_bloomery::{
-    BackendId, BloomId, EvidenceRef, ExecutionStatus, Nonce, ObservedLaneWrites, WorkHandle, WorkOrder, WorkpieceId,
-};
+use aether_bloomery::{BackendId, BloomId, Nonce, ObservedLaneWrites, WorkHandle, WorkOrder, WorkpieceId};
 use aether_substrate::actor::native::{DEFAULT_MAX_IN_FLIGHT, NativeCtx};
 
 use super::CandidatePush;
-use crate::bloomery::executor::{ExecutorPort, ExecutorPortError, ExecutorShell, Settled};
+use crate::bloomery::executor::{ExecutorPort, ExecutorPortError, ExecutorShell, RunObservation, Settled};
 
 /// How many blocking adapter calls this reactor may have in flight at once.
 ///
@@ -84,12 +82,10 @@ pub const MAX_IN_FLIGHT: usize = DEFAULT_MAX_IN_FLIGHT;
 pub enum AdapterCall {
     /// `ExecutorPort::submit` for an order's nonce.
     Submit(Nonce),
-    /// `ExecutorPort::inspect` for a tracked handle's nonce.
-    Inspect(Nonce),
+    /// `ExecutorPort::observe` for a tracked handle's nonce.
+    Observe(Nonce),
     /// `ExecutorPort::cancel` for a nonce — the reactor's cancellation intent.
     Cancel(Nonce),
-    /// `ExecutorPort::stream_evidence` for a completed run's nonce.
-    Evidence(Nonce),
     /// `ExecutorPort::observe_writes`, which takes no argument and so is one
     /// call at a time for the whole reactor.
     ObserveWrites,
@@ -107,9 +103,8 @@ enum AdapterWork {
     /// Boxed: a `WorkOrder` carries a whole `Transformation`, several times the
     /// size of the handles beside it, and this enum is moved into a worker.
     Submit(Box<WorkOrder>),
-    Inspect(WorkHandle),
+    Observe(WorkHandle),
     Cancel(WorkHandle),
-    Evidence(WorkHandle),
     ObserveWrites,
     Publish {
         commit_hex: String,
@@ -121,9 +116,8 @@ impl AdapterWork {
     fn call(&self) -> AdapterCall {
         match self {
             Self::Submit(order) => AdapterCall::Submit(order.nonce.clone()),
-            Self::Inspect(handle) => AdapterCall::Inspect(handle.nonce.clone()),
+            Self::Observe(handle) => AdapterCall::Observe(handle.nonce.clone()),
             Self::Cancel(handle) => AdapterCall::Cancel(handle.nonce.clone()),
-            Self::Evidence(handle) => AdapterCall::Evidence(handle.nonce.clone()),
             Self::ObserveWrites => AdapterCall::ObserveWrites,
             Self::Publish { commit_hex, target_ref } => {
                 AdapterCall::Publish { commit_hex: commit_hex.clone(), target_ref: target_ref.clone() }
@@ -131,14 +125,13 @@ impl AdapterWork {
         }
     }
 
-    /// Run the call. The whole blocking surface of this reactor is these six
+    /// Run the call. The whole blocking surface of this reactor is these five
     /// lines, and they only ever execute on a worker thread.
     fn run(self, shell: &ExecutorShell, pusher: &dyn CandidatePush) -> AdapterAnswer {
         match self {
             Self::Submit(order) => AdapterAnswer::Submit(shell.submit(&order)),
-            Self::Inspect(handle) => AdapterAnswer::Inspect(shell.inspect(&handle)),
+            Self::Observe(handle) => AdapterAnswer::Observe(shell.observe_run(&handle)),
             Self::Cancel(handle) => AdapterAnswer::Cancel(shell.cancel(&handle)),
-            Self::Evidence(handle) => AdapterAnswer::Evidence(shell.stream_evidence(&handle)),
             Self::ObserveWrites => AdapterAnswer::ObserveWrites(shell.observe_writes()),
             Self::Publish { commit_hex, target_ref } => AdapterAnswer::Publish(pusher.push(&commit_hex, &target_ref)),
         }
@@ -150,9 +143,8 @@ impl AdapterWork {
 #[derive(Debug)]
 enum AdapterAnswer {
     Submit(Result<WorkHandle, ExecutorPortError>),
-    Inspect(Result<ExecutionStatus, ExecutorPortError>),
+    Observe(Result<RunObservation, ExecutorPortError>),
     Cancel(Result<(), ExecutorPortError>),
-    Evidence(Result<Vec<EvidenceRef>, ExecutorPortError>),
     ObserveWrites(Vec<ObservedLaneWrites>),
     Publish(Result<(), String>),
 }
@@ -417,9 +409,9 @@ impl ExecutorPort for OffloadedPort<'_> {
         }
     }
 
-    fn inspect(&self, handle: &WorkHandle) -> Settled<Result<ExecutionStatus, ExecutorPortError>> {
-        match self.offload.take_or_want(AdapterWork::Inspect(handle.clone())) {
-            Some(AdapterAnswer::Inspect(answer)) => Settled::Answered(answer),
+    fn observe(&self, handle: &WorkHandle) -> Settled<Result<RunObservation, ExecutorPortError>> {
+        match self.offload.take_or_want(AdapterWork::Observe(handle.clone())) {
+            Some(AdapterAnswer::Observe(answer)) => Settled::Answered(answer),
             _ => Settled::InFlight,
         }
     }
@@ -427,13 +419,6 @@ impl ExecutorPort for OffloadedPort<'_> {
     fn cancel(&self, handle: &WorkHandle) -> Settled<Result<(), ExecutorPortError>> {
         match self.offload.take_or_want(AdapterWork::Cancel(handle.clone())) {
             Some(AdapterAnswer::Cancel(answer)) => Settled::Answered(answer),
-            _ => Settled::InFlight,
-        }
-    }
-
-    fn stream_evidence(&self, handle: &WorkHandle) -> Settled<Result<Vec<EvidenceRef>, ExecutorPortError>> {
-        match self.offload.take_or_want(AdapterWork::Evidence(handle.clone())) {
-            Some(AdapterAnswer::Evidence(answer)) => Settled::Answered(answer),
             _ => Settled::InFlight,
         }
     }

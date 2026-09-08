@@ -54,7 +54,7 @@ pub use local::{
 };
 #[cfg(any(test, feature = "testing"))]
 pub use local::{GroupAbsence, IDENTITY_RECORD, ProcessIdentity, strict_group_absence};
-pub use port::{ExecutorPort, Settled};
+pub use port::{ExecutorPort, RunObservation, Settled};
 pub use reconcile::{LaneOccupancy, LocalLane, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 pub use routing::RoutingExecutor;
 

@@ -51,6 +51,22 @@ pub enum Settled<T> {
     Answered(T),
 }
 
+/// One observation of a dispatched run: what it is doing, and — once it has
+/// finished — what it uploaded.
+#[derive(Debug)]
+pub struct RunObservation {
+    /// The run's current execution state.
+    pub status: ExecutionStatus,
+    /// The evidence the run uploaded, `Some` exactly when `status` is
+    /// [`ExecutionStatus::Completed`].
+    ///
+    /// Carries the stream's *own* result rather than folding it into the
+    /// observation's: a completed run whose artifact surface faulted is still a
+    /// completed run, and the caller counts it as one and faults only that arm
+    /// — which is what it did when the two calls were separate.
+    pub evidence: Option<Result<Vec<EvidenceRef>, ExecutorPortError>>,
+}
+
 /// The executor port every reactor helper calls: the [`ExecutorShell`] surface,
 /// with the two cheap answers left synchronous and the four that reach the
 /// outside world allowed to report [`Settled::InFlight`].
@@ -67,14 +83,19 @@ pub trait ExecutorPort {
     /// Submit a fully-resolved work order, returning the nonce-carrying handle.
     fn submit(&self, order: &WorkOrder) -> Settled<Result<WorkHandle, ExecutorPortError>>;
 
-    /// Inspect the run the handle resolves to.
-    fn inspect(&self, handle: &WorkHandle) -> Settled<Result<ExecutionStatus, ExecutorPortError>>;
+    /// Inspect the run the handle resolves to and, when it has completed,
+    /// stream its evidence in the same call.
+    ///
+    /// One call rather than two, because the intake never wants one without the
+    /// other and an offloading port cannot serve them separately: the cycle
+    /// learns "completed" by *consuming* the inspect answer, so on the turn the
+    /// evidence lands it has no inspect answer left to get past and never
+    /// reaches the evidence at all. Fused, one answer carries both — and a
+    /// tracked handle costs one round trip a turn instead of two.
+    fn observe(&self, handle: &WorkHandle) -> Settled<Result<RunObservation, ExecutorPortError>>;
 
     /// Cancel the run the handle resolves to. Idempotent (ADR-0177).
     fn cancel(&self, handle: &WorkHandle) -> Settled<Result<(), ExecutorPortError>>;
-
-    /// Stream the references to the run's uploaded evidence.
-    fn stream_evidence(&self, handle: &WorkHandle) -> Settled<Result<Vec<EvidenceRef>, ExecutorPortError>>;
 
     /// What each live construct lane has written into its working tree so far
     /// (ADR-0204). Infallible once answered: a mount with no readable working
@@ -112,19 +133,34 @@ impl ExecutorPort for ExecutorShell {
         Settled::Answered(self.backend.submit(order))
     }
 
-    fn inspect(&self, handle: &WorkHandle) -> Settled<Result<ExecutionStatus, ExecutorPortError>> {
-        Settled::Answered(self.backend.inspect(handle))
+    fn observe(&self, handle: &WorkHandle) -> Settled<Result<RunObservation, ExecutorPortError>> {
+        Settled::Answered(self.observe_run(handle))
     }
 
     fn cancel(&self, handle: &WorkHandle) -> Settled<Result<(), ExecutorPortError>> {
         Settled::Answered(self.backend.cancel(handle))
     }
 
-    fn stream_evidence(&self, handle: &WorkHandle) -> Settled<Result<Vec<EvidenceRef>, ExecutorPortError>> {
-        Settled::Answered(self.backend.stream_evidence(handle))
-    }
-
     fn observe_writes(&self) -> Settled<Vec<ObservedLaneWrites>> {
         Settled::Answered(self.backend.observe_writes())
+    }
+}
+
+impl ExecutorShell {
+    /// Inspect the run and, when it has completed, stream its evidence — the
+    /// blocking body of [`ExecutorPort::observe`].
+    ///
+    /// Public to the crate rather than folded into the trait impl because the
+    /// reactor's offload runs exactly this on a worker thread; both spellings
+    /// of the port then perform the same two calls in the same order.
+    ///
+    /// # Errors
+    /// The inspect faulted. A *completed* run whose evidence stream faulted is
+    /// still `Ok`, carrying that fault in [`RunObservation::evidence`].
+    pub fn observe_run(&self, handle: &WorkHandle) -> Result<RunObservation, ExecutorPortError> {
+        let status = self.backend.inspect(handle)?;
+        let evidence =
+            matches!(status, ExecutionStatus::Completed { .. }).then(|| self.backend.stream_evidence(handle));
+        Ok(RunObservation { status, evidence })
     }
 }

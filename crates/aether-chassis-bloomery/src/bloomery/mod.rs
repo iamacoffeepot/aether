@@ -64,8 +64,8 @@ pub use driver::{BloomeryDriverCapability, BloomeryDriverRunning};
 pub use executor::{
     CaptureIdentity, CapturedObjects, DEFAULT_LANE_PROGRAM, ExecutorPort, ExecutorPortError, ExecutorShell,
     LaneOccupancy, LaneProgram, LocalExecutor, LocalExecutorError, LocalLane, OrphanedRun, OutstandingDispatch,
-    ProcessTransformRunner, ReconcileLanes, ReconcileReport, RoutingExecutor, RunLifecycle, RunProcess, RunSpec,
-    Settled, TransformRunner, UnconfiguredActionsBackend, admits_lane_key, mock_lane,
+    ProcessTransformRunner, ReconcileLanes, ReconcileReport, RoutingExecutor, RunLifecycle, RunObservation, RunProcess,
+    RunSpec, Settled, TransformRunner, UnconfiguredActionsBackend, admits_lane_key, mock_lane,
 };
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 pub use executor::{GroupAbsence, IDENTITY_RECORD, ProcessIdentity, strict_group_absence};

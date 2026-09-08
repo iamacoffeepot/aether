@@ -29,7 +29,7 @@ pub trait AdmitSink {
 
 /// One handle this cycle inspected that was not yet [`ExecutionStatus::Completed`].
 ///
-/// `observed_from_unix_millis` is sampled immediately before [`ExecutorPort::inspect`]
+/// `observed_from_unix_millis` is sampled immediately before [`ExecutorPort::observe`]
 /// and `observed_until_unix_millis` immediately after it returns. Heartbeat future
 /// checks use the end; silence age uses the start. An inverted window (`until` <
 /// `from`) is not a backend fault: the status stays pending so the caller's
@@ -190,51 +190,40 @@ pub fn run_intake_cycle_now<Now: FnMut() -> u64>(
             continue;
         }
         let observed_from_unix_millis = now();
-        let status = match port.inspect(handle) {
-            // A worker holds the inspect (#5564). "Never asked", exactly like
-            // an arm this cycle skipped — and unlike a fault, it costs the arm
-            // nothing: its other handles are still asked, each on its own
+        let observed = match port.observe(handle) {
+            // A worker holds the observation (#5564). "Never asked", exactly
+            // like an arm this cycle skipped — and unlike a fault, it costs the
+            // arm nothing: its other handles are still asked, each on its own
             // worker, and the answer is consumed on the turn the completion
             // wake starts.
             Settled::InFlight => {
                 report.unobserved.push(handle.nonce.clone());
                 continue;
             }
-            Settled::Answered(Ok(status)) => status,
+            Settled::Answered(Ok(observed)) => observed,
             Settled::Answered(Err(error)) => {
                 skip_backend(&mut report, &mut faulted, backend, handle, &error, "inspect");
                 continue;
             }
         };
         let observed_until_unix_millis = now();
-        if !matches!(status, ExecutionStatus::Completed { .. }) {
+        let Some(streamed) = observed.evidence else {
             report.pending.push(PendingObservation {
                 nonce: handle.nonce.clone(),
-                status,
+                status: observed.status,
                 observed_from_unix_millis,
                 observed_until_unix_millis,
             });
             continue;
-        }
-        let references = match port.stream_evidence(handle) {
-            // The run is complete and a worker is fetching its evidence. Not
-            // observed *yet*: the handle stays tracked and stays out of the
-            // sweeps, and the next turn admits what the worker brought back.
-            // Counted before the answer lands it would be counted again on
-            // that turn, so `completed` waits for the evidence like the
-            // `unobserved` contract says it does.
-            Settled::InFlight => {
-                report.unobserved.push(handle.nonce.clone());
-                continue;
-            }
-            Settled::Answered(Ok(references)) => references,
-            Settled::Answered(Err(error)) => {
-                report.completed += 1;
+        };
+        report.completed += 1;
+        let references = match streamed {
+            Ok(references) => references,
+            Err(error) => {
                 skip_backend(&mut report, &mut faulted, backend, handle, &error, "stream_evidence");
                 continue;
             }
         };
-        report.completed += 1;
         for reference in references {
             let Some(upload) = claims.claim_for(&reference) else {
                 continue;
