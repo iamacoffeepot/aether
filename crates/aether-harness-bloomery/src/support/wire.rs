@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
 use aether_bloomery::{
-    Admit, AdmitResult, BloomId, BloomView, Event, Fact, IdempotencyKey, Outcome, Query, QueryResult, QuerySelector,
-    ViewDocument,
+    Admit, AdmitResult, BloomId, BloomView, CalibrationDocument, Event, Fact, IdempotencyKey, Outcome, Query,
+    QueryResult, QuerySelector, ViewDocument,
 };
 use aether_chassis_bloomery::ControlCore;
 use aether_chassis_bloomery::bloomery::DoctorReport;
@@ -139,6 +139,23 @@ impl Wire {
                 panic!("this wire read the projection without awaiting the boot journal replay: {refusal}")
             }
             Err(refusal) => panic!("the projection read was refused: {refusal}"),
+        }
+    }
+
+    /// The calibration read (ADR-0184): the capability ledger folded from this
+    /// coordinator's journal, beside the study grade over the same snapshot.
+    ///
+    /// The same `GET /calibration` answer, taken over the control mailbox the
+    /// REST route forwards to, so a scenario reads what an operator reads.
+    ///
+    /// # Panics
+    /// The query was refused or its reply did not decode.
+    pub fn calibration(&mut self) -> CalibrationDocument {
+        let query = Query { selector: QuerySelector::Calibration };
+        match self.call::<_, QueryResult>(control_mailbox(), &query) {
+            QueryResult::Calibration { document } => from_bytes(&document).expect("the calibration document decodes"),
+            QueryResult::Err { error } => panic!("the calibration read was refused: {error}"),
+            other => panic!("expected a calibration reply, got {other:?}"),
         }
     }
 

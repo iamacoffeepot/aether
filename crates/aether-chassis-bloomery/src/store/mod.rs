@@ -67,7 +67,15 @@ pub use aether_bloomery::{
 #[cfg(feature = "runtime")]
 mod config;
 #[cfg(feature = "runtime")]
-pub use config::{StoreConfig, StoreOverlay};
+pub use config::{StoreConfig, StoreOverlay, UnknownStoreClass};
+
+// Which world a journal's rows were written in (ADR-0184): the stamp that keeps
+// a benchmark run's rows out of the estate's history, and the estate's out of a
+// calibration host's.
+#[cfg(feature = "runtime")]
+mod class;
+#[cfg(feature = "runtime")]
+pub use class::StoreClassError;
 
 // Resolving a *bloom's* sealed configuration, distinct from `config` above,
 // which is this capability's own boot config (ADR-0090).
@@ -119,8 +127,8 @@ mod runtime;
 #[cfg(feature = "runtime")]
 pub use runtime::{
     AppendOutcome, CANDIDATE_HASH_OCCASION_LAND, CANDIDATE_HASH_OCCASION_SEAL, CandidateHash, CommitOutcome,
-    JournalWrite, OutstandingOrder, ProofFactRow, ProofFactWrite, RecordOutcome, ScopeRunOpen, ScopeRunRow,
-    SealOutcome, SqliteStore, StoreBackend, StoreCapabilityState, StudyRow, now_unix_millis,
+    JournalOpenError, JournalWrite, OutstandingOrder, ProofFactRow, ProofFactWrite, RecordOutcome, ScopeRunOpen,
+    ScopeRunRow, SealOutcome, SqliteStore, StoreBackend, StoreCapabilityState, StudyRow, now_unix_millis,
 };
 
 #[cfg(all(test, feature = "runtime"))]
