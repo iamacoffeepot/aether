@@ -1509,14 +1509,9 @@ impl<K: Kind, A> Emit<K> for NativeCtx<'_, Multi<K>, A> {
 /// keyed by *handle* `TypeId` (e.g. `HttpServerHandle`), not by *actor*
 /// `TypeId`, since the actor itself never escapes its dispatcher
 /// thread.
+#[derive(Default)]
 pub struct ExportedHandles {
     pub(crate) by_type: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
-}
-
-impl Default for ExportedHandles {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl ExportedHandles {

@@ -206,6 +206,7 @@ pub type SpawnByTagFn = fn(&Registry, u64, ActorTypeTag, bool, &str, &[u8]) -> R
 /// addressable at any lineage depth; `queue` is the cluster-local mail
 /// queue an intra-cluster send is pushed to and [`drain_cluster_queue`]
 /// drains in place.
+#[derive(Default)]
 pub struct Registry {
     inner: UnsafeCell<BTreeMap<MailboxId, InlineSlot>>,
     /// The instance's real folded [`MailboxId`] (`Tag::Mailbox`-tagged),
@@ -620,12 +621,6 @@ impl Registry {
         // before return.
         let queue = unsafe { &*self.queue.get() };
         queue.len()
-    }
-}
-
-impl Default for Registry {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

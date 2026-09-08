@@ -59,6 +59,12 @@ engine boots exactly as env-then-argv configuration dictates.
 
 Each subsystem owns its own config struct, in its own crate, declaring its own
 knobs — there is no central registry that every subsystem has to register into.
+"Its own crate" means the crate whose code *receives* the resolved value, not
+whichever crate the knob is named after: `WindowConfig` is a desktop-chassis boot
+knob group rather than the `aether-window` cap's config, because the chassis
+driver reads it and no window actor does.
+[Capability module anatomy](../capability-anatomy.md#configuration) records where
+a cap's config file sits and the one-config-per-actor bound that goes with it.
 A `#[derive(aether_substrate::Config)]` on that struct is what unifies them: from
 the field annotations it generates the environment parsing, the argument
 (`clap`) layer, and the layered resolution, *and* a machine-readable description
@@ -156,11 +162,14 @@ a non-empty garbage value. The remaining field hints (`env`, `cli_long`,
 `parse` names a custom parser for the rare field that needs one. Two things to
 know going in:
 
-- **Gate it on the `runtime` feature**, as above. A capability crate also
-  cross-compiles to wasm, where the config machinery isn't available; the
-  `#[cfg_attr(feature = "runtime", …)]` keeps the wasm build carrying only the
-  plain struct. Clippy runs host-native and won't catch a missing gate — the
-  wasm32 cross-build in CI will.
+- **Gate it on the `runtime` feature** wherever the file itself reaches the wasm
+  marker build, as above. A capability crate also cross-compiles to wasm, where
+  the config machinery isn't available; the `#[cfg_attr(feature = "runtime", …)]`
+  keeps that build carrying only the plain struct. A config file reached only
+  through `#[cfg(feature = "runtime")] mod runtime;` is already gated once at the
+  module and derives bare — `aether-audio`, `aether-render`, and
+  `aether-lifecycle` are the live examples. Clippy runs host-native and won't
+  catch a missing gate — the wasm32 cross-build in CI will.
 - **Wire the argument overlay into the chassis CLI** so the per-spawn layer
   reaches your knob, and add a `*_defaults_match` test (the derive's literal
   default and your struct's `Default` are declared separately and a test keeps

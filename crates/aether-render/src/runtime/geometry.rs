@@ -168,15 +168,14 @@ fn staged_buffer(
 /// a `create_geometry` reply carries — assigned in sequence the same way
 /// texture ids are, so ids are stable for the session and depend only on
 /// creation order.
+///
+/// The derived `Default` and [`Self::new`] agree because a default
+/// `SessionIds` spans the whole id space, which is the window `new`
+/// opens.
+#[derive(Default)]
 pub struct GeometryRegistry {
     pub ids: SessionIds<u32>,
     pub entries: HashMap<u32, StagedGeometry>,
-}
-
-impl Default for GeometryRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl GeometryRegistry {

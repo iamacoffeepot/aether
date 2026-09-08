@@ -14,8 +14,10 @@ covered in [Component registry](component-registry.md).
 | `list_engines` | hub | live engines and a bounded recently-dead sidecar |
 | `spawn_substrate` | hub → new substrate | create an engine from a stored binary selector |
 | `terminate_substrate` | hub → one substrate | force-stop and reap a supervised child |
-| `upload_binary` | hub artifact store | ingest a chassis binary from a fleet-host path |
+| `upload_binary` | hub artifact store | ingest a chassis binary from a fleet-host path; optional `pin: true` |
 | `list_binaries` | hub artifact store | discover stored binaries and their manifests |
+| `pin_artifact` | hub artifact store | durable explicit pin by exact content hash |
+| `unpin_artifact` | hub artifact store | drop only the explicit pin; a name still protects |
 
 `list_engines` accepts `show: "alive"`, `"dead"`, or `"all"`. The unrequested
 list is absent, not empty. Use `alive` for routine liveness checks and `dead`
@@ -60,7 +62,9 @@ Use this order:
 1. Call `list_binaries` with the chassis, linked-cap, or target filters you
    actually require.
 2. If no stored entry matches, call `upload_binary` with its absolute
-   fleet-host `staged_path` and, optionally, a useful name.
+   fleet-host `staged_path` and, optionally, a useful name. Pass `pin: true`
+   when the hash must survive LRU without a name; `pin: false` (the default)
+   never clears an existing pin.
 3. Capture the returned content hash.
 4. Pass a hash, `name@version`, or name as the `spawn_substrate` selector.
 5. Omit the selector only when the stored `default` headless chassis is the
@@ -68,8 +72,13 @@ Use this order:
 
 The hub reads and hashes the uploaded path and runs the binary's `--describe`
 surface to capture its manifest. Re-uploading identical bytes deduplicates to
-the same hash. A name is a movable pointer; a hash pins the spawn request to
-exact content.
+the same hash. A name is a movable pointer; a content hash selects exact bytes
+for spawn. Durable explicit pin is a sidecar flag on that hash, set at upload
+with `pin: true` or later with `pin_artifact`. `unpin_artifact` removes only
+that flag — a name still protects, and there is no delete or unname tool.
+Runtime engine protection of stored binaries is not implemented (issue 5686).
+Fleet and MCP must ship the same release: the `pin` field changes the typed
+upload kind schema.
 
 Running `--describe` is immediate native code execution, not passive manifest
 inspection. Upload only a task-built executable in a stable private path or an
