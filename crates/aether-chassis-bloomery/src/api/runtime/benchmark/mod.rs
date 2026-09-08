@@ -109,14 +109,16 @@ pub(super) fn start_response(result: StartBenchmarkResult) -> HttpServerResponse
 
 /// Render the runner's answer to a read.
 pub(super) fn read_response(result: ReadBenchmarkResult) -> HttpServerResponse {
-    match result {
-        ReadBenchmarkResult::Ok { run } => json(200, &run),
-        ReadBenchmarkResult::NotFound => error_response(
-            404,
-            "no benchmark run under that handle; a run is trial-mode bookkeeping held in memory, so a coordinator \
-             restart ends the one in flight and its handle with it",
-        ),
-    }
+    result.run.map_or_else(
+        || {
+            error_response(
+                404,
+                "no benchmark run under that handle; a run is trial-mode bookkeeping held in memory, so a \
+                 coordinator restart ends the one in flight and its handle with it",
+            )
+        },
+        |run| json(200, &run),
+    )
 }
 
 /// What a started run answers with.

@@ -20,7 +20,7 @@
 //! bloom is woven together at Integrate, and these members are N implementations
 //! of *the same task over the same base*: the fold collides by construction,
 //! Reconcile laps get charged to members for colliding with their siblings, and
-//! AggregateVerify / AggregateReview / Land judge a tree carrying four
+//! `AggregateVerify` / `AggregateReview` / Land judge a tree carrying four
 //! implementations of one feature merged together. The Construct and Verify
 //! columns would survive — the ledger keys those per member's agent — but
 //! ADR-0184 measures *the line*, and every column past the fold would be a

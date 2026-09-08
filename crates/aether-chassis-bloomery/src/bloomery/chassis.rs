@@ -892,7 +892,7 @@ impl BootableChassis for BloomeryChassis {
             .with_actor::<BenchmarkRunnerCapability>(BenchmarkRunnerSetup {
                 fixture,
                 store_class,
-                mainline_ref: mainline_ref.to_owned(),
+                mainline_ref,
                 poll_interval_secs: benchmark_poll_secs,
             }))
     }

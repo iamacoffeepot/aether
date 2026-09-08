@@ -26,7 +26,7 @@
 //! rather than a check.
 //!
 //! Identity/runtime split (ADR-0122): this ZST is the addressing identity; the
-//! sequencing lives in [`runtime`].
+//! sequencing lives in its `runtime` sibling.
 
 use aether_bloomery::StoreClass;
 use aether_bloomery_git::fixture::FakeGithub;

@@ -68,16 +68,15 @@ pub struct ReadBenchmark {
 }
 
 /// One run's rendered state, or nothing under that handle.
+///
+/// A struct with an optional run rather than a two-armed enum: the absent arm
+/// would carry nothing while the present one carries the whole document, and a
+/// reply whose variants differ that much in size costs every send the larger one.
 #[aether_data::kind(name = "aether.bloomery.benchmark.read_result", eq)]
-pub enum ReadBenchmarkResult {
-    /// The run.
-    Ok {
-        /// Its rendered state.
-        run: BenchmarkRun,
-    },
-    /// No run under that handle — a mistyped one, or a run a restart ended
-    /// ([`RUN_VOLATILITY`]).
-    NotFound,
+pub struct ReadBenchmarkResult {
+    /// The run, or `None` under a handle this coordinator does not hold — a
+    /// mistyped one, or a run a restart ended ([`RUN_VOLATILITY`]).
+    pub run: Option<BenchmarkRun>,
 }
 
 /// The self-addressed wake the runner's poll timer fires each interval.

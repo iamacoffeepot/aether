@@ -26,6 +26,7 @@ use aether_bloomery::{
 use aether_bloomery_git::fixture::FakeGithub;
 use aether_data::Kind;
 use aether_data::wire::{from_bytes, to_vec};
+use aether_substrate::InboundMail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
@@ -59,21 +60,28 @@ struct Run {
     watching: Option<BloomId>,
 }
 
+/// A start held while the store is re-read for configuration the request named
+/// but this cap does not hold. Keyed by the dispatch correlation the
+/// [`LoadConfigsResult`] echoes; the reply obligation rides with it, so the
+/// operator is answered once, on the resumed attempt.
+struct HeldStart {
+    inbound: InboundMail,
+    request: StartBenchmark,
+}
+
 /// Runtime state for [`BenchmarkRunnerCapability`].
 pub struct BenchmarkRunnerState {
     fixture: Option<FakeGithub>,
     store_class: StoreClass,
     mainline_ref: String,
     configs: ResolvedConfigs,
-    /// Whether the boot configuration read has landed. Until it has, this cap
-    /// cannot tell a cell address the store does not hold from one it merely has
-    /// not read, and those refuse a run for opposite reasons.
-    configs_ready: bool,
     runs: BTreeMap<u64, Run>,
     next_run: u64,
     /// The run each in-flight seal or projection read belongs to, keyed by the
     /// dispatch correlation the reply echoes.
     pending: BTreeMap<u64, u64>,
+    /// The starts waiting on a configuration re-read, keyed the same way.
+    pending_start: BTreeMap<u64, HeldStart>,
     _timer: Option<TimerHandle>,
 }
 
@@ -87,14 +95,22 @@ impl BenchmarkRunnerState {
         })
     }
 
+    /// Whether `request` names configuration this cap has not read.
+    ///
+    /// The api cap writes an authored configuration straight to the store, so a
+    /// run naming a cell authored moments earlier legitimately arrives ahead of
+    /// the content here (ADR-0174). That is the same gap the control core closes
+    /// on the admit path, and it is closed the same way: one re-read, then the
+    /// ordinary answer. Without it an operator's own `POST /configs` → `POST
+    /// /benchmark` sequence would refuse a cell the store does hold.
+    fn awaits_configs(&self, request: &StartBenchmark) -> bool {
+        std::iter::once(&request.instructions)
+            .chain(&request.cells)
+            .any(|address| self.configs.stored(*address).is_none())
+    }
+
     /// Plan a run and seal its first cell.
     fn start(&mut self, ctx: &mut NativeCtx<'_, Manual>, request: StartBenchmark) -> StartBenchmarkResult {
-        if self.runs.len() >= MAX_OPEN_BENCHMARKS {
-            return refused("outstanding-benchmark budget exhausted");
-        }
-        if !self.configs_ready {
-            return refused("stored configurations are not loaded yet");
-        }
         let fixture = match self.trial_fixture() {
             Ok(fixture) => fixture.clone(),
             Err(error) => return refused(&error),
@@ -145,7 +161,7 @@ impl BenchmarkRunnerState {
 
         let event = Event {
             idempotency_key: IdempotencyKey(format!("aether.bloomery.benchmark:{}", bloom.0.to_hex())),
-            fact: Fact::Seal(planned.spec.clone()),
+            fact: Fact::Seal(planned.spec),
         };
         match to_vec(&event) {
             Ok(event) => {
@@ -157,11 +173,11 @@ impl BenchmarkRunnerState {
     }
 
     /// Join the cursor cell's seal reply.
-    fn settle_seal(&mut self, run: u64, mail: &AdmitResult) {
+    fn settle_seal(&mut self, run: u64, mail: AdmitResult) {
         let outcome = match mail {
-            AdmitResult::Ok { outcome } => from_bytes::<Outcome>(outcome).ok(),
+            AdmitResult::Ok { outcome } => from_bytes::<Outcome>(&outcome).ok(),
             AdmitResult::Err { error } => {
-                self.refuse_cursor(run, error);
+                self.refuse_cursor(run, &error);
                 return;
             }
         };
@@ -221,9 +237,9 @@ impl BenchmarkRunnerState {
     }
 
     /// Join a projection read: a terminal bloom advances the sequence.
-    fn settle_poll(&mut self, ctx: &mut NativeCtx<'_, Manual>, run: u64, mail: &QueryResult) {
+    fn settle_poll(&mut self, ctx: &mut NativeCtx<'_, Manual>, run: u64, mail: QueryResult) {
         let status = match mail {
-            QueryResult::Bloom { view } => match from_bytes::<BloomView>(view) {
+            QueryResult::Bloom { view } => match from_bytes::<BloomView>(&view) {
                 Ok(view) => view.status,
                 Err(error) => {
                     self.refuse_cursor(run, &format!("a bloom view did not decode: {error}"));
@@ -358,10 +374,10 @@ impl NativeActor for BenchmarkRunnerCapability {
             store_class: params.store_class,
             mainline_ref: params.mainline_ref,
             configs: ResolvedConfigs::default(),
-            configs_ready: false,
             runs: BTreeMap::new(),
             next_run: 1,
             pending: BTreeMap::new(),
+            pending_start: BTreeMap::new(),
             _timer: timer,
         })
     }
@@ -374,20 +390,37 @@ impl NativeActor for BenchmarkRunnerCapability {
 
     /// `POST /benchmark`'s downstream: plan the run, seal its first cell, and
     /// answer with the handle rather than the sequence.
+    ///
+    /// A request naming configuration this cap has not read is held across one
+    /// store re-read rather than refused, so the reply obligation moves into the
+    /// held entry and the answer goes out from
+    /// [`on_load_configs_result`](Self::on_load_configs_result).
     #[handler::manual]
     fn on_start_benchmark(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: StartBenchmark) {
+        let inbound = ctx.take_inbound();
+
+        // Held starts count against the budget too: each one is a run this cap
+        // has already committed to attempting.
+        if state.runs.len() + state.pending_start.len() >= MAX_OPEN_BENCHMARKS {
+            inbound.reply(&refused("outstanding-benchmark budget exhausted"));
+            return;
+        }
+
+        if state.awaits_configs(&mail) {
+            let sent = ctx.actor::<StoreCapability>().send_detached_tracked(&LoadConfigs);
+            state.pending_start.insert(sent.correlation_id, HeldStart { inbound, request: mail });
+            return;
+        }
+
         let result = state.start(ctx, mail);
-        ctx.reply(&result);
+        inbound.reply(&result);
     }
 
     /// `GET /benchmark/{run}`'s downstream.
     #[handler::manual]
     fn on_read_benchmark(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: ReadBenchmark) {
-        let result = state
-            .runs
-            .get(&mail.run)
-            .map_or(ReadBenchmarkResult::NotFound, |run| ReadBenchmarkResult::Ok { run: run.view.clone() });
-        ctx.reply(&result);
+        let ReadBenchmark { run } = mail;
+        ctx.reply(&ReadBenchmarkResult { run: state.runs.get(&run).map(|held| held.view.clone()) });
     }
 
     #[handler::manual]
@@ -400,7 +433,7 @@ impl NativeActor for BenchmarkRunnerCapability {
         let Some(run) = state.pending.remove(&ctx.reply_target().correlation_id) else {
             return;
         };
-        state.settle_seal(run, &mail);
+        state.settle_seal(run, mail);
     }
 
     #[handler::manual]
@@ -408,24 +441,44 @@ impl NativeActor for BenchmarkRunnerCapability {
         let Some(run) = state.pending.remove(&ctx.reply_target().correlation_id) else {
             return;
         };
-        state.settle_poll(ctx, run, &mail);
+        state.settle_poll(ctx, run, mail);
     }
 
-    /// Fill the configuration window the plan resolves cells against.
+    /// Fill the configuration window the plan resolves cells against, and
+    /// resume the start that was waiting for it, if any.
     ///
     /// A malformed row is skipped rather than fatal: unlike the control core's
     /// own boot read, nothing here decides a tier from it — an address that does
-    /// not resolve refuses one benchmark run, which is the honest outcome.
-    #[handler::single]
-    fn on_load_configs_result(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: LoadConfigsResult) {
-        let LoadConfigsResult::Ok { records } = mail else {
-            return;
+    /// not resolve refuses one benchmark run, which is the honest outcome. A
+    /// failed read answers the held start rather than aborting the process, for
+    /// the same reason.
+    ///
+    /// The resumed start is not gated again: a second deferral would loop the
+    /// store on an address the re-read already declined to produce, and the
+    /// plan's own [`UnresolvableConfig`](crate::benchmark::BenchmarkRefusal)
+    /// refusal names it.
+    #[handler::manual]
+    fn on_load_configs_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: LoadConfigsResult) {
+        let held = state.pending_start.remove(&ctx.reply_target().correlation_id);
+        let records = match mail {
+            LoadConfigsResult::Ok { records } => records,
+            LoadConfigsResult::Err { error } => {
+                if let Some(HeldStart { inbound, .. }) = held {
+                    inbound.reply(&refused(&format!("stored configuration read failed: {error}")));
+                }
+                return;
+            }
         };
+
         for record in records {
             if let Some(address) = Digest::from_slice(&record.digest) {
                 state.configs.insert(address, record.kind, record.bytes, record.schema_digest);
             }
         }
-        state.configs_ready = true;
+
+        if let Some(HeldStart { inbound, request }) = held {
+            let result = state.start(ctx, request);
+            inbound.reply(&result);
+        }
     }
 }

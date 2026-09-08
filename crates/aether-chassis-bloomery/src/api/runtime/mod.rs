@@ -761,7 +761,8 @@ impl NativeActor for BloomeryApiCapability {
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         run: http::Path<String>,
     ) -> http::Outcome {
-        let routed = match run.0.parse() {
+        let run = run.0;
+        let routed = match run.parse() {
             Ok(run) => Routed::ReadBenchmark(ReadBenchmark { run }),
             Err(error) => Routed::Reply(error_response(400, &format!("benchmark run handle is not a number: {error}"))),
         };
