@@ -9,7 +9,7 @@
 //! [`WidgetChrome`] is where that ambient state is reached from, split out of
 //! the set because it is the one part that is pure field access. Every stock
 //! widget's three accessor bodies were `&mut self.frame`, `&mut self.theme`,
-//! and `&mut self.state`, sixteen times over, so [`widget_chrome!`] writes
+//! and `&mut self.state`, sixteen times over, so `widget_chrome!` writes
 //! them from the field names and each widget states only what varies.
 //!
 //! One hook carries what varies. [`cancel_activation`] releases whatever
@@ -24,7 +24,7 @@
 //! for the new font's metrics, or the widget silently keeps drawing against
 //! the old font's advances. Twelve widgets used to carry that as a one-line
 //! `on_set_theme` override precisely because the set's own default got it
-//! wrong; naming the adapter in [`widget_chrome!`] is what the override was
+//! wrong; naming the adapter in `widget_chrome!` is what the override was
 //! standing in for.
 //!
 //! `SetWidgetState` is deliberately absent. Its per-widget bodies disagree on
@@ -37,7 +37,7 @@
 //! side: four of the adopters draw no text and never request metrics, so
 //! hosting the reply here would have them declare a kind they can only
 //! no-op. Those that do measure keep a one-line handler over
-//! [`accept_font_metrics_result`](super::accept_font_metrics_result).
+//! `accept_font_metrics_result`.
 //!
 //! [`cancel_activation`]: WidgetDefaults::cancel_activation
 
@@ -54,7 +54,7 @@ use crate::{FocusGained, FocusLost, HoverGained, HoverLost, WidgetFrame};
 /// focus / hover / control state, and — for a widget that measures its own
 /// text — the single-flight font-metrics adapter.
 ///
-/// Implement it with [`widget_chrome!`] rather than by hand; the accessor
+/// Implement it with `widget_chrome!` rather than by hand; the accessor
 /// bodies are field access and nothing else.
 pub trait WidgetChrome {
     /// The widget's cached layout rect, assigned by the panel root.

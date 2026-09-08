@@ -32,7 +32,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, Mail, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_kinds::CachedFontMetrics;
 use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
@@ -320,7 +319,7 @@ impl WasmActor for LabelWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_kinds::{FontMetrics, GlyphAdvance};
+    use aether_kinds::{CachedFontMetrics, FontMetrics, GlyphAdvance};
     use alloc::vec;
 
     use crate::set::ELLIPSIS;

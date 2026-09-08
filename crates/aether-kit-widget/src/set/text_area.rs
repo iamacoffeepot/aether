@@ -10,9 +10,7 @@ use alloc::vec::Vec;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_clipboard::{GetClipboardTextResult, SetClipboardTextResult};
 use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_UP};
-use aether_kinds::{
-    CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput, mouse_button,
-};
+use aether_kinds::{ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput, mouse_button};
 use aether_text::FontMetricsResult;
 
 use crate::set::defaults::{WidgetDefaults, widget_chrome};
@@ -554,7 +552,7 @@ impl WasmActor for TextAreaWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_kinds::{FontMetrics, GlyphAdvance};
+    use aether_kinds::{CachedFontMetrics, FontMetrics, GlyphAdvance};
 
     use crate::set::APPROX_ADVANCE_RATIO;
 
