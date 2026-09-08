@@ -266,7 +266,7 @@ fn develop(harness: &mut SubstrateHarness, raster: &[f32]) -> Vec<f32> {
         .expect("decode ProgramRegisterResult")
     {
         ProgramRegisterResult::Ok { program_id } => program_id,
-        ProgramRegisterResult::Err { reason } => panic!("register failed: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("register failed: {error}"),
     };
 
     // Neither stage reads the block, but the module declares it, so the
@@ -343,7 +343,7 @@ fn depth_weights(harness: &mut SubstrateHarness) -> [f32; 2] {
         .expect("decode depth probe ProgramRegisterResult")
     {
         ProgramRegisterResult::Ok { program_id } => program_id,
-        ProgramRegisterResult::Err { reason } => panic!("register depth probe failed: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("register depth probe failed: {error}"),
     };
     let eye = Vec3::new(0.0, 0.0, 5.0);
     let uniforms =

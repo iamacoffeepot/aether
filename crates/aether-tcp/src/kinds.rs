@@ -65,7 +65,7 @@ pub struct Connect {
 #[kind(name = "aether.tcp.connect_result")]
 pub enum ConnectResult {
     Ok { session_name: String, session_id: aether_data::MailboxId, peer: String },
-    Err { addr: String, reason: String },
+    Err { addr: String, error: String },
 }
 
 /// Reply to `BindListener`. `Ok` carries the resolved listener
@@ -85,7 +85,7 @@ pub enum ConnectResult {
 #[kind(name = "aether.tcp.bind_listener_result")]
 pub enum BindListenerResult {
     Ok { listener_name: String, listener_id: aether_data::MailboxId, local_port: u16 },
-    Err { addr: String, reason: String },
+    Err { addr: String, error: String },
 }
 
 /// `aether.tcp.unbind_listener` — request the singleton
@@ -111,7 +111,7 @@ pub struct UnbindListener {
 #[kind(name = "aether.tcp.unbind_listener_result")]
 pub enum UnbindListenerResult {
     Ok { listener_name: String },
-    Err { listener_name: String, reason: String },
+    Err { listener_name: String, error: String },
 }
 
 /// `aether.tcp.list_listeners` — enumerate every live listener
@@ -132,8 +132,9 @@ pub struct ListenerInfo {
     pub port: u16,
 }
 
-/// Reply to `ListListeners`. Always `Ok` — listing has no
-/// failure mode that can't be expressed by an empty list.
+/// Reply to `ListListeners`. No `Err` arm: this is an enumeration of
+/// the live fleet, and an enumeration cannot miss — no listeners is an
+/// empty list, not a failure.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.tcp.list_listeners_result")]
 pub struct ListListenersResult {
