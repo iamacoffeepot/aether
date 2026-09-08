@@ -190,6 +190,7 @@ pub use persisted::PersistedUpcast;
 pub use persisted::decode_persisted;
 pub use persisted::decode_recorded_decisions;
 pub use persisted::decode_recorded_event;
+pub use persisted::decode_reshaped;
 pub use persisted::kind_named;
 pub use port::AwaitingSurfaceView;
 pub use port::BackendId;

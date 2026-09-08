@@ -367,6 +367,8 @@ pub fn reference_instructions() -> ModelProcessInstructions {
         attribute_findings: field("attribute-findings"),
         fold_conflict_contract: field("fold-conflict-contract"),
         composition_refine_order: field("composition-refine-order"),
+        retrospect: field("retrospect"),
+        retrospect_finding_contract: field("retrospect-finding-contract"),
     }
 }
 

@@ -63,6 +63,11 @@ pub struct ModelProcessInstructions {
     pub fold_conflict_contract: String,
     /// Refine-path composition order. Static command; membership is not interpolated here.
     pub composition_refine_order: String,
+    /// `retrospect.read` process instructions (ADR-0216). The bloom id, the receipt digest, and
+    /// the landed range are prompt-manifest context slots, never interpolated here.
+    pub retrospect: String,
+    /// How the reader emits one finding as a work order — the analogue of [`Self::scope_emission`].
+    pub retrospect_finding_contract: String,
 }
 
 /// Why [`ModelProcessInstructions::validate`] refused a bundle.
@@ -102,6 +107,8 @@ impl ModelProcessInstructions {
             attribute_findings,
             fold_conflict_contract,
             composition_refine_order,
+            retrospect,
+            retrospect_finding_contract,
         } = self;
         for (name, value) in [
             ("conventions", conventions.as_str()),
@@ -121,6 +128,8 @@ impl ModelProcessInstructions {
             ("attribute_findings", attribute_findings.as_str()),
             ("fold_conflict_contract", fold_conflict_contract.as_str()),
             ("composition_refine_order", composition_refine_order.as_str()),
+            ("retrospect", retrospect.as_str()),
+            ("retrospect_finding_contract", retrospect_finding_contract.as_str()),
         ] {
             if value.trim().is_empty() {
                 return Err(ModelProcessInstructionsError::EmptyField(name));
@@ -159,6 +168,8 @@ mod tests {
             attribute_findings: String::from("tag each finding with its task id"),
             fold_conflict_contract: String::from("reproduce intent on the folded head"),
             composition_refine_order: String::from("refine in composition order"),
+            retrospect: String::from("read what the bloom landed and file what it will not fix"),
+            retrospect_finding_contract: String::from("emit one finding as one work order"),
         }
     }
 
@@ -182,6 +193,8 @@ mod tests {
         ("attribute_findings", |bundle, value| bundle.attribute_findings = value),
         ("fold_conflict_contract", |bundle, value| bundle.fold_conflict_contract = value),
         ("composition_refine_order", |bundle, value| bundle.composition_refine_order = value),
+        ("retrospect", |bundle, value| bundle.retrospect = value),
+        ("retrospect_finding_contract", |bundle, value| bundle.retrospect_finding_contract = value),
     ];
 
     #[test]
