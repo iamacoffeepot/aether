@@ -4,8 +4,9 @@
 mod common;
 
 use aether_bloomery::{
-    BloomDraft, ConfigRegistry, Event, Evidence, EvidenceKind, Fact, Outcome, PipelineManifest, ResolvedConfigs,
-    Snapshot, SpendWindow, StageId, VerifyFailure, VerifyFailureSet, VerifyGateSet, decode_recorded_event, reduce,
+    BloomDraft, ConfigKind, ConfigRegistry, Event, Evidence, EvidenceKind, Fact, Outcome, PipelineManifest,
+    ResolvedConfigs, Snapshot, SpendWindow, StageId, VerifyFailure, VerifyFailureSet, VerifyGateSet,
+    decode_recorded_event, reduce,
 };
 use aether_data::Kind;
 use aether_data::wire::to_vec;
