@@ -62,7 +62,7 @@ impl Chassis for HeadlessChassis {
     /// source stack, then wrap the composed boot in a
     /// [`HeadlessTimerDriverCapability`].
     fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        boot_standard(env, |env| {
+        boot_standard(env, |env: &mut CommonEnv| {
             // ADR-0162 §config-at-its-seam: the tick cadence is driver config —
             // its consumer is the std-timer driver's loop period, not a composed
             // cap — so it resolves HERE, off the base's source stack, at the

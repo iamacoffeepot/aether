@@ -13,9 +13,9 @@
 //!   `Chassis::build` body a full-stack chassis parameterises by its
 //!   driver alone.
 //! - [`cli`] — the per-chassis clap roots and per-cap overlay
-//!   composition (ADR-0090 unit d), plus [`chassis_cli!`] — the root's
+//!   composition (ADR-0090 unit d), plus `chassis_cli!` — the root's
 //!   `ChassisCli` impl and flag-parity test.
-//! - [`entry`] — the shared chassis-binary `main` ([`chassis_main!`] /
+//! - [`entry`] — the shared chassis-binary `main` (`chassis_main!` /
 //!   [`entry::run_chassis_main`]).
 //! - [`autoload`] — boot-time component autoload shared by the
 //!   full-stack chassis (issue #1529).

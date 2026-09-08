@@ -59,7 +59,7 @@ impl Chassis for DesktopChassis {
     /// [`BuiltChassis`] whose [`BuiltChassis::run`] blocks on the winit event
     /// loop.
     fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        boot_standard(env, |env| {
+        boot_standard(env, |env: &mut CommonEnv| {
             // ADR-0155 §4: the winit `EventLoop` is a Start-stage runtime
             // handle, not config — construct it here on the boot path (`main()`
             // calls this on the chassis main thread, where winit's `!Send`

@@ -5,7 +5,7 @@
 //! [`run_describe_prelude`] discovery exits, open its `Chassis::Env` off the
 //! parsed root, build, log that the chassis is up, and block on the driver —
 //! and each spelled them out in a thirty-line `main` that differed only in
-//! which two types it named. [`run_chassis_main`] is that flow; [`chassis_main!`]
+//! which two types it named. [`run_chassis_main`] is that flow; `chassis_main!`
 //! is the `fn main` wrapper over it, so a chassis bin declares its chassis and
 //! its CLI root and nothing else.
 //!
@@ -15,7 +15,6 @@
 //! it (ADR-0162). [`ChassisEnv`] names that step per env type rather than per
 //! binary, so the shared flow covers both.
 
-use aether_substrate::Chassis;
 use aether_substrate::chassis::BootableChassis;
 use aether_substrate::config::{ConfigError, ConfigSources};
 use clap::Parser;
@@ -23,7 +22,7 @@ use clap::Parser;
 use crate::boot::{CommonEnv, run_describe_prelude};
 use crate::cli::ChassisCli;
 
-/// How a chassis's [`Chassis::Env`] is opened off its parsed CLI root — the
+/// How a chassis's `Chassis::Env` is opened off its parsed CLI root — the
 /// single step the chassis mains genuinely differed in.
 ///
 /// Implemented per env type, not per chassis: every chassis whose env is a
