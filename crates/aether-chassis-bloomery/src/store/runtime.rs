@@ -3553,6 +3553,7 @@ impl NativeActor for StoreCapability {
                         current_revision: head.current_revision.map(|digest| digest.as_bytes().to_vec()),
                         current_ordinal: head.current_ordinal,
                         status: head.status.as_str().to_owned(),
+                        filed: head.filed,
                     })
                     .collect(),
             },

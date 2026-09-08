@@ -209,6 +209,10 @@ pub struct ListedCommission {
     pub current_ordinal: Option<u64>,
     /// Lifecycle flag. Not signed.
     pub status: String,
+    /// The read that filed this commission (ADR-0216 §3), when a reader did:
+    /// the landing receipt, the heading, and the surface its work order names.
+    /// `None` for every hand-filed commission.
+    pub filed: Option<aether_bloomery::FiledFinding>,
 }
 
 /// Reply to [`ListCommissions`].
