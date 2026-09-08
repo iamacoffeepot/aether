@@ -138,40 +138,42 @@ fn fragment_state<'a>(
     }
 }
 
+/// Everything one pipeline in the [`render_pipeline`] shape differs from its
+/// siblings by. Eight knobs across six call sites in three modules, so they
+/// are named at each site rather than ordered.
+struct RenderPipelineSpec<'a> {
+    label: &'a str,
+    layout: &'a wgpu::PipelineLayout,
+    shader: &'a wgpu::ShaderModule,
+    /// The fragment entry point. The vertex entry is always `vs_main` — every
+    /// pipeline built here shares its stage's one vertex function.
+    fragment_entry: &'a str,
+    vertex_layout: &'a wgpu::VertexBufferLayout<'a>,
+    color_format: wgpu::TextureFormat,
+    blend: wgpu::BlendState,
+    /// The depth-stencil state the pass tests against, or `None` for the
+    /// overlay pipelines, which draw over an already-resolved world pass with
+    /// no depth interaction at all.
+    depth: Option<wgpu::DepthStencilState>,
+}
+
 /// One triangle-list render pipeline in the shape the material pass
 /// ([`material`], ADR-0140) and the overlay pass ([`quad`] / [`shape`],
 /// ADR-0105 / ADR-0213) both draw through: CCW winding, no culling, filled,
-/// multisampled at [`MSAA_SAMPLE_COUNT`], one colour target of `color_format`
-/// composited under `blend`, and `vs_main` as the vertex entry point. `depth`
-/// is the depth-stencil state the pass tests against — `None` for the overlay
-/// pipelines, which draw over an already-resolved world pass with no depth
-/// interaction at all.
-// Eight descriptor knobs, every one of them something a pipeline differs from
-// its siblings by; a struct for the six call sites across the three modules
-// would name each of them twice and clarify nothing.
-#[allow(clippy::too_many_arguments)]
-fn render_pipeline(
-    device: &wgpu::Device,
-    shader: &wgpu::ShaderModule,
-    layout: &wgpu::PipelineLayout,
-    label: &str,
-    color_format: wgpu::TextureFormat,
-    fragment_entry: &str,
-    vertex_layout: &wgpu::VertexBufferLayout<'_>,
-    blend: wgpu::BlendState,
-    depth: Option<wgpu::DepthStencilState>,
-) -> wgpu::RenderPipeline {
-    let fragment_targets = [Some(color_target_state(color_format, blend))];
+/// multisampled at [`MSAA_SAMPLE_COUNT`], and one colour target of the spec's
+/// format composited under its blend.
+fn render_pipeline(device: &wgpu::Device, spec: RenderPipelineSpec<'_>) -> wgpu::RenderPipeline {
+    let fragment_targets = [Some(color_target_state(spec.color_format, spec.blend))];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(label),
-        layout: Some(layout),
+        label: Some(spec.label),
+        layout: Some(spec.layout),
         vertex: wgpu::VertexState {
-            module: shader,
+            module: spec.shader,
             entry_point: Some("vs_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: slice::from_ref(vertex_layout),
+            buffers: slice::from_ref(spec.vertex_layout),
         },
-        fragment: Some(fragment_state(shader, fragment_entry, &fragment_targets)),
+        fragment: Some(fragment_state(spec.shader, spec.fragment_entry, &fragment_targets)),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
@@ -183,7 +185,7 @@ fn render_pipeline(
             unclipped_depth: false,
             conservative: false,
         },
-        depth_stencil: depth,
+        depth_stencil: spec.depth,
         multisample: wgpu::MultisampleState { count: MSAA_SAMPLE_COUNT, ..wgpu::MultisampleState::default() },
         multiview_mask: None,
         cache: None,

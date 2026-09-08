@@ -178,17 +178,19 @@ pub(super) fn build_shape_pipeline(
     // variant included, which premultiplies its sampled texel itself. Overlay
     // content draws over the resolved world pass with no depth interaction,
     // like the quad pipelines.
-    let build = |label, layout, entry_point| {
+    let build = |label, layout, fragment_entry| {
         super::render_pipeline(
             device,
-            &shader,
-            layout,
-            label,
-            color_format,
-            entry_point,
-            &vertex_layout,
-            wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-            None,
+            super::RenderPipelineSpec {
+                label,
+                layout,
+                shader: &shader,
+                fragment_entry,
+                vertex_layout: &vertex_layout,
+                color_format,
+                blend: wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+                depth: None,
+            },
         )
     };
     let plain = build("aether shape pipeline", &pipeline_layout, "fs_main");

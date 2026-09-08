@@ -279,14 +279,16 @@ pub fn build_quad_pipeline(
     let build = |label, blend| {
         super::render_pipeline(
             device,
-            &shader,
-            &pipeline_layout,
-            label,
-            color_format,
-            "fs_main",
-            &vertex_layout,
-            blend,
-            None,
+            super::RenderPipelineSpec {
+                label,
+                layout: &pipeline_layout,
+                shader: &shader,
+                fragment_entry: "fs_main",
+                vertex_layout: &vertex_layout,
+                color_format,
+                blend,
+                depth: None,
+            },
         )
     };
     let straight = build("aether quad pipeline", wgpu::BlendState::ALPHA_BLENDING);

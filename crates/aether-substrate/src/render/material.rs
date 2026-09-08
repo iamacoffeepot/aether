@@ -74,39 +74,33 @@ pub fn build_material_pipelines(
         immediate_size: 0,
     });
 
-    let textured = super::render_pipeline(
-        device,
-        &shader,
-        &textured_layout,
-        "aether textured material pipeline",
-        color_format,
-        "fs_textured",
-        &vertex_layout,
-        wgpu::BlendState::ALPHA_BLENDING,
-        Some(material_depth()),
-    );
-    let textured_premultiplied = super::render_pipeline(
-        device,
-        &shader,
-        &textured_layout,
+    // The three differ by layout, fragment entry, and blend; everything else —
+    // the vertex layout, the shader, and the depth state — is shared.
+    let build = |label, layout, fragment_entry, blend| {
+        super::render_pipeline(
+            device,
+            super::RenderPipelineSpec {
+                label,
+                layout,
+                shader: &shader,
+                fragment_entry,
+                vertex_layout: &vertex_layout,
+                color_format,
+                blend,
+                depth: Some(material_depth()),
+            },
+        )
+    };
+    let textured =
+        build("aether textured material pipeline", &textured_layout, "fs_textured", wgpu::BlendState::ALPHA_BLENDING);
+    let textured_premultiplied = build(
         "aether textured material premultiplied pipeline",
-        color_format,
+        &textured_layout,
         "fs_textured",
-        &vertex_layout,
         wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-        Some(material_depth()),
     );
-    let coverage = super::render_pipeline(
-        device,
-        &shader,
-        &coverage_layout,
-        "aether coverage material pipeline",
-        color_format,
-        "fs_coverage",
-        &vertex_layout,
-        wgpu::BlendState::ALPHA_BLENDING,
-        Some(material_depth()),
-    );
+    let coverage =
+        build("aether coverage material pipeline", &coverage_layout, "fs_coverage", wgpu::BlendState::ALPHA_BLENDING);
 
     let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("aether material vertex buffer"),
