@@ -503,6 +503,7 @@ impl Default for CoordinatorConfig {
             hourly_request_budget: 5000,
             store_path: ":memory:".to_owned(),
             approval_policy_file: "approval-policy.toml".to_owned(),
+            authorized_instruction_bundles: String::new(),
             local_lane_enabled: true,
             local_lane_commands: "construct.,review.,scope.".to_owned(),
             local_worktree_base: ".bloomery/local-worktrees".to_owned(),
