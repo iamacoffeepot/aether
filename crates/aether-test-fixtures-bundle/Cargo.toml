@@ -54,5 +54,13 @@ serde = { workspace = true, default-features = false, features = ["derive"] }
 # LogCapability. The source-observer fixture logs the same way.
 tracing = { workspace = true, default-features = false }
 
+# cargo-machete (the CI unused-deps gate) scans source without expanding
+# macros, so it cannot see that `serde` is reached only through the
+# `#[aether_data::kind(...)]` expansion, which emits `::serde::Serialize` /
+# `::serde::Deserialize` on the fixtures' own kinds. The crate names serde
+# nowhere in source; the dependency is real.
+[package.metadata.cargo-machete]
+ignored = ["serde"] # aether-suppression-request: serde is used only through the #[aether_data::kind] expansion, invisible to a source-only scan
+
 [lints]
 workspace = true

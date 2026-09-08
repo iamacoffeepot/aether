@@ -285,10 +285,7 @@ pub enum TraceTailResult {
 /// registry's `settled` set dedups). The gate-site contract is
 /// "settles eventually," not "settles only once every dependency is
 /// provably done."
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
-)]
-#[kind(name = "aether.trace.settled")]
+#[aether_data::kind(name = "aether.trace.settled", copy, default, eq, derive(Hash))]
 pub struct Settled {
     pub root: MailId,
 }

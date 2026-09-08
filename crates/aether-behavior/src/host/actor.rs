@@ -64,8 +64,7 @@ enum ScriptLoadOrigin {
 
 /// Context stored under an `aether.fs.read` correlation while the behavior host
 /// waits for script bytes.
-#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize)]
-#[kind(name = "aether.behavior.script_load_context")]
+#[aether_data::kind(name = "aether.behavior.script_load_context")]
 struct ScriptLoadContext {
     reply: Option<ReplyHandle>,
     origin: ScriptLoadOrigin,

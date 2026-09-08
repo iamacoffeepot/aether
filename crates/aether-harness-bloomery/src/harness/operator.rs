@@ -13,13 +13,13 @@
 //! that wants to exercise a door's *refusal* drives the door itself.
 
 use aether_bloomery::{
-    BloomId, BloomSpec, Digest, Fact, KeyId, OperatorHold, OperatorProposal, OperatorRepair, Outcome, Withdrawal,
-    WithdrawalCause, WorkpieceId, digest_of, signed_proposal,
+    BloomDraft, BloomId, BloomSpec, Digest, Fact, KeyId, OperatorHold, OperatorProposal, OperatorRepair, Outcome,
+    Withdrawal, WithdrawalCause, WorkpieceId, digest_of, signed_proposal,
 };
 use aether_chassis_bloomery::bloomery::verified_statement_approval;
 
 use super::ScenarioHarness;
-use super::drive::member;
+use super::drive::member_with;
 use crate::scenario::OperatorMove;
 
 impl OperatorMove {
@@ -216,13 +216,25 @@ impl ScenarioHarness {
             .iter()
             .map(|existing| {
                 if existing.workpiece == *workpiece {
-                    member(&existing.workpiece.0, scope_revision)
+                    member_with(&existing.workpiece.0, scope_revision, existing.configs.clone())
                 } else {
                     existing.clone()
                 }
             })
             .collect::<Vec<_>>();
 
-        super::draft(sealed.base(), &members)
+        // The predecessor's own configuration carries across (ADR-0174): a
+        // successor is the same plan re-sealed at a widened scope, not a fresh
+        // one, and dropping its bloom-wide registry would hand the amended
+        // member a bloom that configures nothing — an unpinned process among
+        // them (ADR-0214), which refuses every model dispatch the successor
+        // decides.
+        BloomDraft {
+            proposals: members,
+            base: sealed.base(),
+            configs: sealed.configs().clone(),
+            ..BloomDraft::default()
+        }
+        .seal()
     }
 }

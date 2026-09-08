@@ -16,10 +16,17 @@ use aether_chassis_bloomery::store::OutstandingOrder;
 /// otherwise built.
 #[must_use]
 pub fn member(workpiece: &str, scope_revision: Digest) -> Membership {
+    member_with(workpiece, scope_revision, ConfigRegistry::default())
+}
+
+/// The same member sealing its own configuration registry — the per-member
+/// scope the reducer layers over the bloom's at dispatch (ADR-0174).
+#[must_use]
+pub fn member_with(workpiece: &str, scope_revision: Digest, configs: ConfigRegistry) -> Membership {
     approved(Membership {
         workpiece: WorkpieceId(workpiece.to_owned()),
         scope_revision,
-        configs: ConfigRegistry::default(),
+        configs,
         approval: Evidence { subject: Digest::default(), kind: EvidenceKind::Approval, detail: super::digest(200) },
     })
 }

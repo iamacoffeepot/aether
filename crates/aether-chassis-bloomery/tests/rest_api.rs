@@ -31,8 +31,8 @@ use aether_bloomery::{
     ConfigKind, ConfigRegistry, ContentAddressed, Digest, DispatchPayload, Evidence, EvidenceKind, Harness, KeyId,
     Membership, MetricsSeat, ModelOverride, NamedPath, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease,
     PathOrigin, Provenance, ReasoningEffort, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting,
-    ScopeVerifyInput, SignatureEnvelope, StageCatalog, StageId, Statement, Tier, ToolPolicy, Topic, WorkpieceId,
-    authorization_message, digest_of, verify_scope,
+    ScopeVerifyInput, SignatureEnvelope, StageCatalog, StageId, Statement, StoreClass, Tier, ToolPolicy, Topic,
+    WorkpieceId, authorization_message, digest_of, verify_scope,
 };
 use aether_chassis_bloomery::bloomery::TopicOutbox;
 use aether_chassis_bloomery::commission;
@@ -1649,7 +1649,7 @@ fn fold_unpriced_construct_seats() -> (Vec<MetricsSeat>, CapabilityLedger) {
         },
     )]);
     let source = |asked: &Digest| records.get(asked).copied();
-    (metrics.seats(source), calibration.report(source))
+    (metrics.seats(source), calibration.report(StoreClass::Live, source))
 }
 
 /// Both seat ledgers fold the same dispatch and price the same way: a mechanical

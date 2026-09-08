@@ -152,8 +152,7 @@ std::thread_local! {
 /// Config for [`StubChild`] carrying an observable `value`, so a by-tag
 /// spawn test proves `config_bytes` were decoded and handed to `init`
 /// (rather than dropped or replaced with an empty default).
-#[derive(::aether_data::Kind, ::aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Default)]
-#[kind(name = "test.inline.stub_config")]
+#[aether_data::kind(name = "test.inline.stub_config", default)]
 struct StubConfig {
     value: u32,
 }

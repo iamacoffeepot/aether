@@ -211,14 +211,12 @@ impl NativeActor for BookRouteHandler {
 /// The request/reply kind pair for the deferred-route fixtures
 /// (ADR-0154 §2): a route forwards `EchoAsk` to a peer cap, which
 /// replies `EchoSay`.
-#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize)]
-#[kind(name = "aether.http.test_echo_ask")]
+#[aether_data::kind(name = "aether.http.test_echo_ask")]
 pub struct EchoAsk {
     pub text: String,
 }
 
-#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize)]
-#[kind(name = "aether.http.test_echo_say")]
+#[aether_data::kind(name = "aether.http.test_echo_say")]
 pub struct EchoSay {
     pub text: String,
 }

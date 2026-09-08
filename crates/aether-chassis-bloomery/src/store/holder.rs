@@ -230,8 +230,10 @@ mod tests {
     use tracing::subscriber::with_default;
     use tracing::{Event as TracingEvent, Metadata, Subscriber};
 
+    use aether_bloomery::StoreClass;
+
     use super::{HOLDER_TABLE, JournalHolderError, claim, read_claim, release, write_claim};
-    use crate::store::SqliteStore;
+    use crate::store::{JournalOpenError, SqliteStore};
 
     fn journal_path(dir: &TempDir) -> String {
         dir.path().join("bloomery.db").to_str().expect("a temp path is utf-8").to_owned()
@@ -295,9 +297,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let path = journal_claimed_by(&dir, holder.id());
 
-        let refusal = SqliteStore::open_as_holder(&path).err().expect("a live holder refuses the second open");
+        let refusal =
+            SqliteStore::open_as_holder(&path, StoreClass::Live).err().expect("a live holder refuses the second open");
 
-        let JournalHolderError::Held { pid, path: named, .. } = &refusal else {
+        let JournalOpenError::Holder(JournalHolderError::Held { pid, path: named, .. }) = &refusal else {
             panic!("the refusal must name the holder, not fault: {refusal}");
         };
         assert_eq!(*pid, holder.id(), "the refusal names the pid holding the journal");
@@ -319,7 +322,7 @@ mod tests {
         holder.kill().expect("the stand-in holder is killed");
         holder.wait().expect("the stand-in holder is reaped");
 
-        let store = SqliteStore::open_as_holder(&path).expect("a stale claim is taken over");
+        let store = SqliteStore::open_as_holder(&path, StoreClass::Live).expect("a stale claim is taken over");
         drop(store);
 
         assert!(table_exists(&path, "journal"), "the takeover ran the migrations it was gating");
@@ -334,7 +337,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let path = journal_path(&dir);
 
-        drop(SqliteStore::open_as_holder(&path).expect("an unclaimed journal is claimed"));
+        drop(SqliteStore::open_as_holder(&path, StoreClass::Live).expect("an unclaimed journal is claimed"));
         let conn = Connection::open(&path).expect("the journal opens");
         assert!(read_claim(&conn).expect("the claim table is readable").is_none(), "a clean shutdown releases");
 
@@ -357,9 +360,9 @@ mod tests {
         let path = dir.path().to_str().expect("a temp path is utf-8");
         let events = Arc::new(RecordedOpenFailures::default());
         let error = with_default(OpenFailureRecorder(Arc::clone(&events)), || {
-            SqliteStore::open_as_holder(path).err().expect("a directory is not a journal")
+            SqliteStore::open_as_holder(path, StoreClass::Live).err().expect("a directory is not a journal")
         });
-        let JournalHolderError::Sqlite(sqlite) = &error else {
+        let JournalOpenError::Holder(JournalHolderError::Sqlite(sqlite)) = &error else {
             panic!("connect must surface the rusqlite error, not Held: {error}");
         };
         let direct = Connection::open(path).expect_err("a directory does not open");
@@ -430,12 +433,14 @@ mod tests {
         publish_file(Path::new(&ready), b"ready");
         wait_for_file(Path::new(&go), Duration::from_secs(30));
         let events = Arc::new(RecordedOpenFailures::default());
-        match with_default(OpenFailureRecorder(Arc::clone(&events)), || SqliteStore::open_as_holder(&path)) {
+        match with_default(OpenFailureRecorder(Arc::clone(&events)), || {
+            SqliteStore::open_as_holder(&path, StoreClass::Live)
+        }) {
             Ok(_store) => {
                 publish_file(Path::new(&result), format!("claimed {}", process::id()));
                 hold_until_killed();
             }
-            Err(JournalHolderError::Held { pid, .. }) => {
+            Err(JournalOpenError::Holder(JournalHolderError::Held { pid, .. })) => {
                 publish_file(Path::new(&result), format!("held {pid}"));
             }
             Err(error) => {
@@ -537,7 +542,7 @@ mod tests {
         None
     }
 
-    fn captured_open_failure(events: &RecordedOpenFailures, error: &JournalHolderError) -> String {
+    fn captured_open_failure(events: &RecordedOpenFailures, error: &JournalOpenError) -> String {
         let mut debug = format!("{error:?}");
         let mut bound = debug.len().min(512);
         while bound > 0 && !debug.is_char_boundary(bound) {

@@ -30,7 +30,6 @@ runtime = ["dep:aether-substrate", "dep:arboard"]
 [dependencies]
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
-serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 # Native-only runtime half — gated so wasm/marker builds skip the substrate
 # runtime and the `arboard` system backend.
 aether-substrate = { path = "../aether-substrate", optional = true }

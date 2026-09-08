@@ -67,6 +67,7 @@ fn forked_lane_settings_reach_the_production_resolver() {
         cas_land_enabled: false,
         fixture_base_sha: "abc123",
         heartbeat_silence_secs: None,
+        authorized_instructions: "",
     };
     let exe = env::current_exe().expect("the test executable");
     let test_thread = thread::current();

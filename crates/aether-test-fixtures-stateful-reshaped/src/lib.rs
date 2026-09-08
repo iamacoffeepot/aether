@@ -17,8 +17,7 @@ use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 /// Reshaped durable state — the added `generation` field changes the
 /// schema and therefore `Kind::ID`, which is what drives the decode-miss
 /// when this fixture replaces `stateful_replace_typed`.
-#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]
-#[kind(name = "aether.test_fixtures.counter_state")]
+#[aether_data::kind(name = "aether.test_fixtures.counter_state")]
 pub struct CounterState {
     pub count: u32,
     pub generation: u32,

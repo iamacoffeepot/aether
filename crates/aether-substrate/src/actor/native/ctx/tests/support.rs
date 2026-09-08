@@ -119,8 +119,7 @@ impl Addressable for ParentKeyedPeer {
 
 impl HandlesKind<CastOnly> for ParentKeyedPeer {}
 
-#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
-#[kind(name = "test.native_request_context")]
+#[aether_data::kind(name = "test.native_request_context", partial_eq)]
 pub(super) struct NativeRequestContext {
     pub(super) value: u32,
 }
