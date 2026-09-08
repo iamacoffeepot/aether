@@ -27,6 +27,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
+use core::str::from_utf8;
 
 use serde::{Deserialize, Serialize};
 
@@ -233,7 +234,7 @@ impl RetrospectFinding {
     /// The intent text the filed commission carries — a markdown work order.
     ///
     /// The heading is what the replica projection reads back as the title
-    /// ([`intent_title`](crate::intent_title)), so a filing is a distinguishable
+    /// ([`intent_title`]), so a filing is a distinguishable
     /// row in an issue list rather than one of a dozen copies of a constant.
     /// The surface section states the crate globs the work would touch, in the
     /// same grammar a scope revision declares, so whoever scopes this filing
@@ -288,7 +289,7 @@ impl FiledFinding {
         if receipt.stage != StageId::Study {
             return None;
         }
-        let words = core::str::from_utf8(&intent.words).ok()?;
+        let words = from_utf8(&intent.words).ok()?;
 
         Some(Self {
             receipt: *receipt.inputs.first()?,
