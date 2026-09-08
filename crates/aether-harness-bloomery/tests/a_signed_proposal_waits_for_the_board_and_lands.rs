@@ -14,7 +14,9 @@ const MEMBER: &str = "wp-0";
 
 #[test]
 fn a_signed_proposal_waits_for_the_board_and_lands() {
-    let mut harness = FixtureHarness::start("signed-proposal-waits");
+    // The reader is off by default (ADR-0216 §4); this scenario answers a
+    // landed bloom's read below, so it asks for one.
+    let mut harness = FixtureHarness::start_with_reader("signed-proposal-waits");
     let bloom = harness.seal_members(&[(MEMBER, digest(0x51))]);
 
     let constructs = harness.await_orders(1);
