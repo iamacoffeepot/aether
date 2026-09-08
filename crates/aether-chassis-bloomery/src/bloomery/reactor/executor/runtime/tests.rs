@@ -3786,6 +3786,7 @@ fn an_inverted_observation_window_skips_heartbeat_and_still_honours_the_deadline
 /// phase of a turn waits on the one in front of it.
 mod offloaded_adapter_calls {
     use std::sync::{Arc, Condvar, Mutex};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     use aether_bloomery::testing::digest;
@@ -3939,7 +3940,7 @@ mod offloaded_adapter_calls {
                 );
             }
             offload.start_wanted(&mut ctx, &shell, &pusher);
-            std::thread::sleep(Duration::from_millis(5));
+            thread::sleep(Duration::from_millis(5));
         }
 
         assert_eq!(
@@ -3961,7 +3962,7 @@ mod offloaded_adapter_calls {
                 drain_and_dispatch(&mut store, &port, sweep_at).unwrap();
             }
             offload.start_wanted(&mut ctx, &shell, &pusher);
-            std::thread::sleep(Duration::from_millis(5));
+            thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(backend.submitted().len(), 1, "the released submit answered and the re-drive consumed it");
     }

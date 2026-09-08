@@ -29,6 +29,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread;
 use std::time::Duration;
 
 use aether_bloomery::{BackendObjectId, BloomId, Correspondence, CorrespondenceError, Digest};
@@ -1227,7 +1228,7 @@ impl ActionsApi for FakeGithub {
         // slow-adapter one.
         let stall = self.lock().stall_next_dispatch.take();
         if let Some(delay) = stall {
-            std::thread::sleep(delay);
+            thread::sleep(delay);
         }
 
         let nonce = inputs.get(INPUT_NONCE).cloned().unwrap_or_default();
