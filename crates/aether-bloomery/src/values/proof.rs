@@ -344,6 +344,16 @@ mod tests {
     }
 
     #[test]
+    fn probe_compiled_gate_set_digests() {
+        panic!(
+            "fold={} member={} base={}",
+            VerifyGateSet::fold().digest().to_hex(),
+            VerifyGateSet::member().digest().to_hex(),
+            VerifyGateSet::base().digest().to_hex(),
+        );
+    }
+
+    #[test]
     fn the_compiled_lane_does_not_run_containment() {
         // Tripwire: `VerifyGateSet::fold().digest()` is half of every
         // `VerifiedTree` memo key. Containment is not a `verify.check` member;
