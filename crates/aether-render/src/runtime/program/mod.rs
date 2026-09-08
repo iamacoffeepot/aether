@@ -131,14 +131,14 @@ impl ProgramRegistry {
     pub fn register(&mut self, gpu: &RenderGpu, mail: ProgramRegister) -> ProgramRegisterResult {
         let plan = match validate::validate(&mail) {
             Ok(plan) => plan,
-            Err(reason) => return ProgramRegisterResult::Err { reason },
+            Err(error) => return ProgramRegisterResult::Err { error },
         };
 
         let device = &gpu.device;
         let fullscreen = self.fullscreen_module.get_or_insert_with(|| build_fullscreen_vertex_module(device));
         let passes_gpu = match build_program_passes(device, fullscreen, &plan, &mail.wgsl) {
             Ok(passes_gpu) => passes_gpu,
-            Err(reason) => return ProgramRegisterResult::Err { reason },
+            Err(error) => return ProgramRegisterResult::Err { error },
         };
 
         let program_id = self.next_id;
@@ -213,7 +213,7 @@ impl ProgramRegistry {
             return ProgramTimingsResult::Absent { reason };
         }
         let Some(program) = self.entries.get(&mail.program_id) else {
-            return ProgramTimingsResult::Err { reason: format!("unknown program id {}", mail.program_id) };
+            return ProgramTimingsResult::Err { error: format!("unknown program id {}", mail.program_id) };
         };
         ProgramTimingsResult::Ok { program_id: mail.program_id, rows: program.timings.rows(&program.plan) }
     }

@@ -1,0 +1,30 @@
+error[E0277]: the trait bound `Child: HandlesKind<Unhandled>` is not satisfied
+  --> tests/ui/rejects_inline_child_send_unhandled_kind.rs:66:21
+   |
+66 |     child.send(ctx, &Unhandled { seq: 3 });
+   |           ----      ^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |           |
+   |           required by a bound introduced by this call
+   |
+help: the trait `HandlesKind<Unhandled>` is not implemented for `Child`
+  --> tests/ui/rejects_inline_child_send_unhandled_kind.rs:43:1
+   |
+43 | struct Child;
+   | ^^^^^^^^^^^^
+help: `Child` implements trait `HandlesKind<K>`
+  --> tests/ui/rejects_inline_child_send_unhandled_kind.rs:45:1
+   |
+45 | #[actor(instanced, composable)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   | |
+   | `HandlesKind<AlsoHandled>`
+   | `HandlesKind<Handled>`
+note: required by a bound in `InlineChild::<C>::send`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/child.rs
+   |
+   |     pub fn send<K: Kind, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, M>, payload: &K)
+   |            ---- required by a bound in this associated function
+   |     where
+   |         C: HandlesKind<K>,
+   |            ^^^^^^^^^^^^^^ required by this bound in `InlineChild::<C>::send`
+   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)

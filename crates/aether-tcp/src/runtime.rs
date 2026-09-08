@@ -197,7 +197,7 @@ impl NativeActor for TcpCapability {
             reply_to_pending_connect(
                 ctx,
                 owed,
-                &ConnectResult::Err { addr, reason: format!("connect thread spawn failed: {error}") },
+                &ConnectResult::Err { addr, error: format!("connect thread spawn failed: {error}") },
             );
         }
     }
@@ -222,7 +222,7 @@ impl NativeActor for TcpCapability {
                             reply_to_pending_connect(
                                 ctx,
                                 owed,
-                                &ConnectResult::Err { addr, reason: format!("peer_addr failed: {error}") },
+                                &ConnectResult::Err { addr, error: format!("peer_addr failed: {error}") },
                             );
                             continue;
                         }
@@ -251,13 +251,13 @@ impl NativeActor for TcpCapability {
                             reply_to_pending_connect(
                                 ctx,
                                 owed,
-                                &ConnectResult::Err { addr, reason: format!("spawn failed: {error:?}") },
+                                &ConnectResult::Err { addr, error: format!("spawn failed: {error:?}") },
                             );
                         }
                     }
                 }
-                Err(reason) => {
-                    reply_to_pending_connect(ctx, owed, &ConnectResult::Err { addr, reason });
+                Err(error) => {
+                    reply_to_pending_connect(ctx, owed, &ConnectResult::Err { addr, error });
                 }
             }
         }
@@ -278,7 +278,7 @@ impl NativeActor for TcpCapability {
         let listener = match TcpListener::bind(&mail.addr) {
             Ok(l) => l,
             Err(e) => {
-                ctx.reply(&BindListenerResult::Err { addr: mail.addr, reason: format!("bind failed: {e}") });
+                ctx.reply(&BindListenerResult::Err { addr: mail.addr, error: format!("bind failed: {e}") });
                 return;
             }
         };
@@ -286,7 +286,7 @@ impl NativeActor for TcpCapability {
             Ok(addr) => addr.port(),
             Err(e) => {
                 drop(listener);
-                ctx.reply(&BindListenerResult::Err { addr: mail.addr, reason: format!("local_addr failed: {e}") });
+                ctx.reply(&BindListenerResult::Err { addr: mail.addr, error: format!("local_addr failed: {e}") });
                 return;
             }
         };
@@ -309,7 +309,7 @@ impl NativeActor for TcpCapability {
                 TcpSpawnContext::Listener { addr: mail.addr.clone(), listener_name: subname_str.clone(), local_port },
             )
         {
-            owed.reply(ctx, &BindListenerResult::Err { addr: mail.addr, reason: format!("spawn failed: {error:?}") });
+            owed.reply(ctx, &BindListenerResult::Err { addr: mail.addr, error: format!("spawn failed: {error:?}") });
         }
     }
 
@@ -319,22 +319,22 @@ impl NativeActor for TcpCapability {
             TcpSpawnContext::OutboundSession { addr, session_name, peer } => {
                 done.resolve_with(ctx, move |outcome, _| match &outcome.result {
                     Ok(()) => ConnectResult::Ok { session_name, session_id: outcome.mailbox_id, peer },
-                    Err(error) => ConnectResult::Err { addr, reason: format!("spawn failed: {error:?}") },
+                    Err(error) => ConnectResult::Err { addr, error: format!("spawn failed: {error:?}") },
                 });
             }
             TcpSpawnContext::Listener { addr, listener_name, local_port } => {
                 let listener_mailbox = done.output().mailbox_id;
-                if let Err(error) = &done.output().result {
-                    let reason = format!("spawn failed: {error:?}");
-                    done.resolve_with(ctx, move |_, _| BindListenerResult::Err { addr, reason });
+                if let Err(spawn_error) = &done.output().result {
+                    let error = format!("spawn failed: {spawn_error:?}");
+                    done.resolve_with(ctx, move |_, _| BindListenerResult::Err { addr, error });
                     return;
                 }
                 let monitor_handle = match ctx.monitor(listener_mailbox) {
                     Ok(handle) => handle,
-                    Err(error) => {
+                    Err(monitor_error) => {
                         ctx.actor_at::<TcpListenerActor>(listener_mailbox).send(&Close::default());
-                        let reason = format!("monitor failed: {error:?}");
-                        done.resolve_with(ctx, move |_, _| BindListenerResult::Err { addr, reason });
+                        let error = format!("monitor failed: {monitor_error:?}");
+                        done.resolve_with(ctx, move |_, _| BindListenerResult::Err { addr, error });
                         return;
                     }
                 };
@@ -374,7 +374,7 @@ impl NativeActor for TcpCapability {
         let Some(listener_id) = listener_id else {
             ctx.reply(&UnbindListenerResult::Err {
                 listener_name: mail.listener_name,
-                reason: "no such listener (or already closed)".into(),
+                error: "no such listener (or already closed)".into(),
             });
             return;
         };
@@ -387,7 +387,7 @@ impl NativeActor for TcpCapability {
         let Entry::Vacant(pending) = state.pending_unbinds.entry(listener_id) else {
             ctx.reply(&UnbindListenerResult::Err {
                 listener_name: mail.listener_name,
-                reason: "unbind already in progress".into(),
+                error: "unbind already in progress".into(),
             });
             return;
         };
