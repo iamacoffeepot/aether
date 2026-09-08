@@ -124,8 +124,8 @@ pub(super) fn reduce_seal(
     // Record the catalog and the lane vocabulary admission resolved so the fold
     // reads the record, not a later binary's compiled copies (#4944, ADR-0215).
     effects.push(Decision::RecordStageCatalog { bloom, catalog: catalog.clone() });
-    effects.push(Decision::RecordPipelineManifest { bloom, manifest });
-    let proven = enqueue_base_verify_if_needed(snapshot, spec.base(), &catalog, &mut effects);
+    effects.push(Decision::RecordPipelineManifest { bloom, manifest: manifest.clone() });
+    let proven = enqueue_base_verify_if_needed(snapshot, spec.base(), &catalog, &manifest, &mut effects);
     effects.extend(ready_entries(
         bloom,
         spec.members(),
@@ -155,7 +155,7 @@ fn seal_proposal(
     // this is the bloom's own slot.
     effects.push(Decision::ClaimMembership { workpiece: WorkpieceId::composition(), bloom });
     effects.push(Decision::RecordStageCatalog { bloom, catalog: catalog.clone() });
-    effects.push(Decision::RecordPipelineManifest { bloom, manifest });
+    effects.push(Decision::RecordPipelineManifest { bloom, manifest: manifest.clone() });
     effects.push(Decision::DequeueProposal { proposal });
     effects.push(Decision::RecordIntegration {
         bloom,
@@ -169,6 +169,7 @@ fn seal_proposal(
     });
     let mut record = BloomRecord::empty(spec.clone());
     record.stage_catalog = catalog;
+    record.pipeline_manifest = manifest;
     effects.extend(aggregate_verify_dispatch(&record, bloom, candidate.tree, candidate.checkout));
     effects.push(Decision::RecordMemberDependencies { bloom, edges: Vec::new() });
     Decisions { outcome: Outcome::Sealed(bloom), effects }
@@ -182,22 +183,19 @@ fn enqueue_base_verify_if_needed(
     snapshot: &Snapshot,
     base: Digest,
     catalog: &StageCatalog,
+    manifest: &PipelineManifest,
     effects: &mut Vec<Decision>,
 ) -> bool {
-    if snapshot.base_receipt_for(base).is_some_and(BaseReceipt::is_green) {
+    let gate_set = VerifyGateSet::base_of(manifest).digest();
+    if snapshot.base_receipt_under(base, gate_set).is_some_and(BaseReceipt::is_green) {
         return true;
     }
-    if snapshot.base_receipt_for(base).is_some() {
+    if snapshot.base_receipt_under(base, gate_set).is_some() {
         return false;
     }
     let binding = stage_binding(catalog, StageId::BaseVerify);
     effects.push(Decision::RecordBaseReceipt {
-        receipt: BaseReceipt {
-            base,
-            tree: base,
-            gate_set: VerifyGateSet::base().digest(),
-            verdict: BaseVerdict::Pending,
-        },
+        receipt: BaseReceipt { base, tree: base, gate_set, verdict: BaseVerdict::Pending },
     });
     effects.push(Decision::DispatchBaseVerify {
         base,
@@ -568,8 +566,8 @@ pub(super) fn reduce_supersede(
         effects.push(Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom: successor_id });
     }
     effects.push(Decision::RecordStageCatalog { bloom: successor_id, catalog: catalog.clone() });
-    effects.push(Decision::RecordPipelineManifest { bloom: successor_id, manifest });
-    let proven = enqueue_base_verify_if_needed(snapshot, successor.base(), &catalog, &mut effects);
+    effects.push(Decision::RecordPipelineManifest { bloom: successor_id, manifest: manifest.clone() });
+    let proven = enqueue_base_verify_if_needed(snapshot, successor.base(), &catalog, &manifest, &mut effects);
     // An edgeless supersede of a graph bloom keeps the remaining subgraph —
     // dropping a wedged member must not also drop the edges among the
     // members that stay. Explicit door-resolved edges still win.

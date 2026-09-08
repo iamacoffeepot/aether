@@ -11,12 +11,13 @@
 mod common;
 
 use aether_bloomery::{
-    BloomDraft, ConfigKind, ConfigRegistry, Decision, Decisions, Fact, Outcome, PipelineManifest, ResolvedConfigs,
-    Snapshot, SpendWindow, reduce,
+    BloomDraft, ConfigRegistry, Decision, Decisions, Evidence, EvidenceKind, Fact, Outcome, PipelineManifest,
+    ResolutionClaim, ResolvedConfigs, Snapshot, SpendWindow, StageId, VERIFY_MEMBER_COMMAND, VerifyFailure,
+    VerifyGateSet, reduce,
 };
 use aether_data::Kind;
 use aether_data::wire::to_vec;
-use common::{digest, draft, event, membership};
+use common::{digest, draft, event, membership, workpiece};
 
 /// A vocabulary no compiled copy could produce: its own entrypoint, one
 /// identity, one position. Any assertion that passes against this cannot have
@@ -119,5 +120,67 @@ fn rows_without_a_recorded_manifest_keep_the_compiled_fallback() {
         snapshot.blooms.get(&bloom).expect("sealed").pipeline_manifest,
         PipelineManifest::compiled(),
         "pre-ADR-0215 rows keep the compiled-vocabulary fallback"
+    );
+}
+
+#[test]
+fn a_member_verify_files_under_the_sealed_manifests_gate_set() {
+    // Plausible bug: filing still keys on VerifyGateSet::member(), so a bloom
+    // whose sealed run list dropped an identity the compiled member still
+    // names stores the proof under the compiled digest and the memo lookup
+    // against the record misses — or worse, a later compiled-vocabulary
+    // verify reuses a proof of gates that never ran.
+    let mut manifest = PipelineManifest::compiled();
+    manifest
+        .verifiers
+        .runs
+        .get_mut(VERIFY_MEMBER_COMMAND)
+        .expect("compiled member run")
+        .retain(|name| name != VerifyFailure::Dup.as_str());
+    assert!(
+        !VerifyGateSet::member_of(&manifest).verifiers.contains(VerifyFailure::Dup),
+        "the fixture must actually drop the identity"
+    );
+    assert!(
+        VerifyGateSet::member().verifiers.contains(VerifyFailure::Dup),
+        "and the compiled member must still run it, or the two digests would not distinguish"
+    );
+
+    let (draft, configs) = draft_with_manifest(&manifest);
+    let spec = draft.seal();
+    let bloom = spec.id();
+    let sealed =
+        reduce(&sealed_snapshot(), &event("seal", Fact::Seal(spec.clone())), &configs, &SpendWindow::default());
+    let snapshot = sealed_snapshot().apply(&event("seal", Fact::Seal(spec)), &sealed, &configs);
+
+    let candidate = digest(20);
+    let claim = ResolutionClaim {
+        workpiece: workpiece("alpha"),
+        scope_revision: digest(10),
+        candidate,
+        evidence: Evidence { subject: candidate, kind: EvidenceKind::VerificationResult, detail: digest(21) },
+    };
+    let integrate = event("integrate", Fact::Integrate { bloom, claim });
+    let decided = reduce(&snapshot, &integrate, &configs, &SpendWindow::default());
+    let proof = decided.effects.iter().find_map(|effect| match effect {
+        Decision::RecordVerifyProof { proof, .. } => Some(proof),
+        _ => None,
+    });
+    let Some(proof) = proof else {
+        panic!("a passing member verify must file a proof, got {:?}", decided.effects);
+    };
+
+    assert_eq!(proof.stage, StageId::Verify);
+    assert_eq!(
+        proof.gate_set,
+        VerifyGateSet::member_of(&manifest).digest(),
+        "the proof is filed under the sealed run list, not the compiled member set"
+    );
+    assert_ne!(proof.gate_set, VerifyGateSet::member().digest());
+
+    let folded = snapshot.apply(&integrate, &decided, &configs);
+    assert!(
+        folded.blooms.get(&bloom).expect("sealed").verify_proof_for(StageId::Verify, digest(20)).is_some(),
+        "lookup against the record's manifest must find the proof it just filed"
     );
 }

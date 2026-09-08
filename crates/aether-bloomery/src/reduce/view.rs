@@ -11,7 +11,7 @@ use crate::port::{
     PendingDecisionView, ReviewParkView, ViewDocument, WedgeCause, WithdrawnView,
 };
 use crate::values::BaseVerdict;
-use crate::values::{Question, Withdrawal, WithdrawalCause};
+use crate::values::{Question, VerifyGateSet, Withdrawal, WithdrawalCause};
 
 /// Assemble a self-contained [`ViewDocument`] from a snapshot — the pure
 /// `Snapshot -> ViewDocument` projection the reconcile port pushes outward
@@ -89,7 +89,10 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
 fn base_alert_of(snapshot: &Snapshot) -> Option<BaseAlertView> {
     let sealed = snapshot.blooms.values().find(|record| record.status == BloomStatus::Sealed);
     let base = sealed.map_or(snapshot.observed, |record| record.spec.base());
-    let receipt = snapshot.base_receipt_for(base)?;
+    let receipt = match sealed {
+        Some(record) => snapshot.base_receipt_under(base, VerifyGateSet::base_of(&record.pipeline_manifest).digest()),
+        None => snapshot.base_receipt_for(base),
+    }?;
     let BaseVerdict::Red { evidence, failed } = &receipt.verdict else {
         return None;
     };

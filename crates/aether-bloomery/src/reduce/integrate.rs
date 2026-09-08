@@ -175,7 +175,8 @@ pub(super) fn reduce_integrate(snapshot: &Snapshot, bloom: &BloomId, claim: &Res
     // this is where the line learns that a tree passed its gates (#4891) — the
     // fold of a single member is that same tree, and a repair lap can hand it
     // back unchanged.
-    let effects = claim_effects(snapshot, record, *bloom, claim, proof_of(*bloom, StageId::Verify, &claim.evidence));
+    let effects =
+        claim_effects(snapshot, record, *bloom, claim, proof_of(record, *bloom, StageId::Verify, &claim.evidence));
 
     Decisions { outcome: Outcome::Integrated { bloom: *bloom, workpiece: claim.workpiece.clone() }, effects }
 }

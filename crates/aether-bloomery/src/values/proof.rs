@@ -22,11 +22,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::StageId;
+use crate::values::VerifyFailureSet;
 use crate::values::{
-    Evidence, NetworkProfile, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK,
-    VERIFY_MEMBER_COMMAND,
+    Evidence, NetworkProfile, PipelineManifest, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE,
+    VERIFY_LANE_NETWORK, VERIFY_MEMBER_COMMAND,
 };
-use crate::values::{VerifyFailure, VerifyFailureSet};
 
 /// The identity of the gate set one verify position runs (ADR-0178): the
 /// verifier vocabulary, plus the lane that executes it.
@@ -62,114 +62,120 @@ impl ContentAddressed for VerifyGateSet {
 }
 
 impl VerifyGateSet {
-    /// The gate set the compiled fold verify lane runs — the calibration the
-    /// `AggregateVerify` position of this binary dispatches, named the way
-    /// [`StageCatalog::line`](crate::StageCatalog::line) names the compiled
-    /// line.
+    /// The gate set the compiled fold verify lane runs — [`Self::fold_of`]
+    /// over [`PipelineManifest::compiled`].
     ///
-    /// Compiled rather than sealed because the vocabulary and the lane are both
-    /// compiled today: the catalog authors a stage's profile, budget, and limit,
-    /// none of which is a gate. A memo is journal-derived, so a binary that
-    /// changes either half replays the old proofs under a digest that no longer
-    /// matches and re-proves what it can no longer read as proven — the refusal
-    /// is the ordinary consequence of keying on identity, not a migration step.
-    /// When the gate set becomes an explicitly declared value it lands in this
-    /// type and the memo keeps keying on exactly the same digest.
-    ///
-    /// The verifier set is the nine identities the compiled `verify.check`
-    /// fan-out runs, listed by hand rather than derived from
-    /// [`VerifyFailure::ALL`]. Containment is coordinator-side and never a lane
-    /// member; picking it up from the vocabulary would re-key every stored
-    /// [`VerifiedTree`] proof memo. A future identity the lane *does* run must
-    /// be added here by hand — as [`VerifyFailure::Lock`] was (#5309), which
-    /// re-keys every stored memo exactly as the doc above says it should,
-    /// because the lane's gate set genuinely changed.
+    /// Callers holding a sealed bloom read [`Self::fold_of`] against that
+    /// bloom's record. This projection is what a caller with no manifest
+    /// has, and what a pre-manifest bloom's compiled fallback produces.
     #[must_use]
     pub fn fold() -> Self {
-        Self {
-            verifiers: [
-                VerifyFailure::Preflight,
-                VerifyFailure::Fmt,
-                VerifyFailure::Clippy,
-                VerifyFailure::Docs,
-                VerifyFailure::Test,
-                VerifyFailure::Dup,
-                VerifyFailure::Deps,
-                VerifyFailure::Suppress,
-                VerifyFailure::Lock,
-            ]
-            .into_iter()
-            .collect(),
-            command: String::from(VERIFY_CHECK_COMMAND),
-            image: String::from(VERIFY_LANE_IMAGE),
-            network: VERIFY_LANE_NETWORK,
-        }
+        Self::fold_of(&PipelineManifest::compiled())
     }
 
-    /// The gate set the compiled member verify lane runs — the calibration the
-    /// per-member `Verify` position dispatches.
+    /// The gate set `manifest` declares for the fold (`verify.check`).
     ///
-    /// [`VerifyFailure::Docs`] is absent, and that absence is the whole of what
-    /// separates this vocabulary from [`Self::fold`]'s. Documentation
-    /// correctness is a whole-workspace property — an intra-doc link resolves
-    /// across crates, so a member's closure can neither break it alone nor prove
-    /// it alone — while `cargo doc` over that closure is the single most
-    /// expensive gate the member position runs. Measured over the 2026-08-26
-    /// wave it cost five to nine minutes in each of eighteen member runs and
-    /// found nothing in any of them; every real finding that wave was
-    /// [`VerifyFailure::Test`]'s. So the gate moves to the two positions whose
-    /// question it actually answers, and the member position states a gate set
-    /// that names only what it ran.
+    /// Verifiers come from `[verifiers.runs]` for that command. Image and
+    /// network stay compiled: the manifest declares vocabulary, never
+    /// confinement.
+    #[must_use]
+    pub fn fold_of(manifest: &PipelineManifest) -> Self {
+        Self::of(manifest, VERIFY_CHECK_COMMAND)
+    }
+
+    /// The gate set the compiled member verify lane runs — [`Self::member_of`]
+    /// over [`PipelineManifest::compiled`].
     ///
-    /// A distinct command as well as a distinct verifier list, because the
-    /// worker has to dispatch a different fan-out and the digest has to move for
-    /// both reasons independently: a member proof cannot answer the fold's
-    /// question, and a fold proof recorded before this split cannot answer the
-    /// member's.
+    /// [`VerifyFailure::Docs`] is absent from that compiled run list, and that
+    /// absence is the whole of what separates this vocabulary from
+    /// [`Self::fold`]'s. Documentation correctness is a whole-workspace
+    /// property — an intra-doc link resolves across crates, so a member's
+    /// closure can neither break it alone nor prove it alone. A distinct
+    /// command as well as a distinct verifier list, because the worker has to
+    /// dispatch a different fan-out and the digest has to move for both
+    /// reasons independently.
     #[must_use]
     pub fn member() -> Self {
-        Self {
-            verifiers: Self::fold().verifiers.difference(VerifyFailureSet::one(VerifyFailure::Docs)),
-            command: String::from(VERIFY_MEMBER_COMMAND),
-            ..Self::fold()
-        }
+        Self::member_of(&PipelineManifest::compiled())
     }
 
-    /// The gate set the compiled whole-workspace base verify runs.
+    /// The gate set `manifest` declares for the member position (`verify.member`).
     ///
-    /// Identical eight-plus-one verifier list, image, and network as
-    /// [`Self::fold`] — [`VerifyFailure::Docs`] included, which is what lets a
-    /// landing mint a base receipt from a fold proof at all. The differing
-    /// command is deliberate: a closure-narrowed proof must not satisfy the
-    /// whole-workspace base question, and the two proofs cannot be confused in
-    /// one map.
+    /// The per-position fan-out is data: a manifest that omits an identity
+    /// from this command's run yields a member set without it, even when the
+    /// fold run still names it.
+    #[must_use]
+    pub fn member_of(manifest: &PipelineManifest) -> Self {
+        Self::of(manifest, VERIFY_MEMBER_COMMAND)
+    }
+
+    /// The gate set the compiled whole-workspace base verify runs —
+    /// [`Self::base_of`] over [`PipelineManifest::compiled`].
     ///
-    /// Sequencing, for whoever lands the docs demotion this set is one half of:
-    /// docs failing here mints a **Red** base receipt, and a Red base is a
-    /// day-level stop (ADR-0200). The demotion moves a class of documentation
-    /// failure out of the member position, where a repair lap answers it, and
-    /// into the two positions where nothing does — so it must land only after
-    /// the operator re-verify door for Red base receipts (issue-5477) exists to
-    /// recover one.
+    /// Identical verifier list, image, and network as [`Self::fold`] in the
+    /// compiled vocabulary — [`VerifyFailure::Docs`] included, which is what
+    /// lets a landing mint a base receipt from a fold proof at all. The
+    /// differing command is deliberate: a closure-narrowed proof must not
+    /// satisfy the whole-workspace base question.
     #[must_use]
     pub fn base() -> Self {
-        Self { command: String::from(VERIFY_BASE_COMMAND), ..Self::fold() }
+        Self::base_of(&PipelineManifest::compiled())
     }
 
-    /// The gate set the verify position `stage` runs, or `None` when `stage` is
-    /// not a verify position at all.
+    /// The gate set `manifest` declares for whole-workspace base verify
+    /// (`verify.base`).
+    #[must_use]
+    pub fn base_of(manifest: &PipelineManifest) -> Self {
+        Self::of(manifest, VERIFY_BASE_COMMAND)
+    }
+
+    /// The gate set the compiled verify position `stage` runs, or `None` when
+    /// `stage` is not a verify position at all.
+    ///
+    /// The compiled projection of [`Self::for_stage_of`]. Production filing
+    /// and lookup go through the bloom's sealed manifest.
+    #[must_use]
+    pub fn for_stage(stage: StageId) -> Option<Self> {
+        Self::for_stage_of(stage, &PipelineManifest::compiled())
+    }
+
+    /// The gate set `manifest` declares for verify position `stage`, or `None`
+    /// when `stage` is not a verify position at all.
     ///
     /// The one mapping from position to identity, so a proof is filed and looked
     /// up under the same key by construction rather than by two call sites
     /// agreeing. A stage that dispatches no verify has no gate set to name, and
     /// answering with one would let a proof be filed for gates that never ran.
     #[must_use]
-    pub fn for_stage(stage: StageId) -> Option<Self> {
+    pub fn for_stage_of(stage: StageId, manifest: &PipelineManifest) -> Option<Self> {
         match stage {
-            StageId::Verify => Some(Self::member()),
-            StageId::AggregateVerify => Some(Self::fold()),
-            StageId::BaseVerify => Some(Self::base()),
+            StageId::Verify => Some(Self::member_of(manifest)),
+            StageId::AggregateVerify => Some(Self::fold_of(manifest)),
+            StageId::BaseVerify => Some(Self::base_of(manifest)),
             _ => None,
+        }
+    }
+
+    /// One position's gate set from `manifest`'s `[verifiers.runs]` for
+    /// `command`.
+    ///
+    /// Identities the vocabulary does not intern are dropped rather than
+    /// invented: a run list cannot extend the repair loop past what the
+    /// bloom sealed. Image and network are the coordinator's compiled
+    /// confinement, never a field the tree named.
+    fn of(manifest: &PipelineManifest, command: &str) -> Self {
+        Self {
+            verifiers: manifest
+                .verifiers
+                .runs
+                .get(command)
+                .into_iter()
+                .flatten()
+                .filter_map(|name| manifest.intern(name))
+                .collect(),
+            command: String::from(command),
+            image: String::from(VERIFY_LANE_IMAGE),
+            network: VERIFY_LANE_NETWORK,
         }
     }
 
@@ -245,7 +251,8 @@ mod tests {
     use crate::ids::StageId;
     use crate::values::stage::dispatched_command;
     use crate::values::{
-        Evidence, EvidenceKind, NetworkProfile, VERIFY_BASE_COMMAND, VERIFY_MEMBER_COMMAND, VerifyFailure,
+        Evidence, EvidenceKind, NetworkProfile, PipelineManifest, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND,
+        VERIFY_MEMBER_COMMAND, VerifyFailure, VerifyFailureSet,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -344,13 +351,80 @@ mod tests {
     }
 
     #[test]
-    fn probe_compiled_gate_set_digests() {
-        panic!(
-            "fold={} member={} base={}",
-            VerifyGateSet::fold().digest().to_hex(),
-            VerifyGateSet::member().digest().to_hex(),
-            VerifyGateSet::base().digest().to_hex(),
+    fn compiled_gate_sets_keep_the_memo_key() {
+        // Tripwire: the verify-proof memo is keyed on VerifiedTree, whose
+        // gate-set half is this digest. Reading [verifiers.runs] must produce
+        // byte-identical gate sets or every stored proof misses and the ledger
+        // re-proves. These literals were printed by CI on origin/main at
+        // 129bcf361 (GitHub Actions run 34263194750), before this slice inverted
+        // the constructors; they are not recomputed from live code.
+        let compiled = PipelineManifest::compiled();
+        assert_eq!(
+            VerifyGateSet::fold_of(&compiled).digest(),
+            Digest::pinned("0104f14726e7c5ced359beb39daa5ec92f684676eaaa4e875b3eb39ac53fb1bc"),
         );
+        assert_eq!(
+            VerifyGateSet::member_of(&compiled).digest(),
+            Digest::pinned("c80ad4b275af605c6aec748e7c530debc65642ef750ee5cf6cbe79523744960d"),
+        );
+        assert_eq!(
+            VerifyGateSet::base_of(&compiled).digest(),
+            Digest::pinned("b9ccc1951502b07e3c04bf48afa2b59255abadf260882cb20709b1ace869e2d7"),
+        );
+    }
+
+    #[test]
+    fn a_member_run_that_omits_docs_does_not_take_them_from_the_fold() {
+        // Tripwire: the per-position fan-out is data. A hardcoded
+        // `member = fold − docs` would keep `verify.dup` even when the
+        // member run omitted it, and would drop `verify.docs` even when a
+        // future manifest put it back. The member set is exactly the interned
+        // member run list; the fold set is independently the interned fold
+        // run list.
+        let mut manifest = PipelineManifest::compiled();
+        let member_runs = [
+            VerifyFailure::Preflight,
+            VerifyFailure::Fmt,
+            VerifyFailure::Clippy,
+            VerifyFailure::Test,
+            VerifyFailure::Deps,
+            VerifyFailure::Suppress,
+            VerifyFailure::Lock,
+        ];
+        manifest.verifiers.runs.insert(
+            String::from(VERIFY_MEMBER_COMMAND),
+            member_runs.iter().map(|identity| String::from(identity.as_str())).collect(),
+        );
+        manifest.verifiers.runs.insert(
+            String::from(VERIFY_CHECK_COMMAND),
+            [
+                VerifyFailure::Preflight,
+                VerifyFailure::Fmt,
+                VerifyFailure::Clippy,
+                VerifyFailure::Docs,
+                VerifyFailure::Test,
+                VerifyFailure::Dup,
+                VerifyFailure::Deps,
+                VerifyFailure::Suppress,
+                VerifyFailure::Lock,
+            ]
+            .iter()
+            .map(|identity| String::from(identity.as_str()))
+            .collect(),
+        );
+
+        let member = VerifyGateSet::member_of(&manifest);
+        let fold = VerifyGateSet::fold_of(&manifest);
+
+        assert!(!member.verifiers.contains(VerifyFailure::Docs), "the member run omitted documentation");
+        assert!(
+            !member.verifiers.contains(VerifyFailure::Dup),
+            "and omitted dup — that omission is data, not fold−docs"
+        );
+        assert!(fold.verifiers.contains(VerifyFailure::Docs), "the fold run still names documentation");
+        assert!(fold.verifiers.contains(VerifyFailure::Dup), "and still names dup");
+        assert_eq!(member.verifiers, member_runs.into_iter().collect::<VerifyFailureSet>());
+        assert_ne!(member.digest(), VerifyGateSet::member().digest(), "a custom run list is a different identity");
     }
 
     #[test]

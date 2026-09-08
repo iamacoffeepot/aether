@@ -35,10 +35,14 @@ pub(super) fn reduce_base_verify_completed(
     evidence: &Evidence,
     failed: VerifyFailureSet,
 ) -> Decisions {
+    let gate_set = sealed_on_tree(snapshot, base, tree)
+        .next()
+        .map(|(_, record)| VerifyGateSet::base_of(&record.pipeline_manifest).digest())
+        .unwrap_or_else(|| VerifyGateSet::base().digest());
     let receipt = BaseReceipt {
         base,
         tree,
-        gate_set: VerifyGateSet::base().digest(),
+        gate_set,
         verdict: if passed {
             BaseVerdict::Green { evidence: evidence.clone() }
         } else {
@@ -73,7 +77,11 @@ pub(super) fn reduce_base_reverify(snapshot: &Snapshot, reverify: &BaseReverify)
     if reverify.operator.trim().is_empty() {
         return Decisions::rejected(Outcome::BaseReverifyRejected(BaseReverifyError::BlankOperator));
     }
-    let Some(receipt) = snapshot.base_receipt_for(reverify.base) else {
+    let Some(receipt) = snapshot.base_receipt_for(reverify.base).or_else(|| {
+        snapshot.blooms.values().find_map(|record| {
+            snapshot.base_receipt_under(reverify.base, VerifyGateSet::base_of(&record.pipeline_manifest).digest())
+        })
+    }) else {
         return Decisions::rejected(Outcome::BaseReverifyRejected(BaseReverifyError::NoReceipt));
     };
     if !matches!(receipt.verdict, BaseVerdict::Red { .. }) {

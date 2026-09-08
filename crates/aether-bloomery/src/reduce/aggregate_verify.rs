@@ -242,7 +242,7 @@ pub(super) fn reduce_aggregate_verify_completed(
         // filed as a proof of it (#4891): a later fold that produces the same
         // tree — or a member handed it back unchanged — passes on this record
         // rather than re-running them.
-        effects.extend(proof_of(*bloom, StageId::AggregateVerify, evidence));
+        effects.extend(proof_of(record, *bloom, StageId::AggregateVerify, evidence));
         // The mechanical half of the composite-gate join. Filed whether or not
         // it completes the pair, so the critic's own arrival can read it. Kept
         // separate from the verify proof above because the proof is a statement
