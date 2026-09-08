@@ -273,6 +273,8 @@ impl NativeActor for BloomeryApiCapability {
             commission_seals: HashMap::new(),
             next_commission_seal: 1,
             seal_commission_loads: HashMap::new(),
+            #[cfg(feature = "github")]
+            repair_pushes: HashMap::new(),
         })
     }
 
@@ -948,8 +950,8 @@ impl NativeActor for BloomeryApiCapability {
     /// The control core's reply to an admit — the reducer outcome, or an admit
     /// error.
     ///
-    /// The one reply kind two different flows produce, so it is the one reply
-    /// handler still written by hand. A direct admit route (grant, and the
+    /// The one reply kind several different flows produce, so it is the one
+    /// reply handler still written by hand. A direct admit route (grant, and the
     /// all-auto seal / supersede fast path) relayed its request, so its
     /// requester is recovered from the deferred-source context; the answer and
     /// seal flows dispatched their terminal admit from a reply handler, so
@@ -957,8 +959,18 @@ impl NativeActor for BloomeryApiCapability {
     /// recovery that does not match this reply is a no-op — so calling both is
     /// how one handler serves both without needing to know which flow it is
     /// answering.
+    ///
+    /// A derived repair is the exception that answers itself, because it owes a
+    /// host effect on the outcome rather than only a rendering of it: it
+    /// publishes the candidate ref the reducer just admitted and replies from
+    /// there (issue #5560), so it is offered this reply first and the shared
+    /// rendering runs only on the ones it does not claim.
     #[handler::manual]
     fn on_admit_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: AdmitResult) {
+        #[cfg(feature = "github")]
+        let Some(mail) = state.settle_repair(ctx, mail) else {
+            return;
+        };
         let response = admit_response(mail);
 
         http::answer_deferred(ctx, &response);

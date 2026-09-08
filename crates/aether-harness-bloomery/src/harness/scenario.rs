@@ -237,6 +237,17 @@ impl ScenarioHarness {
         self.wire.bloom(bloom)
     }
 
+    /// `POST path` against the coordinator's REST control ingress: the status
+    /// code and the raw body.
+    ///
+    /// [`apply_operator`](Self::apply_operator) admits the fact a door would
+    /// send; this drives the door itself, which is what a scenario about a
+    /// door's refusal — or about a host effect the door must not spend on a
+    /// refused request — has to do.
+    pub fn post(&self, path: &str, body: &str) -> (u16, String) {
+        self.wire.post(path, body)
+    }
+
     /// Admit one reducer fact through the control core's wire ingress.
     pub fn admit(&mut self, key: &str, fact: Fact) -> Outcome {
         self.wire.admit(key, fact)

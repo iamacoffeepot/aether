@@ -183,6 +183,39 @@ pub struct ApiCapabilityState {
     /// Each in-flight seal-time `LoadCommission`, keyed by its dispatch
     /// correlation, back-pointing at the held [`PendingCommissionSeal`].
     pub(super) seal_commission_loads: HashMap<u64, SealCommissionLoad>,
+    /// Repairs held across their own admit, keyed by that admit dispatch's
+    /// `MailId.correlation_id`, so the operator's candidate ref is force-pushed
+    /// only once the reducer has admitted the repair (issue #5560).
+    #[cfg(feature = "github")]
+    pub(super) repair_pushes: HashMap<u64, PendingRepairPush>,
+}
+
+/// The candidate-ref publication a derived repair owes once its admit lands: the
+/// ref's two name parts and the commit to force-push there.
+#[cfg(feature = "github")]
+pub(super) struct RepairPublication {
+    /// The bloom half of the candidate ref name.
+    pub(super) bloom: BloomId,
+    /// The workpiece half of the candidate ref name.
+    pub(super) workpiece: String,
+    /// The git commit the derivation resolved.
+    pub(super) commit_hex: String,
+}
+
+/// One repair held across its admit: the reply obligation and the publication
+/// owed on an accepted outcome.
+///
+/// The third multi-hop shape, and the only one whose second hop is a *host*
+/// effect rather than another mail. It is held for the same reason the others
+/// are — the answer is not the next reply — and, unlike them, because the effect
+/// is destructive: the ref it moves is the live address a running member's
+/// checkout resolves, so it must not be spent on a request the reducer refuses.
+#[cfg(feature = "github")]
+pub(super) struct PendingRepairPush {
+    /// The held HTTP reply obligation.
+    pub(super) inbound: InboundMail,
+    /// What to publish once the reducer accepts.
+    pub(super) publication: RepairPublication,
 }
 
 /// A request held across a signature-verification round trip: the reply
@@ -357,6 +390,17 @@ pub(super) enum Routed {
     Reply(HttpServerResponse),
     /// Relay to the control core; its `AdmitResult` answers.
     Admit(Admit),
+    /// Relay a derived repair to the control core and hold it, so the member's
+    /// candidate ref is force-pushed only if the reducer admits the repair
+    /// (issue #5560). Answered by
+    /// [`settle_repair`](ApiCapabilityState::settle_repair).
+    #[cfg(feature = "github")]
+    RepairAdmit {
+        /// The repair's own admit.
+        request: Admit,
+        /// The ref publication owed on an accepted outcome.
+        publication: Box<RepairPublication>,
+    },
     /// Relay to the control core; its `QueryResult` answers.
     Query(Query),
     /// Relay to the control core; its `MetricsQueryResult` answers.
@@ -505,6 +549,14 @@ pub(super) fn finish(
     match routed {
         Routed::Reply(response) => http::Outcome::Reply(response),
         Routed::Admit(request) => ctx.defer(&request).to::<ControlCore>(),
+        #[cfg(feature = "github")]
+        Routed::RepairAdmit { request, publication } => {
+            let correlation = state.send_tracked(ctx.actor::<ControlCore>(), &request);
+            state
+                .repair_pushes
+                .insert(correlation, PendingRepairPush { inbound: ctx.take_inbound(), publication: *publication });
+            http::Outcome::Deferred
+        }
         Routed::Query(request) => ctx.defer(&request).to::<ControlCore>(),
         Routed::Metrics(request) => ctx.defer(&request).to::<ControlCore>(),
         Routed::Spend(request) => ctx.defer(&request).to::<ControlCore>(),
