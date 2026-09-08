@@ -278,7 +278,10 @@ pub(super) struct SealVerify {
     /// The signed statement whose verified form (`verified_statement_approval`)
     /// becomes the member's approval. The evidence subject is the gated
     /// proposal's `subject()` — the store statement is bound to the scope
-    /// revision, not the member subject.
+    /// revision, not the member subject. The two can only differ by the
+    /// member's configuration registry, and `resolve_seal_memberships` refuses
+    /// an above-auto member that seals one, so nothing here widens what the
+    /// signer authorized (issue #5561, ADR-0174).
     pub(super) statement: Statement,
 }
 
