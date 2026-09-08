@@ -1,170 +1,71 @@
-// Test-harness chassis binary entry point.
-//
-// Reads chassis-relevant env vars into a `SubstrateHarnessEnv`, asks
-// `SubstrateHarnessChassis::build_passive` to assemble the substrate plus
-// every capability (Log, Io if roots pre-validate, etc.) through the
-// chassis_builder `Builder`, boots the pumped `aether.render` actor
-// offscreen, then drives the events_rx loop on the main thread. The chassis
-// is embedder-driven (no `DriverCapability`) — `main()` IS the driver, the
-// pump host for the render slot.
-//
-// In-process counterpart lives in `aether-harness-substrate::SubstrateHarness`
-// (the `SubstrateHarness::start()` API ADR-0067 introduced); both paths
-// share `SubstrateHarnessChassis::build_passive` and the pumped render path
-// (ADR-0161).
+//! Harness chassis binary entry point. The chassis, CLI root, env, and pump
+//! loop live in `aether_chassis_harness`; this binary composes them.
+//!
+//! It cannot use the shared `chassis_main!` body: the harness is a **passive**
+//! chassis, so there is no driver for the framework to run and `main` is the
+//! driver — it composes through `composed`, terminates in `build_passive`,
+//! claims the pumped `aether.render` slot (ADR-0161), and then owns the loop on
+//! this thread. Everything ahead of that divergence is the shared ceremony:
+//! the ADR-0162 `--describe` / `--print-config` prelude, env resolution off the
+//! source stack, the resolved log filter, and the unknown-`AETHER_*` sweep over
+//! the composed known-key set.
 
+use std::mem;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::sync::mpsc::RecvTimeoutError;
-use std::time::{Duration, Instant};
 
-use aether_actor::root_mailbox;
-use aether_data::{Kind, KindId};
-use aether_fs::NamespaceRoots;
-use aether_kinds::{AdvanceResult, LifecycleAdvance};
-use aether_lifecycle::LifecycleCapability;
-use aether_substrate::actor::native::PumpedSlot;
-use aether_substrate::chassis::settlement::{
-    PumpWake, SettlementRegistry, TerminalDisposition, WaitOutcome, await_settlement_pumped,
-};
-use aether_substrate::runtime::lifecycle;
-use aether_substrate::{Chassis, HubOutbound, Mailer, chassis::frame_loop, mail::MailboxId};
-
-use aether_chassis::next_chassis_correlation;
-use aether_chassis::resolve_teardown_budget;
-use aether_harness_substrate::{
-    DEFAULT_HEIGHT, DEFAULT_WIDTH, SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS,
-};
-use aether_render::{Frame, RenderCapability, RenderCapabilityState, RenderParams, RenderTuningConfig};
-use aether_substrate::render::VERTEX_BUFFER_BYTES;
-use aether_substrate_harness_cap::events::{self, ChassisEvent};
-use crossbeam_channel::{Receiver, Sender};
-
-/// Cumulative patience cap for the per-frame advance settlement gate,
-/// matching the desktop driver. The per-round budget is
-/// `frame_loop::DRAIN_BUDGET`; a starved-but-healthy chain resolves before
-/// this cap, a genuine wedge exhausts it (issue #1305).
-const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
-
-/// Render-size knob for this binary (`AETHER_SUBSTRATE_HARNESS_SIZE=WxH`):
-/// a `#[derive(aether_substrate::Config)]` struct resolved `from_env()` and
-/// lowered to `(u32, u32)` by [`Self::to_size`]. Binary-side because the
-/// in-process harness sizes through its builder, not process env — issue #5706
-/// moved it here from `aether-chassis`, whose only reason to hold it was the
-/// harness dependency this binary owns anyway.
-///
-/// The explicit `env =` pin is belt-and-suspenders against a future field
-/// rename, matching how `ActorRingConfig` pins its historical keys.
-#[derive(Clone, Debug, Default, aether_substrate::Config)]
-#[config(env_prefix = "AETHER_SUBSTRATE_HARNESS", cli_prefix = "substrate-harness")]
-pub struct RenderSizeConfig {
-    /// Offscreen render width and height in pixels; unset falls back to 800x600.
-    ///
-    /// Render dimensions for the offscreen wgpu surface, given as
-    /// `width x height`. Falls back to `800x600` on missing/unparseable
-    /// input with a warn log.
-    #[config(env = "AETHER_SUBSTRATE_HARNESS_SIZE")]
-    pub size: Option<String>,
-}
-
-impl RenderSizeConfig {
-    /// Lower the resolved knob to `(width, height)` pixels: missing env var,
-    /// missing `x` separator, non-numeric parts, or a zero dimension all fall
-    /// back to [`DEFAULT_WIDTH`] × [`DEFAULT_HEIGHT`] with a `warn` log.
-    #[must_use]
-    pub fn to_size(&self) -> (u32, u32) {
-        let Some(raw) = self.size.as_deref() else {
-            return (DEFAULT_WIDTH, DEFAULT_HEIGHT);
-        };
-        if let Some((w, h)) = raw.split_once('x') {
-            match (w.parse::<u32>(), h.parse::<u32>()) {
-                (Ok(w), Ok(h)) if w > 0 && h > 0 => (w, h),
-                _ => {
-                    tracing::warn!(
-                        target: "aether_chassis_harness::boot",
-                        value = %raw,
-                        "AETHER_SUBSTRATE_HARNESS_SIZE unparseable — falling back to default",
-                    );
-                    (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-                }
-            }
-        } else {
-            tracing::warn!(
-                target: "aether_chassis_harness::boot",
-                value = %raw,
-                "AETHER_SUBSTRATE_HARNESS_SIZE missing 'x' separator — falling back to default",
-            );
-            (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-        }
-    }
-}
+use aether_chassis::run_describe_prelude;
+use aether_chassis_harness::{HarnessChassis, HarnessCli, HarnessDriver, HarnessEnv};
+use aether_render::{RenderCapability, RenderParams};
+use aether_substrate::Chassis;
+use aether_substrate::SubstrateBoot;
+use aether_substrate::chassis::settlement::PumpWake;
+use aether_substrate::chassis::{BootableChassis, composed};
+use aether_substrate::config::validate_env;
+use aether_substrate::runtime::log_install::apply_filter;
+use aether_substrate_harness_cap::events::ChassisEvent;
+use clap::Parser as _;
 
 fn main() -> anyhow::Result<()> {
-    let (events_tx, events_rx) = events::channel();
+    let cli = HarnessCli::parse();
+    // ADR-0162 shared prelude: `--print-config` (ADR-0090 §4 dump) and
+    // `--describe` (ADR-0115 manifest) print and exit before Init; a plain
+    // invocation falls through to boot.
+    if run_describe_prelude::<HarnessChassis>(&cli.meta)?.is_handled() {
+        return Ok(());
+    }
+    let (mut env, events_rx) = HarnessEnv::resolve(cli)?;
 
-    // Per issue 464, this `main()` is the env-reading edge.
-    let namespace_roots = NamespaceRoots::from_env();
-    // Resolve the `assets` root for `capture_frame` similarity references
-    // before `namespace_roots` moves into the env.
-    let assets_dir = namespace_roots.assets.clone();
-    let (width, height) = RenderSizeConfig::from_env().to_size();
+    let mut boot = SubstrateBoot::build()?;
+    // #3849: `SubstrateBoot::build` installed the subscriber with an
+    // env-or-`info` filter (before the config file loaded); re-apply the
+    // fully-resolved `AETHER_LOG_FILTER` directive now.
+    apply_filter(&env.runtime.log_filter);
 
-    // The pumped render wake feeds two consumers: the advance-loop settlement
-    // wait (`PumpWake::Mail`) and the parked event loop (`ChassisEvent::RenderMail`).
-    let render_events_tx = events_tx.clone();
+    // ADR-0161: the pumped render actor is claimed post-build, so its wiring is
+    // read off the env before composition consumes it. The `assets` root feeds
+    // `capture_frame` similarity references; the event sender feeds the slot's
+    // wake.
+    let (width, height) = env.render_size.to_size();
+    let render_config = env.render.clone();
+    let assets_dir = env.namespace_roots.assets.clone();
+    let render_events = env.events.clone();
+    let base = mem::take(&mut env.base);
 
-    let env = SubstrateHarnessEnv {
-        workers: WORKERS,
-        pool_workers: None,
-        // Issue 1990: the standalone binary keeps the default ring capacities;
-        // the in-process `SubstrateHarness` builder is the surface for tuning
-        // them (per-harness, no process env).
-        ring_capacities: aether_substrate::RingCapacities::default(),
-        // Issue 2485: the standalone binary keeps the built-in scheduler
-        // tuning (per-harness, no process env).
-        scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-        observed_kinds: None,
-        events_tx,
-        namespace_roots: Some(namespace_roots),
-        // Issue #3764: the standalone binary is the MCP-drivable chassis,
-        // so it composes the full cap set — an in-process harness composes
-        // per scenario instead.
-        component_host: true,
-        compose: vec![
-            Box::new(|b| b.with_actor::<aether_tcp::TcpCapability>(())),
-            Box::new(|b| b.with_actor::<aether_text::TextCapability>(())),
-            Box::new(|b| {
-                b.with_actor::<aether_clipboard::ClipboardCapability>(aether_clipboard::ClipboardParams::InMemory)
-            }),
-        ],
-        // Issue #2509: the standalone binary is an env-reading edge, so
-        // its teardown gate honors `AETHER_SETTLEMENT_CAP_SECS` (including
-        // the `0 → wait forever` sentinel) — the same knob the settlement
-        // gates read.
-        teardown_budget: resolve_teardown_budget(),
-    };
-
-    let SubstrateHarnessBuild { passive, boot, kind_tick } = SubstrateHarnessChassis::build_passive(env)?;
-    let _ = kind_tick; // PR 3c retired the direct Tick push; the bin drives
-    // `LifecycleAdvance` and the lifecycle driver broadcasts Tick.
+    let builder = composed::<HarnessChassis>(&mut boot, base, env)?;
+    // ADR-0156 §4: warn on any unknown `AETHER_*` env var, swept against the
+    // composition-derived known-key set plus the residual hand records.
+    validate_env(&builder.config_manifest().known_keys(&HarnessChassis::residual_knobs()))?;
+    let passive = builder.build_passive()?;
 
     // ADR-0161: boot the pumped `aether.render` actor offscreen. It claims the
-    // `aether.render` slot post-`build_passive` (a no-driver chassis reserved
-    // none at Claim), owning the surfaceless GPU, accumulators, and pending
-    // capture as plain state; the GPU boots lazily on the first frame from
+    // `aether.render` slot post-build (a no-driver chassis reserved none at
+    // Claim), owning the surfaceless GPU, accumulators, and pending capture as
+    // plain state; the GPU boots lazily on the first frame from
     // `offscreen_size`. `..Default::default()` fills `wireframe` and — under a
     // feature-unified build that enables aether-render/desktop — the
     // desktop-only `window: None`, so this literal is robust to unification.
-    let (mut render_slot, render_wake_slot) = passive.boot_pumped_actor::<RenderCapability>(
-        RenderTuningConfig {
-            vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
-            clear_color: aether_render::DEFAULT_CLEAR_COLOR.to_owned(),
-            // Operator-resolvable, unlike the two pinned knobs above:
-            // read through the cap's own ADR-0090 layer so
-            // `AETHER_RENDER_PASS_TIMINGS` reaches the instrument here
-            // the same way it does on a chassis.
-            pass_timings: RenderTuningConfig::from_env().pass_timings,
-        },
+    let (render_slot, render_wake_slot) = passive.boot_pumped_actor::<RenderCapability>(
+        render_config,
         RenderParams {
             observed_kinds: None,
             assets_dir: Some(assets_dir),
@@ -173,192 +74,35 @@ fn main() -> anyhow::Result<()> {
         },
     )?;
 
+    let mut driver = HarnessDriver::new(&boot, Arc::clone(passive.settlement_registry()), render_slot);
     // ADR-0161 §Decision 2: the unified `PumpWake` channel. The render slot's
-    // mailbox wake sends `PumpWake::Mail` so the advance-loop
-    // `await_settlement_pumped` drains on mail arrival, and *also* pokes
-    // `ChassisEvent::RenderMail` so a render mail landing while the loop is
-    // parked (a settled capture pre-mail's `pre_settled` notice) turns the
-    // loop and drains the slot. `subscribe_settlement_with` sends
-    // `PumpWake::Settled` into the same channel per advance.
-    let (pump_tx, pump_rx) = crossbeam_channel::unbounded::<PumpWake>();
-    let wake_pump_tx = pump_tx.clone();
+    // mailbox wake sends `PumpWake::Mail` so the advance-loop settlement wait
+    // drains on mail arrival, and *also* pokes `ChassisEvent::RenderMail` so a
+    // render mail landing while the loop is parked (a settled capture pre-mail's
+    // `pre_settled` notice) turns the loop and drains the slot.
+    let wake_pump_tx = driver.wake_sender();
     render_wake_slot.set(Arc::new(move || {
         let _ = wake_pump_tx.send(PumpWake::Mail);
-        let _ = render_events_tx.send(ChassisEvent::RenderMail);
+        let _ = render_events.send(ChassisEvent::RenderMail);
     }));
-
-    // ADR-0160 drain-at-pump-start: a pumped driver whose loop starts parked
-    // drains once before its first real pump so any mail queued during
-    // `init` / `wire` dispatches.
-    render_slot.drain_available();
-
-    // The recipient for the per-frame `Frame` request, and the loop's route to
-    // the lifecycle cap. ctx-less driver setup, so the root-pinned resolver
-    // answers directly.
-    let render_mailbox = root_mailbox::<RenderCapability>();
-    let lifecycle_mailbox = root_mailbox::<LifecycleCapability>();
-    let kind_lifecycle_advance = <LifecycleAdvance as Kind>::ID;
-    let settlement_registry = Arc::clone(passive.settlement_registry());
+    driver.prime();
 
     tracing::info!(
         target: "aether_substrate::boot",
         width,
         height,
-        workers = WORKERS,
-        profile = SubstrateHarnessChassis::PROFILE,
+        profile = HarnessChassis::PROFILE,
         "substrate-harness componentless boot — drive ticks via aether.substrate_harness.advance; the render runtime boots lazily offscreen on the first frame",
     );
 
-    let mut driver = HarnessDriver {
-        queue: Arc::clone(&boot.queue),
-        outbound: Arc::clone(&boot.outbound),
-        lifecycle_mailbox,
-        kind_lifecycle_advance,
-        render_mailbox,
-        settlement_registry,
-        render_slot,
-        pump_tx,
-        pump_rx,
-        chassis_correlation: AtomicU64::new(1),
-    };
     driver.run(&events_rx);
 
     // Drop ordering: run the pumped render actor's Closed-path teardown
-    // (`unwire` logs the triangle count) BEFORE dropping `passive` (Log shuts
-    // down) → `boot` (legacy capabilities + scheduler join). Listed last-first
-    // since locals drop in reverse declaration order.
-    driver.render_slot.shutdown();
+    // (`unwire` logs the triangle count) BEFORE dropping `passive` (the composed
+    // caps shut down) → `boot` (scheduler join).
+    driver.shutdown();
     drop(driver);
     drop(passive);
     drop(boot);
     Ok(())
-}
-
-/// Loopback-driven render pump host for the standalone harness chassis
-/// (ADR-0161). Owns the pumped `aether.render` slot and drives the advance /
-/// capture frame loop, mirroring the desktop driver's pump shape off winit.
-struct HarnessDriver {
-    queue: Arc<Mailer>,
-    outbound: Arc<HubOutbound>,
-    lifecycle_mailbox: MailboxId,
-    kind_lifecycle_advance: KindId,
-    render_mailbox: MailboxId,
-    settlement_registry: Arc<SettlementRegistry>,
-    render_slot: PumpedSlot<RenderCapability>,
-    /// `PumpWake::Settled` sender cloned into each advance's settlement
-    /// subscription; the slot's mailbox wake feeds the same channel with
-    /// `PumpWake::Mail`.
-    pump_tx: Sender<PumpWake>,
-    pump_rx: Receiver<PumpWake>,
-    /// ADR-0080 §6 chassis-root correlation counter (issue 723).
-    chassis_correlation: AtomicU64,
-}
-
-impl HarnessDriver {
-    /// Drive the chassis event loop on the main thread. `Advance` runs the
-    /// requested frames; `RenderMail` drains the pumped slot so a settled
-    /// capture pre-mail is serviced while the loop is otherwise idle. After
-    /// each event the loop parks with `recv_timeout(capture_deadline)` when a
-    /// capture is pending, so a wedged pre-chain still reaches the actor's
-    /// deadline check. Runs until every `EventSender` clone drops (clean
-    /// shutdown) or a fatal abort tears the process down.
-    fn run(&mut self, events_rx: &events::EventReceiver) {
-        loop {
-            // One recv site: park on the capture deadline when one is pending,
-            // otherwise block until the next event.
-            let event = match self.render_slot.read_state(RenderCapabilityState::capture_deadline).flatten() {
-                Some(deadline) => match events_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                    Ok(event) => event,
-                    Err(RecvTimeoutError::Timeout) => {
-                        // The deadline elapsed with no wake — record a frame so
-                        // the actor's expiry branch replies `Err` to the wedged
-                        // capture.
-                        self.record_frame(false);
-                        continue;
-                    }
-                    Err(RecvTimeoutError::Disconnected) => break,
-                },
-                None => match events_rx.recv() {
-                    Ok(event) => event,
-                    Err(_) => break,
-                },
-            };
-            match event {
-                ChassisEvent::Advance { reply_to, ticks, delta_micros } => {
-                    for _ in 0..ticks {
-                        self.advance_frame(delta_micros);
-                    }
-                    self.outbound.send_reply(reply_to, &AdvanceResult::Ok { ticks_completed: ticks });
-                    // A capture can become ready during an advance (its
-                    // pre-mails settled while the slot drained mid-wait).
-                    self.capture_if_ready();
-                }
-                ChassisEvent::RenderMail => {
-                    self.render_slot.drain_available();
-                    self.capture_if_ready();
-                }
-            }
-        }
-    }
-
-    /// Run one advance frame: push a chassis-root `LifecycleAdvance`, wait for
-    /// the frame chain to settle while pumping the render slot (the draw mail
-    /// the chain is gated on lands on this slot, so a non-pumping wait would
-    /// deadlock — the ADR-0161 §Decision 2 rule), then record the frame.
-    fn advance_frame(&mut self, delta_micros: u32) {
-        let advance_root = self.queue.push_chassis_root_mail(
-            next_chassis_correlation(&self.chassis_correlation),
-            self.lifecycle_mailbox,
-            self.kind_lifecycle_advance,
-            LifecycleAdvance { delta_micros }.encode_into_bytes(),
-            1,
-        );
-        let pump_tx = self.pump_tx.clone();
-        self.settlement_registry.subscribe_settlement_with(advance_root, move || {
-            let _ = pump_tx.send(PumpWake::Settled);
-        });
-        // A frame chain that never settles is a wedged dispatcher, not a
-        // "submit anyway" — fail-fast (ADR-0063) with the escalating-patience
-        // bookkeeping of issue #1305 carried through the pumped wait.
-        if let WaitOutcome::Wedged(wedge) = await_settlement_pumped(
-            &self.pump_rx,
-            &mut self.render_slot,
-            "substrate_harness_bin.frame_advance",
-            frame_loop::DRAIN_BUDGET,
-            FRAME_SETTLEMENT_CAP,
-            TerminalDisposition::Abort,
-        ) {
-            lifecycle::fatal_abort(&self.outbound, wedge.reason());
-        }
-        // ADR-0161 §Decision 1: record by mailing one frame and draining. The
-        // advance commits current producer state (`replay_cache_when_idle:
-        // false`).
-        self.record_frame(false);
-    }
-
-    /// Record a frame: mail one chassis-root `aether.render.frame` and drain
-    /// the slot so its `on_frame` handler runs inline on this thread.
-    fn record_frame(&mut self, replay_cache_when_idle: bool) {
-        self.queue.push_chassis_root_mail(
-            next_chassis_correlation(&self.chassis_correlation),
-            self.render_mailbox,
-            <Frame as Kind>::ID,
-            Frame { replay_cache_when_idle, windows: Vec::new() }.encode_into_bytes(),
-            1,
-        );
-        self.render_slot.drain_available();
-    }
-
-    /// The capture-ready ordering barrier (ADR-0161 R4): drive exactly one
-    /// capture frame once the parked capture is *ready* — every pre-mail chain
-    /// settled onto the accumulators — so the record never runs against a
-    /// still-filling accumulator. `replay_cache_when_idle: true` replays the
-    /// last committed frame (issue 847); the parked capture reads back on this
-    /// frame and replies through its retained guard.
-    fn capture_if_ready(&mut self) {
-        self.render_slot.drain_available();
-        if self.render_slot.read_state(RenderCapabilityState::capture_ready).unwrap_or(false) {
-            self.record_frame(true);
-        }
-    }
 }

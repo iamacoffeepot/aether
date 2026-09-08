@@ -41,7 +41,6 @@ aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 clap = { workspace = true }
-anyhow = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
 # The winit event loop. The wgpu surface stack now lives in the pumped
 # render actor (`aether-render/desktop`, ADR-0161 R3), so the chassis holds

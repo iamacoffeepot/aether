@@ -32,13 +32,13 @@ use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
 use aether_text::FontMetricsResult;
 
 use crate::set::{
-    WidgetDefaults, accept_font_metrics_result, apply_text_theme, approx_text_width, even_split_widths,
-    measured_text_width, pump_text_font_metrics, push_control_outlines, quad, raised_plate, reply_if_hidden, ring,
-    slot_at_local_x, slot_left, text_origin_y,
+    WidgetDefaults, accept_font_metrics_result, approx_text_width, even_split_widths, measured_text_width,
+    pump_text_font_metrics, push_control_outlines, quad, raised_plate, reply_draw, ring, slot_at_local_x, slot_left,
+    text_origin_y, widget_chrome,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
-use crate::theme::{SetTheme, Theme, ThemeState};
+use crate::theme::{Theme, ThemeState};
 use crate::{
     Collect, FocusLost, HoverLost, Menu, MenuBarActivated, MenuBarConfig, MenuBarOpenChanged, MenuItem, SetWidgetState,
     WidgetDrawItem, WidgetDrawList, WidgetFrame,
@@ -435,28 +435,13 @@ impl MenuBarWidget {
     }
 }
 
+widget_chrome!(MenuBarWidget, font_metrics);
+
 impl WidgetDefaults for MenuBarWidget {
-    fn widget_frame(&mut self) -> &mut WidgetFrame {
-        &mut self.frame
-    }
-
-    fn widget_theme(&mut self) -> &mut Theme {
-        &mut self.theme
-    }
-
-    fn widget_state(&mut self) -> &mut InteractionState {
-        &mut self.state
-    }
-
     fn cancel_activation(&mut self) {
         self.pressed_title = None;
         self.open_menu = None;
         self.highlighted_item = None;
-    }
-
-    /// Restyle: adopt the fanned theme and request metrics for its font.
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
     }
 
     /// Focus loss closes the menu. Overrides the shared default because
@@ -622,17 +607,7 @@ impl WasmActor for MenuBarWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
-            return;
-        }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                content_height: None,
-                intrinsic: None,
-                items: self.draw_items(),
-                overlay: self.overlay_items(),
-            });
-        }
+        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()).with_overlay(self.overlay_items()));
     }
 }
 

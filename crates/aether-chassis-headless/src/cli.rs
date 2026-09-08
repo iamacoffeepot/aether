@@ -5,7 +5,8 @@
 //! `aether_chassis::cli`.
 
 use aether_chassis::boot::env_only_after_help;
-use aether_chassis::cli::{ChassisCli, ChassisMeta, CommonOverlay};
+use aether_chassis::chassis_cli;
+use aether_chassis::cli::{ChassisMeta, CommonOverlay};
 use aether_chassis::tick::TickOverlay;
 use clap::Parser;
 
@@ -34,28 +35,4 @@ pub struct HeadlessCli {
     pub meta: ChassisMeta,
 }
 
-impl ChassisCli for HeadlessCli {
-    fn meta(&self) -> &ChassisMeta {
-        &self.meta
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    //! Headless root checkability (ADR-0156 §5): the hand-written root's long-flag
-    //! set must equal the union of its composed overlays' flags plus the meta
-    //! flags, so a dropped or stale flatten fails honestly.
-
-    use super::HeadlessCli;
-    use aether_chassis::cli::{CommonOverlay, long_flags, meta_flags, overlay_flags};
-    use aether_chassis::tick::TickOverlay;
-    use clap::CommandFactory;
-
-    #[test]
-    fn headless_root_flags_equal_composed_overlay_set() {
-        let mut expected = overlay_flags::<CommonOverlay>();
-        expected.extend(overlay_flags::<TickOverlay>());
-        expected.extend(meta_flags());
-        assert_eq!(long_flags(&HeadlessCli::command()), expected);
-    }
-}
+chassis_cli!(HeadlessCli { CommonOverlay, TickOverlay });

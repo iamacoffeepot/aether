@@ -6,7 +6,8 @@
 
 use aether_audio::AudioOverlay;
 use aether_chassis::boot::env_only_after_help;
-use aether_chassis::cli::{ChassisCli, ChassisMeta, CommonOverlay};
+use aether_chassis::chassis_cli;
+use aether_chassis::cli::{ChassisMeta, CommonOverlay};
 use aether_chassis::window::WindowOverlay;
 use aether_render::RenderTuningOverlay;
 use clap::Parser;
@@ -44,34 +45,6 @@ pub struct DesktopCli {
     pub meta: ChassisMeta,
 }
 
-impl ChassisCli for DesktopCli {
-    fn meta(&self) -> &ChassisMeta {
-        &self.meta
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    //! Desktop root checkability (ADR-0156 §5): the hand-written root's long-flag
-    //! set must equal the union of its composed overlays' flags plus the meta
-    //! flags, so a dropped or stale flatten fails honestly.
-
-    use super::DesktopCli;
-    use aether_audio::AudioOverlay;
-    use aether_chassis::cli::{CommonOverlay, long_flags, meta_flags, overlay_flags};
-    use aether_chassis::window::WindowOverlay;
-    use aether_render::RenderTuningOverlay;
-    use clap::CommandFactory;
-
-    #[test]
-    fn desktop_root_flags_equal_composed_overlay_set() {
-        let mut expected = overlay_flags::<CommonOverlay>();
-        expected.extend(overlay_flags::<AudioOverlay>());
-        // Desktop composes the wgpu render cap, so its `RenderTuningConfig` overlay
-        // is flattened only here, not into the shared `CommonOverlay` (issue 3882).
-        expected.extend(overlay_flags::<RenderTuningOverlay>());
-        expected.extend(overlay_flags::<WindowOverlay>());
-        expected.extend(meta_flags());
-        assert_eq!(long_flags(&DesktopCli::command()), expected);
-    }
-}
+// Desktop composes the wgpu render cap, so its `RenderTuningConfig` overlay is
+// flattened only here, not into the shared `CommonOverlay` (issue 3882).
+chassis_cli!(DesktopCli { CommonOverlay, AudioOverlay, RenderTuningOverlay, WindowOverlay });

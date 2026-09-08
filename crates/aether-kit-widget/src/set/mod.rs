@@ -75,7 +75,8 @@ pub mod tooltip;
 pub mod virtual_list;
 
 pub use button::ButtonWidget;
-pub use defaults::WidgetDefaults;
+pub(crate) use defaults::widget_chrome;
+pub use defaults::{WidgetChrome, WidgetDefaults};
 pub use dialog::DialogWidget;
 pub use dropdown::DropdownWidget;
 pub use image::ImageWidget;
@@ -462,7 +463,8 @@ fn accept_font_metrics_result(ctx: &mut WasmCtx<'_>, font_metrics: &mut FontMetr
 /// draw until then rather than guessing a width from the per-character
 /// approximation ([`APPROX_ADVANCE_RATIO`]), which would place the text wrong
 /// and then visibly jump.
-fn measured_text_width(metrics: &CachedFontMetrics, text: &str, size_pixels: f32) -> f32 {
+#[must_use]
+pub fn measured_text_width(metrics: &CachedFontMetrics, text: &str, size_pixels: f32) -> f32 {
     SingleLineLayout::build(text, metrics, size_pixels).width()
 }
 
@@ -551,26 +553,22 @@ pub(super) fn reply_if_hidden(ctx: &WasmCtx<'_>, state: &InteractionState) -> bo
         return false;
     }
     if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetDrawList { content_height: None, intrinsic: None, items: Vec::new(), overlay: Vec::new() });
+        parent.send(&WidgetDrawList::items(Vec::new()));
     }
     true
 }
 
-fn reply_with_draw_items(
-    ctx: &WasmCtx<'_>,
-    state: &InteractionState,
-    draw_items: impl FnOnce() -> Vec<WidgetDrawItem>,
-) {
+/// Reply one widget's draw for this frame, discharging the hidden branch of
+/// the always-reply compositing protocol first. `draw` runs only when the
+/// widget is visible, so a hidden widget builds no geometry, and the list it
+/// returns states only the lanes that widget actually fills
+/// ([`WidgetDrawList::items`] and friends).
+pub(super) fn reply_draw(ctx: &WasmCtx<'_>, state: &InteractionState, draw: impl FnOnce() -> WidgetDrawList) {
     if reply_if_hidden(ctx, state) {
         return;
     }
     if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetDrawList {
-            content_height: None,
-            intrinsic: None,
-            items: draw_items(),
-            overlay: Vec::new(),
-        });
+        parent.send(&draw());
     }
 }
 
@@ -984,11 +982,12 @@ pub(super) fn push_control_outlines(
 /// `Theme` does not carry in v1; this proportional approximation keeps caret
 /// motion local and synchronous. The byte-offset caret *logic* (which the unit
 /// tests pin) is exact regardless — only the pixel placement approximates.
-pub(crate) const APPROX_ADVANCE_RATIO: f32 = 0.5;
+pub const APPROX_ADVANCE_RATIO: f32 = 0.5;
 
 /// The approximate pixel width of `char_count` characters at `size_pixels`,
 /// using [`APPROX_ADVANCE_RATIO`].
-pub(crate) fn approx_text_width(char_count: usize, size_pixels: f32) -> f32 {
+#[must_use]
+pub fn approx_text_width(char_count: usize, size_pixels: f32) -> f32 {
     #[allow(clippy::cast_precision_loss)]
     let count = char_count as f32;
     count * size_pixels * APPROX_ADVANCE_RATIO
@@ -1245,12 +1244,12 @@ pub(super) fn reply_single_line_edit(ctx: &WasmCtx<'_>, edit: SingleLineEdit<'_>
     if reply_if_hidden(ctx, edit.state) {
         return;
     }
-    let intrinsic = edit.intrinsic;
-    let items = single_line_edit_draw_items(&edit);
-    let overlay = single_line_edit_overlay(&edit);
+    let list = WidgetDrawList::items(single_line_edit_draw_items(&edit))
+        .with_intrinsic(edit.intrinsic)
+        .with_overlay(single_line_edit_overlay(&edit));
 
     if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetDrawList { content_height: None, intrinsic, items, overlay });
+        parent.send(&list);
     }
 }
 

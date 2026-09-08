@@ -183,40 +183,37 @@ impl ImageWidget {
         let intrinsic =
             self.has_valid_natural_size().then_some([self.natural_width_pixels, self.natural_height_pixels]);
         if !self.state.is_visible() {
-            return WidgetDrawList { content_height: None, intrinsic, items: Vec::new(), overlay: Vec::new() };
+            return WidgetDrawList::items(Vec::new()).with_intrinsic(intrinsic);
         }
         let Some(placement) = self.placement() else {
-            return WidgetDrawList { content_height: None, intrinsic, items: Vec::new(), overlay: Vec::new() };
+            return WidgetDrawList::items(Vec::new()).with_intrinsic(intrinsic);
         };
-        WidgetDrawList {
-            content_height: None,
-            intrinsic,
-            overlay: Vec::new(),
-            // The image takes the theme's corner radius like every other
-            // face in the set (iamacoffeepot/aether#5709): the texture is
-            // sampled inside the rounded fill's coverage, so a thumbnail is
-            // not the one square corner among rounded plates.
-            items: vec![picture(
-                &self.theme,
-                [
-                    placement.destination_x_pixels,
-                    placement.destination_y_pixels,
-                    placement.destination_width_pixels,
-                    placement.destination_height_pixels,
-                ],
-                ShapeTexture {
-                    texture_id: self.texture_id,
-                    u0: placement.uv_left,
-                    v0: placement.uv_top,
-                    u1: placement.uv_right,
-                    v1: placement.uv_bottom,
-                    // A consumer-uploaded image, like every other
-                    // `create_texture` caller stages.
-                    blend: QuadBlend::Straight,
-                },
-                self.theme.fill(self.tint, self.state.theme_state(false)),
-            )],
-        }
+
+        // The image takes the theme's corner radius like every other face in
+        // the set (iamacoffeepot/aether#5709): the texture is sampled inside
+        // the rounded fill's coverage, so a thumbnail is not the one square
+        // corner among rounded plates.
+        WidgetDrawList::items(vec![picture(
+            &self.theme,
+            [
+                placement.destination_x_pixels,
+                placement.destination_y_pixels,
+                placement.destination_width_pixels,
+                placement.destination_height_pixels,
+            ],
+            ShapeTexture {
+                texture_id: self.texture_id,
+                u0: placement.uv_left,
+                v0: placement.uv_top,
+                u1: placement.uv_right,
+                v1: placement.uv_bottom,
+                // A consumer-uploaded image, like every other
+                // `create_texture` caller stages.
+                blend: QuadBlend::Straight,
+            },
+            self.theme.fill(self.tint, self.state.theme_state(false)),
+        )])
+        .with_intrinsic(intrinsic)
     }
 
     fn apply_config(&mut self, config: ImageConfig) -> bool {

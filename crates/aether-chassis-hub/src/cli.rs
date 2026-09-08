@@ -6,7 +6,8 @@
 //! `aether_chassis::cli`.
 
 use aether_chassis::boot::{ActorRingOverlay, RegistryQueueOverlay, SchedulerTuningOverlay, env_only_after_help};
-use aether_chassis::cli::{ChassisCli, ChassisMeta};
+use aether_chassis::chassis_cli;
+use aether_chassis::cli::ChassisMeta;
 use aether_fleet::FleetOverlay;
 use aether_rpc::RpcServerOverlay;
 use aether_substrate::config::SettlementOverlay;
@@ -61,40 +62,15 @@ pub struct HubCli {
     pub meta: ChassisMeta,
 }
 
-impl ChassisCli for HubCli {
-    fn meta(&self) -> &ChassisMeta {
-        &self.meta
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    //! Hub root checkability (ADR-0156 §5): the hand-written root's long-flag set
-    //! must equal the union of its composed overlays' flags plus the meta flags,
-    //! so a dropped or stale flatten fails honestly.
-
-    use super::HubCli;
-    use aether_chassis::boot::{ActorRingOverlay, RegistryQueueOverlay, SchedulerTuningOverlay};
-    use aether_chassis::cli::{long_flags, meta_flags, overlay_flags};
-    use aether_fleet::FleetOverlay;
-    use aether_rpc::RpcServerOverlay;
-    use aether_substrate::config::SettlementOverlay;
-    use clap::CommandFactory;
-
-    #[test]
-    fn hub_root_flags_equal_composed_overlay_set() {
-        // The hub composes the engines cap plus the RPC server; `--rpc-port`
-        // now rides the derive-emitted `RpcServerOverlay` (#3849) like every
-        // other flag, alongside the meta flags. Issue 3882 flattened the three
-        // tuning overlays the hub resolves off its own source stack (actor ring /
-        // scheduler / settlement).
-        let mut expected = overlay_flags::<FleetOverlay>();
-        expected.extend(overlay_flags::<RpcServerOverlay>());
-        expected.extend(overlay_flags::<ActorRingOverlay>());
-        expected.extend(overlay_flags::<SchedulerTuningOverlay>());
-        expected.extend(overlay_flags::<RegistryQueueOverlay>());
-        expected.extend(overlay_flags::<SettlementOverlay>());
-        expected.extend(meta_flags());
-        assert_eq!(long_flags(&HubCli::command()), expected);
-    }
-}
+// The hub composes the engines cap plus the RPC server; `--rpc-port` rides the
+// derive-emitted `RpcServerOverlay` (#3849) like every other flag. Issue 3882
+// flattened the four tuning overlays the hub resolves off its own source stack
+// (actor ring / scheduler / registry queues / settlement).
+chassis_cli!(HubCli {
+    FleetOverlay,
+    RpcServerOverlay,
+    ActorRingOverlay,
+    SchedulerTuningOverlay,
+    RegistryQueueOverlay,
+    SettlementOverlay,
+});

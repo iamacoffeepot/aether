@@ -28,9 +28,9 @@ use aether_http::HttpServerCapability;
 use aether_kinds::Tick;
 use aether_lifecycle::LifecycleCapability;
 use aether_render::HeadlessRenderCapability;
+use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::chassis::{BootableChassis, composed};
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_substrate_harness_cap::UnsupportedSubstrateHarnessCapability;
 use aether_window::HeadlessWindowCapability;
@@ -38,14 +38,13 @@ use aether_window::HeadlessWindowCapability;
 use aether_chassis::{TickConfig, apply_manifest_tick_settings};
 
 use super::driver::HeadlessTimerDriverCapability;
-use aether_chassis::autoload::autoload_mail;
 use aether_chassis::boot::{
-    ChassisBase, CommonEnv, chassis_residual_knobs, tick_only_lifecycle_params, with_full_stack_caps, with_rpc_server,
+    ChassisBase, CommonEnv, boot_standard, chassis_residual_knobs, tick_only_lifecycle_params, with_full_stack_caps,
+    with_rpc_server,
 };
-use aether_substrate::config::{ConfigError, KnobRecord, validate_env};
+use aether_substrate::config::{ConfigError, KnobRecord};
 
 use crate::cli::HeadlessCli;
-use aether_substrate::runtime::log_install::apply_filter;
 
 /// Marker type for the headless chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<HeadlessChassis>`] returned
@@ -58,76 +57,55 @@ impl Chassis for HeadlessChassis {
     type Driver = HeadlessTimerDriverCapability;
     type Env = CommonEnv;
 
-    /// Build the headless chassis: stand up substrate-core internals,
-    /// compose the capability chain via [`BootableChassis::compose`], then
-    /// wrap the timer in a [`HeadlessTimerDriverCapability`] and hand it to
-    /// the builder.
-    fn build(mut env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        let mut boot = SubstrateBoot::build()?;
-        // #3849: `SubstrateBoot::build` installed the subscriber with an
-        // env-or-`info` filter (before the config file loaded); re-apply the
-        // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
-        // `info`) now so a filter set only in the config file takes effect.
-        apply_filter(&env.runtime.log_filter);
-        let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
-        let mailer = Arc::clone(&boot.queue);
+    /// Build the headless chassis through the shared [`boot_standard`] body,
+    /// declaring only the timer driver: resolve the tick cadence off the base's
+    /// source stack, then wrap the composed boot in a
+    /// [`HeadlessTimerDriverCapability`].
+    fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+        boot_standard(env, |env: &mut CommonEnv| {
+            // ADR-0162 §config-at-its-seam: the tick cadence is driver config —
+            // its consumer is the std-timer driver's loop period, not a composed
+            // cap — so it resolves HERE, off the base's source stack, at the
+            // seam that constructs the timer driver rather than pre-resolved
+            // into a per-chassis env bag. `TickConfig`'s `nonzero` lowering maps
+            // 0 to the default (60 Hz).
+            //
+            // Issue 4001: a depot package (`--package`) manifest's tick cadence
+            // overlays onto the stack BELOW argv/env, ABOVE the compiled
+            // default, before the resolve — so a shipped package runs at its
+            // cadence while an operator's `AETHER_TICK_HZ` / `--tick-hz` still
+            // wins.
+            let package_settings = env.package_settings.clone();
+            apply_manifest_tick_settings(&mut env.base.sources, &package_settings)?;
+            let tick_period = env.base.sources.resolve::<TickConfig>()?.to_tick_period();
+            // #3930: the non-cap members ride as resolved structs now; lower the
+            // two the boot log line reports (the same lowered values the fused
+            // `with_chassis_config_member` install re-lowers onto the builder
+            // seams during `compose`).
+            let ring_capacities = env.base.actor_ring.to_ring_capacities();
 
-        // ADR-0162 §config-at-its-seam: the tick cadence is driver config — its
-        // consumer is the std-timer driver's loop period, not a composed cap — so
-        // it resolves HERE, off the base's source stack, at the seam that
-        // constructs the timer driver rather than pre-resolved into a per-chassis
-        // env bag. `TickConfig`'s `nonzero` lowering maps 0 to the default (60 Hz).
-        //
-        // Issue 4001: a depot package (`--package`) manifest's tick cadence
-        // overlays onto the stack BELOW argv/env, ABOVE the compiled default,
-        // before the resolve — so a shipped package runs at its cadence while an
-        // operator's `AETHER_TICK_HZ` / `--tick-hz` still wins.
-        let package_settings = env.package_settings.clone();
-        apply_manifest_tick_settings(&mut env.base.sources, &package_settings)?;
-        let tick_period = env.base.sources.resolve::<TickConfig>()?.to_tick_period();
-        // #3930: the non-cap members ride as resolved structs now; lower the two
-        // the boot log line reports (the same lowered values as before). The fused
-        // `with_chassis_config_member` install re-lowers `workers` onto the builder
-        // seam during `compose`.
-        let workers = env.chassis_boot.to_workers();
-        let ring_capacities = env.base.actor_ring.to_ring_capacities();
-        // The autoload list is drained after build; lift the base stratum out so
-        // `composed` installs the aborter + base ahead of `compose` (the leftover
-        // default `env.base` is never re-read).
-        let autoload = mem::take(&mut env.autoload);
-        let base = mem::take(&mut env.base);
+            // Tick rates are bounded well below `u32::MAX` Hz (typically
+            // 60-240 Hz), so the `u128 → u32` narrowing never saturates in
+            // practice; a `try_from` that saturates rather than a cast that
+            // wraps keeps an absurd cadence honest in the log line without
+            // needing a truncation allow.
+            let tick_hz =
+                u32::try_from(Duration::from_secs(1).as_nanos() / tick_period.as_nanos().max(1)).unwrap_or(u32::MAX);
+            tracing::info!(
+                target: "aether_substrate::boot",
+                workers_override = ?env.chassis_boot.to_workers(),
+                tick_hz = tick_hz,
+                log_ring_capacity = ring_capacities.log,
+                trace_ring_capacity = ring_capacities.trace,
+                trace_ring_max_capacity = ring_capacities.trace_max,
+                "componentless boot — load a component via aether.component.load",
+            );
 
-        // Tick rates are bounded well below `u32::MAX` Hz (typically
-        // 60-240 Hz); the `u128 → u32` narrowing is safe in practice.
-        #[allow(clippy::cast_possible_truncation)]
-        let tick_hz = (Duration::from_secs(1).as_nanos() / tick_period.as_nanos().max(1)) as u32;
-        tracing::info!(
-            target: "aether_substrate::boot",
-            workers_override = ?workers,
-            tick_hz = tick_hz,
-            log_ring_capacity = ring_capacities.log,
-            trace_ring_capacity = ring_capacities.trace,
-            trace_ring_max_capacity = ring_capacities.trace_max,
-            "componentless boot — load a component via aether.component.load",
-        );
-
-        let builder = composed::<Self>(&mut boot, base, env)?;
-        // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
-        // var, sweeping against the composition-derived known-key set plus the
-        // residual hand records. Runs here (not in `resolve_env`) because the
-        // per-chassis known keys come from the composed builder's manifest.
-        validate_env(&builder.config_manifest().known_keys(&Self::residual_knobs()))?;
-        let driver = HeadlessTimerDriverCapability { boot, kind_tick, tick_period };
-        let built = builder.driver(driver).build()?;
-        // Auto-load any bundled components, in order, before the run loop
-        // starts. Fire-and-forward: the component host dispatches each load
-        // off the worker pool (already up after `build`), so the components
-        // are live shortly after `run` begins — no hub required. Mirrors the
-        // desktop chassis drain (#1520, generalized in #1529).
-        for component in autoload {
-            mailer.push(autoload_mail(component));
-        }
-        Ok(built)
+            Ok(move |boot: SubstrateBoot| {
+                let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
+                HeadlessTimerDriverCapability { boot, kind_tick, tick_period }
+            })
+        })
     }
 }
 
