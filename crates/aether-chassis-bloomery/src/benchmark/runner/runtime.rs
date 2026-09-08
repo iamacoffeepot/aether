@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use aether_actor::{Manual, runtime};
+use aether_actor::{Manual, OutboundReply, runtime};
 use aether_bloomery::{
     Admit, AdmitResult, BloomId, BloomView, Digest, Event, Fact, IdempotencyKey, LoadConfigs, LoadConfigsResult,
     Outcome, Query, QueryResult, QuerySelector, ResolvedConfigs, StoreClass, is_active_unlanded,
