@@ -485,7 +485,7 @@ impl StageCatalog {
     ///
     /// A binding names lanes in two places, and both are checked. Its `process`
     /// names one whenever that string is not one of the coordinator's own host
-    /// positions, and [`dispatched_command`] names the one the executor actually
+    /// positions, and `dispatched_command` names the one the executor actually
     /// routes — which is the load-bearing half, since `StageId::Review`'s
     /// process is the host position `review` while its dispatch runs
     /// `review.critic`. Checking only the first would admit a catalog whose

@@ -109,3 +109,8 @@ fn schema_digest_failures_are_annotated_without_a_regen_command() {
     assert!(annotated.contains("append the new digest to `schema-digests.txt` and register an upcast"));
     assert!(!annotated.contains("fixtures regen"), "{annotated}");
 }
+
+#[test]
+fn probe_current_digests() {
+    panic!("PROBE decisions {}", DECISIONS.current_digest());
+}
