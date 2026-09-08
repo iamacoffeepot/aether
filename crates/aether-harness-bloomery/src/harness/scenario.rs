@@ -999,6 +999,10 @@ impl ScenarioHarness {
     /// Wake the executor reactor until the coordinator holds exactly `count`
     /// outstanding orders.
     ///
+    /// Does not wake the integrate reactor. A still-pending integrate receipt
+    /// holds later integrate rows on that topic; wait with [`Self::pump_until`]
+    /// while a later row's fold side-effect must stay armed.
+    ///
     /// # Panics
     /// The coordinator dispatched more than `count` orders, or nothing inside the step budget.
     pub fn await_orders(&mut self, count: usize) -> Vec<OutstandingOrder> {
