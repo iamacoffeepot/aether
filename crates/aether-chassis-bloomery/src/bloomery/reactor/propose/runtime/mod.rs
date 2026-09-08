@@ -23,7 +23,8 @@ use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
     Admit, BloomDraft, BloomSpec, ConfigKind, ConfigRegistry, Correspondence, Digest, Event, Fact, Forecast,
-    IdempotencyKey, OperatorProposal, ProposalPayload, SharedCorrespondence, Topic, WorkpieceId, digest_of, encode_hex,
+    IdempotencyKey, OperatorProposal, PipelineManifest, ProposalPayload, SharedCorrespondence, Topic, WorkpieceId,
+    digest_of, encode_hex,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
@@ -89,6 +90,7 @@ fn seal_key(proposal: &OperatorProposal) -> IdempotencyKey {
 fn proposal_spec(proposal: &OperatorProposal, base: Digest) -> BloomSpec {
     let mut configs = ConfigRegistry::default();
     configs.insert::<OperatorProposal>(proposal.address());
+    configs.insert::<PipelineManifest>(PipelineManifest::compiled().address());
     BloomDraft { proposals: Vec::new(), base, configs, forecast: Forecast::default() }.seal()
 }
 
@@ -132,6 +134,17 @@ fn seal_unrecorded(
             sequence,
             %error,
             "proposal config write failed; stopping the ack prefix to re-drive",
+        );
+        return None;
+    }
+    let manifest = PipelineManifest::compiled();
+    let manifest_bytes = to_vec(&manifest).expect("the compiled manifest encodes");
+    if let Err(error) = store.record_config(manifest.address().as_bytes(), PipelineManifest::NAME, &manifest_bytes) {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::propose",
+            sequence,
+            %error,
+            "compiled pipeline manifest write failed; stopping the ack prefix to re-drive",
         );
         return None;
     }

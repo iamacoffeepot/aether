@@ -354,7 +354,7 @@ fn a_sealed_catalog_whose_bytes_do_not_decode_is_refused() {
 
     // Correctly filed at the sealed address, so the name-keyed walk passes it —
     // the bytes are what will not produce a catalog.
-    let mut configs = ResolvedConfigs::default();
+    let mut configs = compiled_resolved();
     configs.insert(catalog.address(), StageCatalog::NAME, vec![0xff], None);
 
     let decided = reduce(

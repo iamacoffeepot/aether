@@ -8,7 +8,10 @@
 
 #![allow(clippy::unwrap_used)]
 
-use aether_bloomery::{BloomDraft, Fact, Outcome, PIPELINE_MANIFEST_PATH, PipelineManifest, config_address};
+use aether_bloomery::{
+    BloomDraft, Digest, Evidence, EvidenceKind, Fact, Outcome, PIPELINE_MANIFEST_PATH, PipelineManifest,
+    VerifyFailureSet, config_address,
+};
 use aether_data::Kind;
 use aether_data::wire::to_vec;
 use aether_harness_bloomery::{HarnessBuilder, Repo, digest, member, mock_lane_program};
@@ -40,6 +43,23 @@ fn a_declared_entrypoint_reaches_the_childs_argv() {
     match harness.admit("seal-a-declared-entrypoint", Fact::Seal(spec)) {
         Outcome::Sealed(_) => {}
         other => panic!("a base that declares its lanes must seal, got {other:?}"),
+    }
+    match harness.admit(
+        "prove-the-declared-entrypoint-base",
+        Fact::BaseVerifyCompleted {
+            base,
+            tree: base,
+            passed: true,
+            evidence: Evidence {
+                subject: base,
+                kind: EvidenceKind::VerificationResult,
+                detail: Digest::from_bytes([9; 32]),
+            },
+            failed: VerifyFailureSet::EMPTY,
+        },
+    ) {
+        Outcome::BaseProven { .. } => {}
+        other => panic!("the fixture base must prove green so construct dispatches: {other:?}"),
     }
 
     harness.pump_until("a lane dispatch records the sealed entrypoint", |harness| {

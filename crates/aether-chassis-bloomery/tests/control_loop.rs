@@ -33,7 +33,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_bloomery::testing::with_compiled_manifest;
+use aether_bloomery::testing::{compiled_resolved, with_compiled_manifest};
 use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, BloomId, CONTROL_CORE_NAMESPACE, CalibrationDocument, CandidateRef, ConfigKind,
     ConfigRegistry, Decision, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership,
@@ -403,7 +403,7 @@ fn replay_folds_the_recorded_decision_not_the_current_reducer() {
     let db = db.to_str().unwrap();
 
     let resurrectable = seal_event("seal-a", 0, "wp-a");
-    let control_a = reduce(&Snapshot::default(), &resurrectable, &ResolvedConfigs::default(), &SpendWindow::default());
+    let control_a = reduce(&Snapshot::default(), &resurrectable, &compiled_resolved(), &SpendWindow::default());
     assert!(
         matches!(control_a.outcome, Outcome::Sealed(_)),
         "fixture control: today's reducer would admit the rejected row (else the resurrection arm tests nothing)"
@@ -411,7 +411,7 @@ fn replay_folds_the_recorded_decision_not_the_current_reducer() {
     let refusal = Decisions { outcome: Outcome::SealRejected(SealError::EmptyMembership), effects: Vec::new() };
 
     let admitted = seal_event("seal-b", 0, "wp-b");
-    let decided_b = reduce(&Snapshot::default(), &admitted, &ResolvedConfigs::default(), &SpendWindow::default());
+    let decided_b = reduce(&Snapshot::default(), &admitted, &compiled_resolved(), &SpendWindow::default());
     assert!(matches!(decided_b.outcome, Outcome::Sealed(_)), "fixture control: the admitted row's record seals");
 
     let mut store = SqliteStore::open(db).unwrap();
@@ -578,7 +578,7 @@ fn the_view_is_not_served_before_the_journal_has_replayed() {
     let db = db.to_str().unwrap();
 
     let sealed = seal_event("seal-visible", 0, "wp");
-    let decided = reduce(&Snapshot::default(), &sealed, &ResolvedConfigs::default(), &SpendWindow::default());
+    let decided = reduce(&Snapshot::default(), &sealed, &compiled_resolved(), &SpendWindow::default());
     assert!(matches!(decided.outcome, Outcome::Sealed(_)), "fixture control: the planted row seals");
     plant_pre_replay_journal(db, &sealed, &decided);
 
@@ -623,7 +623,7 @@ fn metrics_and_spend_are_not_served_before_the_journal_has_replayed() {
     let db = db.to_str().unwrap();
 
     let sealed = seal_event("seal-visible", 0, "wp");
-    let decided = reduce(&Snapshot::default(), &sealed, &ResolvedConfigs::default(), &SpendWindow::default());
+    let decided = reduce(&Snapshot::default(), &sealed, &compiled_resolved(), &SpendWindow::default());
     let bloom = match &decided.outcome {
         Outcome::Sealed(bloom) => *bloom,
         other => panic!("fixture control: the planted row seals: {other:?}"),
@@ -670,7 +670,7 @@ fn an_observation_classified_against_a_moved_base_is_discarded() {
     let db = db.to_str().unwrap();
 
     let sealed = seal_event("seal-stale-obs", 0, "wp-stale-obs");
-    let seal_decided = reduce(&Snapshot::default(), &sealed, &ResolvedConfigs::default(), &SpendWindow::default());
+    let seal_decided = reduce(&Snapshot::default(), &sealed, &compiled_resolved(), &SpendWindow::default());
     let bloom = match &seal_decided.outcome {
         Outcome::Sealed(bloom) => *bloom,
         other => panic!("fixture control: the planted seal must seal: {other:?}"),

@@ -1073,8 +1073,9 @@ fn authored_stage_catalog_reaches_the_dispatch_profile() {
     assert_eq!(status, 201, "open draft");
     let draft_id = opened["draft_id"].as_str().unwrap();
     let revision = seed_commission(http_port, "wp-1", &["docs/guide/**"]);
-    let mut patch = serde_json::to_value(valid_draft("wp-1", revision)).unwrap();
-    patch["configs"] = serde_json::to_value(&configs).unwrap();
+    let mut draft = valid_draft("wp-1", revision);
+    draft.configs.overlay(configs);
+    let patch = serde_json::to_value(&draft).unwrap();
     // The registry goes up in canonical form and comes back with its address
     // spelled the way the `/artifacts/{digest}` path would spell it.
     let rendered_registry =
