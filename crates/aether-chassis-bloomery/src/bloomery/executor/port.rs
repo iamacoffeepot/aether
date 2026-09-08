@@ -33,9 +33,7 @@
 //! keep serving its direct callers unchanged while the reactor's helpers move
 //! over wholesale.
 
-use aether_bloomery::{
-    BackendId, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, ObservedLaneWrites, WorkHandle, WorkOrder,
-};
+use aether_bloomery::{BackendId, EvidenceRef, ExecutionStatus, Nonce, ObservedLaneWrites, WorkHandle, WorkOrder};
 
 use super::{ExecutorPortError, ExecutorShell};
 

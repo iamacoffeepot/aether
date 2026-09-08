@@ -52,7 +52,7 @@ use crate::bloomery::open_scope_run;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::{CoordinatorConfig, GithubConnectionConfig};
 use crate::bloomery::{
-    ExecutorPort, ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, Settled,
+    ExecutorPort, ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle,
     UnconfiguredActionsBackend,
 };
 use crate::session::SessionConfig;
@@ -3803,8 +3803,9 @@ mod offloaded_adapter_calls {
         CandidatePush, CapturingBackend, NOW_UNIX_MILLIS, NameEvidenceClaims, RecordingPush, Stores,
         drain_and_dispatch, enqueue_construct_dispatch, pull_and_admit, tick_clock_at, track,
     };
+    use crate::bloomery::outbox::TopicOutbox;
     use crate::bloomery::{ExecutorPort, ExecutorPortError, ExecutorShell, Settled};
-    use crate::store::{SqliteStore, StoreBackend};
+    use crate::store::SqliteStore;
 
     /// A backend whose `submit` parks until the test opens the gate. Everything
     /// else answers at once, so the only thing a turn can be waiting on is that

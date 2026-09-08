@@ -2848,10 +2848,9 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
         heartbeat_silence_millis: state.heartbeat_silence_millis,
     };
 
-    let mut admits = Vec::new();
-    let mut publications = Vec::new();
-    if let Some(store) = state.store.as_mut() {
+    let (admits, publications) = if let Some(store) = state.store.as_mut() {
         let executor = state.offload.port(&shell);
+        let mut admits = Vec::new();
 
         // Skip the drain while inside a transient-failure backoff window (#3593) —
         // paces the re-drive instead of hammering GitHub at the flat poll cadence.
@@ -2882,8 +2881,10 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
             correspondence.as_ref(),
         );
         admits.extend(pulled);
-        publications = published;
-    }
+        (admits, published)
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     for admit in admits {
         // Fire-and-forget: the control actor's on_admit is reliable local mail,

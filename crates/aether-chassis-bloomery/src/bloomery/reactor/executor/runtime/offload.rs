@@ -52,12 +52,13 @@
 //! single-threaded dispatcher, which is its own mutual exclusion.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::{
     BackendId, BloomId, EvidenceRef, ExecutionStatus, Nonce, ObservedLaneWrites, WorkHandle, WorkOrder, WorkpieceId,
 };
-use aether_substrate::actor::native::NativeCtx;
+use aether_substrate::actor::native::{DEFAULT_MAX_IN_FLIGHT, NativeCtx};
 
 use super::CandidatePush;
 use crate::bloomery::executor::{ExecutorPort, ExecutorPortError, ExecutorShell, Settled};
@@ -70,7 +71,7 @@ use crate::bloomery::executor::{ExecutorPort, ExecutorPortError, ExecutorShell, 
 /// is a fleet-wide property and not an executor one. Deliberately not a config
 /// knob — nothing in the deployment story wants to tune it, and an unset knob
 /// is one more way to mount a reactor that cannot dispatch.
-pub const MAX_IN_FLIGHT: usize = aether_substrate::actor::native::DEFAULT_MAX_IN_FLIGHT;
+pub const MAX_IN_FLIGHT: usize = DEFAULT_MAX_IN_FLIGHT;
 
 /// One blocking call, named by what makes it *the same call* on a later turn.
 ///
@@ -103,12 +104,17 @@ pub enum AdapterCall {
 /// keying on the payload would start a second run for it.
 #[derive(Clone, Debug)]
 enum AdapterWork {
-    Submit(WorkOrder),
+    /// Boxed: a `WorkOrder` carries a whole `Transformation`, several times the
+    /// size of the handles beside it, and this enum is moved into a worker.
+    Submit(Box<WorkOrder>),
     Inspect(WorkHandle),
     Cancel(WorkHandle),
     Evidence(WorkHandle),
     ObserveWrites,
-    Publish { commit_hex: String, target_ref: String },
+    Publish {
+        commit_hex: String,
+        target_ref: String,
+    },
 }
 
 impl AdapterWork {
@@ -243,7 +249,7 @@ impl AdapterOffload {
     pub fn drain_publications(&mut self) -> Vec<(PendingPublish, Result<(), String>)> {
         let mut answered = Vec::new();
         let mut waiting = Vec::new();
-        for capture in core::mem::take(&mut self.publishing) {
+        for capture in mem::take(&mut self.publishing) {
             let work =
                 AdapterWork::Publish { commit_hex: capture.commit_hex.clone(), target_ref: capture.target_ref.clone() };
             match self.take_or_want(work) {
@@ -260,7 +266,7 @@ impl AdapterOffload {
     /// the next turn re-derives it from the same durable state, and a buffered
     /// copy would replay a request the world has since moved past.
     pub fn start_wanted(&mut self, ctx: &mut NativeCtx<'_>, shell: &ExecutorShell, pusher: &Arc<dyn CandidatePush>) {
-        let wanted = core::mem::take(&mut self.lock().wanted);
+        let wanted = mem::take(&mut self.lock().wanted);
 
         for work in wanted {
             if self.in_flight() >= MAX_IN_FLIGHT {
@@ -338,7 +344,7 @@ impl ExecutorPort for OffloadedPort<'_> {
     }
 
     fn submit(&self, order: &WorkOrder) -> Settled<Result<WorkHandle, ExecutorPortError>> {
-        match self.offload.take_or_want(AdapterWork::Submit(order.clone())) {
+        match self.offload.take_or_want(AdapterWork::Submit(Box::new(order.clone()))) {
             Some(AdapterAnswer::Submit(answer)) => Settled::Answered(answer),
             _ => Settled::InFlight,
         }
