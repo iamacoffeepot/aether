@@ -187,7 +187,7 @@ impl WasmActor for RadioGroupWidget {
     const NAMESPACE: &'static str = "aether.kit.widget.radio";
 
     fn init(config: RadioConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        let selected = clamp_option_index(config.initial_index, config.options.len());
+        let selected = clamp_option_index(config.initial, config.options.len());
         Ok(RadioGroupWidget {
             options: config.options,
             selected,
@@ -199,7 +199,7 @@ impl WasmActor for RadioGroupWidget {
     }
 
     /// Replace the options / theme in place, re-clamping the selection into
-    /// the new vector. `initial_index` seeds the group only at `init`, so a
+    /// the new vector. `initial` seeds the group only at `init`, so a
     /// re-sent config does not move the reader's choice; [`SetSelection`] does.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: RadioConfig) {

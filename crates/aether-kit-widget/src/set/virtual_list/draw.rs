@@ -31,9 +31,8 @@ impl VirtualListWidget {
     /// the two: the selection carrying that same hover.
     ///
     /// Before this the widget-wide hover flag lit the *selected* row wherever
-    /// in the list the pointer was, so pointing at the fourth gem lit the
-    /// first — the owner's round-11 note 13, "the current behavior only has
-    /// the selected element being activated when hovering over ANY item".
+    /// in the list the pointer was, so pointing at the fourth row lit the
+    /// first — hover is a fact about a row, not about the widget.
     pub(super) fn row_fill(&self, selected: bool, hovered: bool) -> Rgba {
         let base = match (selected, hovered) {
             (true, _) => self.theme.selection,
@@ -268,7 +267,7 @@ mod tests {
         let theme = Theme::DEFAULT;
         let mut widget = measured_list(2, 2);
         widget.items = vec![
-            VirtualListRow::from("Astral Plate").with_trailing(vec!["21/20".into()]).with_ink(TextInk::RarityLegendary),
+            VirtualListRow::from("Astral Plate").with_trailing(vec!["21/20".into()]).with_ink(TextInk::Tier4),
             VirtualListRow::from("Iron Ring").with_trailing(vec!["1".into()]),
         ];
         widget.selected_index = Some(0);
@@ -276,7 +275,7 @@ mod tests {
 
         let runs = row_runs(&widget);
         assert_eq!(runs.len(), 4, "two rows of two columns: {runs:?}");
-        assert_eq!(runs[0].1, theme.rarity_legendary, "the chosen row's name kept its tier");
+        assert_eq!(runs[0].1, theme.tier_4, "the chosen row's name kept its tier");
         assert_eq!(runs[1].1, theme.selection_text, "its amount did not take the tier with it");
         assert_eq!(runs[2].1, theme.text_primary, "an inkless row is written exactly as it was");
         assert_eq!(runs[3].1, theme.text_primary);

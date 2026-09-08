@@ -15,7 +15,14 @@ The set is a defaultless grab-bag module (ADR-0138): load a widget by its
 `module@export` selector against the `aether_kit_widget` stem — `WidgetPanel` is
 `aether_kit_widget@aether.kit.widget.panel`, the `EditorShell` arbiter is
 `aether_kit_widget@aether.kit.widget.editor`, and so on. The `aether.kit.widget.*`
-export namespaces themselves are unchanged.
+export namespaces themselves are unchanged. **Every stock widget is exported**,
+not a chosen subset, so any of them can be loaded by selector as well as spawned
+inline by a root.
+
+Every widget kind — configs, events, and the schema types nested in them — is
+declared in one place and reaches the crate root, so a consumer writes
+`use aether_kit_widget::{ButtonConfig, DialogConfig};` and never has to know
+which module a kind happens to be defined in.
 
 The widgets build on two foundations documented alongside them: the
 draw-compositing protocol (ADR-0117 — `Collect` down, `WidgetDrawList` up, the
@@ -70,7 +77,7 @@ widget sends can misreport it.
   place (a slider's range, a field's cap, a button's label).
 
   **A re-sent config never moves a value the widget already holds.** Every
-  `initial*` field is a *seed*: the widget reads it at `init` and ignores it on
+  `initial` field is a *seed*: the widget reads it at `init` and ignores it on
   every later config — with one extension, that a seed still seeds what holds
   *nothing*. The two widgets whose selection may be absent (`VirtualListConfig`,
   `DropdownConfig`) take their seed on the config that first gives them a vector
@@ -150,23 +157,55 @@ widget sends can misreport it.
   focus arrived, which is what decides whether a ring is drawn at all — see
   [the focus-visible rule](#the-focus-ring-marks-keyboard-focus).
 - **Value, up.** `SliderChanged { value, committed }`, `TextCommitted { text }`,
-  `RadioSelected { index }`, `VirtualListSelected { selected_index }`, and
-  `ButtonClicked` flow to the parent through `ctx.parent()`. A slider streams
+  `RadioSelected { index }`, `VirtualListSelected { index }`, and
+  `ButtonActivated` flow to the parent through `ctx.parent()`. A slider streams
   `committed: false` values through a drag and a final `committed: true` on
   release, so a consumer previews the drag and commits the expensive work
   once.
 
-  `VirtualListAction { row_index, action_index }` reports a verb bound to one
-  list row (see [row verbs](#a-verb-can-sit-on-the-row)) and is deliberately
-  *not* a selection: the press that fires it leaves the list's current row
-  where it was. `VirtualListHover { row }` reports the row the pointer is
-  resting on (see [the row under the pointer](#the-row-under-the-pointer)) and
-  is not a selection either — the reader is looking, not choosing.
+  `VirtualListActivated { index, action }` reports a verb bound to one list row
+  (see [row verbs](#a-verb-can-sit-on-the-row)) and is deliberately *not* a
+  selection: the press that fires it leaves the list's current row where it
+  was. `VirtualListHover { index, x, y, width, height }` reports the row the
+  pointer is resting on (see [the row under the
+  pointer](#the-row-under-the-pointer)) and is not a selection either — the
+  reader is looking, not choosing.
 
-  `ToggleChanged { on }`, `SegmentedSelected { index }`, `TabSelected
-  { index }`, `MenuItemActivated { menu, item }`, and `NumericChanged { value,
+  `ToggleChanged { on }`, `SegmentedSelected { index }`, `TabStripSelected
+  { index }`, `MenuBarActivated { menu, item }`, and `NumericChanged { value,
   committed }` use that same source-attributed lane; Numeric applies the
   preview/commit distinction to typed values.
+
+### How a widget kind is named
+
+One rule per axis, so a name can be guessed rather than looked up.
+
+- **The kind is `aether.kit.widget.{widget}.{suffix}`**, and the suffix is the
+  semantic class of the event, not a synonym chosen per widget: `.changed` for
+  a continuous value that moved (slider, numeric, toggle, splitter),
+  `.selected` for a choice among a vector (radio, segmented, tab strip,
+  dropdown, virtual list), `.committed` for an edit a reader finished (the two
+  text controls, which share `aether.kit.widget.text.committed` because they
+  emit the identical value), and `.activated` for a verb that was pressed
+  (button, menu bar, a virtual list's row verb). Reports that are neither a
+  value nor a verb keep their own descriptive suffix — `.hover`, `.placed`,
+  `.open_changed`, `.region_changed`, `.shed` — because "changed" would say
+  less about them, not more.
+- **The Rust type is the wire name minus its dots**: `slider.changed` is
+  `SliderChanged`, `tab_strip.selected` is `TabStripSelected`,
+  `menu_bar.activated` is `MenuBarActivated`. The exceptions are stated rather
+  than drifted: a kind directly under `aether.kit.widget.` whose tail is a
+  generic word carries the family segment so the exported symbol still names
+  something (`frame` is `WidgetFrame`, `draw_list` is `WidgetDrawList`), and a
+  data-down setter reads as the imperative it is (`set_state` is
+  `SetWidgetState`, `set_selection` is `SetSelection`).
+- **One index into the widget's own vector is `index`**, everywhere: a
+  selection, a hovered row, the row a verb hangs on. A second index qualifies
+  itself (`VirtualListActivated.action`), and a pair naming two levels of a
+  nested structure keeps both level names (`MenuBarActivated { menu, item }`).
+- **A config's seed field is `initial`**, whatever its type — a string, a
+  boolean, a number, an index, an `Option<u32>`. `SplitterConfig::position_pixels`
+  is deliberately not spelled that way because it is not a seed.
 
 Every stock widget is `#[actor(instanced, composable)]`, so it satisfies
 `ChildOf<P>` for any Wasm actor parent in the same resident module. A custom
@@ -180,7 +219,7 @@ placement facts at runtime.
 
 `WidgetKind::Button` spawns `ButtonWidget` from `ButtonConfig { label,
 emphasis, tone, theme, state }`. A left press inside arms it and the matching
-release inside fires `ButtonClicked`; a release that drifts off cancels.
+release inside fires `ButtonActivated`; a release that drifts off cancels.
 Enter fires on its press, Space on its matching release.
 
 `emphasis` is `ButtonEmphasis { Filled, Tonal, Outlined, Text }` and ranks how
@@ -334,7 +373,7 @@ an `Rgba`:
 | `Inherited` (default) | whatever the run would have drawn without an ink — `text_primary`, or `text_muted` at `TextRole::Caption`, and a widget may override it further |
 | `Muted` | `text_muted`, whatever the role's size |
 | `Accent` | `accent` — as a **run**, never a plate |
-| `RarityCommon` / `RarityUncommon` / `RarityRare` / `RarityLegendary` | the four rungs of the theme's rarity ladder |
+| `Tier1` / `Tier2` / `Tier3` / `Tier4` | the four rungs of the theme's tier ladder |
 | `HueWarm` / `HueCool` / `HueBright` / `HueViolet` / `HuePlain` | the five inks of the theme's hue set |
 
 It exists because a row is more than one run. A list row's name and its
@@ -342,9 +381,12 @@ trailing amount, a dropdown option and the closed row it is repeated on —
 before this one ink covered a whole row, so "this run muted, that one in the
 tag's colour" could not be said, and a name could not carry its own tier.
 
-The **rarity ladder** is a generic four-step scale: anything with a tier — a
-drop, a tier list, a plan — writes its names in it. `rarity_common` is the
-plain ink, and the three above it are a cool blue, a yellow and a warm gold.
+The **tier ladder** is a generic four-step scale: anything ranked — a drop's
+rarity, a tier list, a plan's confidence — writes its names in it. The rungs
+are numbered rather than named because the kit does not know what they rank:
+`tier_1` is the plain ink, and the three above it are a cool blue, a yellow and
+a warm gold. A host maps its own vocabulary onto them in one function, the same
+way it maps onto the hue set.
 What the rungs *mean* is the host's; what they look like is the theme's, and
 each is chosen so it clears 4.5 against the raised surface and 3.0 against
 **every fill a row can draw under it** — the hover wash and the selection
@@ -432,7 +474,7 @@ A host that wants `⌘` in a label ships a face that has it, or writes
 
 ## Fixed-row virtual lists
 
-`VirtualListConfig { items, initial_selected_index, visible_row_count,
+`VirtualListConfig { items, initial, visible_row_count,
 empty_text, ruled, scroll_bar_gap_units, host_scroll_strip, theme, state }`
 retains the complete row vector while
 realizing the rows the viewport reaches. The panel fixes the slot height at
@@ -603,19 +645,25 @@ right item only while every item is realized. The list says it instead:
 ```rust
 #[handler::manual]
 fn on_virtual_list_hover(&mut self, ctx: &mut WasmCtx<'_, Manual>, hover: VirtualListHover) {
-    // `hover.row` is an index into the config's `items`, or `None` once the
-    // pointer has left the rows.
+    // `hover.index` is into the config's `items`, or `None` once the pointer
+    // has left the rows; `hover.x/y/width/height` is that row's plate.
 }
 ```
 
-`VirtualListHover { row: Option<u32> }` is sent whenever that answer
-**changes** — from a pointer move, a wheel, a thumb drag, or a fresh item
-vector arriving under a still pointer — and is attributed by
-`ctx.source_mailbox()` like every other value-up event. The scroll bar's
-gutter is not a row, so a thumb drag reports nothing rather than whichever row
-happens to pass under the pointer. It is not a selection and never becomes
-one: hovering a row says the reader is looking at it, which is what a tooltip
-answers, and says nothing about what they have chosen.
+`VirtualListHover { index: Option<u32>, x, y, width, height }` is sent whenever
+that answer **changes** — from a pointer move, a wheel, a thumb drag, or a
+fresh item vector arriving under a still pointer — and is attributed by
+`ctx.source_mailbox()` like every other value-up event. The rectangle is the
+row's plate in the same window pixels the panel assigned the list its frame in,
+so a host stands a tooltip on the row without measuring anything, and it is all
+zeroes when `index` is `None` — the event that says to take the tooltip down.
+That is the set's rule and not this widget's courtesy: **a widget that owns
+sub-rectangles the root cannot hit-test reports the hovered one's geometry
+along with its index**, which is why `DropdownHover` has the identical shape.
+The scroll bar's gutter is not a row, so a thumb drag reports nothing rather
+than whichever row happens to pass under the pointer. It is not a selection and
+never becomes one: hovering a row says the reader is looking at it, which is
+what a tooltip answers, and says nothing about what they have chosen.
 
 A pointed-at row draws a face of its own — the kit's role-agnostic hover wash
 over the plain surface, the same face a dropdown's open list draws under the
@@ -687,7 +735,7 @@ whole row:
 ```rust
 use aether_kit_widget::{TextInk, VirtualListRow};
 
-let row = VirtualListRow::from(item.name).with_ink(TextInk::RarityRare);
+let row = VirtualListRow::from(item.name).with_ink(TextInk::Tier3);
 ```
 
 Each trailing span carries its own ink the same way. A column of *amounts* is
@@ -748,8 +796,8 @@ block. What it takes off the text budget is the block plus its one gap of clear
 space *less* one pad, since the block stands in the pad the budget already gave
 up. A row with no `actions` is laid out precisely as it always was.
 
-A press on a verb arms it and the release-inside fires `VirtualListAction {
-row_index, action_index }` — the button's own press-then-release-inside, so a
+A press on a verb arms it and the release-inside fires `VirtualListActivated {
+index, action }` — the button's own press-then-release-inside, so a
 press that slides off the verb cancels, which is what a `×` deserves. It
 reports **no selection**: a press anywhere else on the row still selects as it
 always did, and the whole point of a verb on the row is that removing the third
@@ -836,7 +884,7 @@ Indent belongs in the field, never in the string. Padding a name with spaces
 puts the indent in the text, and a proportional face's space advance is not the
 spacing unit.
 
-`initial_selected_index` is an `Option`, and a list whose model holds no
+`initial` is an `Option`, and a list whose model holds no
 current item shows none — no row lights up, rather than the first row lighting
 as if it had been chosen. The selected row, when there is one, fills with
 `theme.selection` over `theme.selection_text`. A list with no items at all
@@ -847,7 +895,7 @@ nothing.
 
 ## Dropdowns
 
-`DropdownConfig { options, initial_selected_index, placeholder, open_row_count,
+`DropdownConfig { options, initial, placeholder, open_row_count,
 theme, state }` is the control for one current choice whose alternatives are
 secondary. Closed it is a single row reading the chosen option — or
 `placeholder` in muted ink while nothing is chosen — with a chevron at its
@@ -910,12 +958,12 @@ scrolls the realized window. The dropdown says it instead:
 ```rust
 #[handler::manual]
 fn on_dropdown_hover(&mut self, ctx: &mut WasmCtx<'_, Manual>, hover: DropdownHover) {
-    // `hover.option` indexes the config's `options`; `x`/`y`/`width`/`height`
+    // `hover.index` indexes the config's `options`; `x`/`y`/`width`/`height`
     // are that row's rectangle in window pixels.
 }
 ```
 
-`DropdownHover { option: Option<u32>, x, y, width, height }` is sent whenever
+`DropdownHover { index: Option<u32>, x, y, width, height }` is sent whenever
 the answer **changes** — a pointer move, an arrow key scrolling the window
 under a still pointer, the list closing — and is attributed by
 `ctx.source_mailbox()` like every other value-up event. `None` is the pointer
@@ -978,13 +1026,13 @@ instead, and Left/Right do the same by keyboard, clamping at the ends. The item
 under the pointer takes the hover overlay; Up/Down walk that highlight over the
 enabled items only, skipping the disabled ones and clamping at the ends, and
 Enter activates the highlighted item. A press on an enabled item reports
-`MenuItemActivated { menu, item }` and closes; a press on a disabled item does
+`MenuBarActivated { menu, item }` and closes; a press on a disabled item does
 nothing at all — not even close — so a mis-aimed press leaves the menu standing
 to try again. A press anywhere else, a title included, closes without
 activating, which is what makes pressing the open title read as the toggle it
 looks like.
 
-`MenuOpenChanged { open }` reports each open and close edge exactly once —
+`MenuBarOpenChanged { open }` reports each open and close edge exactly once —
 including the close that Escape, focus loss, a re-sent config, or becoming
 unavailable forces, and *excluding* a switch from one menu to another, which is
 not a new open edge and does not disturb the grab the root already holds. A
@@ -1164,7 +1212,7 @@ the bottom-right grows as its top-left corner is pulled up and left.
 
 The position follows the pointer's **travel** from where the press landed, not
 its absolute position, so grabbing the strip anywhere along its width does not
-jump the split. `SplitterMoved { position_pixels }` streams the clamped value
+jump the split. `SplitterChanged { position_pixels }` streams the clamped value
 while the drag is live and goes quiet at either end of the range rather than
 re-sending the same number every frame; there is no preview/commit split,
 because a region resize is applied as it happens.
@@ -1199,7 +1247,7 @@ releases, so it would have to be handed back for a gesture that is over when
 the button comes up.)
 
 It does ask one thing of the host: **do not respawn the strip mid-drag**. A
-root that rebuilds its layout on every `SplitterMoved` — which is the ordinary
+root that rebuilds its layout on every `SplitterChanged` — which is the ordinary
 way to host a resizable pane — calls `Focus::clear` and re-registers on the
 drag's first pixel, and that is fine, because `clear` drops the entries and
 only the entries (see [Rebuilding the table under a live
@@ -1292,7 +1340,7 @@ contents and over the screen it covers.
 **Resizing** uses the handle the kit already has. Frame a `SplitterWidget` with
 `bare: true` over the plate's right edge (`SplitterAxis::Horizontal`), another
 over its bottom edge (`Vertical`), and a third over the bottom-right corner
-(`Corner`), and re-frame the dialog on each `SplitterMoved`:
+(`Corner`), and re-frame the dialog on each `SplitterChanged`:
 
 ```rust
 // The three strips, derived from the plate the dialog reported.
@@ -1346,7 +1394,7 @@ local draw orders the track before its moving knob and label, then adds the
 common validation/focus outlines.
 
 `WidgetKind::Segmented` spawns `SegmentedWidget` from `SegmentedConfig {
-options, initial_index, theme, state }`. The assigned row is divided into
+options, initial, theme, state }`. The assigned row is divided into
 equal-width named segments. A pointer press selects its bucket, and focused
 Left/Right movement clamps at the first and last option. Empty option lists
 have no hit buckets. `SegmentedSelected { index }` reports only actual changes.
@@ -1360,11 +1408,11 @@ so. Until those metrics land the labels draw whole and left-padded, the same
 interim the tab strip has.
 
 `WidgetKind::TabStrip` spawns `TabStripWidget` from `TabStripConfig { labels,
-initial_index, style, theme, state }` — one row of tabs over parallel content
+initial, style, theme, state }` — one row of tabs over parallel content
 sets viewed one at a time. `style` is `TabStripStyle { Chips, Filled }` and
 picks between the two shapes below; it defaults to `Chips`, which is what
 every strip drew before the field existed. Selection is identical in both: a
-left press selects, focused Left/Right moves and clamps, and `TabSelected {
+left press selects, focused Left/Right moves and clamps, and `TabStripSelected {
 index }` reports only actual changes.
 
 **`Chips`** — content-sized tabs sitting in the section. Unlike the segmented
@@ -1640,7 +1688,7 @@ re-register routes nothing, and its hover leaves through an ordinary
 `HoverTransition` on the next motion.
 
 That is not a convenience, it is what makes a resizable pane work. A root that
-hosts a splitter rebuilds its layout on every `SplitterMoved` — that *is* the
+hosts a splitter rebuilds its layout on every `SplitterChanged` — that *is* the
 resize — which means it calls `clear` and re-registers on the drag's first
 pixel. A `clear` that also dropped the capture ended the drag there, so the
 pane could not be moved; one that dropped the hover left the strip lit forever,
@@ -1763,7 +1811,7 @@ The overlay's counterpart on the input side is the
 to that child until `end_grab`, outranking drag capture, and hover edges are
 suppressed while it holds so nothing under the overlay lights up. The widget
 asks for the grab by reporting `DropdownOpenChanged { open: true }` — or
-`MenuOpenChanged { open: true }`, which the root answers the same way — and
+`MenuBarOpenChanged { open: true }`, which the root answers the same way — and
 gives it back with `open: false`; that is why the close edge is reported for
 every way a list or a menu can close, including focus loss. Without the grab a
 press that lands outside the widget's own rect would go to whatever is under
@@ -1968,8 +2016,23 @@ The vertical order follows the declared order, so what a panel
 contains is config data. Its
 value-up handlers are the seam: each attributes the event by
 `ctx.source_mailbox()` and is where a map editor translates a widget change
-into world-knob driver mail. Fork it by handing it your own `children` and
-filling in those handlers.
+into world-knob driver mail. Hand it your own `children` and fill in those
+handlers.
+
+**`children` selects from the stock set; it does not extend it.** `WidgetKind`
+is a closed, kit-owned enum — every variant maps to a compile-time
+`spawn_inline_child::<P, A>` call, which is what makes the dispatch exhaustive
+and an unknown widget a compile error rather than a runtime warn-drop. So a
+`WidgetChildSpec` cannot name a widget a consumer wrote. A consumer that needs
+its own widget in a tree writes its **own root** rather than configuring this
+one, and the pieces a root is made of are public for exactly that:
+`panel::spawn_widget_child` spawns one child and reports back the
+`SpawnedChild` metadata (id, reported extents, eligibility, state, the scroll
+strip it wants) a root needs to place and route it; `ChildLayout` says whether
+the slot is a panel row or a content extent; `content_frame` takes the clear
+column a host-owned scroll bar stands in out of an assigned rectangle. Adding a
+variant to `WidgetKind` is a change to this crate, and the stock set is
+deliberately what the kit itself can draw.
 
 Inline children are externally addressable by lineage. Keep the exact root
 `name` returned by `load_component`, then append

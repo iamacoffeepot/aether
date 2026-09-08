@@ -123,8 +123,8 @@ impl Composite {
     /// than the ordinary one, without touching its membership, layout, or
     /// current-frame reply. Returns whether a slot was found.
     ///
-    /// This is the lane a plate that *hosts* the root's own children needs
-    /// (the studio's gap 15). A popover's plate stands over the primary
+    /// This is the lane a plate that *hosts* the root's own children needs.
+    /// A popover's plate stands over the primary
     /// content, so it goes in the overlay — but a popover's controls are
     /// ordinary widgets of the root, and ordinary draws are what an overlay
     /// fill cuts text out from under. Marking the popover's children overlay

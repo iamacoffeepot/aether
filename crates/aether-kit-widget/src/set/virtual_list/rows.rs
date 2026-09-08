@@ -8,9 +8,9 @@
 
 use alloc::vec::Vec;
 
-use crate::VirtualListRow;
 use crate::set::virtual_list::{VirtualListWidget, valid_frame};
 use crate::theme::TextRole;
+use crate::{VirtualListRow, WidgetFrame};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct VisibleRowWindow {
@@ -226,10 +226,24 @@ impl VirtualListWidget {
         })
     }
 
+    /// One realized row's plate in **window pixels** — the same space the panel
+    /// gives the list its frame in, so a host can stand a tooltip on the row
+    /// the list says the pointer is resting on without redoing any of the
+    /// geometry above. `None` for an item outside the realized window.
+    pub(super) fn row_frame(&self, item_index: usize) -> Option<WidgetFrame> {
+        let bands = self.row_bands(item_index)?;
+        Some(WidgetFrame {
+            x: self.frame.x,
+            y: self.frame.y + bands.plate_top,
+            width: self.row_width(),
+            height: bands.plate_height,
+        })
+    }
+
     /// How wide a row is: the frame less whatever the scroll bar's gutter
     /// takes off its right end. A row stops where the gutter starts — it does
-    /// not run under the bar and get covered by it (round-5 note 8), which is
-    /// what a full-frame row fill did.
+    /// not run under the bar and get covered by it, which is what a full-frame
+    /// row fill did.
     pub(super) fn row_width(&self) -> f32 {
         (self.frame.width - self.bar_gutter_width()).max(0.0)
     }
@@ -247,8 +261,8 @@ impl VirtualListWidget {
     /// **first** row whose top clears a viewport of the content's end once the
     /// offset table stands.
     ///
-    /// That last window is rounded **up** (the studio's gap 41a, round-17 note
-    /// 1 — "on defense extended stats cannot scroll to bottom"). Rounded down
+    /// That last window is rounded **up**, so a list can always be scrolled to
+    /// its own bottom. Rounded down
     /// it started on the last row whose top is at or before the content's end,
     /// so unless the frame happened to be an exact prefix sum of the rows the
     /// window stopped short by up to a row's height and the final statistic
@@ -287,7 +301,7 @@ impl VirtualListWidget {
     /// way; a host drawing a container around the list needs the pixels, so
     /// the one number is stated in both units from the same two branches
     /// rather than re-derived on the host's side out of a mirrored row
-    /// arithmetic that drifts (the studio's gap 41).
+    /// arithmetic that drifts.
     ///
     /// `None` for a table whose rows the list has not measured yet — the
     /// offset table missing while some row asks for a height of its own, or
@@ -339,6 +353,23 @@ mod tests {
     use crate::{VirtualListConfig, WidgetDrawItem, WidgetFrame};
     use alloc::format;
     use alloc::vec::Vec;
+
+    #[test]
+    fn the_reported_hover_rectangle_is_the_plate_the_row_actually_draws() {
+        // Tripwire: `VirtualListHover` carries the hovered row's rectangle so a
+        // host can stand a tooltip on it without redoing the list's geometry.
+        // A rectangle derived from anything but the bands the plate is drawn
+        // from is a second copy of that geometry, free to drift from the draw
+        // the moment a row carries a height of its own.
+        let widget = measured_list(20, 5);
+        let (x, y, width, height, _) = row_plates(&widget)[2];
+
+        let reported = widget.row_frame(2).expect("a realized row has a rectangle");
+
+        assert_eq!((reported.x, reported.y), (widget.frame.x + x, widget.frame.y + y));
+        assert_eq!((reported.width, reported.height), (width, height));
+        assert!(widget.row_frame(19).is_none(), "a row outside the realized window has no rectangle");
+    }
 
     #[test]
     fn window_clamps_zero_one_beginning_middle_and_tail() {
@@ -556,7 +587,7 @@ mod tests {
         // config.
         let mut widget = config_list(VirtualListConfig {
             items: (0..50).map(|index| noted(&format!("stat {index}"), "a sentence under the statistic")).collect(),
-            initial_selected_index: Some(40),
+            initial: Some(40),
             visible_row_count: 5,
             ..VirtualListConfig::default()
         });

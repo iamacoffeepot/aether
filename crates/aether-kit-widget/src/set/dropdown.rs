@@ -220,7 +220,7 @@ impl DropdownWidget {
             height: 0.0,
         });
         parent.send(&DropdownHover {
-            option: next.and_then(|index| u32::try_from(index).ok()),
+            index: next.and_then(|index| u32::try_from(index).ok()),
             x: row.x,
             y: row.y,
             width: row.width,
@@ -246,15 +246,15 @@ impl DropdownWidget {
     /// the open row count, and the theme, with the current choice re-clamped
     /// into the new option vector.
     ///
-    /// `initial_selected_index` is a seed and seeds only what holds nothing: it
-    /// is read while the dropdown has no choice — at `init`, and on the config
-    /// that first gives it options — and ignored once there is one to preserve.
-    /// `state` is not its business at all; it travels its own lane so a state
-    /// change can be reported.
+    /// `initial` is a seed and seeds only what holds nothing: it is read while
+    /// the dropdown has no choice — at `init`, and on the config that first
+    /// gives it options — and ignored once there is one to preserve. `state` is
+    /// not its business at all; it travels its own lane so a state change can
+    /// be reported.
     fn reconfigure(&mut self, config: DropdownConfig) {
         self.options = config.options;
         self.selected_index = self.selected_index.map_or_else(
-            || clamp_optional_index(config.initial_selected_index, self.options.len()),
+            || clamp_optional_index(config.initial, self.options.len()),
             |index| clamp_optional_selection(Some(index), self.options.len()),
         );
         self.placeholder = config.placeholder;
@@ -358,8 +358,8 @@ impl DropdownWidget {
     /// draw has to charge itself the same thing or the reservation is a
     /// number nobody honours. Drawn against the bare frame instead, a run
     /// wider than the row ran under the mark and out the other side for the
-    /// slot clip to cut — `Choose an ascendancy` ended flush against the
-    /// chevron with no gap at all, which is the owner's note. Charging the
+    /// slot clip to cut, ending flush against the chevron with no gap at all —
+    /// so the mark read as the last letter of the word. Charging the
     /// column stops the run one spacing unit short of the mark at every
     /// width, so a name that was cut says so and the mark keeps its air.
     ///
@@ -410,7 +410,7 @@ impl DropdownWidget {
     /// the closed row could ever read, one `pad` either side, and the chevron
     /// column; by one theme row. `None` until the font's advances resolve, so
     /// a cell is never sized from a guess it would then visibly resize away
-    /// from (the studio's gap 26).
+    /// from.
     ///
     /// The placeholder counts as one of those runs. It is what the closed row
     /// reads while nothing is chosen, so a cell that fitted only the options
@@ -608,7 +608,7 @@ impl WasmActor for DropdownWidget {
     fn init(config: DropdownConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         let font_id = config.theme.font_id;
         Ok(DropdownWidget {
-            selected_index: clamp_optional_index(config.initial_selected_index, config.options.len()),
+            selected_index: clamp_optional_index(config.initial, config.options.len()),
             options: config.options,
             placeholder: config.placeholder,
             open_row_count: usize::try_from(config.open_row_count).unwrap_or(usize::MAX),
@@ -643,7 +643,7 @@ impl WasmActor for DropdownWidget {
 
     /// Replace the options / theme in place from a re-sent config, holding the
     /// current choice and re-clamping it into the new option vector.
-    /// `initial_selected_index` seeds the dropdown only at `init`;
+    /// `initial` seeds the dropdown only at `init`;
     /// [`SetSelection`] moves the choice.
     ///
     /// A list that was open closes: its rows are the vector that just changed,
@@ -879,7 +879,7 @@ mod tests {
 
     #[test]
     fn a_re_sent_config_holds_the_choice_and_clamps_it_into_the_new_options() {
-        // Tripwire: `on_config` used to reseed from `initial_selected_index`,
+        // Tripwire: `on_config` used to reseed from `initial`,
         // so a host that replaced the option labels — a refresh loop that
         // re-sends every child its config — cleared the reader's choice. The
         // seed is read at `init` alone now; `SetSelection` moves the choice.
@@ -1226,14 +1226,14 @@ mod tests {
         // from precisely the row the reader is looking at.
         let theme = Theme::DEFAULT;
         let mut widget = dropdown(6, 3, Some(1));
-        widget.options[1] = DropdownOption::from("Astral Plate").with_ink(TextInk::RarityRare);
+        widget.options[1] = DropdownOption::from("Astral Plate").with_ink(TextInk::Tier3);
         widget.open = true;
 
-        assert_eq!(widget.closed_row_text(), ("Astral Plate", theme.rarity_rare));
+        assert_eq!(widget.closed_row_text(), ("Astral Plate", theme.tier_3));
         assert!(
             widget.overlay_items().iter().any(|item| matches!(
                 item,
-                WidgetDrawItem::Text { text, color, .. } if text == "Astral Plate" && *color == theme.rarity_rare
+                WidgetDrawItem::Text { text, color, .. } if text == "Astral Plate" && *color == theme.tier_3
             )),
             "the open list writes the current option in its own ink too",
         );

@@ -37,6 +37,7 @@ use aether_math::{Rgba, Vec2};
 use aether_render::{ScreenVertex, ShapeShadow, ShapeStroke, ShapeTexture};
 use serde::{Deserialize, Serialize};
 
+use crate::set::placement::{PlacementBounds, PlacementSide};
 use crate::theme::{TextInk, TextRole, Theme};
 
 /// `aether.kit.widget.collect` — a per-frame poll a compositing node
@@ -470,8 +471,7 @@ pub struct WidgetDrawList {
     /// widget's, because the font metrics are. A host that draws a container
     /// around a scrolling widget sizes it to this — a four-row table gets a
     /// four-row plate rather than a tall empty box — instead of mirroring the
-    /// widget's own row arithmetic and drifting from it (the studio's gap
-    /// 41).
+    /// widget's own row arithmetic and drifting from it.
     #[serde(default)]
     pub content_height: Option<f32>,
     pub items: Vec<WidgetDrawItem>,
@@ -884,7 +884,7 @@ pub struct SetToggle {
 /// place.
 ///
 /// **A re-sent config never moves a value the widget already holds.** Every
-/// `initial*` field is a seed: read at `init`, ignored by every later config,
+/// `initial` field is a seed: read at `init`, ignored by every later config,
 /// and a reconfigure updates presentation, bounds, and options and then
 /// re-clamps what the widget already holds into them. The one extension is
 /// that a seed still seeds what holds *nothing*: the two widgets whose
@@ -896,7 +896,7 @@ pub struct SetToggle {
 /// value on purpose, send [`SetValue`], [`SetText`], [`SetSelection`], or
 /// [`SetToggle`]; to change external availability alone, [`SetWidgetState`].
 ///
-/// [`SplitterConfig::position_pixels`](crate::set::SplitterConfig) is the one
+/// [`SplitterConfig::position_pixels`] is the one
 /// stated exception, and it is not a seed: a splitter's position *is* its
 /// configuration, so re-sending the config is how a host moves the bar.
 /// `aether.kit.widget.slider.config` — a horizontal value slider over
@@ -986,7 +986,7 @@ pub struct TextAreaConfig {
 }
 
 /// `aether.kit.widget.radio.config` — a vertical list of mutually-exclusive
-/// `options`, one selected at a time, starting at `initial_index` (clamped
+/// `options`, one selected at a time, starting at `initial` (clamped
 /// into range at init). Each option draws as one theme row.
 ///
 /// A re-sent config replaces the options and holds the current selection,
@@ -997,7 +997,7 @@ pub struct RadioConfig {
     pub options: Vec<String>,
     /// The row selected at boot. A seed: read at `init` and ignored by every
     /// later config.
-    pub initial_index: u32,
+    pub initial: u32,
     pub theme: Theme,
     #[serde(default)]
     pub state: WidgetControlState,
@@ -1060,7 +1060,7 @@ impl From<&str> for InkedSpan {
 /// width, the same elision and the same hover / pressed answer a
 /// [`ButtonConfig`] draws with — it is the kit's button face, drawn inside a row
 /// the list owns rather than in a slot a layout gave it. A press on one reports
-/// [`VirtualListAction`] and leaves the selection alone; a press anywhere else
+/// [`VirtualListActivated`] and leaves the selection alone; a press anywhere else
 /// on the row selects as it always did.
 ///
 /// Rank a row verb **down**. A column of rows each carrying a filled accent
@@ -1294,7 +1294,7 @@ pub struct VirtualListConfig {
     /// list has no selection — at `init`, and again on the config that first
     /// populates an empty list — and ignored once there is a chosen row to
     /// preserve. [`SetSelection`] moves a selection that already exists.
-    pub initial_selected_index: Option<u32>,
+    pub initial: Option<u32>,
     pub visible_row_count: u32,
     /// The one caption line drawn in place of rows when `items` is empty
     /// (`"No saved builds"`), in the caption role and muted ink. An empty
@@ -1320,10 +1320,9 @@ pub struct VirtualListConfig {
     /// [`Self::SCROLL_BAR_GAP_UNITS`] by default, which is two: a control
     /// inside a plate sits at least two spacing units from its edge
     /// (`designing-a-screen.md` §6), and from the rows' side the rail is that
-    /// edge. One unit was the whole gutter until round 15 and the owner read
-    /// it as touching the values twice over — round-14 note 5, *"More left
-    /// padding on the scroll bar in build tab"*, and round-17 note 7, *"The
-    /// scrollbar is still too close to content to the left side."*
+    /// edge. One unit reads as the bar touching the values it stands beside:
+    /// the gutter and the track are both narrow, so a single unit between them
+    /// is not seen as clear space at all.
     ///
     /// A host that wants more sets more. The gutter is taken off the rows'
     /// own width, so the leading run elides against what is left of it rather
@@ -1341,8 +1340,9 @@ pub struct VirtualListConfig {
     /// the track in the strip just past the frame's right edge — the way a
     /// pane's rail is drawn past the body it scrolls — and takes **nothing**
     /// off the rows, so a value's right edge does not move when the vector
-    /// starts to overflow. The owner's round-16 note 3: *"I feel like the
-    /// scrollbar should EXTEND the panel slightly to exist and be adjacent."*
+    /// starts to overflow. A bar that appears should *extend* the list rather
+    /// than narrow it: content that shifts sideways the moment one more row
+    /// arrives is content the reader has to find again.
     ///
     /// A host that sets it owes the widget that column:
     /// [`Self::scroll_strip_width`] is how wide, and the slot's clip has to
@@ -1415,7 +1415,7 @@ impl Default for VirtualListConfig {
     fn default() -> Self {
         Self {
             items: Vec::new(),
-            initial_selected_index: None,
+            initial: None,
             visible_row_count: 0,
             empty_text: String::new(),
             ruled: false,
@@ -1489,7 +1489,7 @@ pub struct DropdownConfig {
     /// and a seed seeds only what holds nothing: read while the dropdown has no
     /// choice — at `init`, and on the config that first gives it options — and
     /// ignored once there is one to preserve.
-    pub initial_selected_index: Option<u32>,
+    pub initial: Option<u32>,
     /// What the closed row reads when nothing is selected.
     #[serde(default)]
     pub placeholder: String,
@@ -1515,7 +1515,7 @@ pub struct TabStripConfig {
     pub labels: Vec<String>,
     /// The tab selected at boot. A seed: read at `init` and ignored by every
     /// later config.
-    pub initial_index: u32,
+    pub initial: u32,
     /// Which of the two tab shapes the strip draws.
     /// [`TabStripStyle::Chips`] — the content-sized row every strip drew
     /// before the field existed — unless a host asks for the filled row.
@@ -1528,12 +1528,13 @@ pub struct TabStripConfig {
 
 /// The two shapes a row of tabs takes.
 ///
-/// The owner's round-8 note 14: "the tab buttons are good but they don't feel
-/// like typical tabs … like they aren't small buttons in the section but
-/// buttons that take the space and feel more dominant." Both shapes select
-/// the same way and report the same [`TabSelected`]; what changes is whether
-/// the row is a set of content-sized chips sitting in the section or the
-/// section's own top edge.
+/// Content-sized chips sitting in a section read as small buttons placed on
+/// it rather than as the section's own tabs; a strip that takes the whole
+/// width reads as the top edge of what it switches. Which one a screen wants
+/// is a design decision, so it is a field. Both shapes select the same way and
+/// report the same [`TabStripSelected`]; what changes is whether the row is a
+/// set of content-sized chips sitting in the section or the section's own top
+/// edge.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TabStripStyle {
     /// Content-sized tabs on the raised surface, one gap between them, the
@@ -1590,9 +1591,9 @@ pub struct Menu {
 /// top of a screen, the place an application's commands live (File, Edit,
 /// View, Help). A press on a title opens that menu's items below it in the
 /// widget's overlay ([`WidgetDrawList::overlay`]) under the root's pointer
-/// grab, reported through [`MenuOpenChanged`]; while a menu is open, moving
+/// grab, reported through [`MenuBarOpenChanged`]; while a menu is open, moving
 /// the pointer over another title opens that one instead. A press on an
-/// enabled item activates it ([`MenuItemActivated`]) and closes; Escape or a
+/// enabled item activates it ([`MenuBarActivated`]) and closes; Escape or a
 /// press elsewhere closes without activating. The bar is one row high; each
 /// title is sized to its text plus padding.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
@@ -1608,8 +1609,7 @@ pub struct MenuBarConfig {
 /// button styles in, and the reason a region of five verbs does not read as
 /// five equal demands.
 ///
-/// The owner's round-8 note 5: "a single yellow button for everything is
-/// kinda meh." A screen that fills every verb with the accent has said
+/// A screen that fills every verb with the accent has said
 /// "primary action" five times, so it has said it nowhere; the accent means
 /// the primary action only while one verb per region carries it. The ladder
 /// below is the one every published system agrees on, loudest first.
@@ -1653,7 +1653,7 @@ pub enum ButtonTone {
 }
 
 /// `aether.kit.widget.button.config` — a momentary push button showing
-/// `label`, firing [`ButtonClicked`] on a press-then-release-inside.
+/// `label`, firing [`ButtonActivated`] on a press-then-release-inside.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.button.config")]
 pub struct ButtonConfig {
@@ -1690,7 +1690,7 @@ pub struct ToggleConfig {
 }
 
 /// `aether.kit.widget.segmented.config` — a horizontal list of equal-width,
-/// mutually exclusive named options, starting at `initial_index` (clamped
+/// mutually exclusive named options, starting at `initial` (clamped
 /// into range at init).
 ///
 /// A re-sent config replaces the options and holds the current one, re-clamped
@@ -1701,7 +1701,7 @@ pub struct SegmentedConfig {
     pub options: Vec<String>,
     /// The segment selected at boot. A seed: read at `init` and ignored by
     /// every later config.
-    pub initial_index: u32,
+    pub initial: u32,
     pub theme: Theme,
     #[serde(default)]
     pub state: WidgetControlState,
@@ -1832,10 +1832,10 @@ pub struct SliderChanged {
     pub committed: bool,
 }
 
-/// `aether.kit.widget.text_field.committed` — the shared text-control value-up
+/// `aether.kit.widget.text.committed` — the shared text-control value-up
 /// event. A text field emits it on Enter; a text area emits it on Ctrl+Enter.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.text_field.committed")]
+#[kind(name = "aether.kit.widget.text.committed")]
 pub struct TextCommitted {
     pub text: String,
 }
@@ -1853,10 +1853,10 @@ pub struct RadioSelected {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.widget.virtual_list.selected")]
 pub struct VirtualListSelected {
-    pub selected_index: u32,
+    pub index: u32,
 }
 
-/// `aether.kit.widget.virtual_list.action` — a verb bound to one row of a
+/// `aether.kit.widget.virtual_list.activated` — a verb bound to one row of a
 /// virtual list was pressed: `row_index` into the config's `items`,
 /// `action_index` into that row's [`RowAction`] vector. Which list it came from
 /// is the root's `source_mailbox` attribution, exactly as for
@@ -1867,41 +1867,56 @@ pub struct VirtualListSelected {
 /// rather than select-then-remove — which is the whole reason a verb sits on
 /// the row instead of under the list.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[kind(name = "aether.kit.widget.virtual_list.action")]
-pub struct VirtualListAction {
-    pub row_index: u32,
-    pub action_index: u32,
+#[kind(name = "aether.kit.widget.virtual_list.activated")]
+pub struct VirtualListActivated {
+    /// The row the verb hangs on, into the config's `items`.
+    pub index: u32,
+    /// Which of that row's [`RowAction`]s was pressed.
+    pub action: u32,
 }
 
 /// `aether.kit.widget.virtual_list.hover` — the row the pointer is resting on
-/// changed: `row` is an index into the config's `items`, or `None` once the
-/// pointer has left the rows. Which list it came from is the root's
-/// `source_mailbox` attribution, exactly as for [`VirtualListSelected`].
+/// changed: `index` is into the config's `items`, or `None` once the pointer
+/// has left the rows. Which list it came from is the root's `source_mailbox`
+/// attribution, exactly as for [`VirtualListSelected`].
 ///
 /// A list keeps its rows out of the host's hit table on purpose — the list owns
 /// them, realizes a window of them, and scrolls that window under a pointer
 /// that has not moved. So a host that wants to explain the row under the
 /// pointer had a choice between doing the list's own geometry a second time and
-/// getting it wrong the moment the list scrolled, or explaining nothing (the
-/// studio's gap 19). This is the list saying it instead: sent when the answer
-/// *changes*, from a pointer move, a wheel, a thumb drag, or the items being
-/// replaced under a still pointer.
+/// getting it wrong the moment the list scrolled, or explaining nothing. This
+/// is the list saying it instead: sent when the answer *changes*, from a
+/// pointer move, a wheel, a thumb drag, or the items being replaced under a
+/// still pointer.
+///
+/// `x` / `y` / `width` / `height` are that row's **plate rectangle** in the
+/// same window-pixel space the panel gives a widget its frame in, so a host can
+/// stand a tooltip on the row without measuring anything. It is all zeroes when
+/// `index` is `None`, which is the event that says to take the tooltip down.
+/// This is the rule for the whole set, not a courtesy of this one widget: **a
+/// widget that owns sub-rectangles the root cannot hit-test reports the
+/// hovered one's geometry along with its index.** [`DropdownHover`] is the
+/// other half of it, in the identical shape.
 ///
 /// It is not a selection and it does not become one. Hovering a row says the
-/// reader is looking at it — the tooltip a list of gems owes them — and nothing
-/// about what they have chosen.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+/// reader is looking at it — the tooltip a list of items owes them — and
+/// nothing about what they have chosen.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 #[kind(name = "aether.kit.widget.virtual_list.hover")]
 pub struct VirtualListHover {
-    pub row: Option<u32>,
+    pub index: Option<u32>,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
-/// `aether.kit.widget.button.clicked` — a button's value-up event, fired once
+/// `aether.kit.widget.button.activated` — a button's value-up event, fired once
 /// per completed press-then-release-inside. Fieldless: the click carries no
 /// data, and which button clicked is the root's `source_mailbox` attribution.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.button.clicked")]
-pub struct ButtonClicked;
+#[kind(name = "aether.kit.widget.button.activated")]
+pub struct ButtonActivated;
 
 /// `aether.kit.widget.toggle.changed` — a toggle's value-up event.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
@@ -1947,8 +1962,8 @@ pub struct DropdownOpenChanged {
 }
 
 /// `aether.kit.widget.dropdown.hover` — the option under the pointer in the
-/// **open** list changed: `option` is an index into the config's `options`, or
-/// `None` once the pointer has left the list or the list has closed. Which
+/// **open** list changed: `index` is into the config's `options`, or `None`
+/// once the pointer has left the list or the list has closed. Which
 /// dropdown it came from is the root's `source_mailbox` attribution, exactly as
 /// for [`DropdownSelected`].
 ///
@@ -1965,11 +1980,11 @@ pub struct DropdownOpenChanged {
 /// frame in, so a host can stand a tooltip on the row without measuring
 /// anything. The overlay is offset by its slot's origin and never clipped or
 /// moved, so the rectangle is where the row really draws. It is all zeroes when
-/// `option` is `None`, which is the event that says to take the tooltip down.
+/// `index` is `None`, which is the event that says to take the tooltip down.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 #[kind(name = "aether.kit.widget.dropdown.hover")]
 pub struct DropdownHover {
-    pub option: Option<u32>,
+    pub index: Option<u32>,
     pub x: f32,
     pub y: f32,
     pub width: f32,
@@ -1980,7 +1995,7 @@ pub struct DropdownHover {
 /// `index`. Emitted only on an actual change.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[kind(name = "aether.kit.widget.tab_strip.selected")]
-pub struct TabSelected {
+pub struct TabStripSelected {
     pub index: u32,
 }
 
@@ -1988,7 +2003,7 @@ pub struct TabSelected {
 /// `menu` (both indices into the config) was activated.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[kind(name = "aether.kit.widget.menu_bar.activated")]
-pub struct MenuItemActivated {
+pub struct MenuBarActivated {
     pub menu: u32,
     pub item: u32,
 }
@@ -1998,8 +2013,427 @@ pub struct MenuItemActivated {
 /// (`open: false`, the root ends it). Reported once per edge.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[kind(name = "aether.kit.widget.menu_bar.open_changed")]
-pub struct MenuOpenChanged {
+pub struct MenuBarOpenChanged {
     pub open: bool,
+}
+
+/// `aether.kit.widget.dialog.config` — the plate a modal stands on. The
+/// widget's assigned [`WidgetFrame`] is the plate's rectangle; this says what
+/// is written on it and how small it may get.
+///
+/// A dialog is re-framed, not re-configured, to resize: the host's splitters
+/// write the frame. Re-send the config to rename it or to change the floor.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.kit.widget.dialog.config")]
+pub struct DialogConfig {
+    /// The one line naming what the reader opened, set at
+    /// [`TextRole::Heading`]. An empty title draws no title row at all — the
+    /// plate is then a bare frame, which is what a confirmation with nothing
+    /// to name wants.
+    pub title: String,
+    /// The narrowest the plate may be drawn. `0` (the default) is the title's
+    /// own floor alone: the plate never goes narrower than its title plus a
+    /// pad each side once the font's advances land, because a modal whose
+    /// name is cut in half is worse than one that refuses to shrink.
+    #[serde(default)]
+    pub min_width_pixels: f32,
+    /// The shortest the plate may be drawn. `0` (the default) is the chrome's
+    /// own floor: the title row, its rule, and the padding under it, which is
+    /// a dialog with an empty body rather than one with a clipped title.
+    #[serde(default)]
+    pub min_height_pixels: f32,
+    pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
+}
+
+/// `aether.kit.widget.dialog.placed` — where the plate actually stands and
+/// where its body is, in the same window pixels the frame was assigned in.
+/// Reported whenever either changes, never every frame.
+///
+/// The host needs both. `body` is where it frames its own slot children, so
+/// they land under the title rather than over it. `frame` is the plate as
+/// *drawn* — which is the assigned frame grown to the minimum the title
+/// needs — so the host can hand it to its peers as the rectangle they are
+/// occluded by, and hang its resize splitters on the edges the reader sees.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
+#[kind(name = "aether.kit.widget.dialog.placed")]
+pub struct DialogPlaced {
+    pub frame: PlacementBounds,
+    pub body: PlacementBounds,
+}
+
+/// Which pointer motion moves a splitter's position.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SplitterAxis {
+    /// Left and right: a vertical edge between two side-by-side regions, the
+    /// docked pane's case.
+    #[default]
+    Horizontal,
+    /// Up and down: a horizontal edge between two stacked regions.
+    Vertical,
+    /// Both at once, averaged: one side length of a square plate dragged by
+    /// its corner.
+    Corner,
+}
+
+/// `aether.kit.widget.splitter.config` — the drag handle between two
+/// regions. `position_pixels` is the scalar the host resizes with (a pane's
+/// width, a plate's side), held between `min_pixels` and `max_pixels`;
+/// `axis` says which pointer motion moves it, and `inverted` flips the
+/// direction for a region anchored to the far edge — a plate pinned to the
+/// bottom-right grows as its top-left corner is dragged *up and left*, so its
+/// handle counts travel the other way.
+///
+/// The widget's assigned [`WidgetFrame`] is the
+/// hit strip; the lit mark is two logical pixels inside it, so the target can
+/// be as generous as the host likes without the affordance becoming a column.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.kit.widget.splitter.config")]
+pub struct SplitterConfig {
+    pub axis: SplitterAxis,
+    pub min_pixels: f32,
+    pub max_pixels: f32,
+    /// Where the split stands now — **the one config field in the set that is
+    /// also a verb**, and the sole exception to the rule that a re-sent config
+    /// never moves a value.
+    ///
+    /// Every other value-carrying widget seeds itself from an `initial` field
+    /// at `init` and ignores it afterwards, so a host may re-send a config
+    /// freely, and moves the value through a deliberate setter
+    /// ([`SetValue`], [`SetText`], [`SetSelection`], [`SetToggle`]).
+    /// A splitter has no such setter because its position *is* its
+    /// configuration — there is nothing else in this struct a host would resend
+    /// on its own — so re-sending the config is how a host moves the bar (a
+    /// menu command that resets a pane's width). It is named without an
+    /// `initial` prefix for exactly that reason: it is not a seed. The widget
+    /// clamps whatever it is given, and a re-send ends a live drag.
+    pub position_pixels: f32,
+    /// The region grows as the pointer travels toward the origin rather than
+    /// away from it.
+    #[serde(default)]
+    pub inverted: bool,
+    /// A bare handle draws no mark while the pointer is on it. An edge the
+    /// reader can already see (the border of a plate) needs none: the
+    /// pointer's resize shape is the whole signal, and a line lighting under
+    /// it is one more thing on the screen. A bare handle still reports every
+    /// hover and move.
+    #[serde(default)]
+    pub bare: bool,
+    pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
+}
+
+/// `aether.kit.widget.splitter.changed` — the split's new position, clamped
+/// into the configured range, streamed while the pointer drags. There is no
+/// preview/commit split: a region resize is applied as it happens, which is
+/// the whole feedback the gesture has.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[kind(name = "aether.kit.widget.splitter.changed")]
+pub struct SplitterChanged {
+    pub position_pixels: f32,
+}
+
+/// `aether.kit.widget.splitter.hover` — the pointer entered (`true`) or left
+/// (`false`) the handle's strip. The host decides what to do with it: on a
+/// screen where the edge is the only resizable thing, mail
+/// `aether.window.set_cursor` with the axis's resize icon; on one where the
+/// gesture is already obvious, do nothing. A widget never sets the cursor
+/// itself.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[kind(name = "aether.kit.widget.splitter.hover")]
+pub struct SplitterHover {
+    pub entered: bool,
+}
+
+/// What a notice is: a report, a caution, or a failure. The three are drawn
+/// in three colours that mean those three things and nothing else — the
+/// severity is the whole reason a notice region beats a line of text
+/// wherever there was room.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToastSeverity {
+    /// It worked, or here is something you asked to be told. A cool blue-grey
+    /// bar ([`Theme::info`]).
+    #[default]
+    Info,
+    /// It worked partly, or it will not work for long. An orange bar
+    /// ([`Theme::warning`]).
+    Warning,
+    /// It did not work. A red bar ([`Theme::error`]).
+    Error,
+}
+
+/// `aether.kit.widget.toast.notice` — raise one transient notice in the
+/// region. Send it to the toast widget from anywhere: the region stacks it
+/// newest-first, wraps it at the region's width, and drops it on its own
+/// after [`ToastConfig::lifetime_frames`] frames. An empty `text` raises
+/// nothing, because a plate with no line on it is a flash a reader cannot
+/// read.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.kit.widget.toast.notice")]
+pub struct ToastNotice {
+    pub severity: ToastSeverity,
+    pub text: String,
+}
+
+/// How many notices stand at once by default. A fourth would be a column of
+/// text down the primary view; the oldest leaves to make room.
+const DEFAULT_MAX_STANDING: u32 = 3;
+
+/// How many frames a notice stands for by default — four seconds at sixty a
+/// second.
+const DEFAULT_LIFETIME_FRAMES: u32 = 240;
+
+/// `aether.kit.widget.toast.config` — the region transient notices appear
+/// in. `max_standing` is how many stand at once before the oldest leaves to
+/// make room, and `lifetime_frames` is how long each one stays, counted in
+/// the root's per-frame `Collect`s (240 at the desktop's sixty a second is
+/// four seconds — long enough to read a line, short enough that a stale
+/// refusal is never mistaken for a description of the screen).
+///
+/// The widget's assigned [`WidgetFrame`] is the
+/// region: notices stack down from its top edge at its width, so a host puts
+/// notices where it wants them by placing the slot.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.toast.config")]
+pub struct ToastConfig {
+    /// How many notices stand at once. Zero means the region is a sink: it
+    /// accepts notices and shows none, which is what a screen with the region
+    /// switched off should do rather than growing an unbounded backlog.
+    pub max_standing: u32,
+    /// How many `Collect` frames a notice stands for before it leaves. Zero
+    /// keeps every notice until the cap pushes it out.
+    pub lifetime_frames: u32,
+    /// The type step a notice's line is set at. [`TextRole::Body`] — the
+    /// reading size, which is what the region drew before this field existed —
+    /// unless a host asks for another.
+    ///
+    /// Round-4 note 15 is one word long: "toast text can be larger." The size
+    /// is a *theme* fact, not a toast fact — the kit has one type scale and a
+    /// widget names its step on it rather than carrying a pixel size of its
+    /// own — so the region takes a role and the theme resolves it. The whole
+    /// plate follows: the line box, the wrap measure, and therefore how far
+    /// down the region the stack reaches.
+    #[serde(default)]
+    pub role: TextRole,
+    pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
+}
+
+impl Default for ToastConfig {
+    fn default() -> Self {
+        Self {
+            max_standing: DEFAULT_MAX_STANDING,
+            lifetime_frames: DEFAULT_LIFETIME_FRAMES,
+            role: TextRole::default(),
+            theme: Theme::default(),
+            state: WidgetControlState::default(),
+        }
+    }
+}
+
+/// `aether.kit.widget.toast.region_changed` — the standing stack changed:
+/// one arrived, one aged out, or the cap pushed one off the end. `standing`
+/// is how many are up now and `height_pixels` how far down the region they
+/// reach, so a host that has to tell another actor what is covered (a tree
+/// view being drawn under the notices) reports that rectangle without
+/// re-deriving the stack's geometry. Emitted on the edge only, never every
+/// frame.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[kind(name = "aether.kit.widget.toast.region_changed")]
+pub struct ToastRegionChanged {
+    pub standing: u32,
+    pub height_pixels: f32,
+}
+
+/// A mark drawn inline at the head of a [`TooltipLine`], before its words.
+///
+/// It exists because some things are recognized by their colour and shape
+/// before they are read at all — an instilled gem, a rarity, a damage type —
+/// and a card that names them in words makes the reader translate back. The
+/// host owns the texture: it registers the image once through
+/// `aether.render.create_texture` and hands the tooltip the session id it got
+/// back, along with the texture's **own** pixel size, which is what the plate
+/// preserves the aspect of. The widget draws it and nothing else — it never
+/// creates, updates, or destroys a texture.
+///
+/// The drawn size is not `width_pixels` × `height_pixels`: the icon is scaled
+/// to the line's own cap band ([`crate::set::text_cap_height`]) with its
+/// aspect kept, so a
+/// 64-pixel icon and a 16-pixel one both stand exactly as tall as the capitals
+/// beside them. Schema-only; nested in [`TooltipLine`].
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
+pub struct TooltipIcon {
+    /// The session-scoped texture id `aether.render.create_texture` replied
+    /// with. Non-owning: the host that made it keeps it alive.
+    pub texture_id: u32,
+    /// The texture's own width in pixels — the numerator of the aspect the
+    /// scaled icon keeps, not the width it is drawn at.
+    pub width_pixels: f32,
+    /// The texture's own height in pixels.
+    pub height_pixels: f32,
+}
+
+/// One line of a tooltip section, as the host wrote it: the words, the icon
+/// that stands before them, and the two presentation escapes a hover card
+/// needs.
+///
+/// Every option is `None` by default, which is the kit's own rule — the
+/// plate's first line is the name and is set at [`TextRole::Body`] in the
+/// primary ink, every line after it at [`TextRole::Caption`] in the muted
+/// one. A host overrides `ink` for the lines it needs to *distinguish*: which
+/// line of a card the reader's search matched, or which stat is not being
+/// counted. Inking by role alone collapses both distinctions, because a role
+/// carries one ink. Schema-only; nested in [`TooltipSection`].
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct TooltipLine {
+    pub text: String,
+    /// The type step this line is set at, or `None` for the kit's rule.
+    #[serde(default)]
+    pub role: Option<TextRole>,
+    /// The ink this line is drawn in, or `None` for the role's own ink.
+    #[serde(default)]
+    pub ink: Option<Rgba>,
+    /// The mark drawn at the head of this line, before its words: the icon of
+    /// the thing the line is about, when the thing is recognized by its colour
+    /// and shape faster than by its name.
+    ///
+    /// It takes the line's first row only — a wrapped line is one thought, and
+    /// one thought has one icon — and the words start one spacing unit after
+    /// it. The line's measure shrinks by that footprint, so an icon makes a
+    /// line wrap earlier rather than run past the plate, and the continuation
+    /// rows are inset to the words' own start, so a wrapped line reads as one
+    /// entry indented under its icon. An icon on a line with **no words** is a
+    /// paragraph break and draws nothing: a break is a break.
+    #[serde(default)]
+    pub icon: Option<TooltipIcon>,
+}
+
+impl From<String> for TooltipLine {
+    fn from(text: String) -> Self {
+        Self { text, role: None, ink: None, icon: None }
+    }
+}
+
+impl From<&str> for TooltipLine {
+    fn from(text: &str) -> Self {
+        Self::from(String::from(text))
+    }
+}
+
+/// One block of a tooltip's text, drawn with a rule between it and the next.
+/// Sections are how a tooltip divides what it is saying — the name, the
+/// sentence, where the number came from — instead of running three unrelated
+/// facts together as one paragraph. Schema-only; nested in [`TooltipConfig`].
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct TooltipSection {
+    /// The section's lines as the host wrote them. Each is wrapped to the
+    /// plate's measure, so a line is a thought rather than a row of pixels;
+    /// an empty section draws nothing at all, rule included. A whole line is
+    /// also the unit the shed ladder drops
+    /// ([`TooltipConfig::max_height_pixels`]), so a plate out of room never
+    /// ends a sentence halfway.
+    ///
+    /// A line with **no words in it is a paragraph break** and draws one empty
+    /// row, so a section whose lines are paragraphs is
+    /// written with the blanks in it:
+    /// `TooltipSection::new(["First.", "", "Second."])`. A blank at the very
+    /// top or bottom of the plate is dropped, the same rule
+    /// [`crate::set::wrap_to_width_hanging`] applies
+    /// inside one line — a break needs something on both sides of it to be
+    /// a break.
+    pub lines: Vec<TooltipLine>,
+}
+
+impl TooltipSection {
+    /// A section from anything a line can be written as — plain strings for
+    /// the common case, [`TooltipLine`]s where a line needs its own ink.
+    ///
+    /// ```ignore
+    /// TooltipSection::new(["Life", "Your health pool."])
+    /// ```
+    #[must_use]
+    pub fn new<I, L>(lines: I) -> Self
+    where
+        I: IntoIterator<Item = L>,
+        L: Into<TooltipLine>,
+    {
+        Self { lines: lines.into_iter().map(Into::into).collect() }
+    }
+}
+
+/// `aether.kit.widget.tooltip.shed` — how many whole entries the plate had to
+/// drop to fit [`TooltipConfig::max_height_pixels`], reported up to the host
+/// on every change (`0` when a plate that was shedding fits again).
+///
+/// The host is the one that can do something about it: it knows what the
+/// dropped entries said, so it is the one that can word the tail — "+3 more"
+/// — or re-send a shorter card. The widget only reports the number, because
+/// choosing the words is exactly the host's knowledge the tooltip deliberately
+/// does not hold.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.kit.widget.tooltip.shed")]
+pub struct TooltipShed {
+    pub dropped: u32,
+}
+
+/// `aether.kit.widget.tooltip.config` — an anchored plate explaining the
+/// thing the pointer is on. `sections` are drawn in order with a rule between
+/// them, wrapped at `max_width_pixels` (`0` takes the kit's reading measure,
+/// [`crate::set::reveal_wrap_width`]); `side` is the side of the anchor the
+/// plate prefers
+/// and `bounds` is the region it must stay inside, which it flips across the
+/// anchor to honour. The widget's assigned
+/// [`WidgetFrame`] is the anchor.
+///
+/// Hidden (`state.visible = false`) or sectionless, it draws nothing — which
+/// is how a host says the pointer has moved on.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.kit.widget.tooltip.config")]
+pub struct TooltipConfig {
+    pub sections: Vec<TooltipSection>,
+    /// The widest the text may run before it wraps. `0` (the default) takes
+    /// [`crate::set::reveal_wrap_width`] at the caption size — the same
+    /// reading measure
+    /// the hover reveal plate uses, so the two look like one kit.
+    #[serde(default)]
+    pub max_width_pixels: f32,
+    /// The tallest the plate may stand. `0` (the default) is no budget at
+    /// all. Over it, the plate **sheds**: it drops trailing whole entries —
+    /// never part of one — until it fits, and reports how many went as
+    /// [`TooltipShed`] so the host can word the tail.
+    #[serde(default)]
+    pub max_height_pixels: f32,
+    /// How far the continuation rows of a wrapped line are inset. `0` — the
+    /// default, and what the kit's own plates use — is a **flush** block: a
+    /// sentence that wrapped stays aligned with the row it started on. A
+    /// hanging indent is the opt-in for
+    /// the one case that wants it: a list of stats, where an inset
+    /// continuation makes a two-row stat read as one stat rather than as two
+    /// lines that happen to be adjacent.
+    #[serde(default)]
+    pub hanging_indent_pixels: f32,
+    /// The side of the anchor the plate prefers.
+    #[serde(default)]
+    pub side: PlacementSide,
+    /// Rectangles the plate would rather not cover, in the same window pixels
+    /// the anchor frame is assigned in — the thing being explained, its
+    /// neighbours, the standing plates around it. **The first entry outranks
+    /// the rest**: the plate gets clear of it before it considers any other,
+    /// which is what keeps a hover card attached to its own subject. Empty
+    /// (the default) places by the flip-and-clamp rule alone.
+    #[serde(default)]
+    pub avoid: Vec<PlacementBounds>,
+    /// The region the plate must stay inside, in the same window pixels the
+    /// anchor frame is assigned in. A widget cannot ask the window how big it
+    /// is, so the host that owns the region names it here.
+    #[serde(default)]
+    pub bounds: PlacementBounds,
+    pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
 }
 
 /// `aether.kit.widget.frame` — the layout rect the root assigns a child,

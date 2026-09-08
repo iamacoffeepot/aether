@@ -44,7 +44,7 @@ pub mod composite;
 mod editor;
 pub mod focus;
 pub mod layout;
-mod panel;
+pub mod panel;
 pub mod routing;
 mod scroll;
 pub mod set;
@@ -53,7 +53,7 @@ pub mod text_edit;
 pub mod theme;
 
 pub use editor::EditorShell;
-pub use panel::WidgetPanel;
+pub use panel::{ChildLayout, SpawnedChild, WidgetPanel, content_frame, spawn_widget_child};
 pub use scroll::ScrollWidget;
 pub use theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 
@@ -67,6 +67,12 @@ pub use theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 // `BehaviorHost` so the panel's `WidgetKind::BehaviorHost` arm can spawn it by
 // tag; the two invocations are cfg-exclusive, keeping the ordinary build's
 // exported set (and its `aether.kinds` section) unchanged.
+//
+// The rule is **every stock widget**, not a chosen few: a widget the panel can
+// spawn by `WidgetKind` is a widget a host can also load on its own by
+// `module@actor` selector, and the seven that were missing from this list were
+// indistinguishable from an oversight. The roots (`Widget`, `ScrollWidget`,
+// `EditorShell`, `WidgetPanel`) are listed on the same rule.
 //
 // The `export!` macro itself gates its emitted entry surface behind the invoking
 // crate's `library` feature, so a consuming cdylib (aether-kit's workbench) links
@@ -88,6 +94,13 @@ aether_actor::export!(
     set::ToggleWidget,
     set::SegmentedWidget,
     set::NumericWidget,
+    set::DropdownWidget,
+    set::TabStripWidget,
+    set::MenuBarWidget,
+    set::DialogWidget,
+    set::ToastWidget,
+    set::TooltipWidget,
+    set::SplitterWidget,
     EditorShell,
     WidgetPanel
 );
@@ -107,6 +120,13 @@ aether_actor::export!(
     set::ToggleWidget,
     set::SegmentedWidget,
     set::NumericWidget,
+    set::DropdownWidget,
+    set::TabStripWidget,
+    set::MenuBarWidget,
+    set::DialogWidget,
+    set::ToastWidget,
+    set::TooltipWidget,
+    set::SplitterWidget,
     EditorShell,
     WidgetPanel,
     aether_behavior::BehaviorHost

@@ -81,7 +81,7 @@ impl VirtualListWidget {
 
     pub(super) fn emit(ctx: &WasmCtx<'_>, selected_index: u32) {
         if let Some(parent) = ctx.parent() {
-            parent.send(&VirtualListSelected { selected_index });
+            parent.send(&VirtualListSelected { index: selected_index });
         }
     }
 }
