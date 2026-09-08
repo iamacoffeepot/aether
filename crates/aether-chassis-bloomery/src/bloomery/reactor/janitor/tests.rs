@@ -15,10 +15,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use aether_bloomery::testing::{digest, draft, event, membership, splice_bloom};
-use aether_bloomery::{
-    BloomId, BloomSpec, BloomStatus, Digest, Fact, Forecast, ResolvedConfigs, Snapshot, SpendWindow, reduce,
-};
+use aether_bloomery::testing::{compiled_resolved, digest, draft, event, membership, splice_bloom};
+use aether_bloomery::{BloomId, BloomSpec, BloomStatus, Digest, Fact, Forecast, Snapshot, SpendWindow, reduce};
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{GitSource, MainlineRef, SourceError, candidate_ref_name};
 use aether_data::wire::to_vec;
@@ -43,7 +41,7 @@ fn journal(store: &mut SqliteStore, key: &str, fact: Fact) {
 /// later replay could not arrive at by re-deciding it.
 fn journal_decided_against(store: &mut SqliteStore, key: &str, fact: Fact, board: &Snapshot) {
     let event = event(key, fact);
-    let decisions = reduce(board, &event, &ResolvedConfigs::default(), &SpendWindow::default());
+    let decisions = reduce(board, &event, &compiled_resolved(), &SpendWindow::default());
     store
         .append_event(&JournalWrite {
             idempotency_key: key,

@@ -19,7 +19,7 @@ use aether_bloomery::{
     ReasoningEffort, ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, StageOverride,
     StoreClass, StudyCost, StudyRecord, Unproducible, VerifyFailure, VerifyFailureSet, VerifyGateSet, reduce,
 };
-use common::{claim, digest, draft_with_member_override, event, membership, workpiece};
+use common::{claim, compiled_resolved, digest, draft_with_member_override, event, membership, workpiece};
 
 /// The member every case drives, and the digests it runs against.
 const MEMBER: &str = "wp-a";
@@ -365,7 +365,7 @@ impl History {
         Self {
             snapshot: Snapshot::new(digest(1)).with_green_base(digest(1)),
             live: CalibrationLedger::default(),
-            configs: ResolvedConfigs::default(),
+            configs: compiled_resolved(),
             rows: Vec::new(),
         }
     }

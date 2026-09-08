@@ -4,10 +4,8 @@
 
 mod common;
 
-use aether_bloomery::{
-    Decision, Decisions, Fact, Outcome, ResolvedConfigs, Snapshot, SpendWindow, StageCatalog, StageId, reduce,
-};
-use common::{draft, draft_with_catalog, event, membership};
+use aether_bloomery::{Decision, Decisions, Fact, Outcome, Snapshot, SpendWindow, StageCatalog, StageId, reduce};
+use common::{compiled_resolved, draft, draft_with_catalog, event, membership};
 
 #[test]
 fn a_newly_sealed_bloom_records_the_catalog_admission_resolved() {
@@ -18,7 +16,7 @@ fn a_newly_sealed_bloom_records_the_catalog_admission_resolved() {
     let decisions = reduce(
         &Snapshot::new(common::digest(1)).with_green_base(common::digest(1)),
         &event("seal", Fact::Seal(spec)),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     match decisions.effects.iter().find(|effect| matches!(effect, Decision::RecordStageCatalog { .. })) {
@@ -51,7 +49,7 @@ fn the_fold_reads_the_recorded_catalog_not_a_re_resolution() {
     let snapshot = Snapshot::new(common::digest(1)).with_green_base(common::digest(1)).apply(
         &event("seal", Fact::Seal(spec)),
         &decisions,
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
     );
     assert_eq!(
         snapshot.blooms.get(&bloom).expect("sealed").stage_catalog,
@@ -103,7 +101,7 @@ fn pre_existing_rows_without_a_recorded_catalog_keep_the_compiled_line_fallback(
     let snapshot = Snapshot::new(common::digest(1)).with_green_base(common::digest(1)).apply(
         &event("seal", Fact::Seal(spec)),
         &decisions,
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
     );
     assert_eq!(
         snapshot.blooms.get(&bloom).expect("sealed").stage_catalog,

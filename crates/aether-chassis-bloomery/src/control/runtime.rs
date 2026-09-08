@@ -2067,13 +2067,12 @@ fn observation_already_admitted(snapshot: &Snapshot, head: &Digest) -> bool {
 #[cfg(test)]
 mod tests {
     use aether_actor::Manual;
-    use aether_bloomery::testing::digest;
+    use aether_bloomery::testing::{compiled_resolved, digest, with_compiled_manifest};
     use aether_bloomery::{
         Admit, BloomDraft, BloomId, BloomRecord, BloomStatus, CandidateRef, ClaimResult, ClaimSeal, Commit,
         ConfigRegistry, Decision, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, HostFaultHold,
-        IdempotencyKey, Membership, OperatorRepair, OperatorRepairError, OutboxPayload, Outcome, QueryResult,
-        ResolvedConfigs, Snapshot, SpendWindow, StudyCost, StudyRecord, Topic, ViewDocument, WorkpieceId, decode_row,
-        reduce,
+        IdempotencyKey, Membership, OperatorRepair, OperatorRepairError, OutboxPayload, Outcome, QueryResult, Snapshot,
+        SpendWindow, StudyCost, StudyRecord, Topic, ViewDocument, WorkpieceId, decode_row, reduce,
     };
     use aether_data::wire::{from_bytes, to_vec};
     use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr};
@@ -2357,8 +2356,12 @@ mod tests {
     }
 
     fn seal_event(key: &str, workpiece: &str) -> Event {
-        let spec =
-            BloomDraft { proposals: vec![membership(workpiece, 1)], base: digest(0), ..BloomDraft::default() }.seal();
+        let spec = with_compiled_manifest(BloomDraft {
+            proposals: vec![membership(workpiece, 1)],
+            base: digest(0),
+            ..BloomDraft::default()
+        })
+        .seal();
         Event { idempotency_key: IdempotencyKey(key.into()), fact: Fact::Seal(spec) }
     }
 
@@ -2377,7 +2380,7 @@ mod tests {
         event: &Event,
         last: Option<Digest>,
     ) -> Option<(ViewDocument, Digest, OutboxPayload)> {
-        let configs = ResolvedConfigs::default();
+        let configs = compiled_resolved();
         let decisions = reduce(snapshot, event, &configs, &SpendWindow::default());
         view_document_outbox(snapshot, &configs, event, &decisions, None, last).expect("a view document encodes").map(
             |(payload, digest)| {
@@ -2412,6 +2415,7 @@ mod tests {
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), mailbox));
         let mut control = ControlCoreState::inert(mailer);
         control.snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
+        control.configs = compiled_resolved();
 
         let event = seal_event("seal", "issue-5381");
         {
@@ -2501,8 +2505,8 @@ mod tests {
         let (_, digest, _) = admit_view(&snapshot, &seal, None).expect("the first admit publishes");
         let snapshot = snapshot.apply(
             &seal,
-            &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
-            &ResolvedConfigs::default(),
+            &reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default()),
+            &compiled_resolved(),
         );
 
         assert!(
@@ -2519,8 +2523,8 @@ mod tests {
         let seal = seal_event("seal", "issue-5381");
         snapshot = snapshot.apply(
             &seal,
-            &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
-            &ResolvedConfigs::default(),
+            &reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default()),
+            &compiled_resolved(),
         );
         let bloom = snapshot.blooms.keys().copied().next().expect("the sealed bloom");
         snapshot.blooms.get_mut(&bloom).expect("the sealed bloom").status = BloomStatus::Resolved;
@@ -2535,8 +2539,8 @@ mod tests {
 
         snapshot = snapshot.apply(
             &land,
-            &reduce(&snapshot, &land, &ResolvedConfigs::default(), &SpendWindow::default()),
-            &ResolvedConfigs::default(),
+            &reduce(&snapshot, &land, &compiled_resolved(), &SpendWindow::default()),
+            &compiled_resolved(),
         );
         let (document, _, _) = admit_view(&snapshot, &overlap_event("overlap", "issue-5381"), Some(digest))
             .expect("dropping the landed bloom is itself a document change");

@@ -16,7 +16,7 @@ use aether_bloomery::{
     ResolvedConfigs, SealError, Snapshot, SpendWindow, StageId, StageOverride, StudyCost, StudyRecord, SupersedeError,
     reduce,
 };
-use common::{digest, draft, draft_with_member_override, event, membership, workpiece};
+use common::{compiled_resolved, digest, draft, draft_with_member_override, event, membership, workpiece};
 
 const MEMBER: &str = "wp-a";
 const REVISION: u8 = 10;
@@ -35,7 +35,7 @@ impl Journal {
         Self {
             snapshot: Snapshot::new(digest(1)).with_green_base(digest(1)),
             ledger: MetricsLedger::default(),
-            configs: ResolvedConfigs::default(),
+            configs: compiled_resolved(),
             bloom: BloomId(digest(0)),
             next_sequence: 1,
         }

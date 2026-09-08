@@ -33,11 +33,12 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aether_bloomery::testing::{compiled_resolved, with_compiled_manifest};
 use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, BloomId, CONTROL_CORE_NAMESPACE, CalibrationDocument, CandidateRef, ConfigKind,
     ConfigRegistry, Decision, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership,
     MetricsQuery, MetricsQueryResult, MetricsView, ModelOverride, ObserveMainlineResult, OperatorHold, OperatorRepair,
-    OperatorRepairError, Outcome, Query, QueryResult, QuerySelector, ResolutionClaim, ResolvedBloom, ResolvedConfigs,
+    OperatorRepairError, Outcome, PipelineManifest, Query, QueryResult, QuerySelector, ResolutionClaim, ResolvedBloom,
     SealError, Snapshot, SpendQuery, SpendQueryResult, SpendWindow, StageCatalog, StageId, StudyCost, StudyRecord,
     Unproducible, VerifyFailureSet, ViewDocument, WorkpieceId, decode_recorded_decisions, digest_of, reduce,
 };
@@ -69,6 +70,7 @@ fn spawn(port: u16, db: &str) -> Coordinator {
 /// sibling to steal — and the handshake helper dials the port the child
 /// announced in its boot log.
 fn spawn_with_store(db: &str, client_name: &str) -> (Coordinator, TcpStream) {
+    plant_compiled_manifest(db);
     spawn_and_connect(client_name, Duration::from_mins(1), || spawn(0, db))
 }
 
@@ -82,6 +84,7 @@ const BOOT_REPLAY_HOLD: Duration = Duration::from_secs(8);
 /// [`spawn_with_store`] with the store holding its boot replay reply for
 /// [`BOOT_REPLAY_HOLD`] (issue 5765).
 fn spawn_with_store_holding_replay(db: &str, client_name: &str) -> (Coordinator, TcpStream) {
+    plant_compiled_manifest(db);
     let hold = BOOT_REPLAY_HOLD.as_millis().to_string();
     spawn_and_connect(client_name, Duration::from_mins(1), || {
         Coordinator::spawn(
@@ -290,8 +293,12 @@ fn seal_event_configured(key: &str, base: u8, workpiece: &str, configs: ConfigRe
     member.approval.subject = member.subject();
     // An empty registry selects the compiled stage line. A configured seal uses
     // the catalog content the caller resolved before reducing.
-    let spec =
-        BloomDraft { proposals: vec![member], base: Digest::from_bytes([base; 32]), ..BloomDraft::default() }.seal();
+    let spec = with_compiled_manifest(BloomDraft {
+        proposals: vec![member],
+        base: Digest::from_bytes([base; 32]),
+        ..BloomDraft::default()
+    })
+    .seal();
     Event { idempotency_key: IdempotencyKey(key.to_owned()), fact: Fact::Seal(spec) }
 }
 
@@ -393,7 +400,7 @@ fn replay_folds_the_recorded_decision_not_the_current_reducer() {
     let db = db.to_str().unwrap();
 
     let resurrectable = seal_event("seal-a", 0, "wp-a");
-    let control_a = reduce(&Snapshot::default(), &resurrectable, &ResolvedConfigs::default(), &SpendWindow::default());
+    let control_a = reduce(&Snapshot::default(), &resurrectable, &compiled_resolved(), &SpendWindow::default());
     assert!(
         matches!(control_a.outcome, Outcome::Sealed(_)),
         "fixture control: today's reducer would admit the rejected row (else the resurrection arm tests nothing)"
@@ -401,7 +408,7 @@ fn replay_folds_the_recorded_decision_not_the_current_reducer() {
     let refusal = Decisions { outcome: Outcome::SealRejected(SealError::EmptyMembership), effects: Vec::new() };
 
     let admitted = seal_event("seal-b", 0, "wp-b");
-    let decided_b = reduce(&Snapshot::default(), &admitted, &ResolvedConfigs::default(), &SpendWindow::default());
+    let decided_b = reduce(&Snapshot::default(), &admitted, &compiled_resolved(), &SpendWindow::default());
     assert!(matches!(decided_b.outcome, Outcome::Sealed(_)), "fixture control: the admitted row's record seals");
 
     let mut store = SqliteStore::open(db).unwrap();
@@ -568,7 +575,7 @@ fn the_view_is_not_served_before_the_journal_has_replayed() {
     let db = db.to_str().unwrap();
 
     let sealed = seal_event("seal-visible", 0, "wp");
-    let decided = reduce(&Snapshot::default(), &sealed, &ResolvedConfigs::default(), &SpendWindow::default());
+    let decided = reduce(&Snapshot::default(), &sealed, &compiled_resolved(), &SpendWindow::default());
     assert!(matches!(decided.outcome, Outcome::Sealed(_)), "fixture control: the planted row seals");
     plant_pre_replay_journal(db, &sealed, &decided);
 
@@ -613,7 +620,7 @@ fn metrics_and_spend_are_not_served_before_the_journal_has_replayed() {
     let db = db.to_str().unwrap();
 
     let sealed = seal_event("seal-visible", 0, "wp");
-    let decided = reduce(&Snapshot::default(), &sealed, &ResolvedConfigs::default(), &SpendWindow::default());
+    let decided = reduce(&Snapshot::default(), &sealed, &compiled_resolved(), &SpendWindow::default());
     let bloom = match &decided.outcome {
         Outcome::Sealed(bloom) => *bloom,
         other => panic!("fixture control: the planted row seals: {other:?}"),
@@ -660,7 +667,7 @@ fn an_observation_classified_against_a_moved_base_is_discarded() {
     let db = db.to_str().unwrap();
 
     let sealed = seal_event("seal-stale-obs", 0, "wp-stale-obs");
-    let seal_decided = reduce(&Snapshot::default(), &sealed, &ResolvedConfigs::default(), &SpendWindow::default());
+    let seal_decided = reduce(&Snapshot::default(), &sealed, &compiled_resolved(), &SpendWindow::default());
     let bloom = match &seal_decided.outcome {
         Outcome::Sealed(bloom) => *bloom,
         other => panic!("fixture control: the planted seal must seal: {other:?}"),
@@ -844,6 +851,7 @@ fn the_capability_ledger_is_measured_live_and_rebuilt_on_replay() {
 /// collision used to, boot error still can) is another attempt, not a
 /// 30s wait on a closed port.
 fn spawn_with_artifacts(db: &str, artifacts: &str, client_name: &str) -> (Coordinator, TcpStream) {
+    plant_compiled_manifest(db);
     spawn_and_connect(client_name, Duration::from_mins(1), || {
         Coordinator::spawn(
             0,
@@ -1205,11 +1213,11 @@ fn approved_member(workpiece: &str) -> Membership {
 }
 
 fn two_member_seal_event(key: &str, base: u8, wp_a: &str, wp_b: &str) -> Event {
-    let spec = BloomDraft {
+    let spec = with_compiled_manifest(BloomDraft {
         proposals: vec![approved_member(wp_a), approved_member(wp_b)],
         base: Digest::from_bytes([base; 32]),
         ..BloomDraft::default()
-    }
+    })
     .seal();
     Event { idempotency_key: IdempotencyKey(key.to_owned()), fact: Fact::Seal(spec) }
 }
@@ -1248,6 +1256,19 @@ fn integration_dispatch_count(db: &str) -> usize {
             decisions.effects.iter().filter(|effect| matches!(effect, Decision::DispatchIntegration { .. })).count()
         })
         .sum()
+}
+
+/// File the compiled pipeline vocabulary into `db` before the child boots, so a
+/// `Fact::Seal` this suite admits names a [`PipelineManifest`] address the store
+/// can produce (ADR-0215) without an RPC after handshake. A post-handshake write
+/// waits out [`BOOT_REPLAY_HOLD`] and lets the first live read miss the window.
+fn plant_compiled_manifest(db: &str) {
+    let compiled = PipelineManifest::compiled();
+    let bytes = to_vec(&compiled).expect("the compiled manifest encodes");
+    SqliteStore::open(db)
+        .unwrap()
+        .record_config(compiled.address().as_bytes(), PipelineManifest::NAME, &bytes)
+        .unwrap();
 }
 
 /// Author a configuration straight to the store, exactly as the api cap's

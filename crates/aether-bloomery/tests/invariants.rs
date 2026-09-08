@@ -30,8 +30,8 @@ use aether_bloomery::{BloomRecord, WorkpieceId};
 use aether_data::Kind;
 use aether_data::wire::to_vec;
 use common::{
-    claim, digest, draft, draft_with_catalog, event, membership, observing, sealed_and_resolved, splice_bloom, step,
-    workpiece,
+    claim, compiled_resolved, digest, draft, draft_with_catalog, event, membership, observing, sealed_and_resolved,
+    splice_bloom, step, workpiece,
 };
 use proptest::collection::btree_set;
 use proptest::prelude::*;
@@ -102,7 +102,7 @@ proptest! {
         let base = Snapshot::new(digest(2));
         let (after_seal, sealed) = step(&base, &event("s", Fact::Seal(sealed_only)));
         prop_assert!(matches!(sealed.outcome, Outcome::Sealed(_)));
-        let early = reduce(&after_seal, &event("r", Fact::Resolve { bloom: bloom2, tree: digest(40), head: digest(41), lineage: vec![] }), &ResolvedConfigs::default(), &SpendWindow::default());
+        let early = reduce(&after_seal, &event("r", Fact::Resolve { bloom: bloom2, tree: digest(40), head: digest(41), lineage: vec![] }), &compiled_resolved(), &SpendWindow::default());
         let member_not_integrated =
             matches!(early.outcome, Outcome::ResolveRejected(ResolveError::MemberNotIntegrated { .. }));
         prop_assert!(member_not_integrated);
@@ -121,7 +121,7 @@ proptest! {
 
         // Move mainline off the sealed base (as if another bloom had landed).
         snapshot.mainline = digest(moved);
-        let stale = reduce(&snapshot, &event("stale", Fact::Land { bloom, new_head: digest(50) }), &ResolvedConfigs::default(), &SpendWindow::default());
+        let stale = reduce(&snapshot, &event("stale", Fact::Land { bloom, new_head: digest(50) }), &compiled_resolved(), &SpendWindow::default());
         match stale.outcome {
             Outcome::LandRejected(LandError::BaseMismatch(mismatch)) => {
                 prop_assert_eq!(mismatch.expected, spec.base());
@@ -172,12 +172,8 @@ fn second_concurrent_seal_is_refused() {
 
     // Disjoint membership — no workpiece overlap, so a conflict cannot fire.
     let second = draft(1, vec![membership("beta", 11)]).seal();
-    let rejected = reduce(
-        &after_first,
-        &event("second", Fact::Seal(second)),
-        &ResolvedConfigs::default(),
-        &SpendWindow::default(),
-    );
+    let rejected =
+        reduce(&after_first, &event("second", Fact::Seal(second)), &compiled_resolved(), &SpendWindow::default());
     assert!(matches!(rejected.outcome, Outcome::SealRejected(SealError::ActiveBloomExists(_))));
     assert!(rejected.effects.is_empty());
 }
@@ -210,8 +206,7 @@ fn foreign_hold_aborts_the_whole_seal() {
 fn seal_rejects_empty_membership() {
     let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let empty = draft(1, vec![]).seal();
-    let decided =
-        reduce(&base, &event("empty", Fact::Seal(empty)), &ResolvedConfigs::default(), &SpendWindow::default());
+    let decided = reduce(&base, &event("empty", Fact::Seal(empty)), &compiled_resolved(), &SpendWindow::default());
     assert!(matches!(decided.outcome, Outcome::SealRejected(SealError::EmptyMembership)));
 }
 
@@ -221,7 +216,7 @@ fn seal_rejects_duplicate_workpiece() {
     // Same workpiece at two distinct revisions — not an exact duplicate, so it
     // survives seal's dedup and reaches the reducer's duplicate check.
     let dup = draft(1, vec![membership("wp", 10), membership("wp", 11)]).seal();
-    let decided = reduce(&base, &event("dup", Fact::Seal(dup)), &ResolvedConfigs::default(), &SpendWindow::default());
+    let decided = reduce(&base, &event("dup", Fact::Seal(dup)), &compiled_resolved(), &SpendWindow::default());
     match decided.outcome {
         Outcome::SealRejected(SealError::DuplicateWorkpiece(wp)) => assert_eq!(wp, workpiece("wp")),
         other => panic!("expected DuplicateWorkpiece, got {other:?}"),
@@ -238,7 +233,7 @@ fn seal_rejects_a_member_claiming_the_reserved_composition_id() {
     let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let reserved = draft(1, vec![membership(WorkpieceId::COMPOSITION, 10)]).seal();
     let decided =
-        reduce(&base, &event("reserved", Fact::Seal(reserved)), &ResolvedConfigs::default(), &SpendWindow::default());
+        reduce(&base, &event("reserved", Fact::Seal(reserved)), &compiled_resolved(), &SpendWindow::default());
     match decided.outcome {
         Outcome::SealRejected(SealError::ReservedWorkpieceId(wp)) => assert!(wp.is_composition()),
         other => panic!("expected ReservedWorkpieceId, got {other:?}"),
@@ -255,7 +250,7 @@ fn seal_rejects_unbound_or_wrong_kind_approval() {
     let decided = reduce(
         &base,
         &event("s1", Fact::Seal(draft(1, vec![wrong_subject]).seal())),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(decided.outcome, Outcome::SealRejected(SealError::UnapprovedMember(_))));
@@ -266,7 +261,7 @@ fn seal_rejects_unbound_or_wrong_kind_approval() {
     let decided = reduce(
         &base,
         &event("s2", Fact::Seal(draft(1, vec![wrong_kind]).seal())),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(decided.outcome, Outcome::SealRejected(SealError::UnapprovedMember(_))));
@@ -282,8 +277,7 @@ fn seal_rejects_a_known_bloom_id() {
     let (after_seal, sealed) = step(&base, &event("seal", Fact::Seal(spec.clone())));
     assert!(matches!(sealed.outcome, Outcome::Sealed(_)));
 
-    let again =
-        reduce(&after_seal, &event("again", Fact::Seal(spec)), &ResolvedConfigs::default(), &SpendWindow::default());
+    let again = reduce(&after_seal, &event("again", Fact::Seal(spec)), &compiled_resolved(), &SpendWindow::default());
     match again.outcome {
         Outcome::SealRejected(SealError::KnownBloom(id)) => assert_eq!(id, bloom),
         other => panic!("expected KnownBloom, got {other:?}"),
@@ -325,7 +319,7 @@ fn an_absent_catalog_runs_the_line_but_an_empty_one_is_refused() {
     let admitted = reduce(
         &Snapshot::new(digest(1)).with_green_base(digest(1)),
         &event("absent", Fact::Seal(unconfigured.seal())),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(admitted.outcome, Outcome::Sealed(_)), "sealing no catalog runs the line: {:?}", admitted.outcome);
@@ -360,7 +354,7 @@ fn a_sealed_catalog_whose_bytes_do_not_decode_is_refused() {
 
     // Correctly filed at the sealed address, so the name-keyed walk passes it —
     // the bytes are what will not produce a catalog.
-    let mut configs = ResolvedConfigs::default();
+    let mut configs = compiled_resolved();
     configs.insert(catalog.address(), StageCatalog::NAME, vec![0xff], None);
 
     let decided = reduce(
@@ -504,7 +498,7 @@ fn self_supersession_is_refused() {
     let decided = reduce(
         &after_seal,
         &event("self", Fact::Supersede { predecessor, successor: spec }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(decided.outcome, Outcome::SupersedeRejected(SupersedeError::SelfSupersession)));
@@ -553,7 +547,7 @@ fn supersede_rejects_a_foreign_double_claim() {
     let decided = reduce(
         &snapshot,
         &event("sup", Fact::Supersede { predecessor, successor: successor_spec }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     match decided.outcome {
@@ -581,7 +575,7 @@ fn supersede_rejects_an_invalid_successor_membership() {
     let decided = reduce(
         &snapshot,
         &event("dup", Fact::Supersede { predecessor, successor: dup }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert_eq!(
@@ -595,7 +589,7 @@ fn supersede_rejects_an_invalid_successor_membership() {
     let decided = reduce(
         &snapshot,
         &event("empty", Fact::Supersede { predecessor, successor: empty }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert_eq!(decided.outcome, Outcome::SupersedeRejected(SupersedeError::InvalidMember(SealError::EmptyMembership)));
@@ -743,7 +737,7 @@ fn supersession_dispatches_every_non_inherited_successor_member() {
                 candidate: None,
             },
         ),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(
@@ -787,7 +781,7 @@ fn re_integration_overwrites_the_stale_claim() {
             implicated: vec![],
         },
     );
-    match reduce(&after, &verdict, &ResolvedConfigs::default(), &SpendWindow::default()).outcome {
+    match reduce(&after, &verdict, &compiled_resolved(), &SpendWindow::default()).outcome {
         Outcome::Resolved(bloom) => {
             assert_eq!(bloom.resolution_claims.len(), 1);
             assert_eq!(bloom.resolution_claims[0].candidate, digest(200));
@@ -916,7 +910,7 @@ fn a_refused_landing_repairs_the_weave_then_parks_at_the_budget() {
 
     // A rejection naming a head other than the one being landed is stale.
     assert!(matches!(
-        reduce(&snapshot, &refused(99, 60), &ResolvedConfigs::default(), &SpendWindow::default()).outcome,
+        reduce(&snapshot, &refused(99, 60), &compiled_resolved(), &SpendWindow::default()).outcome,
         Outcome::LandingRejectedRefused(LandingRejectedError::SubjectMismatch { .. }),
     ));
 
@@ -1003,7 +997,7 @@ fn a_failing_aggregate_verify_repairs_the_weave_then_parks_at_the_ceiling() {
     // A verdict bound to a tree other than the held fold's is stale — refused,
     // so a superseded fold's failure cannot act on a newer one.
     assert!(matches!(
-        reduce(&snapshot, &failed("stale", 99, 52), &ResolvedConfigs::default(), &SpendWindow::default()).outcome,
+        reduce(&snapshot, &failed("stale", 99, 52), &compiled_resolved(), &SpendWindow::default()).outcome,
         Outcome::AggregateVerifyRejected(AggregateVerifyError::SubjectMismatch { .. }),
     ));
 
@@ -1094,8 +1088,7 @@ fn the_park_ceiling_refuses_a_fold_at_the_budget() {
     let budget = snapshot.blooms.get(&bloom).unwrap().stage_catalog.retry_budget_of(StageId::AggregateVerify).unwrap();
     snapshot.blooms.get_mut(&bloom).unwrap().aggregate_verify_rolls = budget - 1;
 
-    let decided =
-        reduce(&snapshot, &folded(bloom, "r-ceiling", 40), &ResolvedConfigs::default(), &SpendWindow::default());
+    let decided = reduce(&snapshot, &folded(bloom, "r-ceiling", 40), &compiled_resolved(), &SpendWindow::default());
     assert!(
         matches!(
             decided.outcome,
@@ -1148,32 +1141,21 @@ fn a_failing_composition_review_repairs_the_weave_and_never_reopens_a_member() {
 
     // A verdict bound to a tree other than the held fold's is stale — refused.
     assert!(matches!(
-        reduce(
-            &snapshot,
-            &verdict("stale", 99, 50, vec!["alpha"]),
-            &ResolvedConfigs::default(),
-            &SpendWindow::default()
-        )
-        .outcome,
+        reduce(&snapshot, &verdict("stale", 99, 50, vec!["alpha"]), &compiled_resolved(), &SpendWindow::default())
+            .outcome,
         Outcome::AggregateReviewRejected(AggregateReviewError::SubjectMismatch { .. }),
     ));
     // A verdict naming a non-member is malformed — the label still has to name
     // real code for the follow-up it files to be findable.
     assert!(matches!(
-        reduce(
-            &snapshot,
-            &verdict("ghost", 40, 50, vec!["ghost"]),
-            &ResolvedConfigs::default(),
-            &SpendWindow::default()
-        )
-        .outcome,
+        reduce(&snapshot, &verdict("ghost", 40, 50, vec!["ghost"]), &compiled_resolved(), &SpendWindow::default())
+            .outcome,
         Outcome::AggregateReviewRejected(AggregateReviewError::NotAMember(_)),
     ));
     // An empty implication is a finding about the weave as a whole. It is no
     // longer expanded to every member, because there is nothing to route to.
     assert!(matches!(
-        reduce(&snapshot, &verdict("empty", 40, 50, vec![]), &ResolvedConfigs::default(), &SpendWindow::default())
-            .outcome,
+        reduce(&snapshot, &verdict("empty", 40, 50, vec![]), &compiled_resolved(), &SpendWindow::default()).outcome,
         Outcome::CompositionRewoven { refused_at: StageId::AggregateReview, attempt: 1, .. },
     ));
 
@@ -1232,7 +1214,7 @@ fn a_failing_composition_review_repairs_the_weave_and_never_reopens_a_member() {
     // A re-fold while parked is refused by the pending decision — the named
     // reason is the owner's open question, not a bare ceiling count.
     assert!(matches!(
-        reduce(&after4, &event("r3", Fact::Resolve { bloom, tree: digest(46), head: digest(47), lineage: vec![] }), &ResolvedConfigs::default(), &SpendWindow::default())
+        reduce(&after4, &event("r3", Fact::Resolve { bloom, tree: digest(46), head: digest(47), lineage: vec![] }), &compiled_resolved(), &SpendWindow::default())
             .outcome,
         Outcome::ResolveRejected(ResolveError::PendingDecision { question }) if question == digest(51),
     ));
@@ -1395,7 +1377,7 @@ fn an_aggregate_review_executor_fault_retries_the_review_without_charging_any_ot
     // the same axis a stale verdict is, so a report from a superseded fold
     // cannot spend a newer fold's retries.
     assert!(matches!(
-        reduce(&snapshot, &fault("stale", 99, 60), &ResolvedConfigs::default(), &SpendWindow::default()).outcome,
+        reduce(&snapshot, &fault("stale", 99, 60), &compiled_resolved(), &SpendWindow::default()).outcome,
         Outcome::AggregateReviewRejected(AggregateReviewError::SubjectMismatch { .. }),
     ));
 
@@ -1569,7 +1551,7 @@ fn a_member_executor_fault_retries_the_same_stage_without_charging_work_or_repai
         },
     );
     assert!(matches!(
-        reduce(&snapshot, &stale, &ResolvedConfigs::default(), &SpendWindow::default()).outcome,
+        reduce(&snapshot, &stale, &compiled_resolved(), &SpendWindow::default()).outcome,
         Outcome::MemberExecutorFaultRejected(aether_bloomery::MemberExecutorFaultError::EvidenceNotBound { .. }),
     ));
 
@@ -1677,7 +1659,7 @@ fn adopting_the_park_question_rearms_the_review_cycle() {
 
     // The re-armed cycle runs whole: a failing verdict repairs the weave again
     // instead of tripping the spent ceiling.
-    let repaired = reduce(&rearmed, &fail("f3", 42, 52), &ResolvedConfigs::default(), &SpendWindow::default());
+    let repaired = reduce(&rearmed, &fail("f3", 42, 52), &compiled_resolved(), &SpendWindow::default());
     assert!(matches!(repaired.outcome, Outcome::CompositionRewoven { attempt: 1, .. }));
 }
 
@@ -1705,7 +1687,7 @@ fn a_question_bound_to_the_held_fold_marks_the_review_park() {
     let adopted = reduce(
         &held,
         &event("ans", Fact::AdoptAnswer { bloom, answer: answer_adopting(digest(60)) }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(
@@ -1719,8 +1701,7 @@ fn a_question_bound_to_the_held_fold_marks_the_review_park() {
     // channel like every other refusal.
     assert!(record.composition_findings.is_empty(), "a contested question is not a gate's refusal");
     assert!(matches!(
-        reduce(&held, &adjudicated(bloom, "adj", vec![60]), &ResolvedConfigs::default(), &SpendWindow::default())
-            .outcome,
+        reduce(&held, &adjudicated(bloom, "adj", vec![60]), &compiled_resolved(), &SpendWindow::default()).outcome,
         Outcome::FindingsAdjudicated { .. },
     ));
 }
@@ -1765,7 +1746,7 @@ fn admit_evidence_refuses_unknown_bloom_and_the_wrong_door() {
     let unknown = reduce(
         &base,
         &event("u", Fact::AdmitEvidence { bloom, evidence: study }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(unknown.outcome, Outcome::AdmitEvidenceRejected(AdmitEvidenceError::UnknownOrInactiveBloom)));
@@ -1778,7 +1759,7 @@ fn admit_evidence_refuses_unknown_bloom_and_the_wrong_door() {
     let mis_routed = reduce(
         &snapshot,
         &event("c", Fact::AdmitEvidence { bloom, evidence: claim_ev }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(mis_routed.outcome, Outcome::AdmitEvidenceRejected(AdmitEvidenceError::EvidenceNotBound)));
@@ -1788,7 +1769,7 @@ fn admit_evidence_refuses_unknown_bloom_and_the_wrong_door() {
     let also_mis = reduce(
         &snapshot,
         &event("a", Fact::AdmitEvidence { bloom, evidence: approval }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(also_mis.outcome, Outcome::AdmitEvidenceRejected(AdmitEvidenceError::EvidenceNotBound)));
@@ -1861,7 +1842,7 @@ fn a_question_admission_holds_the_bloom_and_blocks_resolve() {
     let resolve = reduce(
         &integrated,
         &event("r", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(
@@ -1893,7 +1874,7 @@ fn an_adopted_answer_releases_the_hold_and_redispatches() {
     let blocked = reduce(
         &snapshot,
         &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(blocked.outcome, Outcome::ResolveRejected(ResolveError::PendingDecision { .. })));
@@ -1920,7 +1901,7 @@ fn an_adopted_answer_releases_the_hold_and_redispatches() {
     let resolved = reduce(
         &released,
         &event("r2", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(
@@ -1953,7 +1934,7 @@ fn an_answer_that_does_not_adopt_a_held_question_is_refused() {
     let refused = reduce(
         &held,
         &event("obs", Fact::AdoptAnswer { bloom, answer: observed }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(refused.outcome, Outcome::AdoptAnswerRejected(AdoptAnswerError::NotInstructionCapable)));
@@ -1963,7 +1944,7 @@ fn an_answer_that_does_not_adopt_a_held_question_is_refused() {
     let no_match = reduce(
         &held,
         &event("wrong", Fact::AdoptAnswer { bloom, answer: wrong }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(no_match.outcome, Outcome::AdoptAnswerRejected(AdoptAnswerError::NoMatchingHold)));
@@ -2036,7 +2017,7 @@ fn land_refusals_name_their_own_reason() {
     let unknown = reduce(
         &base,
         &event("u", Fact::Land { bloom, new_head: digest(40) }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(unknown.outcome, Outcome::LandRejected(LandError::UnknownBloom(_))));
@@ -2046,7 +2027,7 @@ fn land_refusals_name_their_own_reason() {
     let not_resolved = reduce(
         &after_seal,
         &event("nr", Fact::Land { bloom, new_head: digest(40) }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(not_resolved.outcome, Outcome::LandRejected(LandError::NotResolved(_))));
@@ -2076,19 +2057,19 @@ fn landing_rejection_refusals_name_their_own_reason() {
     let unknown = reduce(
         &Snapshot::new(digest(1)).with_green_base(digest(1)),
         &rejected(40),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(unknown.outcome, Outcome::LandingRejectedRefused(LandingRejectedError::UnknownBloom)));
 
     let (sealed, _) =
         step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec.clone())));
-    let not_awaiting = reduce(&sealed, &rejected(40), &ResolvedConfigs::default(), &SpendWindow::default());
+    let not_awaiting = reduce(&sealed, &rejected(40), &compiled_resolved(), &SpendWindow::default());
     assert!(matches!(not_awaiting.outcome, Outcome::LandingRejectedRefused(LandingRejectedError::NotAwaitingLanding),));
 
     let mut headless = Snapshot::new(digest(1)).with_green_base(digest(1));
     splice_bloom(&mut headless, &spec, BloomStatus::Resolved);
-    let no_head = reduce(&headless, &rejected(40), &ResolvedConfigs::default(), &SpendWindow::default());
+    let no_head = reduce(&headless, &rejected(40), &compiled_resolved(), &SpendWindow::default());
     assert!(matches!(no_head.outcome, Outcome::LandingRejectedRefused(LandingRejectedError::NoResolvedHead)));
 }
 
@@ -2116,8 +2097,7 @@ fn seal_refuses_a_workpiece_a_landed_bloom_already_resolved() {
     let (landed, _) = step(&snapshot, &event("land", Fact::Land { bloom, new_head: digest(50) }));
 
     let again = draft(50, vec![membership("issue-4866", 10)]).seal();
-    let refused =
-        reduce(&landed, &event("reseal", Fact::Seal(again)), &ResolvedConfigs::default(), &SpendWindow::default());
+    let refused = reduce(&landed, &event("reseal", Fact::Seal(again)), &compiled_resolved(), &SpendWindow::default());
     match &refused.outcome {
         Outcome::SealRejected(SealError::WorkpieceAlreadyLanded { workpiece: wp, bloom: landed_by }) => {
             assert_eq!(wp, &workpiece("issue-4866"));
@@ -2138,8 +2118,7 @@ fn a_fresh_scope_revision_is_the_rerun_escape() {
     let (landed, _) = step(&snapshot, &event("land", Fact::Land { bloom: spec.id(), new_head: digest(50) }));
 
     let rerun = draft(50, vec![membership("issue-4866", 11)]).seal();
-    let decided =
-        reduce(&landed, &event("rerun", Fact::Seal(rerun)), &ResolvedConfigs::default(), &SpendWindow::default());
+    let decided = reduce(&landed, &event("rerun", Fact::Seal(rerun)), &compiled_resolved(), &SpendWindow::default());
     assert!(matches!(decided.outcome, Outcome::Sealed(_)), "a fresh scope revision reseals: {:?}", decided.outcome);
 }
 
@@ -2165,7 +2144,7 @@ fn supersede_refuses_a_fresh_landed_member_and_admits_the_predecessors_own() {
     let carried = reduce(
         &snapshot,
         &event("carry", Fact::Supersede { predecessor, successor: carry_only }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(
@@ -2178,7 +2157,7 @@ fn supersede_refuses_a_fresh_landed_member_and_admits_the_predecessors_own() {
     let refused = reduce(
         &snapshot,
         &event("add-done", Fact::Supersede { predecessor, successor: adding_done }),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     match &refused.outcome {
@@ -2230,8 +2209,8 @@ fn a_replayed_journal_reproduces_the_landed_workpiece_refusal() {
     };
     let reseal = event("reseal", Fact::Seal(draft(50, vec![membership("issue-4866", 10)]).seal()));
 
-    let live_refusal = reduce(&fold(&journal), &reseal, &ResolvedConfigs::default(), &SpendWindow::default());
-    let replayed_refusal = reduce(&fold(&journal), &reseal, &ResolvedConfigs::default(), &SpendWindow::default());
+    let live_refusal = reduce(&fold(&journal), &reseal, &compiled_resolved(), &SpendWindow::default());
+    let replayed_refusal = reduce(&fold(&journal), &reseal, &compiled_resolved(), &SpendWindow::default());
     assert_eq!(
         replayed_refusal.outcome, live_refusal.outcome,
         "replay of the landed journal refuses the same reseal the live fold did",
@@ -2768,7 +2747,7 @@ fn a_failing_attempt_retries_within_budget_then_wedges() {
             },
         }],
     };
-    let revived = after2.apply(&event("revive", fail("ignored").fact), &advance, &ResolvedConfigs::default());
+    let revived = after2.apply(&event("revive", fail("ignored").fact), &advance, &compiled_resolved());
     assert!(
         !revived.blooms.get(&bloom).unwrap().wedged.contains_key(&workpiece("wp")),
         "a cursor that moves clears the wedge",
@@ -3131,7 +3110,7 @@ fn verify_failed_refuses_invalid_state_set_and_binding_without_effects() {
     let unbound_and_empty = reduce(
         &snapshot,
         &verify_failed("unbound-empty", bloom, "wp", digest(99), 81, VerifyFailureSet::EMPTY),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(
@@ -3143,7 +3122,7 @@ fn verify_failed_refuses_invalid_state_set_and_binding_without_effects() {
     let unbound = reduce(
         &snapshot,
         &verify_failed("unbound", bloom, "wp", digest(99), 82, VerifyFailureSet::one(VerifyFailure::Fmt)),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(
@@ -3158,7 +3137,7 @@ fn verify_failed_refuses_invalid_state_set_and_binding_without_effects() {
     let stranger = reduce(
         &snapshot,
         &verify_failed("stranger", bloom, "ghost", digest(10), 83, VerifyFailureSet::one(VerifyFailure::Fmt)),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(stranger.outcome, Outcome::VerifyFailedRejected(VerifyFailedError::NotAMember(_))));
@@ -3167,7 +3146,7 @@ fn verify_failed_refuses_invalid_state_set_and_binding_without_effects() {
     let no_cursor = reduce(
         &snapshot,
         &verify_failed("no-cursor", bloom, "wp", digest(10), 84, VerifyFailureSet::one(VerifyFailure::Fmt)),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(no_cursor.outcome, Outcome::VerifyFailedRejected(VerifyFailedError::NotDispatched(_))));
@@ -3175,7 +3154,7 @@ fn verify_failed_refuses_invalid_state_set_and_binding_without_effects() {
     let unknown = reduce(
         &base,
         &verify_failed("unknown", bloom, "wp", digest(10), 84, VerifyFailureSet::one(VerifyFailure::Fmt)),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(unknown.outcome, Outcome::VerifyFailedRejected(VerifyFailedError::UnknownOrInactiveBloom)));
@@ -3908,7 +3887,7 @@ fn attempt_completion_refuses_mismatch_terminal_non_member_and_unknown() {
     let mismatch = reduce(
         &snapshot,
         &verify_failed("m", bloom, "wp", digest(10), 80, VerifyFailureSet::one(VerifyFailure::Clippy)),
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
         &SpendWindow::default(),
     );
     assert!(matches!(
@@ -3918,12 +3897,8 @@ fn attempt_completion_refuses_mismatch_terminal_non_member_and_unknown() {
 
     // A passing terminal Verify never completes here — it integrates through
     // Fact::Integrate.
-    let terminal = reduce(
-        &snapshot,
-        &completion("t", "wp", StageId::Verify),
-        &ResolvedConfigs::default(),
-        &SpendWindow::default(),
-    );
+    let terminal =
+        reduce(&snapshot, &completion("t", "wp", StageId::Verify), &compiled_resolved(), &SpendWindow::default());
     assert!(matches!(
         terminal.outcome,
         Outcome::AttemptCompletedRejected(AttemptCompletedError::TerminalStage(StageId::Verify)),
@@ -3931,29 +3906,21 @@ fn attempt_completion_refuses_mismatch_terminal_non_member_and_unknown() {
 
     // A passing Review is off the dispatched line entirely (ADR-0153) and reads
     // as the same terminal mis-route.
-    let off_line = reduce(
-        &snapshot,
-        &completion("r", "wp", StageId::Review),
-        &ResolvedConfigs::default(),
-        &SpendWindow::default(),
-    );
+    let off_line =
+        reduce(&snapshot, &completion("r", "wp", StageId::Review), &compiled_resolved(), &SpendWindow::default());
     assert!(matches!(
         off_line.outcome,
         Outcome::AttemptCompletedRejected(AttemptCompletedError::TerminalStage(StageId::Review)),
     ));
 
     // A non-member workpiece.
-    let stranger = reduce(
-        &snapshot,
-        &completion("n", "ghost", StageId::Construct),
-        &ResolvedConfigs::default(),
-        &SpendWindow::default(),
-    );
+    let stranger =
+        reduce(&snapshot, &completion("n", "ghost", StageId::Construct), &compiled_resolved(), &SpendWindow::default());
     assert!(matches!(stranger.outcome, Outcome::AttemptCompletedRejected(AttemptCompletedError::NotAMember(_))));
 
     // An unknown bloom (nothing sealed on `base`).
     let unknown =
-        reduce(&base, &completion("u", "wp", StageId::Construct), &ResolvedConfigs::default(), &SpendWindow::default());
+        reduce(&base, &completion("u", "wp", StageId::Construct), &compiled_resolved(), &SpendWindow::default());
     assert!(matches!(
         unknown.outcome,
         Outcome::AttemptCompletedRejected(AttemptCompletedError::UnknownOrInactiveBloom),
@@ -4092,7 +4059,7 @@ mod sealed_config {
     use aether_data::Kind;
     use aether_data::wire::to_vec;
 
-    use crate::common::{approved, digest, membership};
+    use crate::common::{approved, compiled_resolved, digest, membership, with_compiled_manifest};
 
     #[aether_data::kind(name = "aether.bloomery.test_seal_config", eq)]
     struct LaneConfig {
@@ -4108,7 +4075,7 @@ mod sealed_config {
     /// Content for every lane this module seals, so a seal under test refuses on
     /// the property it is about rather than on content nobody supplied.
     fn lane_content() -> ResolvedConfigs {
-        let mut configs = ResolvedConfigs::default();
+        let mut configs = compiled_resolved();
         for lane in ["cheap", "expensive"] {
             let value = LaneConfig { lane: lane.to_owned() };
             configs.insert(value.address(), LaneConfig::NAME, to_vec(&value).expect("test value encodes"), None);
@@ -4126,7 +4093,12 @@ mod sealed_config {
             &Event {
                 idempotency_key: IdempotencyKey("seal".to_owned()),
                 fact: Fact::Seal(
-                    BloomDraft { proposals: vec![member], base: digest(1), ..BloomDraft::default() }.seal(),
+                    with_compiled_manifest(BloomDraft {
+                        proposals: vec![member],
+                        base: digest(1),
+                        ..BloomDraft::default()
+                    })
+                    .seal(),
                 ),
             },
             configs,
@@ -4168,7 +4140,7 @@ mod sealed_config {
         member.configs = sealing("cheap");
         let member = approved(member);
 
-        let refused = sealed_given(member.clone(), &ResolvedConfigs::default());
+        let refused = sealed_given(member.clone(), &compiled_resolved());
         assert!(
             matches!(
                 refused,
@@ -4187,7 +4159,12 @@ mod sealed_config {
     fn draft_with(bloom: ConfigRegistry, member: ConfigRegistry) -> BloomDraft {
         let mut proposal = membership("wp-a", 1);
         proposal.configs = member;
-        BloomDraft { proposals: vec![proposal], base: digest(1), configs: bloom, ..BloomDraft::default() }
+        with_compiled_manifest(BloomDraft {
+            proposals: vec![proposal],
+            base: digest(1),
+            configs: bloom,
+            ..BloomDraft::default()
+        })
     }
 
     // Tripwire: the bloom id covers the configuration sealed at both scopes. A
@@ -5368,7 +5345,7 @@ fn an_adjudication_closes_the_finding_unparks_the_bloom_and_touches_no_member() 
     // An adjudication of a finding this bloom never raised closes nothing: the
     // override adjudicates findings, so it cannot invent one to waive.
     assert!(matches!(
-        reduce(&parked, &adjudicated(bloom, "ghost", vec![99]), &ResolvedConfigs::default(), &SpendWindow::default()).outcome,
+        reduce(&parked, &adjudicated(bloom, "ghost", vec![99]), &compiled_resolved(), &SpendWindow::default()).outcome,
         Outcome::AdjudicationRejected(AdjudicationError::UnknownFinding(finding)) if finding == digest(99),
     ));
 
@@ -5463,7 +5440,7 @@ fn a_pre_fix_park_still_replays_and_stays_adjudicable() {
         ],
     };
 
-    let replayed = awaiting.apply(&refusal, &pre_fix, &ResolvedConfigs::default());
+    let replayed = awaiting.apply(&refusal, &pre_fix, &compiled_resolved());
 
     let record = replayed.blooms.get(&bloom).unwrap();
     assert_eq!(record.review_park, Some(digest(71)), "the pre-fix park projects as it always did");
@@ -5592,11 +5569,11 @@ fn a_deferral_naming_no_issue_is_refused() {
     };
 
     assert!(matches!(
-        reduce(&parked, &deferred(0), &ResolvedConfigs::default(), &SpendWindow::default()).outcome,
+        reduce(&parked, &deferred(0), &compiled_resolved(), &SpendWindow::default()).outcome,
         Outcome::AdjudicationRejected(AdjudicationError::DeferredWithoutIssue),
     ));
     assert!(matches!(
-        reduce(&parked, &deferred(4957), &ResolvedConfigs::default(), &SpendWindow::default()).outcome,
+        reduce(&parked, &deferred(4957), &compiled_resolved(), &SpendWindow::default()).outcome,
         Outcome::FindingsAdjudicated { .. },
     ));
 }
@@ -5627,7 +5604,7 @@ fn an_override_refuses_a_bloom_whose_membership_is_not_approved() {
     splice_bloom(&mut snapshot, &spec, BloomStatus::Sealed);
 
     assert!(matches!(
-        reduce(&snapshot, &adjudicated(bloom, "adj", vec![70]), &ResolvedConfigs::default(), &SpendWindow::default()).outcome,
+        reduce(&snapshot, &adjudicated(bloom, "adj", vec![70]), &compiled_resolved(), &SpendWindow::default()).outcome,
         Outcome::AdjudicationRejected(AdjudicationError::UnapprovedMember(ref wp)) if *wp == workpiece("alpha"),
     ));
 
@@ -5644,7 +5621,7 @@ fn an_override_refuses_a_bloom_whose_membership_is_not_approved() {
         },
     );
     assert!(matches!(
-        reduce(&snapshot, &repair, &ResolvedConfigs::default(), &SpendWindow::default()).outcome,
+        reduce(&snapshot, &repair, &compiled_resolved(), &SpendWindow::default()).outcome,
         Outcome::OperatorRepairRejected(OperatorRepairError::UnapprovedMember(ref wp)) if *wp == workpiece("alpha"),
     ));
 
@@ -5658,7 +5635,7 @@ fn an_override_refuses_a_bloom_whose_membership_is_not_approved() {
         reduce(
             &approved_snapshot,
             &adjudicated(approved_spec.id(), "adj-2", vec![70]),
-            &ResolvedConfigs::default(),
+            &compiled_resolved(),
             &SpendWindow::default()
         )
         .outcome,
@@ -5720,7 +5697,7 @@ fn an_operator_repair_re_enters_a_wedged_member_at_verify_with_the_gates_intact(
     // product of an override, and one that says nothing records that a person
     // intervened and nothing about why.
     let refuse = |snapshot: &Snapshot, event: &Event| {
-        reduce(snapshot, event, &ResolvedConfigs::default(), &SpendWindow::default()).outcome
+        reduce(snapshot, event, &compiled_resolved(), &SpendWindow::default()).outcome
     };
     assert!(matches!(
         refuse(&wedged, &repair("blank", workpiece("wp"), "   ")),
@@ -6053,8 +6030,7 @@ fn releasing_dispatches_exactly_what_the_hold_owed_and_nothing_else() {
     // Nothing is owed twice: releasing again is refused, and a fresh hold on the
     // released bloom starts from an empty set rather than replaying the old one.
     assert!(matches!(
-        reduce(&after, &released(bloom, "again", "second try"), &ResolvedConfigs::default(), &SpendWindow::default())
-            .outcome,
+        reduce(&after, &released(bloom, "again", "second try"), &compiled_resolved(), &SpendWindow::default()).outcome,
         Outcome::OperatorHoldRejected(OperatorHoldError::NotHeld),
     ));
     let (rehold, _) = step(&after, &held(bloom, "hold-2", "on second thoughts"));
@@ -6086,14 +6062,14 @@ fn a_hold_and_its_release_replay_from_the_recorded_decisions_alone() {
     let mut live = base.clone();
     let mut recorded = Vec::new();
     for step_event in &script {
-        let decided = reduce(&live, step_event, &ResolvedConfigs::default(), &SpendWindow::default());
-        live = live.apply(step_event, &decided, &ResolvedConfigs::default());
+        let decided = reduce(&live, step_event, &compiled_resolved(), &SpendWindow::default());
+        live = live.apply(step_event, &decided, &compiled_resolved());
         recorded.push(decided);
     }
 
     let mut replayed = base;
     for (step_event, decided) in script.iter().zip(recorded.iter()) {
-        replayed = replayed.apply(step_event, decided, &ResolvedConfigs::default());
+        replayed = replayed.apply(step_event, decided, &compiled_resolved());
     }
 
     assert_eq!(replayed, live, "replay over the recorded decisions rebuilds the held-and-released bloom exactly");
@@ -6116,7 +6092,7 @@ fn both_brake_edges_state_a_reason_and_who_or_are_refused() {
     let (sealed, _) = step(&base, &event("seal", Fact::Seal(spec)));
 
     let blank = |key: &str, fact: Fact| {
-        reduce(&sealed, &event(key, fact), &ResolvedConfigs::default(), &SpendWindow::default()).outcome
+        reduce(&sealed, &event(key, fact), &compiled_resolved(), &SpendWindow::default()).outcome
     };
     let empty_operator = OperatorHold { reason: "stated".into(), operator: "  ".into() };
     for (label, outcome, expected) in [
@@ -6159,8 +6135,7 @@ fn both_brake_edges_state_a_reason_and_who_or_are_refused() {
         "the hold's whole product is the record of it",
     );
     assert!(matches!(
-        reduce(&snapshot, &held(bloom, "hold-again", "again"), &ResolvedConfigs::default(), &SpendWindow::default())
-            .outcome,
+        reduce(&snapshot, &held(bloom, "hold-again", "again"), &compiled_resolved(), &SpendWindow::default()).outcome,
         Outcome::OperatorHoldRejected(OperatorHoldError::AlreadyHeld),
     ));
     assert_eq!(
@@ -6258,9 +6233,9 @@ fn no_fact_family_dispatches_a_member_of_a_held_bloom() {
         ),
     ];
     for (label, fact) in families {
-        let unheld = reduce(&running, &fact, &ResolvedConfigs::default(), &SpendWindow::default());
+        let unheld = reduce(&running, &fact, &compiled_resolved(), &SpendWindow::default());
         assert!(!member_dispatches(&unheld).is_empty(), "fixture bug: {label} must dispatch on an unheld bloom");
-        let gated = reduce(&frozen, &fact, &ResolvedConfigs::default(), &SpendWindow::default());
+        let gated = reduce(&frozen, &fact, &compiled_resolved(), &SpendWindow::default());
         assert!(member_dispatches(&gated).is_empty(), "{label} dispatched on a held bloom: {:?}", gated.effects);
     }
 
@@ -6269,12 +6244,11 @@ fn no_fact_family_dispatches_a_member_of_a_held_bloom() {
     let (folding, folding_bloom) = three_members_with_claims();
     let collision = fold_conflict(folding_bloom, "collide", "alpha", 93, 94, 95);
     assert!(
-        !member_dispatches(&reduce(&folding, &collision, &ResolvedConfigs::default(), &SpendWindow::default()))
-            .is_empty(),
+        !member_dispatches(&reduce(&folding, &collision, &compiled_resolved(), &SpendWindow::default())).is_empty(),
         "fixture bug: a fold conflict must dispatch a reconcile on an unheld bloom",
     );
     let (folding_frozen, _) = step(&folding, &held(folding_bloom, "hold-fold", "stop the reconcile spend"));
-    let gated = reduce(&folding_frozen, &collision, &ResolvedConfigs::default(), &SpendWindow::default());
+    let gated = reduce(&folding_frozen, &collision, &compiled_resolved(), &SpendWindow::default());
     assert!(member_dispatches(&gated).is_empty(), "a reconcile dispatched on a held bloom: {:?}", gated.effects);
 
     // A grant is a budget move, which a hold does not gate — so it is admitted
@@ -6306,13 +6280,13 @@ fn no_fact_family_dispatches_a_member_of_a_held_bloom() {
         },
     );
     assert!(matches!(
-        reduce(&granted, &repair, &ResolvedConfigs::default(), &SpendWindow::default()).outcome,
+        reduce(&granted, &repair, &compiled_resolved(), &SpendWindow::default()).outcome,
         Outcome::OperatorRepairRejected(OperatorRepairError::Held),
     ));
     let (let_go, _) = step(&granted, &released(bloom, "release", "fixed"));
     assert!(
         matches!(
-            reduce(&let_go, &repair, &ResolvedConfigs::default(), &SpendWindow::default()).outcome,
+            reduce(&let_go, &repair, &compiled_resolved(), &SpendWindow::default()).outcome,
             Outcome::OperatorRepairRejected(_)
         ),
         "and past the release it is judged on its own terms again",
@@ -6608,14 +6582,14 @@ fn a_held_aggregate_and_its_release_replay_from_the_recorded_decisions_alone() {
     let mut live = ready.clone();
     let mut recorded = Vec::new();
     for step_event in &script {
-        let decided = reduce(&live, step_event, &ResolvedConfigs::default(), &SpendWindow::default());
-        live = live.apply(step_event, &decided, &ResolvedConfigs::default());
+        let decided = reduce(&live, step_event, &compiled_resolved(), &SpendWindow::default());
+        live = live.apply(step_event, &decided, &compiled_resolved());
         recorded.push(decided);
     }
 
     let mut replayed = ready;
     for (step_event, decided) in script.iter().zip(recorded.iter()) {
-        replayed = replayed.apply(step_event, decided, &ResolvedConfigs::default());
+        replayed = replayed.apply(step_event, decided, &compiled_resolved());
     }
 
     assert_eq!(replayed, live, "replay over the recorded decisions rebuilds the held-and-released fold exactly");

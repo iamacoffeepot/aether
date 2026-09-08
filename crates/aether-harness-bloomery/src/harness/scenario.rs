@@ -14,8 +14,9 @@ use aether_bloomery::{
     AgentSelection, BackendObjectId, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CalibrationDocument,
     CandidateRef, ConfigKind, ConfigRegistry, Correspondence, Digest, Evidence, EvidenceKind, Fact, FakeKeyProvider,
     Harness, KeyId, MemberDependency, Membership, ModelOverride, ModelProcessInstructions, Observation, Outcome,
-    Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Snapshot, StageCatalog, StageId, Statement,
-    StoreClass, VerifyFailureSet, ViewDocument, WorkpieceId, decode_recorded_event, signed_approval,
+    PipelineManifest, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Snapshot, StageCatalog, StageId,
+    Statement, StoreClass, VerifyFailureSet, ViewDocument, WorkpieceId, config_address, decode_recorded_event,
+    signed_approval,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
@@ -144,6 +145,7 @@ impl ScenarioHarness {
         }
 
         let mut configs = author_instructions(&store_path);
+        configs.overlay(author_manifest(&store_path));
         let authorized = configs
             .address::<ModelProcessInstructions>()
             .expect("the authored instruction bundle seals its own address")
@@ -989,7 +991,7 @@ fn in_process_env(
     };
 
     let defaults = CoordinatorConfig::default();
-    let scripted = builder.lane == Lane::Scripted;
+    let scripted = matches!(builder.lane, Lane::Scripted | Lane::FromManifest);
     let coordinator = CoordinatorConfig {
         store_path: store_path.to_owned(),
         authorized_instruction_bundles: authorized_instructions.to_owned(),
@@ -1002,10 +1004,10 @@ fn in_process_env(
         } else {
             defaults.local_lane_commands
         },
-        local_lane_program: if scripted {
-            crate::mock_lane_program()
-        } else {
-            defaults.local_lane_program
+        local_lane_program: match builder.lane {
+            Lane::FromManifest => String::new(),
+            Lane::Scripted => crate::mock_lane_program(),
+            Lane::Off => defaults.local_lane_program,
         },
         local_worktree_base: if scripted {
             worktree_base.to_owned()
@@ -1134,6 +1136,22 @@ fn author_instructions(store_path: &str) -> ConfigRegistry {
         &mut SqliteStore::open(store_path).expect("the coordinator's journal opens for writing"),
         &reference_instructions(),
     )
+}
+
+/// File the compiled pipeline vocabulary so a `Fact::Seal` the harness admits
+/// directly names a [`PipelineManifest`] address the store can produce
+/// (ADR-0215). Draft formation still derives the same bytes from the seeded
+/// `pipeline.toml`; this is the path that never opens a draft.
+fn author_manifest(store_path: &str) -> ConfigRegistry {
+    let bytes = to_vec(&PipelineManifest::compiled()).expect("the compiled manifest encodes");
+    let address = config_address(PipelineManifest::NAME, &bytes);
+    SqliteStore::open(store_path)
+        .expect("the coordinator's journal opens for writing")
+        .record_config(address.as_bytes(), PipelineManifest::NAME, &bytes)
+        .expect("the compiled manifest records");
+    let mut configs = ConfigRegistry::default();
+    configs.insert::<PipelineManifest>(address);
+    configs
 }
 
 fn author_catalog(store_path: &str, wall_clock_secs: u64) -> ConfigRegistry {

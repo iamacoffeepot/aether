@@ -1,7 +1,7 @@
 //! Scripted-verdict helpers the fixture cell shares with every scenario that
 //! uploads an answer the coordinator dispatched.
 
-use aether_bloomery::testing::approved;
+use aether_bloomery::testing::{approved, with_compiled_manifest};
 use aether_bloomery::{
     BloomDraft, BloomSpec, CandidateRef, CompositionParents, ConfigRegistry, Digest, Evidence, EvidenceKind,
     Membership, Nonce, RetrospectClaim, VerifyFailureSet, WorkpieceId,
@@ -34,7 +34,7 @@ pub fn member_with(workpiece: &str, scope_revision: Digest, configs: ConfigRegis
 /// Freeze `members` into a spec sealing on `base`.
 #[must_use]
 pub fn draft(base: Digest, members: &[Membership]) -> BloomSpec {
-    BloomDraft { proposals: members.to_vec(), base, ..BloomDraft::default() }.seal()
+    with_compiled_manifest(BloomDraft { proposals: members.to_vec(), base, ..BloomDraft::default() }).seal()
 }
 
 /// The verdict a lane would have uploaded for `order`: no candidate, no

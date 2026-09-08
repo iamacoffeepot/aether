@@ -15,11 +15,11 @@
 mod common;
 
 use aether_bloomery::{
-    BloomId, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, OrphanClaimReleaseCompletion, Outcome,
-    ResolvedConfigs, Snapshot, SpendWindow, StageId, VerifyFailure, VerifyFailureSet, WorkpieceId, reduce,
+    BloomId, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, OrphanClaimReleaseCompletion, Outcome, Snapshot,
+    SpendWindow, StageId, VerifyFailure, VerifyFailureSet, WorkpieceId, reduce,
 };
 use aether_data::wire::{from_bytes, to_vec};
-use common::{claim, digest, draft, event, membership};
+use common::{claim, compiled_resolved, digest, draft, event, membership};
 
 /// The canonical bloom, as the journal of admitted events: seal → integrate
 /// each member → resolve (the fold, which dispatches the aggregate verify) →
@@ -98,8 +98,9 @@ fn replay(journal: &[Event]) -> (Vec<Decisions>, Snapshot) {
     let mut decisions = Vec::with_capacity(journal.len());
     for ev in journal {
         let decoded: Event = from_bytes(&to_vec(ev).unwrap()).unwrap();
-        let outcome = reduce(&snapshot, &decoded, &ResolvedConfigs::default(), &SpendWindow::default());
-        snapshot = snapshot.apply(&decoded, &outcome, &ResolvedConfigs::default());
+        let configs = compiled_resolved();
+        let outcome = reduce(&snapshot, &decoded, &configs, &SpendWindow::default());
+        snapshot = snapshot.apply(&decoded, &outcome, &configs);
         decisions.push(outcome);
     }
     (decisions, snapshot)
@@ -325,8 +326,8 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // dispatch and every seal step the manifest record; neither branch's own pin
 // names it. An intended, coordinated break, recomputed.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0x97, 0x48, 0x8a, 0x27, 0x63, 0xcb, 0x6c, 0xbf, 0xd8, 0x07, 0x40, 0xd3, 0xd2, 0xe6, 0x28, 0x4b, 0x48, 0xf4, 0x00,
-    0x10, 0x57, 0x4c, 0xde, 0x31, 0x77, 0x28, 0x5f, 0x25, 0x7e, 0x42, 0xcd, 0xab,
+    0xa2, 0x28, 0xc6, 0xff, 0x9a, 0xb4, 0xdc, 0xe9, 0x2f, 0x7f, 0xe5, 0x86, 0xbd, 0x2e, 0x01, 0x10, 0x35, 0x49, 0x3a,
+    0xed, 0xa0, 0xe3, 0x21, 0x58, 0xa2, 0x85, 0x71, 0xc8, 0x48, 0x24, 0x50, 0x99,
 ];
 
 #[test]

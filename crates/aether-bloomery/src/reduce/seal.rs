@@ -23,9 +23,10 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
     BaseReceipt, BaseVerdict, BloomSpec, CandidateRef, ConfigKind, ConfigResolveError, ConfigScopes, DependencyError,
-    EvidenceKind, MemberCandidate, MemberDependency, Membership, ModelOverride, OperatorProposal, PipelineManifest,
-    ResolutionClaim, ResolvedConfigs, SpendCeiling, SpendWindow, StageCatalog, Transformation, Unproducible,
-    VerifyFailureSet, VerifyGateSet, VerifyProof, resolve_member_dependencies,
+    EvidenceKind, MemberCandidate, MemberDependency, Membership, ModelOverride, OperatorProposal,
+    PIPELINE_MANIFEST_PATH, PipelineManifest, ResolutionClaim, ResolvedConfigs, SpendCeiling, SpendWindow,
+    StageCatalog, Transformation, Unproducible, VerifyFailureSet, VerifyGateSet, VerifyProof,
+    resolve_member_dependencies,
 };
 
 pub(super) fn reduce_seal(
@@ -335,8 +336,12 @@ fn validate_line(spec: &BloomSpec, configs: &ResolvedConfigs) -> Result<Admitted
     let catalog = sealed_config::<StageCatalog>(ConfigScopes::bloom_wide(spec.configs()), configs)?
         .unwrap_or_else(StageCatalog::line);
     catalog.validate().map_err(SealError::UnrunnableStageCatalog)?;
-    let manifest = sealed_config::<PipelineManifest>(ConfigScopes::bloom_wide(spec.configs()), configs)?
-        .unwrap_or_else(PipelineManifest::compiled);
+    let Some(manifest) = sealed_config::<PipelineManifest>(ConfigScopes::bloom_wide(spec.configs()), configs)? else {
+        return Err(SealError::UnusablePipelineManifest {
+            base: spec.base(),
+            path: String::from(PIPELINE_MANIFEST_PATH),
+        });
+    };
     catalog
         .validate_against(&manifest)
         .map_err(|error| SealError::CatalogOutsideDeclaredLanes { error, declared: manifest.declared_lanes() })?;
@@ -360,8 +365,7 @@ fn validate_line(spec: &BloomSpec, configs: &ResolvedConfigs) -> Result<Admitted
 struct AdmittedLine {
     /// The catalog the bloom is graded against.
     catalog: StageCatalog,
-    /// The vocabulary the bloom's base declares, or the compiled one when it
-    /// sealed none.
+    /// The vocabulary the bloom's base declares.
     manifest: PipelineManifest,
 }
 
@@ -852,6 +856,8 @@ fn verify_reentry(
 
 #[cfg(test)]
 mod tests {
+    use crate::testing::{compiled_resolved, file_compiled_manifest, step as testing_step, with_compiled_manifest};
+
     use crate::persisted::DECISIONS;
     use alloc::string::String;
 
@@ -867,8 +873,8 @@ mod tests {
     };
     use crate::values::{
         BaseReceipt, BaseVerdict, BloomDraft, BloomSpec, CandidateRef, ConfigKind, ConfigRegistry, Evidence,
-        EvidenceKind, Forecast, MemberDependency, Membership, OperatorProposal, ResolutionClaim, ResolvedConfigs,
-        SpendCeiling, SpendQuiesce, SpendWindow, Unproducible, VerifyGateSet,
+        EvidenceKind, Forecast, MemberDependency, Membership, OperatorProposal, PIPELINE_MANIFEST_PATH,
+        ResolutionClaim, ResolvedConfigs, SpendCeiling, SpendQuiesce, SpendWindow, Unproducible, VerifyGateSet,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -887,7 +893,11 @@ mod tests {
     }
 
     fn draft(revision: u8) -> BloomDraft {
-        BloomDraft { proposals: vec![membership("wp", revision)], base: digest(0), ..BloomDraft::default() }
+        with_compiled_manifest(BloomDraft {
+            proposals: vec![membership("wp", revision)],
+            base: digest(0),
+            ..BloomDraft::default()
+        })
     }
 
     fn ceiling_content(ceiling: &SpendCeiling) -> (ConfigRegistry, ResolvedConfigs) {
@@ -899,7 +909,8 @@ mod tests {
     }
 
     fn draft_with_ceiling(revision: u8, ceiling: &SpendCeiling) -> (BloomDraft, ResolvedConfigs) {
-        let (configs, resolved) = ceiling_content(ceiling);
+        let (mut configs, mut resolved) = ceiling_content(ceiling);
+        file_compiled_manifest(&mut configs, &mut resolved);
         (BloomDraft { configs, ..draft(revision) }, resolved)
     }
 
@@ -961,12 +972,11 @@ mod tests {
                 Fact::Seal(spec) => spec,
                 _ => unreachable!(),
             },
-            &ResolvedConfigs::default(),
+            &compiled_resolved(),
             &SpendWindow::default(),
             &[],
         );
-        let snapshot =
-            Snapshot::new(digest(0)).with_green_base(digest(0)).apply(&event, &prior, &ResolvedConfigs::default());
+        let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0)).apply(&event, &prior, &compiled_resolved());
         let before = snapshot.blooms.get(&existing_id).expect("the prior bloom is on the snapshot").clone();
 
         // Land the prior bloom so the one-active-bloom gate is not what refuses.
@@ -1032,7 +1042,7 @@ mod tests {
         let decided = reduce_seal(
             &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &spec,
-            &ResolvedConfigs::default(),
+            &compiled_resolved(),
             &window(u64::MAX, &[]),
             &[],
         );
@@ -1063,8 +1073,10 @@ mod tests {
         let mut member = membership("wp", 1);
         member.configs.insert::<SpendCeiling>(ceiling.address());
         member.approval.subject = member.subject();
-        let spec = BloomDraft { proposals: vec![member], base: digest(0), ..BloomDraft::default() }.seal();
-        let mut configs = ResolvedConfigs::default();
+        let spec =
+            with_compiled_manifest(BloomDraft { proposals: vec![member], base: digest(0), ..BloomDraft::default() })
+                .seal();
+        let mut configs = compiled_resolved();
         configs.insert(ceiling.address(), SpendCeiling::NAME, to_vec(&ceiling).expect("ceiling encodes"), None);
 
         let decided = reduce_seal(
@@ -1098,11 +1110,16 @@ mod tests {
         let mut registry = ConfigRegistry::default();
         registry.insert::<SpendCeiling>(address);
 
-        let spec = BloomDraft { configs: registry.clone(), ..draft(1) }.seal();
+        let spec = {
+            let mut draft = draft(1);
+            draft.configs.overlay(registry);
+            draft
+        }
+        .seal();
         let decided = reduce_seal(
             &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &spec,
-            &ResolvedConfigs::default(),
+            &compiled_resolved(),
             &SpendWindow::default(),
             &[],
         );
@@ -1119,7 +1136,7 @@ mod tests {
             decided.outcome,
         );
 
-        let mut configs = ResolvedConfigs::default();
+        let mut configs = compiled_resolved();
         configs.insert(address, String::from("aether.bloomery.price_table"), vec![1, 2, 3], None);
         let decided = reduce_seal(
             &Snapshot::new(digest(0)).with_green_base(digest(0)),
@@ -1141,7 +1158,7 @@ mod tests {
             decided.outcome,
         );
 
-        configs = ResolvedConfigs::default();
+        configs = compiled_resolved();
         configs.insert(address, SpendCeiling::NAME, vec![0xff, 0xff], None);
         let decided = reduce_seal(
             &Snapshot::new(digest(0)).with_green_base(digest(0)),
@@ -1203,7 +1220,7 @@ mod tests {
         let decided = reduce_seal(
             &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &spec,
-            &ResolvedConfigs::default(),
+            &compiled_resolved(),
             &SpendWindow::default(),
             &[],
         );
@@ -1232,11 +1249,11 @@ mod tests {
     // in-memory Decisions value would agree even if the wire dropped the graph.
     #[test]
     fn a_seal_with_edges_journals_the_graph_and_replay_folds_it() {
-        let spec = BloomDraft {
+        let spec = with_compiled_manifest(BloomDraft {
             proposals: vec![membership("wp-a", 1), membership("wp-b", 2)],
             base: digest(0),
             ..BloomDraft::default()
-        }
+        })
         .seal();
         let bloom = spec.id();
         let edges =
@@ -1246,7 +1263,7 @@ mod tests {
             fact: Fact::GraphSeal { predecessor: None, spec, edges: edges.clone() },
         };
         let base = Snapshot::new(digest(0)).with_green_base(digest(0));
-        let decided = reduce(&base, &event, &ResolvedConfigs::default(), &SpendWindow::default());
+        let decided = reduce(&base, &event, &compiled_resolved(), &SpendWindow::default());
         assert!(matches!(decided.outcome, Outcome::Sealed(id) if id == bloom));
         match decided.effects.last() {
             Some(Decision::RecordMemberDependencies { bloom: recorded, edges: recorded_edges }) => {
@@ -1256,14 +1273,14 @@ mod tests {
             other => panic!("expected the resolved graph, got {other:?}"),
         }
 
-        let live = base.apply(&event, &decided, &ResolvedConfigs::default());
+        let live = base.apply(&event, &decided, &compiled_resolved());
         let journaled: Event = from_bytes(&to_vec(&event).expect("event encodes")).expect("event decodes");
         let recorded: Decisions = decode_recorded_decisions(
             &to_vec(&decided).expect("decisions encode"),
             Some(DECISIONS.current_digest().as_bytes()),
         )
         .expect("journaled decisions decode");
-        let replayed = base.apply(&journaled, &recorded, &ResolvedConfigs::default());
+        let replayed = base.apply(&journaled, &recorded, &compiled_resolved());
 
         assert_eq!(
             live.blooms.get(&bloom).map(|record| &record.dependencies),
@@ -1286,12 +1303,12 @@ mod tests {
     }
 
     fn spec_at(members: &[(&str, u8)], forecast_tokens: u64) -> BloomSpec {
-        BloomDraft {
+        with_compiled_manifest(BloomDraft {
             proposals: members.iter().map(|(name, revision)| membership(name, *revision)).collect(),
             base: digest(0),
             forecast: Forecast { predicted_tokens: forecast_tokens, predicted_worker_secs: 0, predicted_retries: 0 },
             ..BloomDraft::default()
-        }
+        })
         .seal()
     }
 
@@ -1300,8 +1317,7 @@ mod tests {
     }
 
     fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
-        let decisions = reduce(snapshot, event, &ResolvedConfigs::default(), &SpendWindow::default());
-        (snapshot.apply(event, &decisions, &ResolvedConfigs::default()), decisions)
+        testing_step(snapshot, event)
     }
 
     fn verified_claim(name: &str, revision: u8, candidate: u8, verdict: u8) -> ResolutionClaim {
@@ -1628,14 +1644,14 @@ mod tests {
             event("sup", Fact::Supersede { predecessor: predecessor_spec.id(), successor: successor_spec.clone() });
 
         let base = Snapshot::new(digest(0)).with_green_base(digest(0));
-        let sealed = reduce(&base, &seal, &ResolvedConfigs::default(), &SpendWindow::default());
-        let after_seal = base.apply(&seal, &sealed, &ResolvedConfigs::default());
-        let decided_a = reduce(&after_seal, &a_done, &ResolvedConfigs::default(), &SpendWindow::default());
-        let after_a = after_seal.apply(&a_done, &decided_a, &ResolvedConfigs::default());
-        let decided_c = reduce(&after_a, &c_done, &ResolvedConfigs::default(), &SpendWindow::default());
-        let after_c = after_a.apply(&c_done, &decided_c, &ResolvedConfigs::default());
-        let decided_sup = reduce(&after_c, &supersede, &ResolvedConfigs::default(), &SpendWindow::default());
-        let live = after_c.apply(&supersede, &decided_sup, &ResolvedConfigs::default());
+        let sealed = reduce(&base, &seal, &compiled_resolved(), &SpendWindow::default());
+        let after_seal = base.apply(&seal, &sealed, &compiled_resolved());
+        let decided_a = reduce(&after_seal, &a_done, &compiled_resolved(), &SpendWindow::default());
+        let after_a = after_seal.apply(&a_done, &decided_a, &compiled_resolved());
+        let decided_c = reduce(&after_a, &c_done, &compiled_resolved(), &SpendWindow::default());
+        let after_c = after_a.apply(&c_done, &decided_c, &compiled_resolved());
+        let decided_sup = reduce(&after_c, &supersede, &compiled_resolved(), &SpendWindow::default());
+        let live = after_c.apply(&supersede, &decided_sup, &compiled_resolved());
 
         let replayed = base
             .apply(
@@ -1645,7 +1661,7 @@ mod tests {
                     Some(DECISIONS.current_digest().as_bytes()),
                 )
                 .expect("seal decodes"),
-                &ResolvedConfigs::default(),
+                &compiled_resolved(),
             )
             .apply(
                 &from_bytes(&to_vec(&a_done).expect("event encodes")).expect("event decodes"),
@@ -1654,7 +1670,7 @@ mod tests {
                     Some(DECISIONS.current_digest().as_bytes()),
                 )
                 .expect("a decodes"),
-                &ResolvedConfigs::default(),
+                &compiled_resolved(),
             )
             .apply(
                 &from_bytes(&to_vec(&c_done).expect("event encodes")).expect("event decodes"),
@@ -1663,7 +1679,7 @@ mod tests {
                     Some(DECISIONS.current_digest().as_bytes()),
                 )
                 .expect("c decodes"),
-                &ResolvedConfigs::default(),
+                &compiled_resolved(),
             )
             .apply(
                 &from_bytes(&to_vec(&supersede).expect("event encodes")).expect("event decodes"),
@@ -1672,7 +1688,7 @@ mod tests {
                     Some(DECISIONS.current_digest().as_bytes()),
                 )
                 .expect("sup decodes"),
-                &ResolvedConfigs::default(),
+                &compiled_resolved(),
             );
 
         assert_eq!(live, replayed, "apply-only replay of the journaled rows rebuilds the live snapshot");
@@ -1940,7 +1956,7 @@ mod tests {
         let decided = reduce_seal(
             &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &spec,
-            &ResolvedConfigs::default(),
+            &compiled_resolved(),
             &SpendWindow::default(),
             &[],
         );
@@ -1948,10 +1964,38 @@ mod tests {
     }
 
     #[test]
+    fn a_spec_naming_no_manifest_is_refused_at_the_door() {
+        // The compiled vocabulary is not a fallback for a fresh seal. A
+        // successor of a pre-manifest bloom goes through this same door.
+        let spec = BloomDraft { proposals: vec![membership("wp", 1)], base: digest(7), ..BloomDraft::default() }.seal();
+        let decided = reduce_seal(
+            &Snapshot::new(digest(7)).with_green_base(digest(7)),
+            &spec,
+            &ResolvedConfigs::default(),
+            &SpendWindow::default(),
+            &[],
+        );
+        match decided.outcome {
+            Outcome::SealRejected(SealError::UnusablePipelineManifest { base, path }) => {
+                assert_eq!(base, digest(7));
+                assert_eq!(path, PIPELINE_MANIFEST_PATH);
+            }
+            other => panic!("a spec naming no manifest must refuse the seal, got {other:?}"),
+        }
+        assert!(decided.effects.is_empty(), "a refused seal claims nothing");
+    }
+
+    #[test]
     fn a_memberless_proposal_seals_at_verify_over_the_supplied_candidate() {
-        let (proposal, registry, configs) = proposal_content();
-        let spec =
-            BloomDraft { proposals: Vec::new(), base: digest(0), configs: registry, ..BloomDraft::default() }.seal();
+        let (proposal, registry, mut configs) = proposal_content();
+        file_compiled_manifest(&mut ConfigRegistry::default(), &mut configs);
+        let spec = with_compiled_manifest(BloomDraft {
+            proposals: Vec::new(),
+            base: digest(0),
+            configs: registry,
+            ..BloomDraft::default()
+        })
+        .seal();
         let decided = reduce_seal(
             &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &spec,

@@ -703,10 +703,12 @@ pub(super) fn wedged(
 
 #[cfg(test)]
 mod tests {
+    use crate::testing::{step as testing_step, with_compiled_manifest};
+
     use super::*;
     use crate::ids::IdempotencyKey;
-    use crate::reduce::{Event, Fact, GrantAttemptsError, Outcome, reduce};
-    use crate::values::{BloomDraft, BloomSpec, EvidenceKind, Membership, OperatorHold, ResolvedConfigs, SpendWindow};
+    use crate::reduce::{Event, Fact, GrantAttemptsError, Outcome};
+    use crate::values::{BloomDraft, BloomSpec, EvidenceKind, Membership, OperatorHold};
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
@@ -732,13 +734,16 @@ mod tests {
     }
 
     fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
-        let decisions = reduce(snapshot, event, &ResolvedConfigs::default(), &SpendWindow::default());
-        (snapshot.apply(event, &decisions, &ResolvedConfigs::default()), decisions)
+        testing_step(snapshot, event)
     }
 
     fn sealed() -> (Snapshot, BloomId) {
-        let spec =
-            BloomDraft { proposals: vec![membership("wp", 10)], base: digest(0), ..BloomDraft::default() }.seal();
+        let spec = with_compiled_manifest(BloomDraft {
+            proposals: vec![membership("wp", 10)],
+            base: digest(0),
+            ..BloomDraft::default()
+        })
+        .seal();
         let bloom = spec.id();
         let (snapshot, _) =
             step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", Fact::Seal(spec)));
@@ -837,8 +842,12 @@ mod tests {
     // slot and leaves the sealed base. Catches treating absence as a digest.
     #[test]
     fn a_fresh_construct_checks_out_the_sealed_base() {
-        let spec =
-            BloomDraft { proposals: vec![membership("wp", 10)], base: digest(0), ..BloomDraft::default() }.seal();
+        let spec = with_compiled_manifest(BloomDraft {
+            proposals: vec![membership("wp", 10)],
+            base: digest(0),
+            ..BloomDraft::default()
+        })
+        .seal();
         let bloom = spec.id();
         let (after, decided) =
             step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", Fact::Seal(spec)));
@@ -1173,11 +1182,11 @@ mod tests {
     }
 
     fn two_member_spec(base: u8) -> BloomSpec {
-        BloomDraft {
+        with_compiled_manifest(BloomDraft {
             proposals: vec![membership("alpha", 10), membership("beta", 11)],
             base: digest(base),
             ..BloomDraft::default()
-        }
+        })
         .seal()
     }
 

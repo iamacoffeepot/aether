@@ -23,8 +23,7 @@ use super::{JanitorReactorCapability, JanitorReactorSetup};
 
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::bloomery::{
-    CaptureIdentity, DEFAULT_LANE_PROGRAM, ExecutorShell, LaneOccupancy, LaneProgram, ProcessTransformRunner,
-    SourceShell, TransformRunner,
+    CaptureIdentity, ExecutorShell, LaneOccupancy, LaneProgram, ProcessTransformRunner, SourceShell, TransformRunner,
 };
 use crate::store::SqliteStore;
 
@@ -105,7 +104,7 @@ impl NativeActor for JanitorReactorCapability {
             store: Some(store),
             runner: Arc::new(ProcessTransformRunner::new(
                 CaptureIdentity::default(),
-                LaneProgram::parse(DEFAULT_LANE_PROGRAM),
+                LaneProgram::default(),
                 PathBuf::from(&config.repo),
             )),
             worktree_base,

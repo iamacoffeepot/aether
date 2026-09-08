@@ -82,13 +82,13 @@ pub(super) fn reduce_study_completed(
 
 #[cfg(test)]
 mod tests {
+    use crate::testing::{compiled_resolved, with_compiled_manifest};
+
     use super::reduce_study_completed;
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
     use crate::reduce::{BloomStatus, Decision, Decisions, Event, Fact, Outcome, Snapshot, reduce};
-    use crate::values::{
-        BloomDraft, ConfigRegistry, Evidence, EvidenceKind, Membership, ResolvedConfigs, SpendWindow, Transformation,
-    };
+    use crate::values::{BloomDraft, ConfigRegistry, Evidence, EvidenceKind, Membership, SpendWindow, Transformation};
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
@@ -107,12 +107,17 @@ mod tests {
 
     /// A bloom carried to the moment before its land, plus its id.
     fn resolved(base: Digest) -> (Snapshot, BloomId) {
-        let spec = BloomDraft { proposals: vec![membership("issue-5807", 10)], base, ..BloomDraft::default() }.seal();
+        let spec = with_compiled_manifest(BloomDraft {
+            proposals: vec![membership("issue-5807", 10)],
+            base,
+            ..BloomDraft::default()
+        })
+        .seal();
         let bloom = spec.id();
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         let snapshot = Snapshot::new(base).with_green_base(base);
-        let decided = reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default());
-        let mut snapshot = snapshot.apply(&seal, &decided, &ResolvedConfigs::default());
+        let decided = reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default());
+        let mut snapshot = snapshot.apply(&seal, &decided, &compiled_resolved());
         snapshot.blooms.get_mut(&bloom).expect("the seal recorded the bloom").status = BloomStatus::Resolved;
 
         (snapshot, bloom)
@@ -144,7 +149,7 @@ mod tests {
         let decisions = reduce(
             &snapshot,
             &Event { idempotency_key: IdempotencyKey("land".into()), fact: Fact::Land { bloom, new_head: landed } },
-            &ResolvedConfigs::default(),
+            &compiled_resolved(),
             &SpendWindow::default(),
         );
 
@@ -174,8 +179,8 @@ mod tests {
         let (snapshot, bloom) = resolved(base);
         let land =
             Event { idempotency_key: IdempotencyKey("land".into()), fact: Fact::Land { bloom, new_head: digest(40) } };
-        let decided = reduce(&snapshot, &land, &ResolvedConfigs::default(), &SpendWindow::default());
-        let snapshot = snapshot.apply(&land, &decided, &ResolvedConfigs::default());
+        let decided = reduce(&snapshot, &land, &compiled_resolved(), &SpendWindow::default());
+        let snapshot = snapshot.apply(&land, &decided, &compiled_resolved());
 
         let fault = Evidence { subject: digest(77), kind: EvidenceKind::ExecutorFault, detail: digest(78) };
         let decisions = reduce_study_completed(&snapshot, &bloom, false, &fault);
@@ -190,7 +195,7 @@ mod tests {
                 fact: Fact::StudyCompleted { bloom, passed: false, evidence: fault },
             },
             &decisions,
-            &ResolvedConfigs::default(),
+            &compiled_resolved(),
         );
         let record = after.blooms.get(&bloom).expect("the landed bloom is still recorded");
         assert_eq!(record.status, BloomStatus::Landed, "a faulted read leaves the bloom landed");
@@ -226,7 +231,7 @@ mod tests {
         let decisions = reduce(
             &snapshot,
             &Event { idempotency_key: IdempotencyKey("land".into()), fact: Fact::Land { bloom, new_head: digest(40) } },
-            &ResolvedConfigs::default(),
+            &compiled_resolved(),
             &SpendWindow::default(),
         );
 

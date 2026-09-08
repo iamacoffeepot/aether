@@ -303,6 +303,11 @@ pub struct LaneRun {
     /// missing field is a pre-field ledger, and pid 0 is not a child.
     #[serde(default)]
     pub process_id: Option<u32>,
+    /// The argv the child was spawned with, program first when the mock ran as
+    /// a process. Recorded so a scenario can assert the sealed `[entrypoint]`
+    /// reached the spawn (ADR-0215) without running a real lane.
+    #[serde(default)]
+    pub argv: Vec<String>,
 }
 
 /// Append `run` to the ledger in `dir`.
@@ -470,6 +475,7 @@ mod tests {
             worktree: None,
             env: Vec::new(),
             process_id: None,
+            argv: Vec::new(),
         }
     }
 
@@ -575,6 +581,7 @@ mod tests {
             worktree: None,
             env: Vec::new(),
             process_id: None,
+            argv: Vec::new(),
         };
 
         append_run(dir.path(), &run("wp-a", StageId::Construct, "n-1")).unwrap();
@@ -628,6 +635,7 @@ mod tests {
                 worktree: None,
                 env: Vec::new(),
                 process_id: None,
+                argv: Vec::new(),
             },
         )
         .unwrap();

@@ -115,8 +115,12 @@ fn host_identity_resolves(worktree_dir: &Path) -> bool {
 pub struct ProcessTransformRunner {
     /// Who candidate captures are authored as.
     identity: CaptureIdentity,
-    /// Which program a dispatch spawns in the scratch worktree (#4727).
-    lane_program: LaneProgram,
+    /// Host override for the program a dispatch spawns (#4727, ADR-0215).
+    ///
+    /// `Some` replaces the sealed manifest's `[entrypoint]`. `None` means the
+    /// dispatch reads [`RunSpec::entrypoint`]. Tests pass a concrete program
+    /// through [`Self::new`] and so always override.
+    lane_override: Option<LaneProgram>,
     /// The coordinator repository worktrees are added to. An absolute path —
     /// the local authority, or the process current directory captured at
     /// construction — never `"."`.
@@ -135,13 +139,32 @@ pub struct ProcessTransformRunner {
 }
 
 impl ProcessTransformRunner {
-    /// Build the runner over the capture identity, lane invocation, and
-    /// repository the host resolved.
+    /// Build the runner over the capture identity, a host lane override, and
+    /// the repository the host resolved.
+    ///
+    /// `lane_program` is always an override: tests point the real spawn at a
+    /// stand-in this way. Production empty-vs-set lives on
+    /// [`Self::with_lane_override`].
     #[must_use]
     pub fn new(identity: CaptureIdentity, lane_program: LaneProgram, repo: impl Into<PathBuf>) -> Self {
         let repo = repo.into();
         let repo = repo.canonicalize().unwrap_or(repo);
-        Self { identity, lane_program, repo, fetch_remote: String::new(), head_override: None, tree_override: None }
+        Self {
+            identity,
+            lane_override: Some(lane_program),
+            repo,
+            fetch_remote: String::new(),
+            head_override: None,
+            tree_override: None,
+        }
+    }
+
+    /// Replace or clear the host override. `None` means the dispatch reads the
+    /// sealed manifest's `[entrypoint]`.
+    #[must_use]
+    pub fn with_lane_override(mut self, lane_override: Option<LaneProgram>) -> Self {
+        self.lane_override = lane_override;
+        self
     }
 
     /// Fetch missing order identities from `remote` instead of `origin`.
@@ -253,7 +276,7 @@ impl TransformRunner for ProcessTransformRunner {
         // environment this constructs rather than the coordinator's, which the
         // child would otherwise inherit wholesale and come up configured as a
         // second coordinator (#4714; see `lane_env`).
-        let mut lane = self.lane_program.command();
+        let mut lane = self.lane_override.as_ref().unwrap_or(&spec.entrypoint).command();
         construct_lane_env(&mut lane, inherited_env());
         export_build_env(&mut lane, spec);
         lane.current_dir(spec.worktree_dir);
@@ -1122,6 +1145,7 @@ mod tests {
             stage: None,
             bloom: None,
             receipt: None,
+            entrypoint: LaneProgram::default(),
         }
     }
 

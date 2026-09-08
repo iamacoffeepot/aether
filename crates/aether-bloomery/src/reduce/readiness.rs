@@ -473,6 +473,8 @@ fn member_index(record: &BloomRecord, workpiece: &WorkpieceId) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use crate::testing::{compiled_resolved, step as testing_step, with_compiled_manifest};
+
     use crate::persisted::DECISIONS;
     use aether_data::wire::{from_bytes, to_vec};
 
@@ -485,7 +487,7 @@ mod tests {
     };
     use crate::values::{
         BloomDraft, BloomSpec, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, ResolutionClaim,
-        ResolvedConfigs, SpendWindow, StageCatalog, resolve_member_dependencies,
+        SpendWindow, StageCatalog, resolve_member_dependencies,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -508,11 +510,11 @@ mod tests {
     }
 
     fn spec(members: &[(&str, u8)]) -> BloomSpec {
-        BloomDraft {
+        with_compiled_manifest(BloomDraft {
             proposals: members.iter().map(|(name, revision)| membership(name, *revision)).collect(),
             base: digest(0),
             ..BloomDraft::default()
-        }
+        })
         .seal()
     }
 
@@ -521,8 +523,7 @@ mod tests {
     }
 
     fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
-        let decisions = reduce(snapshot, event, &ResolvedConfigs::default(), &SpendWindow::default());
-        (snapshot.apply(event, &decisions, &ResolvedConfigs::default()), decisions)
+        testing_step(snapshot, event)
     }
 
     fn seal_graph(members: &[(&str, u8)], edges: Vec<MemberDependency>) -> (Snapshot, BloomSpec) {
@@ -730,10 +731,10 @@ mod tests {
         let integrate = event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) });
 
         let base = Snapshot::new(digest(0)).with_green_base(digest(0));
-        let sealed = reduce(&base, &seal, &ResolvedConfigs::default(), &SpendWindow::default());
-        let after_seal = base.apply(&seal, &sealed, &ResolvedConfigs::default());
-        let integrated = reduce(&after_seal, &integrate, &ResolvedConfigs::default(), &SpendWindow::default());
-        let live = after_seal.apply(&integrate, &integrated, &ResolvedConfigs::default());
+        let sealed = reduce(&base, &seal, &compiled_resolved(), &SpendWindow::default());
+        let after_seal = base.apply(&seal, &sealed, &compiled_resolved());
+        let integrated = reduce(&after_seal, &integrate, &compiled_resolved(), &SpendWindow::default());
+        let live = after_seal.apply(&integrate, &integrated, &compiled_resolved());
 
         let replayed_seal: Decisions = decode_recorded_decisions(
             &to_vec(&sealed).expect("seal encodes"),
@@ -749,12 +750,12 @@ mod tests {
             .apply(
                 &from_bytes(&to_vec(&seal).expect("event encodes")).expect("event decodes"),
                 &replayed_seal,
-                &ResolvedConfigs::default(),
+                &compiled_resolved(),
             )
             .apply(
                 &from_bytes(&to_vec(&integrate).expect("event encodes")).expect("event decodes"),
                 &replayed_integrate,
-                &ResolvedConfigs::default(),
+                &compiled_resolved(),
             );
 
         let bloom = spec.id();

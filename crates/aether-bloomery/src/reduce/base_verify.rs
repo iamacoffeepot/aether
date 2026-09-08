@@ -144,6 +144,8 @@ fn dispatch_owed(snapshot: &Snapshot, record: &BloomRecord, bloom: BloomId, effe
 
 #[cfg(test)]
 mod tests {
+    use crate::testing::{compiled_resolved, with_compiled_manifest};
+
     use super::{reduce_base_reverify, reduce_base_verify_completed};
     use crate::digest::Digest;
     use crate::ids::{IdempotencyKey, WorkpieceId};
@@ -174,11 +176,16 @@ mod tests {
 
     #[test]
     fn a_green_receipt_releases_withheld_construct() {
-        let spec =
-            BloomDraft { proposals: vec![membership("wp-a", 1)], base: digest(0), ..BloomDraft::default() }.seal();
+        let spec = with_compiled_manifest(BloomDraft {
+            proposals: vec![membership("wp-a", 1)],
+            base: digest(0),
+            ..BloomDraft::default()
+        })
+        .seal();
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
-        let sealed = reduce(&Snapshot::new(digest(0)), &seal, &ResolvedConfigs::default(), &SpendWindow::default());
-        let snapshot = Snapshot::new(digest(0)).apply(&seal, &sealed, &ResolvedConfigs::default());
+        let configs = compiled_resolved();
+        let sealed = reduce(&Snapshot::new(digest(0)), &seal, &configs, &SpendWindow::default());
+        let snapshot = Snapshot::new(digest(0)).apply(&seal, &sealed, &configs);
         assert!(sealed.effects.iter().any(|effect| matches!(effect, Decision::DeferDispatch { .. })));
 
         let decided = reduce_base_verify_completed(

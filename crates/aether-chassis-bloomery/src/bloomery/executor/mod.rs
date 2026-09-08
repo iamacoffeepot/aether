@@ -48,9 +48,8 @@ mod reconcile;
 mod routing;
 
 pub use local::{
-    CaptureIdentity, CapturedObjects, DEFAULT_LANE_PROGRAM, LaneProgram, LocalExecutor, LocalExecutorError,
-    OrphanedRun, ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec, TransformRunner, admits_lane_key,
-    mock_lane,
+    CaptureIdentity, CapturedObjects, LaneProgram, LocalExecutor, LocalExecutorError, OrphanedRun,
+    ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec, TransformRunner, admits_lane_key, mock_lane,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use local::{GroupAbsence, IDENTITY_RECORD, ProcessIdentity, strict_group_absence};

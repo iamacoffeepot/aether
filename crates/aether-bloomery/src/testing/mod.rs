@@ -17,7 +17,7 @@ use crate::port::{BloomView, CommissionProjection, MemberView};
 use crate::reduce::{BloomRecord, BloomStatus, Decisions, Event, Fact, Snapshot, reduce};
 use crate::values::{
     BloomDraft, BloomSpec, ConfigKind, ConfigRegistry, Evidence, EvidenceKind, Membership, ModelOverride,
-    ResolutionClaim, ResolvedConfigs, SpendWindow, StageCatalog,
+    PipelineManifest, ResolutionClaim, ResolvedConfigs, SpendWindow, StageCatalog, config_address,
 };
 
 /// A distinct digest named by one seed byte.
@@ -53,11 +53,57 @@ pub fn approved(mut member: Membership) -> Membership {
     member
 }
 
-/// A draft sealing on `base` with the given memberships, configuring nothing —
-/// so it runs the compiled line (ADR-0174).
+/// File the compiled pipeline vocabulary as a resolved registry entry a spec
+/// can seal against (ADR-0215).
+///
+/// A fresh seal names a [`PipelineManifest`] address; a draft that names none
+/// is refused, and a draft that names one whose bytes the reducer was not
+/// given is `UnproducibleConfig`. Reducer-level tests that used to seal an
+/// empty registry reach for this.
+///
+/// # Panics
+/// A [`PipelineManifest`] never fails to encode; a panic here is a broken kind
+/// invariant.
+pub fn file_compiled_manifest(configs: &mut ConfigRegistry, resolved: &mut ResolvedConfigs) {
+    let bytes = to_vec(&PipelineManifest::compiled()).expect("compiled manifest encodes");
+    let address = config_address(PipelineManifest::NAME, &bytes);
+    configs.insert::<PipelineManifest>(address);
+    resolved.insert(address, PipelineManifest::NAME, bytes, None);
+}
+
+/// The compiled vocabulary, filed as a registry entry plus the bytes that
+/// produce it.
+#[must_use]
+pub fn compiled_manifest() -> (ConfigRegistry, ResolvedConfigs) {
+    let mut configs = ConfigRegistry::default();
+    let mut resolved = ResolvedConfigs::default();
+    file_compiled_manifest(&mut configs, &mut resolved);
+    (configs, resolved)
+}
+
+/// Overlay the compiled vocabulary onto `draft` so a fresh seal names a
+/// [`PipelineManifest`] address.
+#[must_use]
+pub fn with_compiled_manifest(mut draft: BloomDraft) -> BloomDraft {
+    let (configs, _) = compiled_manifest();
+    draft.configs.overlay(configs);
+    draft
+}
+
+/// The resolved bytes of [`compiled_manifest`], for a `reduce` call whose
+/// spec already names that address.
+#[must_use]
+pub fn compiled_resolved() -> ResolvedConfigs {
+    compiled_manifest().1
+}
+
+/// A draft sealing on `base` with the given memberships, configuring the
+/// compiled pipeline vocabulary (ADR-0215) so the seal door has a manifest
+/// address to resolve.
 #[must_use]
 pub fn draft(base: u8, members: Vec<Membership>) -> BloomDraft {
-    BloomDraft { proposals: members, base: digest(base), ..BloomDraft::default() }
+    let (configs, _) = compiled_manifest();
+    BloomDraft { proposals: members, base: digest(base), configs, ..BloomDraft::default() }
 }
 
 /// A draft sealing `catalog` bloom-wide, with the [`ResolvedConfigs`] that
@@ -73,6 +119,7 @@ pub fn draft_with_catalog(base: u8, members: Vec<Membership>, catalog: &StageCat
 
     let mut resolved = ResolvedConfigs::default();
     resolved.insert(catalog.address(), StageCatalog::NAME, to_vec(catalog).expect("catalog encodes"), None);
+    file_compiled_manifest(&mut configs, &mut resolved);
 
     (BloomDraft { proposals: members, base: digest(base), configs, ..BloomDraft::default() }, resolved)
 }
@@ -94,10 +141,12 @@ pub fn draft_with_member_override(
     member.configs.insert::<ModelOverride>(override_.address());
     let member = approved(member);
 
+    let mut configs = ConfigRegistry::default();
     let mut resolved = ResolvedConfigs::default();
     resolved.insert(override_.address(), ModelOverride::NAME, to_vec(override_).expect("override encodes"), None);
+    file_compiled_manifest(&mut configs, &mut resolved);
 
-    (BloomDraft { proposals: vec![member], base: digest(base), ..BloomDraft::default() }, resolved)
+    (BloomDraft { proposals: vec![member], base: digest(base), configs, ..BloomDraft::default() }, resolved)
 }
 
 /// A resolution claim integrated at `revision`, whose evidence binds to its
@@ -123,8 +172,9 @@ pub fn event(key: &str, fact: Fact) -> Event {
 /// Reduce and evolve in one step — the journal-replay unit.
 #[must_use]
 pub fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
-    let decisions = reduce(snapshot, event, &ResolvedConfigs::default(), &SpendWindow::default());
-    let next = snapshot.apply(event, &decisions, &ResolvedConfigs::default());
+    let resolved = compiled_resolved();
+    let decisions = reduce(snapshot, event, &resolved, &SpendWindow::default());
+    let next = snapshot.apply(event, &decisions, &resolved);
     (next, decisions)
 }
 
@@ -143,13 +193,10 @@ pub fn observing(snapshot: &Snapshot, head: u8) -> Snapshot {
 pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> (Snapshot, BloomSpec) {
     let spec = draft(mainline, members).seal();
     let bloom = spec.id();
+    let resolved = compiled_resolved();
     let mut snapshot = Snapshot::new(digest(mainline)).with_green_base(digest(mainline));
     let seal = event("seal", Fact::Seal(spec.clone()));
-    snapshot = snapshot.apply(
-        &seal,
-        &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
-        &ResolvedConfigs::default(),
-    );
+    snapshot = snapshot.apply(&seal, &reduce(&snapshot, &seal, &resolved, &SpendWindow::default()), &resolved);
     let mut seed = 100u8;
     for member in spec.members() {
         let candidate = digest(seed);

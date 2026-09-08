@@ -156,13 +156,14 @@ fn landed_base_receipt(
 
 #[cfg(test)]
 mod tests {
+    use crate::testing::{compiled_resolved, with_compiled_manifest};
+
     use super::reduce_land;
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey, WorkpieceId};
     use crate::reduce::{BloomStatus, Decision, Decisions, Event, Fact, Outcome, RecordedRefusal, Snapshot, reduce};
     use crate::values::{
-        BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Membership, OperatorProposal,
-        ResolvedConfigs, SpendWindow,
+        BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Membership, OperatorProposal, SpendWindow,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -190,11 +191,11 @@ mod tests {
         // object, while `Outcome::Landed` must still carry the bare receipt the
         // land fact and the source port are written against.
         let base = digest(0);
-        let spec = BloomDraft {
+        let spec = with_compiled_manifest(BloomDraft {
             proposals: vec![membership("issue-4628", 10), membership("issue-4629", 20)],
             base,
             ..BloomDraft::default()
-        }
+        })
         .seal();
         let bloom = spec.id();
         let sealed_order: Vec<WorkpieceId> = spec.members().iter().map(|member| member.workpiece.clone()).collect();
@@ -203,8 +204,8 @@ mod tests {
         let mut snapshot = Snapshot::new(base).with_green_base(base);
         snapshot = snapshot.apply(
             &seal,
-            &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
-            &ResolvedConfigs::default(),
+            &reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default()),
+            &compiled_resolved(),
         );
         snapshot.blooms.get_mut(&bloom).expect("the seal recorded the bloom under its own spec id").status =
             BloomStatus::Resolved;
@@ -229,13 +230,18 @@ mod tests {
 
     /// A sealed-but-unresolved bloom, plus the id it was recorded under.
     fn sealed(base: Digest) -> (Snapshot, BloomId) {
-        let spec = BloomDraft { proposals: vec![membership("issue-4628", 10)], base, ..BloomDraft::default() }.seal();
+        let spec = with_compiled_manifest(BloomDraft {
+            proposals: vec![membership("issue-4628", 10)],
+            base,
+            ..BloomDraft::default()
+        })
+        .seal();
         let bloom = spec.id();
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         let snapshot = Snapshot::new(base).with_green_base(base);
-        let decided = reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default());
+        let decided = reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default());
 
-        (snapshot.apply(&seal, &decided, &ResolvedConfigs::default()), bloom)
+        (snapshot.apply(&seal, &decided, &compiled_resolved()), bloom)
     }
 
     fn refusal(decisions: &Decisions) -> &RecordedRefusal {

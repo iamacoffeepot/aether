@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use aether_bloomery::testing::{digest, membership};
+use aether_bloomery::testing::{compiled_resolved, digest, membership, with_compiled_manifest};
 use aether_bloomery::{
     BloomDraft, Decisions, Event, Fact, IdempotencyKey, ResolvedConfigs, Snapshot, SpendWindow, reduce, view_of,
 };
@@ -37,14 +37,14 @@ const MEMBER_ISSUES: [u64; 2] = [4628, 4629];
 /// journal-then-reduce path, not a hand-built snapshot.
 fn synthetic_bloom_snapshot() -> Snapshot {
     let base = digest(0);
-    let spec = BloomDraft {
+    let spec = with_compiled_manifest(BloomDraft {
         proposals: vec![
             membership(&format!("issue-{}", MEMBER_ISSUES[0]), 10),
             membership(&format!("issue-{}", MEMBER_ISSUES[1]), 20),
         ],
         base,
         ..BloomDraft::default()
-    }
+    })
     .seal();
 
     let event = Event { idempotency_key: IdempotencyKey("seal-1".into()), fact: Fact::Seal(spec) };
@@ -52,7 +52,7 @@ fn synthetic_bloom_snapshot() -> Snapshot {
 
     // Decide once at admission and journal the decision beside the event
     // (ADR-0190) — the shape every production journal row has.
-    let decided = reduce(&Snapshot::new(base), &event, &ResolvedConfigs::default(), &SpendWindow::default());
+    let decided = reduce(&Snapshot::new(base), &event, &compiled_resolved(), &SpendWindow::default());
     let mut store = SqliteStore::open(":memory:").unwrap();
     store
         .append_event(&JournalWrite {

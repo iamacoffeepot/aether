@@ -199,6 +199,20 @@ pub enum SealError {
         /// tree.
         declared: Vec<String>,
     },
+    /// A spec names no [`PipelineManifest`](crate::PipelineManifest) address
+    /// (ADR-0215). A base must declare its lanes; the compiled vocabulary is
+    /// not a fallback for a fresh seal. A successor of a pre-manifest bloom
+    /// goes through this same door and must be sealed against a base that
+    /// carries the file. Records already journaled keep folding against
+    /// [`PipelineManifest::compiled`](crate::PipelineManifest::compiled) via
+    /// [`PipelineManifest::sealed_in`](crate::PipelineManifest::sealed_in).
+    /// Appended so the prior variants' wire discriminants are unchanged.
+    UnusablePipelineManifest {
+        /// The base the spec named.
+        base: Digest,
+        /// The path that base was expected to carry.
+        path: String,
+    },
 }
 
 /// Why a supersession was refused.

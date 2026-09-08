@@ -34,8 +34,9 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    BloomDraft, BloomId, BloomSpec, ConfigRegistry, ContentAddressed, Digest, Evidence, EvidenceKind, Membership,
-    ModelOverride, ModelProcessInstructions, Observation, Provenance, Statement, StoreClass, WorkpieceId, digest_of,
+    BloomDraft, BloomId, BloomSpec, ConfigKind, ConfigRegistry, ContentAddressed, Digest, Evidence, EvidenceKind,
+    Membership, ModelOverride, ModelProcessInstructions, Observation, PipelineManifest, Provenance, Statement,
+    StoreClass, WorkpieceId, digest_of,
 };
 use aether_bloomery_git::short_hex;
 use aether_data::Kind;
@@ -254,6 +255,7 @@ pub fn plan(
     let (base, version, samples) = (set.base, set.version(), run.samples);
     let mut configs = ConfigRegistry::default();
     configs.insert::<ModelProcessInstructions>(run.instructions);
+    configs.insert::<PipelineManifest>(PipelineManifest::compiled().address());
 
     let blooms = set
         .tasks

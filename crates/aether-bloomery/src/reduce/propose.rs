@@ -76,13 +76,14 @@ fn stated(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::testing::{compiled_resolved, with_compiled_manifest};
+
     use super::{offer_after_land, reduce_propose};
     use crate::digest::{Digest, digest_of};
     use crate::ids::{IdempotencyKey, WorkpieceId};
     use crate::reduce::{BloomStatus, Decision, Event, Fact, Outcome, ProposalError, Snapshot, reduce};
     use crate::values::{
-        BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Membership, OperatorProposal,
-        ResolvedConfigs, SpendWindow,
+        BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Membership, OperatorProposal, SpendWindow,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -113,13 +114,18 @@ mod tests {
     }
 
     fn sealed_snapshot() -> Snapshot {
-        let spec = BloomDraft { proposals: vec![membership("wp")], base: digest(0), ..BloomDraft::default() }.seal();
+        let spec = with_compiled_manifest(BloomDraft {
+            proposals: vec![membership("wp")],
+            base: digest(0),
+            ..BloomDraft::default()
+        })
+        .seal();
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         snapshot.apply(
             &seal,
-            &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
-            &ResolvedConfigs::default(),
+            &reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default()),
+            &compiled_resolved(),
         )
     }
 
