@@ -24,8 +24,8 @@
 //! than spent on a verdict nobody could read.
 
 use aether_bloomery::{
-    BloomDraft, BloomId, ConfigRegistry, Decision, Decisions, Digest, Event, Fact, Outcome, PIPELINE_MANIFEST_PATH,
-    PipelineManifest, StageId, VerifyFailure, VerifyFailureSet, WorkpieceId,
+    BloomDraft, BloomId, ConfigRegistry, Decision, Decisions, Digest, Event, Fact, ModelProcessInstructions, Outcome,
+    PIPELINE_MANIFEST_PATH, PipelineManifest, StageId, VerifyFailure, VerifyFailureSet, WorkpieceId,
 };
 use aether_chassis_bloomery::store::{OutstandingOrder, SqliteStore, StoreBackend};
 use aether_data::Kind;
@@ -58,7 +58,7 @@ fn a_verdict_naming_an_undeclared_verifier_is_refused() {
 
     let authority = Repo::builder()
         .identity("test", "test@example.test")
-        .seed_file(PIPELINE_MANIFEST_PATH, &nine_identities())
+        .seed_file(PIPELINE_MANIFEST_PATH, nine_identities().as_str())
         .bare_clone()
         .create();
     let roots = HarnessRoots::create();
@@ -73,7 +73,11 @@ fn a_verdict_naming_an_undeclared_verifier_is_refused() {
     );
 
     let base = harness.view().mainline;
+    // ADR-0214: an unpinned bloom cannot start a model attempt, so the draft
+    // pins the harness's instruction bundle exactly as `seal_member` does. This
+    // scenario has to reach Verify, which means Construct has to dispatch.
     let mut configs = ConfigRegistry::default();
+    configs.insert::<ModelProcessInstructions>(harness.instructions());
     configs.insert::<PipelineManifest>(derive_manifest(&harness, base));
     let spec =
         BloomDraft { proposals: vec![member(WORKPIECE, digest(0x51))], base, configs, ..BloomDraft::default() }.seal();
@@ -85,7 +89,7 @@ fn a_verdict_naming_an_undeclared_verifier_is_refused() {
 
     // Run until the lane has actually rendered its verdict, then give the intake
     // cycle every chance to admit it.
-    harness.run_until(|harness| verify_ran(harness), 80);
+    harness.run_until(verify_ran, 80);
     for _ in 0..5 {
         harness.tick();
     }

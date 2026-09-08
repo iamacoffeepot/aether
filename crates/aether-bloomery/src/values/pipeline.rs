@@ -301,19 +301,29 @@ impl PipelineManifest {
         self.intern(failure.as_str()) == Some(failure)
     }
 
-    /// Every identity in `failures` this vocabulary does not declare, in the
-    /// set's own canonical order.
+    /// Every position in `failures` this vocabulary does not declare, named as
+    /// best this reader can, in the set's own canonical order.
     ///
     /// The refusal's evidence: a verdict naming one of these is refused at
-    /// admission, where the bloom — and so the vocabulary it sealed — is in
-    /// hand (ADR-0215).
+    /// admission, where the bloom — and so the vocabulary it sealed — is in hand
+    /// (ADR-0215). Judged on *positions* rather than on names, because a mask is
+    /// a mask over positions and a reader without the declaring vocabulary
+    /// cannot spell a position past the one it compiles. A position at or past
+    /// the declared width is undeclared; so is one whose declared identity is
+    /// not the identity this binary compiles at that position, which is a
+    /// vocabulary that moved a compiled identity off its own bit and would
+    /// re-key every mask already journaled.
     #[must_use]
     pub fn undeclared_verifiers(&self, failures: VerifyFailureSet) -> Vec<String> {
-        failures
-            .iter()
-            .filter(|failure| !self.declares_verifier(*failure))
-            .map(|failure| String::from(failure.as_str()))
-            .collect()
+        failures.positions().filter(|position| !self.declares_position(*position)).map(name_of).collect()
+    }
+
+    /// Whether this vocabulary declares the identity at `position`.
+    fn declares_position(&self, position: u8) -> bool {
+        let Some(declared) = self.verifiers.identities.get(usize::from(position)) else {
+            return false;
+        };
+        VerifyFailure::ALL.get(usize::from(position)).is_none_or(|compiled| compiled.as_str() == declared.as_str())
     }
 
     /// Every lane command the repository declares, model lanes first.
@@ -354,6 +364,15 @@ impl PipelineManifest {
         }
         Ok(manifest)
     }
+}
+
+/// How a refusal spells one verifier position: the compiled identity's name
+/// when this binary has one, and the bare position when it does not — the
+/// bloom's recorded manifest is what names the rest.
+fn name_of(position: u8) -> String {
+    VerifyFailure::ALL
+        .get(usize::from(position))
+        .map_or_else(|| format!("verifier position {position}"), |identity| String::from(identity.as_str()))
 }
 
 /// The declared spelling of each compiled lane command, in the order given.

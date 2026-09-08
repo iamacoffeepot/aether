@@ -30,6 +30,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 use core::iter::FromIterator;
+use core::str::from_utf8;
 
 use aether_data::Schema;
 use aether_data::schema::{LabelCell, LabelNode, SchemaCell, SchemaType};
@@ -46,18 +47,20 @@ const IDENTITY_PREFIX: &str = "verify.";
 
 /// The most bytes one verifier identity's name may occupy.
 ///
-/// A cap rather than an open string because a declared identity is stored
-/// inline in a [`VerifyFailureSet`], which is `Copy` and travels through the
-/// fold by value. The longest identity this repository declares is
+/// A cap rather than an open string because an identity is `Copy` and stores
+/// its name inline. The longest identity this repository declares is
 /// `verify.containment` at eighteen bytes.
 pub const MAX_VERIFIER_IDENTITY_BYTES: usize = 24;
 
-/// How many identities a set can carry that this binary compiles no name for —
-/// the declared vocabulary's width less the compiled one's.
-const DECLARED_SLOTS: usize = MAX_VERIFIER_IDENTITIES - VerifyFailure::ALL.len();
-
 /// The vocabulary bound as a position count, which is what a mask is indexed by.
-const POSITION_COUNT: u8 = MAX_VERIFIER_IDENTITIES as u8;
+const POSITION_COUNT: u8 = 16;
+
+/// How many positions the compiled vocabulary occupies. A declared identity
+/// this binary compiles no name for starts above them.
+const COMPILED_POSITIONS: u8 = 10;
+
+const _: () = assert!(POSITION_COUNT as usize == MAX_VERIFIER_IDENTITIES);
+const _: () = assert!(COMPILED_POSITIONS as usize == VerifyFailure::ALL.len());
 
 /// One verifier identity's name, stored inline so an identity stays `Copy`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -96,7 +99,7 @@ impl IdentityName {
     fn as_str(&self) -> &str {
         // Every stored name came through `new`, which admits ASCII only, so the
         // bytes are valid UTF-8 by construction; an empty name renders empty.
-        core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or("")
+        from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or("")
     }
 }
 
@@ -252,8 +255,7 @@ impl VerifyFailure {
         if Self::from_name(name).is_some() {
             return None;
         }
-        let slot = usize::from(position).checked_sub(Self::ALL.len())?;
-        if slot >= DECLARED_SLOTS {
+        if position < COMPILED_POSITIONS || position >= POSITION_COUNT {
             return None;
         }
         Some(Self::Declared(DeclaredIdentity { position, name: IdentityName::new(name)? }))
@@ -292,12 +294,6 @@ impl VerifyFailure {
 
     const fn bit(self) -> u16 {
         1 << self.position()
-    }
-
-    /// The first position a declared identity may occupy — the compiled
-    /// vocabulary's width.
-    const fn first_declared_position() -> u8 {
-        POSITION_COUNT - DECLARED_SLOTS as u8
     }
 }
 
@@ -354,9 +350,7 @@ impl<'de> WireDecode<'de> for VerifyFailure {
         // The real interning is the set decoder's, below — a lone identity is
         // not a shape any durable row carries, since every recorded verifier
         // verdict is a set.
-        Self::from_name(&name)
-            .or_else(|| Self::declared(Self::first_declared_position(), &name))
-            .ok_or(WireError::Message(name))
+        Self::from_name(&name).or_else(|| Self::declared(COMPILED_POSITIONS, &name)).ok_or(WireError::Message(name))
     }
 }
 
@@ -393,7 +387,7 @@ impl Visitor<'_> for VerifyFailureVisitor {
         E: DeError,
     {
         VerifyFailure::from_name(value)
-            .or_else(|| VerifyFailure::declared(VerifyFailure::first_declared_position(), value))
+            .or_else(|| VerifyFailure::declared(COMPILED_POSITIONS, value))
             .ok_or_else(|| E::unknown_variant(value, &VERIFY_FAILURE_NAMES))
     }
 }
@@ -427,61 +421,46 @@ const VERIFY_FAILURE_NAMES: [&str; 10] = [
 /// not a property of this reusable value.
 ///
 /// The mask is over *interned positions*, and interning is relative to a
-/// vocabulary — the compiled one for a reader holding no manifest, which is the
-/// same relativity the mask always had against a binary. The names of
-/// identities the compiled vocabulary does not carry ride beside the mask so a
-/// decoded row re-encodes as the row it was, rather than losing the very
-/// identity the tolerance exists to admit.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VerifyFailureSet {
-    mask: u16,
-    declared: [IdentityName; DECLARED_SLOTS],
-}
+/// vocabulary: the compiled one for a reader holding no manifest, the bloom's
+/// sealed one for the door that admits a verdict. That is the same relativity
+/// the mask always had against a binary, moved somewhere it is recorded — the
+/// bloom's journaled [`PipelineManifest`](super::PipelineManifest) is what names
+/// a position this binary compiles no name for.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
+pub struct VerifyFailureSet(u16);
 
 impl VerifyFailureSet {
     /// The empty set.
-    pub const EMPTY: Self = Self { mask: 0, declared: [IdentityName::EMPTY; DECLARED_SLOTS] };
+    pub const EMPTY: Self = Self(0);
 
     /// A set containing exactly `failure`.
     #[must_use]
-    pub fn one(failure: VerifyFailure) -> Self {
-        let mut set = Self { mask: failure.bit(), ..Self::EMPTY };
-        if let VerifyFailure::Declared(identity) = failure
-            && let Some(slot) = Self::slot_of(identity.position)
-        {
-            set.declared[slot] = identity.name;
-        }
-        set
+    pub const fn one(failure: VerifyFailure) -> Self {
+        Self(failure.bit())
     }
 
     /// Whether no failure identity is present.
     #[must_use]
     pub const fn is_empty(self) -> bool {
-        self.mask == 0
+        self.0 == 0
     }
 
     /// Whether `failure` belongs to the set.
     #[must_use]
-    pub fn contains(self, failure: VerifyFailure) -> bool {
-        self.identity_at(failure.position()) == Some(failure)
+    pub const fn contains(self, failure: VerifyFailure) -> bool {
+        self.0 & failure.bit() != 0
     }
 
     /// The set-theoretic union.
     #[must_use]
-    pub fn union(self, other: Self) -> Self {
-        let mut out = Self { mask: self.mask | other.mask, declared: self.declared };
-        for (slot, name) in out.declared.iter_mut().enumerate() {
-            if name.is_empty() {
-                *name = other.declared[slot];
-            }
-        }
-        out
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 
     /// The set-theoretic intersection.
     #[must_use]
-    pub fn intersection(self, other: Self) -> Self {
-        self.retaining(self.mask & other.mask)
+    pub const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
     }
 
     /// The set-theoretic difference: every identity in `self` that `other` does
@@ -493,24 +472,35 @@ impl VerifyFailureSet {
     /// stay one hand-written list and one stated difference rather than two
     /// lists free to drift.
     #[must_use]
-    pub fn difference(self, other: Self) -> Self {
-        self.retaining(self.mask & !other.mask)
+    pub const fn difference(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
     }
 
-    /// Iterate in the canonical identity order.
+    /// Iterate the identities this reader can name, in canonical order.
     ///
-    /// A mask bit at a declared position whose name this set does not carry —
-    /// what a four-hex artifact token alone can produce — names no identity and
-    /// is skipped, exactly as an unknown bit was invisible to iteration before
-    /// declared identities existed.
+    /// A position the compiled vocabulary does not name yields nothing here —
+    /// the same invisibility an unknown mask bit always had — because naming it
+    /// takes the vocabulary that declared it. [`positions`](Self::positions) is
+    /// the vocabulary-free view, and it is what an admission door holding the
+    /// bloom's manifest judges against.
     pub fn iter(self) -> impl Iterator<Item = VerifyFailure> {
-        (0..POSITION_COUNT).filter_map(move |position| self.identity_at(position))
+        VerifyFailure::ALL.into_iter().filter(move |failure| self.contains(*failure))
+    }
+
+    /// Every position this set names, in canonical order, whether or not this
+    /// binary compiles a name for it.
+    ///
+    /// The set is a mask over interned positions and a position is what every
+    /// decision downstream actually turns on, so this is the view that survives
+    /// a vocabulary the reader does not compile.
+    pub fn positions(self) -> impl Iterator<Item = u8> {
+        (0..POSITION_COUNT).filter(move |position| self.0 & (1u16 << position) != 0)
     }
 
     /// Encode the canonical artifact token: exactly four lowercase hex digits.
     #[must_use]
     pub fn to_mask(self) -> String {
-        format!("{:04x}", self.mask)
+        format!("{:04x}", self.0)
     }
 
     /// Decode a two- or four-lowercase-hex-digit artifact token.
@@ -532,7 +522,7 @@ impl VerifyFailureSet {
             }
             _ => return None,
         };
-        Some(Self { mask: value, ..Self::EMPTY })
+        Some(Self(value))
     }
 
     /// One identity name interned against this set's vocabulary: the compiled
@@ -541,59 +531,14 @@ impl VerifyFailureSet {
     ///
     /// Positions are handed out in the order names arrive, which is the order a
     /// canonical row carries them — so a manifest that appends identities past
-    /// the compiled vocabulary interns to the same positions it declared.
+    /// the compiled vocabulary interns them to the positions it declared.
     fn intern(self, name: &str) -> Option<VerifyFailure> {
         if let Some(compiled) = VerifyFailure::from_name(name) {
             return Some(compiled);
         }
-        let free = self.declared.iter().position(|declared| declared.is_empty())?;
-        VerifyFailure::declared(VerifyFailure::first_declared_position() + u8::try_from(free).ok()?, name)
-    }
-
-    /// The identity this set carries at `position`, or `None` when the bit is
-    /// clear or names nothing this set can spell.
-    fn identity_at(self, position: u8) -> Option<VerifyFailure> {
-        if position >= POSITION_COUNT || self.mask & (1u16 << position) == 0 {
-            return None;
-        }
-        match VerifyFailure::ALL.get(usize::from(position)) {
-            Some(compiled) => Some(*compiled),
-            None => {
-                let name = self.declared[Self::slot_of(position)?];
-                (!name.is_empty()).then_some(VerifyFailure::Declared(DeclaredIdentity { position, name }))
-            }
-        }
-    }
-
-    /// This set's declared-name slot for `position`, or `None` when `position`
-    /// belongs to the compiled vocabulary or lies past the bound.
-    fn slot_of(position: u8) -> Option<usize> {
-        let slot = usize::from(position).checked_sub(VerifyFailure::ALL.len())?;
-        (slot < DECLARED_SLOTS).then_some(slot)
-    }
-
-    /// This set narrowed to `mask`, dropping the names of every bit the mask
-    /// clears so an absent identity leaves nothing behind to compare.
-    fn retaining(self, mask: u16) -> Self {
-        let mut out = Self { mask, declared: self.declared };
-        for (slot, name) in out.declared.iter_mut().enumerate() {
-            if mask & (1u16 << (VerifyFailure::ALL.len() + slot)) == 0 {
-                *name = IdentityName::EMPTY;
-            }
-        }
-        out
-    }
-}
-
-impl Default for VerifyFailureSet {
-    fn default() -> Self {
-        Self::EMPTY
-    }
-}
-
-impl fmt::Debug for VerifyFailureSet {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_set().entries(self.iter()).finish()
+        (COMPILED_POSITIONS..POSITION_COUNT)
+            .find(|position| self.0 & (1u16 << position) == 0)
+            .and_then(|position| VerifyFailure::declared(position, name))
     }
 }
 
@@ -608,9 +553,8 @@ impl Serialize for VerifyFailureSet {
     where
         S: Serializer,
     {
-        let identities = self.iter().collect::<Vec<_>>();
-        let mut sequence = serializer.serialize_seq(Some(identities.len()))?;
-        for failure in identities {
+        let mut sequence = serializer.serialize_seq(Some(self.0.count_ones() as usize))?;
+        for failure in self.iter() {
             sequence.serialize_element(&failure)?;
         }
         sequence.end()
@@ -636,7 +580,7 @@ impl<'de> Visitor<'de> for VerifyFailureSetVisitor {
             let Some(failure) = set.intern(&name) else {
                 return Err(A::Error::unknown_variant(&name, &VERIFY_FAILURE_NAMES));
             };
-            if set.iter().any(|existing| existing.as_str() == name) {
+            if set.contains(failure) {
                 return Err(A::Error::custom(format!("duplicate verifier failure `{name}`")));
             }
             if previous.is_some_and(|previous| previous >= failure) {
@@ -711,28 +655,30 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_identity_past_the_compiled_vocabulary_decodes_and_re_encodes() {
+    fn a_declared_identity_past_the_compiled_vocabulary_decodes_as_its_position() {
         // Tripwire: decode is tolerant where intake is strict (ADR-0215). A row
         // written by a coordinator whose manifest declares an eleventh identity
         // must fold on a binary that compiles ten, or replay aborts at boot on
-        // the journal the record exists to keep readable — and it must re-encode
-        // as the row it was, since a decode that silently dropped the identity
-        // would rewrite history rather than read it.
+        // the journal the record exists to keep readable. What survives is the
+        // position — which is what every decision downstream turns on, and what
+        // the bloom's recorded manifest names.
         let decoded = decode(&["verify.fmt", "verify.novel"]).expect("a declared identity decodes");
         let novel = VerifyFailure::declared(10, "verify.novel").expect("the eleventh position is declarable");
 
-        assert!(decoded.contains(novel), "the identity survives the decode as its declared position");
         assert_eq!(novel.position(), 10, "an identity past the compiled ten takes the next position");
         assert_eq!(novel.compiled_position(), None, "and no position in the compiled table");
+        assert!(decoded.contains(novel), "the identity survives the decode as its declared position");
+        assert_eq!(decoded.positions().collect::<Vec<_>>(), [1, 10], "both positions are in the mask");
         assert_eq!(
             decoded.iter().map(|failure| failure.as_str().to_owned()).collect::<Vec<_>>(),
-            ["verify.fmt", "verify.novel"],
-            "the decoded set re-encodes as the names it was given",
+            ["verify.fmt"],
+            "and naming a position this binary compiles no name for takes the vocabulary that declared it",
         );
-        assert_eq!(
-            from_bytes::<VerifyFailureSet>(&to_vec(&decoded).expect("the set encodes")).expect("and decodes"),
-            decoded,
-        );
+
+        // A malformed identity is still a decode failure: tolerance is about a
+        // vocabulary this reader does not carry, never about a row it cannot
+        // parse.
+        assert!(decode(&["verify.NOVEL"]).is_err());
 
         // The bound is the manifest reader's, so a seventeenth position is not
         // declarable however well-formed its name, and neither is a name the
@@ -831,7 +777,7 @@ mod tests {
         // too-narrow format renders `0x3ff` as the three characters the
         // decoder refuses — the artifact name then buys no upload and the
         // failing lane's evidence is dropped silently (#5798).
-        assert_eq!(VerifyFailureSet::from_mask(&format!("{:0width$x}", all.mask)), Some(all));
+        assert_eq!(VerifyFailureSet::from_mask(&format!("{:0width$x}", all.0)), Some(all));
     }
 
     const MEMBERS_IN_CANONICAL_ORDER: [&str; 3] = ["verify.preflight", "verify.fmt", "verify.deps"];
