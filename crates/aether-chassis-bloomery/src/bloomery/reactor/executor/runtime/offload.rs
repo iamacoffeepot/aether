@@ -186,6 +186,17 @@ struct Ledger {
     /// re-run each one the moment its answer landed — turning the reactor's
     /// configured poll interval into "as fast as the network answers".
     asked_this_round: BTreeSet<AdapterCall>,
+    /// Nonces whose submit this offload owes an answer for, from the moment a
+    /// turn asks until a turn consumes the answer.
+    ///
+    /// Rounds do not clear it, and that is the point: the registry row is
+    /// written before the submit runs, so between the two the row is the only
+    /// evidence of a dispatch and it says the wrong thing. The drain reads this
+    /// set to tell "the row proves the entry reached a worker" from "the row is
+    /// the reservation the submit has not answered yet", and would otherwise
+    /// ack an entry past a submit that never ran — leaving an outstanding order
+    /// no run stands behind until its deadline reaps it.
+    owed_submits: BTreeSet<Nonce>,
 }
 
 /// A capture waiting to be published (ADR-0152), held across turns because the
@@ -283,6 +294,13 @@ impl AdapterOffload {
         ledger.wanted.clear();
     }
 
+    /// Whether a submit for `nonce` is still owed — asked and not yet answered
+    /// to a turn, whatever stage of the offload it is at.
+    #[must_use]
+    pub fn owes_submit(&self, nonce: &Nonce) -> bool {
+        self.lock().owed_submits.contains(nonce)
+    }
+
     /// Hand this round's backlog to workers, up to [`MAX_IN_FLIGHT`] at once.
     /// What does not fit stays queued and starts as slots free, so a round
     /// wider than the ceiling still finishes inside its own round.
@@ -352,12 +370,18 @@ impl AdapterOffload {
         let call = work.call();
         let mut ledger = self.lock();
         if let Some(answer) = ledger.answers.remove(&call) {
+            if let AdapterCall::Submit(nonce) = &call {
+                ledger.owed_submits.remove(nonce);
+            }
             return Some(answer);
         }
         let held = ledger.in_flight.contains(&call)
             || ledger.asked_this_round.contains(&call)
             || ledger.wanted.iter().any(|held| held.call() == call);
         if !held {
+            if let AdapterCall::Submit(nonce) = &call {
+                ledger.owed_submits.insert(nonce.clone());
+            }
             ledger.wanted.push_back(work);
         }
         None
@@ -422,8 +446,6 @@ impl ExecutorPort for OffloadedPort<'_> {
     }
 
     fn holds_submit(&self, nonce: &Nonce) -> bool {
-        let call = AdapterCall::Submit(nonce.clone());
-        let ledger = self.offload.lock();
-        ledger.in_flight.contains(&call) || ledger.answers.contains_key(&call)
+        self.offload.owes_submit(nonce)
     }
 }

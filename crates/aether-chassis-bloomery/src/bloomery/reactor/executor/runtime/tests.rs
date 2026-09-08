@@ -3993,4 +3993,45 @@ mod offloaded_adapter_calls {
         assert_eq!(offload.in_flight(), MAX_IN_FLIGHT, "the surplus asks wait for a free slot rather than a thread");
         backend.open();
     }
+
+    /// A submit the offload has been asked for but has not answered keeps its
+    /// outbox entry unacked.
+    ///
+    /// The registry row is written before the call runs (the lane resolves
+    /// session reuse from that very row), so between the two the row exists and
+    /// no run does. A drain that read the row alone as proof the entry reached
+    /// a worker would ack past a dispatch that never started, leaving an
+    /// outstanding order nothing stands behind until its deadline reaps it —
+    /// the member silently loses a stage.
+    ///
+    /// No worker is started here at all, which is the shape a full ceiling or a
+    /// dropped want produces: asked, owed, and not yet run.
+    #[test]
+    fn a_submit_the_offload_still_owes_keeps_its_entry_unacked() {
+        let mut store = SqliteStore::open(":memory:").unwrap();
+        let bloom = BloomId(digest(1));
+        let (sequence, _) = enqueue_construct_dispatch(&mut store, bloom, "wp-owed", 5);
+        let shell = ExecutorShell::new(Arc::new(LatchedSubmit::default()));
+        let mut offload = AdapterOffload::new();
+
+        offload.open_round();
+        let (handles, ack_through, transient_failure) = {
+            let port = offload.port(&shell);
+            drain_and_dispatch(&mut store, &port, NOW_UNIX_MILLIS).unwrap()
+        };
+        assert!(handles.is_empty(), "an unanswered submit tracks no handle");
+        assert_eq!(ack_through, None, "the turn that hands the submit out acks nothing");
+        assert_eq!(transient_failure, None, "an in-flight submit is not a failure, so it opens no backoff window");
+        assert!(
+            store.lookup_order(&format!("dispatch-{sequence}")).unwrap().is_some(),
+            "the row is written before the call runs, which is what makes it an unreliable proof",
+        );
+
+        offload.open_round();
+        let (_, ack_through, _) = {
+            let port = offload.port(&shell);
+            drain_and_dispatch(&mut store, &port, NOW_UNIX_MILLIS).unwrap()
+        };
+        assert_eq!(ack_through, None, "a later turn must not read the reservation row as a submitted dispatch");
+    }
 }
