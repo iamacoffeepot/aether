@@ -355,14 +355,18 @@ impl WidgetDrawItem {
 
     /// Intersect this item's clip with a slot clip in the same coordinate
     /// space. Empty or invalid results omit the item.
+    ///
+    /// Consumes the item and rewrites only its clip: the caller already owns
+    /// the value it hands in, so a surviving `Text` run keeps its glyph
+    /// allocation instead of paying a copy per compositor level per frame.
     #[must_use]
-    pub(super) fn intersect_clip(&self, slot: Option<WidgetClipRect>) -> Option<Self> {
+    pub(super) fn intersect_clip(self, slot: Option<WidgetClipRect>) -> Option<Self> {
         let clip = match intersect_widget_clips(self.clip(), slot) {
             WidgetClipIntersection::Unbounded => None,
             WidgetClipIntersection::Finite { rect } => Some(rect),
             WidgetClipIntersection::Empty => return None,
         };
-        Some(self.clone().with_clip(clip))
+        Some(self.with_clip(clip))
     }
 
     /// This item drawn under `clip` instead of its own, whichever variant
@@ -2726,6 +2730,33 @@ mod tests {
             },
             "offset moves the baseline and item-local clip while preserving the glyph run",
         );
+    }
+
+    #[test]
+    fn intersect_clip_rewrites_the_clip_without_recopying_the_glyph_run() {
+        // Tripwire: intersect_clip used to clone the item its sole caller
+        // already owns, recopying every surviving glyph run once per
+        // compositor level per frame. The pointer identity is what the
+        // by-value signature buys; equality alone would not notice a clone.
+        let text = String::from("a glyph run long enough to sit on the heap");
+        let pointer = text.as_ptr();
+        let placed = WidgetDrawItem::Text {
+            x: 5.0,
+            y: 6.0,
+            font_id: 11,
+            text,
+            size_pixels: 14.0,
+            color: Rgba::WHITE,
+            clip: Some(WidgetClipRect { x: 10.0, y: 20.0, width: 30.0, height: 40.0 }),
+        }
+        .intersect_clip(Some(WidgetClipRect { x: 15.0, y: 25.0, width: 10.0, height: 12.0 }))
+        .expect("a finite overlap keeps the item");
+
+        let WidgetDrawItem::Text { text, clip, .. } = placed else {
+            panic!("expected the Text variant back, got {placed:?}");
+        };
+        assert_eq!(clip, Some(WidgetClipRect { x: 15.0, y: 25.0, width: 10.0, height: 12.0 }));
+        assert_eq!(text.as_ptr(), pointer, "the surviving glyph run must be moved, not copied");
     }
 
     #[test]
