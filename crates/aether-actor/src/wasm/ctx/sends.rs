@@ -39,7 +39,7 @@ use crate::mail::mailbox::Mailbox;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::reply_mode::ReplyMode;
 use crate::model::{
-    Addressable, CallerAddressable, CallerScope, CallerScoped, HandlesKind, Instanced, Resolve, Singleton,
+    Addressable, CallerAddressable, CallerScope, CallerScoped, Embedded, HandlesKind, Instanced, Resolve, Singleton,
 };
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, Registry};
@@ -85,16 +85,17 @@ impl Sends<'_> {
     /// receiver actor `R`, carrying this actor's id as the send's `from`.
     #[must_use]
     pub fn actor<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R> {
-        self.__actor_with_namespace::<R>(R::NAMESPACE)
+        self.actor_with_namespace::<R>(R::NAMESPACE)
     }
 
     /// Namespace-aware typed actor construction, identical to
-    /// [`WasmCtx::__actor_with_namespace`]. Not part of the public API — the
-    /// cap-owned facades that address by a runtime namespace (the
-    /// `aether-component` peer verbs) build on it.
-    #[doc(hidden)]
+    /// [`WasmCtx::actor_with_namespace`]: the shared body behind
+    /// [`Self::actor`] and [`Self::resolve_embedded`].
     #[must_use]
-    pub fn __actor_with_namespace<R: Singleton + CallerAddressable>(&self, namespace: &str) -> WasmActorMailbox<'_, R> {
+    pub(crate) fn actor_with_namespace<R: Singleton + CallerAddressable>(
+        &self,
+        namespace: &str,
+    ) -> WasmActorMailbox<'_, R> {
         WasmActorMailbox::__new(
             <<R as Addressable>::Resolver as Resolve>::resolve(
                 self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE),
@@ -117,6 +118,14 @@ impl Sends<'_> {
             self.mailbox,
             self.inline,
         )
+    }
+
+    /// The instance of embedded actor `R` loaded under the runtime name
+    /// `name`, identical to [`WasmCtx::resolve_embedded`]: a helper handed a
+    /// `Sends` names the same instance its caller would have named.
+    #[must_use]
+    pub fn resolve_embedded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R> {
+        self.actor_with_namespace::<R>(name)
     }
 
     /// Send `payload` through a stored [`Mailbox<K>`] addressing token,

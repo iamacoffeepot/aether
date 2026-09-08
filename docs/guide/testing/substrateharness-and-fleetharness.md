@@ -162,8 +162,8 @@ The component host resolves `parent_name` through the live registry, uses its
 canonical path as the new actor's lineage, and returns the ordinary
 `LoadResult`. On success, `LoadResult::Ok.name` is the canonical child address,
 for example `PARENT/aether.embedded:worker`; an unknown parent produces
-`LoadResult::Err`. This makes parent-relative `PeerCtxExt::peer` and
-`peer_named` routes testable across explicit and nested component scopes.
+`LoadResult::Err`. This makes parent-relative typed addressing testable across
+explicit and nested component scopes.
 Ordinary `LoadComponent` mail still loads beneath `aether.component`, and this
 harness constructor does not add an MCP or production-hub load mode.
 

@@ -24,11 +24,15 @@
 //! test of the handoff rather than a way around it.
 //!
 //! Compiled only under `cfg(all(feature = "github", any(test, feature =
-//! "testing")))` — the `github` half because the order registry and the fixture
-//! it scripts against are both that feature's, the `testing` half beside the
-//! [`FakeGithub`](aether_bloomery_github::testing::FakeGithub) fixture it gates,
-//! so a production binary carries neither the kinds nor the handler that admits
-//! them.
+//! "testing")))` — the `github` half because the order registry and the
+//! fixture repository it scripts against are both that feature's, the
+//! `testing` half because a substituted verdict is test-only in a way the
+//! [fixture backend](aether_bloomery_github::fixture) is not: the fixture is a
+//! replayable *world* a real lane runs against (which is why #4871 promoted it
+//! to production), while a scripted verdict stands in for the lane itself. A
+//! benchmark bloom dispatches real lanes, so it needs the one and never the
+//! other, and a production binary carries neither the kinds nor the handler
+//! that admits them.
 //!
 //! [`admit_uploaded`]: crate::bloomery::admit_uploaded
 

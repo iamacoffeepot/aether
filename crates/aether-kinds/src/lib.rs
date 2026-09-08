@@ -603,13 +603,13 @@ mod control_plane {
     /// Replica 0 claims the bare `base`; every later replica claims
     /// `{base}-{index}`. The bare instance is what makes a replicated
     /// component reachable by bare-type peer addressing at all
-    /// (iamacoffeepot/aether#5727): `ctx.peer::<R>()` folds `R::NAMESPACE`
+    /// (iamacoffeepot/aether#5727): `ctx.actor::<R>()` folds `R::NAMESPACE`
     /// beneath the caller's host, so a fan-out that suffixed *every*
     /// instance registered nothing at the name the compile-time resolver
     /// computes and every bare-type send to it silently missed. Suffixing
     /// from 1 also makes `replicas: 1` load exactly what an omitted field
-    /// loads, and leaves `peer_named::<R>("{base}-2")` naming one replica
-    /// exactly.
+    /// loads, and leaves `ctx.resolve_embedded::<R>("{base}-2")` naming one
+    /// replica exactly.
     ///
     /// The rule lives here, beside the kind whose `name` field carries it,
     /// because two independent producers must agree on it byte for byte:
@@ -1540,7 +1540,7 @@ mod control_plane {
         /// Replica 0 claims the bare base name and later replicas claim the
         /// `-{index}` suffix. The bug this catches is a fan-out that suffixes
         /// index 0 again: the load then registers nothing at the name
-        /// `ctx.peer::<R>()` folds from `R::NAMESPACE`, and every bare-type
+        /// `ctx.actor::<R>()` folds from `R::NAMESPACE`, and every bare-type
         /// send to the replicated component silently misses
         /// (iamacoffeepot/aether#5727).
         #[test]

@@ -141,7 +141,7 @@ fn daily_ref(date: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{DayCoverage, RollError, advance_main, cut_daily, daily_ref};
-    use crate::testing::FakeGithub;
+    use crate::fixture::FakeGithub;
 
     const MAIN_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DAY_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

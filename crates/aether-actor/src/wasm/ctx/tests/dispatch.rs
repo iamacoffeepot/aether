@@ -223,7 +223,7 @@ fn embedded_actor_resolution_and_delivery_use_entry_and_inline_logical_parents()
     let child_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(child.0, &registry, NO_INBOUND_SOURCE);
 
     let default = entry_ctx.actor::<EmbeddedPeer>();
-    let named = entry_ctx.__actor_with_namespace::<EmbeddedPeer>("named-peer");
+    let named = entry_ctx.actor_with_namespace::<EmbeddedPeer>("named-peer");
     let nested = child_ctx.actor::<EmbeddedPeer>();
     assert_eq!(default.mailbox_id(), default_entry_peer);
     assert_eq!(named.mailbox_id(), named_entry_peer);

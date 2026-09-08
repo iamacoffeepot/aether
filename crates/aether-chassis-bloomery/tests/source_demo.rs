@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use aether_bloomery::testing::digest;
 use aether_bloomery::{BloomId, Digest, IntegrateOutcome};
-use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{GitSource, GithubLanding, LandingSource, MainlineRef, ProposalOutcome, SourceError};
 use aether_chassis_bloomery::bloomery::SourceShell;
 

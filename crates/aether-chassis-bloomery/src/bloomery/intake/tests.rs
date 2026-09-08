@@ -16,7 +16,7 @@ use aether_bloomery::{
     SurfacePathRequest, SurfaceRequest, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder,
     WorkpieceId, reduce,
 };
-use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
     ActionsExecutor, Artifact, ExecutorError, GithubError, LaneWorkflows, RunConclusion, RunStatus,
 };

@@ -49,7 +49,6 @@ pub use kinds::*;
 use core::f32::consts::FRAC_PI_3;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_component::component::PeerCtxExt;
 use aether_kinds::{Key, KeyRelease, Tick, keycode};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_math::{TAU, Vec2, Vec3};
@@ -173,12 +172,12 @@ impl WasmActor for CameraController {
         match &mut self.shadow {
             Shadow::Orbit(orbit) => {
                 if let Some(params) = step_orbit(orbit, held, &self.config) {
-                    ctx.peer::<CameraComponent>().send(&CameraOrbitSet { name: camera, params });
+                    ctx.actor::<CameraComponent>().send(&CameraOrbitSet { name: camera, params });
                 }
             }
             Shadow::Topdown(topdown) => {
                 if let Some(params) = step_topdown(topdown, held, &self.config) {
-                    ctx.peer::<CameraComponent>().send(&CameraTopdownSet { name: camera, params });
+                    ctx.actor::<CameraComponent>().send(&CameraTopdownSet { name: camera, params });
                 }
             }
         }
@@ -192,7 +191,7 @@ impl CameraController {
         let camera = self.config.camera.clone();
         match &self.shadow {
             Shadow::Orbit(orbit) => {
-                ctx.peer::<CameraComponent>().send(&CameraOrbitSet {
+                ctx.actor::<CameraComponent>().send(&CameraOrbitSet {
                     name: camera,
                     params: OrbitParams {
                         distance: Some(orbit.distance),
@@ -205,7 +204,7 @@ impl CameraController {
                 });
             }
             Shadow::Topdown(topdown) => {
-                ctx.peer::<CameraComponent>().send(&CameraTopdownSet {
+                ctx.actor::<CameraComponent>().send(&CameraTopdownSet {
                     name: camera,
                     params: TopdownParams {
                         center: Some([topdown.center.x, topdown.center.y]),

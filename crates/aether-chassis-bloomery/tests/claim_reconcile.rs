@@ -46,7 +46,7 @@ use aether_bloomery::{
     Evidence, EvidenceKind, Fact, Membership, ReleaseSeal, ResolutionClaim, SealConflict, SealError, Snapshot,
     SupersedeError, TransferSeal,
 };
-use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{GitSource, MainlineRef};
 use aether_chassis_bloomery::bloomery::SourceShell;
 use aether_chassis_bloomery::source::SourceCapabilityState;

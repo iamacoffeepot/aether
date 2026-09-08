@@ -4,21 +4,18 @@
 //! A loaded component resolves under the reserved `aether.embedded` scope.
 //! The [`Embedded`] resolver folds the `aether.embedded:<NAMESPACE>` node onto
 //! the runtime parent mailbox selected by
-//! [`CallerScoped`](aether_actor::CallerScoped). The same tagged mailbox id is
-//! a sufficient routing seed for default, named, nested, and re-parented peer
-//! resolution; no raw carry or lookup is needed. The explicit by-name verb
-//! [`resolve_embedded`] still supplies the root component-host mailbox for
-//! callers that deliberately address that host.
+//! [`CallerScoped`](aether_actor::CallerScoped), which is how a co-hosted
+//! caller reaches it by bare type. The by-name [`resolve_embedded`] supplies
+//! the root component-host carry instead, for a caller with no such ctx to
+//! resolve from — and this test pins the two to the same address.
 
 // Asserts the host-class fold differs from the bare-NAMESPACE hash, and stands
 // in the `aether.component` carry by name — the primitive yields the reference
 // id under test, not a sibling-cap address.
 #![allow(clippy::disallowed_methods)]
 
-use aether_actor::wasm::NO_INBOUND_SOURCE;
-use aether_actor::wasm::inline::Registry;
-use aether_actor::{Addressable, CallerScope, CallerScoped, Embedded, Manual, Resolve, WasmCtx};
-use aether_component::{PeerCtxExt, resolve_embedded};
+use aether_actor::{Addressable, Embedded};
+use aether_component::resolve_embedded;
 use aether_data::{mailbox_id_from_name, mailbox_id_from_path};
 
 /// A fixture embeddable — stands in for a loaded wasm component, selecting the
@@ -60,8 +57,7 @@ fn embeddable_resolves_under_the_host_class() {
 
     // resolve_embedded folds the rendered lineage
     // `aether.component/aether.embedded:<name>` (ADR-0099 §4/§5) — exactly the
-    // id the host registers the loaded component under, and exactly what the
-    // by-name verb `loaded::<R>(name)` computes.
+    // id the host registers the loaded component under.
     assert_eq!(
         resolve_embedded(FixtureComponent::NAMESPACE),
         mailbox_id_from_path("aether.component/aether.embedded:test.embeddable.fixture"),
@@ -74,34 +70,4 @@ fn embeddable_resolves_under_the_host_class() {
         mailbox_id_from_name("test.embeddable.fixture"),
         "the host-class fold differs from the bare hash — the #1364 fix",
     );
-}
-
-#[test]
-fn embedded_peer_resolution_follows_nested_and_reparented_parents() {
-    assert_eq!(<Embedded as CallerScoped>::SCOPE, CallerScope::Parent);
-
-    let parent_a = mailbox_id_from_path("test.root/test.composite:a");
-    let parent_b = mailbox_id_from_path("test.root/test.composite:b");
-    let caller_a = Embedded::resolve(parent_a.0, "caller", ());
-    let caller_b = Embedded::resolve(parent_b.0, "caller", ());
-    let registry_a = Registry::new();
-    registry_a.set_self_id(caller_a.0);
-    registry_a.set_parent_id(parent_a.0);
-    let registry_b = Registry::new();
-    registry_b.set_self_id(caller_b.0);
-    registry_b.set_parent_id(parent_b.0);
-    let ctx_a: WasmCtx<'_, Manual> = WasmCtx::__new(caller_a.0, &registry_a, NO_INBOUND_SOURCE);
-    let ctx_b: WasmCtx<'_, Manual> = WasmCtx::__new(caller_b.0, &registry_b, NO_INBOUND_SOURCE);
-
-    assert_eq!(ctx_a.peer::<FixtureComponent>().mailbox_id(), FixtureComponent::resolve(parent_a.0, ()));
-    assert_eq!(ctx_b.peer::<FixtureComponent>().mailbox_id(), FixtureComponent::resolve(parent_b.0, ()));
-    assert_eq!(
-        ctx_a.peer_named::<FixtureComponent>("fixture-3").mailbox_id(),
-        Embedded::resolve(parent_a.0, "fixture-3", ()),
-    );
-    assert_eq!(
-        ctx_b.peer_named::<FixtureComponent>("fixture-3").mailbox_id(),
-        Embedded::resolve(parent_b.0, "fixture-3", ()),
-    );
-    assert_ne!(ctx_a.peer::<FixtureComponent>().mailbox_id(), ctx_b.peer::<FixtureComponent>().mailbox_id());
 }

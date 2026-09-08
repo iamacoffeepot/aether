@@ -23,7 +23,7 @@ use aether_bloomery::{
     VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
     split_lane_identity,
 };
-use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
     ActionsExecutor, Artifact, ExecutorError, GitSource, GithubError, LaneWorkflows, MainlineRef, RunConclusion,
     RunStatus, StageVerdict, landing_branch, to_hex,

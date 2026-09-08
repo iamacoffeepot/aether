@@ -38,7 +38,6 @@ mod kinds;
 pub use kinds::*;
 
 use aether_actor::{ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_component::component::PeerCtxExt;
 use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
 use aether_kinds::{MeshLoadResult, Render};
 use aether_lifecycle::LifecycleCapability;
@@ -146,7 +145,7 @@ impl WasmActor for MeshViewer {
             ctx.actor::<RenderCapability>().send_many(&self.cache.faces);
         }
         if !self.cache.outlines.is_empty() {
-            ctx.peer::<CameraComponent>().send(&CameraEyeRequest);
+            ctx.actor::<CameraComponent>().send(&CameraEyeRequest);
         }
     }
 

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use aether_bloomery::testing::{digest, workpiece};
 use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind, ClaimRefState, Digest};
-use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{GitSource, MainlineRef};
 use aether_data::wire::{from_bytes, to_vec};
 

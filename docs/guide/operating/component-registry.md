@@ -131,7 +131,7 @@ name and `describe_kinds` for its exact live schema.
 named for the bare `base` and each later instance `{base}-{index}`. The base is
 selected from explicit load name, export, or default entry namespace in that
 order, so a fan-out over the default namespace leaves replica 0 reachable from a
-co-hosted component's bare-type `ctx.peer::<R>()`, and `replicas: 1` loads
+co-hosted component's bare-type `ctx.actor::<R>()`, and `replicas: 1` loads
 exactly what an omitted field loads. The result carries one shared capabilities
 block and an `instances` list of ids/names.
 

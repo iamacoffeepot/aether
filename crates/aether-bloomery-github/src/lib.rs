@@ -70,10 +70,8 @@ mod webhook;
 
 // Re-export the moved modules so in-crate paths (`crate::source::…`,
 // `crate::correspondence::…`, `crate::marker::…`, `crate::mainline::…`) and
-// the in-process fake stay stable after the extraction.
-#[cfg(any(test, feature = "testing"))]
-pub use aether_bloomery_git::testing;
-pub use aether_bloomery_git::{correspondence, mainline, marker, source};
+// the in-process fixture stay stable after the extraction.
+pub use aether_bloomery_git::{correspondence, fixture, mainline, marker, source};
 
 pub use aether_bloomery_git::{
     ActionsApi, Artifact, ChecksState, Comment, CommissionProjectionApi, DayCoverage, GitCommit, GitDataApi,

@@ -170,7 +170,6 @@ name = "aether-bloomery-git"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-bloomery",
- "aether-bloomery-git",
  "serde",
  "sha2",
  "tempfile",
@@ -182,7 +181,6 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-bloomery",
  "aether-bloomery-git",
- "aether-bloomery-github",
  "jsonwebtoken",
  "reqwest",
  "serde",
@@ -395,16 +393,6 @@ dependencies = [
  "sha2",
  "tracing",
  "wasmtime",
-]
-
-[[package]]
-name = "aether-component-ui-tests"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-component",
- "aether-substrate",
- "trybuild",
 ]
 
 [[package]]

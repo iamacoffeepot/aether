@@ -595,7 +595,7 @@ mod tests {
     };
     use crate::client::ChecksState;
     use crate::client::PullRequestApi;
-    use crate::testing::FakeGithub;
+    use crate::fixture::FakeGithub;
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
