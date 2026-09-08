@@ -458,12 +458,11 @@ impl Reacquired {
     }
 
     fn fire(&self, arm: &Mutex<Option<(String, String)>>, name: &str) {
-        let mut arm = arm.lock().expect("arm");
-        if arm.as_ref().is_none_or(|(armed, _)| armed != name) {
-            return;
+        let armed = arm.lock().expect("arm").take_if(|(target, _)| target.as_str() == name);
+
+        if let Some((target, sha)) = armed {
+            self.local.update_ref(&target, &sha, true).expect("the replacement claimant acquires the name");
         }
-        let (armed, sha) = arm.take().expect("armed");
-        self.local.update_ref(&armed, &sha, true).expect("the replacement claimant acquires the name");
     }
 }
 
