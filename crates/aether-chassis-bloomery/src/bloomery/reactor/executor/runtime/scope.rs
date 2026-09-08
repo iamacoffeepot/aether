@@ -30,7 +30,7 @@
 use aether_bloomery::{BloomId, ConfigRegistry, Digest, Topic, WorkHandle, control::ScopeDispatchPayload};
 use aether_data::wire::from_bytes;
 
-use crate::bloomery::executor::{ExecutorPort, Settled};
+use crate::bloomery::executor::ExecutorPort;
 use crate::bloomery::intake::{DispatchRecord, dispatch_and_record, dispatch_nonce};
 use crate::bloomery::outbox::TopicOutbox;
 use crate::store::StoreBackend;
@@ -99,14 +99,7 @@ pub(super) fn drain_and_dispatch_scope(
             // this even if one were supplied.
             configs: ConfigRegistry::default(),
         };
-        // A worker holds this submit (#5564). The entry stays unacked and the
-        // drain stops here; the completion wake re-drives it and consumes the
-        // answer. Not a transient failure, so no backoff window opens — nothing
-        // failed, and the port recognizes the re-ask as the same submit.
-        let Settled::Answered(submitted) = dispatch_and_record(executor, store, &record, now_unix_millis) else {
-            break;
-        };
-        match submitted {
+        match dispatch_and_record(executor, store, &record, now_unix_millis) {
             Ok(handle) => {
                 // After the order is recorded, never before: the ledger row
                 // says "this run is in flight under this nonce", and a nonce

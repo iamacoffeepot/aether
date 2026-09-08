@@ -10,7 +10,7 @@ use aether_bloomery::{
 use aether_bloomery_github::{ExecutorError, GithubError};
 use aether_data::wire::to_vec;
 
-use crate::bloomery::executor::{ExecutorPort, ExecutorPortError, LocalExecutorError, Settled};
+use crate::bloomery::executor::{ExecutorPort, ExecutorPortError, LocalExecutorError};
 use crate::bloomery::provenance::{ProvenanceRefusal, admit_model_dispatch, gated, journal_refusal};
 use crate::store::{OutstandingOrder, RecordOutcome, StoreBackend};
 
@@ -263,13 +263,6 @@ impl DispatchError {
 /// process's own store — so it decides before the submit is handed out and a
 /// refused dispatch never reaches a worker at all.
 ///
-/// # Settlement
-/// [`Settled::InFlight`] when the port handed the submit to a worker (#5564).
-/// The registry row is already written, which is what lets the worker's own
-/// session-reuse lookup resolve it; the caller leaves its outbox entry unacked
-/// and re-drives, and the port recognizes the re-ask as the same submit rather
-/// than starting a second run.
-///
 /// # Errors
 /// [`DispatchError::Provenance`] if the instruction-provenance gate refused
 /// (nothing was recorded or submitted), [`DispatchError::Store`] if the registry
@@ -280,25 +273,19 @@ pub fn dispatch_and_record(
     store: &mut dyn StoreBackend,
     record: &DispatchRecord,
     now_unix_millis: u64,
-) -> Settled<Result<WorkHandle, DispatchError>> {
+) -> Result<WorkHandle, DispatchError> {
     if gated(&record.transformation.command)
         && let Err(refusal) = admit_model_dispatch(store, record)
     {
         journal_refusal(store, record, &refusal);
-        return Settled::Answered(Err(DispatchError::Provenance(refusal)));
+        return Err(DispatchError::Provenance(refusal));
     }
-    if let Err(error) = record_dispatch_at(store, record, now_unix_millis) {
-        return Settled::Answered(Err(DispatchError::Store(error)));
-    }
-    match port.submit(&record.to_order()) {
-        Settled::InFlight => Settled::InFlight,
-        Settled::Answered(Ok(handle)) => Settled::Answered(Ok(handle)),
-        Settled::Answered(Err(error)) => {
-            // Nothing reached the worker lane, so the row describes a dispatch
-            // that does not exist; drop it rather than leave the deadline sweep
-            // to expire an order no run was ever started for.
-            let _ = store.consume_order(&record.nonce.0);
-            Settled::Answered(Err(DispatchError::Submit(error)))
-        }
-    }
+    record_dispatch_at(store, record, now_unix_millis).map_err(DispatchError::Store)?;
+    port.submit(&record.to_order()).map_err(|error| {
+        // Nothing reached the worker lane, so the row describes a dispatch that
+        // does not exist; drop it rather than leave the deadline sweep to expire
+        // an order no run was ever started for.
+        let _ = store.consume_order(&record.nonce.0);
+        DispatchError::Submit(error)
+    })
 }

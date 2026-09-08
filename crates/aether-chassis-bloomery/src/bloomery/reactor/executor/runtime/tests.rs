@@ -3806,8 +3806,7 @@ mod offloaded_adapter_calls {
 
     use aether_bloomery::testing::digest;
     use aether_bloomery::{
-        BloomId, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, StageCatalog, StageId, Topic, Transformation,
-        WorkHandle, WorkOrder,
+        BloomId, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, ObservedLaneWrites, Topic, WorkHandle, WorkOrder,
     };
     use aether_data::{MailId, MailboxId, Source};
     use aether_substrate::actor::native::NativeCtx;
@@ -3821,28 +3820,29 @@ mod offloaded_adapter_calls {
     };
     use crate::bloomery::outbox::TopicOutbox;
     use crate::bloomery::{ExecutorPort, ExecutorPortError, ExecutorShell, Settled};
-    use crate::store::{SqliteStore, StoreBackend};
+    use crate::store::SqliteStore;
 
-    /// A backend whose `submit` parks until the test opens the gate. Everything
-    /// else answers at once, so the only thing a turn can be waiting on is that
-    /// one submit — which is exactly the shape of the production stall: a
-    /// `workflow_dispatch` round trip, or a lane's `git worktree add`.
+    /// A backend whose lane-write sweep parks until the test opens the gate.
+    ///
+    /// That sweep is a `git` shell-out per live lane in production, and it sits
+    /// structurally *before* the deadline sweep in the tick — so it is exactly
+    /// the call whose round trip used to hold everything behind it.
     #[derive(Default)]
-    struct LatchedSubmit {
+    struct LatchedSweep {
         gate: Mutex<bool>,
         opened: Condvar,
-        submitted: Mutex<Vec<String>>,
+        swept: Mutex<u32>,
         cancelled: Mutex<Vec<String>>,
     }
 
-    impl LatchedSubmit {
+    impl LatchedSweep {
         fn open(&self) {
             *self.gate.lock().unwrap() = true;
             self.opened.notify_all();
         }
 
-        fn submitted(&self) -> Vec<String> {
-            self.submitted.lock().unwrap().clone()
+        fn swept(&self) -> u32 {
+            *self.swept.lock().unwrap()
         }
 
         fn cancelled(&self) -> Vec<String> {
@@ -3850,16 +3850,10 @@ mod offloaded_adapter_calls {
         }
     }
 
-    impl ExecutorBackend for LatchedSubmit {
+    impl ExecutorBackend for LatchedSweep {
         type Error = ExecutorPortError;
 
         fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
-            let mut gate = self.gate.lock().unwrap();
-            while !*gate {
-                gate = self.opened.wait(gate).unwrap();
-            }
-            drop(gate);
-            self.submitted.lock().unwrap().push(order.nonce.0.clone());
             Ok(WorkHandle::new(order.nonce.clone()))
         }
 
@@ -3875,44 +3869,76 @@ mod offloaded_adapter_calls {
         fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
             Ok(Vec::new())
         }
+
+        fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
+            let mut gate = self.gate.lock().unwrap();
+            while !*gate {
+                gate = self.opened.wait(gate).unwrap();
+            }
+            drop(gate);
+            *self.swept.lock().unwrap() += 1;
+            Vec::new()
+        }
+    }
+
+    /// A backend whose per-handle observation parks, for asserting the ceiling.
+    #[derive(Default)]
+    struct LatchedObserve {
+        gate: Mutex<bool>,
+        opened: Condvar,
+    }
+
+    impl LatchedObserve {
+        fn open(&self) {
+            *self.gate.lock().unwrap() = true;
+            self.opened.notify_all();
+        }
+    }
+
+    impl ExecutorBackend for LatchedObserve {
+        type Error = ExecutorPortError;
+
+        fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+            Ok(WorkHandle::new(order.nonce.clone()))
+        }
+
+        fn inspect(&self, _handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+            let mut gate = self.gate.lock().unwrap();
+            while !*gate {
+                gate = self.opened.wait(gate).unwrap();
+            }
+            Ok(ExecutionStatus::Unknown)
+        }
+
+        fn cancel(&self, _handle: &WorkHandle) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+            Ok(Vec::new())
+        }
     }
 
     /// A binding whose self-mailbox is not registered: the completion wake is
     /// warn-dropped, so these tests drive the turns themselves rather than
-    /// riding the actor loop. What they are asserting is what a turn can do
-    /// while a call is out, not how the wake is delivered.
+    /// riding the actor loop. What they assert is what a turn can do while a
+    /// call is out, not how the wake is delivered.
     fn binding() -> Arc<NativeBinding> {
         let (_registry, mailer) = fresh_substrate();
         Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x5564)))
     }
 
-    fn work_order(nonce: &str) -> WorkOrder {
-        WorkOrder {
-            transformation: Transformation::for_member_stage(
-                &StageCatalog::binding_of(StageId::Construct),
-                digest(1),
-                digest(0xC0),
-                digest(0xB0),
-            ),
-            nonce: Nonce(nonce.to_owned()),
-        }
-    }
-
-    /// The failure #5564 names, as one assertion: a submit a worker is holding
+    /// The failure #5564 names, as one assertion: a call a worker is holding
     /// must not stop the deadline sweep behind it.
     ///
-    /// One member's order is already past its sealed deadline and must be
-    /// cancelled; a second member's dispatch is waiting in the outbox and its
-    /// submit never returns. Turn after turn, the drain hands that submit to a
-    /// worker and *keeps going* — inspect, expiry, cancel — so the overdue
-    /// order dies while the submit is still parked.
-    ///
-    /// Pre-fix the drain called `submit` inline, so the turn never reached
-    /// `expire_overdue_orders` at all: this loop would spin to its budget with
-    /// `cancelled()` empty, which is the production stall — a lane burning past
-    /// its wall clock because a peer's dispatch is slow.
+    /// The lane-write sweep parks and never answers. It sits before the pull and
+    /// the expiry in the tick, so pre-fix the turn stopped there: `observe_writes`
+    /// ran inline and the sweep behind it was simply never reached, and this loop
+    /// would spin to its budget with no cancel recorded. That is the production
+    /// stall — a lane burning past its wall clock because a `git` call in front of
+    /// the sweep is slow.
     #[test]
-    fn a_submit_a_worker_holds_does_not_stop_the_deadline_sweep() {
+    fn a_call_a_worker_holds_does_not_stop_the_deadline_sweep() {
         let mut store = SqliteStore::open(":memory:").unwrap();
         let bloom = BloomId(digest(1));
 
@@ -3925,16 +3951,13 @@ mod offloaded_adapter_calls {
         let mut tracked = track(handles);
         let overdue_nonce = format!("dispatch-{overdue_sequence}");
 
-        // The dispatch whose submit will never come back.
-        enqueue_construct_dispatch(&mut store, bloom, "wp-blocked", 6);
-
-        let backend = Arc::new(LatchedSubmit::default());
+        let backend = Arc::new(LatchedSweep::default());
         let shell = ExecutorShell::new(Arc::clone(&backend));
         let pusher: Arc<dyn CandidatePush> = Arc::new(RecordingPush::default());
         let binding = binding();
         let mut offload = AdapterOffload::new();
 
-        // Well past the setup order's sealed hour, so the sweep is due.
+        // Well past the order's sealed hour, so the sweep is due.
         let sweep_at = NOW_UNIX_MILLIS + 7_200_000;
         let budget = Instant::now() + Duration::from_secs(30);
         while backend.cancelled().is_empty() && Instant::now() < budget {
@@ -3944,7 +3967,10 @@ mod offloaded_adapter_calls {
             let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
             {
                 let port = offload.port(&shell);
-                drain_and_dispatch(&mut store, &port, sweep_at).unwrap();
+                assert!(
+                    matches!(ExecutorPort::observe_writes(&port), Settled::InFlight),
+                    "the parked sweep never answers, so every turn reads it as in flight",
+                );
                 pull_and_admit(
                     Stores { store: &mut store, artifacts: None },
                     &port,
@@ -3961,33 +3987,20 @@ mod offloaded_adapter_calls {
         assert_eq!(
             backend.cancelled(),
             vec![overdue_nonce],
-            "the deadline sweep must terminate the overdue order while the peer submit is still parked",
+            "the deadline sweep must terminate the overdue order while the lane-write sweep is still parked",
         );
-        assert!(backend.submitted().is_empty(), "the parked submit has not answered, so the sweep ran beside it");
+        assert_eq!(backend.swept(), 0, "the parked sweep has not answered, so the deadline sweep ran beside it");
 
-        // And the parked submit still lands once its call returns — nothing was
-        // lost by asking again every turn.
         backend.open();
-        let budget = Instant::now() + Duration::from_secs(30);
-        while backend.submitted().is_empty() && Instant::now() < budget {
-            offload.open_round();
-            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-            {
-                let port = offload.port(&shell);
-                drain_and_dispatch(&mut store, &port, sweep_at).unwrap();
-            }
-            offload.start_wanted(&mut ctx, &shell, &pusher);
-            thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(backend.submitted().len(), 1, "the released submit answered and the re-drive consumed it");
     }
 
     /// The ceiling holds: a turn that asks for more calls than the offload may
-    /// run starts exactly `MAX_IN_FLIGHT` workers and re-derives the rest next
-    /// turn. Without it a burst of tracked handles would spawn one thread each.
+    /// run starts exactly `MAX_IN_FLIGHT` workers and queues the rest for the
+    /// slots they free. Without it a burst of tracked handles would spawn one
+    /// thread each.
     #[test]
     fn the_offload_starts_at_most_the_ceiling_of_workers() {
-        let backend = Arc::new(LatchedSubmit::default());
+        let backend = Arc::new(LatchedObserve::default());
         let shell = ExecutorShell::new(Arc::clone(&backend));
         let pusher: Arc<dyn CandidatePush> = Arc::new(RecordingPush::default());
         let binding = binding();
@@ -3998,56 +4011,13 @@ mod offloaded_adapter_calls {
         {
             let port = offload.port(&shell);
             for index in 0..MAX_IN_FLIGHT + 2 {
-                assert!(
-                    matches!(port.submit(&work_order(&format!("n-{index}"))), Settled::InFlight),
-                    "a first ask is always in flight",
-                );
+                let handle = WorkHandle::new(Nonce(format!("n-{index}")));
+                assert!(matches!(port.observe(&handle), Settled::InFlight), "a first ask is always in flight",);
             }
         }
         offload.start_wanted(&mut ctx, &shell, &pusher);
 
         assert_eq!(offload.in_flight(), MAX_IN_FLIGHT, "the surplus asks wait for a free slot rather than a thread");
         backend.open();
-    }
-
-    /// A submit the offload has been asked for but has not answered keeps its
-    /// outbox entry unacked.
-    ///
-    /// The registry row is written before the call runs (the lane resolves
-    /// session reuse from that very row), so between the two the row exists and
-    /// no run does. A drain that read the row alone as proof the entry reached
-    /// a worker would ack past a dispatch that never started, leaving an
-    /// outstanding order nothing stands behind until its deadline reaps it —
-    /// the member silently loses a stage.
-    ///
-    /// No worker is started here at all, which is the shape a full ceiling or a
-    /// dropped want produces: asked, owed, and not yet run.
-    #[test]
-    fn a_submit_the_offload_still_owes_keeps_its_entry_unacked() {
-        let mut store = SqliteStore::open(":memory:").unwrap();
-        let bloom = BloomId(digest(1));
-        let (sequence, _) = enqueue_construct_dispatch(&mut store, bloom, "wp-owed", 5);
-        let shell = ExecutorShell::new(Arc::new(LatchedSubmit::default()));
-        let mut offload = AdapterOffload::new();
-
-        offload.open_round();
-        let (handles, ack_through, transient_failure) = {
-            let port = offload.port(&shell);
-            drain_and_dispatch(&mut store, &port, NOW_UNIX_MILLIS).unwrap()
-        };
-        assert!(handles.is_empty(), "an unanswered submit tracks no handle");
-        assert_eq!(ack_through, None, "the turn that hands the submit out acks nothing");
-        assert_eq!(transient_failure, None, "an in-flight submit is not a failure, so it opens no backoff window");
-        assert!(
-            store.lookup_order(&format!("dispatch-{sequence}")).unwrap().is_some(),
-            "the row is written before the call runs, which is what makes it an unreliable proof",
-        );
-
-        offload.open_round();
-        let (_, ack_through, _) = {
-            let port = offload.port(&shell);
-            drain_and_dispatch(&mut store, &port, NOW_UNIX_MILLIS).unwrap()
-        };
-        assert_eq!(ack_through, None, "a later turn must not read the reservation row as a submitted dispatch");
     }
 }

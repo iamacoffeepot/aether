@@ -16,6 +16,11 @@
 //! offload keeps no backlog of deferred work — a buffered call would be a
 //! *stale* request replayed after the world moved. It keeps a ledger instead:
 //!
+//! `submit` is the one call that stays on the dispatcher, for a reason that is
+//! about visibility rather than blocking: its order registry row is written
+//! before it runs, and that row is what the view, the doctor, and every harness
+//! read as "waiting on a run". See [`ExecutorPort::submit`].
+//!
 //! - `in_flight` — the calls a worker holds right now, keyed by [`AdapterCall`]
 //!   so a re-ask on the next turn recognizes its own call rather than starting
 //!   a second one. That key is also the reactor's **cancellation intent**: a
@@ -80,8 +85,6 @@ pub const MAX_IN_FLIGHT: usize = DEFAULT_MAX_IN_FLIGHT;
 /// is recognized while a different ref is its own call.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum AdapterCall {
-    /// `ExecutorPort::submit` for an order's nonce.
-    Submit(Nonce),
     /// `ExecutorPort::observe` for a tracked handle's nonce.
     Observe(Nonce),
     /// `ExecutorPort::cancel` for a nonce — the reactor's cancellation intent.
@@ -100,22 +103,15 @@ pub enum AdapterCall {
 /// keying on the payload would start a second run for it.
 #[derive(Clone, Debug)]
 enum AdapterWork {
-    /// Boxed: a `WorkOrder` carries a whole `Transformation`, several times the
-    /// size of the handles beside it, and this enum is moved into a worker.
-    Submit(Box<WorkOrder>),
     Observe(WorkHandle),
     Cancel(WorkHandle),
     ObserveWrites,
-    Publish {
-        commit_hex: String,
-        target_ref: String,
-    },
+    Publish { commit_hex: String, target_ref: String },
 }
 
 impl AdapterWork {
     fn call(&self) -> AdapterCall {
         match self {
-            Self::Submit(order) => AdapterCall::Submit(order.nonce.clone()),
             Self::Observe(handle) => AdapterCall::Observe(handle.nonce.clone()),
             Self::Cancel(handle) => AdapterCall::Cancel(handle.nonce.clone()),
             Self::ObserveWrites => AdapterCall::ObserveWrites,
@@ -129,7 +125,6 @@ impl AdapterWork {
     /// lines, and they only ever execute on a worker thread.
     fn run(self, shell: &ExecutorShell, pusher: &dyn CandidatePush) -> AdapterAnswer {
         match self {
-            Self::Submit(order) => AdapterAnswer::Submit(shell.submit(&order)),
             Self::Observe(handle) => AdapterAnswer::Observe(shell.observe_run(&handle)),
             Self::Cancel(handle) => AdapterAnswer::Cancel(shell.cancel(&handle)),
             Self::ObserveWrites => AdapterAnswer::ObserveWrites(shell.observe_writes()),
@@ -142,7 +137,6 @@ impl AdapterWork {
 /// answers have five different types and none of them is worth erasing.
 #[derive(Debug)]
 enum AdapterAnswer {
-    Submit(Result<WorkHandle, ExecutorPortError>),
     Observe(Result<RunObservation, ExecutorPortError>),
     Cancel(Result<(), ExecutorPortError>),
     ObserveWrites(Vec<ObservedLaneWrites>),
@@ -178,17 +172,6 @@ struct Ledger {
     /// re-run each one the moment its answer landed — turning the reactor's
     /// configured poll interval into "as fast as the network answers".
     asked_this_round: BTreeSet<AdapterCall>,
-    /// Nonces whose submit this offload owes an answer for, from the moment a
-    /// turn asks until a turn consumes the answer.
-    ///
-    /// Rounds do not clear it, and that is the point: the registry row is
-    /// written before the submit runs, so between the two the row is the only
-    /// evidence of a dispatch and it says the wrong thing. The drain reads this
-    /// set to tell "the row proves the entry reached a worker" from "the row is
-    /// the reservation the submit has not answered yet", and would otherwise
-    /// ack an entry past a submit that never ran — leaving an outstanding order
-    /// no run stands behind until its deadline reaps it.
-    owed_submits: BTreeSet<Nonce>,
 }
 
 /// A capture waiting to be published (ADR-0152), held across turns because the
@@ -286,13 +269,6 @@ impl AdapterOffload {
         ledger.wanted.clear();
     }
 
-    /// Whether a submit for `nonce` is still owed — asked and not yet answered
-    /// to a turn, whatever stage of the offload it is at.
-    #[must_use]
-    pub fn owes_submit(&self, nonce: &Nonce) -> bool {
-        self.lock().owed_submits.contains(nonce)
-    }
-
     /// Hand this round's backlog to workers, up to [`MAX_IN_FLIGHT`] at once.
     /// What does not fit stays queued and starts as slots free, so a round
     /// wider than the ceiling still finishes inside its own round.
@@ -362,18 +338,12 @@ impl AdapterOffload {
         let call = work.call();
         let mut ledger = self.lock();
         if let Some(answer) = ledger.answers.remove(&call) {
-            if let AdapterCall::Submit(nonce) = &call {
-                ledger.owed_submits.remove(nonce);
-            }
             return Some(answer);
         }
         let held = ledger.in_flight.contains(&call)
             || ledger.asked_this_round.contains(&call)
             || ledger.wanted.iter().any(|held| held.call() == call);
         if !held {
-            if let AdapterCall::Submit(nonce) = &call {
-                ledger.owed_submits.insert(nonce.clone());
-            }
             ledger.wanted.push_back(work);
         }
         None
@@ -402,11 +372,11 @@ impl ExecutorPort for OffloadedPort<'_> {
         ExecutorPort::backend_for(self.shell, handle)
     }
 
-    fn submit(&self, order: &WorkOrder) -> Settled<Result<WorkHandle, ExecutorPortError>> {
-        match self.offload.take_or_want(AdapterWork::Submit(Box::new(order.clone()))) {
-            Some(AdapterAnswer::Submit(answer)) => Settled::Answered(answer),
-            _ => Settled::InFlight,
-        }
+    /// Straight through to the shell: the order registry row is written before
+    /// the submit runs, so handing it out would publish a reservation as a
+    /// dispatch (see [`ExecutorPort::submit`]).
+    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, ExecutorPortError> {
+        ExecutorPort::submit(self.shell, order)
     }
 
     fn observe(&self, handle: &WorkHandle) -> Settled<Result<RunObservation, ExecutorPortError>> {
@@ -428,9 +398,5 @@ impl ExecutorPort for OffloadedPort<'_> {
             Some(AdapterAnswer::ObserveWrites(observed)) => Settled::Answered(observed),
             _ => Settled::InFlight,
         }
-    }
-
-    fn holds_submit(&self, nonce: &Nonce) -> bool {
-        self.offload.owes_submit(nonce)
     }
 }

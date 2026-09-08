@@ -28,12 +28,13 @@ use tracing::{Event as TracingEvent, Metadata, Subscriber};
 
 use super::{
     Admission, AdmitDecision, AdmitSink, DispatchError, DispatchRecord, EvidenceClaims, IntakeRefusal,
-    UploadedEvidence, admit_uploaded, dispatch_nonce, record_dispatch, run_intake_cycle, run_intake_cycle_now,
+    UploadedEvidence, admit_uploaded, dispatch_and_record, dispatch_nonce, record_dispatch, run_intake_cycle,
+    run_intake_cycle_now,
 };
 use crate::bloomery::open_scope_run;
 use crate::bloomery::{
     ExecutorPortError, ExecutorShell, LocalExecutorError, OutstandingDispatch, ReconcileLanes, ReconcileReport,
-    RoutingExecutor, Settled,
+    RoutingExecutor,
 };
 use crate::bloomery::{authorize_instructions, reference_instructions};
 use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
@@ -44,23 +45,6 @@ const PINNED_REF: &str = "refs/heads/main";
 
 fn store() -> SqliteStore {
     SqliteStore::open(":memory:").unwrap()
-}
-
-/// [`super::dispatch_and_record`] against an [`ExecutorShell`], which answers
-/// every call on the calling thread (#5564): the settled wrapper is always
-/// `Answered` here, so these tests keep asserting the `Result` they always did.
-/// A reactor mounts an offloading port instead, and its drains handle the
-/// third answer.
-fn dispatch_and_record(
-    shell: &ExecutorShell,
-    store: &mut dyn StoreBackend,
-    record: &DispatchRecord,
-    now_unix_millis: u64,
-) -> Result<WorkHandle, DispatchError> {
-    match super::dispatch_and_record(shell, store, record, now_unix_millis) {
-        Settled::Answered(answer) => answer,
-        Settled::InFlight => panic!("an ExecutorShell answers every adapter call itself"),
-    }
 }
 
 fn shell(fake: FakeGithub) -> ExecutorShell {

@@ -8,7 +8,8 @@
 //! states the rule ("Never block in a handler"), ADR-0093 gives the shape that
 //! keeps it (hand the call to a worker, answer from a later handler turn).
 //!
-//! [`ExecutorPort`] is the same six calls with one more answer:
+//! [`ExecutorPort`] is the same calls, with one more answer on the four that
+//! reach the outside world and can be handed out:
 //! [`Settled::InFlight`] — "a worker holds this call; ask again on a later
 //! turn". Every caller that drains, inspects, cancels, or sweeps takes the port
 //! rather than the shell, so the same code runs on either side of the offload:
@@ -33,7 +34,7 @@
 //! keep serving its direct callers unchanged while the reactor's helpers move
 //! over wholesale.
 
-use aether_bloomery::{BackendId, EvidenceRef, ExecutionStatus, Nonce, ObservedLaneWrites, WorkHandle, WorkOrder};
+use aether_bloomery::{BackendId, EvidenceRef, ExecutionStatus, ObservedLaneWrites, WorkHandle, WorkOrder};
 
 use super::{ExecutorPortError, ExecutorShell};
 
@@ -81,7 +82,21 @@ pub trait ExecutorPort {
     fn backend_for(&self, handle: &WorkHandle) -> BackendId;
 
     /// Submit a fully-resolved work order, returning the nonce-carrying handle.
-    fn submit(&self, order: &WorkOrder) -> Settled<Result<WorkHandle, ExecutorPortError>>;
+    ///
+    /// The one call that is *not* settled, and deliberately (#5564): the order
+    /// registry row is written before the submit runs — the local lane resolves
+    /// session reuse from that very row — so a submit a worker still holds
+    /// leaves a row for a dispatch that has not happened. That row is not
+    /// private bookkeeping: `outstanding_orders` is what the view, the doctor's
+    /// open-dispatch report, and every harness read as "this coordinator is
+    /// waiting on a run". Handing the submit out would publish a reservation as
+    /// a dispatch. Closing that needs a durable submit-intent row the readers
+    /// can tell apart, which is its own change; until then this call keeps the
+    /// dispatcher for its round trip.
+    ///
+    /// # Errors
+    /// The dispatch surface is unreachable or refused the dispatch.
+    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, ExecutorPortError>;
 
     /// Inspect the run the handle resolves to and, when it has completed,
     /// stream its evidence in the same call.
@@ -101,19 +116,6 @@ pub trait ExecutorPort {
     /// (ADR-0204). Infallible once answered: a mount with no readable working
     /// trees observes nothing, which is the honest answer and not a fault.
     fn observe_writes(&self) -> Settled<Vec<ObservedLaneWrites>>;
-
-    /// Whether a submit for `nonce` is still with this port — a worker holds
-    /// it, or its answer has landed and no turn has consumed it yet.
-    ///
-    /// The dispatch drain needs it because the order registry is written
-    /// *before* the submit runs (session reuse resolves the lane from that very
-    /// row), so a row alone no longer proves the entry reached a worker: while
-    /// the submit is in flight the row exists and the answer does not. A port
-    /// that answers every call itself never holds one, so the default is
-    /// `false` and the row means what it always meant.
-    fn holds_submit(&self, _nonce: &Nonce) -> bool {
-        false
-    }
 }
 
 /// The shell answers every call itself, on the calling thread. The identity
@@ -129,8 +131,8 @@ impl ExecutorPort for ExecutorShell {
         self.backend.backend_for(handle)
     }
 
-    fn submit(&self, order: &WorkOrder) -> Settled<Result<WorkHandle, ExecutorPortError>> {
-        Settled::Answered(self.backend.submit(order))
+    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, ExecutorPortError> {
+        self.backend.submit(order)
     }
 
     fn observe(&self, handle: &WorkHandle) -> Settled<Result<RunObservation, ExecutorPortError>> {

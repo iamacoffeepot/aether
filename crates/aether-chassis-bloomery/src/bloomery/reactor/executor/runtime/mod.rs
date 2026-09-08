@@ -1156,18 +1156,8 @@ fn hold_overlapping_reconcile(
 /// an earlier drain that could not ack past a held sibling. The nonce is the
 /// sequence, so the row is the proof this entry reached a worker; submitting
 /// again would start a second run for the same outbox row.
-/// The row alone stopped being the proof once the submit moved off the tick
-/// (#5564): it is written *before* the call runs, so an entry whose submit a
-/// worker still holds has a row and no answer. Asking the port closes that
-/// window — a held submit reads as not-yet-submitted, the entry stays unacked,
-/// and the re-drive is the one that consumes the answer.
-fn dispatch_already_submitted(
-    store: &mut dyn StoreBackend,
-    executor: &dyn ExecutorPort,
-    sequence: u64,
-) -> rusqlite::Result<bool> {
-    let nonce = dispatch_nonce(sequence);
-    Ok(store.lookup_order(&nonce.0)?.is_some() && !executor.holds_submit(&nonce))
+fn dispatch_already_submitted(store: &mut dyn StoreBackend, sequence: u64) -> rusqlite::Result<bool> {
+    Ok(store.lookup_order(&dispatch_nonce(sequence).0)?.is_some())
 }
 
 /// Advance the contiguous ack prefix unless a held Reconcile earlier in this
@@ -1422,11 +1412,6 @@ enum DispatchSubmit {
     Parked,
     Refused,
     Transient,
-    /// A worker holds the submit (#5564) — nothing has succeeded and nothing
-    /// has failed. The entry stays unacked and re-drives; distinct from
-    /// [`Self::Transient`] because no backoff window should open for a call
-    /// that is still running.
-    InFlight,
 }
 
 /// Overlay the advisory, park a composition Refine that has no findings, and
@@ -1478,14 +1463,7 @@ fn submit_dispatch_entry(
     if park_composition_refine_without_findings(&record, sequence) {
         return Ok(DispatchSubmit::Parked);
     }
-    // A worker holds this submit (#5564). The registry row is written and the
-    // entry stays unacked; the completion wake re-drives it and consumes the
-    // answer, and the port recognizes the re-ask as the same submit rather than
-    // starting a second run.
-    let Settled::Answered(submitted) = dispatch_and_record(executor, store, &record, now_unix_millis) else {
-        return Ok(DispatchSubmit::InFlight);
-    };
-    match submitted {
+    match dispatch_and_record(executor, store, &record, now_unix_millis) {
         Ok(handle) => Ok(DispatchSubmit::Submitted(handle)),
         Err(error) if error.is_permanent() => {
             // A permanent refusal never clears on retry, so parking (acking
@@ -1548,7 +1526,7 @@ fn drain_and_dispatch(
             );
             break;
         };
-        if dispatch_already_submitted(store, executor, entry.sequence)? {
+        if dispatch_already_submitted(store, entry.sequence)? {
             ack_if_unblocked(held, &mut ack_through, entry.sequence);
             continue;
         }
@@ -1586,7 +1564,6 @@ fn drain_and_dispatch(
                 transient_failure = Some(entry.sequence);
                 break;
             }
-            DispatchSubmit::InFlight => break,
         }
     }
     Ok((handles, ack_through, transient_failure))
@@ -1748,14 +1725,7 @@ fn drain_and_dispatch_aggregate(
             // axis, so this is the only scope the overlay walks.
             configs: payload.configs,
         };
-        // A worker holds this submit (#5564). The entry stays unacked and the
-        // drain stops here; the completion wake re-drives it and consumes the
-        // answer. Not a transient failure, so no backoff window opens — nothing
-        // failed, and the port recognizes the re-ask as the same submit.
-        let Settled::Answered(submitted) = dispatch_and_record(executor, store, &record, now_unix_millis) else {
-            break;
-        };
-        match submitted {
+        match dispatch_and_record(executor, store, &record, now_unix_millis) {
             Ok(handle) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
@@ -1842,14 +1812,7 @@ fn drain_and_dispatch_aggregate_verify(
             transformation: payload.transformation,
             configs: ConfigRegistry::default(),
         };
-        // A worker holds this submit (#5564). The entry stays unacked and the
-        // drain stops here; the completion wake re-drives it and consumes the
-        // answer. Not a transient failure, so no backoff window opens — nothing
-        // failed, and the port recognizes the re-ask as the same submit.
-        let Settled::Answered(submitted) = dispatch_and_record(executor, store, &record, now_unix_millis) else {
-            break;
-        };
-        match submitted {
+        match dispatch_and_record(executor, store, &record, now_unix_millis) {
             Ok(handle) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
@@ -1927,14 +1890,7 @@ fn drain_and_dispatch_base_verify(
             transformation: payload.transformation,
             configs: ConfigRegistry::default(),
         };
-        // A worker holds this submit (#5564). The entry stays unacked and the
-        // drain stops here; the completion wake re-drives it and consumes the
-        // answer. Not a transient failure, so no backoff window opens — nothing
-        // failed, and the port recognizes the re-ask as the same submit.
-        let Settled::Answered(submitted) = dispatch_and_record(executor, store, &record, now_unix_millis) else {
-            break;
-        };
-        match submitted {
+        match dispatch_and_record(executor, store, &record, now_unix_millis) {
             Ok(handle) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
@@ -2100,14 +2056,7 @@ fn drain_and_redispatch(
             break;
         }
 
-        // A worker holds this submit (#5564). The entry stays unacked and the
-        // drain stops here; the completion wake re-drives it and consumes the
-        // answer. Not a transient failure, so no backoff window opens — nothing
-        // failed, and the port recognizes the re-ask as the same submit.
-        let Settled::Answered(submitted) = dispatch_and_record(executor, store, &record, now_unix_millis) else {
-            break;
-        };
-        match submitted {
+        match dispatch_and_record(executor, store, &record, now_unix_millis) {
             Ok(handle) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
