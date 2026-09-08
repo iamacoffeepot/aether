@@ -8,6 +8,8 @@
 
 use std::collections::HashMap;
 
+use aether_substrate::session_ids::SessionIds;
+
 use crate::VertexFormat;
 use crate::kinds::{
     CreateGeometry, CreateGeometryResult, DestroyGeometry, UpdateGeometry, VertexAttribute, vertex_stride_bytes,
@@ -162,12 +164,12 @@ fn staged_buffer(
     buffer
 }
 
-/// Session-scoped geometry registry. `next_id` hands out the
-/// `geometry_id` a `create_geometry` reply carries — assigned in
-/// sequence the same way texture ids are, so ids are stable for the
-/// session and depend only on creation order.
+/// Session-scoped geometry registry. `ids` hands out the `geometry_id`
+/// a `create_geometry` reply carries — assigned in sequence the same way
+/// texture ids are, so ids are stable for the session and depend only on
+/// creation order.
 pub struct GeometryRegistry {
-    pub next_id: u32,
+    pub ids: SessionIds<u32>,
     pub entries: HashMap<u32, StagedGeometry>,
 }
 
@@ -180,7 +182,7 @@ impl Default for GeometryRegistry {
 impl GeometryRegistry {
     #[must_use]
     pub fn new() -> Self {
-        Self { next_id: 0, entries: HashMap::new() }
+        Self { ids: SessionIds::new(), entries: HashMap::new() }
     }
 
     /// Drop every buffer realization built against the current device
@@ -197,14 +199,18 @@ impl GeometryRegistry {
     }
 
     /// Stage a new geometry, validating the layout and bytes before any
-    /// id is consumed. A rejected create leaves `next_id` untouched, so
-    /// ids stay dense over accepted geometries.
+    /// id is consumed. A rejected create leaves the id sequence
+    /// untouched, so ids stay dense over accepted geometries.
     pub fn create(&mut self, mail: CreateGeometry) -> CreateGeometryResult {
         if let Err(error) = validate_geometry(&mail.layout, &mail.vertices, &mail.indices) {
             return CreateGeometryResult::Err { error };
         }
-        let geometry_id = self.next_id;
-        self.next_id += 1;
+        let Some(geometry_id) = self.ids.allocate() else {
+            return CreateGeometryResult::Err {
+                error: "this session has run out of geometry ids; destroy_geometry does not recycle them".to_owned(),
+            };
+        };
+
         self.entries.insert(
             geometry_id,
             StagedGeometry {
@@ -351,7 +357,7 @@ mod tests {
         let out_of_range = rejection(&mut registry, create(skinned_layout(), vec![0u8; 40], indices_bytes(&[0, 1, 2])));
         assert!(out_of_range.contains("out of range for 2 vertices"), "index-range class: {out_of_range}");
 
-        assert_eq!(registry.next_id, 0, "rejected creates must not consume ids");
+        assert_eq!(registry.ids.peek(), Some(0), "rejected creates must not consume ids");
         let accepted = registry.create(create(skinned_layout(), vec![0u8; 40], indices_bytes(&[0, 1, 0])));
         assert!(
             matches!(accepted, CreateGeometryResult::Ok { geometry_id: 0 }),
@@ -448,7 +454,7 @@ mod tests {
 
         registry.invalidate_device_resources();
 
-        assert_eq!(registry.next_id, 1, "device replacement must not rewind public ids");
+        assert_eq!(registry.ids.peek(), Some(1), "device replacement must not rewind public ids");
         assert_eq!(registry.entries.len(), 1);
         let entry = &registry.entries[&geometry_id];
         assert_eq!(entry.layout, layout);

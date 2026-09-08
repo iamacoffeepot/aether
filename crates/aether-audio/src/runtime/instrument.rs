@@ -283,7 +283,7 @@ pub fn builtin_names() -> Vec<&'static str> {
 }
 
 /// The first instrument id available to a loaded bank — one past the
-/// last compiled-in built-in. The cap's `next_instrument_id` starts
+/// last compiled-in built-in. The cap's `instrument_ids` window starts
 /// here, the synth's bank table begins at the same offset.
 #[allow(clippy::cast_possible_truncation)]
 pub fn builtin_id_ceiling() -> u8 {

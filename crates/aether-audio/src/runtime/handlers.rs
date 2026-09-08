@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use aether_actor::OutboundReply;
 
+use super::sample::SampleBank;
 use super::{
     AudioCapabilityState, AudioEvent, AudioLoadContext, BankAssemblyContext, BankAssemblyOutput, DecodeOutput,
     FsCapability, Manual, NativeCtx, ReadResult, SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS, TaskDone,
@@ -285,6 +286,40 @@ impl AudioCapabilityState {
         ctx.actor::<FsCapability>().with_context(&context).read(mail.namespace, mail.path);
     }
 
+    /// Claim a session-scoped instrument id for an assembled bank and
+    /// hand the bank to the synth (ADR-0103 §4). `Err` carries the text
+    /// the reply relays: a chassis with no audio pipeline, or a session
+    /// that has loaded every id the synth's `u8` bank table can address
+    /// — the old counter saturated there and re-registered id 255 for
+    /// every later load while still replying `Ok`.
+    fn register_assembled_bank(&mut self, bank: &Arc<SampleBank>) -> Result<LoadInstrumentResult, String> {
+        let Some(sender) = self.sender.as_ref() else {
+            return Err("audio pipeline not initialised on this desktop substrate".to_owned());
+        };
+        let Some(instrument_id) = self.instrument_ids.allocate() else {
+            return Err("this session has loaded every addressable instrument id".to_owned());
+        };
+
+        let name = bank.name.clone();
+        // PCM byte counts are bounded well below u64.
+        let resident_bytes = bank.resident_bytes as u64;
+        if sender.push(AudioEvent::RegisterInstrument { id: instrument_id, bank: Arc::clone(bank) }).is_err() {
+            tracing::warn!(
+                target: "aether_substrate::audio",
+                "event queue full — dropping register_instrument",
+            );
+        }
+
+        tracing::info!(
+            target: "aether_substrate::audio",
+            instrument_id,
+            name = %name,
+            resident_bytes,
+            "sampled instrument loaded",
+        );
+        Ok(LoadInstrumentResult::Ok { instrument_id, name, resident_bytes })
+    }
+
     pub fn handle_instrument_assembled(
         &mut self,
         ctx: &mut NativeCtx<'_>,
@@ -295,39 +330,13 @@ impl AudioCapabilityState {
         // assignment, register event) run before `resolve_with` consumes
         // `done`.
         let outcome: LoadInstrumentResult = match done.output() {
-            Ok(bank) => {
-                if let Some(sender) = self.sender.as_ref() {
-                    let instrument_id = self.next_instrument_id;
-                    self.next_instrument_id = self.next_instrument_id.saturating_add(1);
-                    let name = bank.name.clone();
-                    // PCM byte counts are bounded well below u64.
-                    let resident_bytes = bank.resident_bytes as u64;
-                    if sender
-                        .push(AudioEvent::RegisterInstrument { id: instrument_id, bank: Arc::clone(bank) })
-                        .is_err()
-                    {
-                        tracing::warn!(
-                            target: "aether_substrate::audio",
-                            "event queue full — dropping register_instrument",
-                        );
-                    }
-                    tracing::info!(
-                        target: "aether_substrate::audio",
-                        instrument_id,
-                        name = %name,
-                        resident_bytes,
-                        "sampled instrument loaded",
-                    );
-                    LoadInstrumentResult::Ok { instrument_id, name, resident_bytes }
-                } else {
+            Ok(bank) => match self.register_assembled_bank(bank) {
+                Ok(registered) => registered,
+                Err(error) => {
                     let cx = done.context();
-                    LoadInstrumentResult::Err {
-                        namespace: cx.namespace.clone(),
-                        path: cx.path.clone(),
-                        error: "audio pipeline not initialised on this desktop substrate".to_owned(),
-                    }
+                    LoadInstrumentResult::Err { namespace: cx.namespace.clone(), path: cx.path.clone(), error }
                 }
-            }
+            },
             Err(error) => {
                 let cx = done.context();
                 LoadInstrumentResult::Err {

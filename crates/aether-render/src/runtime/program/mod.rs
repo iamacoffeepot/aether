@@ -14,6 +14,7 @@ use aether_substrate::render::{
     build_program_compute_pipeline, build_program_draw_pipeline, build_program_pipeline, program_inputs_layout,
     program_storage_layout, program_uniform_layout,
 };
+use aether_substrate::session_ids::SessionIds;
 
 use super::geometry::{GeometryRegistry, wgpu_vertex_attributes};
 use super::pipeline::RenderGpu;
@@ -90,7 +91,7 @@ type TransientKey = (u32, u32, wgpu::TextureFormat);
 /// pooled entry is the transient texture's view — it serves as both the
 /// pass attachment and the sampled input, and keeps the texture alive.
 pub struct ProgramRegistry {
-    next_id: u32,
+    ids: SessionIds<u32>,
     entries: HashMap<u32, RegisteredProgram>,
     /// The shared fullscreen vertex module, built on first register.
     fullscreen_module: Option<wgpu::ShaderModule>,
@@ -114,7 +115,7 @@ impl ProgramRegistry {
     #[must_use]
     pub fn new(timings_enabled: bool) -> Self {
         Self {
-            next_id: 0,
+            ids: SessionIds::new(),
             entries: HashMap::new(),
             fullscreen_module: None,
             transient_pool: HashMap::new(),
@@ -141,8 +142,12 @@ impl ProgramRegistry {
             Err(error) => return ProgramRegisterResult::Err { error },
         };
 
-        let program_id = self.next_id;
-        self.next_id += 1;
+        let Some(program_id) = self.ids.allocate() else {
+            return ProgramRegisterResult::Err {
+                error: "this session has run out of program ids; program_destroy does not recycle them".to_owned(),
+            };
+        };
+
         let cache = DispatchCache::new(&plan);
         let timings = PassCosts::new(&plan);
         self.entries.insert(
@@ -497,7 +502,7 @@ fn fs_solid() -> @location(0) vec4<f32> {
         textures.invalidate_device_resources();
         registry.rebuild_for_device(&replacement_gpu);
 
-        assert_eq!(registry.next_id, 2, "replacement must not rewind public ids");
+        assert_eq!(registry.ids.peek(), Some(2), "replacement must not rewind public ids");
         assert!(registry.entries.contains_key(&healthy_id));
         assert!(registry.entries.contains_key(&quarantined_id));
         assert_eq!(registry.entries[&healthy_id].wgsl, SOLID_WGSL);
@@ -540,8 +545,8 @@ fn fs_solid() -> @location(0) vec4<f32> {
             "a quarantined dispatch drops before it realizes any binding",
         );
 
-        let next_id = register(&mut registry, &replacement_gpu);
-        assert_eq!(next_id, 2, "new registration continues after the preserved id sequence");
+        let program_id = register(&mut registry, &replacement_gpu);
+        assert_eq!(program_id, 2, "new registration continues after the preserved id sequence");
     }
 
     #[test]

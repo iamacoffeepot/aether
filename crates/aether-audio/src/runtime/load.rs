@@ -111,8 +111,17 @@ impl AudioCapabilityState {
         // `parse_sfz` guarantees at least one region with a sample, so
         // `samples` is non-empty.
         let remaining = samples.len();
-        let assembly_id = self.next_assembly_id;
-        self.next_assembly_id += 1;
+        let Some(assembly_id) = self.assembly_ids.allocate() else {
+            ctx.reply_to(
+                source,
+                &LoadInstrumentResult::Err {
+                    namespace,
+                    path,
+                    error: "this session has run out of bank-assembly ids".to_owned(),
+                },
+            );
+            return;
+        };
 
         let fs_paths: Vec<(u64, String)> = samples
             .iter()

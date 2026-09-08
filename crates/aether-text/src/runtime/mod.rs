@@ -17,6 +17,7 @@ pub use aether_kinds::QuadSpace;
 pub use aether_substrate::Manual;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
+use aether_substrate::session_ids::SessionIds;
 
 use crate::MEMORY_FONT_NAMESPACE;
 use aether_fs::FsMailboxExt;
@@ -98,9 +99,9 @@ pub struct TextCapabilityState {
     /// file is resident under. Dedups the registry: a repeat load or
     /// a `font_metrics` grab of the same file reuses one resident
     /// font and a stable id rather than parsing a second copy.
-    pub font_ids: HashMap<(String, String), u32>,
-    /// Next `font_id` to assign — monotonic, session-scoped.
-    pub next_font_id: u32,
+    pub font_id_by_path: HashMap<(String, String), u32>,
+    /// Source of the `font_id`s handed back — monotonic, session-scoped.
+    pub font_ids: SessionIds<u32>,
     /// The shelf-packed glyph atlas (CPU-side source of truth).
     pub atlas: Atlas,
     /// The render-cap `texture_id` backing [`Self::atlas`], once
@@ -115,8 +116,8 @@ impl TextCapabilityState {
     pub fn new() -> Self {
         Self {
             fonts: HashMap::new(),
-            font_ids: HashMap::new(),
-            next_font_id: 0,
+            font_id_by_path: HashMap::new(),
+            font_ids: SessionIds::new(),
             atlas: Atlas::new(),
             atlas_texture_id: None,
             atlas_create_inflight: false,
@@ -127,17 +128,19 @@ impl TextCapabilityState {
     /// deduped by `(namespace, path)`: a path already resident
     /// returns its existing id (and drops the freshly-parsed `font`),
     /// so repeat loads and metric grabs of one file share a single
-    /// resident font and a stable id.
-    pub fn register_font(&mut self, namespace: &str, path: &str, font: Arc<fontdue::Font>) -> u32 {
+    /// resident font and a stable id. `None` once the session has run
+    /// out of ids — the caller replies `Err` rather than aliasing a
+    /// resident font.
+    pub fn register_font(&mut self, namespace: &str, path: &str, font: Arc<fontdue::Font>) -> Option<u32> {
         let key = (namespace.to_owned(), path.to_owned());
-        if let Some(&existing) = self.font_ids.get(&key) {
-            return existing;
+        if let Some(&existing) = self.font_id_by_path.get(&key) {
+            return Some(existing);
         }
-        let font_id = self.next_font_id;
-        self.next_font_id = self.next_font_id.saturating_add(1);
+
+        let font_id = self.font_ids.allocate()?;
         self.fonts.insert(font_id, font);
-        self.font_ids.insert(key, font_id);
-        font_id
+        self.font_id_by_path.insert(key, font_id);
+        Some(font_id)
     }
 
     /// Forward an `aether.fs.read`, carrying the original requester as a
@@ -436,7 +439,7 @@ impl NativeActor for TextCapability {
                 ctx.reply(&reply);
             }
             FontRef::Path { namespace, path } => {
-                if let Some(&font_id) = state.font_ids.get(&(namespace.clone(), path.clone())) {
+                if let Some(&font_id) = state.font_id_by_path.get(&(namespace.clone(), path.clone())) {
                     // Already resident — measure from the cached font
                     // now, no fs round trip.
                     let metrics = build_font_metrics(&state.fonts[&font_id]);
@@ -511,9 +514,15 @@ impl NativeActor for TextCapability {
             Err(error) => Err(error.clone()),
         };
 
-        match parsed {
-            Ok((font, resident_bytes)) => {
-                let font_id = state.register_font(&namespace, &path, Arc::clone(&font));
+        let registered = parsed.and_then(|(font, resident_bytes)| {
+            state
+                .register_font(&namespace, &path, Arc::clone(&font))
+                .map(|font_id| (font, font_id, resident_bytes))
+                .ok_or_else(|| "this session has run out of font ids".to_owned())
+        });
+
+        match registered {
+            Ok((font, font_id, resident_bytes)) => {
                 tracing::info!(
                     target: "aether_substrate::text",
                     font_id,
@@ -850,7 +859,7 @@ mod tests {
             LoadFontResult::Err { error, .. } => panic!("expected Ok: {error}"),
         }
         assert_eq!(state.fonts.len(), 1);
-        assert_eq!(state.font_ids.get(&(MEMORY_FONT_NAMESPACE.to_owned(), "embedded.ttf".to_owned())), Some(&0),);
+        assert_eq!(state.font_id_by_path.get(&(MEMORY_FONT_NAMESPACE.to_owned(), "embedded.ttf".to_owned())), Some(&0),);
     }
 
     #[test]
@@ -1157,6 +1166,7 @@ mod tests {
         let first = state.register_font("assets", "font.ttf", Arc::new(test_font()));
         let again = state.register_font("assets", "font.ttf", Arc::new(test_font()));
         assert_eq!(first, again, "a repeat path must reuse the resident id");
+        assert!(first.is_some(), "a fresh session has ids to hand out");
         assert_eq!(state.fonts.len(), 1, "only one resident font for the path");
 
         let other = state.register_font("assets", "other.ttf", Arc::new(test_font()));
@@ -1221,6 +1231,6 @@ mod tests {
             FontMetricsResult::Err { error } => panic!("expected Ok: {error}"),
         }
         assert_eq!(state.fonts.len(), 1, "load-on-miss registers the font");
-        assert_eq!(state.font_ids.len(), 1, "and indexes it by path");
+        assert_eq!(state.font_id_by_path.len(), 1, "and indexes it by path");
     }
 }

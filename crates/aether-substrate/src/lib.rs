@@ -60,6 +60,10 @@ pub mod pid_lock;
 pub mod render;
 pub mod runtime;
 pub mod scheduler;
+// The one monotonic id counter the capabilities that mint caller-visible
+// ids (render textures / geometries / programs, text fonts, audio banks)
+// share, so they agree on what happens at the ceiling.
+pub mod session_ids;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 pub mod transform;
