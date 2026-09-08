@@ -4,6 +4,8 @@
 //! golden guards share: `cargo xtask fixtures regen` encodes them, and the
 //! tests compare those bytes to the checked-in files.
 
+use core::iter::once;
+
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::port::{ClaimRefKind, ProjectedReceipt};
 use crate::reduce::{
@@ -98,7 +100,7 @@ fn pipeline_manifest() -> PipelineManifest {
         lanes: DeclaredLanes { model: vec!["construct.implement".into()], mechanical: vec!["verify.check".into()] },
         verifiers: DeclaredVerifiers {
             identities: vec!["verify.fmt".into(), "verify.clippy".into()],
-            runs: core::iter::once(("verify.check".into(), vec!["verify.fmt".into()])).collect(),
+            runs: once(("verify.check".into(), vec!["verify.fmt".into()])).collect(),
         },
         evidence: DeclaredEvidence { envelope: 1 },
     }
