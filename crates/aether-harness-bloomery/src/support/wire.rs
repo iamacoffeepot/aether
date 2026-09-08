@@ -186,6 +186,7 @@ impl Wire {
     /// # Panics
     /// The REST port was never bound, or the ingress did not answer a
     /// well-formed response.
+    #[must_use]
     pub fn post(&self, path: &str, body: &str) -> (u16, String) {
         let port = self.http_port.expect("the coordinator bound a REST control ingress");
         let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the REST ingress accepts");

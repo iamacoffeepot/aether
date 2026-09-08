@@ -244,6 +244,7 @@ impl ScenarioHarness {
     /// send; this drives the door itself, which is what a scenario about a
     /// door's refusal — or about a host effect the door must not spend on a
     /// refused request — has to do.
+    #[must_use]
     pub fn post(&self, path: &str, body: &str) -> (u16, String) {
         self.wire.post(path, body)
     }

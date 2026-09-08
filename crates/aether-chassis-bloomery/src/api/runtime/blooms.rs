@@ -628,27 +628,39 @@ impl ApiCapabilityState {
         else {
             return Some(mail);
         };
-        let RepairPublication { bloom, workpiece, commit_hex } = publication;
+        if !admitted_repair(&mail) {
+            inbound.reply(&admit_response(mail));
+            return None;
+        }
 
-        let response = if admitted_repair(&mail) {
-            match self.pusher.as_ref() {
-                Some(pusher) => match push_candidate(pusher.as_ref(), &bloom, &workpiece, &commit_hex) {
-                    Ok(()) => admit_response(mail),
-                    Err(error) => error_response(
-                        500,
-                        &format!(
-                            "the repair was admitted but publishing its candidate ref failed: {error}; the member \
-                             refuses its verify as machinery until the ref is published"
-                        ),
-                    ),
-                },
-                None => error_response(500, "the repair was admitted but this chassis mounts no candidate-ref pusher"),
-            }
-        } else {
-            admit_response(mail)
-        };
+        let RepairPublication { bloom, workpiece, commit_hex } = publication;
+        let response = self
+            .publish_repaired_candidate(&bloom, &workpiece, &commit_hex)
+            .map_or_else(|refusal| refusal, |()| admit_response(mail));
         inbound.reply(&response);
         None
+    }
+
+    /// Force-push one admitted repair's candidate to the workpiece's ref, or the
+    /// `500` that says the repair is journaled and only its publication is owed.
+    fn publish_repaired_candidate(
+        &self,
+        bloom: &BloomId,
+        workpiece: &str,
+        commit_hex: &str,
+    ) -> Result<(), HttpServerResponse> {
+        let Some(pusher) = self.pusher.as_ref() else {
+            return Err(error_response(500, "the repair was admitted but this chassis mounts no candidate-ref pusher"));
+        };
+        push_candidate(pusher.as_ref(), bloom, workpiece, commit_hex).map_err(|error| {
+            error_response(
+                500,
+                &format!(
+                    "the repair was admitted but publishing its candidate ref failed: {error}; the member refuses \
+                     its verify as machinery until the ref is published"
+                ),
+            )
+        })
     }
 }
 
@@ -746,12 +758,19 @@ fn derive_repair_candidate(
 
         use crate::bloomery::{CandidateSource, derive_candidate};
 
-        let (Some(correspondence), Some(_)) = (state.correspondence.as_ref(), state.pusher.as_ref()) else {
+        let Some(correspondence) = state.correspondence.as_ref() else {
             return Err(error_response(
                 422,
                 "this chassis cannot derive a candidate from a commit: no correspondence store is mounted",
             ));
         };
+        if state.pusher.is_none() {
+            return Err(error_response(
+                422,
+                "this chassis cannot derive a candidate from a commit: no candidate-ref pusher is mounted, so an \
+                 admitted repair could never be published",
+            ));
+        }
         let derived = match source {
             RepairSource::FromCommit(commit) => {
                 derive_candidate(correspondence.as_ref(), CandidateSource::Commit(commit), Path::new("."))
