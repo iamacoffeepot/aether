@@ -1370,7 +1370,9 @@ mod tests {
     use crate::mail::registry::effect::{
         ActivationToken, EffectBatch, RegistryApplied, RegistryEffect, RegistryEffectError,
     };
-    use crate::mail::registry::{MailDispatch, Registry, RegistryOwnerLease, RouteRelayLease, noop_handler};
+    use crate::mail::registry::{
+        MailDispatch, Registry, RegistryOwnerLease, RouteRelayLease, canonical_mailbox_id, noop_handler,
+    };
     use crate::runtime::lifecycle::PanicAborter;
     use crate::scheduler::{BatchBudget, CycleResult, Pool, PoolConfig, PoolHandle, SlotState};
     use crate::testing::boot_authority;
@@ -1697,7 +1699,7 @@ mod tests {
             RegistryQueueCapacities::default(),
         );
         let caller = thread::current().id();
-        let parent_id = MailboxId::from_name("test.activation.owner-close-parent");
+        let parent_id = canonical_mailbox_id("test.activation.owner-close-parent");
         let parent = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), parent_id));
         let key = ChildReservationKey::new(
             parent_id,
@@ -1762,7 +1764,7 @@ mod tests {
         let caller = thread::current().id();
         let parent = Arc::new(NativeBinding::new_for_test(
             Arc::clone(&mailer),
-            MailboxId::from_name("test.activation.rejected-batch-parent"),
+            canonical_mailbox_id("test.activation.rejected-batch-parent"),
         ));
         let (first_tx, first_rx) = crossbeam_channel::unbounded();
         let (middle_tx, middle_rx) = crossbeam_channel::unbounded();
@@ -1885,7 +1887,7 @@ mod tests {
         );
         let parent = Arc::new(NativeBinding::new_for_test(
             Arc::clone(&mailer),
-            MailboxId::from_name("test.activation.self-close-parent"),
+            canonical_mailbox_id("test.activation.self-close-parent"),
         ));
         let (events_tx, _events_rx) = crossbeam_channel::unbounded();
         let (commit, dispatch_id, key) = finalized_probe(&spawner, &parent, "self-close", events_tx, 1);

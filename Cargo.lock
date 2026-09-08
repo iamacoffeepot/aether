@@ -335,7 +335,6 @@ name = "aether-chassis-hub"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-chassis",
- "aether-data",
  "aether-fleet",
  "aether-harness-fleet",
  "aether-kinds",

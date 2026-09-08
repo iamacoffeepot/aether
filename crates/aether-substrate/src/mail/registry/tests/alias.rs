@@ -10,8 +10,8 @@ use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect, RegistryEffectError};
 use crate::mail::registry::owner::RegistryOwnerLease;
-use crate::mail::registry::{MailboxEntry, Registry, noop_handler};
-use crate::mail::{KindId, Mail, MailboxId};
+use crate::mail::registry::{MailboxEntry, Registry, canonical_mailbox_id, noop_handler};
+use crate::mail::{KindId, Mail};
 use crate::scheduler::WakeSink;
 use crate::testing::boot_authority as auth;
 
@@ -40,7 +40,7 @@ fn manual_owner_cycles_alias_to_starting_parent_parks_until_parent_promotes() {
     let deliveries = Arc::new(Mutex::new(Vec::new()));
     let scheduled = Arc::new(AtomicUsize::new(0));
     let parent_name = "alias-starting-parent";
-    let parent_id = MailboxId::from_name(parent_name);
+    let parent_id = canonical_mailbox_id(parent_name);
     let (_, _, _, birth) =
         prepared_test_spawn(&registry, &mailer, parent_name, Arc::clone(&deliveries), scheduled, vec![parent_id], 1);
     let birth_completion = registry.submit(EffectBatch::new(vec![birth])).unwrap();

@@ -1,6 +1,6 @@
 use aether_actor::Addressable;
-use aether_data::{Kind, MailboxId};
-use aether_harness_substrate::{ExecutionResult, HarnessOp, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SubstrateHarness};
+use aether_data::Kind;
+use aether_harness_substrate::{ExecutionResult, HarnessOp, SubstrateHarness, substrate_harness_observer_mailbox};
 use aether_kinds::{Key, MouseMove};
 use aether_window::{
     CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult, ListWindows,
@@ -206,7 +206,7 @@ fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
         ])
         .expect("create routed windows");
 
-    let observer = MailboxId::from_name(SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME);
+    let observer = substrate_harness_observer_mailbox();
     harness
         .execute(vec![
             (

@@ -676,7 +676,9 @@ impl<'a> Cursor<'a> {
 mod tests {
     use super::*;
     use crate::encode_schema;
-    use crate::test_fixtures::{cast_struct, named, pending_ok_err_variants, scalar, structured_struct};
+    use crate::test_fixtures::{
+        cast_struct, named, pending_ok_err_variants, sample_mailbox_id, scalar, structured_struct,
+    };
     use aether_data::SchemaCell;
     use aether_data::tagged_id;
     use serde_json::json;
@@ -999,7 +1001,7 @@ mod tests {
             name: "mailbox".into(),
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
-        let mailbox = aether_data::MailboxId::from_name("aether.component");
+        let mailbox = sample_mailbox_id();
         let s = tagged_id::encode(mailbox.0).expect("test setup: encode tagged mailbox id");
         roundtrip(json!({ "mailbox": s }), &schema);
     }
@@ -1012,7 +1014,7 @@ mod tests {
             NamedField { name: "stream".into(), ty: SchemaType::Scalar(Primitive::U8) },
             NamedField { name: "mailbox".into(), ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID) },
         ]);
-        let mailbox = aether_data::MailboxId::from_name("aether.component");
+        let mailbox = sample_mailbox_id();
         let s = tagged_id::encode(mailbox.0).expect("test setup: encode tagged mailbox id");
         roundtrip(json!({ "stream": 1, "mailbox": s }), &schema);
     }

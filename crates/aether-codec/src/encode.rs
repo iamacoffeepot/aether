@@ -705,7 +705,9 @@ fn oor(name: &str, ty: &str) -> EncodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_fixtures::{cast_struct, named, pending_ok_err_variants, scalar, structured_struct};
+    use crate::test_fixtures::{
+        cast_struct, named, pending_ok_err_variants, sample_mailbox_id, scalar, structured_struct,
+    };
     use aether_data::SchemaCell;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1294,7 +1296,7 @@ mod tests {
             name: "mailbox".into(),
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
-        let mailbox = aether_data::MailboxId::from_name("aether.component");
+        let mailbox = sample_mailbox_id();
         let s = tagged_id::encode(mailbox.0).expect("test setup: encode tagged mailbox id");
         let bytes = encode_schema(&json!({ "mailbox": s }), &schema).expect("test setup: encode typed-id wire field");
         let mut expected: Vec<u8> = Vec::new();
@@ -1310,7 +1312,7 @@ mod tests {
             name: "mailbox".into(),
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
-        let mailbox = aether_data::MailboxId::from_name("aether.component");
+        let mailbox = sample_mailbox_id();
         let bytes = encode_schema(&json!({ "mailbox": mailbox.0 }), &schema)
             .expect("test setup: encode typed-id from raw number");
         let mut expected: Vec<u8> = Vec::new();
@@ -1344,7 +1346,7 @@ mod tests {
             scalar("stream", Primitive::U8),
             NamedField { name: "mailbox".into(), ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID) },
         ]);
-        let mailbox = aether_data::MailboxId::from_name("aether.component");
+        let mailbox = sample_mailbox_id();
         let s = tagged_id::encode(mailbox.0).expect("test setup: encode tagged mailbox id");
         let bytes = encode_schema(&json!({ "stream": 1, "mailbox": s }), &schema)
             .expect("test setup: encode typed-id cast field");

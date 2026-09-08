@@ -5,11 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::RegistryQueueCapacities;
-use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
-use crate::mail::registry::Registry;
 use crate::mail::registry::effect::{EffectBatch, RegistryApplied, RegistryEffect, StartingCancellation};
 use crate::mail::registry::owner::RegistryOwnerLease;
+use crate::mail::registry::{Registry, canonical_mailbox_id};
 use crate::scheduler::WakeSink;
 use crate::testing::boot_authority as auth;
 
@@ -38,7 +37,7 @@ fn cancel_and_rereserve_in_one_batch_read_through_the_staged_tombstone() {
     );
 
     let name = "staged-tombstone";
-    let id = MailboxId::from_name(name);
+    let id = canonical_mailbox_id(name);
     let reserved = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
     owner.run_once();
     let first_token = starting_token(&reserved.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());

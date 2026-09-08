@@ -109,8 +109,9 @@ impl Registry {
     /// its id if so. The id itself is deterministic (ADR-0029/ADR-0099
     /// §4) — callers that just want the id without a liveness check can
     /// fold the written name themselves with `mailbox_id_from_path`,
-    /// which is what this lookup does. `MailboxId::from_name` is the
-    /// single-segment hasher and misses a `/`-rendered lineage address.
+    /// which is what this lookup does. The registry's own
+    /// `canonical_mailbox_id` is the single-segment derivation and misses a
+    /// `/`-rendered lineage address.
     ///
     /// # Panics
     /// Panics if the inner routing lock is poisoned — fail-fast per

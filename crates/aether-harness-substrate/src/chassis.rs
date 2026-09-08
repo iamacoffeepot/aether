@@ -61,6 +61,19 @@ pub const WORKERS: usize = 2;
 /// thread per `SubstrateHarness`.
 pub const SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME: &str = "aether.substrate_harness.observer";
 
+/// The observer inbox's [`MailboxId`].
+///
+/// The observer is a raw inline handler, not an actor type, so no typed
+/// resolver answers for it — the harness registers the name and therefore
+/// owns the derivation, the way the registry owns the depth-1 fixed point it
+/// assigns. Scenarios that hand the observer to a capability as a
+/// subscription target need the id rather than the name.
+#[must_use]
+#[allow(clippy::disallowed_methods)] // aether-suppression-request: the harness registers this raw inbox by name, so there is no actor type for a typed resolver to answer from; one gated derivation beside the name it registers
+pub fn substrate_harness_observer_mailbox() -> MailboxId {
+    MailboxId::from_name(SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME)
+}
+
 /// ADR-0071 marker type for the substrate-harness chassis. Carries no
 /// fields — the chassis instance is the [`PassiveChassis<SubstrateHarnessChassis>`]
 /// returned by [`Self::build_passive`]. Test-harness is the embedder-

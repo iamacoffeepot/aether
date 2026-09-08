@@ -14,9 +14,9 @@ use std::sync::atomic::AtomicU64;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use aether_actor::Addressable;
+use aether_actor::root_mailbox;
 use aether_chassis::next_chassis_correlation;
-use aether_data::{Kind, KindId, mailbox_id_from_name};
+use aether_data::{Kind, KindId};
 use aether_kinds::{AdvanceResult, LifecycleAdvance};
 use aether_lifecycle::LifecycleCapability;
 use aether_render::{Frame, RenderCapability, RenderCapabilityState};
@@ -64,14 +64,11 @@ impl HarnessDriver {
         settlement_registry: Arc<SettlementRegistry>,
         render_slot: PumpedSlot<RenderCapability>,
     ) -> Self {
-        // Chassis route-freezing: the loop wires itself to the pumped render
-        // actor's and the lifecycle cap's own ids (their NAMESPACEs) — ctx-less
-        // driver setup, no sibling resolver in scope. Both allows relocate
-        // verbatim from the binary this module was split out of.
-        #[allow(clippy::disallowed_methods)] // aether-suppression-request: route-freeze to the actor's own NAMESPACE
-        let render_mailbox = mailbox_id_from_name(<RenderCapability as Addressable>::NAMESPACE);
-        #[allow(clippy::disallowed_methods)] // aether-suppression-request: route-freeze to the cap's own NAMESPACE
-        let lifecycle_mailbox = mailbox_id_from_name(<LifecycleCapability as Addressable>::NAMESPACE);
+        // The loop wires itself to the pumped render actor and the lifecycle
+        // cap; ctx-less driver setup, so the root-pinned resolver answers
+        // directly.
+        let render_mailbox = root_mailbox::<RenderCapability>();
+        let lifecycle_mailbox = root_mailbox::<LifecycleCapability>();
 
         let (pump_tx, pump_rx) = crossbeam_channel::unbounded::<PumpWake>();
         Self {

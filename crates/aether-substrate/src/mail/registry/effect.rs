@@ -15,6 +15,7 @@ use crate::actor::native::offload::blocking::DeferredCompletion;
 use super::mailbox::MailboxEntry;
 use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
+use crate::mail::registry::canonical_mailbox_id;
 use crate::mail::view::View;
 use crate::mail::{CostCell, CostTable, KindId, MailId, MailboxId, SourceAddr};
 use crate::scheduler::SeizeHandle;
@@ -277,7 +278,7 @@ impl PreparedSpawnCommit {
 
 impl PreparedRoute {
     pub fn named(canonical_name: String) -> Self {
-        Self { id: MailboxId::from_name(&canonical_name), canonical_name }
+        Self { id: canonical_mailbox_id(&canonical_name), canonical_name }
     }
 
     pub fn with_id(id: MailboxId, canonical_name: String) -> Self {
