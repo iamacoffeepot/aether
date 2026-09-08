@@ -40,6 +40,12 @@ pub const REVIEW_CRITIC_COMMAND: &str = "review.critic";
 /// a lane no executor recognizes.
 pub const SCOPE_FILL_COMMAND: &str = "scope.fill";
 
+/// The reader lane's typed command (ADR-0216): the bloom-level retrospective
+/// that reads what a bloom landed and files what it will not fix. The one
+/// spelling shared by the dispatched [`Transformation::command`] and the host
+/// executors that route on it, like the three lane commands above.
+pub const RETROSPECT_READ_COMMAND: &str = "retrospect.read";
+
 /// The fold's mechanical verify lane — the whole fan-out, in CI-parity order,
 /// dispatched by `AggregateVerify` over the woven tree (ADR-0149 §The line).
 ///
@@ -94,7 +100,10 @@ pub const VERIFY_LANE_NETWORK: NetworkProfile = NetworkProfile::None;
 /// (ADR-0149 §Execution on Actions).
 #[must_use]
 pub fn is_model_lane(command: &str) -> bool {
-    command == CONSTRUCT_IMPLEMENT_COMMAND || command == REVIEW_CRITIC_COMMAND || command == SCOPE_FILL_COMMAND
+    command == CONSTRUCT_IMPLEMENT_COMMAND
+        || command == REVIEW_CRITIC_COMMAND
+        || command == SCOPE_FILL_COMMAND
+        || command == RETROSPECT_READ_COMMAND
 }
 
 /// The typed command this stage's dispatch constructs, if it dispatches a
@@ -110,6 +119,10 @@ pub fn is_model_lane(command: &str) -> bool {
 /// for a bloom, so a sealed per-member override can never reach it, and
 /// admitting the key would let an operator author a pin that silently never
 /// applies.
+///
+/// [`StageId::Study`] dispatches [`RETROSPECT_READ_COMMAND`] (ADR-0216): the
+/// bloom-level reader at the tail of the line, whose binding's `process` names
+/// the host position `retrospect` the same way the two review stages' does.
 #[must_use]
 pub(super) fn dispatched_command(stage: StageId) -> Option<&'static str> {
     match stage {
@@ -118,9 +131,8 @@ pub(super) fn dispatched_command(stage: StageId) -> Option<&'static str> {
         StageId::Verify => Some(VERIFY_MEMBER_COMMAND),
         StageId::AggregateVerify => Some(VERIFY_CHECK_COMMAND),
         StageId::BaseVerify => Some(VERIFY_BASE_COMMAND),
-        StageId::Sketch | StageId::Scope | StageId::Approve | StageId::Integrate | StageId::Land | StageId::Study => {
-            None
-        }
+        StageId::Study => Some(RETROSPECT_READ_COMMAND),
+        StageId::Sketch | StageId::Scope | StageId::Approve | StageId::Integrate | StageId::Land => None,
     }
 }
 
@@ -527,6 +539,12 @@ impl StageCatalog {
                 2,
                 3_600,
             ),
+            // Study is the bloom-level reader at the tail of the line
+            // (ADR-0216): it consumes Land's receipt and files what it will not
+            // fix. `process` names the host position, like `review` does; the
+            // command it dispatches is `retrospect.read`. One attempt only —
+            // findings are a product, never a gate, so a read that fails
+            // resolves the bloom with the study missing rather than wedging it.
             StageId::Study => (&["bloom.receipt"], &["bloom.study"], "retrospect", "study-recorded", 1, 3_600),
             // BaseVerify is the mechanical verify lane's, the same shape
             // AggregateVerify has: a compiler over a checked-out tree, not a
@@ -589,16 +607,17 @@ impl StageCatalog {
     pub fn profile_of(stage: StageId) -> AgentProfile {
         // The **dispatched model lanes** — the ones that actually fork an
         // agent CLI — are Construct and its Refine/Reconcile repair re-entries,
-        // the two review positions, and Scope. Construct and review run muse;
-        // Scope runs grok (ADR-0208). That is the whole set `is_model_lane`
-        // recognizes, so this is the calibration that decides what writes the
-        // code, what judges it, and what fills a workpiece before freeze.
+        // the two review positions, Scope, and the Study reader. Construct and
+        // review run muse; Scope runs grok (ADR-0208); the reader runs opus
+        // (ADR-0216 §2). That is the whole set `is_model_lane` recognizes, so
+        // this is the calibration that decides what writes the code, what
+        // judges it, what fills a workpiece before freeze, and what reads a
+        // landed batch.
         //
         // The remaining stages keep their Claude calibration and it is inert:
-        // Approve is a pre-seal host process, Study is not dispatched as a
-        // worker lane, and the mechanical stages run a compiler.
-        // `is_model_lane` keeps the resolved harness off every one of their
-        // argvs, so their harness names a CLI none of them forks.
+        // Approve is a pre-seal host process and the mechanical stages run a
+        // compiler. `is_model_lane` keeps the resolved harness off every one of
+        // their argvs, so their harness names a CLI none of them forks.
         //
         // Harness and model move together, and must: a model id belongs to the
         // provider its harness talks to, so a lane pointed at muse while still
@@ -669,8 +688,8 @@ pub enum DispatchKey {
         stage: StageId,
     },
     /// One bloom-level position's slot: `Integrate`, `AggregateVerify`,
-    /// `AggregateReview`, or `Land` — the stages that dispatch once per bloom
-    /// rather than once per member.
+    /// `AggregateReview`, `Land`, or the `Study` reader — the stages that
+    /// dispatch once per bloom rather than once per member.
     Bloom {
         /// The dispatched bloom-level stage.
         stage: StageId,
@@ -822,6 +841,9 @@ impl Transformation {
             StageId::BaseVerify => unreachable!(
                 "BaseVerify is a bloom-less whole-workspace gate built by Transformation::for_base_verify, never a member-stage transformation"
             ),
+            StageId::Study => unreachable!(
+                "Study is the bloom-level reader built by Transformation::for_study_read, never a member-stage transformation"
+            ),
             StageId::Construct
             | StageId::Refine
             | StageId::Reconcile
@@ -829,8 +851,9 @@ impl Transformation {
             | StageId::Approve
             | StageId::Integrate
             | StageId::AggregateVerify
-            | StageId::AggregateReview
-            | StageId::Study => (CONSTRUCT_IMPLEMENT_COMMAND, "iama/construct-claude:1", NetworkProfile::Restricted),
+            | StageId::AggregateReview => {
+                (CONSTRUCT_IMPLEMENT_COMMAND, "iama/construct-claude:1", NetworkProfile::Restricted)
+            }
         };
         Self {
             command: String::from(command),
@@ -1009,6 +1032,53 @@ impl Transformation {
             diff_base: Some(base),
             outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
             image: String::from("iama/review-claude:1"),
+            limits: ExecutionLimits { wall_clock_secs: binding.wall_clock_secs },
+            network: NetworkProfile::Restricted,
+            description: None,
+            model: None,
+        }
+    }
+
+    /// The bloom-level reader transformation (ADR-0216 §1): the
+    /// `retrospect.read` lane dispatched once per bloom against what the bloom
+    /// landed.
+    ///
+    /// `subject` is the receipt digest `Land` produced — the artifact the read
+    /// is *about*, and what the returned findings bind to. `checkout` is the
+    /// landed head the reader checks out and `base` the bloom's sealed base, so
+    /// `base..checkout` is the landed range: exactly the subject material §1
+    /// names, and the same committed-candidate shape both whole-bloom gates
+    /// already use. A reader left to read the working tree would judge a clean
+    /// checkout and file findings about nothing (#4723).
+    ///
+    /// Restricted egress like the other model lanes: the worker forks an agent
+    /// CLI and reaches the model API, never full network. It reads a landed
+    /// diff — text authored by construct lanes — so full network on this lane
+    /// would be the widest surface on the line.
+    ///
+    /// `binding` is the sealed catalog's `Study` binding, carrying the authored
+    /// wall-clock limit this read runs under. That pairing is checked rather
+    /// than assumed, but only in a debug build, for the same reason the sibling
+    /// aggregate constructors check theirs.
+    ///
+    /// # Panics
+    ///
+    /// In a debug build, when `binding` is not the `Study` binding.
+    #[must_use]
+    pub fn for_study_read(binding: &StageBinding, subject: Digest, checkout: Digest, base: Digest) -> Self {
+        debug_assert_eq!(
+            binding.stage,
+            StageId::Study,
+            "the dispatched limit must come from the stage being dispatched",
+        );
+
+        Self {
+            command: String::from(RETROSPECT_READ_COMMAND),
+            inputs: alloc::vec![subject],
+            checkout,
+            diff_base: Some(base),
+            outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
+            image: String::from("iama/retrospect-claude:1"),
             limits: ExecutionLimits { wall_clock_secs: binding.wall_clock_secs },
             network: NetworkProfile::Restricted,
             description: None,
@@ -1260,6 +1330,38 @@ mod tests {
         0xd4, 0x30, 0x64, 0x95, 0x2b, 0xec, 0x5d, 0x37, 0x87, 0x92, 0xe0, 0xd9, 0x9c, 0xe7,
     ];
 
+    // Tripwire: every command a stage dispatches is classified by exactly one of
+    // the two lane vocabularies. `dispatched_command` and `is_model_lane` are
+    // separate matches over the same spellings, and the host keys real behavior
+    // off the second: which argv the child gets, whether a credential and a
+    // resolved model ride along, and — since #5804 — whether the dispatch passes
+    // the prompt-manifest provenance gate at all. A stage wired to a command the
+    // disjunction does not recognize would fork its calibrated seat as if it were
+    // a compiler run: no credential, no attested model, no provenance check, and
+    // no failure to read. The reverse half catches a mechanical verify command
+    // admitted into the model set, which would hand a zero-egress compiler lane a
+    // credential.
+    #[test]
+    fn every_dispatched_command_is_classified_by_exactly_one_lane_vocabulary() {
+        const MECHANICAL: [&str; 3] = [VERIFY_MEMBER_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_BASE_COMMAND];
+        for stage in StageId::ALL {
+            let Some(command) = dispatched_command(*stage) else {
+                continue;
+            };
+            assert_ne!(
+                is_model_lane(command),
+                MECHANICAL.contains(&command),
+                "{stage:?} dispatches `{command}`, which is classified as both a model and a mechanical lane, or as \
+                 neither",
+            );
+        }
+        assert_eq!(
+            dispatched_command(StageId::Study),
+            Some(RETROSPECT_READ_COMMAND),
+            "the bloom-level reader is the line's fourth model lane (ADR-0216)",
+        );
+    }
+
     // Tripwire: the compiled line passes the same validation an authored catalog
     // must. It is the fallback every unconfigured bloom runs, so a line that fails
     // its own rule would refuse every seal — and the rule is authored by hand
@@ -1423,6 +1525,11 @@ mod tests {
             Some(base),
             "the critic's candidate is the committed range the fold built",
         );
+        assert_eq!(
+            Transformation::for_study_read(&binding(StageId::Study), subject, checkout, base).diff_base,
+            Some(base),
+            "the reader's subject is the landed range, not a clean checkout's working tree",
+        );
     }
 
     // The reducer never authors the advisory work-order description (#3595): it
@@ -1461,6 +1568,8 @@ mod tests {
         shortened_aggregate_verify.wall_clock_secs = 1_200;
         let mut shortened_aggregate_review = binding(StageId::AggregateReview);
         shortened_aggregate_review.wall_clock_secs = 1_500;
+        let mut shortened_study = binding(StageId::Study);
+        shortened_study.wall_clock_secs = 1_800;
 
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
@@ -1491,6 +1600,11 @@ mod tests {
                 .wall_clock_secs,
             1_500,
             "the aggregate-review critic copies the binding it was handed, not the compiled calibration"
+        );
+        assert_eq!(
+            Transformation::for_study_read(&shortened_study, subject, checkout, base).limits.wall_clock_secs,
+            1_800,
+            "the reader copies the binding it was handed, not the compiled calibration"
         );
     }
 

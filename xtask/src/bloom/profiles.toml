@@ -60,14 +60,20 @@ reasoning_effort = "Medium"
 
 # The seat bundles below key every stage `is_model_lane` recognizes:
 # `Construct`, its `Refine` repair re-entry, the ADR-0189 `Reconcile`
-# fold-conflict repair, and the two review positions. That is the whole set
-# `ModelOverride::validate` admits at the seal door, and the compiled
-# `StageCatalog::line()` default for all five is muse — so a seat left unkeyed
-# dispatches muse there, and the seats are enumerated rather than carried by a
-# member-wide floor that says nothing about which model sits where. Muse is
-# retired from these active seats, not from the catalog: it remains the compiled
-# default a seal with no override still resolves, and stays selectable by raw
-# config or a profile that names it.
+# fold-conflict repair, the two review positions, and the ADR-0216 `Study`
+# reader. That is the whole set `ModelOverride::validate` admits at the seal
+# door, and the compiled `StageCatalog::line()` default is muse for the first
+# five — so a seat left unkeyed dispatches muse there, and the seats are
+# enumerated rather than carried by a member-wide floor that says nothing about
+# which model sits where. Muse is retired from these active seats, not from the
+# catalog: it remains the compiled default a seal with no override still
+# resolves, and stays selectable by raw config or a profile that names it.
+#
+# `Study` sits with the judge, never with the construct side. The reader's
+# subject is the landed batch the construct seats wrote, so seating it on the
+# contestant's own model would have it read its own output — the property the
+# cross-judge bundles exist for, applied to the one lane whose whole input is
+# what the others produced.
 #
 # Effort is pinned only on the seats that name one; the rest keep their stage's
 # calibrated tier.
@@ -79,6 +85,7 @@ Refine = { agent = { harness = "Claude", model = "claude-opus-5" } }
 Reconcile = { agent = { harness = "Claude", model = "claude-opus-5" } }
 Review = { agent = { harness = "Claude", model = "claude-opus-5" } }
 AggregateReview = { agent = { harness = "Claude", model = "claude-opus-5" } }
+Study = { agent = { harness = "Claude", model = "claude-opus-5" } }
 
 # Opus writes, Grok judges. The judge is not the contestant's model, so the
 # independence the muse critic supplied implicitly is an explicit property of
@@ -90,6 +97,7 @@ Refine = { agent = { harness = "Claude", model = "claude-opus-5" } }
 Reconcile = { agent = { harness = "Claude", model = "claude-opus-5" } }
 Review = { agent = { harness = "Grok", model = "grok-4.6" }, reasoning_effort = "High" }
 AggregateReview = { agent = { harness = "Grok", model = "grok-4.6" }, reasoning_effort = "High" }
+Study = { agent = { harness = "Grok", model = "grok-4.6" }, reasoning_effort = "High" }
 
 # The mirror: Grok writes, Opus judges.
 [model_overrides.cross-judge-grok-construct.per_stage]
@@ -98,6 +106,7 @@ Refine = { agent = { harness = "Grok", model = "grok-4.6" }, reasoning_effort = 
 Reconcile = { agent = { harness = "Grok", model = "grok-4.6" }, reasoning_effort = "High" }
 Review = { agent = { harness = "Claude", model = "claude-opus-5" } }
 AggregateReview = { agent = { harness = "Claude", model = "claude-opus-5" } }
+Study = { agent = { harness = "Claude", model = "claude-opus-5" } }
 
 # Grok writes, Sonnet judges. The calibrated assignment: grok-4.6 High on
 # Construct/Refine/Reconcile, claude-sonnet-5 High on the two review seats.
@@ -107,6 +116,7 @@ Refine = { agent = { harness = "Grok", model = "grok-4.6" }, reasoning_effort = 
 Reconcile = { agent = { harness = "Grok", model = "grok-4.6" }, reasoning_effort = "High" }
 Review = { agent = { harness = "Claude", model = "claude-sonnet-5" }, reasoning_effort = "High" }
 AggregateReview = { agent = { harness = "Claude", model = "claude-sonnet-5" }, reasoning_effort = "High" }
+Study = { agent = { harness = "Claude", model = "claude-sonnet-5" }, reasoning_effort = "High" }
 
 [forecasts.none]
 predicted_tokens = 0
