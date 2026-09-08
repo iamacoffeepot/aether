@@ -4,12 +4,12 @@
 //! declare is refused at admission, and its order is not spent (ADR-0215).
 //!
 //! This is the strict half of the decode-tolerant / intake-strict move, end to
-//! end. The lane names an identity; nothing between the lane and this door holds
-//! a manifest, so nothing between them can judge it — the decoder that reads the
-//! evidence deliberately admits any well-formed identity so a row from a
-//! coordinator with a wider vocabulary still folds. The admission door is where
-//! the bloom is in hand, and therefore where the vocabulary the bloom sealed is
-//! in hand.
+//! end. The lane names an identity out of its own compiled vocabulary; nothing
+//! between the lane and this door holds a manifest, so nothing between them can
+//! judge it — the decoder that reads the evidence deliberately admits any
+//! well-formed identity so a row from a coordinator with a wider vocabulary
+//! still folds. The admission door is where the bloom is in hand, and therefore
+//! where the vocabulary the bloom sealed is in hand.
 //!
 //! What a silent admission would cost is ADR-0178's forgiveness bound. A member
 //! spends no repair roll on a verdict whose identities it has not failed on
@@ -38,38 +38,67 @@ const CHECKED_IN: &str = include_str!("../../../pipeline.toml");
 
 const WORKPIECE: &str = "wp";
 
-/// The base's manifest: this repository's vocabulary less the identity appended
-/// most recently (#5309), so the tenth is well-formed, compiled, and undeclared
-/// all at once — which is the case a compiled-table membership test cannot tell
-/// apart from a declared one.
-fn nine_identities() -> String {
-    CHECKED_IN
-        .lines()
-        .map(|line| line.replace("\"verify.lock\",", "").replace(", \"verify.lock\"", ""))
-        .collect::<Vec<_>>()
-        .join("\n")
+/// The vocabulary the base declares: this repository's, truncated before
+/// [`VerifyFailure::Clippy`].
+///
+/// Truncated rather than edited in the middle, and that is the whole design of
+/// the fixture. A position is an identity's bit in every recorded mask, so a
+/// vocabulary that *drops* an identity from the middle moves every identity
+/// after it off its own bit — a different refusal, and not the one under test.
+/// Cutting the tail leaves `verify.preflight` and `verify.fmt` exactly where
+/// this binary compiles them and makes everything past them undeclared,
+/// `verify.clippy` included — which is the identity the scripted mechanical
+/// lane names when it fails.
+const DECLARED: &str = r#"["verify.preflight", "verify.fmt"]"#;
+
+fn base_manifest() -> String {
+    let mut text = String::new();
+    let mut inside_identities = false;
+    for line in CHECKED_IN.lines() {
+        if inside_identities {
+            inside_identities = !line.starts_with(']');
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("identities = [") {
+            inside_identities = !rest.contains(']');
+            text.push_str(&format!("identities = {DECLARED}\n"));
+        } else if let Some((position, _)) = line.split_once(" = [")
+            && position.starts_with('"')
+        {
+            // A `[verifiers.runs]` entry: what that verify position's fan-out
+            // runs is a subset of the vocabulary, so it truncates with it.
+            text.push_str(&format!("{position} = {DECLARED}\n"));
+        } else {
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    text
 }
 
 #[test]
 fn a_verdict_naming_an_undeclared_verifier_is_refused() {
-    let declared = PipelineManifest::from_toml(&nine_identities()).expect("the nine-identity manifest reads");
-    assert_eq!(declared.identity_count(), 9, "the fixture must actually drop an identity");
-    assert!(!declared.declares_verifier(VerifyFailure::Lock));
+    let declared = PipelineManifest::from_toml(&base_manifest()).expect("the truncated manifest reads");
+    assert_eq!(declared.identity_count(), 2, "the fixture must actually shorten the vocabulary");
+    assert!(declared.declares_verifier(VerifyFailure::Preflight), "and keep what it declares on its own bit");
+    assert!(!declared.declares_verifier(VerifyFailure::Clippy), "while the identity the lane names is outside it");
 
     let authority = Repo::builder()
         .identity("test", "test@example.test")
-        .seed_file(PIPELINE_MANIFEST_PATH, nine_identities().as_str())
+        .seed_file(PIPELINE_MANIFEST_PATH, base_manifest().as_str())
         .bare_clone()
         .create();
     let roots = HarnessRoots::create();
     let mut harness = HarnessBuilder::local_authority(&authority).roots(&roots).start("undeclared-verifier");
 
-    // The lane names the identity the base dropped. Every other position keeps
-    // the all-passing script, so the run reaches Verify on its own.
+    // The member's Verify fails; every other position keeps the all-passing
+    // script, so the run reaches Verify on its own. The identity the failure
+    // names is the mock lane's own `verify.clippy`, which this base does not
+    // declare — the script selects the lane's mode, never its vocabulary.
     harness.script_lane(
         &WorkpieceId(WORKPIECE.to_owned()),
         StageId::Verify,
-        &[LaneScript::VerifyFail(VerifyFailureSet::one(VerifyFailure::Lock))],
+        &[LaneScript::VerifyFail(VerifyFailureSet::one(VerifyFailure::Clippy))],
     );
 
     let base = harness.view().mainline;
@@ -83,7 +112,7 @@ fn a_verdict_naming_an_undeclared_verifier_is_refused() {
         BloomDraft { proposals: vec![member(WORKPIECE, digest(0x51))], base, configs, ..BloomDraft::default() }.seal();
     let bloom = spec.id();
     assert!(
-        matches!(harness.admit("seal-nine-identities", Fact::Seal(spec)), Outcome::Sealed(id) if id == bloom),
+        matches!(harness.admit("seal-truncated-vocabulary", Fact::Seal(spec)), Outcome::Sealed(id) if id == bloom),
         "a bloom sealing the address its base declared is admitted",
     );
 
