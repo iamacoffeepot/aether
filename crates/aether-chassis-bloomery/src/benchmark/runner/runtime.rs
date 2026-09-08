@@ -16,6 +16,7 @@
 //! about to knock on.
 
 use std::collections::BTreeMap;
+use std::iter::once;
 use std::time::Duration;
 
 use aether_actor::{Manual, OutboundReply, runtime};
@@ -39,7 +40,7 @@ use crate::benchmark::kinds::{
 use crate::benchmark::run::{BenchmarkPlan, PlannedBloom, RunSpec, plan, require_trial_mode};
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::control::ControlCore;
-use crate::store::{RecordDispatchDescription, StoreCapability};
+use crate::store::{RecordDispatchDescription, RecordDispatchDescriptionResult, StoreCapability};
 
 /// Ceiling on the runs this capability tracks at once (ADR-0184).
 ///
@@ -104,9 +105,7 @@ impl BenchmarkRunnerState {
     /// ordinary answer. Without it an operator's own `POST /configs` → `POST
     /// /benchmark` sequence would refuse a cell the store does hold.
     fn awaits_configs(&self, request: &StartBenchmark) -> bool {
-        std::iter::once(&request.instructions)
-            .chain(&request.cells)
-            .any(|address| self.configs.stored(*address).is_none())
+        once(&request.instructions).chain(&request.cells).any(|address| self.configs.stored(*address).is_none())
     }
 
     /// Plan a run and seal its first cell.
@@ -426,6 +425,28 @@ impl NativeActor for BenchmarkRunnerCapability {
     #[handler::manual]
     fn on_benchmark_tick(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: BenchmarkTick) {
         state.poll(ctx);
+    }
+
+    /// Answer the work-order write this cap sends fire-and-forget.
+    ///
+    /// Handled rather than left to warn as an unrouted arrival, and logged
+    /// rather than aborting the cell: the row only carries the replayed order to
+    /// the lane, so a failed write is a cell whose agent reads no work order —
+    /// worth saying loudly, and not worth failing an admission that already
+    /// committed.
+    #[handler::single]
+    fn on_record_dispatch_description_result(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: RecordDispatchDescriptionResult,
+    ) {
+        if let RecordDispatchDescriptionResult::Err { error } = mail {
+            tracing::error!(
+                target: "aether_chassis_bloomery::benchmark",
+                %error,
+                "a benchmark cell's work-order row did not persist",
+            );
+        }
     }
 
     #[handler::manual]

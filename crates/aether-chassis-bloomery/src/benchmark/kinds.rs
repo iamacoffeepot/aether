@@ -61,7 +61,7 @@ pub enum StartBenchmarkResult {
 }
 
 /// Read one run's rendered state.
-#[aether_data::kind(name = "aether.bloomery.benchmark.read", eq)]
+#[aether_data::kind(name = "aether.bloomery.benchmark.read", copy, eq)]
 pub struct ReadBenchmark {
     /// The handle a start returned.
     pub run: u64,

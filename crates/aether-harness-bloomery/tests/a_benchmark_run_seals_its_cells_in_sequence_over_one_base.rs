@@ -67,6 +67,12 @@ fn a_benchmark_run_seals_its_cells_in_sequence_over_one_base() {
     let cells = [harness.record_model_override("bench-cell-a"), harness.record_model_override("bench-cell-b")];
     let base = harness.view().mainline;
 
+    // The sealed base and the commit the ref stands at are two different values:
+    // `base` is the bloomery digest a bloom pins, and at boot that is the
+    // all-zero genesis sentinel, which names the repository's head only through
+    // the correspondence. What the reset has to restore is the commit.
+    let checkout = harness.fixture_mainline();
+
     let request = serde_json::json!({
         "set": "0908-calibration",
         "base": base.to_hex(),
@@ -126,7 +132,7 @@ fn a_benchmark_run_seals_its_cells_in_sequence_over_one_base() {
 
         assert_eq!(
             harness.fixture_mainline(),
-            base,
+            checkout,
             "the run resets the fixture mainline to the golden-task base after cell {index}, so the next one replays \
              the same tree"
         );
