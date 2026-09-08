@@ -6,9 +6,9 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    Admit, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, LaneObservation, Nonce, ResolutionClaim,
-    StageCatalog, StageId, StageResult, StageVerdict, SurfaceRequest, VerifyFailure, VerifyFailureSet, WorkpieceId,
-    classify_findings, normalize_stage_result,
+    Admit, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, LaneObservation, Nonce, PipelineManifest,
+    ResolutionClaim, StageCatalog, StageId, StageResult, StageVerdict, SurfaceRequest, VerifyFailure, VerifyFailureSet,
+    WorkpieceId, classify_findings, normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 use std::fmt::Write as _;
@@ -89,6 +89,25 @@ pub enum IntakeRefusal {
     /// (ADR-0195 / ADR-0176); every other stage refuses rather than being
     /// given unratified semantics by admission.
     ExecutorFaultOutOfStage(StageId),
+    /// The verdict named a verifier identity the bloom's sealed vocabulary does
+    /// not declare (ADR-0215).
+    ///
+    /// The strict half of ADR-0215's decode-tolerant / intake-strict move. The
+    /// decoder that read this set held no manifest and admitted any
+    /// syntactically valid identity; this door holds the bloom, and so the
+    /// vocabulary the bloom sealed, which is the only place the question "is
+    /// this an identity that could have failed here" has an answer. Refusing it
+    /// here is what keeps ADR-0178's forgiveness bound bounded: an identity
+    /// outside the sealed vocabulary would extend a member's repair loop by one
+    /// more novel failure that costs no roll.
+    UndeclaredVerifier {
+        /// The identities the verdict named that the bloom's manifest does not
+        /// declare, in the set's canonical order.
+        undeclared: Vec<String>,
+        /// The vocabulary the bloom actually sealed, so the refusal states the
+        /// alternative instead of sending its reader to a file in a tree.
+        declared: Vec<String>,
+    },
     /// A surface-request or plain-decline verdict arrived against a stage that
     /// runs no construct-family lane (ADR-0207). Only Construct / Refine /
     /// Reconcile dispatch `construct.implement`, so only they can decline for
@@ -204,6 +223,50 @@ fn verifier_failure_refusal(stage: StageId, upload: &UploadedEvidence) -> Option
         verdict: upload.verdict,
         failed_verifiers: upload.observation.failed_verifiers,
     })
+}
+
+// ADR-0215's intake-strict half: every identity a verdict names has to be one
+// the bloom's own sealed vocabulary declares.
+//
+// The manifest is read off the order's flattened registry rather than from a
+// compiled copy, because the whole point of the record is that the vocabulary
+// belongs to the tree the bloom sealed and not to this binary. A bloom that
+// sealed none — every bloom from before ADR-0215 — is judged against
+// `PipelineManifest::compiled()`, the vocabulary it actually ran under, exactly
+// as its record folds against that value. An entry the store cannot read is the
+// same answer for a different reason: the seal door already refused a manifest
+// the host could not resolve, so a missing row here is a corrupt store rather
+// than a bloom with a different vocabulary, and inventing an undeclared-identity
+// refusal out of it would wedge members over a storage fault.
+fn undeclared_verifier_refusal(
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    upload: &UploadedEvidence,
+) -> Result<Option<IntakeRefusal>, IntakeError> {
+    if upload.observation.failed_verifiers.is_empty() {
+        return Ok(None);
+    }
+    let manifest = sealed_manifest(store, record)?;
+    let undeclared = manifest.undeclared_verifiers(upload.observation.failed_verifiers);
+    if undeclared.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(IntakeRefusal::UndeclaredVerifier {
+        undeclared,
+        declared: manifest.identities().map(String::from).collect(),
+    }))
+}
+
+// The lane vocabulary `record`'s bloom sealed, or the compiled one when it
+// sealed none.
+fn sealed_manifest(store: &mut dyn StoreBackend, record: &DispatchRecord) -> Result<PipelineManifest, IntakeError> {
+    let Some(address) = record.configs.address::<PipelineManifest>() else {
+        return Ok(PipelineManifest::compiled());
+    };
+    let Some((_, bytes, _)) = store.lookup_config(address.as_bytes())? else {
+        return Ok(PipelineManifest::compiled());
+    };
+    Ok(from_bytes::<PipelineManifest>(&bytes).unwrap_or_else(|_| PipelineManifest::compiled()))
 }
 
 /// Decompose a failing aggregate verdict's findings against the bloom's
@@ -744,6 +807,9 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
         return Ok(AdmitDecision::Refused(IntakeRefusal::CorruptOrder(upload.nonce.clone())));
     };
     if let Some(refusal) = out_of_stage_refusal(record.stage, upload) {
+        return Ok(AdmitDecision::Refused(refusal));
+    }
+    if let Some(refusal) = undeclared_verifier_refusal(store, &record, upload)? {
         return Ok(AdmitDecision::Refused(refusal));
     }
     let observed = StageResult { subject: upload.subject, verdict: upload.verdict, detail: upload.detail };

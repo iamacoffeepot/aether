@@ -132,9 +132,12 @@ fn counted_verdict(
     let seen_verify_failures = cursor.seen_verify_failures.union(failed_verifiers);
     let rolls = cursor.repair_rolls + u32::from(!repeated_verifiers.is_empty());
 
-    // The loop is bounded by N + B: V1 has N = 10 identities, so at most ten
-    // failed verdicts can add a new identity without spending a roll; at most B
-    // later verdicts can spend the sealed Verify budget before this member wedges.
+    // The loop is bounded by N + B, and both halves are read off the record
+    // rather than compiled (ADR-0215): at most N verdicts can add an identity
+    // the member has not failed on yet without spending a roll, and at most B
+    // later verdicts spend the sealed Verify budget before it wedges. The bound
+    // is `record.verify_forgiveness_bound()`, which computes it from the
+    // vocabulary the bloom sealed instead of restating a number by hand.
     if !repeated_verifiers.is_empty() && rolls >= record.stage_catalog.retry_budget_of(StageId::Verify).unwrap_or(1) {
         let progress = StageProgress {
             stage: StageId::Verify,

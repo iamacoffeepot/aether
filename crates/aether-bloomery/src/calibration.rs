@@ -391,8 +391,8 @@ impl CalibrationLedger {
             if resolved > 0 {
                 cell.rolls_to_green = cell.rolls_to_green.saturating_add(slot.dispatches);
             }
-            for (identity, verdicts) in VerifyFailure::ALL.into_iter().zip(slot.failures) {
-                cell.failures[identity as usize] = cell.failures[identity as usize].saturating_add(verdicts);
+            for (column, verdicts) in slot.failures.into_iter().enumerate() {
+                cell.failures[column] = cell.failures[column].saturating_add(verdicts);
             }
         }
 
@@ -506,8 +506,13 @@ impl CalibrationLedger {
         let Some(slot) = self.slots.get_mut(&id) else {
             return;
         };
-        for identity in failed.iter() {
-            slot.failures[identity as usize] = slot.failures[identity as usize].saturating_add(1);
+        // Keyed by the identity's position in the compiled vocabulary, which is
+        // the width of these columns. An identity a bloom's sealed manifest
+        // declares past that vocabulary has no column here and is counted
+        // nowhere rather than into a neighbour's; the ledger keys its columns on
+        // the identity string in the slice that follows this one (#5817).
+        for column in failed.iter().filter_map(VerifyFailure::compiled_position) {
+            slot.failures[column] = slot.failures[column].saturating_add(1);
         }
     }
 }

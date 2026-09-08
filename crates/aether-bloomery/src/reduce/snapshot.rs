@@ -2224,6 +2224,24 @@ impl BloomRecord {
         }
     }
 
+    /// ADR-0178's forgiveness bound for this bloom's members: `N + B`, the most
+    /// failing terminal-Verify verdicts one member can absorb before it wedges.
+    ///
+    /// `N` is the sealed vocabulary's size — at most that many verdicts can name
+    /// an identity the member has not failed on yet, and a verdict that repeats
+    /// none spends no repair roll — and `B` is the sealed `Verify` retry budget
+    /// that bounds the repeats after them. Both halves come off this record,
+    /// which is the whole point (ADR-0215): `N` was a comment restating a
+    /// compiled `ALL.len()` beside the value it described, and it was stale from
+    /// the moment the tenth identity landed. A bloom sealed before the manifest
+    /// existed answers from [`PipelineManifest::compiled`], the vocabulary it
+    /// actually ran under.
+    #[must_use]
+    pub fn verify_forgiveness_bound(&self) -> u32 {
+        let identities = u32::try_from(self.pipeline_manifest.identity_count()).unwrap_or(u32::MAX);
+        identities.saturating_add(self.stage_catalog.retry_budget_of(StageId::Verify).unwrap_or(1))
+    }
+
     /// The composition findings no operator adjudication has closed (#4957).
     ///
     /// The one place closure is decided, so the adjudication door and every

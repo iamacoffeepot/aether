@@ -11,16 +11,17 @@ use std::sync::{Arc, Mutex};
 use aether_bloomery::{
     BloomDraft, BloomId, BloomRecord, CandidateRef, CompositionParents, Conclusion, ConfigRegistry, Decision, Digest,
     Event, Evidence, EvidenceKind, EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey,
-    LaneObservation, Membership, NetworkProfile, Nonce, Observation, Outcome, Provenance, ResolvedConfigs,
-    RetrospectClaim, Snapshot, SpendWindow, StageCatalog, StageId, StageVerdict, Statement, StudyCall, StudyCost,
-    SuppressionRequest, SurfacePathRequest, SurfaceRequest, Transformation, VerifyFailure, VerifyFailureSet,
-    WorkHandle, WorkOrder, WorkpieceId, reduce,
+    LaneObservation, Membership, NetworkProfile, Nonce, Observation, Outcome, PipelineManifest, Provenance,
+    ResolvedConfigs, RetrospectClaim, Snapshot, SpendWindow, StageCatalog, StageId, StageVerdict, Statement, StudyCall,
+    StudyCost, SuppressionRequest, SurfacePathRequest, SurfaceRequest, Transformation, VerifyFailure, VerifyFailureSet,
+    WorkHandle, WorkOrder, WorkpieceId, config_address, reduce,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
     ActionsExecutor, Artifact, ExecutorError, GithubError, LaneWorkflows, RunConclusion, RunStatus,
 };
-use aether_data::wire::from_bytes;
+use aether_data::Kind;
+use aether_data::wire::{from_bytes, to_vec};
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::subscriber::with_default;
@@ -955,6 +956,63 @@ fn a_reconcile_result_admits_attempt_completed_not_out_of_line() {
     assert_eq!(*stage, StageId::Reconcile);
     assert!(*passed, "a VerificationPassed verdict passes the gate");
     assert!(store.lookup_order("n-rec").unwrap().is_none(), "the admitted order is consumed");
+}
+
+#[test]
+fn a_verdict_naming_an_identity_the_bloom_did_not_seal_is_refused() {
+    // ADR-0215's intake-strict half. The decoder that read this set held no
+    // manifest, so it admitted the identity; this door holds the bloom, and so
+    // the vocabulary the bloom sealed. Admitting it anyway would put an
+    // identity the base does not implement into the member's seen set, which is
+    // one more novel failure that costs no repair roll — exactly the unbounded
+    // vocabulary ADR-0178 closed the enum to prevent.
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let workpiece = WorkpieceId("wp-undeclared".to_owned());
+    let candidate = Digest::from_bytes([5; 32]);
+
+    // A base declaring nine identities: this repository's vocabulary less the
+    // one appended most recently (#5309).
+    let mut manifest = PipelineManifest::compiled();
+    manifest.verifiers.identities.retain(|identity| identity != VerifyFailure::Lock.as_str());
+    for runs in manifest.verifiers.runs.values_mut() {
+        runs.retain(|identity| identity != VerifyFailure::Lock.as_str());
+    }
+    let bytes = to_vec(&manifest).expect("a manifest encodes");
+    let address = config_address(PipelineManifest::NAME, &bytes);
+    store.record_config(address.as_bytes(), PipelineManifest::NAME, &bytes).unwrap();
+
+    let mut configs = ConfigRegistry::default();
+    configs.insert::<PipelineManifest>(address);
+    let record = DispatchRecord {
+        configs,
+        ..dispatch_record("n-undeclared", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate)
+    };
+    record_dispatch(&mut store, &record).unwrap();
+
+    let failed = |failures| UploadedEvidence {
+        nonce: Nonce("n-undeclared".to_owned()),
+        subject: candidate,
+        verdict: StageVerdict::VerificationFailed,
+        detail: Digest::from_bytes([7; 32]),
+        observation: LaneObservation { failed_verifiers: failures, ..Default::default() },
+    };
+
+    let refusal = admit_uploaded(&mut store, &failed(VerifyFailureSet::one(VerifyFailure::Lock))).unwrap();
+    let AdmitDecision::Refused(IntakeRefusal::UndeclaredVerifier { undeclared, declared }) = refusal else {
+        panic!("a verdict naming an identity outside the sealed vocabulary is refused: {refusal:?}");
+    };
+    assert_eq!(undeclared, [VerifyFailure::Lock.as_str()], "the refusal names the identity the base does not declare");
+    assert_eq!(declared.len(), 9, "and the vocabulary it does, so the reader need not go read a tree");
+
+    // The refusal precedes the consume, so the honest verdict the same order
+    // could still carry is not lost with it — and an identity the base *does*
+    // declare admits through the same door untouched.
+    let admitted = admit_uploaded(&mut store, &failed(VerifyFailureSet::one(VerifyFailure::Clippy))).unwrap();
+    let AdmitDecision::Admitted(admission) = admitted else {
+        panic!("an identity the sealed vocabulary declares is admitted: {admitted:?}");
+    };
+    assert!(matches!(admission.event.fact, Fact::VerifyFailed { .. }));
 }
 
 #[test]

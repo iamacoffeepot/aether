@@ -41,7 +41,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CONSTRUCT_IMPLEMENT_COMMAND, ConfigScopes, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, ResolvedConfigs,
-    SCOPE_FILL_COMMAND, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_MEMBER_COMMAND, VerifyFailure, VerifyGateSet,
+    SCOPE_FILL_COMMAND, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_MEMBER_COMMAND, VerifyFailure,
+    VerifyFailureSet, VerifyGateSet,
 };
 
 /// Where a repository states its lanes: the root of the checkout, beside
@@ -261,6 +262,60 @@ impl PipelineManifest {
         self.lanes.model.iter().any(|declared| declared == command)
     }
 
+    /// How many verifier identities this vocabulary declares — the `N` of
+    /// ADR-0178's `N + B` forgiveness bound, read off the value a bloom sealed
+    /// rather than off whatever a binary happens to compile.
+    #[must_use]
+    pub fn identity_count(&self) -> usize {
+        self.verifiers.identities.len()
+    }
+
+    /// Every verifier identity this vocabulary declares, in declaration order —
+    /// which is bit order, and what a refusal names back.
+    pub fn identities(&self) -> impl Iterator<Item = &str> {
+        self.verifiers.identities.iter().map(String::as_str)
+    }
+
+    /// The identity `name` interned against this vocabulary: its declared
+    /// position, carried on the value.
+    ///
+    /// `None` when this manifest does not declare `name` at all, and equally
+    /// when it declares it at a position this coordinator cannot represent — a
+    /// compiled identity moved off its own bit, or a new name below the compiled
+    /// vocabulary's width. Both are answered the same way because both mean the
+    /// same thing to an admission door: the vocabulary in the row is not the
+    /// vocabulary the bloom sealed, and a mask interned against it would name
+    /// gates that never ran.
+    #[must_use]
+    pub fn intern(&self, name: &str) -> Option<VerifyFailure> {
+        let position = u8::try_from(self.identities().position(|declared| declared == name)?).ok()?;
+        VerifyFailure::from_name(name)
+            .filter(|compiled| compiled.position() == position)
+            .or_else(|| VerifyFailure::declared(position, name))
+    }
+
+    /// Whether this vocabulary declares `failure` — the same identity at the
+    /// same position.
+    #[must_use]
+    pub fn declares_verifier(&self, failure: VerifyFailure) -> bool {
+        self.intern(failure.as_str()) == Some(failure)
+    }
+
+    /// Every identity in `failures` this vocabulary does not declare, in the
+    /// set's own canonical order.
+    ///
+    /// The refusal's evidence: a verdict naming one of these is refused at
+    /// admission, where the bloom — and so the vocabulary it sealed — is in
+    /// hand (ADR-0215).
+    #[must_use]
+    pub fn undeclared_verifiers(&self, failures: VerifyFailureSet) -> Vec<String> {
+        failures
+            .iter()
+            .filter(|failure| !self.declares_verifier(*failure))
+            .map(|failure| String::from(failure.as_str()))
+            .collect()
+    }
+
     /// Every lane command the repository declares, model lanes first.
     ///
     /// What a refusal names back: an operator told their catalog names a lane
@@ -379,7 +434,7 @@ mod tests {
     use std::path::Path;
 
     use super::{PipelineManifest, PipelineManifestError};
-    use crate::values::is_model_lane;
+    use crate::values::{VerifyFailure, VerifyFailureSet, is_model_lane};
 
     fn checked_in_manifest() -> PipelineManifest {
         let text = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pipeline.toml"))
@@ -447,6 +502,43 @@ mod tests {
                 "`{surprise}` must be refused"
             );
         }
+    }
+
+    #[test]
+    fn an_identity_is_interned_against_the_declared_vocabulary() {
+        // The whole of ADR-0215's move for verifier identity: membership stops
+        // being a compiled table lookup and becomes a position in the vocabulary
+        // the bloom sealed. A `declares_verifier` that reached for
+        // `VerifyFailure::from_name` would pass every assertion this repository
+        // can make about its own manifest, because the two agree today — so the
+        // vocabularies below deliberately do not.
+        let mut nine = PipelineManifest::compiled();
+        nine.verifiers.identities.retain(|identity| identity != VerifyFailure::Lock.as_str());
+
+        assert_eq!(nine.identity_count(), 9);
+        assert!(nine.declares_verifier(VerifyFailure::Clippy));
+        assert!(!nine.declares_verifier(VerifyFailure::Lock), "an identity the base dropped is not declared");
+        assert_eq!(
+            nine.undeclared_verifiers([VerifyFailure::Clippy, VerifyFailure::Lock].into_iter().collect()),
+            [VerifyFailure::Lock.as_str()],
+        );
+
+        // A vocabulary that appends past the compiled one interns the new
+        // identity at the position it declared, which is its bit.
+        let mut eleven = PipelineManifest::compiled();
+        eleven.verifiers.identities.push(String::from("verify.novel"));
+        let novel = eleven.intern("verify.novel").expect("an appended identity interns");
+        assert_eq!(novel.position(), 10);
+        assert!(eleven.declares_verifier(novel));
+        assert!(eleven.undeclared_verifiers(VerifyFailureSet::one(novel)).is_empty());
+
+        // A vocabulary that moves a compiled identity off its own bit is
+        // refused rather than re-interned: every stored mask was written
+        // against the position it is being moved away from.
+        let mut reordered = PipelineManifest::compiled();
+        reordered.verifiers.identities.swap(0, 1);
+        assert!(!reordered.declares_verifier(VerifyFailure::Fmt));
+        assert_eq!(reordered.intern("verify.fmt"), None);
     }
 
     #[test]
