@@ -61,16 +61,16 @@ use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
 use crate::set::{
-    WidgetDefaults, accept_font_metrics_result, apply_text_theme, centered_text_x, clamp_option_index, elide_to_width,
-    even_split_widths, fit_row_widths, measured_text_width, pointer_wash, pump_text_font_metrics,
+    WidgetDefaults, accept_font_metrics_result, apply_text_theme, centered_text_x, clamp_option_index, clamp_selection,
+    elide_to_width, even_split_widths, fit_row_widths, measured_text_width, pointer_wash, pump_text_font_metrics,
     push_control_outlines, quad, release_left, reply_if_hidden, slot_at_local_x, spread_row_widths, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, Theme, ThemeState};
 use crate::{
-    Collect, HoverLost, SetWidgetState, TabSelected, TabStripConfig, TabStripStyle, WidgetControlState, WidgetDrawItem,
-    WidgetDrawList, WidgetFrame,
+    Collect, HoverLost, SetSelection, SetWidgetState, TabSelected, TabStripConfig, TabStripStyle, WidgetControlState,
+    WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 /// Thickness, in pixels, of the selected tab's bottom-edge underline — the
@@ -313,8 +313,8 @@ impl WidgetDefaults for TabStripWidget {
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send
-/// it its `TabStripConfig` again to replace the labels or the selection in
-/// place.
+/// it its `TabStripConfig` again to replace the labels or the style in place —
+/// that holds the current tab. Send it [`SetSelection`] to move the tab.
 #[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for TabStripWidget {
     type Config = TabStripConfig;
@@ -343,10 +343,13 @@ impl WasmActor for TabStripWidget {
 
     /// Replace the labels / selection / theme in place from a re-sent config,
     /// and request metrics for the new theme font.
+    /// Replace the labels / style / theme in place, re-clamping the selection
+    /// into the new vector. `initial_index` seeds the strip only at `init`;
+    /// [`SetSelection`] moves the tab.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: TabStripConfig) {
-        self.selected_index = clamp_option_index(config.initial_index, config.labels.len());
         self.labels = config.labels;
+        self.selected_index = clamp_selection(self.selected_index, self.labels.len());
         self.style = config.style;
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
@@ -360,6 +363,16 @@ impl WasmActor for TabStripWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
+    }
+
+    /// Push the current tab from the host, clamped into the labels. Silent —
+    /// no [`TabSelected`]. A `None` index is ignored: a strip of tabs always
+    /// has one selected.
+    #[handler::single]
+    fn on_set_selection(&mut self, _ctx: &mut WasmCtx<'_>, set: SetSelection) {
+        if let Some(index) = set.index {
+            self.selected_index = clamp_option_index(index, self.labels.len());
+        }
     }
 
     /// Install a font-metrics reply; the next `Collect` lays the tabs out

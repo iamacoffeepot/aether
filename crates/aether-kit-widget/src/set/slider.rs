@@ -23,7 +23,7 @@ use crate::set::{push_control_outlines, quad, reply_if_hidden};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
 use crate::{
-    Collect, SetWidgetState, SliderChanged, SliderConfig, WidgetControlState, WidgetDrawItem, WidgetDrawList,
+    Collect, SetValue, SetWidgetState, SliderChanged, SliderConfig, WidgetControlState, WidgetDrawItem, WidgetDrawList,
     WidgetFrame,
 };
 
@@ -243,6 +243,13 @@ impl WasmActor for SliderWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
+    }
+
+    /// Push a value from the host, clamped and snapped like any other. Silent:
+    /// the host asked for it, so it is not reported back as a change.
+    #[handler::single]
+    fn on_set_value(&mut self, _ctx: &mut WasmCtx<'_>, set: SetValue) {
+        self.value = self.snapped(set.value);
     }
 
     /// A left press begins a drag and sets the value from the cursor.

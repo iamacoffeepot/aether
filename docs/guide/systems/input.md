@@ -114,6 +114,18 @@ fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
 `WindowSelector::All` includes all current windows and windows created later.
 If one mailbox matches both selectors, it receives one copy.
 
+Both subscribe surfaces are gated on `aether_actor::Publishes<K>`, the send-side
+mirror of `HandlesKind`: `WindowCapability` implements it for the event
+vocabulary above, `LifecycleCapability` for the stage kinds, and a kind neither
+publishes has no impl at all. So subscribing at the wrong capability —
+`windows.subscribe::<Tick>(..)`, `lifecycle.subscribe::<Key>()` — is an `E0277`
+at the `wire` call site whose message names the capability that does publish the
+kind, instead of a stored subscription row that never fires. The failure it
+replaces is entirely silent: the row is accepted, the event is dropped at its
+source for want of a matching subscriber, and the component just looks dead. The
+same bound is on `subscribe_for`, `unsubscribe`, and `unsubscribe_for`, since a
+kind that cannot be subscribed cannot be unsubscribed either.
+
 Then handle the event as ordinary mail and inspect its source id:
 
 ```rust

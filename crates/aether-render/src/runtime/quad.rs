@@ -1,18 +1,21 @@
 //! Per-frame overlay accumulator state for the `aether.render` cap
 //! (ADR-0105). `on_draw_textured_quads` / `on_draw_solid_quads` /
-//! `on_draw_screen_triangles` push a [`QuadBatch`] into the accumulator;
-//! the driver's `record_overlay_pass` consumes them at record time.
+//! `on_draw_screen_triangles` / `on_draw_shapes` push a [`QuadBatch`]
+//! into the accumulator; the driver's `record_overlay_pass` consumes
+//! them at record time.
 
 use aether_kinds::{ClipRect, QuadSpace};
 
 use super::super::kinds::{
-    DrawScreenTriangles, DrawSolidQuads, DrawTexturedQuads, QuadBlend, ScreenTriangle, SolidQuad, TexturedQuad,
+    DrawScreenTriangles, DrawShapes, DrawSolidQuads, DrawTexturedQuads, QuadBlend, ScreenTriangle, Shape, SolidQuad,
+    TexturedQuad,
 };
 use super::texture::TextureRegistry;
 
-/// What an accumulated overlay batch draws. Both arms record in the one
-/// overlay pass in submission order through the one pipeline; they
-/// differ only in how the batch expands to vertices.
+/// What an accumulated overlay batch draws. Every arm records in the one
+/// overlay pass in submission order; the textured arms share one
+/// pipeline and differ only in how the batch expands to vertices, while
+/// shapes run through their own pipeline (ADR-0213).
 #[derive(Clone)]
 pub enum OverlayGeometry {
     /// Axis-aligned rects, each cornered out into two triangles under
@@ -23,6 +26,10 @@ pub enum OverlayGeometry {
     /// point of the kind is that pixel coordinates are absolute, so
     /// there is no projection to choose.
     ScreenTriangles(Vec<ScreenTriangle>),
+    /// Rounded, stroked, shadowed boxes evaluated as a distance field
+    /// under the projection `space` selects (ADR-0213). Samples no
+    /// texture: the batch's `texture_id` is unused.
+    Shapes { space: QuadSpace, shapes: Vec<Shape> },
 }
 
 /// One accumulated overlay batch (ADR-0105): the texture it samples, the
@@ -94,6 +101,21 @@ impl QuadBatch {
             clip: mail.clip,
             blend: QuadBlend::Straight,
             geometry: OverlayGeometry::ScreenTriangles(mail.triangles),
+        }
+    }
+
+    /// The batch a `draw_shapes` submission accumulates to (ADR-0213). A
+    /// shape carries its own colours and samples no texture, so the batch
+    /// names the reserved white id only to fill the field; the record path
+    /// never looks it up. The fragment stage composes its parts
+    /// premultiplied, and the shape pipeline blends accordingly, so `blend`
+    /// is likewise unread.
+    pub fn shapes(mail: DrawShapes) -> Self {
+        Self {
+            texture_id: super::texture::WHITE_TEXTURE_ID,
+            clip: mail.clip,
+            blend: QuadBlend::Premultiplied,
+            geometry: OverlayGeometry::Shapes { space: mail.space, shapes: mail.shapes },
         }
     }
 }
