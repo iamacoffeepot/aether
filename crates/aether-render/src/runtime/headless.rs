@@ -16,9 +16,9 @@ use aether_substrate::chassis::error::BootError;
 use crate::headless::HeadlessRenderCapability;
 use crate::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DestroyGeometry, DestroyTexture,
-    DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawSolidQuads, DrawTexturedQuads, DrawTriangle,
-    ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult,
-    UpdateGeometry, UpdateTexture, ViewProjection,
+    DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawShapes, DrawSolidQuads, DrawTexturedQuads,
+    DrawTriangle, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings,
+    ProgramTimingsResult, UpdateGeometry, UpdateTexture, ViewProjection,
 };
 
 /// `HeadlessRenderCapability` runtime state, which is nothing at all — the
@@ -141,6 +141,11 @@ impl NativeActor for HeadlessRenderCapability {
     /// as `on_draw_solid_quads`.
     #[handler::single]
     fn on_draw_screen_triangles(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawScreenTriangles) {}
+
+    /// `DrawShapes` lands here as a no-op (ADR-0213) for the same reason
+    /// as `on_draw_screen_triangles`.
+    #[handler::single]
+    fn on_draw_shapes(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawShapes) {}
 
     /// `DrawMaterialTextured` lands here as a no-op for the same
     /// reason as `on_draw_textured_quads`.
