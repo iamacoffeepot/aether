@@ -4,6 +4,7 @@ mod scope;
 mod symbols;
 mod tools;
 mod triage;
+mod vocabulary;
 #[cfg(test)]
 mod workflow;
 
@@ -18,7 +19,7 @@ use std::slice::from_ref;
 use std::thread;
 use std::time::Instant;
 
-use aether_bloomery::{VerifyFailure, VerifyFailureSet};
+use aether_bloomery::{PipelineManifest, VerifyFailure, VerifyFailureSet};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 
@@ -31,7 +32,25 @@ use crate::transform::verify::closure::Closure;
 use crate::transform::verify::scope::Scope;
 pub(super) use crate::transform::verify::triage::Excused;
 use crate::transform::verify::triage::ReplayVerdict;
+use crate::transform::verify::vocabulary::checkout_vocabulary;
 use crate::transform::{ChannelKind, Channels, Evidence, EvidenceChannel, GateTiming, TransformArgs, build_evidence};
+
+/// The typed id of the verify umbrella (#3626) the reducer dispatches for the
+/// `AggregateVerify` stage. The bloomery command constant is the type-level
+/// spelling; the checkout's `pipeline.toml` is what the lane fans out to.
+pub(super) use aether_bloomery::VERIFY_CHECK_COMMAND as VERIFY_CHECK;
+
+/// The typed id of the per-member verify the reducer dispatches for the Verify
+/// stage. Distinct from [`VERIFY_CHECK`] because the gate set it runs is its
+/// own identity: the proof a member files must name the gates that ran over it.
+pub(super) use aether_bloomery::VERIFY_MEMBER_COMMAND as VERIFY_MEMBER;
+
+/// The typed id of the whole-workspace base verify. Same fan-out as
+/// [`VERIFY_CHECK`] in this repository's manifest, but closure resolution is
+/// skipped: with an empty candidate range `Scope::resolve` yields an empty
+/// package set and `scheduled_args` would strip `--workspace` while adding no
+/// `-p`, reporting green over nothing.
+pub(super) use aether_bloomery::VERIFY_BASE_COMMAND as VERIFY_BASE;
 
 /// One CI-mirroring invocation for a `verify.*` command id, plus the tools it
 /// needs present to run at all (#4706).
@@ -800,33 +819,6 @@ fn unjudged_notice(stdout: &str, scope: &Scope) -> Option<String> {
     })
 }
 
-/// The typed id of the verify umbrella (#3626) the reducer dispatches for the
-/// `AggregateVerify` stage (`Transformation::for_aggregate_verify`) — distinct
-/// from the concrete `verify.*` ids `verify_command` maps individually.
-pub(super) const VERIFY_CHECK: &str = "verify.check";
-
-/// The typed id of the per-member verify the reducer dispatches for the Verify
-/// stage (`Transformation::for_member_stage`).
-///
-/// [`VERIFY_CHECK`]'s fan-out less [`DOCS_MEMBER`] — see [`Position::runs`] for
-/// why documentation sits at the whole-tree positions. Its own id because the
-/// gate set it runs is its own identity: the proof a member files must name the
-/// gates that ran over it, and `aether-bloomery`'s `VerifyGateSet::member`
-/// spells this id for exactly that reason.
-pub(super) const VERIFY_MEMBER: &str = "verify.member";
-
-/// The typed id of the whole-workspace base verify. Same
-/// [`verify_check_members`] fan-out as [`VERIFY_CHECK`], but closure resolution
-/// is skipped: with an empty candidate range `Scope::resolve` yields an empty
-/// package set and `scheduled_args` would strip `--workspace` while adding no `-p`,
-/// reporting green over nothing.
-pub(super) const VERIFY_BASE: &str = "verify.base";
-
-/// The documentation member — named once, because two things read it: the
-/// position that declines to run it, and the test that pins which position
-/// that is.
-const DOCS_MEMBER: &str = "verify.docs";
-
 /// Which verify position an umbrella run answers for.
 ///
 /// The three positions of the line, and the two axes that separate them: how
@@ -834,6 +826,11 @@ const DOCS_MEMBER: &str = "verify.docs";
 /// as one closed vocabulary rather than as two booleans threaded through the
 /// pass, because every combination a pair of booleans admits is not a position —
 /// there is no docs-less base and no closure-narrowed vocabulary the base runs.
+///
+/// The fan-out itself is the checkout's: [`members`](Self::members) reads
+/// `[verifiers.runs]` for this position's command, so a manifest that omits an
+/// identity from one position skips that gate rather than the lane re-declaring
+/// the list.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Position {
     /// One member's candidate, narrowed to its diff's closure.
@@ -845,6 +842,16 @@ pub(super) enum Position {
 }
 
 impl Position {
+    /// The position `command` names, if it is one of the three umbrellas.
+    pub(super) fn of(command: &str) -> Option<Self> {
+        match command {
+            VERIFY_MEMBER => Some(Self::Member),
+            VERIFY_CHECK => Some(Self::Fold),
+            VERIFY_BASE => Some(Self::Base),
+            _ => None,
+        }
+    }
+
     /// The typed command id this position's evidence reports itself under — the
     /// same spelling its dispatch names.
     fn command(self) -> &'static str {
@@ -861,28 +868,17 @@ impl Position {
         self == Self::Base
     }
 
-    /// Whether this position runs `id`.
-    ///
-    /// One member differs, and only at one position: the member `Verify` does
-    /// not run [`DOCS_MEMBER`]. Documentation correctness is a whole-workspace
-    /// property — an intra-doc link resolves across crates, so the crates a
-    /// member's closure reaches can neither break it alone nor prove it alone —
-    /// while `cargo doc` over that closure is the most expensive single gate the
-    /// position runs. Over the 2026-08-26 wave it cost five to nine minutes in
-    /// each of eighteen member runs and found nothing in any of them; every real
-    /// finding that wave was `verify.test`'s. So the gate runs where its
-    /// question can be answered: the fold, and the base.
-    ///
-    /// The member position is the *only* one that skips it. A fold whose
-    /// documentation went unbuilt would carry that silence into the base receipt
-    /// a landing mints from its verdict.
-    fn runs(self, id: &str) -> bool {
-        self != Self::Member || id != DOCS_MEMBER
+    /// The members this position fans out to, from the checkout's
+    /// `[verifiers.runs]` for [`command`](Self::command).
+    fn members(self) -> Vec<&'static str> {
+        spawnable_runs(checkout_vocabulary(), self.command())
     }
 
-    /// The members this position fans out to, in CI-parity order.
-    fn members(self) -> Vec<&'static str> {
-        verify_check_members().iter().copied().filter(|id| self.runs(id)).collect()
+    /// The members `manifest` declares for this position — what a synthetic
+    /// run list is judged against, without touching the checkout file.
+    #[cfg(test)]
+    fn members_of(self, manifest: &PipelineManifest) -> Vec<&str> {
+        spawnable_runs(manifest, self.command())
     }
 }
 
@@ -891,23 +887,27 @@ impl Position {
 /// rather than silent (#4890).
 const SCOPE_LOG: &str = "verify.scope.log";
 
-/// The complete ordered member vocabulary, in CI-parity order — what
-/// `verify.check` and `verify.base` fan out to, and what
-/// [`Position::members`] filters for the member position.
-/// Pure so the umbrella membership is testable without spawning cargo; growing
-/// this list (e.g. a future `verify.test`) needs no change to the reducer's
-/// dispatched stage command.
-fn verify_check_members() -> &'static [&'static str] {
-    &[
-        "verify.suppress",
-        "verify.fmt",
-        "verify.clippy",
-        "verify.docs",
-        "verify.test",
-        "verify.dup",
-        "verify.deps",
-        "verify.lock",
-    ]
+/// The complete ordered spawn list `verify.check` and `verify.base` fan out to
+/// on this checkout — `[verifiers.runs]` for that command, less identities that
+/// are not a process (`verify.preflight` is attributed, never spawned).
+fn verify_check_members() -> Vec<&'static str> {
+    Position::Fold.members()
+}
+
+/// Identities `[verifiers.runs]` names for `command` that this lane can actually
+/// spawn. `verify.preflight` is a legal identity no process implements: the
+/// umbrella attributes operational faults to it, and `verify_command` does not
+/// map it.
+fn spawnable_runs<'a>(manifest: &'a PipelineManifest, command: &str) -> Vec<&'a str> {
+    manifest
+        .verifiers
+        .runs
+        .get(command)
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .filter(|id| verify_command(id).is_some())
+        .collect()
 }
 
 /// The members that build into the lane's `CARGO_TARGET_DIR`, and so cannot run
@@ -995,12 +995,11 @@ impl MemberOutcome {
     /// member found nothing wrong with it. Charging it to
     /// [`VerifyFailure::Preflight`] would put a host outage into the repair
     /// ledger the member's stuckness is measured from.
+    ///
+    /// Names intern against the checkout's manifest so the bit the evidence
+    /// carries is the sealed vocabulary's position, not a compiled copy of it.
     fn failure(self, id: &str) -> Option<VerifyFailure> {
-        match self {
-            Self::Passed | Self::Environment => None,
-            Self::Failed => VerifyFailure::from_name(id),
-            Self::Operational => Some(VerifyFailure::Preflight),
-        }
+        interned_failure(checkout_vocabulary(), self, id)
     }
 }
 
@@ -1034,9 +1033,25 @@ fn member_outcome(invocation: &VerifyInvocation, derived_pass: bool, code: Optio
     }
 }
 
-/// Project failed member outcomes onto ADR-0178's closed canonical set.
+/// Project failed member outcomes onto the checkout's interned set.
 fn failed_verifiers<'a>(members: impl IntoIterator<Item = (&'a str, MemberOutcome)>) -> VerifyFailureSet {
-    members.into_iter().filter_map(|(id, outcome)| outcome.failure(id)).collect()
+    failed_verifiers_of(checkout_vocabulary(), members)
+}
+
+/// Project failed member outcomes onto `manifest`'s interned set.
+fn failed_verifiers_of<'a>(
+    manifest: &PipelineManifest,
+    members: impl IntoIterator<Item = (&'a str, MemberOutcome)>,
+) -> VerifyFailureSet {
+    members.into_iter().filter_map(|(id, outcome)| interned_failure(manifest, outcome, id)).collect()
+}
+
+fn interned_failure(manifest: &PipelineManifest, outcome: MemberOutcome, id: &str) -> Option<VerifyFailure> {
+    match outcome {
+        MemberOutcome::Passed | MemberOutcome::Environment => None,
+        MemberOutcome::Failed => manifest.intern(id),
+        MemberOutcome::Operational => manifest.intern(VerifyFailure::Preflight.as_str()),
+    }
 }
 
 /// Every program the members `position` fans out to need — the roots
@@ -2536,12 +2551,13 @@ fn environment_observations(members: &[MemberRun]) -> Option<EvidenceChannel> {
     (!observed.is_empty()).then(|| EvidenceChannel::environment(observed.join("\n\n")))
 }
 
-/// The `verify.check` / `verify.base` umbrella (#3626): runs every member in
-/// `verify_check_members()` unconditionally — no short-circuit on first
-/// failure, so a partial failure still leaves every member's log for
-/// diagnosis — then writes one aggregate `evidence.json` whose `status`
-/// passes only when every member passed. Exit mirrors the aggregate, exactly
-/// as the single-command path mirrors its own verify's exit.
+/// The `verify.check` / `verify.base` umbrella (#3626): runs every spawnable
+/// member in the checkout's `[verifiers.runs]` for this position
+/// unconditionally — no short-circuit on first failure, so a partial failure
+/// still leaves every member's log for diagnosis — then writes one aggregate
+/// `evidence.json` whose `status` passes only when every member passed. Exit
+/// mirrors the aggregate, exactly as the single-command path mirrors its own
+/// verify's exit.
 ///
 /// The candidate's reverse-dependency closure is resolved once, before any
 /// member runs, and every member is discriminated against that one answer
@@ -2550,10 +2566,11 @@ fn environment_observations(members: &[MemberRun]) -> Option<EvidenceChannel> {
 /// skips that resolution so each member keeps its stated `--workspace` argv: an
 /// empty candidate range would otherwise false-green a workspace-wide question.
 ///
-/// `position` also chooses the fan-out — the member position does not run
-/// `verify.docs` (see [`Position::runs`]) — and names the command the evidence
-/// reports itself under, which is half the gate-set identity a bloom files the
-/// resulting proof against.
+/// `position` also chooses the fan-out from the checkout's `[verifiers.runs]`
+/// for that command — this repository's member run omits `verify.docs` because
+/// documentation correctness is a whole-workspace property — and names the
+/// command the evidence reports itself under, which is half the gate-set
+/// identity a bloom files the resulting proof against.
 pub(super) fn run_verify_check(args: &TransformArgs, position: Position) -> Result<()> {
     let umbrella_started = Instant::now();
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
@@ -2565,7 +2582,11 @@ pub(super) fn run_verify_check(args: &TransformArgs, position: Position) -> Resu
     missing.extend(tools::preflight_targets(&required_targets(position)));
     if !missing.is_empty() {
         let evidence = Evidence {
-            failed_verifiers: Some(VerifyFailureSet::one(VerifyFailure::Preflight)),
+            failed_verifiers: Some(VerifyFailureSet::one(
+                checkout_vocabulary()
+                    .intern(VerifyFailure::Preflight.as_str())
+                    .expect("verify.preflight is declared in the compiled vocabulary and this repository's manifest"),
+            )),
             // A run that refused before its first member compiled nothing, so
             // there is nothing for a cache to have served and nothing whose
             // memory there was to measure — and no gate ran, so there is no
@@ -2807,13 +2828,13 @@ fn check_pass(args: &TransformArgs, logs: &Path, position: Position) -> Result<C
 #[cfg(test)]
 mod tests {
     use super::{
-        BASE_SET_SUBJECT, Captured, DOCS_MEMBER, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun,
-        MemberRunner, Position, SUPPRESS_MEMBER, Scope, SpawnRunner, TestSchedule, VERIFY_BASE, VERIFY_CHECK,
-        VERIFY_MEMBER, VerifyInvocation, builds_artifacts, clippy_verdict, closure, distil_diagnostics,
-        effective_exit_code, empty_closure_run, environment_observations, failed_verifiers, host_fault_in,
+        BASE_SET_SUBJECT, Captured, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner,
+        Position, SUPPRESS_MEMBER, Scope, SpawnRunner, TestSchedule, VERIFY_BASE, VERIFY_CHECK, VERIFY_MEMBER,
+        VerifyInvocation, builds_artifacts, clippy_verdict, closure, distil_diagnostics, effective_exit_code,
+        empty_closure_run, environment_observations, failed_verifiers, failed_verifiers_of, host_fault_in,
         member_diff_base, member_outcome, member_scope_notice, operational_failure_notice, package_name,
         preflight_tools, prepare_failure_log, render_diagnostics, replay_args, required_targets, required_tools,
-        run_member, run_member_discriminated, run_timed_prepare, umbrella_status, unjudged_notice,
+        run_member, run_member_discriminated, run_timed_prepare, spawnable_runs, umbrella_status, unjudged_notice,
         verify_check_members, verify_command, verify_findings, workflow,
     };
     use std::iter;
@@ -2824,7 +2845,8 @@ mod tests {
     use crate::transform::peak_memory;
     use crate::transform::review::REVIEW_CRITIC;
     use crate::transform::sccache::CompilerCache;
-    use aether_bloomery::{VerifyFailure, VerifyFailureSet};
+    use crate::transform::verify::vocabulary::checkout_vocabulary;
+    use aether_bloomery::{PipelineManifest, VERIFY_MEMBER_COMMAND, VerifyFailure, VerifyFailureSet};
 
     /// The full command line an invocation dispatches, program first, in the
     /// shape a workflow `run:` line is read into.
@@ -3139,7 +3161,7 @@ mod tests {
         // the moment a flag moved (#5078). Verify's typed map is the authority:
         // every umbrella member must still resolve, and none of the heavy argv
         // may appear in construct prose.
-        for &id in verify_check_members() {
+        for id in verify_check_members() {
             assert!(verify_command(id).is_some(), "{id} must resolve via verify_command");
         }
 
@@ -3410,7 +3432,7 @@ mod tests {
 
         // Nothing else in the lane declares a prepare, and the narrowing must
         // not invent one for them.
-        for &id in verify_check_members().iter().filter(|id| **id != "verify.test") {
+        for id in verify_check_members().into_iter().filter(|id| *id != "verify.test") {
             let invocation = verify_command(id).expect("member mapped");
             assert_eq!(invocation.prepare_under(&closure_scope(&["aether-math"])), None, "{id} declares no prepare");
         }
@@ -3467,7 +3489,7 @@ mod tests {
         // unscoped path would move the stage that proves the landing.
         let scope = Scope::resolve(None);
 
-        for &id in verify_check_members() {
+        for id in verify_check_members() {
             let invocation = verify_command(id).expect("member mapped");
             assert_eq!(
                 invocation.scheduled_args(&scope, None, TestSchedule::default()),
@@ -3810,10 +3832,10 @@ mod tests {
         //
         // Asked of the two whole-tree positions, which are the ones that stand
         // between a candidate and the landing CI. The member position runs a
-        // subset by design (see `Position::runs`), and
-        // `the_member_position_runs_every_gate_but_documentation` pins exactly
-        // which one it drops — a subset stated in one place rather than a hole
-        // this test would have to tolerate.
+        // subset by design (the checkout's `[verifiers.runs]` for
+        // `verify.member`), and
+        // `a_manifest_that_omits_an_identity_skips_that_gate` pins that the
+        // resolved run list, not a compiled skip, is what drops a gate.
         for job in workflow::required_jobs() {
             if NOT_A_GATE.contains(&job.as_str()) {
                 continue;
@@ -3831,27 +3853,36 @@ mod tests {
     }
 
     #[test]
-    fn the_member_position_runs_every_gate_but_documentation() {
-        // Tripwire: this is the demotion itself, stated as a set difference in
-        // the one place the fan-out is decided. Both directions matter. A member
-        // position that regains `verify.docs` is eighteen five-to-nine-minute
-        // rustdoc builds a wave, over closures that cannot answer the question;
-        // a member position that drops anything *else* is a gate a candidate
-        // walks past unrun until the fold — or CI — catches it, which is the
-        // expensive direction the umbrella exists to avoid.
-        //
-        // And the two whole-tree positions must keep the gate: the fold's
-        // verdict is what a landing mints its whole-workspace base receipt from.
-        let member = Position::Member.members();
-        let dropped: Vec<&str> = verify_check_members().iter().copied().filter(|id| !member.contains(id)).collect();
+    fn the_lanes_rendered_mask_matches_the_checkout_manifests_interned_set() {
+        // Tripwire: the lane used to intern names through VerifyFailure::from_name
+        // (the compiled table) while the coordinator interned the same names
+        // against pipeline.toml. Those two copies are what this slice collapses.
+        // A set of names must render the same four-hex mask either way.
+        let manifest = checkout_vocabulary();
+        let names = ["verify.fmt", "verify.test", "verify.lock"];
+        let via_lane = failed_verifiers_of(manifest, names.iter().copied().map(|id| (id, MemberOutcome::Failed)));
+        let via_manifest: VerifyFailureSet = names.iter().copied().filter_map(|name| manifest.intern(name)).collect();
+        assert_eq!(via_lane.to_mask(), via_manifest.to_mask());
+        assert_eq!(via_lane.to_mask().len(), 4, "the artifact token stays four hex characters");
+    }
 
-        assert_eq!(dropped, vec![DOCS_MEMBER], "the member position drops documentation and nothing else");
-        assert_eq!(Position::Fold.members(), verify_check_members(), "the fold runs the whole vocabulary");
-        assert_eq!(Position::Base.members(), verify_check_members(), "and so does the base");
-        assert!(
-            member.iter().eq(verify_check_members().iter().filter(|id| **id != DOCS_MEMBER)),
-            "the subset keeps CI-parity order, so a failing member's exit code is still the first one CI would hit",
-        );
+    #[test]
+    fn a_manifest_that_omits_an_identity_skips_that_gate() {
+        // Tripwire: membership is the checkout's `[verifiers.runs]`, not a
+        // compiled skip list. A member run that drops an identity must not fan
+        // that identity out — asserted on the resolved list, not by spawning
+        // a compiler.
+        let mut manifest = PipelineManifest::compiled();
+        let omitted = "verify.lock";
+        let runs =
+            manifest.verifiers.runs.get_mut(VERIFY_MEMBER_COMMAND).expect("compiled vocabulary declares a member run");
+        assert!(runs.iter().any(|id| id == omitted), "the fixture itself must have named the identity");
+        runs.retain(|id| id != omitted);
+
+        let members = Position::Member.members_of(&manifest);
+        assert!(!members.contains(&omitted), "an omitted identity is not a gate this position runs");
+        assert!(members.contains(&"verify.fmt"), "the rest of the run is still spawned");
+        assert!(!spawnable_runs(&manifest, VERIFY_MEMBER_COMMAND).contains(&omitted));
     }
 
     #[test]
@@ -4129,7 +4160,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // verify_command. A member the umbrella names and the dispatcher cannot
         // run is a silent skip. Ordering against the workflow is already proven
         // by `the_umbrella_covers_every_required_ci_job`.
-        for &id in verify_check_members() {
+        for id in verify_check_members() {
             assert!(verify_command(id).is_some(), "{id} must resolve via verify_command");
         }
     }
@@ -4146,7 +4177,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // member's own argv does.
         const READS_ONLY: [&str; 2] = ["fmt", "metadata"];
 
-        for &id in verify_check_members() {
+        for id in verify_check_members() {
             let invocation = verify_command(id).expect("every member resolves");
             let compiles = invocation.prepare.is_some()
                 || (invocation.program == "cargo" && !READS_ONLY.contains(&invocation.args[0]));
@@ -4161,13 +4192,14 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
 
     #[test]
     fn every_umbrella_member_has_a_typed_failure_identity() {
-        // Tripwire: an umbrella member that VerifyFailure::from_name cannot
-        // decode is dropped from the projected set, so a run in which it is the
-        // only failure emits status "fail" with no failed_verifiers — a shape
-        // both transports refuse, stalling the dispatch to its deadline rather
-        // than charging the member. verify.suppress was exactly that (#4807).
-        for &id in verify_check_members() {
-            assert!(VerifyFailure::from_name(id).is_some(), "{id} must carry a typed failure identity");
+        // Tripwire: an umbrella member the checkout vocabulary cannot intern
+        // is dropped from the projected set, so a run in which it is the only
+        // failure emits status "fail" with no failed_verifiers — a shape both
+        // transports refuse, stalling the dispatch to its deadline rather than
+        // charging the member. verify.suppress was exactly that (#4807).
+        let manifest = checkout_vocabulary();
+        for id in verify_check_members() {
+            assert!(manifest.intern(id).is_some(), "{id} must intern against the checkout vocabulary");
         }
     }
 

@@ -61,7 +61,7 @@ use crate::transform::review::REVIEW_CRITIC;
 use crate::transform::review_reports::REVIEW_REPORT;
 use crate::transform::sccache::{CompilerCache, Counters};
 use crate::transform::scratch::Scratch;
-use crate::transform::verify::{Excused, Position, SuppressionRequest, VERIFY_BASE, VERIFY_CHECK, VERIFY_MEMBER};
+use crate::transform::verify::{Excused, Position, SuppressionRequest};
 
 #[derive(Args, Clone)]
 pub struct TransformArgs {
@@ -386,7 +386,7 @@ struct Evidence {
 
 impl Serialize for Evidence {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut state = serializer.serialize_struct("Evidence", 16)?;
+        let mut state = serializer.serialize_struct("Evidence", 17)?;
         state.serialize_field("command", &self.command)?;
         state.serialize_field("nonce", &self.nonce)?;
         state.serialize_field("status", &self.status)?;
@@ -396,6 +396,10 @@ impl Serialize for Evidence {
         if let Some(failures) = &self.failed_verifiers {
             state.serialize_field("failed_verifiers", failures)?;
         }
+        // The interned bit-or the Actions wrapper prints as the four-hex
+        // artifact token. Derived from the same set the envelope names, so the
+        // wrapper does not carry a second copy of the vocabulary.
+        state.serialize_field("failure_mask", &interned_mask_bits(self.failed_verifiers.as_ref()))?;
         self.channels.serialize_into(&mut state, ChannelKind::Environment)?;
         if let Some(counters) = &self.sccache {
             state.serialize_field("sccache", counters)?;
@@ -524,16 +528,20 @@ pub fn run(args: &TransformArgs) -> Result<()> {
     if args.command == REVIEW_REPORT {
         return review_mcp::serve(&args.out);
     }
-    if args.command == VERIFY_MEMBER {
-        return verify::run_verify_check(args, Position::Member);
-    }
-    if args.command == VERIFY_CHECK {
-        return verify::run_verify_check(args, Position::Fold);
-    }
-    if args.command == VERIFY_BASE {
-        return verify::run_verify_check(args, Position::Base);
+    if let Some(position) = Position::of(&args.command) {
+        return verify::run_verify_check(args, position);
     }
     verify::run_single(args)
+}
+
+/// The interned bit-or of `failures`, which the Actions wrapper prints as the
+/// four-hex artifact token. Zero when the envelope omits the set.
+fn interned_mask_bits(failures: Option<&VerifyFailureSet>) -> u16 {
+    failures
+        .map(|set| {
+            u16::from_str_radix(&set.to_mask(), 16).expect("VerifyFailureSet::to_mask is four lowercase hex digits")
+        })
+        .unwrap_or(0)
 }
 
 /// Refuse CI scheduling inputs on every command except `verify.test`.
@@ -668,7 +676,7 @@ impl Measurements {
 mod tests {
     use super::{
         ChannelKind, EvidenceChannel, Excused, GateTiming, SuppressionRequest, TransformArgs, build_evidence,
-        reject_test_schedule,
+        interned_mask_bits, reject_test_schedule,
         verify::{MemberOutcome, MemberRun, stated_requests, verify_findings},
     };
     use clap::Parser;
@@ -705,9 +713,12 @@ mod tests {
         assert_eq!(evidence.exit_code, Some(1));
         assert_eq!(evidence.nonce, None);
         assert_eq!(evidence.failed_verifiers, Some(failures));
+        let value = serde_json::to_value(&evidence).expect("evidence serializes");
+        assert_eq!(value["failed_verifiers"], serde_json::json!(["verify.clippy"]));
         assert_eq!(
-            serde_json::to_value(&evidence).expect("evidence serializes")["failed_verifiers"],
-            serde_json::json!(["verify.clippy"]),
+            value["failure_mask"],
+            serde_json::json!(interned_mask_bits(Some(&failures))),
+            "the wrapper reads the interned mask, not a second bit table",
         );
     }
 
