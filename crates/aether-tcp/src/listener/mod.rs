@@ -12,7 +12,7 @@
 //! The accept returns, sees the flag, breaks; the dispatcher thread
 //! (in `unwire`) joins the accept thread.
 
-use super::{TcpCapability, kinds::ConnectionReady};
+use super::TcpCapability;
 
 /// `aether.tcp.listener` **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`), the

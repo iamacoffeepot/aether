@@ -2129,9 +2129,8 @@ mod tests {
     #[test]
     fn delete_ref_treats_already_gone_as_ok() {
         // Tripwire: a 404/422 (the ref is already gone) is the clean idempotent
-        // outcome release's name-only cleanup delete and an acquire's rollback
-        // depend on — never a `Status` error that would fail an interrupted
-        // release's re-delete.
+        // outcome the working-ref prune depends on — never a `Status` error
+        // that would fail a prune re-run over a name already reclaimed.
         let gone_404 = client(404, r#"{"message":"Not Found"}"#);
         gone_404.delete_ref("bloomery/claims/absent").expect("404 is Ok");
         let gone_422 = client(422, r#"{"message":"Reference does not exist"}"#);

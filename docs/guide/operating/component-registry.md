@@ -20,8 +20,10 @@ on one engine, or into several engines.
 
 | Tool | Purpose |
 |---|---|
-| `upload_component` | ingest a `.wasm` path into the hub store |
+| `upload_component` | ingest a `.wasm` path into the hub store; optional `pin: true` |
 | `list_components` | list/filter stored component artifacts |
+| `pin_artifact` | durable explicit pin by exact stored content hash |
+| `unpin_artifact` | drop only the explicit pin; a name still protects |
 | `load_component` | instantiate stored wasm in one engine |
 | `replace_component` | splice stored wasm behind one live mailbox id |
 | `describe_component` | inspect a live component's receive surface |
@@ -49,7 +51,9 @@ paths and not inline wasm bytes.
 The reliable sequence is:
 
 1. Build the wasm artifact on the same fleet host whose path the hub can read.
-2. Call `upload_component(staged_path, name?)`.
+2. Call `upload_component(staged_path, name?, pin?)`. `pin: true` records
+   durable explicit protection before this upload's eviction, including
+   unnamed uploads. `pin: false` (the default) never clears an existing pin.
 3. Record the returned content hash and optional name.
 4. Confirm its manifest with registry `list_components`; when no name was
    supplied, set `include_history: true` and locate the returned hash.
@@ -73,8 +77,9 @@ clean load error, not “first actor wins.”
 
 Names are mutable. Re-uploading under the same name repoints it. The old hash
 remains stored and, once no other name points at it, becomes unnamed history
-eligible for LRU eviction. It is not deleted by repointing. Hashes are therefore
-the correct deployment evidence.
+eligible for LRU eviction unless it still carries an explicit pin. It is not
+deleted by repointing. Hashes are therefore the correct deployment evidence.
+`unpin_artifact` removes only the explicit flag; it is not unname or delete.
 
 ## Stored registry behavior
 
@@ -85,9 +90,16 @@ unnamed hashes. Use the returned `total_matched` and an explicit `limit` when a
 complete history is actually needed.
 
 A named artifact is protected from disk-budget LRU eviction. An unnamed,
-unpinned history entry is eligible. The current MCP surface has no delete,
-unname, or pin tool, so long-term disk policy belongs to the hub operator rather
-than an individual component-driving task.
+unpinned history entry is eligible. `pin_artifact` / `unpin_artifact` (and
+`upload_component(pin: true)`) record or drop durable explicit protection on an
+exact content hash — names are never resolved. `pin: false` on upload is not
+unpin. There is still no delete or unname operation. Component runtime
+protection of stored artifacts is not provided here: the hub holds the binary
+of every engine it supervises (issue 5686), but it does not supervise a loaded
+component, so a component's stored wasm is protected by a name or a pin alone.
+Fleet and MCP
+must ship the same release: the `pin` field changes the typed upload kind
+schema.
 
 ## Loading into an engine
 
@@ -115,15 +127,18 @@ name and `describe_kinds` for its exact live schema.
 
 ### Replicas
 
-`replicas: N` performs N sequential loads with shared wasm/config and names each
-instance `{base}-{index}`. The base is selected from explicit load name, export,
-or default entry namespace in that order. The result carries one shared
-capabilities block and an `instances` list of ids/names.
+`replicas: N` performs N sequential loads with shared wasm/config. Replica 0 is
+named for the bare `base` and each later instance `{base}-{index}`. The base is
+selected from explicit load name, export, or default entry namespace in that
+order, so a fan-out over the default namespace leaves replica 0 reachable from a
+co-hosted component's bare-type `ctx.peer::<R>()`, and `replicas: 1` loads
+exactly what an omitted field loads. The result carries one shared capabilities
+block and an `instances` list of ids/names.
 
 A replica fan-out is not transactional. If replica K fails, instances before K
 remain live and the error says how many loaded. The failed call does not return
 the successful prefix's `instances` records or mailbox ids. Their lineage names
-follow the deterministic suffix rule, but the current public listing surface
+follow the deterministic naming rule, but the current public listing surface
 does not recover their ids. On a task-owned engine, terminate and start clean.
 On a shared engine, stop and report the partial prefix rather than guessing ids
 or retrying into occupied names.

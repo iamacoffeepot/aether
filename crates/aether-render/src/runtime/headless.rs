@@ -31,6 +31,11 @@ use crate::{
 /// exposing it as crate-public API.
 pub struct HeadlessRenderCapabilityState;
 
+/// What a headless chassis has instead of a GPU, said once: the reply every
+/// GPU-bound render kind answers with, so a caller fails fast (ADR-0035
+/// §Consequences) instead of waiting on a frame that never comes.
+const UNAVAILABLE_ERROR: &str = "unsupported on headless chassis — no GPU";
+
 #[runtime]
 impl NativeActor for HeadlessRenderCapability {
     /// The runtime state this identity boots into (ADR-0122 split) —
@@ -45,18 +50,6 @@ impl NativeActor for HeadlessRenderCapability {
         Ok(HeadlessRenderCapabilityState)
     }
 
-    /// `DrawTriangle` lands here as a no-op so headless boots of
-    /// desktop-designed components (which emit `DrawTriangle` every
-    /// tick) don't trip the unknown-mailbox warn path.
-    #[handler::single]
-    fn on_draw_triangle(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mails: &[DrawTriangle]) {}
-
-    /// `ViewProjection` lands here as a no-op for the same reason as
-    /// `on_draw_triangle` — desktop-designed components publish
-    /// `aether.view_projection` every tick.
-    #[handler::single]
-    fn on_camera(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ViewProjection) {}
-
     /// `CaptureFrame` replies `Err` inline so MCP `capture_frame`
     /// fails fast on headless instead of hanging on a reply that
     /// never comes. Mirrors ADR-0035 §Consequences fail-fast shape
@@ -70,8 +63,7 @@ impl NativeActor for HeadlessRenderCapability {
     /// (iamacoffeepot/aether#4341).
     #[handler::manual]
     fn on_capture_frame(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: CaptureFrame) {
-        ctx.take_inbound()
-            .reply(&CaptureFrameResult::Err { error: "unsupported on headless chassis — no GPU".to_owned() });
+        ctx.take_inbound().reply(&CaptureFrameResult::Err { error: UNAVAILABLE_ERROR.to_owned() });
     }
 
     /// `CreateTexture` replies `Err` so an agent that creates a texture
@@ -86,20 +78,8 @@ impl NativeActor for HeadlessRenderCapability {
         _ctx: &mut NativeCtx<'_>,
         _mail: CreateTexture,
     ) -> CreateTextureResult {
-        CreateTextureResult::Err { error: "unsupported on headless chassis — no GPU".to_owned() }
+        CreateTextureResult::Err { error: UNAVAILABLE_ERROR.to_owned() }
     }
-
-    /// `UpdateTexture` lands here as a no-op so desktop-designed
-    /// components running on headless don't trip the unknown-mailbox
-    /// warn path — mirrors `on_draw_triangle`.
-    #[handler::single]
-    fn on_update_texture(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: UpdateTexture) {}
-
-    /// `DestroyTexture` lands here as a no-op so desktop-designed
-    /// components running on headless don't trip the unknown-mailbox
-    /// warn path — mirrors `on_update_texture`.
-    #[handler::single]
-    fn on_destroy_texture(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DestroyTexture) {}
 
     /// `CreateGeometry` replies `Err` so an agent that creates a
     /// geometry against a headless chassis fails fast instead of waiting
@@ -113,44 +93,8 @@ impl NativeActor for HeadlessRenderCapability {
         _ctx: &mut NativeCtx<'_>,
         _mail: CreateGeometry,
     ) -> CreateGeometryResult {
-        CreateGeometryResult::Err { error: "unsupported on headless chassis — no GPU".to_owned() }
+        CreateGeometryResult::Err { error: UNAVAILABLE_ERROR.to_owned() }
     }
-
-    /// `UpdateGeometry` lands here as a no-op (ADR-0171) for the same
-    /// reason as `on_update_texture` — fire-and-forget kinds are
-    /// absorbed, not failed.
-    #[handler::single]
-    fn on_update_geometry(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: UpdateGeometry) {}
-
-    /// `DestroyGeometry` lands here as a no-op (ADR-0171) for the same
-    /// reason as `on_update_geometry`.
-    #[handler::single]
-    fn on_destroy_geometry(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DestroyGeometry) {}
-
-    /// `DrawTexturedQuads` lands here as a no-op for the same reason
-    /// as `on_update_texture`.
-    #[handler::single]
-    fn on_draw_textured_quads(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawTexturedQuads) {}
-
-    /// `DrawScreenTriangles` lands here as a no-op for the same reason
-    /// as `on_draw_textured_quads`.
-    #[handler::single]
-    fn on_draw_screen_triangles(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawScreenTriangles) {}
-
-    /// `DrawShapes` lands here as a no-op (ADR-0213) for the same reason
-    /// as `on_draw_screen_triangles`.
-    #[handler::single]
-    fn on_draw_shapes(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawShapes) {}
-
-    /// `DrawMaterialTextured` lands here as a no-op for the same
-    /// reason as `on_draw_textured_quads`.
-    #[handler::single]
-    fn on_draw_material_textured(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawMaterialTextured) {}
-
-    /// `DrawMaterialCoverage` lands here as a no-op for the same
-    /// reason as `on_draw_textured_quads`.
-    #[handler::single]
-    fn on_draw_material_coverage(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawMaterialCoverage) {}
 
     /// `ProgramRegister` replies `Err` so an agent registering an
     /// authored render program against a headless chassis fails fast
@@ -162,19 +106,8 @@ impl NativeActor for HeadlessRenderCapability {
         _ctx: &mut NativeCtx<'_>,
         _mail: ProgramRegister,
     ) -> ProgramRegisterResult {
-        ProgramRegisterResult::Err { error: "unsupported on headless chassis — no GPU".to_owned() }
+        ProgramRegisterResult::Err { error: UNAVAILABLE_ERROR.to_owned() }
     }
-
-    /// `ProgramDispatch` lands here as a no-op (ADR-0170) for the same
-    /// reason as `on_draw_textured_quads` — fire-and-forget kinds are
-    /// absorbed, not failed.
-    #[handler::single]
-    fn on_program_dispatch(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ProgramDispatch) {}
-
-    /// `ProgramDestroy` lands here as a no-op (ADR-0170) for the same
-    /// reason as `on_program_dispatch`.
-    #[handler::single]
-    fn on_program_destroy(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ProgramDestroy) {}
 
     /// `ProgramTimings` replies `Absent`, not `Err`
     /// (iamacoffeepot/aether#4423): a headless chassis has no GPU to time
@@ -188,8 +121,69 @@ impl NativeActor for HeadlessRenderCapability {
         _ctx: &mut NativeCtx<'_>,
         _mail: ProgramTimings,
     ) -> ProgramTimingsResult {
-        ProgramTimingsResult::Absent { reason: "unsupported on headless chassis — no GPU".to_owned() }
+        ProgramTimingsResult::Absent { reason: UNAVAILABLE_ERROR.to_owned() }
     }
+
+    // The absorbed kinds. Every one of them is fire-and-forget on the pumped
+    // runtime — it accumulates into a frame this chassis never records, or
+    // releases a resource this chassis never realized — so dropping it here is
+    // honest silence rather than a swallowed request, and answers the whole
+    // reason this cap claims `aether.render` at all: a desktop-designed
+    // component running headless emits these every tick, and an unclaimed
+    // mailbox would warn-storm. A new fire-and-forget render verb belongs in
+    // this run.
+
+    /// `DrawTriangle` is absorbed (ADR-0066).
+    #[handler::single]
+    fn on_draw_triangle(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mails: &[DrawTriangle]) {}
+
+    /// `ViewProjection` is absorbed (ADR-0066).
+    #[handler::single]
+    fn on_camera(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ViewProjection) {}
+
+    /// `UpdateTexture` is absorbed (ADR-0105).
+    #[handler::single]
+    fn on_update_texture(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: UpdateTexture) {}
+
+    /// `DestroyTexture` is absorbed (ADR-0105).
+    #[handler::single]
+    fn on_destroy_texture(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DestroyTexture) {}
+
+    /// `UpdateGeometry` is absorbed (ADR-0171).
+    #[handler::single]
+    fn on_update_geometry(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: UpdateGeometry) {}
+
+    /// `DestroyGeometry` is absorbed (ADR-0171).
+    #[handler::single]
+    fn on_destroy_geometry(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DestroyGeometry) {}
+
+    /// `DrawTexturedQuads` is absorbed (ADR-0105).
+    #[handler::single]
+    fn on_draw_textured_quads(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawTexturedQuads) {}
+
+    /// `DrawScreenTriangles` is absorbed (iamacoffeepot/aether#5504).
+    #[handler::single]
+    fn on_draw_screen_triangles(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawScreenTriangles) {}
+
+    /// `DrawShapes` is absorbed (ADR-0213).
+    #[handler::single]
+    fn on_draw_shapes(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawShapes) {}
+
+    /// `DrawMaterialTextured` is absorbed (ADR-0140).
+    #[handler::single]
+    fn on_draw_material_textured(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawMaterialTextured) {}
+
+    /// `DrawMaterialCoverage` is absorbed (ADR-0140).
+    #[handler::single]
+    fn on_draw_material_coverage(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawMaterialCoverage) {}
+
+    /// `ProgramDispatch` is absorbed (ADR-0170).
+    #[handler::single]
+    fn on_program_dispatch(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ProgramDispatch) {}
+
+    /// `ProgramDestroy` is absorbed (ADR-0170).
+    #[handler::single]
+    fn on_program_destroy(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ProgramDestroy) {}
 }
 
 #[cfg(all(test, feature = "runtime"))]

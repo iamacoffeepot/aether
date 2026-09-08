@@ -329,12 +329,18 @@ mod engine {
     /// sha256-hashes the bytes, dedups against the existing store, forks
     /// `staged_path --describe` to capture its [`BinaryManifest`], and
     /// stores both. `name`, when set, points that human-readable name at
-    /// the resulting hash. Reply: [`UploadBinaryResult`].
+    /// the resulting hash. `pin` records durable explicit eviction
+    /// protection; `false` (the JSON default) never clears an existing
+    /// pin. Adding this field changes the kind schema, so fleet and MCP
+    /// must ship the same release — it is JSON defaulting, not old kind-id
+    /// compatibility. Reply: [`UploadBinaryResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.fleet.upload_binary")]
     pub struct UploadBinary {
         pub staged_path: String,
         pub name: Option<String>,
+        #[serde(default)]
+        pub pin: bool,
     }
 
     /// Reply to [`UploadBinary`] (ADR-0115, issue 1953). `Ok` carries the
@@ -478,12 +484,18 @@ mod engine {
     /// straight from the wasm (no execution step — `aether.kinds.inputs` +
     /// `aether.namespace` + the `producers` section), and stores both.
     /// `name`, when set, points that human-readable name at the resulting
-    /// hash. Reply: [`UploadComponentResult`].
+    /// hash. `pin` records durable explicit eviction protection; `false`
+    /// (the JSON default) never clears an existing pin. Adding this field
+    /// changes the kind schema, so fleet and MCP must ship the same
+    /// release — it is JSON defaulting, not old kind-id compatibility.
+    /// Reply: [`UploadComponentResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.fleet.upload_component")]
     pub struct UploadComponent {
         pub staged_path: String,
         pub name: Option<String>,
+        #[serde(default)]
+        pub pin: bool,
     }
 
     /// Reply to [`UploadComponent`] (ADR-0116, issue 1956). `Ok` carries the
@@ -495,6 +507,29 @@ mod engine {
     #[kind(name = "aether.fleet.upload_component_result")]
     pub enum UploadComponentResult {
         Ok { hash: String, name: Option<String> },
+        Err { error: String },
+    }
+
+    /// `aether.fleet.set_artifact_pinned` — set or clear durable explicit
+    /// eviction protection on one stored content hash (ADR-0115). Operates
+    /// only on an exact stored hash; names are never resolved. `pinned:
+    /// true` is pin; `pinned: false` is unpin of the explicit flag only —
+    /// a name still protects the hash. Reply: [`SetArtifactPinnedResult`].
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.fleet.set_artifact_pinned")]
+    pub struct SetArtifactPinned {
+        pub hash: String,
+        pub pinned: bool,
+    }
+
+    /// Reply to [`SetArtifactPinned`]. `Ok` is returned only after the
+    /// sidecar write succeeded. An unknown hash is `Err`; a persistence
+    /// failure is `Err` and leaves prior protection unchanged. Equal
+    /// in-memory state still requires a successful persist.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.fleet.set_artifact_pinned_result")]
+    pub enum SetArtifactPinnedResult {
+        Ok { hash: String, pinned: bool },
         Err { error: String },
     }
 
@@ -574,10 +609,41 @@ mod engine {
 
 mod control_plane {
     use alloc::collections::BTreeMap;
+    use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
 
     use serde::{Deserialize, Serialize};
+
+    /// The [`LoadComponent`] `name` that instance `index` of a
+    /// `replicas: N` fan-out claims (issue 2626).
+    ///
+    /// Replica 0 claims the bare `base`; every later replica claims
+    /// `{base}-{index}`. The bare instance is what makes a replicated
+    /// component reachable by bare-type peer addressing at all
+    /// (iamacoffeepot/aether#5727): `ctx.peer::<R>()` folds `R::NAMESPACE`
+    /// beneath the caller's host, so a fan-out that suffixed *every*
+    /// instance registered nothing at the name the compile-time resolver
+    /// computes and every bare-type send to it silently missed. Suffixing
+    /// from 1 also makes `replicas: 1` load exactly what an omitted field
+    /// loads, and leaves `peer_named::<R>("{base}-2")` naming one replica
+    /// exactly.
+    ///
+    /// The rule lives here, beside the kind whose `name` field carries it,
+    /// because two independent producers must agree on it byte for byte:
+    /// `aether-chassis`'s boot-manifest / package fan-out registers these
+    /// names, and `aether-mcp` predicts them both to name each
+    /// `load_component` replica and to poll `spawn_substrate` boot
+    /// readiness. A divergence between the two is a boot wait that never
+    /// finds the name it is waiting for.
+    #[must_use]
+    pub fn replica_load_name(base: &str, index: u32) -> String {
+        if index == 0 {
+            String::from(base)
+        } else {
+            format!("{base}-{index}")
+        }
+    }
 
     /// `aether.component.load` — request the substrate load a WASM
     /// component into a freshly allocated mailbox. Carries the raw
@@ -1504,5 +1570,23 @@ mod control_plane {
         pub output_tokens: u32,
         pub wall_clock_millis: u32,
         pub cost_micros: Option<u64>,
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::replica_load_name;
+
+        /// Replica 0 claims the bare base name and later replicas claim the
+        /// `-{index}` suffix. The bug this catches is a fan-out that suffixes
+        /// index 0 again: the load then registers nothing at the name
+        /// `ctx.peer::<R>()` folds from `R::NAMESPACE`, and every bare-type
+        /// send to the replicated component silently misses
+        /// (iamacoffeepot/aether#5727).
+        #[test]
+        fn replica_zero_claims_the_bare_base_name() {
+            assert_eq!(replica_load_name("handler", 0), "handler");
+            assert_eq!(replica_load_name("handler", 1), "handler-1");
+            assert_eq!(replica_load_name("handler", 2), "handler-2");
+        }
     }
 }

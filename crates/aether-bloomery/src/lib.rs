@@ -419,6 +419,8 @@ pub use values::MemberProjection;
 pub use values::MemberSubject;
 pub use values::Membership;
 pub use values::ModelOverride;
+pub use values::ModelProcessInstructions;
+pub use values::ModelProcessInstructionsError;
 pub use values::NamedPath;
 pub use values::NamedSymbol;
 pub use values::NarrowingRefusal;

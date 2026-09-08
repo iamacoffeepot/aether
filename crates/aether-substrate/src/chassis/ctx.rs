@@ -93,7 +93,7 @@ impl fmt::Debug for MailboxClaim {
 /// wrapper, but here the access invariant is stricter (one fixed
 /// thread, not "at most one pool worker at a time"). The `unsafe impl
 /// Sync` / `Send` are the safety story.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 #[allow(
     clippy::non_send_fields_in_send_ty,
     reason = "driver-as-actor invariant: slots only touched on one fixed thread; see type docs"
@@ -125,12 +125,6 @@ impl SharedActorSlots {
     #[must_use]
     pub fn slots(&self) -> &ActorSlots {
         &self.0
-    }
-}
-
-impl Default for SharedActorSlots {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

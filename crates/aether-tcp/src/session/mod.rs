@@ -25,7 +25,7 @@
 //! `SessionClosed`; observer-less sessions preserve the previous
 //! drop-on-the-floor behavior.
 
-use super::{TcpCapability, TcpListenerActor, kinds::SessionWrite};
+use super::{TcpCapability, TcpListenerActor};
 
 /// `aether.tcp.session` **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`), the
