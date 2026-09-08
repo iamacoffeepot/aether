@@ -1145,7 +1145,7 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         assert_eq!(connection.executor_model_workflow_file, "transform-model.yml");
         assert_eq!(coordinator.poll_interval_secs, 5);
         assert_eq!(coordinator.lane_target_scan_interval_secs, 300);
-        assert_eq!(coordinator.local_lane_prefixes(), ["construct.", "review.", "scope."]);
+        assert_eq!(coordinator.local_lane_prefixes(), ["construct.", "review.", "scope.", "retrospect."]);
         assert_eq!(coordinator.store_path, ":memory:");
         assert_eq!(coordinator.heartbeat_silence_secs, 600);
         assert_eq!(coordinator.heartbeat_silence_secs().expect("the default is nonzero"), 600);

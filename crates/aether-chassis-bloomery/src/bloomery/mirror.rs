@@ -91,11 +91,12 @@ mod tests {
         assert_eq!(config.local_lane_prefixes(), vec!["construct.".to_owned(), "verify.".to_owned()]);
 
         // The default routes the model-driven lanes local — construct/refine,
-        // the review critic, and the scoper — each forks an agent CLI under an
-        // ambient credential the zero-secret runner deliberately lacks.
+        // the review critic, the scoper, and the bloom-level reader — each forks
+        // an agent CLI under an ambient credential the zero-secret runner
+        // deliberately lacks.
         assert_eq!(
             CoordinatorConfig::default().local_lane_prefixes(),
-            vec!["construct.".to_owned(), "review.".to_owned(), "scope.".to_owned()]
+            vec!["construct.".to_owned(), "review.".to_owned(), "scope.".to_owned(), "retrospect.".to_owned()]
         );
     }
 }

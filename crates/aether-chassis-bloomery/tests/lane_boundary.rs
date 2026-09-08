@@ -55,19 +55,7 @@ fn ran_under(mode: LaneMode) -> LaneHarness {
 }
 
 fn wait_until_the_reader_has_answered(harness: &mut ScenarioHarness, bloom: BloomId) {
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        if !harness.study_verdicts(bloom).is_empty() && harness.outstanding().is_empty() {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the reader never answered; outstanding={:?} commands={:?}",
-            harness.outstanding(),
-            harness.ledger().into_iter().map(|run| run.command).collect::<Vec<_>>(),
-        );
-        thread::sleep(Duration::from_millis(250));
-    }
+    harness.pump_until("the reader answers", |harness| !harness.study_verdicts(bloom).is_empty());
 }
 
 #[test]
