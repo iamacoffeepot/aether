@@ -32,6 +32,7 @@ mod bump;
 mod cargo;
 mod dev_component;
 mod dist;
+mod docs;
 mod fixtures;
 mod inventory;
 mod namespaces;
@@ -50,6 +51,7 @@ use crate::build_wasm::BuildWasmArgs;
 use crate::bump::BumpArgs;
 use crate::dev_component::DevComponentArgs;
 use crate::dist::DistArgs;
+use crate::docs::DocsArgs;
 use crate::fixtures::FixturesArgs;
 use crate::namespaces::NamespacesArgs;
 use crate::package::PackageArgs;
@@ -75,6 +77,10 @@ enum Commands {
     BuildWasm(BuildWasmArgs),
     /// Build component wasm + chassis bins into `dist/` with a manifest.
     Dist(DistArgs),
+    /// Pin hand-written documentation against the surface it mirrors.
+    /// `check-mcp-tools` diffs `CLAUDE.md`'s MCP tool list against the
+    /// `#[tool]`-registered set in `aether-mcp`.
+    Docs(DocsArgs),
     /// Rewrite or check pinned golden fixture files.
     Fixtures(FixturesArgs),
     /// Emit the shippable depot layout (ADR-0163 §1): the chassis binary,
@@ -123,6 +129,7 @@ fn main() -> Result<()> {
         Commands::DevComponent(args) => dev_component::run(&args),
         Commands::BuildWasm(args) => build_wasm::run(&args),
         Commands::Dist(args) => dist::run(&args),
+        Commands::Docs(args) => docs::run(&args),
         Commands::Fixtures(args) => fixtures::run(&args),
         Commands::Package(args) => package::run(&args),
         Commands::Transform(args) => transform::run(&args),

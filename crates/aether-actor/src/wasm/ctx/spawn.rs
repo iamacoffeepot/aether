@@ -10,7 +10,7 @@ use crate::model::ctx::reply_mode::{Manual, ReplyMode};
 use crate::model::{Addressable, ChildOf, Instanced, NamespaceError, Subname, validate_namespace_segment};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
-use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor};
+use crate::wasm::{ActorInitError, ErasedWasmActor, ModuleChild, WasmActor};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -173,6 +173,56 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         <C as WasmActor>::State: ErasedWasmActor,
     {
         self.validate_spawn_parent::<P>()?;
+        self.install_inline::<C>(subname, config)
+    }
+
+    /// ADR-0114: spawn an **inline child** naming only the child type — the
+    /// spelling every module-composable child wants, and the wasm analogue of
+    /// the native `ctx.spawn_child::<C>` that already reads its parent from
+    /// the ctx.
+    ///
+    /// [`Self::spawn_inline_child`] additionally takes the spawning actor's
+    /// own type as `P` and validates it against the ctx at run time, which the
+    /// ctx already knows: `P` carries no information the call needs (the kit
+    /// wrote `::<Self, Self>`), cannot be inferred — so a generic spawn helper
+    /// has to thread it through its own signature — and a wrong `P` copied
+    /// from a sibling actor compiles, then fails at run time as
+    /// [`SpawnError::ParentIdentityMismatch`] where a `.ok()` or a warn-log
+    /// leaves the child silently absent. `C: ModuleChild` — what
+    /// `#[actor(instanced, composable)]` emits — is exactly the declaration
+    /// that makes the parent type irrelevant: the child may sit beneath any
+    /// [`WasmActor`] parent its module exports.
+    ///
+    /// Keep [`Self::spawn_inline_child`] for the genuinely per-parent
+    /// `child_of(Parent)` edge, where the declared placement really does name
+    /// one parent and validating it against the ctx is the point.
+    ///
+    /// Everything else — subname resolution, alias allocation, the in-guest
+    /// `init`, registry insertion, the child's `wire` — is
+    /// [`Self::spawn_inline_child`]'s, and so is the returned
+    /// [`InlineChild<C>`]. A ctx whose mailbox identifies no actor still
+    /// returns [`SpawnError::ParentIdentityUnavailable`] before any host call:
+    /// the parent is read rather than named, not skipped.
+    pub fn spawn_inline<C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<InlineChild<C>, SpawnError>
+    where
+        // The erasure bounds are `spawn_inline_child`'s, for the same reason:
+        // the registry stores the child as `dyn ErasedWasmActor`. They stay
+        // explicit rather than folded into `ModuleChild`, which is a placement
+        // *permission* (ADR-0166) and should not also assert a boxing seam.
+        C: ModuleChild + ErasedWasmActor,
+        <C as WasmActor>::State: ErasedWasmActor,
+    {
+        self.spawn_parent()?;
+        self.install_inline::<C>(subname, config)
+    }
+
+    /// The spawn body both inline verbs share, entered once their differing
+    /// parent-identity check has passed.
+    fn install_inline<C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<InlineChild<C>, SpawnError>
+    where
+        C: Instanced + WasmActor + ErasedWasmActor,
+        <C as WasmActor>::State: ErasedWasmActor,
+    {
         let (is_counter, full_subname) = resolve_subname(subname)?;
         let alias = MailboxId(mail::spawn_inline_child_scoped(self.mailbox, is_counter, &full_subname));
         // Re-decode an owned `C::Config` for the in-guest `init` from the
@@ -194,11 +244,16 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
             .map(InlineChild::new)
     }
 
-    fn validate_spawn_parent<P: WasmActor>(&self) -> Result<ActorTypeTag, SpawnError> {
-        let actual = self
-            .inline
+    /// The actor type this ctx is executing, per the registry — the logical
+    /// parent every spawn from here nests under.
+    fn spawn_parent(&self) -> Result<ActorTypeTag, SpawnError> {
+        self.inline
             .actor_type_tag(MailboxId(self.mailbox))
-            .ok_or(SpawnError::ParentIdentityUnavailable(MailboxId(self.mailbox)))?;
+            .ok_or(SpawnError::ParentIdentityUnavailable(MailboxId(self.mailbox)))
+    }
+
+    fn validate_spawn_parent<P: WasmActor>(&self) -> Result<ActorTypeTag, SpawnError> {
+        let actual = self.spawn_parent()?;
         let expected = ActorTypeTag::of::<P>();
         if actual != expected {
             return Err(SpawnError::ParentIdentityMismatch { expected, actual });

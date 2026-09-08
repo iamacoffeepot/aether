@@ -211,7 +211,7 @@ impl Widget {
             let Some(child_config) = decode_nested_widget_config(spec) else {
                 continue;
             };
-            match ctx.spawn_inline_child::<Self, Self>(Subname::Named(&spec.subname), &child_config) {
+            match ctx.spawn_inline::<Self>(Subname::Named(&spec.subname), &child_config) {
                 Ok(child) => self.composite.register_slot(
                     child.id(),
                     Vec2::new(spec.origin[0], spec.origin[1]),

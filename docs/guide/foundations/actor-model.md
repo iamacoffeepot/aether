@@ -737,7 +737,13 @@ sibling just as the listener stands up a session:
 addressed by tag rather than by Rust type, so the parent is named at the call
 and the SDK checks it against the ctx's registry-backed actor tag before
 encoding config or calling the host; writing a different parent type earns an
-error rather than bypassing the declared edge. A component spawns within the
+error rather than bypassing the declared edge. The co-located
+counterpart — an inline child (ADR-0114) — is
+`ctx.spawn_inline::<Panel>(Subname::Named("body"), &config)`, which names only
+the child type and reads the parent from the ctx as the native side does; its
+two-type sibling `spawn_inline_child::<RootManager, Panel>` stays for the
+per-parent `child_of(Parent)` edge. Either hands back an `InlineChild<Panel>`,
+whose `send` is checked against `Panel`'s handler set. A component spawns within the
 module it was built from; a foreign module comes in through `load_component`, which
 carries its own code and kinds — the boundary is covered in
 [Components & lifecycle](../systems/components.md).
