@@ -120,6 +120,7 @@ pub struct HarnessBuilder {
     workpiece: String,
     wall_clock_secs: Option<u64>,
     heartbeat_silence_secs: Option<u64>,
+    retrospect_reader_enabled: bool,
     script: Option<LaneScript>,
     repo: Option<Repo>,
     authority_path: Option<PathBuf>,
@@ -145,6 +146,7 @@ impl HarnessBuilder {
             workpiece: "wp".to_owned(),
             wall_clock_secs: None,
             heartbeat_silence_secs: None,
+            retrospect_reader_enabled: false,
             script: None,
             repo: None,
             authority_path: None,
@@ -170,6 +172,7 @@ impl HarnessBuilder {
             workpiece: "wp".to_owned(),
             wall_clock_secs: None,
             heartbeat_silence_secs: None,
+            retrospect_reader_enabled: false,
             script: Some(script.clone()),
             repo: None,
             authority_path: None,
@@ -197,6 +200,7 @@ impl HarnessBuilder {
             workpiece: "wp".to_owned(),
             wall_clock_secs: None,
             heartbeat_silence_secs: None,
+            retrospect_reader_enabled: false,
             script: Some(LaneScript::all_passing()),
             repo: None,
             authority_path: Some(repo.path().to_owned()),
@@ -271,6 +275,18 @@ impl HarnessBuilder {
         self
     }
 
+    /// Whether the coordinator dispatches the bloom-level reader after a
+    /// landing (ADR-0216 §4).
+    ///
+    /// Off, like the production default: a scenario that expects a landed
+    /// bloom to be read has to say so, and one that expects a landing to end
+    /// at the landing gets that without opting out of anything.
+    #[must_use]
+    pub const fn retrospect_reader(mut self, enabled: bool) -> Self {
+        self.retrospect_reader_enabled = enabled;
+        self
+    }
+
     /// Script the mock lane reads. Ignored when the lane axis is off.
     #[must_use]
     pub fn script(mut self, script: &LaneScript) -> Self {
@@ -333,6 +349,16 @@ impl FixtureHarness {
     #[must_use]
     pub fn start_with_poll(client_name: &str, poll_interval_secs: u64) -> Self {
         Self { inner: HarnessBuilder::fixture().poll_interval_secs(poll_interval_secs).start(client_name) }
+    }
+
+    /// Boot like [`start`](Self::start) with the bloom-level reader enabled
+    /// (ADR-0216 §4) — for a scenario whose subject is the read itself.
+    ///
+    /// # Panics
+    /// As [`start`](Self::start).
+    #[must_use]
+    pub fn start_with_reader(client_name: &str) -> Self {
+        Self { inner: HarnessBuilder::fixture().retrospect_reader(true).start(client_name) }
     }
 }
 

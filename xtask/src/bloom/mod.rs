@@ -13,6 +13,7 @@ mod client;
 mod dto;
 mod hex;
 mod http;
+mod instructions;
 mod plan;
 mod profiles;
 mod roll;
@@ -29,6 +30,7 @@ use clap::{Args, Subcommand};
 
 use crate::bloom::amend::{AmendArgs, OperatorKey};
 use crate::bloom::client::{Client, bloom_in};
+use crate::bloom::instructions::InstructionsArgs;
 use crate::bloom::plan::BaseChoice;
 use crate::bloom::roll::RollArgs;
 use crate::bloom::upgrade::UpgradeArgs;
@@ -116,6 +118,10 @@ enum BloomCommand {
     /// archive tier. Refuses unless the coordinator is between blooms.
     /// Nothing is ever deleted.
     Archive(archive::ArchiveArgs),
+    /// Assemble the model-process instruction bundle from this repository's
+    /// instruction sources and print its content address (ADR-0214). Recording
+    /// it authorizes nothing.
+    Instructions(InstructionsArgs),
     /// Take one member out of a walking bloom without superseding it (#5327).
     Withdraw(WithdrawArgs),
     /// Run one member's current stage again on the candidate it already holds.
@@ -440,6 +446,7 @@ fn run_on_with_policy(endpoint: &Endpoint, command: &BloomCommand, approval_poli
         BloomCommand::Upgrade(args) => upgrade::run(&client, args),
         BloomCommand::Amend(args) => amend::run(&client, args, approval_policy),
         BloomCommand::Archive(args) => archive::run(&client, args),
+        BloomCommand::Instructions(args) => instructions::run(&client, args),
         BloomCommand::Withdraw(args) => run_withdraw(&client, args),
         BloomCommand::Retry(args) => run_retry(&client, args),
         BloomCommand::Reverify(args) => run_reverify_base(&client, args),

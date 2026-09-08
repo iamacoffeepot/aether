@@ -15,7 +15,8 @@
 pub(super) const LANE_CONTEXT: &str = include_str!("lane_context.md");
 
 /// Render the curated lane context as the prompt section the lanes carry it in.
-pub(super) fn section() -> String {
+/// `pub(crate)` so `cargo xtask bloom instructions` imports this exact section.
+pub(crate) fn section() -> String {
     format!(
         "## Conventions\n\n\
          The curated lane context — the conventions this repository is written to. Follow them as \

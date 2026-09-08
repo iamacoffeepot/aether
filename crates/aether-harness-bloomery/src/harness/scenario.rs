@@ -15,7 +15,7 @@ use aether_bloomery::{
     CandidateRef, ConfigKind, ConfigRegistry, Correspondence, Digest, Evidence, EvidenceKind, Fact, FakeKeyProvider,
     Harness, KeyId, MemberDependency, Membership, ModelOverride, ModelProcessInstructions, Observation, Outcome,
     Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Snapshot, StageCatalog, StageId, Statement,
-    StoreClass, VerifyFailureSet, ViewDocument, WorkpieceId, signed_approval,
+    StoreClass, VerifyFailureSet, ViewDocument, WorkpieceId, decode_recorded_event, signed_approval,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
@@ -182,6 +182,7 @@ impl ScenarioHarness {
                         fixture_base_sha: repo.head(),
                         heartbeat_silence_secs: builder.heartbeat_silence_secs,
                         authorized_instructions: &authorized,
+                        retrospect_reader_enabled: builder.retrospect_reader_enabled,
                     },
                 );
                 (None, Some(child), Wire::from_stream(stream), None)
@@ -992,6 +993,7 @@ fn in_process_env(
     let coordinator = CoordinatorConfig {
         store_path: store_path.to_owned(),
         authorized_instruction_bundles: authorized_instructions.to_owned(),
+        retrospect_reader_enabled: builder.retrospect_reader_enabled,
         artifacts_root: Some(artifacts_root.to_owned()),
         poll_interval_secs: builder.poll_interval_secs,
         local_lane_enabled: scripted,
@@ -1088,6 +1090,9 @@ pub struct ForkedLaneSettings<'a> {
     /// child authorizes as model-process policy (ADR-0214). A child that omits
     /// it authorizes nothing and refuses every model dispatch.
     pub authorized_instructions: &'a str,
+    /// `AETHER_BLOOMERY_RETROSPECT_READER_ENABLED` — whether the child
+    /// dispatches the bloom-level reader after a landing (ADR-0216 §4).
+    pub retrospect_reader_enabled: bool,
 }
 
 impl ForkedLaneSettings<'_> {
@@ -1107,6 +1112,7 @@ impl ForkedLaneSettings<'_> {
             (String::from("AETHER_BLOOMERY_OPERATOR_NAME"), String::from("lane harness")),
             (String::from("AETHER_BLOOMERY_OPERATOR_EMAIL"), String::from("lane-harness@example.test")),
             (String::from("AETHER_BLOOMERY_AUTHORIZED_INSTRUCTIONS"), self.authorized_instructions.to_owned()),
+            (String::from("AETHER_BLOOMERY_RETROSPECT_READER_ENABLED"), self.retrospect_reader_enabled.to_string()),
         ];
         if let Some(secs) = self.heartbeat_silence_secs {
             env.push((String::from("AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS"), secs.to_string()));
@@ -1561,6 +1567,32 @@ impl ScenarioHarness {
             .expect("the coordinator's journal opens for reading")
             .lookup_study(bloom.0.as_bytes(), attempt.as_bytes())
             .expect("the study index reads")
+    }
+
+    /// Every reader verdict `bloom`'s journal recorded (ADR-0216), in journal
+    /// order — `true` for a read that produced a study, `false` for one that
+    /// did not.
+    ///
+    /// Read off the durable journal rather than the projection because a study
+    /// is evidence and nothing else: it moves no cursor, holds no member, and
+    /// so has no line in [`BloomView`] to assert on. Empty means no read has
+    /// been decided or answered yet.
+    ///
+    /// # Panics
+    /// The journal could not be opened or read.
+    #[must_use]
+    pub fn study_verdicts(&self, bloom: BloomId) -> Vec<bool> {
+        SqliteStore::open(&self.store_path)
+            .expect("the coordinator's journal opens for reading")
+            .replay_journal()
+            .expect("the journal replays")
+            .iter()
+            .filter_map(|record| decode_recorded_event(&record.event, record.event_schema.as_deref()).ok())
+            .filter_map(|event| match event.fact {
+                Fact::StudyCompleted { bloom: read, passed, .. } if read == bloom => Some(passed),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Fetch one artifact from the store root the chassis was configured with.

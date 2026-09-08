@@ -21,7 +21,9 @@ const MEMBER: &str = "wp-0";
 
 #[test]
 fn a_landed_bloom_is_read_and_a_faulted_read_does_not_hold_it() {
-    let mut harness = FixtureHarness::start("study-after-land");
+    // The reader is off by default (ADR-0216 §4), so a scenario about the read
+    // itself turns it on. Its sibling scenario asserts the other arm.
+    let mut harness = FixtureHarness::start_with_reader("study-after-land");
     let base = harness.view().mainline;
     let bloom = harness.seal_member(MEMBER, digest(0x51));
 
