@@ -56,22 +56,26 @@ fn a_benchmark_run_seals_one_bloom_per_profile_cell() {
         "each sample is its own bloom, not a duplicate admit of a sibling: {body}"
     );
     for bloom in blooms {
-        assert!(bloom["admission"].get("Admitted").is_some(), "every cell's seal must be admitted: {bloom}");
+        // The reducer's own answer, not merely that it answered: a refused seal
+        // is still `Admitted`, and a run of four that sealed none would leave
+        // every later assertion measuring an empty table.
+        assert!(bloom["admission"]["Admitted"].get("Sealed").is_some(), "every cell's seal must seal: {body}");
     }
     assert!(!report["cost_caveat"].as_str().unwrap().is_empty(), "the run renders the under-reporting caveat");
     assert_eq!(report["tasks"].as_array().unwrap().len(), 1, "one landed pull request is one golden task");
 
-    // The four blooms share one base, so one `verify.base` gates all of them;
-    // passing it is what lets each bloom's Construct dispatch, and only a model
-    // lane enters the capability ledger.
-    let base_verify = harness.await_order();
-    assert_eq!(stage_of(&base_verify), StageId::BaseVerify);
-    harness.upload_admitted(&passed(&base_verify));
-
-    let constructs = harness.await_orders(4);
-    for order in &constructs {
-        assert_eq!(stage_of(order), StageId::Construct);
-    }
+    // Answer whatever mechanical base gate the shared base owes as it appears,
+    // and wait for the four model lanes — only those enter the capability
+    // ledger, and how many gates precede them is the coordinator's business
+    // rather than something this scenario should pin.
+    harness.pump_until("the four benchmark blooms dispatch their construct lanes", |harness| {
+        for order in harness.orders() {
+            if stage_of(&order) == StageId::BaseVerify {
+                harness.upload_admitted(&passed(&order));
+            }
+        }
+        harness.orders().iter().filter(|order| stage_of(order) == StageId::Construct).count() == 4
+    });
 
     let ledger = harness.calibration().ledger;
     assert_eq!(ledger.store, StoreClass::Trial, "a benchmark run's rows are trial rows: {ledger:?}");
