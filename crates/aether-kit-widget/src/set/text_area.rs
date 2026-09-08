@@ -26,8 +26,8 @@ use crate::state::InteractionState;
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState, TextSpan};
 use crate::theme::{SetTheme, Theme, ThemeState};
 use crate::{
-    Collect, FocusGained, FocusLost, SetWidgetState, TextAreaConfig, TextCommitted, WidgetControlState, WidgetDrawItem,
-    WidgetFrame,
+    Collect, FocusGained, FocusLost, SetText, SetWidgetState, TextAreaConfig, TextCommitted, WidgetControlState,
+    WidgetDrawItem, WidgetFrame,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,6 +387,8 @@ impl WidgetDefaults for TextAreaWidget {
 /// # Agent
 /// Not loaded directly — a panel spawns it from [`TextAreaConfig`]. Plain
 /// Enter inserts a newline; Ctrl+Enter emits [`TextCommitted`] to the parent.
+/// A re-sent config resizes and restyles it in place, holding the buffer;
+/// [`SetText`] replaces what it holds.
 #[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for TextAreaWidget {
     type Config = TextAreaConfig;
@@ -415,17 +417,16 @@ impl WasmActor for TextAreaWidget {
         self.pump_font_metrics(ctx);
     }
 
+    /// Re-cap, resize, and restyle in place from a re-sent config. `initial`
+    /// seeds the buffer only at `init`, so the text, the caret, and the
+    /// scrolled row window survive; only the window is re-reconciled, against
+    /// the new row count. [`SetText`] replaces the contents.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: TextAreaConfig) {
-        self.edit = TextEditState::new(config.initial);
         self.max_chars = config.max_chars;
         self.rows = config.rows;
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
-        self.dragging = false;
-        self.paste_pending = false;
-        self.preferred_x_pixels = None;
-        self.scroll_top = 0;
         self.apply_control_state(ctx, config.state);
         self.reconcile_scroll();
         self.pump_font_metrics(ctx);
@@ -434,6 +435,15 @@ impl WasmActor for TextAreaWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
+    }
+
+    /// Replace the buffer from the host, then pull the row window back onto
+    /// the caret. Silent — no [`TextCommitted`].
+    #[handler::single]
+    fn on_set_text(&mut self, _ctx: &mut WasmCtx<'_>, set: SetText) {
+        self.edit.replace_value(set.text, set.keep_caret);
+        self.preferred_x_pixels = None;
+        self.reconcile_scroll();
     }
 
     #[handler::single]

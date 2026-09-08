@@ -238,13 +238,16 @@ use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove, MouseWheel};
 use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
-use crate::set::{accept_font_metrics_result, apply_text_theme, pump_text_font_metrics, release_left, reply_if_hidden};
+use crate::set::{
+    accept_font_metrics_result, apply_text_theme, clamp_optional_index, clamp_optional_selection,
+    pump_text_font_metrics, release_left, reply_if_hidden,
+};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, Theme};
 use crate::{
-    Collect, HoverLost, SetWidgetState, VirtualListConfig, VirtualListRow, WidgetControlState, WidgetDrawList,
-    WidgetEligibilityChanged, WidgetFrame,
+    Collect, HoverLost, SetSelection, SetWidgetState, VirtualListConfig, VirtualListRow, WidgetControlState,
+    WidgetDrawList, WidgetEligibilityChanged, WidgetFrame,
 };
 
 use actions::RowActionIndex;
@@ -343,7 +346,7 @@ impl VirtualListWidget {
     fn from_config(config: VirtualListConfig) -> Self {
         let font_id = config.theme.font_id;
         let visible_row_count = usize_from_u32(config.visible_row_count);
-        let selected_index = initial_selection(config.initial_selected_index, config.items.len());
+        let selected_index = clamp_optional_index(config.initial_selected_index, config.items.len());
         let first_index = selected_index.map_or(0, |selected_index| {
             reveal_window(selected_index, 0, visible_row_count, config.items.len()).first_index
         });
@@ -442,7 +445,10 @@ impl WidgetDefaults for VirtualListWidget {
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
-/// its `VirtualListConfig` again to replace the item vector or viewport. An
+/// its `VirtualListConfig` again to replace the item vector or viewport — that
+/// holds the selection and the scrolled row window, so a list that refreshes
+/// under a reader does not jump back to the top; [`SetSelection`] moves the
+/// selection. An
 /// item is a
 /// `VirtualListRow { text, trailing, role, ink, actions, note, indent, space_before, rule_above }`
 /// — write plain strings through `VirtualListRow::from` for a one-column list,
@@ -471,6 +477,17 @@ impl WasmActor for VirtualListWidget {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
+    /// Replace the items / viewport / theme in place, holding the selection and
+    /// the scrolled row window and re-clamping both into the new vector, so a
+    /// list that refreshes under a reader does not jump back to the top.
+    /// [`SetSelection`] moves the selection.
+    ///
+    /// `initial_selected_index` is a seed, and a seed seeds: it is read while
+    /// the list holds **no** selection — at `init`, and again on the config
+    /// that first populates an empty list — and ignored once there is a chosen
+    /// row to preserve. So "here are the rows, start on the first" is still one
+    /// mail, and a later refresh of those rows cannot undo what the reader
+    /// chose.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: VirtualListConfig) {
         let previous_eligible = content_eligible(self.items.len(), self.visible_row_count);
@@ -481,10 +498,11 @@ impl WasmActor for VirtualListWidget {
         self.scroll_bar_gap_units = config.scroll_bar_gap_units;
         self.bar_placement = BarPlacement::of(config.host_scroll_strip);
         self.visible_row_count = usize_from_u32(config.visible_row_count);
-        self.selected_index = initial_selection(config.initial_selected_index, self.items.len());
-        self.first_index = 0;
-        self.thumb_grab_pixels = None;
-        self.wheel_residual_pixels = 0.0;
+        let held = self.selected_index;
+        self.selected_index = held.map_or_else(
+            || clamp_optional_index(config.initial_selected_index, self.items.len()),
+            |index| clamp_optional_selection(Some(index), self.items.len()),
+        );
         self.hovered_action = None;
         self.pressed_action = None;
         self.font_metrics.set_desired(config.theme.font_id);
@@ -493,7 +511,11 @@ impl WasmActor for VirtualListWidget {
         // The heights are a function of the theme, so the table is rebuilt
         // once it has landed and before anything asks where a row stands.
         self.refresh_row_layout();
-        self.reveal_selection();
+        if held.is_none() && self.selected_index.is_some() {
+            self.reveal_selection();
+        } else {
+            self.first_index = self.first_index.min(self.max_first_index());
+        }
         self.apply_control_state(ctx, config.state);
         let next_eligible = content_eligible(self.items.len(), self.visible_row_count);
         if previous_eligible != next_eligible
@@ -504,6 +526,18 @@ impl WasmActor for VirtualListWidget {
         // A fresh vector under a still pointer is a different row under it.
         self.settle_hovered_row(ctx);
         pump_text_font_metrics(ctx, &mut self.font_metrics);
+    }
+
+    /// Push the selected row from the host, clamped into the items and `None`
+    /// for no selection at all, scrolling it into view. Silent — no
+    /// [`VirtualListSelected`](crate::VirtualListSelected).
+    #[handler::single]
+    fn on_set_selection(&mut self, ctx: &mut WasmCtx<'_>, set: SetSelection) {
+        self.selected_index = clamp_optional_index(set.index, self.items.len());
+        if self.selected_index.is_some() {
+            self.reveal_selection();
+        }
+        self.settle_hovered_row(ctx);
     }
 
     /// Install a font-metrics reply; the next `Collect` elides and measures
@@ -648,14 +682,6 @@ fn content_eligible(item_count: usize, visible_row_count: usize) -> bool {
     item_count > 0 && visible_row_count > 0
 }
 
-fn initial_selection(initial_selected_index: Option<u32>, item_count: usize) -> Option<usize> {
-    let initial_selected_index = initial_selected_index?;
-    if item_count == 0 {
-        return None;
-    }
-    Some(usize_from_u32(initial_selected_index).min(item_count - 1))
-}
-
 fn valid_frame(frame: &WidgetFrame) -> bool {
     frame.x.is_finite()
         && frame.y.is_finite()
@@ -670,15 +696,6 @@ mod tests {
     use super::*;
     use crate::set::virtual_list::fixture::list;
     use crate::theme::ThemeState;
-
-    #[test]
-    fn initial_selection_is_none_for_empty_and_clamped_for_nonempty() {
-        assert_eq!(initial_selection(Some(0), 0), None);
-        assert_eq!(initial_selection(None, 5), None, "no selection asked for is no selection");
-        assert_eq!(initial_selection(Some(0), 1), Some(0));
-        assert_eq!(initial_selection(Some(99), 5), Some(4));
-        assert_eq!(initial_selection(Some(u32::MAX), usize::MAX), Some(usize_from_u32(u32::MAX)));
-    }
 
     #[test]
     fn hover_focus_and_control_state_follow_shared_interaction_rules() {

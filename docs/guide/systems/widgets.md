@@ -68,6 +68,52 @@ widget sends can misreport it.
   `spawn_inline_child::<WidgetPanel, W>(subname, &config)` boots the widget with and a
   re-sendable mail: send a widget its config kind again to reconfigure it in
   place (a slider's range, a field's cap, a button's label).
+
+  **A re-sent config never moves a value the widget already holds.** Every
+  `initial*` field is a *seed*: the widget reads it at `init` and ignores it on
+  every later config — with one extension, that a seed still seeds what holds
+  *nothing*. The two widgets whose selection may be absent (`VirtualListConfig`,
+  `DropdownConfig`) take their seed on the config that first gives them a vector
+  to choose from, so "here are the rows, start on the first" is still one mail,
+  and every later refresh of those rows leaves the reader's choice alone.
+  A reconfigure updates presentation, bounds, and options, then re-clamps what
+  the widget already holds into them — a shorter option vector pulls a
+  selection back to its last entry, narrower numeric bounds pull the committed
+  value inside them, and a text control keeps its buffer, its caret, and its
+  selection. So a host may re-send every child its config on every push,
+  unconditionally, without a memo of what it last sent and without fighting
+  someone typing into a search field. A live gesture survives it too — the
+  control the reader is pressing or dragging is still the control they took
+  hold of — and only becoming disabled or hidden cancels one. The two
+  consequences a reconfigure does carry, because the surface under them
+  changed: a dropdown closes an open list (reported as `DropdownOpenChanged
+  { open: false }`, so the root takes its pointer grab back), and a splitter's
+  re-send ends a live drag.
+
+  `SplitterConfig::position_pixels` is the single stated exception, and it is
+  not spelled `initial_*` for that reason: a splitter's position *is* its
+  configuration, so re-sending the config is how a host moves the bar.
+- **Value, down.** Four setters push a value on purpose, the deliberate lane the
+  re-send contract above leaves open. Each is silent — the host set what it
+  would otherwise be told about, so none of them emits the matching events-up
+  kind — and each clamps into the widget's current bounds or vector exactly as a
+  reader's own input would.
+
+  | kind | fields | widgets that take it |
+  |---|---|---|
+  | `SetValue` | `value: f32` | Slider, Numeric |
+  | `SetText` | `text: String`, `keep_caret: bool` | TextField, TextArea |
+  | `SetSelection` | `index: Option<u32>` | Radio, Segmented, TabStrip, Dropdown, VirtualList |
+  | `SetToggle` | `on: bool` | Toggle |
+
+  `SetText`'s `keep_caret` holds the caret, the selection, and an area's
+  scrolled row window where the reader left them, floored onto the new string —
+  which is what a host correcting text under someone still typing wants; `false`
+  collapses the caret at the end. `SetSelection`'s `None` clears the selection
+  where a widget can hold none (Dropdown, VirtualList) and is ignored by one
+  that always has a selection (Radio, Segmented, TabStrip). A widget that holds
+  no value — Button, Label, Image, MenuBar, Dialog, Toast, Tooltip, Splitter —
+  takes no setter.
 - **Style, down.** `SetTheme { theme }` re-fans a live restyle. A widget adopts
   the new tokens and the next immediate-mode frame draws with them — one frame
   of latency, no invalidation bookkeeping. There is no cascade and no

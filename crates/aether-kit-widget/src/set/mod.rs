@@ -514,11 +514,33 @@ fn apply_static_control_state(ctx: &WasmCtx<'_>, state: &mut InteractionState, n
 }
 
 fn clamp_option_index(index: u32, len: usize) -> usize {
+    clamp_selection(index as usize, len)
+}
+
+/// The selection a widget already holds, pulled back into an option vector that
+/// has just been replaced under it. The same rule a config seed gets, applied
+/// to the live value instead — which is what makes a re-sent config safe: the
+/// choice survives, it just cannot point past the end of the new vector.
+fn clamp_selection(selected: usize, len: usize) -> usize {
     if len == 0 {
         0
     } else {
-        (index as usize).min(len - 1)
+        selected.min(len - 1)
     }
+}
+
+/// [`clamp_option_index`] for the widgets whose selection can be absent — the
+/// dropdown and the virtual list. `None` asks for no selection and stays none;
+/// an empty vector clears one.
+fn clamp_optional_index(index: Option<u32>, len: usize) -> Option<usize> {
+    clamp_optional_selection(usize::try_from(index?).ok(), len)
+}
+
+/// [`clamp_selection`] for those same two: the choice they already hold,
+/// resolved against a vector that has just been replaced under it.
+fn clamp_optional_selection(selected: Option<usize>, len: usize) -> Option<usize> {
+    let selected = selected?;
+    (len > 0).then(|| selected.min(len - 1))
 }
 
 /// Discharge the hidden-widget branch of the always-reply compositing
@@ -1565,6 +1587,27 @@ fn fit_row_widths(mut natural: Vec<f32>, row_width: f32, gap: f32) -> Vec<f32> {
 mod tests {
     use super::*;
     use aether_kinds::WindowId;
+
+    #[test]
+    fn a_requested_selection_is_none_for_empty_and_clamped_for_nonempty() {
+        assert_eq!(clamp_optional_index(Some(0), 0), None);
+        assert_eq!(clamp_optional_index(None, 5), None, "no selection asked for is no selection");
+        assert_eq!(clamp_optional_index(Some(0), 1), Some(0));
+        assert_eq!(clamp_optional_index(Some(99), 5), Some(4));
+        assert_eq!(clamp_optional_index(Some(u32::MAX), usize::MAX), Some(u32::MAX as usize));
+    }
+
+    #[test]
+    fn a_held_selection_survives_a_shorter_vector_by_moving_to_its_last_entry() {
+        // Tripwire: this is what makes a re-sent config safe. A widget whose
+        // option vector shrinks under it must keep a choice, not lose one, and
+        // must never index past the end of what it now holds.
+        assert_eq!(clamp_selection(4, 6), 4);
+        assert_eq!(clamp_selection(4, 2), 1);
+        assert_eq!(clamp_selection(4, 0), 0, "an empty vector has only the zeroth slot to name");
+        assert_eq!(clamp_optional_selection(Some(4), 2), Some(1));
+        assert_eq!(clamp_optional_selection(Some(4), 0), None, "an empty vector is no selection at all");
+    }
 
     /// A fixed-advance measure, so a wrap point is arithmetic a reader can
     /// check: every character is `MONO_ADVANCE` pixels wide.

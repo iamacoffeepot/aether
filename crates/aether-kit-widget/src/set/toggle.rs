@@ -21,8 +21,8 @@ use crate::set::{ActivationArms, push_control_outlines, reply_if_hidden, text_or
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
 use crate::{
-    Collect, SetWidgetState, ToggleChanged, ToggleConfig, WidgetControlState, WidgetDrawItem, WidgetDrawList,
-    WidgetFrame,
+    Collect, SetToggle, SetWidgetState, ToggleChanged, ToggleConfig, WidgetControlState, WidgetDrawItem,
+    WidgetDrawList, WidgetFrame,
 };
 
 /// A boolean switch with a track, knob, and optional label.
@@ -212,18 +212,31 @@ impl WasmActor for ToggleWidget {
         })
     }
 
+    /// Relabel and restyle in place from a re-sent config. `initial` seeds the
+    /// switch only at `init`, so this holds the flag; [`SetToggle`] flips it.
+    /// A live press arm survives too — the switch the reader is pressing is
+    /// still the switch they pressed — and only becoming unavailable cancels
+    /// it, through [`Self::apply_control_state`].
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: ToggleConfig) {
         self.label = config.label;
-        self.on = config.initial;
         self.theme = config.theme;
-        self.clear_arms();
         self.apply_control_state(ctx, config.state);
     }
 
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
+    }
+
+    /// Push the flag from the host. Silent — no [`ToggleChanged`], since the
+    /// host set what it would be told about. Any live arm is cancelled: the
+    /// press that armed it would otherwise complete against a value the reader
+    /// never saw.
+    #[handler::single]
+    fn on_set_toggle(&mut self, _ctx: &mut WasmCtx<'_>, set: SetToggle) {
+        self.on = set.on;
+        self.clear_arms();
     }
 
     #[handler::single]

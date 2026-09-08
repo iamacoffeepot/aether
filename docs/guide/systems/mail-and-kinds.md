@@ -127,7 +127,7 @@ The lower-level `send_tracked(&request)` / `ctx.in_reply_to()` pair is still
 available when the request id itself is the domain key. `in_reply_to()` returns
 `None` for ordinary inbound requests, uncorrelated mail, and inline-cluster local
 dispatches that never crossed the host envelope boundary. Echoed payload fields
-such as `namespace` + `path` on `aether.fs.read_result` remain useful domain
+such as the echoed `addr` on `aether.fs.read_result` remain useful domain
 context, but exact duplicate-safe matching belongs to the request context or
 envelope request id. Multi emissions and detached data phases still carry their
 own domain-level correlation in their payloads.
