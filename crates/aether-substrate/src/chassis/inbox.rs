@@ -582,7 +582,6 @@ mod tests {
     }
 
     use crate::{BootError, NativeActor, NativeInitCtx};
-    use aether_data::Schema;
 
     #[aether_data::kind(name = "test.adr0109.request", copy, partial_eq)]
     struct ReplyRequest {

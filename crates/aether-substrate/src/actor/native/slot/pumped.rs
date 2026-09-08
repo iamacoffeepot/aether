@@ -199,7 +199,7 @@ mod tests {
     use aether_actor::log::ActorLogRing;
     use aether_actor::trace::ActorTraceRing;
     use aether_actor::{Addressable, HandlesKind, Local as _, MailSender, Manual, One};
-    use aether_data::{Kind, KindId, MailId, MailboxId, Schema, Source, SourceAddr, mailbox_id_from_name};
+    use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr, mailbox_id_from_name};
     use aether_kinds::trace::TraceEvent;
     use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult, descriptors};
 
