@@ -1234,7 +1234,8 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
     // name, over `use super::*` so the identity struct and its declared parents
     // still resolve — which is what frees the identity file from restating the
     // whole handler-and-reply kind list by hand.
-    let imports = select_for_demands(&harvested.kind_imports, &identity_import_demands(identity, opts));
+    let demands = identity_import_demands(identity, opts, &item.generics);
+    let imports = select_for_demands(&harvested.kind_imports, &demands);
     let module_ident = quote::format_ident!("__aether_actor_identity_{}", ident.to_string().to_lowercase());
 
     Ok(quote! {
@@ -1254,12 +1255,19 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
 /// gated to match the place that wants it (see [`ImportDemand`]).
 ///
 /// Three shapes: the always-on frame (the `Addressable` body's `NAMESPACE`
-/// expression plus the identity and its declared parents, named by the
-/// `Root` / `ChildOf` / inventory markers alike), each handler's argument kind
-/// under that handler's own `#[cfg]`s, and each handler's reply kind under those
-/// plus `not(wasm)` — the reply is spelled only by the ADR-0109 `HandlerEntry`
-/// inventory row, which no wasm build emits.
-fn identity_import_demands(identity: &HarvestedIdentity, opts: &ActorOpts) -> Vec<ImportDemand> {
+/// expression plus the declared parents, named by the `Addressable` / `ChildOf`
+/// impls), each handler's argument kind under that handler's own `#[cfg]`s, and
+/// each handler's reply kind under those plus `not(wasm)` — the reply is spelled
+/// only by the ADR-0109 `HandlerEntry` inventory row, which no wasm build emits.
+///
+/// A generic identity emits no handler inventory at all (the non-generic
+/// `NAMESPACE` const wouldn't resolve in the inventory static), so it wants no
+/// reply imports either.
+fn identity_import_demands(
+    identity: &HarvestedIdentity,
+    opts: &ActorOpts,
+    generics: &syn::Generics,
+) -> Vec<ImportDemand> {
     let namespace = &identity.namespace;
     let parents = &opts.child_of;
     let mut demands = vec![ImportDemand { cfgs: Vec::new(), tokens: quote! { #namespace #(#parents)* } }];
@@ -1268,11 +1276,13 @@ fn identity_import_demands(identity: &HarvestedIdentity, opts: &ActorOpts) -> Ve
         let cfgs: Vec<TokenStream2> = marker.cfgs.iter().map(|cfg| quote! { #cfg }).collect();
         let kind = &marker.kind;
         demands.push(ImportDemand { cfgs: cfgs.clone(), tokens: quote! { #kind } });
-        if let Some(reply) = &marker.reply {
-            let mut reply_cfgs = cfgs;
-            reply_cfgs.push(quote! { #[cfg(not(target_family = "wasm"))] });
-            demands.push(ImportDemand { cfgs: reply_cfgs, tokens: quote! { #reply } });
-        }
+
+        let Some(reply) = marker.reply.as_ref().filter(|_| generics.params.is_empty()) else {
+            continue;
+        };
+        let mut reply_cfgs = cfgs;
+        reply_cfgs.push(quote! { #[cfg(not(target_family = "wasm"))] });
+        demands.push(ImportDemand { cfgs: reply_cfgs, tokens: quote! { #reply } });
     }
     demands
 }
