@@ -109,7 +109,9 @@ Test-only packages are grouped by role rather than maintained here as an
 exhaustive crate ledger. `aether-test-fixtures-*` packages provide deliberately
 small wasm/native artifacts for replacement, capability-split, boot,
 multi-actor, and behavior contracts. `aether-component-ui-tests` is the narrow
-trybuild host for component route compile contracts. Derive crates also keep
+trybuild host for component route compile contracts, and
+`aether-subscribe-ui-tests` the equally narrow host for the publisher gate on
+the lifecycle and window subscribe surfaces. Derive crates also keep
 their compile-pass/fail fixtures beside the macro they exercise. These are
 often better executable examples than an old prose snippet.
 

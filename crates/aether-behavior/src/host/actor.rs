@@ -557,6 +557,7 @@ mod tests {
     use crate::host::test_support::{fixed_output_wasm, forward_output};
     use aether_actor::Lifecycle;
     use aether_actor::wasm::{NO_INBOUND_SOURCE, inline::Registry};
+    use aether_fs::NamespaceAddr;
     use alloc::string::ToString;
     use alloc::vec;
     use alloc::vec::Vec;
@@ -608,7 +609,7 @@ mod tests {
     }
 
     fn attached_script_read_result() -> ReadResult {
-        ReadResult::Ok { namespace: "assets".to_string(), path: "behavior.wasm".to_string(), bytes: attach_script() }
+        ReadResult::Ok { addr: NamespaceAddr::new("assets", "behavior.wasm"), bytes: attach_script() }
     }
 
     fn assert_attach_offered(sink: &RecordingSink) {
@@ -692,11 +693,7 @@ mod tests {
         let mut reports = 0;
 
         let (result, reply) = host.apply_read_result(
-            ReadResult::Ok {
-                namespace: "assets".to_string(),
-                path: "behavior.wasm".to_string(),
-                bytes: attach_script(),
-            },
+            ReadResult::Ok { addr: NamespaceAddr::new("assets", "behavior.wasm"), bytes: attach_script() },
             load_context(ScriptLoadOrigin::Boot, "assets", "behavior.wasm"),
             |host| {
                 drain_prime(host, &mut reports);
@@ -721,7 +718,7 @@ mod tests {
         let mut sink = RecordingSink::default();
 
         let (result, reply) = host.apply_read_result(
-            ReadResult::Ok { namespace: "assets".to_string(), path: "echoed.wasm".to_string(), bytes: attach_script() },
+            ReadResult::Ok { addr: NamespaceAddr::new("assets", "echoed.wasm"), bytes: attach_script() },
             load_context(ScriptLoadOrigin::Runtime, "scripts", "actual.wasm"),
             |host| host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH),
         );

@@ -79,7 +79,7 @@ pub struct PackageArgs {
 ///
 /// ```text
 /// <out>/
-///   aether-substrate            # chassis binary (desktop or headless; .exe on Windows)
+///   aether-desktop              # chassis binary (`aether-headless` under `--chassis headless`; .exe on Windows)
 ///   LICENSE-MIT                 # workspace licenses, shipped with the statically linked binary
 ///   LICENSE-APACHE
 ///   pack/manifest               # `encode_manifest` output
