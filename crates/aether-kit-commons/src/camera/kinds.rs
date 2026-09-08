@@ -141,6 +141,7 @@ pub struct CameraEyeResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_data::Kind;
 
     #[test]
     fn kind_names_are_stable() {

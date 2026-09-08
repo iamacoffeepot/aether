@@ -836,6 +836,7 @@ mod tests {
     }
 
     use super::super::{FsFetch, FsFetchError, FsFetchResult, FsFoldError};
+    use aether_data::Kind;
     use aether_substrate::transform::TransformRegistry;
 
     /// Unit test: `on_fetch` with empty transforms returns raw file bytes.

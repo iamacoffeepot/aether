@@ -250,7 +250,7 @@ pub struct Modifiers {
 
 #[cfg(test)]
 mod tests {
-    use aether_data::{Schema, SchemaType};
+    use aether_data::{Kind, Schema, SchemaType};
 
     use super::{
         ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,

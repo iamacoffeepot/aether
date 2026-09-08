@@ -217,7 +217,7 @@ impl<'a> ConfigScopes<'a> {
 
 #[cfg(test)]
 mod tests {
-    use serde::Deserialize;
+    use aether_data::Kind;
 
     use super::*;
 

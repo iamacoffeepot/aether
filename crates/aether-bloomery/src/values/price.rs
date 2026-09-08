@@ -315,6 +315,7 @@ mod tests {
 
     use super::{LongContextBand, PriceRates, PriceTable, SealedPriceTable};
     use crate::values::{ConfigRegistry, ConfigScopes, ResolvedConfigs, StudyCall, StudyCost, config_address};
+    use aether_data::Kind;
     use aether_data::wire::to_vec;
     use serde::{Deserialize, Serialize};
 

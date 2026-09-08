@@ -264,8 +264,8 @@ impl ResolvedConfigs {
 
 #[cfg(test)]
 mod tests {
+    use aether_data::Kind;
     use aether_data::wire::to_vec;
-    use serde::{Deserialize, Serialize};
 
     use super::*;
 

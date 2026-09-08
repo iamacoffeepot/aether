@@ -47,8 +47,8 @@ use aether_bloomery::{
     Admit, AdmitResult, BloomId, Checkpoint, Digest, Event, Evidence, EvidenceKind, Fact, Gate, IdempotencyKey,
     IntegrateOutcome, IntegratePayload, MemberCandidate, Read, Refusal, SplicePayload, Topic, WorkpieceId,
 };
-use aether_data::MailboxId;
 use aether_data::wire::{from_bytes, to_vec};
+use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
