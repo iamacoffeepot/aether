@@ -16,6 +16,7 @@
 //! available. The realized [`RealizedTexture`] carries the wgpu texture
 //! plus the group-1 bind group built against shared texture bindings.
 
+use super::shape::{SHAPE_VERTEX_BUFFER_BYTES, ShapePipeline, build_shape_pipeline};
 use super::targets::Targets;
 use std::iter;
 use std::slice;
@@ -69,14 +70,16 @@ pub struct TextureBindings {
     pub nearest_sampler: wgpu::Sampler,
 }
 
-/// Owned GPU state for the quad overlay pipeline: the render pipeline,
-/// the per-frame vertex buffer, and the viewport uniform + its bind
-/// group (group 0). Texture group-1 state is supplied by
-/// [`TextureBindings`].
+/// Owned GPU state for the overlay pass: the two textured-quad render
+/// pipelines (one per blend), the shape pipeline (ADR-0213), the
+/// per-frame vertex buffer, and the viewport uniform + its bind group
+/// (group 0), which every overlay pipeline is built against. Texture
+/// group-1 state is supplied by [`TextureBindings`].
 #[allow(clippy::struct_field_names)]
 pub struct QuadPipeline {
     straight: wgpu::RenderPipeline,
     premultiplied: wgpu::RenderPipeline,
+    shape: ShapePipeline,
     vertex_buffer: wgpu::Buffer,
     viewport_buffer: wgpu::Buffer,
     viewport_bind_group: wgpu::BindGroup,
@@ -130,16 +133,28 @@ pub enum CompositeBlend {
     Premultiplied,
 }
 
-/// One draw inside the overlay pass: the group-1 bind group for the
-/// batch's texture, and the vertex sub-range (in vertices, not bytes)
-/// the batch's expanded quads occupy in the shared vertex buffer.
+/// What one overlay draw samples and which pipeline it runs through. The
+/// two sources index different vertex buffers — textured draws the quad
+/// buffer, shape draws the shape buffer (ADR-0213) — so an
+/// [`OverlayDraw`]'s vertex range is read against the buffer its source
+/// names.
+pub enum OverlaySource<'a> {
+    /// Textured quads or screen triangles: the group-1 bind group for the
+    /// batch's texture, drawn through the pipeline `blend` selects.
+    Textured { bind_group: &'a wgpu::BindGroup, blend: CompositeBlend },
+    /// Distance-field shapes, drawn through the shape pipeline; no texture.
+    Shapes,
+}
+
+/// One draw inside the overlay pass: its source, and the vertex
+/// sub-range (in vertices, not bytes) the batch's expanded geometry
+/// occupies in that source's vertex buffer.
 pub struct OverlayDraw<'a> {
-    pub bind_group: &'a wgpu::BindGroup,
+    pub source: OverlaySource<'a>,
     pub first_vertex: u32,
     pub vertex_count: u32,
     /// Optional framebuffer-pixel scissor: `[x, y, width, height]`.
     pub clip: Option<[f32; 4]>,
-    pub blend: CompositeBlend,
 }
 
 /// Build the shared texture + sampler bindings used by texture-sampling
@@ -297,6 +312,9 @@ pub fn build_quad_pipeline(
     };
     let straight = build("aether quad pipeline", wgpu::BlendState::ALPHA_BLENDING);
     let premultiplied = build("aether quad premultiplied pipeline", wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
+    // The shape pipeline (ADR-0213) shares the viewport layout so the
+    // overlay pass binds group 0 once for all three pipelines.
+    let shape = build_shape_pipeline(device, color_format, &viewport_bind_group_layout);
 
     let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("aether quad vertex buffer"),
@@ -305,7 +323,7 @@ pub fn build_quad_pipeline(
         mapped_at_creation: false,
     });
 
-    QuadPipeline { straight, premultiplied, vertex_buffer, viewport_buffer, viewport_bind_group }
+    QuadPipeline { straight, premultiplied, shape, vertex_buffer, viewport_buffer, viewport_bind_group }
 }
 
 /// Create a GPU texture from staged `pixels` and build its group-1 bind
@@ -588,15 +606,17 @@ pub fn push_world_quad_vertices(
     }
 }
 
-/// Record the overlay pass: upload `vertex_bytes` + the `view_proj` /
-/// `viewport` uniform, then draw each `OverlayDraw` range with its
-/// texture bind group into the offscreen color target. The pass loads
-/// (does not clear) the existing color so the world pass beneath shows
-/// through, and binds no depth target. Empty `draws` is a no-op;
-/// `vertex_bytes` exceeding [`QUAD_VERTEX_BUFFER_BYTES`] drops the pass
-/// with a warn. `view_proj` is column-major — the World quad path
-/// transforms anchors through it in the vertex shader.
-// Eight arguments mirror the same all-in-one pattern `record_main_pass`
+/// Record the overlay pass: upload `vertex_bytes` (quads and triangles)
+/// and `shape_vertex_bytes` (ADR-0213 shapes) + the `view_proj` /
+/// `viewport` uniform, then draw each `OverlayDraw` range through the
+/// pipeline its source selects into the offscreen color target. The pass
+/// loads (does not clear) the existing color so the world pass beneath
+/// shows through, and binds no depth target. Empty `draws` is a no-op;
+/// either byte buffer exceeding its cap ([`QUAD_VERTEX_BUFFER_BYTES`] /
+/// [`SHAPE_VERTEX_BUFFER_BYTES`]) drops the pass with a warn. `view_proj`
+/// is column-major — the World paths transform anchors through it in
+/// the vertex shader.
+// Nine arguments mirror the same all-in-one pattern `record_main_pass`
 // uses; bundling into a struct here for one call site adds no clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn record_quad_overlay_pass(
@@ -605,11 +625,12 @@ pub fn record_quad_overlay_pass(
     pipeline: &QuadPipeline,
     targets: &Targets,
     vertex_bytes: &[u8],
+    shape_vertex_bytes: &[u8],
     draws: &[OverlayDraw<'_>],
     viewport: [f32; 2],
     view_proj: [f32; 16],
 ) {
-    if draws.is_empty() || vertex_bytes.is_empty() {
+    if draws.is_empty() || (vertex_bytes.is_empty() && shape_vertex_bytes.is_empty()) {
         return;
     }
     if vertex_bytes.len() > QUAD_VERTEX_BUFFER_BYTES {
@@ -621,7 +642,21 @@ pub fn record_quad_overlay_pass(
         );
         return;
     }
-    queue.write_buffer(&pipeline.vertex_buffer, 0, vertex_bytes);
+    if shape_vertex_bytes.len() > SHAPE_VERTEX_BUFFER_BYTES {
+        tracing::warn!(
+            target: "aether_substrate::render",
+            shape_vertex_bytes = shape_vertex_bytes.len(),
+            cap = SHAPE_VERTEX_BUFFER_BYTES,
+            "dropping overlay pass: shape vertex bytes exceed fixed buffer",
+        );
+        return;
+    }
+    if !vertex_bytes.is_empty() {
+        queue.write_buffer(&pipeline.vertex_buffer, 0, vertex_bytes);
+    }
+    if !shape_vertex_bytes.is_empty() {
+        queue.write_buffer(&pipeline.shape.vertex_buffer, 0, shape_vertex_bytes);
+    }
     // Viewport uniform: view_proj (16 f32 = 64 bytes) + size (2 f32 =
     // 8 bytes) + pad (2 f32 = 8 bytes) = 80 bytes total.
     let mut uniform = [0f32; 20];
@@ -639,7 +674,6 @@ pub fn record_quad_overlay_pass(
         multiview_mask: None,
     });
     pass.set_bind_group(0, &pipeline.viewport_bind_group, &[]);
-    pass.set_vertex_buffer(0, pipeline.vertex_buffer.slice(..vertex_bytes.len() as u64));
     for draw in draws {
         if draw.vertex_count == 0 {
             continue;
@@ -647,12 +681,23 @@ pub fn record_quad_overlay_pass(
         let Some(scissor) = clamped_scissor(draw.clip, targets.width(), targets.height()) else {
             continue;
         };
-        pass.set_pipeline(match draw.blend {
-            CompositeBlend::Straight => &pipeline.straight,
-            CompositeBlend::Premultiplied => &pipeline.premultiplied,
-        });
+        // Each source reads its own vertex buffer; the bind is re-stated
+        // per draw so painter order can interleave the two freely.
+        match draw.source {
+            OverlaySource::Textured { bind_group, blend } => {
+                pass.set_pipeline(match blend {
+                    CompositeBlend::Straight => &pipeline.straight,
+                    CompositeBlend::Premultiplied => &pipeline.premultiplied,
+                });
+                pass.set_vertex_buffer(0, pipeline.vertex_buffer.slice(..vertex_bytes.len() as u64));
+                pass.set_bind_group(1, bind_group, &[]);
+            }
+            OverlaySource::Shapes => {
+                pass.set_pipeline(&pipeline.shape.pipeline);
+                pass.set_vertex_buffer(0, pipeline.shape.vertex_buffer.slice(..shape_vertex_bytes.len() as u64));
+            }
+        }
         pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
-        pass.set_bind_group(1, draw.bind_group, &[]);
         pass.draw(draw.first_vertex..draw.first_vertex + draw.vertex_count, 0..1);
     }
 }
