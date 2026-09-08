@@ -1,5 +1,5 @@
 //! The two hops a benchmark run takes: the fire-and-forget work orders, and the
-//! N tracked seals it is held across.
+//! one seal it is held across.
 
 use aether_actor::Manual;
 use aether_bloomery::{Admit, AdmitResult, Event, Fact, IdempotencyKey, Outcome};
@@ -9,19 +9,17 @@ use aether_substrate::actor::native::NativeCtx;
 
 use super::super::hex::hex_encode;
 use super::super::response::{error_response, json};
-use super::super::state::{
-    ApiCapabilityState, BenchmarkAdmit, MAX_OPEN_BENCHMARKS, PendingBenchmark, PendingBenchmarkSetup, Routed,
-};
+use super::super::state::{ApiCapabilityState, MAX_OPEN_BENCHMARKS, PendingBenchmark, Routed};
 use super::BenchmarkRequest;
 use crate::benchmark::{
-    BenchmarkAdmission, BenchmarkBloomView, BenchmarkPlan, BenchmarkReport, GoldenTask, GoldenTaskSet, PlannedBloom,
-    RunSpec, extract, plan,
+    BenchmarkAdmission, BenchmarkMemberView, BenchmarkPlan, BenchmarkReport, GoldenTask, GoldenTaskSet, RunSpec,
+    extract, plan,
 };
 use crate::control::ControlCore;
 use crate::store::{RecordDispatchDescription, StoreCapability};
 
 /// Extract the golden-task set the request names, plan the run over it, and
-/// dispatch the seals.
+/// dispatch its seal.
 pub(super) fn run(state: &ApiCapabilityState, ctx: &NativeCtx<'_, Manual>, request: BenchmarkRequest) -> Routed {
     let Some(fixture) = state.fixture.as_ref() else {
         return Routed::Reply(error_response(
@@ -58,105 +56,85 @@ pub(super) fn run(state: &ApiCapabilityState, ctx: &NativeCtx<'_, Manual>, reque
     };
 
     match dispatch(state, ctx, planned) {
-        Ok(setup) => Routed::DeferredBenchmark(Box::new(setup)),
+        Ok(held) => Routed::DeferredBenchmark(Box::new(held)),
         Err(response) => Routed::Reply(response),
     }
 }
 
-/// Encode every seal, write the work orders, and dispatch the admits.
+/// Write the work orders, then dispatch the seal.
 ///
-/// Encoding runs to completion before anything is sent, so a spec that will not
-/// encode refuses the whole run rather than leaving a prefix of it sealed and
-/// the rest missing — the same all-or-nothing posture the bloom ceiling takes.
+/// The orders go out fire-and-forget through the same `RecordDispatchDescription`
+/// the seal door uses, and for the same stated reason: a record *about* an
+/// admission must not be able to fail the admission it describes. They go first
+/// because the row is what carries the replayed order to the lane, and the
+/// executor only reads it a reactor tick after the seal commits.
 fn dispatch(
     state: &ApiCapabilityState,
     ctx: &NativeCtx<'_, Manual>,
     planned: BenchmarkPlan,
-) -> Result<PendingBenchmarkSetup, HttpServerResponse> {
-    let admits = planned.blooms.iter().map(seal_admit).collect::<Result<Vec<_>, _>>()?;
+) -> Result<PendingBenchmark, HttpServerResponse> {
+    let admit = seal_admit(&planned)?;
+    let bloom = planned.bloom().0.as_bytes().to_vec();
 
-    for bloom in &planned.blooms {
+    for member in &planned.members {
         ctx.actor::<StoreCapability>().send_detached(&RecordDispatchDescription {
-            bloom: bloom.id().0.as_bytes().to_vec(),
-            workpiece: bloom.workpiece.0.clone(),
-            description: bloom.order.clone(),
+            bloom: bloom.clone(),
+            workpiece: member.workpiece.0.clone(),
+            description: member.order.clone(),
         });
     }
 
-    let correlations = admits
-        .iter()
-        .enumerate()
-        .map(|(index, admit)| (state.send_tracked(ctx.actor::<ControlCore>(), admit), index))
-        .collect();
-
-    Ok(PendingBenchmarkSetup { planned, correlations })
+    Ok(PendingBenchmark { correlation: state.send_tracked(ctx.actor::<ControlCore>(), &admit), planned })
 }
 
 impl ApiCapabilityState {
-    /// Join one benchmark seal's `AdmitResult` into its held run, replying when
-    /// the last one lands.
+    /// Answer a held benchmark run from its seal's `AdmitResult`.
     ///
-    /// Hands the reply back when it belongs to something else, the way the
-    /// repair door's own settlement does, so the shared renderer serves every
-    /// flow this one does not claim.
+    /// Held rather than relayed because the answer is the *run's* report — the
+    /// set version and the caveats its cells are read under — and the shared
+    /// admit renderer knows only the outcome. Hands the reply back when it
+    /// belongs to something else, the way the repair door's own settlement does.
     pub(in crate::api::runtime) fn settle_benchmark(
         &mut self,
         ctx: &NativeCtx<'_, Manual>,
         mail: AdmitResult,
     ) -> Option<AdmitResult> {
-        let Some(BenchmarkAdmit { run, index }) = self.benchmark_admits.remove(&ctx.reply_target().correlation_id)
-        else {
-            return Some(mail);
-        };
-        // A sibling seal may already have failed the run closed and taken its
-        // table with it; this reply then has nothing to fill, and it is still
-        // claimed rather than handed to the shared renderer.
-        let pending = self.benchmarks.get_mut(&run)?;
-        pending.admissions[index] = Some(admission(&mail));
-        pending.remaining -= 1;
-        if pending.remaining > 0 {
-            return None;
-        }
+        let correlation = ctx.reply_target().correlation_id;
+        let held = self.benchmarks.remove(&correlation)?;
 
-        let PendingBenchmark { inbound, planned, admissions, .. } =
-            self.benchmarks.remove(&run).expect("the run is present; it was just mutated");
-        inbound.reply(&json(200, &report(&planned, &admissions)));
+        held.inbound.reply(&json(200, &report(&held.planned, admission(&mail))));
         None
     }
 
-    /// Fail one held run closed and tear down its still-outstanding siblings —
-    /// the `fail_seal` sibling, reached when a seal's chain settles without a
-    /// reply.
-    ///
-    /// Whole-run rather than per-bloom, because a run's answer is one table: a
-    /// report short a cell, handed back as a `200`, is a comparison a reader
-    /// cannot tell from a complete one.
-    pub(in crate::api::runtime) fn fail_benchmark(&mut self, run: u64, reason: &str) {
-        let Some(PendingBenchmark { inbound, .. }) = self.benchmarks.remove(&run) else {
-            return;
-        };
-        self.benchmark_admits.retain(|_, admit| admit.run != run);
-        inbound.reply(&error_response(504, reason));
+    /// Fail a held run closed — the `fail_seal` sibling, reached when its seal's
+    /// chain settles without a reply.
+    pub(in crate::api::runtime) fn fail_benchmark(&mut self, correlation: u64, reason: &str) {
+        if let Some(held) = self.benchmarks.remove(&correlation) {
+            held.inbound.reply(&error_response(504, reason));
+        }
     }
 }
 
-/// One benchmark bloom's `Admit`, keyed for idempotency by the bloom's own id.
+/// The run's `Admit`, keyed for idempotency by the bloom's own id.
 ///
 /// The bloom id is the digest of the spec, so a re-POSTed run dedups onto the
-/// blooms it already sealed instead of sealing a second copy of each — which is
-/// what an operator retrying a run whose fixture was mid-seed wants, and is the
-/// same key the seal door defaults to.
-fn seal_admit(bloom: &PlannedBloom) -> Result<Admit, HttpServerResponse> {
+/// bloom it already sealed instead of sealing a second copy — which is what an
+/// operator retrying a run whose fixture was mid-seed wants, and is the same key
+/// the seal door defaults to.
+fn seal_admit(planned: &BenchmarkPlan) -> Result<Admit, HttpServerResponse> {
     let event = Event {
-        idempotency_key: IdempotencyKey(format!("aether.bloomery.benchmark:{}", hex_encode(bloom.id().0.as_bytes()))),
-        fact: Fact::Seal(bloom.spec.clone()),
+        idempotency_key: IdempotencyKey(format!(
+            "aether.bloomery.benchmark:{}",
+            hex_encode(planned.bloom().0.as_bytes())
+        )),
+        fact: Fact::Seal(planned.spec.clone()),
     };
     to_vec(&event)
         .map(|event| Admit { event })
         .map_err(|error| error_response(500, &format!("benchmark seal encode failed: {error}")))
 }
 
-/// Render one admit reply as the run's answer for that cell.
+/// Render the admit reply as the run's answer.
 fn admission(result: &AdmitResult) -> BenchmarkAdmission {
     match result {
         AdmitResult::Ok { outcome } => match from_bytes::<Outcome>(outcome) {
@@ -168,28 +146,22 @@ fn admission(result: &AdmitResult) -> BenchmarkAdmission {
 }
 
 /// Render the finished run.
-fn report(planned: &BenchmarkPlan, admissions: &[Option<BenchmarkAdmission>]) -> BenchmarkReport {
+fn report(planned: &BenchmarkPlan, admission: BenchmarkAdmission) -> BenchmarkReport {
     BenchmarkReport {
         set: planned.set.name.clone(),
         set_version: planned.set.version(),
         base: planned.set.base,
         tasks: planned.set.tasks.clone(),
-        blooms: planned
-            .blooms
+        bloom: planned.bloom(),
+        admission,
+        members: planned
+            .members
             .iter()
-            .zip(admissions)
-            .map(|(bloom, admission)| BenchmarkBloomView {
-                bloom: bloom.id(),
-                workpiece: bloom.workpiece.0.clone(),
-                pull_request: bloom.pull_request,
-                cell: bloom.cell,
-                sample: bloom.sample,
-                // Every slot is filled before the reply fires — the run replies
-                // on its last admit — so an unanswered one is a bug, and saying
-                // so is better than a `null` a reader would take for a verdict.
-                admission: admission
-                    .clone()
-                    .unwrap_or_else(|| BenchmarkAdmission::Refused("no admit reply was joined".to_owned())),
+            .map(|member| BenchmarkMemberView {
+                workpiece: member.workpiece.0.clone(),
+                pull_request: member.pull_request,
+                cell: member.cell,
+                sample: member.sample,
             })
             .collect(),
         caveat: String::from(aether_bloomery::LEDGER_CAVEAT),

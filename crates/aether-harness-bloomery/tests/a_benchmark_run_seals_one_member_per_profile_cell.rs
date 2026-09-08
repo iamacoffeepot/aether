@@ -1,14 +1,14 @@
-//! One golden task, two profile cells, sample size two: four benchmark blooms,
-//! and a trial ledger whose cells are attributable to the `ModelOverride` each
-//! one sealed (ADR-0184, issue #4871).
+//! One golden task, two profile cells, sample size two: four benchmark members
+//! of one bloom, and a trial ledger whose cells are attributable to the
+//! `ModelOverride` each one sealed (ADR-0184, issue #4871).
 //!
 //! The bug this catches is the whole mechanism failing quietly. Every cell of a
-//! benchmark run replays the *same* order on the *same* base, so four blooms
+//! benchmark run replays the *same* order on the *same* base, so four members
 //! that all resolved the compiled line — an override that never reached the
 //! registry, an address nothing stored, a plan that reused one workpiece and
-//! deduplicated three of its four seals — produce a ledger that looks exactly
-//! like a working comparison, minus the comparison. Only reading the cells back
-//! and finding each agent where its own override put it distinguishes the two.
+//! collapsed four members into fewer — produce a ledger that looks exactly like
+//! a working comparison, minus the comparison. Only reading the cells back and
+//! finding each agent where its own override put it distinguishes the two.
 //!
 //! The fixture cell *is* the trial cell (issue #5794), so this boots precisely
 //! the coordinator a calibration host runs and drives the door an operator
@@ -28,7 +28,7 @@ fn stage_of(order: &OutstandingOrder) -> StageId {
 }
 
 #[test]
-fn a_benchmark_run_seals_one_bloom_per_profile_cell() {
+fn a_benchmark_run_seals_one_member_per_profile_cell() {
     let mut harness = FixtureHarness::start("benchmark-run");
     let landing = harness.seed_landed_pull_request(5820, "Build the benchmark run.");
     let cells = [harness.record_model_override("bench-cell-a"), harness.record_model_override("bench-cell-b")];
@@ -48,27 +48,26 @@ fn a_benchmark_run_seals_one_bloom_per_profile_cell() {
     assert_eq!(status, 200, "the benchmark door must seal the run: {body}");
 
     let report: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let blooms = report["blooms"].as_array().unwrap();
-    assert_eq!(blooms.len(), 4, "two cells at sample size two are four blooms: {body}");
+    // The reducer's own answer, not merely that it answered: a refused seal is
+    // still `Admitted`, and a run that sealed nothing would leave every later
+    // assertion measuring an empty table.
+    assert!(report["admission"]["Admitted"].get("Sealed").is_some(), "the run's seal must seal: {body}");
+
+    let members = report["members"].as_array().unwrap();
+    assert_eq!(members.len(), 4, "two cells at sample size two are four members: {body}");
     assert_eq!(
-        blooms.iter().map(|bloom| bloom["bloom"].as_str().unwrap()).collect::<BTreeSet<_>>().len(),
+        members.iter().map(|member| member["workpiece"].as_str().unwrap()).collect::<BTreeSet<_>>().len(),
         4,
-        "each sample is its own bloom, not a duplicate admit of a sibling: {body}"
+        "each sample is its own member rather than a name collapsed onto a sibling: {body}"
     );
-    for bloom in blooms {
-        // The reducer's own answer, not merely that it answered: a refused seal
-        // is still `Admitted`, and a run of four that sealed none would leave
-        // every later assertion measuring an empty table.
-        assert!(bloom["admission"]["Admitted"].get("Sealed").is_some(), "every cell's seal must seal: {body}");
-    }
     assert!(!report["cost_caveat"].as_str().unwrap().is_empty(), "the run renders the under-reporting caveat");
     assert_eq!(report["tasks"].as_array().unwrap().len(), 1, "one landed pull request is one golden task");
 
-    // Answer whatever mechanical base gate the shared base owes as it appears,
-    // and wait for the four model lanes — only those enter the capability
-    // ledger, and how many gates precede them is the coordinator's business
-    // rather than something this scenario should pin.
-    harness.pump_until("the four benchmark blooms dispatch their construct lanes", |harness| {
+    // Answer whatever mechanical base gate the base owes as it appears, and wait
+    // for the four model lanes — only those enter the capability ledger, and how
+    // many gates precede them is the coordinator's business rather than
+    // something this scenario should pin.
+    harness.pump_until("the four benchmark members dispatch their construct lanes", |harness| {
         for order in harness.orders() {
             if stage_of(&order) == StageId::BaseVerify {
                 harness.upload_admitted(&passed(&order));

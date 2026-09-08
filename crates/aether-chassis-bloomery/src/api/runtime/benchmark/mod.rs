@@ -18,14 +18,13 @@
 //!
 //! Two, and only one of them is awaited. [`seal`] holds both.
 //!
-//! Each bloom's work order is written to its dispatch-description row
+//! Each member's work order is written to its dispatch-description row
 //! fire-and-forget, through the same `RecordDispatchDescription` the seal door
 //! uses and for the same stated reason: a record *about* an admission must not
-//! be able to fail the admission it describes. The seals then go out as N
-//! tracked `Admit`s and the request is held until the last one answers, so the
-//! operator's `200` reports every cell or none of them — a run that replied
-//! after the first admit would hand back a comparison whose other cells might
-//! still be refused.
+//! be able to fail the admission it describes. The run's one seal then goes out
+//! as a tracked `Admit`, and the request is held across it so the reply can be
+//! the run's own report — the set version and the caveats its cells are read
+//! under — rather than the shared outcome rendering.
 
 pub(super) mod seal;
 #[cfg(test)]
@@ -55,9 +54,9 @@ pub(super) struct BenchmarkRequest {
     pub(super) pull_requests: Vec<u64>,
     /// One recorded `aether.bloomery.model_override` address per profile cell.
     pub(super) cells: Vec<Digest>,
-    /// How many blooms to seal per `(task, cell)`.
+    /// How many members to seal per `(task, cell)`.
     pub(super) samples: u32,
-    /// The recorded `aether.bloomery.model_process_instructions` bundle every
+    /// The recorded `aether.bloomery.model_process_instructions` bundle the
     /// bloom pins (ADR-0214). Named here rather than chosen by the door: a model
     /// attempt runs only under a bundle the host authorized, and a benchmark's
     /// cells are only comparable to live operation when they run its bundle.

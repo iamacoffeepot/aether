@@ -14,9 +14,11 @@
 //!
 //! - [`golden`] — what a landed pull request is, read back as a runnable task,
 //!   and what a *set* of them is as a versioned value.
-//! - [`run`] — the seal loop as a pure plan: a set plus cells plus a sample size
-//!   becomes one [`BloomSpec`](aether_bloomery::BloomSpec) per
-//!   `(task, cell, sample)`.
+//! - [`run`] — the seal as a pure plan: a set plus cells plus a sample size
+//!   becomes one [`BloomSpec`](aether_bloomery::BloomSpec) whose members are the
+//!   `(task, cell, sample)` triples. One bloom, many members — the coordinator
+//!   admits one active bloom at a time, and [`run`] says why that costs the
+//!   measurement nothing.
 //! - `api::runtime::benchmark` — the operator door, which is the only part that
 //!   reads a repository, admits a fact, or holds a request.
 //!
@@ -44,6 +46,6 @@ mod tests;
 
 pub use golden::{GoldenTask, GoldenTaskError, GoldenTaskSet, extract};
 pub use run::{
-    BenchmarkAdmission, BenchmarkBloomView, BenchmarkPlan, BenchmarkRefusal, BenchmarkReport, CellAddress,
-    MAX_BENCHMARK_BLOOMS, PlannedBloom, RunSpec, benchmark_workpiece, plan, require_trial_mode,
+    BenchmarkAdmission, BenchmarkMemberView, BenchmarkPlan, BenchmarkRefusal, BenchmarkReport, CellAddress,
+    MAX_BENCHMARK_MEMBERS, PlannedMember, RunSpec, benchmark_workpiece, plan, require_trial_mode,
 };

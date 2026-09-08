@@ -102,7 +102,7 @@ use claims::{claims_response, release_status_response};
 use configs::{config_response, load_configs};
 use reads::{ArtifactQuery, JournalQuery, artifact_response, journal_response};
 use response::{error_response, json};
-use state::{BenchmarkAdmit, Routed, SealVerify, VerifyPending, finish};
+use state::{Routed, SealVerify, VerifyPending, finish};
 
 use super::BloomeryApiCapability;
 
@@ -278,8 +278,6 @@ impl NativeActor for BloomeryApiCapability {
             store_class: params.store_class,
             fixture: params.fixture,
             benchmarks: HashMap::new(),
-            next_benchmark: 1,
-            benchmark_admits: HashMap::new(),
             #[cfg(feature = "github")]
             doctor: None,
             commission_verifying: HashMap::new(),
@@ -752,8 +750,8 @@ impl NativeActor for BloomeryApiCapability {
     }
 
     /// `POST /benchmark` — replay landed history across profile cells, sealing
-    /// one bloom per `(golden task, cell, sample)` (ADR-0184). Refused `409` on
-    /// a coordinator whose journal is live-classed.
+    /// one bloom whose members are the `(golden task, cell, sample)` triples
+    /// (ADR-0184). Refused `409` on a live-classed coordinator.
     #[http::route(Post, "/benchmark")]
     fn on_post_benchmark(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
         let routed = benchmark::post(state, &ctx, ctx.request());
@@ -991,9 +989,9 @@ impl NativeActor for BloomeryApiCapability {
     /// rendering runs only on the ones it does not claim.
     #[handler::manual]
     fn on_admit_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: AdmitResult) {
-        // A benchmark seal answers nothing on its own — its run replies once
-        // every sibling has landed — so it is offered this reply first and the
-        // rest of the chain runs only on the ones it does not claim.
+        // A benchmark run answers with its own report rather than the shared
+        // outcome rendering, so it is offered this reply first and the rest of
+        // the chain runs only on the ones it does not claim.
         let Some(mail) = state.settle_benchmark(ctx, mail) else {
             return;
         };
@@ -1346,11 +1344,11 @@ impl NativeActor for BloomeryApiCapability {
             inbound.reply(&error_response(504, "commission store read settled without a reply"));
         } else if let Some(load) = state.seal_commission_loads.remove(&mail.root.correlation_id) {
             state.fail_commission_seal(load.seal, 504, "commission store read settled without a reply");
-        } else if let Some(BenchmarkAdmit { run, .. }) = state.benchmark_admits.remove(&mail.root.correlation_id) {
-            // One benchmark seal's chain settled without a reply, so the run's
-            // table can never be completed; fail the whole run closed and tear
-            // down its still-outstanding siblings.
-            state.fail_benchmark(run, "a benchmark seal settled without a reply");
+        } else {
+            // A benchmark run's seal settled without a reply; its report can
+            // never be written, so the held request is failed closed rather
+            // than waiting out the ingress timeout. A miss is a no-op.
+            state.fail_benchmark(mail.root.correlation_id, "a benchmark seal settled without a reply");
         }
     }
 }
