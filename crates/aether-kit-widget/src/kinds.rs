@@ -811,6 +811,65 @@ pub struct WidgetEligibilityChanged {
     pub keyboard: bool,
 }
 
+/// `aether.kit.widget.set_value` — push a new number into a widget that holds
+/// one, without disturbing anything else about it. Handled by the slider and
+/// the numeric editor; the value is clamped and snapped into the widget's
+/// current `min..=max` / `step` exactly as a typed or dragged one is.
+///
+/// This is the deliberate lane. A widget's `Config` seeds its value at `init`
+/// and never again ([`SliderConfig::initial`]), so a host that wants the value
+/// to move says so here rather than by re-sending a config.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[kind(name = "aether.kit.widget.set_value")]
+pub struct SetValue {
+    pub value: f32,
+}
+
+/// `aether.kit.widget.set_text` — replace the contents of a text control.
+/// Handled by the text field and the text area, the two controls that hold an
+/// edit buffer.
+///
+/// `keep_caret` says what happens to the caret, the selection, and (in an
+/// area) the scrolled row window: `true` keeps them where the reader left
+/// them, clamped into the new string — the setting for a host that is
+/// reformatting or correcting text under someone who is still typing in it.
+/// `false` places the caret at the end of the new string with nothing
+/// selected, which is what replacing the buffer wholesale means.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.kit.widget.set_text")]
+pub struct SetText {
+    pub text: String,
+    pub keep_caret: bool,
+}
+
+/// `aether.kit.widget.set_selection` — push a new current option into a widget
+/// that chooses one from a vector: the radio group, the segmented control, the
+/// tab strip, the dropdown, and the virtual list.
+///
+/// `index` is into the same option / item vector the widget's config carries,
+/// clamped into range like a config seed. `None` clears the selection where a
+/// widget can hold none (dropdown, virtual list); a widget that always has one
+/// (radio, segmented, tab strip) ignores it, since "no tab" is not a state a
+/// strip of tabs has.
+///
+/// Setting the selection does not report it back: the host asked for it, so it
+/// already knows. Only a reader's own choice emits [`RadioSelected`] and its
+/// siblings.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[kind(name = "aether.kit.widget.set_selection")]
+pub struct SetSelection {
+    pub index: Option<u32>,
+}
+
+/// `aether.kit.widget.set_toggle` — push a toggle's boolean. Handled by the
+/// toggle alone, the one widget whose whole value is a flag. Like the other
+/// setters it is silent: a host-set value emits no [`ToggleChanged`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[kind(name = "aether.kit.widget.set_toggle")]
+pub struct SetToggle {
+    pub on: bool,
+}
+
 /// The widget set's config/style/layout/state/interaction data-down lanes and
 /// value/state events-up lanes. Events carry **no widget identity field**: the
 /// root attributes replies against the `MailboxId` recorded at spawn
@@ -823,6 +882,23 @@ pub struct WidgetEligibilityChanged {
 /// theme), and is both the `spawn_inline_child` init config and a re-sendable
 /// data-down mail: sending a widget its `Config` kind again reconfigures it in
 /// place.
+///
+/// **A re-sent config never moves a value the widget already holds.** Every
+/// `initial*` field is a seed: read at `init`, ignored by every later config,
+/// and a reconfigure updates presentation, bounds, and options and then
+/// re-clamps what the widget already holds into them. The one extension is
+/// that a seed still seeds what holds *nothing*: the two widgets whose
+/// selection may be absent ([`VirtualListConfig`], [`DropdownConfig`]) take
+/// their seed on the config that first gives them a vector to choose from, so
+/// "here are the rows, start on the first" stays one mail. So a host may re-send a config unconditionally — to
+/// relabel, restyle, or replace an option vector — without clearing what a
+/// reader typed or chose, and without a memo of what it last sent. To move the
+/// value on purpose, send [`SetValue`], [`SetText`], [`SetSelection`], or
+/// [`SetToggle`]; to change external availability alone, [`SetWidgetState`].
+///
+/// [`SplitterConfig::position_pixels`](crate::set::SplitterConfig) is the one
+/// stated exception, and it is not a seed: a splitter's position *is* its
+/// configuration, so re-sending the config is how a host moves the bar.
 /// `aether.kit.widget.slider.config` — a horizontal value slider over
 /// `min..=max`, snapped to `step`, starting at `initial`. The consumer maps
 /// the reported `f32` onto its own domain (a `u8` intensity, a preset index).
@@ -842,7 +918,9 @@ pub struct SliderConfig {
     /// does a non-finite one.
     pub step: f32,
     /// The value the slider starts at, clamped and snapped into the
-    /// normalised range. A non-finite `initial` takes `min`.
+    /// normalised range. A non-finite `initial` takes `min`. A seed: read at
+    /// `init` and ignored by every later config, so a restyle or a range
+    /// change does not jump the value. [`SetValue`] moves it on purpose.
     pub initial: f32,
     pub theme: Theme,
     #[serde(default)]
@@ -866,10 +944,19 @@ impl Default for SliderConfig {
 /// starting at `initial`, capped at `max_chars` characters (`0` = no cap).
 /// The field keeps its caret and active selection on UTF-8 character boundaries
 /// and places both from resolved font metrics once the font settles.
+///
+/// A re-sent config restyles and re-caps the field and leaves the buffer, the
+/// caret, and the selection alone; [`SetText`] replaces the contents.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.text_field.config")]
 pub struct TextFieldConfig {
+    /// The string the field starts with. A seed: read at `init` and ignored by
+    /// every later config.
     pub initial: String,
+    /// The character cap, `0` for none. A lowered cap bounds what can be typed
+    /// next; it does not cut text already in the buffer, because a config has
+    /// no licence to throw a reader's words away. Send [`SetText`] to shorten
+    /// it.
     pub max_chars: u32,
     pub theme: Theme,
     #[serde(default)]
@@ -879,10 +966,18 @@ pub struct TextFieldConfig {
 /// `aether.kit.widget.text_area.config` — a multiline editable string with a
 /// fixed whole-line viewport. `rows` is the number of visible rows (`0` uses
 /// one row); `max_chars` counts Unicode scalar values (`0` = no cap).
+///
+/// A re-sent config restyles the area and resizes its viewport, holding the
+/// buffer, the caret, and the scrolled row window; [`SetText`] replaces the
+/// contents.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.text_area.config")]
 pub struct TextAreaConfig {
+    /// The string the area starts with. A seed: read at `init` and ignored by
+    /// every later config.
     pub initial: String,
+    /// The character cap, `0` for none. As in [`TextFieldConfig::max_chars`], a
+    /// lowered cap bounds the next insertion rather than cutting the buffer.
     pub max_chars: u32,
     pub rows: u32,
     pub theme: Theme,
@@ -893,10 +988,15 @@ pub struct TextAreaConfig {
 /// `aether.kit.widget.radio.config` — a vertical list of mutually-exclusive
 /// `options`, one selected at a time, starting at `initial_index` (clamped
 /// into range at init). Each option draws as one theme row.
+///
+/// A re-sent config replaces the options and holds the current selection,
+/// re-clamped into the new vector; [`SetSelection`] moves it.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.radio.config")]
 pub struct RadioConfig {
     pub options: Vec<String>,
+    /// The row selected at boot. A seed: read at `init` and ignored by every
+    /// later config.
     pub initial_index: u32,
     pub theme: Theme,
     #[serde(default)]
@@ -1177,6 +1277,11 @@ impl From<&str> for VirtualListRow {
 /// `aether.kit.widget.virtual_list.config` — a fixed-row viewport over a
 /// potentially large item vector. The panel fixes the viewport height from
 /// `visible_row_count`; the actor realizes only that bounded row window.
+///
+/// A re-sent config replaces the items and holds the selection and the scrolled
+/// row window, both re-clamped into the new vector — so a list that refreshes
+/// under a reader does not jump back to the top. [`SetSelection`] moves the
+/// selection.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.widget.virtual_list.config")]
 pub struct VirtualListConfig {
@@ -1184,6 +1289,11 @@ pub struct VirtualListConfig {
     /// The row selected at boot, or `None` for no selection — a list whose
     /// model holds no current item shows none, rather than lighting its
     /// first row as if it did.
+    ///
+    /// A seed, and a seed seeds only what holds nothing: it is read while the
+    /// list has no selection — at `init`, and again on the config that first
+    /// populates an empty list — and ignored once there is a chosen row to
+    /// preserve. [`SetSelection`] moves a selection that already exists.
     pub initial_selected_index: Option<u32>,
     pub visible_row_count: u32,
     /// The one caption line drawn in place of rows when `items` is empty
@@ -1366,10 +1476,19 @@ impl From<&str> for DropdownOption {
 /// change. While open the widget holds the root's pointer grab, reported
 /// through [`DropdownOpenChanged`]. Use it for a choice whose current value is
 /// what matters and whose alternatives are secondary; three or more options.
+///
+/// A re-sent config replaces the options and holds the current choice,
+/// re-clamped into the new vector; [`SetSelection`] moves it. An open list
+/// closes on a reconfigure — its rows are the vector that just changed — so the
+/// root is handed back the pointer grab through [`DropdownOpenChanged`].
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.dropdown.config")]
 pub struct DropdownConfig {
     pub options: Vec<DropdownOption>,
+    /// The option chosen at boot, or `None` to show the `placeholder`. A seed,
+    /// and a seed seeds only what holds nothing: read while the dropdown has no
+    /// choice — at `init`, and on the config that first gives it options — and
+    /// ignored once there is one to preserve.
     pub initial_selected_index: Option<u32>,
     /// What the closed row reads when nothing is selected.
     #[serde(default)]
@@ -1387,10 +1506,15 @@ pub struct DropdownConfig {
 /// selection role and an underline. A press or a focused Left/Right selects.
 /// Tabs are for parallel content sets viewed one at a time; keep labels to a
 /// word or two.
+///
+/// A re-sent config replaces the labels and holds the current tab, re-clamped
+/// into the new vector; [`SetSelection`] moves it.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.tab_strip.config")]
 pub struct TabStripConfig {
     pub labels: Vec<String>,
+    /// The tab selected at boot. A seed: read at `init` and ignored by every
+    /// later config.
     pub initial_index: u32,
     /// Which of the two tab shapes the strip draws.
     /// [`TabStripStyle::Chips`] — the content-sized row every strip drew
@@ -1550,10 +1674,15 @@ pub struct ButtonConfig {
 
 /// `aether.kit.widget.toggle.config` — a boolean switch with a visible
 /// `label`, starting at `initial`.
+///
+/// A re-sent config relabels and restyles the switch and holds its flag;
+/// [`SetToggle`] flips it.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.toggle.config")]
 pub struct ToggleConfig {
     pub label: String,
+    /// Which way the switch starts. A seed: read at `init` and ignored by every
+    /// later config.
     pub initial: bool,
     pub theme: Theme,
     #[serde(default)]
@@ -1563,10 +1692,15 @@ pub struct ToggleConfig {
 /// `aether.kit.widget.segmented.config` — a horizontal list of equal-width,
 /// mutually exclusive named options, starting at `initial_index` (clamped
 /// into range at init).
+///
+/// A re-sent config replaces the options and holds the current one, re-clamped
+/// into the new vector; [`SetSelection`] moves it.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.segmented.config")]
 pub struct SegmentedConfig {
     pub options: Vec<String>,
+    /// The segment selected at boot. A seed: read at `init` and ignored by
+    /// every later config.
     pub initial_index: u32,
     pub theme: Theme,
     #[serde(default)]
@@ -1575,12 +1709,19 @@ pub struct SegmentedConfig {
 
 /// `aether.kit.widget.numeric.config` — a typed, steppable number bounded by
 /// `min..=max`, snapped to `step`, and starting at `initial`.
+///
+/// A re-sent config restyles the editor and re-bounds it, re-clamping the
+/// committed value into the new range. The edit buffer is left alone unless
+/// that clamp actually moved the value, so re-bounding a field does not eat a
+/// half-typed number; [`SetValue`] sets one on purpose.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.widget.numeric.config")]
 pub struct NumericConfig {
     pub min: f32,
     pub max: f32,
     pub step: f32,
+    /// The number the editor starts at. A seed: read at `init` and ignored by
+    /// every later config.
     pub initial: f32,
     pub theme: Theme,
     #[serde(default)]
