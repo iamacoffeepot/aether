@@ -24,7 +24,7 @@ use std::collections::BTreeSet;
 use aether_bloomery::{StageId, StoreClass, WorkpieceId};
 use aether_chassis_bloomery::store::OutstandingOrder;
 use aether_data::wire::from_bytes;
-use aether_harness_bloomery::{FixtureHarness, OperatorMove, digest};
+use aether_harness_bloomery::{FixtureHarness, OperatorMove, digest, passed};
 
 /// How many `(cell, sample)` blooms the run seals.
 const CELLS: usize = 4;
@@ -36,6 +36,28 @@ fn stage_of(order: &OutstandingOrder) -> StageId {
 /// Whether the run has recorded cell `index` as reaching a terminal status.
 fn resolved(run: &serde_json::Value, index: usize) -> bool {
     run["cells"][index]["state"].get("Resolved").is_some()
+}
+
+/// The construct order the cell currently sealed is waiting on, answering any
+/// mechanical base gate that shows up first.
+///
+/// How many gates precede a cell's model lane is the coordinator's business, so
+/// this waits for the lane rather than pinning the shape of what comes before
+/// it — the base receipt is per base, and every cell here shares one.
+fn await_construct(harness: &mut FixtureHarness) -> OutstandingOrder {
+    harness.pump_until("the cell dispatches its construct lane", |harness| {
+        for order in harness.orders() {
+            if stage_of(&order) == StageId::BaseVerify {
+                harness.upload_admitted(&passed(&order));
+            }
+        }
+        harness.orders().iter().any(|order| stage_of(order) == StageId::Construct)
+    });
+    harness
+        .orders()
+        .into_iter()
+        .find(|order| stage_of(order) == StageId::Construct)
+        .expect("the pump returned once a construct order was outstanding")
 }
 
 #[test]
@@ -66,9 +88,12 @@ fn a_benchmark_run_seals_its_cells_in_sequence_over_one_base() {
 
     let mut sealed = Vec::new();
     for index in 0..CELLS {
-        // Exactly one order outstanding, every time: that is the sequence.
-        let construct = harness.await_order();
-        assert_eq!(stage_of(&construct), StageId::Construct, "cell {index} dispatches its own model lane");
+        let construct = await_construct(&mut harness);
+        assert_eq!(
+            harness.orders().iter().filter(|order| stage_of(order) == StageId::Construct).count(),
+            1,
+            "one cell walks at a time: cell {index} is the only model lane outstanding"
+        );
 
         let bloom = aether_bloomery::BloomId(
             aether_bloomery::Digest::from_slice(&construct.bloom).expect("an order names a whole bloom id"),
