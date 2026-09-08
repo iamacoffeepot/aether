@@ -18,7 +18,7 @@
 use aether_bloomery::{StageId, StoreClass};
 use aether_chassis_bloomery::store::OutstandingOrder;
 use aether_data::wire::from_bytes;
-use aether_harness_bloomery::{FixtureHarness, digest, passed};
+use aether_harness_bloomery::{FixtureHarness, digest};
 
 fn stage_of(order: &OutstandingOrder) -> StageId {
     from_bytes(&order.stage).expect("a recorded order carries a StageId")
@@ -26,16 +26,13 @@ fn stage_of(order: &OutstandingOrder) -> StageId {
 
 #[test]
 fn a_trial_coordinator_ledgers_its_rows_as_trial() {
+    // `seal_member` passes the base receipt, so the order it leaves outstanding
+    // is the Construct lane. That matters here: only a model lane enters the
+    // capability ledger, and a scenario that stopped at the mechanical base
+    // verify would be asserting the class of an empty table.
     let mut harness = FixtureHarness::start("trial-store-ledger");
     harness.seal_member("wp", digest(0x51));
 
-    let base = harness.await_order();
-    assert_eq!(stage_of(&base), StageId::BaseVerify);
-    harness.upload_admitted(&passed(&base));
-
-    // Construct is a model lane, so the fold has a cell to report: only those
-    // enter the capability ledger, and a scenario that stopped at the
-    // mechanical base verify would assert the class of an empty table.
     let construct = harness.await_order();
     assert_eq!(stage_of(&construct), StageId::Construct);
 
