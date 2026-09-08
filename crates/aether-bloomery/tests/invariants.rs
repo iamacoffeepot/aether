@@ -31,7 +31,7 @@ use aether_data::Kind;
 use aether_data::wire::to_vec;
 use common::{
     claim, compiled_resolved, digest, draft, draft_with_catalog, event, membership, observing, sealed_and_resolved,
-    splice_bloom, step, with_compiled_manifest, workpiece,
+    splice_bloom, step, workpiece,
 };
 use proptest::collection::btree_set;
 use proptest::prelude::*;
@@ -4059,7 +4059,7 @@ mod sealed_config {
     use aether_data::Kind;
     use aether_data::wire::to_vec;
 
-    use crate::common::{approved, digest, membership};
+    use crate::common::{approved, compiled_resolved, digest, membership, with_compiled_manifest};
 
     #[aether_data::kind(name = "aether.bloomery.test_seal_config", eq)]
     struct LaneConfig {
