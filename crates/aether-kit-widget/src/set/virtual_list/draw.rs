@@ -290,7 +290,10 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 WidgetDrawItem::Text { text, .. } => Some(text.as_str()),
-                WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+                WidgetDrawItem::Quad { .. }
+                | WidgetDrawItem::TexturedQuad { .. }
+                | WidgetDrawItem::Shape { .. }
+                | WidgetDrawItem::Triangle { .. } => None,
             })
             .collect();
         assert_eq!(text, vec!["row 2", "row 3", "row 4", "row 5", "row 6"]);
@@ -325,7 +328,10 @@ mod tests {
                 .into_iter()
                 .filter_map(|item| match item {
                     WidgetDrawItem::Quad { color, .. } => Some(color),
-                    WidgetDrawItem::Text { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+                    WidgetDrawItem::Text { .. }
+                    | WidgetDrawItem::TexturedQuad { .. }
+                    | WidgetDrawItem::Shape { .. }
+                    | WidgetDrawItem::Triangle { .. } => None,
                 })
                 .collect::<Vec<_>>()
         };
@@ -456,13 +462,13 @@ mod tests {
         widget.replace_control_state(control);
         widget.state.gain_focus(true);
         let items = widget.draw_items();
-        assert_eq!(items.len(), 20, "ten row items, the bar's two quads, and two four-quad outlines");
-        for item in &items[12..16] {
-            assert!(matches!(item, WidgetDrawItem::Quad { color, .. } if *color == widget.theme.warning));
-        }
-        for item in &items[16..20] {
-            assert!(matches!(item, WidgetDrawItem::Quad { color, .. } if *color == widget.theme.accent));
-        }
+        assert_eq!(items.len(), 14, "ten row items, the bar's two items, and two rings");
+        let ring_color = |item: &WidgetDrawItem| match item {
+            WidgetDrawItem::Shape { fill: None, stroke: Some(stroke), .. } => Some(stroke.color),
+            _ => None,
+        };
+        assert_eq!(ring_color(&items[12]), Some(widget.theme.warning), "the validation ring comes first");
+        assert_eq!(ring_color(&items[13]), Some(widget.theme.accent), "and the focus ring is drawn inside it");
     }
 
     #[test]

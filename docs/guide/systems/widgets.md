@@ -2090,10 +2090,56 @@ To add a new widget — a dropdown, a checkbox, a color well — write one more
 with a `WidgetDrawList`, then spawn it into a panel's stack. The focus model and
 the draw protocol carry it with no new machinery.
 
+## Plates, rings, and knobs are shapes
+
+The chrome a widget draws — a button's face, a field's box, a dialog's plate,
+a focus ring, a toggle's knob, a radio's dot, a scroll bar's thumb — is a
+`WidgetDrawItem::Shape` ([ADR-0213](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0213-gpu-shapes-for-the-widget-kit.md)):
+an axis-aligned box with a `corner_radius`, an optional `fill`, an optional
+inside `stroke { width_pixels, color }`, and an optional `shadow { blur_pixels,
+offset, color }`, evaluated by the render capability as a signed distance
+field so every edge is anti-aliased at any fractional position. A radius at or
+above half the shorter side is a circle, a stroke with no fill is a ring, and a
+shadow with neither is a soft halo. A caret and a stepper arrow are one
+`WidgetDrawItem::Triangle` — three local corners with a colour each — where a
+stack of quad rows used to approximate them. `Quad` stays the flat fill: a row,
+a track, a selection band, a rule, a divider, a scroll bar's track.
+
+The theme owns the numbers. `corner_radius_pixels` (one spacing unit at 1×),
+`stroke_width_pixels` (the hairline), `shadow_blur_pixels` (two units),
+`shadow_offset_pixels`, and `shadow` are metrics like `pad` and `gap`, so
+`Theme::scaled` carries them with the rest, and the lift a plate gets from its
+shadow is a measured number: `Theme::shadow_lift` is the contrast the raised
+surface reads at against the ground the shadow darkens, and a tripwire holds it
+above the bare surface step.
+
+The set draws through three helpers in `set/mod.rs`, so there is one plate and
+not one per widget:
+
+- `plate(theme, x, y, width, height, fill, stroke)` — a rounded box at the
+  theme's radius: a button face (`push_button_face`), a field's box, a
+  dropdown's closed row.
+- `raised_plate(theme, x, y, width, height, fill, edge)` — a plate that stands
+  over something else, with the theme's shadow under it: a dialog, a tooltip, a
+  popover, a toast, a hover reveal, and — with `edge: None` and a `ring` drawn
+  after its rows — a dropdown's open list and a menu.
+- `ring(theme, x, y, width, height, thickness, color)` — a stroke with no fill:
+  the validation ring and the inset focus ring `push_control_outlines` draws,
+  the keyboard focus ring on a button.
+
+A shape takes part in the root's hole cutting by its **fill box** alone: a
+filled plate raised after a run cuts the run exactly as a quad does, while a
+ring, a halo, and a triangle cover nothing — so a focus ring drawn as one
+stroke over a field never punches a hole in the field's own text, and the
+shadow under a dialog lets the glyphs it falls across show through. The box is
+a little more than a rounded fill at the corners, which is the conservative
+side.
+
 ## Local clipping and root emission
 
-`WidgetDrawItem::{Quad, TexturedQuad, Text}.clip` uses `WidgetClipRect { x, y,
-width, height }` in the drawing widget's local pixel space.
+`WidgetDrawItem::{Quad, TexturedQuad, Text, Shape, Triangle}.clip` uses
+`WidgetClipRect { x, y, width, height }` in the drawing widget's local pixel
+space.
 `WidgetDrawItem::TexturedQuad` also carries named destination and UV fields,
 an `Rgba` tint, and a non-owning session texture id from `CreateTexture`; the
 producer that created the texture remains responsible for update and destroy.
@@ -2106,11 +2152,12 @@ slot.
 
 Only the root has framebuffer coordinates. It converts the effective
 `WidgetClipRect` to the render/text `ClipRect` when it emits. In one pass over
-the non-text items, solids group into contiguous equal-clip batches and
-textured items group by contiguous equal `(texture_id, clip)` keys. Kind,
-texture, and clip transitions flush; repeated keys are never regrouped across
-a transition. Both direct handlers target the same render recipient, whose
-FIFO preserves authored order. Text still follows the established later lane.
+the non-text items, solids group into contiguous equal-clip batches, textured
+items group by contiguous equal `(texture_id, clip)` keys, and shapes and
+triangles each group into contiguous equal-clip batches of their own
+(`draw_shapes`, `draw_screen_triangles`). Kind, texture, and clip transitions
+flush; repeated keys are never regrouped across a transition. Every direct
+handler targets the same render recipient, whose FIFO preserves authored order. Text still follows the established later lane.
 Thus an unclipped all-solid tree remains one solid batch, while mixed items or
 distinct clips may produce several mails from the same single root render
 sender.

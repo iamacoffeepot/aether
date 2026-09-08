@@ -1,0 +1,58 @@
+[package]
+name = "aether-substrate-harness-cap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# The `aether.substrate_harness` capability (ADR-0067 / ADR-0121 / ADR-0122):
+# `aether.substrate_harness.advance { ticks }` and the two chassis profiles
+# that claim the mailbox — the substrate-harness chassis's real drive
+# (`SubstrateHarnessCapability`, which hands the request to the embedder loop
+# over `events`) and the fail-fast stub every other chassis composes
+# (`UnsupportedSubstrateHarnessCapability`).
+#
+# Its own crate per `docs/guide/capability-anatomy.md`. Before issue #5706 the
+# cap lived inside `aether-harness-substrate`, so desktop, headless and hub all
+# carried a 13k-line test crate — 7.4k of it the perf sweep framework — as a
+# normal dependency to compose 100 lines of fail-fast stub.
+#
+# The `-cap` suffix disambiguates: the bare `aether-substrate-harness` name the
+# `aether-<cap>` convention would pick is already the harness chassis binary
+# (`aether-chassis-harness`'s `[[bin]]`).
+
+# ADR-0122 identity/runtime split: the wasm-safe identities and their
+# `HandlesKind` markers compile always-on; the `aether_substrate`-typed runtime
+# halves (the `HubOutbound` reply path, the embedder event channel) are gated,
+# so a marker-only guest can address `ctx.actor::<SubstrateHarnessCapability>()`
+# without dragging the substrate through.
+[features]
+default = ["runtime"]
+runtime = ["dep:aether-substrate"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+# Named by the `#[actor]` codegen (typed ids, the name inventory entry), not
+# by hand-written source.
+aether-data = { path = "../aether-data" }
+aether-kinds = { path = "../aether-kinds" }
+# Native-only runtime half — gated so wasm/marker builds skip the substrate
+# runtime. `events::ChassisEvent` carries a `Source` reply target, so the
+# channel rides the same gate.
+aether-substrate = { path = "../aether-substrate", optional = true }
+
+# cargo-machete scans source without expanding macros, so it cannot see that
+# `aether-data` is reached only through the `#[actor]` expansion (the typed
+# ids and the name-inventory entry it emits). A false positive, so ignored here
+# rather than dropped.
+[package.metadata.cargo-machete]
+ignored = ["aether-data"] # aether-suppression-request: `#[actor]` emits `::aether_data::Kind` decode/ID paths plus the `name_inventory::HandlerEntry` submit; no hand-written source in this crate names it
+
+# The `#[actor]` macro emits a `cfg(not(target_family = "wasm"))`-gated
+# `inventory::submit!` HandlerEntry per handler, so native builds need
+# `inventory` reachable; wasm guests don't (the gate skips emission).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+inventory = { workspace = true }
+
+[lints]
+workspace = true

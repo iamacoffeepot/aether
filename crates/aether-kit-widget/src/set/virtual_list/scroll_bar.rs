@@ -197,13 +197,17 @@ impl VirtualListWidget {
         };
         [
             quad(bar.left, 0.0, bar.width, bar.height, self.theme.outline),
-            quad(
-                bar.left,
-                bar.thumb_top,
-                bar.width,
-                bar.thumb_height,
-                self.theme.fill(self.theme.text_muted, thumb_state),
-            ),
+            WidgetDrawItem::Shape {
+                x: bar.left,
+                y: bar.thumb_top,
+                width: bar.width,
+                height: bar.thumb_height,
+                corner_radius: bar.width * 0.5,
+                fill: Some(self.theme.fill(self.theme.text_muted, thumb_state)),
+                stroke: None,
+                shadow: None,
+                clip: None,
+            },
         ]
     }
 }
@@ -239,7 +243,7 @@ mod tests {
         let metrics = widget.font_metrics.resolved().expect("the test table is installed");
         for item in widget.draw_items() {
             match item {
-                WidgetDrawItem::Quad { x, width, .. } => {
+                WidgetDrawItem::Quad { x, width, .. } | WidgetDrawItem::Shape { x, width, .. } => {
                     assert!(x + width <= bar.left || x >= bar.left, "a row fill straddles the bar's left edge");
                 }
                 WidgetDrawItem::Text { x, text, .. } => {
@@ -247,6 +251,7 @@ mod tests {
                     assert!(right < bar.left, "{text:?} runs to {right}, past the bar at {}", bar.left);
                 }
                 WidgetDrawItem::TexturedQuad { .. } => panic!("a list draws no textures"),
+                WidgetDrawItem::Triangle { .. } => panic!("a list draws no triangles"),
             }
         }
 

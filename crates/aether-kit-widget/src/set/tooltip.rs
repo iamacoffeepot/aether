@@ -97,8 +97,8 @@ use aether_text::FontMetricsResult;
 use crate::set::placement::{PlacementBounds, PlacementSide, place_plate_avoiding};
 use crate::set::{
     WidgetDefaults, accept_font_metrics_result, apply_text_theme, approx_text_width, measured_text_width,
-    pump_text_font_metrics, push_rect_border, quad, reply_if_hidden, reveal_wrap_width, text_baseline_y,
-    text_cap_height, text_origin_y, wrap_to_width_hanging,
+    pump_text_font_metrics, quad, raised_plate, reply_if_hidden, reveal_wrap_width, text_baseline_y, text_cap_height,
+    text_origin_y, wrap_to_width_hanging,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
@@ -381,8 +381,15 @@ impl TooltipWidget {
         let pad = self.theme.space(PAD_UNITS);
 
         let mut items = Vec::new();
-        items.push(quad(left, top, width, height, self.theme.surface_raised));
-        push_rect_border(&mut items, left, top, width, height, RULE_THICKNESS, self.theme.outline);
+        items.push(raised_plate(
+            &self.theme,
+            left,
+            top,
+            width,
+            height,
+            self.theme.surface_raised,
+            Some(self.theme.outline),
+        ));
 
         let mut line_top = top + pad;
         let mut section = entries.first().map_or(0, |entry| entry.section);
@@ -854,7 +861,7 @@ mod tests {
         widget.frame = WidgetFrame { x: 20.0, y: 280.0, width: 200.0, height: 20.0 };
         let (items, _) = widget.overlay_items();
         let plate = items.first().expect("a plate is drawn");
-        let WidgetDrawItem::Quad { y, height, .. } = plate else {
+        let WidgetDrawItem::Shape { y, height, .. } = plate else {
             panic!("the plate leads with its fill: {plate:?}");
         };
         // Local coordinates: the frame's own origin is zero.

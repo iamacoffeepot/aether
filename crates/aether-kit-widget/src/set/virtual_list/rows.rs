@@ -431,7 +431,10 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 WidgetDrawItem::Quad { y, height, color, .. } => Some((*y, *height, *color)),
-                WidgetDrawItem::Text { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+                WidgetDrawItem::Text { .. }
+                | WidgetDrawItem::TexturedQuad { .. }
+                | WidgetDrawItem::Shape { .. }
+                | WidgetDrawItem::Triangle { .. } => None,
             })
             .collect();
 

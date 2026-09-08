@@ -58,8 +58,8 @@ pub mod raw;
 // allows mirror the def-site allows on each type.
 #[allow(clippy::module_name_repetitions)]
 pub use ctx::{
-    ActorTypeTag, InlineChild, NO_INBOUND_SOURCE, RelativeMailbox, SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx,
-    WireCtx,
+    ActorTypeTag, InlineChild, NO_INBOUND_SOURCE, RelativeMailbox, Sends, SpawnError, WasmCtx, WasmDropCtx,
+    WasmInitCtx, WireCtx,
 };
 #[allow(clippy::module_name_repetitions)]
 pub use mailbox::{WasmActorMailbox, WasmActorMailboxWithContext};

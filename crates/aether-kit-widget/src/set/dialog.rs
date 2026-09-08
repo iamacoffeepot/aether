@@ -73,8 +73,8 @@ use aether_text::FontMetricsResult;
 
 use crate::set::placement::PlacementBounds;
 use crate::set::{
-    WidgetDefaults, accept_font_metrics_result, apply_text_theme, measured_text_width, pump_text_font_metrics,
-    push_rect_border, quad, reply_if_hidden, text_origin_y,
+    WidgetDefaults, accept_font_metrics_result, apply_text_theme, measured_text_width, pump_text_font_metrics, quad,
+    raised_plate, reply_if_hidden, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
@@ -216,8 +216,15 @@ impl DialogWidget {
         let (width, height, pad) = (plate.width, plate.height, self.pad());
 
         let mut items = Vec::with_capacity(7);
-        items.push(quad(0.0, 0.0, width, height, self.theme.surface_raised));
-        push_rect_border(&mut items, 0.0, 0.0, width, height, RULE_THICKNESS, self.theme.outline);
+        items.push(raised_plate(
+            &self.theme,
+            0.0,
+            0.0,
+            width,
+            height,
+            self.theme.surface_raised,
+            Some(self.theme.outline),
+        ));
         if self.title.is_empty() {
             return items;
         }
@@ -429,7 +436,11 @@ mod tests {
         // nothing above it and a body pushed down by an empty row.
         let widget = measured("", 400.0, 300.0);
         assert_eq!(widget.body().y, widget.plate().y + widget.pad());
-        assert_eq!(widget.overlay_items().len(), 5, "a fill and its four-sided ring, and nothing else");
+        assert_eq!(
+            widget.overlay_items().len(),
+            1,
+            "the plate — fill, edge, and shadow in one shape — and nothing else"
+        );
     }
 
     #[test]

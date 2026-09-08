@@ -54,11 +54,8 @@ use aether_kinds::keycode::KEY_ESCAPE;
 
 use crate::WidgetDrawItem;
 use crate::set::placement::{PlacementBounds, PlacementSide, place_plate};
-use crate::set::{push_rect_border, quad};
+use crate::set::raised_plate;
 use crate::theme::Theme;
-
-/// The hairline a popover's ring is drawn at.
-const RING_THICKNESS: f32 = 1.0;
 
 /// One popover: whether it is up, and the plate it occupies while it is.
 ///
@@ -194,8 +191,15 @@ impl Popover {
             return Vec::new();
         }
         let mut items = Vec::with_capacity(5);
-        items.push(quad(plate.x, plate.y, plate.width, plate.height, theme.surface_raised));
-        push_rect_border(&mut items, plate.x, plate.y, plate.width, plate.height, RING_THICKNESS, theme.outline);
+        items.push(raised_plate(
+            theme,
+            plate.x,
+            plate.y,
+            plate.width,
+            plate.height,
+            theme.surface_raised,
+            Some(theme.outline),
+        ));
         items
     }
 }

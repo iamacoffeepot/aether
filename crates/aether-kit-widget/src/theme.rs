@@ -154,6 +154,28 @@ pub struct Theme {
     /// [`Theme::space`]. `pad` and `gap` are the two most common
     /// multiples, kept as fields for the widgets that draw with them.
     pub space_unit_pixels: f32,
+    /// The radius, in pixels, a plate's, a field's, a button's, or a
+    /// list's corners are rounded by (ADR-0213) — one spacing unit at 1×,
+    /// so a control's corner sits on the same grid as its padding. A box
+    /// rounds by at most half its shorter side, so a knob or a radio's dot
+    /// drawn at a radius of half its size is a circle.
+    pub corner_radius_pixels: f32,
+    /// The width, in pixels, of the stroke an outlined control's edge and a
+    /// raised plate's edge are drawn at — the hairline.
+    pub stroke_width_pixels: f32,
+    /// How far, in pixels, the shadow under a raised plate feathers past its
+    /// edge — two spacing units at 1×. The lift a dialog, a tooltip, a
+    /// dropdown's list, or a menu gets over what it stands on, where the
+    /// design allows no draw layer and the plate's edge was the whole of the
+    /// lift before.
+    pub shadow_blur_pixels: f32,
+    /// How far, in pixels, that shadow is pushed from the plate — `[x, y]`,
+    /// y down — so the light reads as coming from above.
+    pub shadow_offset_pixels: [f32; 2],
+    /// The colour of that shadow, alpha included: a translucent black on a
+    /// dark theme, where the ground under a plate is darkened rather than
+    /// lit.
+    pub shadow: Rgba,
     /// Session-scoped font id to draw label/value text with.
     /// Placeholder `0` here — the panel root stamps the real id
     /// once its `load_font_result` arrives.
@@ -328,8 +350,26 @@ impl Theme {
             heading_size_pixels: self.heading_size_pixels * factor,
             caption_size_pixels: self.caption_size_pixels * factor,
             space_unit_pixels: self.space_unit_pixels * factor,
+            corner_radius_pixels: self.corner_radius_pixels * factor,
+            stroke_width_pixels: self.stroke_width_pixels * factor,
+            shadow_blur_pixels: self.shadow_blur_pixels * factor,
+            shadow_offset_pixels: self.shadow_offset_pixels.map(|offset| offset * factor),
             ..self
         }
+    }
+
+    /// The contrast a raised plate reads at against the ground its shadow
+    /// darkens — `surface_raised` over `surface` with the shadow's edge
+    /// strength composited between them. The shadow is at half its alpha
+    /// on the plate's edge (the distance field's feather is centred there),
+    /// so the darkest band a reader sees just outside the plate is the
+    /// shadow at half strength over the surface. The number the design's
+    /// "lift" is, so a theme whose shadow does not lift its plates fails a
+    /// test rather than a glance.
+    #[must_use]
+    pub fn shadow_lift(&self) -> f32 {
+        let edge = Rgba::new(self.shadow.r, self.shadow.g, self.shadow.b, self.shadow.a * 0.5);
+        Self::contrast_ratio(self.surface_raised, Self::composite_over(self.surface, edge))
     }
 
     /// Resolve a widget's actual draw color: `base` unchanged for
@@ -515,6 +555,11 @@ impl Theme {
         heading_size_pixels: 16.0,
         caption_size_pixels: 12.0,
         space_unit_pixels: 4.0,
+        corner_radius_pixels: 4.0,
+        stroke_width_pixels: 1.0,
+        shadow_blur_pixels: 8.0,
+        shadow_offset_pixels: [0.0, 2.0],
+        shadow: Rgba::new(0.0, 0.0, 0.0, 0.6),
         font_id: 0,
     };
 }
@@ -660,6 +705,36 @@ mod tests {
                 "the tonal plate for {role:?} left the span between the surface and the role",
             );
         }
+    }
+
+    #[test]
+    fn a_shadow_lifts_a_plate_further_off_its_ground_than_the_plate_alone() {
+        // Tripwire: ADR-0213 gives the design a shadow to spend, and the
+        // point of spending it is a number — the plate reads against its
+        // darkened ground at more than it reads against the bare surface.
+        // A theme whose shadow was lighter than its surface, or too faint
+        // to darken it, would fail here rather than in a glance at a
+        // dialog. On this dark theme the bare step is 1.12 and the shadow
+        // takes it to 1.18 — half again the separation, out of a ground that
+        // is nearly black already.
+        let theme = Theme::DEFAULT;
+        let bare = Theme::contrast_ratio(theme.surface_raised, theme.surface);
+        let lifted = theme.shadow_lift();
+        assert!(lifted > bare, "the shadow lifts a plate to {lifted}, no more than the bare step {bare}");
+        assert!(lifted - bare >= 0.05, "the shadow's lift {lifted} over the bare step {bare} is too small to see");
+    }
+
+    #[test]
+    fn scaling_carries_the_shape_tokens_with_the_metrics() {
+        // Tripwire: a scale factor that moved the padding and left the
+        // corner radius, the shadow, or its offset behind would draw a 2×
+        // plate with 1× corners — the tokens are metrics and scale as one.
+        let theme = Theme::DEFAULT.scaled(2.0);
+        assert_eq!(theme.corner_radius_pixels, Theme::DEFAULT.corner_radius_pixels * 2.0);
+        assert_eq!(theme.shadow_blur_pixels, Theme::DEFAULT.shadow_blur_pixels * 2.0);
+        assert_eq!(theme.shadow_offset_pixels, Theme::DEFAULT.shadow_offset_pixels.map(|offset| offset * 2.0));
+        assert_eq!(theme.stroke_width_pixels, Theme::DEFAULT.stroke_width_pixels * 2.0);
+        assert_eq!(theme.shadow, Theme::DEFAULT.shadow, "a colour is not a metric");
     }
 
     #[test]
