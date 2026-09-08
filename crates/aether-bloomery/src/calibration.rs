@@ -541,11 +541,12 @@ impl CalibrationLedger {
     /// manifest was recorded — the fallback a pre-ADR-0215 journal row folds
     /// against, matching [`BloomRecord`](crate::BloomRecord) construction.
     fn declared_identities(&self, bloom: BloomId) -> Vec<String> {
-        match self.manifests.get(&bloom) {
-            Some(manifest) => manifest.verifiers.identities.clone(),
-            None => VerifyFailure::ALL.iter().map(|identity| String::from(identity.as_str())).collect(),
-        }
+        self.manifests.get(&bloom).map_or_else(compiled_identities, |manifest| manifest.verifiers.identities.clone())
     }
+}
+
+fn compiled_identities() -> Vec<String> {
+    VerifyFailure::ALL.iter().map(|identity| String::from(identity.as_str())).collect()
 }
 
 /// The cell one slot aggregates into. The harness rides as its runner-facing
