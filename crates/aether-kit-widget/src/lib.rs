@@ -231,8 +231,8 @@ impl Widget {
                 continue;
             };
             match ctx.spawn_inline_child::<Self, Self>(Subname::Named(&spec.subname), &child_config) {
-                Ok(alias) => self.composite.register_slot(
-                    alias,
+                Ok(child) => self.composite.register_slot(
+                    child.id(),
                     Vec2::new(spec.origin[0], spec.origin[1]),
                     spec.clip,
                     &spec.subname,

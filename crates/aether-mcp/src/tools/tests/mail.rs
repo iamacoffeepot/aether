@@ -20,25 +20,25 @@ async fn send_mail_reports_per_item_errors() {
         .send_mail(Parameters(SendMailArgs {
             mails: vec![
                 MailSpec {
-                    engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+                    engine_id: Some("00000000-0000-0000-0000-000000000001".to_owned()),
                     mail: EngineMailSpec {
-                        recipient_name: "aether.fs".to_owned(),
+                        address: "aether.fs".to_owned(),
                         kind_name: "not.a.real.kind".to_owned(),
                         params: None,
                     },
                 },
                 MailSpec {
-                    engine_id: "not-a-uuid".to_owned(),
+                    engine_id: Some("not-a-uuid".to_owned()),
                     mail: EngineMailSpec {
-                        recipient_name: "aether.fs".to_owned(),
+                        address: "aether.fs".to_owned(),
                         kind_name: "aether.fs.list".to_owned(),
                         params: None,
                     },
                 },
                 MailSpec {
-                    engine_id: "00000000-0000-0000-0000-000000000002".to_owned(),
+                    engine_id: Some("00000000-0000-0000-0000-000000000002".to_owned()),
                     mail: EngineMailSpec {
-                        recipient_name: "aether.fs".to_owned(),
+                        address: "aether.fs".to_owned(),
                         kind_name: "aether.fs.list".to_owned(),
                         params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
                     },
@@ -65,15 +65,15 @@ async fn send_mail_traced_bad_spec_is_tool_error() {
     let mcp = connect_mcp(port);
     let result = mcp
         .send_mail_traced(Parameters(SendMailTracedArgs {
-            engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+            engine_id: Some("00000000-0000-0000-0000-000000000001".to_owned()),
             mails: vec![EngineMailSpec {
-                recipient_name: "aether.render".to_owned(),
+                address: "aether.render".to_owned(),
                 kind_name: "not.a.real.kind".to_owned(),
                 params: None,
             }],
-            settlement_timeout_ms: None,
+            settlement_timeout_millis: None,
             fire_and_forget: false,
-            full: false,
+            format: TraceFormat::Tree,
         }))
         .await;
     assert!(result.is_err(), "an unknown kind in the batch should be a tool error");
@@ -95,9 +95,9 @@ async fn send_mail_fire_and_forget_rejects_unknown_engine_during_resolution() {
             mails: vec![MailSpec {
                 // Recipient resolution is routed first and reports that this
                 // engine is not supervised before the application mail fires.
-                engine_id: "00000000-0000-0000-0000-000000000099".to_owned(),
+                engine_id: Some("00000000-0000-0000-0000-000000000099".to_owned()),
                 mail: EngineMailSpec {
-                    recipient_name: "aether.fs".to_owned(),
+                    address: "aether.fs".to_owned(),
                     kind_name: "aether.fs.list".to_owned(),
                     params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
                 },
@@ -130,9 +130,9 @@ async fn direct_mail_uses_the_engine_answer_and_named_mail_skips_pre_resolution(
 
     let prepared = mcp
         .prepare_direct_mail(MailSpec {
-            engine_id: engine.0.to_string(),
+            engine_id: Some(engine.0.to_string()),
             mail: EngineMailSpec {
-                recipient_name: supplied.to_owned(),
+                address: supplied.to_owned(),
                 kind_name: "aether.fs.list".to_owned(),
                 params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
             },
@@ -149,7 +149,7 @@ async fn direct_mail_uses_the_engine_answer_and_named_mail_skips_pre_resolution(
         .encode_mail_bundle(
             engine,
             &[EngineMailSpec {
-                recipient_name: supplied.to_owned(),
+                address: supplied.to_owned(),
                 kind_name: "aether.fs.list".to_owned(),
                 params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
             }],
@@ -216,9 +216,9 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
         &mcp,
         0,
         MailSpec {
-            engine_id: engine.0.to_string(),
+            engine_id: Some(engine.0.to_string()),
             mail: EngineMailSpec {
-                recipient_name: supplied.to_owned(),
+                address: supplied.to_owned(),
                 kind_name: "aether.fs.list".to_owned(),
                 params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
             },
@@ -248,9 +248,9 @@ async fn fire_and_forget_awaits_resolution_but_not_application_settlement() {
     let engine = EngineId(Uuid::from_u128(0x4057));
 
     mcp.deliver_one_fire(MailSpec {
-        engine_id: engine.0.to_string(),
+        engine_id: Some(engine.0.to_string()),
         mail: EngineMailSpec {
-            recipient_name: "aether.fs".to_owned(),
+            address: "aether.fs".to_owned(),
             kind_name: "aether.fs.list".to_owned(),
             params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
         },
@@ -292,6 +292,7 @@ fn traced_response_node() -> MailNodeJson {
 #[test]
 fn traced_response_serializes_compact_and_full_settled_shapes_precisely() {
     let compact = serde_json::to_value(SendMailTracedResponse {
+        engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
         status: "settled".to_owned(),
         root: Some(MailIdJson { sender: "aether.chassis".to_owned(), correlation_id: 1 }),
         mails: None,
@@ -306,6 +307,7 @@ fn traced_response_serializes_compact_and_full_settled_shapes_precisely() {
     assert_eq!(compact["node_count"], 1);
 
     let full = serde_json::to_value(SendMailTracedResponse {
+        engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
         status: "settled".to_owned(),
         root: Some(MailIdJson { sender: "aether.chassis".to_owned(), correlation_id: 1 }),
         mails: Some(vec![traced_response_node()]),
@@ -323,6 +325,7 @@ fn traced_response_serializes_compact_and_full_settled_shapes_precisely() {
 #[test]
 fn traced_response_omits_projection_fields_on_timeout_and_dispatch() {
     let timeout = serde_json::to_value(SendMailTracedResponse {
+        engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
         status: "timeout".to_owned(),
         root: None,
         mails: None,
@@ -338,6 +341,7 @@ fn traced_response_omits_projection_fields_on_timeout_and_dispatch() {
     assert!(!timeout.contains_key("node_count"));
 
     let dispatched = serde_json::to_value(SendMailTracedResponse {
+        engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
         status: "dispatched".to_owned(),
         root: Some(MailIdJson { sender: "aether.chassis".to_owned(), correlation_id: 1 }),
         mails: None,
@@ -351,4 +355,30 @@ fn traced_response_omits_projection_fields_on_timeout_and_dispatch() {
     assert!(dispatched.get("mails").is_some_and(serde_json::Value::is_null));
     assert!(!dispatched.contains_key("tree"));
     assert!(!dispatched.contains_key("node_count"));
+}
+
+/// The pre-0.4 `recipient_name` spelling still deserializes into `address`
+/// for one release — bare and through `MailSpec`'s `#[serde(flatten)]`,
+/// which routes fields through a content buffer where an alias is easy to
+/// lose. The advertised schema names only `address`, so the alias is a
+/// quiet compatibility path and not a second documented key.
+#[test]
+fn the_pre_0_4_recipient_name_key_still_deserializes_as_address() {
+    let bare: EngineMailSpec =
+        serde_json::from_value(serde_json::json!({ "recipient_name": "aether.fs", "kind_name": "aether.fs.list" }))
+            .expect("the recipient_name alias deserializes");
+    assert_eq!(bare.address, "aether.fs");
+
+    let flattened: MailSpec = serde_json::from_value(serde_json::json!({
+        "engine_id": "00000000-0000-0000-0000-000000000001",
+        "recipient_name": "aether.fs",
+        "kind_name": "aether.fs.list",
+    }))
+    .expect("the alias survives MailSpec's flatten");
+    assert_eq!(flattened.mail.address, "aether.fs");
+
+    let schema = serde_json::to_value(schemars::schema_for!(EngineMailSpec)).expect("schema serializes");
+    let properties = schema["properties"].as_object().expect("schema has properties");
+    assert!(properties.contains_key("address"), "the schema advertises the canonical key: {schema}");
+    assert!(!properties.contains_key("recipient_name"), "the alias stays out of the advertised schema: {schema}");
 }

@@ -89,7 +89,7 @@ fn create_geometry(harness: &mut SubstrateHarness, label: &'static str, mail: &C
         .expect("decode create geometry reply")
     {
         CreateGeometryResult::Ok { geometry_id } => geometry_id,
-        CreateGeometryResult::Err { reason } => panic!("create geometry failed: {reason}"),
+        CreateGeometryResult::Err { error } => panic!("create geometry failed: {error}"),
     }
 }
 
@@ -181,7 +181,7 @@ fn register_program(harness: &mut SubstrateHarness) -> u32 {
         .expect("decode register reply")
     {
         ProgramRegisterResult::Ok { program_id } => program_id,
-        ProgramRegisterResult::Err { reason } => panic!("register failed: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("register failed: {error}"),
     }
 }
 
@@ -311,7 +311,7 @@ fn compute_derives_indirect_geometry_refreshes_after_update_and_recovers_after_d
         ProgramTimingsResult::Absent { reason } => {
             assert!(!reason.trim().is_empty(), "an unavailable timing instrument must say why");
         }
-        ProgramTimingsResult::Err { reason } => panic!("timings for the registered program failed: {reason}"),
+        ProgramTimingsResult::Err { error } => panic!("timings for the registered program failed: {error}"),
         ProgramTimingsResult::Ok { rows, .. } => {
             assert_eq!(rows.len(), 2);
             assert_eq!(rows[0].stage, PassStageKind::Compute);

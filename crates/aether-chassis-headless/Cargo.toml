@@ -33,8 +33,11 @@ aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-lifecycle = { path = "../aether-lifecycle" }
 aether-component = { path = "../aether-component" }
 aether-http = { path = "../aether-http" }
-# The headless chassis absorbs audio mail with a typed Err reply, so it
-# names the `SetMasterGain` kind pair without the cpal runtime.
+# The headless chassis composes `HeadlessAudioCapability`, the crate's
+# fail-fast `aether.audio` companion. The companion's runtime half rides the
+# same `runtime` feature as the pumped cap (one `mod runtime;` gate, ADR-0122),
+# so the cpal/synth stack is linked but never constructed here — no audio
+# device is opened on a headless boot.
 aether-audio = { path = "../aether-audio", features = ["runtime"] }
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }

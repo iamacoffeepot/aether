@@ -1,6 +1,7 @@
 use super::bytes::resolve_bytes_params;
+use super::describe::component_reply;
 use super::envelope::{engine_envelope, local_envelope};
-use super::ids::{parse_engine_id, parse_mailbox_id, resolve_handled_kind, static_kind_name};
+use super::ids::{resolve_handled_kind, static_kind_name};
 use super::render::{frame_size_aware_error, internal, internal_msg, json, project_capabilities};
 use super::{COMPONENT_CAP, FLEET_CAP, Mcp};
 use crate::args::{
@@ -165,11 +166,13 @@ pub(super) fn replica_names(base: &str, replicas: u32) -> Vec<String> {
 }
 
 pub(super) fn replicas_reply(
+    engine_id: &str,
     capabilities: &ComponentCapabilities,
     instances: &[serde_json::Value],
     full: bool,
 ) -> Result<String, McpError> {
     json(&serde_json::json!({
+        "engine_id": engine_id,
         "capabilities": project_capabilities(capabilities, full),
         "instances": instances,
     }))
@@ -413,7 +416,7 @@ pub(super) async fn list_components(mcp: &Mcp, args: ListComponentsArgs) -> Resu
 }
 
 pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result<String, McpError> {
-    let engine = parse_engine_id(&args.engine_id)?;
+    let (engine, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
     let selector = selector_with_explicit_export(&args.selector, args.export.as_deref());
     reject_replicas_out_of_range(args.replicas, &selector)?;
     // ADR-0116: resolve the selector hub-local to the wasm bytes; a
@@ -431,8 +434,18 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
     let export = args.export.or(resolved.export);
 
     let Some(replicas) = args.replicas else {
-        return load_single_component(mcp, engine, &selector, resolved.wasm, args.name, config, export, args.full)
-            .await;
+        return load_single_component(
+            mcp,
+            engine,
+            &engine_id,
+            &selector,
+            resolved.wasm,
+            args.name,
+            config,
+            export,
+            args.full,
+        )
+        .await;
     };
 
     // issue 2626: loop the single-load dispatch N times, one shared
@@ -495,6 +508,7 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
         }
     }
     replicas_reply(
+        &engine_id,
         &shared_caps.expect("replicas >= 1: loop either populated shared_caps or returned early"),
         &instances,
         args.full,
@@ -509,6 +523,7 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
 async fn load_single_component(
     mcp: &Mcp,
     engine: EngineId,
+    engine_id: &str,
     selector: &str,
     wasm: Vec<u8>,
     name: Option<String>,
@@ -528,6 +543,7 @@ async fn load_single_component(
                 .expect("component cache mutex is never poisoned")
                 .insert((engine, mailbox_id), capabilities.clone());
             json(&serde_json::json!({
+                "engine_id": engine_id,
                 "mailbox_id": mailbox_id,
                 "name": name,
                 "capabilities": project_capabilities(&capabilities, full),
@@ -539,8 +555,11 @@ async fn load_single_component(
 }
 
 pub(super) async fn replace_component(mcp: &Mcp, args: ReplaceComponentArgs) -> Result<String, McpError> {
-    let engine = parse_engine_id(&args.engine_id)?;
-    let mailbox_id = parse_mailbox_id(&args.mailbox_id)?;
+    let (engine, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
+    // The one tool that used to demand a raw `mbx-…` id now goes through
+    // the same address resolver as its siblings, so a lineage name works
+    // here too (issue 5715). A tagged id stays the local fast path.
+    let mailbox_id = mcp.resolve_engine_address(engine, &args.address).await.map_err(internal)?.0;
     let selector = selector_with_explicit_export(&args.selector, args.export.as_deref());
     // ADR-0116: resolve the selector hub-local to the replacement wasm
     // bytes (hash-primary, so a hash pins/rolls to an exact build).
@@ -562,13 +581,11 @@ pub(super) async fn replace_component(mcp: &Mcp, args: ReplaceComponentArgs) -> 
         .call_one(engine_envelope(
             engine,
             COMPONENT_CAP,
-            &ReplaceComponent {
-                mailbox_id,
-                wasm: resolved.wasm,
-                drain_timeout_ms: args.drain_timeout_ms,
-                config,
-                export,
-            },
+            // `drain_timeout_ms` is a vestigial wire field no substrate
+            // reads (post-ADR-0038 the splice is structural). The tool no
+            // longer accepts it; the wire kind still carries it, so it is
+            // pinned to `None` here until the kind itself drops it.
+            &ReplaceComponent { mailbox_id, wasm: resolved.wasm, drain_timeout_ms: None, config, export },
         ))
         .await
         .map_err(|e| frame_size_aware_error(&format!("replace_component {selector:?}"), e))?;
@@ -578,7 +595,7 @@ pub(super) async fn replace_component(mcp: &Mcp, args: ReplaceComponentArgs) -> 
                 .lock()
                 .expect("component cache mutex is never poisoned")
                 .insert((engine, mailbox_id), capabilities.clone());
-            json(&project_capabilities(&capabilities, args.full))
+            component_reply(&engine_id, &args.address, &capabilities, args.full)
         }
         Some(ReplaceResult::Err { error }) => Err(internal_msg(&error)),
         None => Err(internal_msg("undecodable ReplaceResult")),

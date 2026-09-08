@@ -891,7 +891,7 @@ where
     <A as WasmActor>::State: aether_actor::ErasedWasmActor,
 {
     match ctx.spawn_inline_child::<P, A>(Subname::Named(subname), config) {
-        Ok(id) => Some(id),
+        Ok(child) => Some(child.id()),
         Err(error) => {
             tracing::warn!(
                 target: "aether_kit_widget",
