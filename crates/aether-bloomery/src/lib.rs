@@ -408,6 +408,7 @@ pub use values::ExecutionLimits;
 pub use values::FIELD_ENTRY_SCHEMA;
 pub use values::FieldEntry;
 pub use values::FieldKind;
+pub use values::FiledFinding;
 pub use values::FindingClass;
 pub use values::FoldContribution;
 pub use values::Forecast;

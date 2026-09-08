@@ -381,6 +381,7 @@ fn actor_setups(
             repository: repository.clone(),
             disabled_missing: github.missing_connection_knobs(),
             authorized_instructions: ProcessPolicy::parse(&coordinator.authorized_instruction_bundles),
+            retrospect_reader_enabled: coordinator.retrospect_reader_enabled,
             // Same refuse-origin pusher `candidate_publication` selected (#4842).
             pusher: Arc::clone(&pusher),
         },

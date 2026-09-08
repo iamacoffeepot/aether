@@ -71,12 +71,13 @@ pub fn gated(command: &str) -> bool {
     is_model_lane(command) && command != SCOPE_FILL_COMMAND
 }
 
-/// Why the gate refused to let a dispatch reach a model.
+/// Why a dispatch was refused before it could reach a model.
 ///
 /// Every variant names what was pinned and where the trail went cold, so the
 /// refusal reads without a debugger. Only [`Self::Store`] is transient — the
-/// rest are statements about immutable content and an immutable authorization
-/// set, and will answer identically on every retry.
+/// rest are statements about immutable content, an immutable authorization
+/// set, or this host's own boot configuration, and will answer identically on
+/// every retry.
 #[derive(Debug)]
 pub enum ProvenanceRefusal {
     /// The dispatch's sealed configuration pins no instruction bundle. An
@@ -109,6 +110,16 @@ pub enum ProvenanceRefusal {
     },
     /// Manifest assembly refused a slot's derivation closure.
     Closure(ClosureViolation),
+    /// This host does not dispatch the bloom-level reader (ADR-0216 §4).
+    ///
+    /// Not produced by [`admit_model_dispatch`]: the study drain refuses before
+    /// the gate is reached, because there is nothing to resolve for a lane that
+    /// is not going to run. It travels through [`journal_refusal`] anyway
+    /// because a read this host declines to spend is exactly the shape every
+    /// other refusal here is — a dispatch that will not reach a model, owed a
+    /// journal entry rather than a dropped log line, so the bloom lands with a
+    /// study that is legibly missing.
+    ReaderDisabled,
     /// The store faulted while resolving the pin. Transient: it says nothing
     /// about the content.
     Store(rusqlite::Error),
@@ -149,6 +160,11 @@ impl fmt::Display for ProvenanceRefusal {
                 bundle.to_hex()
             ),
             Self::Closure(violation) => write!(f, "prompt manifest refused: {violation:?}"),
+            Self::ReaderDisabled => write!(
+                f,
+                "this host does not dispatch the bloom-level reader (ADR-0216 §4); the study is missing by \
+                 configuration, not by failure"
+            ),
             Self::Store(error) => write!(f, "instruction-bundle lookup failed: {error}"),
         }
     }

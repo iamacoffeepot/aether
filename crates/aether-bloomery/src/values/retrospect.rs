@@ -27,6 +27,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
+use core::str::from_utf8;
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +36,7 @@ use super::statement::{Provenance, StageReceipt, Statement};
 use super::surface::truncated;
 use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::{StageId, WorkpieceId};
+use crate::port::intent_title;
 
 /// One finding as the reader emitted it — the wire shape
 /// `retrospect_finding_contract` describes, before anything has judged it.
@@ -232,7 +234,7 @@ impl RetrospectFinding {
     /// The intent text the filed commission carries — a markdown work order.
     ///
     /// The heading is what the replica projection reads back as the title
-    /// ([`intent_title`](crate::intent_title)), so a filing is a distinguishable
+    /// ([`intent_title`]), so a filing is a distinguishable
     /// row in an issue list rather than one of a dozen copies of a constant.
     /// The surface section states the crate globs the work would touch, in the
     /// same grammar a scope revision declares, so whoever scopes this filing
@@ -246,6 +248,88 @@ impl RetrospectFinding {
         let _ = writeln!(words, "\nDerived from bloom receipt `{}` by the ADR-0216 reader.", self.receipt.to_hex());
         words
     }
+}
+
+/// What a filed commission says about the read that filed it — the read side of
+/// [`RetrospectFinding::intent_words`].
+///
+/// A reader of the estate holds a commission, not a [`RetrospectFinding`]: the
+/// finding itself is never persisted, only the intent statement minted from it.
+/// This projects that statement back into the three things a list row needs to
+/// say — which landing receipt the read consumed, what the work order is called,
+/// and where it would happen — so the pile is readable beside the bloom it came
+/// out of rather than only as a wall of opaque `retrospect-` ids.
+///
+/// Absent for every hand-filed commission ([`Self::of_intent`] answers `None`),
+/// so an ordinary list row is exactly what it was.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct FiledFinding {
+    /// The landing receipt the read consumed — the stage receipt's first input,
+    /// which is the digest a bloom's own `Study` evidence binds to.
+    pub receipt: Digest,
+    /// The work order's heading, or empty when the intent carries none.
+    pub title: String,
+    /// The crate globs the intent's `Surface` section names.
+    pub surface: Vec<String>,
+}
+
+impl FiledFinding {
+    /// Project `intent`, or `None` when no reader filed it.
+    ///
+    /// The provenance is the whole test: only a [`Provenance::StageReceipt`]
+    /// naming [`StageId::Study`] is a reader's filing, and a stage receipt over
+    /// no inputs named no receipt to derive from. Nothing here is a check on
+    /// authority — a stage receipt authorizes nothing at any door (ADR-0216 §3),
+    /// and this is a projection for a reader's eyes.
+    #[must_use]
+    pub fn of_intent(intent: &Statement) -> Option<Self> {
+        let Provenance::StageReceipt(receipt) = &intent.provenance else {
+            return None;
+        };
+        if receipt.stage != StageId::Study {
+            return None;
+        }
+        let words = from_utf8(&intent.words).ok()?;
+
+        Some(Self {
+            receipt: *receipt.inputs.first()?,
+            title: intent_title(&intent.words).unwrap_or_default(),
+            surface: surface_globs(words),
+        })
+    }
+}
+
+/// The globs of a work order's `## Surface` section, in written order.
+///
+/// The reading half of [`RetrospectFinding::intent_words`], and it lives beside
+/// the writer so the two move together: a heading or bullet spelled differently
+/// there is a section nothing here finds, and the round-trip test below is what
+/// says so out loud. Bounded by the same ceiling the writer is bounded by, so a
+/// hand-written intent that happens to carry the section cannot make a list row
+/// unbounded.
+fn surface_globs(words: &str) -> Vec<String> {
+    let mut globs = Vec::new();
+    let mut inside = false;
+    for line in words.lines() {
+        let line = line.trim();
+        if let Some(heading) = line.strip_prefix("##") {
+            inside = heading.trim().eq_ignore_ascii_case("surface");
+            continue;
+        }
+        if !inside || globs.len() == RetrospectFinding::MAX_SURFACE_GLOBS {
+            continue;
+        }
+        if let Some(glob) = line
+            .strip_prefix("- ")
+            .and_then(|item| item.trim().strip_prefix('`'))
+            .and_then(|item| item.strip_suffix('`'))
+            .filter(|glob| !glob.is_empty())
+        {
+            globs.push(glob.to_owned());
+        }
+    }
+
+    globs
 }
 
 /// The reader's derivation record: one statement asserting the receipt it read,
@@ -316,11 +400,13 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
 
-    use super::{RetrospectClaim, RetrospectFinding, RetrospectRefusal, filed_intent, reader_derivation};
+    use super::{
+        FiledFinding, RetrospectClaim, RetrospectFinding, RetrospectRefusal, Statement, filed_intent, reader_derivation,
+    };
     use crate::digest::{Digest, digest_of};
     use crate::port::intent_title;
     use crate::sign::{AuthorityDoor, FakeKeyProvider};
-    use crate::values::Provenance;
+    use crate::values::{Observation, Provenance};
 
     fn claim(title: &str, body: &str, surface: &[&str]) -> RetrospectClaim {
         RetrospectClaim {
@@ -407,5 +493,45 @@ mod tests {
             Some("a leak"),
             "the intent's heading is what the replica projection titles the filing by",
         );
+    }
+
+    #[test]
+    fn a_filed_intent_projects_back_to_the_words_it_was_written_from() {
+        // Tripwire: `intent_words` writes the work order and `FiledFinding`
+        // reads it back, and the two are hand-written halves of one format.
+        // Respell the heading, the bullet, or the section name on either side
+        // and a console listing this bloom's pile loses the surface (or the
+        // whole row) while every type still compiles.
+        let receipt = Digest::from_bytes([7; 32]);
+        let emission = RetrospectFinding::normalize(
+            receipt,
+            vec![claim("a leak", "the reader saw it", &["crates/aether-bloomery/**", "crates/aether-codec/**"])],
+        )
+        .expect("well-formed entries normalize");
+        let finding = &emission.findings[0];
+
+        let projected = FiledFinding::of_intent(&filed_intent(
+            finding,
+            &reader_derivation(Digest::from_bytes([8; 32]), receipt, None, Digest::from_bytes([2; 32]), &[]),
+        ))
+        .expect("a reader's filing projects");
+
+        assert_eq!(projected.receipt, receipt, "the row names the landing receipt the read consumed");
+        assert_eq!(projected.title, finding.title);
+        assert_eq!(projected.surface, finding.surface, "the Surface section reads back as the globs it stated");
+    }
+
+    #[test]
+    fn a_hand_filed_commission_is_not_a_reader_filing() {
+        // Tripwire: the projection keys on provenance alone. Loosen it to "has
+        // words shaped like a work order" and every hand-authored commission
+        // starts rendering as a machine proposal on some bloom's receipt.
+        let intent = Statement {
+            words: b"# ship the store\n\n## Surface\n\n- `crates/aether-bloomery/**`\n".to_vec(),
+            provenance: Provenance::ObservationAttestation(Observation { source: "an operator".to_string() }),
+            parents: Vec::new(),
+        };
+
+        assert_eq!(FiledFinding::of_intent(&intent), None);
     }
 }

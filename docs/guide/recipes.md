@@ -79,6 +79,10 @@ current source.
   (drive-only) — install the checked-in user unit and its environment-file
   template, then start, restart, and read the coordinator through systemd and
   journald.
+- **[Authorizing an instruction bundle and enabling the bloom reader](recipes/enabling-the-bloom-reader.md)**
+  (drive-only) — import the model-process instruction bundle, record it as
+  configuration, authorize its address on the host, and decide the reader's
+  seat separately from the bundle that carries its text.
 - **Debugging a hung settlement** (drive-only) — reading a stuck mail chain
   with the trace tools.
 

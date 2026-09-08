@@ -20,8 +20,8 @@
 //!   coordinator never sees it.
 
 mod claude;
-mod construct;
-mod conventions;
+pub mod construct;
+pub mod conventions;
 mod fixers;
 mod grok;
 #[cfg(test)]
@@ -32,11 +32,11 @@ mod lint_check;
 mod messages;
 mod muse;
 mod peak_memory;
-mod review;
+pub mod review;
 mod review_mcp;
 mod review_reports;
 mod sccache;
-mod scope;
+pub mod scope;
 mod scratch;
 mod verify;
 

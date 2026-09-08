@@ -757,6 +757,7 @@ fn head_view(listed: ListedCommission) -> Result<CommissionHeadView, HttpServerR
         current_revision: listed.current_revision.map(|bytes| digest_of_bytes(&bytes)).transpose()?,
         current_ordinal: listed.current_ordinal,
         status: listed.status,
+        filed: listed.filed,
     })
 }
 

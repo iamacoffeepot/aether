@@ -5,6 +5,7 @@ mod backlog;
 mod board;
 mod detail;
 mod dispatch;
+mod filed;
 mod journal;
 mod json;
 mod metrics;

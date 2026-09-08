@@ -743,6 +743,22 @@ pub struct CommissionHeadView {
     pub current_ordinal: Option<u64>,
     #[serde(default)]
     pub status: String,
+    /// The reader's read that filed this commission (ADR-0216 §3). Absent for a
+    /// hand-filed commission, and absent from a coordinator that predates the
+    /// field.
+    #[serde(default)]
+    pub filed: Option<FiledFindingView>,
+}
+
+/// One filed finding's own account of the read it came out of.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FiledFindingView {
+    #[serde(default)]
+    pub receipt: DigestHex,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub surface: Vec<String>,
 }
 
 /// `GET /commissions/{id}` — the head, current revision, and current approvals.

@@ -32,8 +32,8 @@ use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::{ClaimHolder, ClaimRefKind};
 use crate::reduce::{Event, Outcome};
 use crate::values::{
-    CandidateRef, ConfigRegistry, Disposition, Forecast, MemberDependency, Membership, ScopeRevision, ScopeVerifyInput,
-    ScopeVerifyReport, Statement, SuppressionVerdict, Workpiece,
+    CandidateRef, ConfigRegistry, Disposition, FiledFinding, Forecast, MemberDependency, Membership, ScopeRevision,
+    ScopeVerifyInput, ScopeVerifyReport, Statement, SuppressionVerdict, Workpiece,
 };
 
 /// Default REST control-API port when `AETHER_HTTP_PORT` is unset — distinct
@@ -832,6 +832,16 @@ pub struct CommissionHeadView {
     pub current_ordinal: Option<u64>,
     /// Lifecycle flag. Not signed.
     pub status: String,
+    /// The read that filed this commission, when a reader did (ADR-0216 §3):
+    /// the landing receipt it derives from, its heading, and the surface its
+    /// work order names.
+    ///
+    /// Absent — and omitted from the body — for every hand-filed commission, so
+    /// an ordinary row is unchanged. Present, it says only what the intent's own
+    /// provenance already says: a filing is an unapproved proposal, and nothing
+    /// here is an approval or a scope revision a seal could name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filed: Option<FiledFinding>,
 }
 
 /// `GET /commissions` — every matching commission head.

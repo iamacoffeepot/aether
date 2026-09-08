@@ -28,7 +28,9 @@ use crate::transform::{LaneRun, Measurements, TransformArgs, run_model_lane, wri
 /// The lane-owned in-repo instruction source. Embedded at build time so the
 /// scoping lane owns its process natively — the prompt is assembled from this
 /// text, never from `.claude/skills/scope` in the worker's checkout.
-pub(super) const SCOPE_INSTRUCTIONS: &str = include_str!("scope_instructions.md");
+/// Reachable outside this module so `cargo xtask bloom instructions` imports
+/// this exact text.
+pub const SCOPE_INSTRUCTIONS: &str = include_str!("scope_instructions.md");
 
 /// The three-valued status the local backend already knows how to read, matching
 /// the review lane's contract.

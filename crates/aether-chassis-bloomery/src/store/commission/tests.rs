@@ -7,9 +7,9 @@ use aether_bloomery::testing::{claim, draft, event as decided_event, membership 
 use aether_bloomery::{
     AuthorityDoor, BloomId, CommissionProjection, CommissionStatus, CommissionValueError, ContentAddressed, Decision,
     Decisions, Digest, Ed25519KeyProvider, Fact, FakeKeyProvider, KeyId, NamedPath, Observation, Outcome, PathOrigin,
-    Provenance, SCOPE_FILL_COMMAND, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting,
-    ScopeVerifyInput, SignatureEnvelope, StageId, Statement, Topic, WorkpieceId, authorization_message, decode_row,
-    digest_of, encode_row,
+    Provenance, RetrospectClaim, RetrospectFinding, SCOPE_FILL_COMMAND, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA,
+    ScopeRevision, ScopeRouting, ScopeVerifyInput, SignatureEnvelope, StageId, Statement, Topic, WorkpieceId,
+    authorization_message, decode_row, digest_of, encode_row, filed_intent, reader_derivation,
 };
 use aether_data::Kind;
 use aether_data::wire::{from_bytes, to_vec};
@@ -884,6 +884,39 @@ fn the_projection_snapshot_carries_the_intents_own_heading() {
         .find(|payload| payload.workpiece == workpiece("wp-untitled"))
         .expect("the seeded commission projects");
     assert_eq!(untitled.title, "", "an intent with no heading carries no title");
+}
+
+#[test]
+fn a_listed_head_carries_the_read_that_filed_it() {
+    // The plausible bug: the head list decodes each intent statement to
+    // recompute its digest and then throws the statement away, so a reader's
+    // filing (ADR-0216 §3) is indistinguishable from a hand-filed commission on
+    // the only route that lists them — and a bloom's filed pile renders empty
+    // forever with nothing failing anywhere.
+    let mut store = memory();
+    let receipt = Digest::from_bytes([7; 32]);
+    let claimed = RetrospectClaim {
+        title: "a leak".to_owned(),
+        body: "the reader saw it and will not fix it".to_owned(),
+        surface: vec!["crates/aether-bloomery/**".to_owned()],
+    };
+    let emission = RetrospectFinding::normalize(receipt, vec![claimed]).expect("a well-formed emission normalizes");
+    let finding = &emission.findings[0];
+    let derivation =
+        reader_derivation(Digest::from_bytes([8; 32]), receipt, None, Digest::from_bytes([9; 32]), &emission.findings);
+
+    store.create(&finding.workpiece(), &filed_intent(finding, &derivation)).expect("file the finding");
+    seed(&mut store, "issue-1");
+
+    let heads = store.list(Some(CommissionStatus::Open)).expect("list the open commissions");
+    let filed: Vec<_> = heads.iter().filter(|head| head.filed.is_some()).collect();
+
+    assert_eq!(filed.len(), 1, "the hand-filed commission beside it carries no read: {heads:?}");
+    assert_eq!(filed[0].id, finding.workpiece());
+    let projected = filed[0].filed.as_ref().expect("the filing's head projects its read");
+    assert_eq!(projected.receipt, receipt, "the row names the landing receipt the read consumed");
+    assert_eq!(projected.title, finding.title);
+    assert_eq!(projected.surface, finding.surface);
 }
 
 #[test]
