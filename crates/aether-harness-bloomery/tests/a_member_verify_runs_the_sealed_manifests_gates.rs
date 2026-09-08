@@ -16,8 +16,8 @@ use aether_bloomery::{
 };
 use aether_chassis_bloomery::store::StoreBackend;
 use aether_data::Kind;
-use aether_data::wire::{from_bytes, to_vec};
-use aether_harness_bloomery::{HarnessBuilder, Lane, Repo, ScenarioHarness, captured, digest, member, passed};
+use aether_data::wire::to_vec;
+use aether_harness_bloomery::{HarnessBuilder, Repo, ScenarioHarness, digest, member};
 
 /// This repository's own manifest — the text a base normally carries.
 const CHECKED_IN: &str = include_str!("../../../pipeline.toml");
@@ -31,8 +31,7 @@ fn a_member_verify_runs_the_sealed_manifests_gates() {
         .seed_file(PIPELINE_MANIFEST_PATH, without_dup_on_member())
         .bare_clone()
         .create();
-    let mut harness =
-        HarnessBuilder::local_authority(&authority).lane_axis(Lane::Off).start("member-verify-reads-manifest");
+    let mut harness = HarnessBuilder::local_authority(&authority).start("member-verify-reads-manifest");
 
     let base = harness.view().mainline;
     let manifest = PipelineManifest::from_toml(&without_dup_on_member()).expect("the fixture reads");
@@ -48,21 +47,6 @@ fn a_member_verify_runs_the_sealed_manifests_gates() {
         other => panic!("a base that still declares every lane must seal, got {other:?}"),
     }
 
-    let first = harness.await_order();
-    let construct = if from_bytes::<StageId>(&first.stage).unwrap() == StageId::BaseVerify {
-        harness.upload_admitted(&passed(&first));
-        harness.await_order()
-    } else {
-        first
-    };
-    assert_eq!(from_bytes::<StageId>(&construct.stage).unwrap(), StageId::Construct);
-    let candidate = harness.seed_capture(bloom, MEMBER, digest(0xC1), digest(0xD1));
-    harness.upload_admitted(&captured(&construct, candidate));
-
-    let verify = harness.await_order();
-    assert_eq!(from_bytes::<StageId>(&verify.stage).unwrap(), StageId::Verify);
-    harness.upload_admitted(&passed(&verify));
-
     let expected = VerifyGateSet::member_of(&manifest).digest();
     assert!(
         !VerifyGateSet::member_of(&manifest).verifiers.contains(VerifyFailure::Dup),
@@ -70,7 +54,11 @@ fn a_member_verify_runs_the_sealed_manifests_gates() {
     );
     assert_ne!(expected, VerifyGateSet::member().digest(), "that drop must move the identity");
 
-    let proof = filed_member_proof(&harness).expect("a passing member verify files a proof");
+    harness.pump_until("the member verify files a proof under the sealed gates", |harness| {
+        filed_member_proof(harness).is_some_and(|proof| proof.gate_set == expected)
+    });
+
+    let proof = filed_member_proof(&harness).expect("pump_until saw the proof");
     assert_eq!(proof.stage, StageId::Verify);
     assert_eq!(proof.gate_set, expected, "the proof is filed under the sealed member run list, not the compiled one");
 }
