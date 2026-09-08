@@ -41,6 +41,12 @@
 //! Visual scenarios that need the wgpu adapter probe use
 //! `aether_harness_substrate_capture::test_helpers::require_runtime`
 //! instead — the probe belongs with the GPU crate (issue #3765).
+//!
+//! Pre-build the wasm the gate looks for with `cargo xtask build-wasm`.
+//! Without it `require_wasm` fails the scenario rather than skipping it
+//! (issue #5724): a skip that reports `test … ok` is indistinguishable
+//! from a pass, and the whole point of running the scenario is to learn
+//! which of the two happened.
 
 use aether_data::Kind;
 use aether_kinds::NamedMail;
@@ -138,33 +144,51 @@ fn runtime_target_root(current: &Path) -> Option<PathBuf> {
     current.ancestors().find(|dir| dir.join("Cargo.lock").is_file()).map(|root| root.join("target"))
 }
 
-/// Skip-or-panic gate over the wasm artifact alone: locates the wasm
-/// with no GPU involvement, for scenarios whose harness composition needs
-/// no render cap (issue #3765). Returns the wasm path on success; `None`
-/// when the test should skip. Visual scenarios use the capture crate's
-/// `require_runtime`, which adds the wgpu adapter probe in front of
-/// this.
+/// Opt back into the pre-#5724 skip: with `AETHER_ALLOW_WASM_SKIP=1` a
+/// missing wasm artifact returns `None` again instead of failing the
+/// scenario. Any other value — including `0` and the empty string — is
+/// not the opt-in, so a stale export cannot quietly restore the silent
+/// pass this knob exists to make explicit.
+const ALLOW_WASM_SKIP: &str = "AETHER_ALLOW_WASM_SKIP";
+
+/// The pre-#5724 CI strict toggle. Strict is now the default, so this
+/// stays accepted rather than required: `cargo xtask transform
+/// verify.test` still exports it, and while it is exported it also wins
+/// over [`ALLOW_WASM_SKIP`] — a CI run cannot be talked into skipping by
+/// an ambient opt-in in the environment it inherited.
+const REQUIRE_RUNTIME: &str = "AETHER_REQUIRE_RUNTIME";
+
+/// Whether a missing wasm artifact is allowed to skip rather than fail.
+#[allow(clippy::disallowed_methods)] // aether-suppression-request: test-harness skip/strict knob, not cap config
+fn wasm_skip_allowed() -> bool {
+    env::var(REQUIRE_RUNTIME).is_err() && env::var(ALLOW_WASM_SKIP).is_ok_and(|value| value == "1")
+}
+
+/// Gate over the wasm artifact alone: locates the wasm with no GPU
+/// involvement, for scenarios whose harness composition needs no render
+/// cap (issue #3765). Returns the wasm path on success. Visual scenarios
+/// use the capture crate's `require_runtime`, which adds the wgpu
+/// adapter probe in front of this.
 ///
-/// `AETHER_REQUIRE_RUNTIME=1` flips the skip into a panic so CI catches
-/// a forgotten pre-build entry instead of passing a 30 ms vacuous test.
-/// CI sets this; local devs leave it unset and keep the skip behavior.
+/// A missing artifact **fails** the scenario (issue #5724). The skip it
+/// used to take returned `None` through an `eprintln!` the test harness
+/// captures and only prints on failure, so a scenario that ran nothing
+/// reported `test … ok` — and an agent who had not pre-built the wasm
+/// read a whole suite of those as proof its change worked. Set
+/// `AETHER_ALLOW_WASM_SKIP=1` to take the skip anyway, which is what a
+/// consumer who genuinely cannot cross-build wasm wants and what nobody
+/// reaches for by accident.
 ///
 /// # Panics
-/// Panics in strict (`AETHER_REQUIRE_RUNTIME=1`) mode if the named
-/// crate's wasm artifact is not pre-built — fail-fast per ADR-0063: CI
-/// relies on the strict mode to catch missing pre-build entries.
+/// Panics when the named crate's wasm artifact is not pre-built and the
+/// skip is not explicitly allowed — fail-fast per ADR-0063.
 #[must_use]
-// Test-only skip diagnostic — emitted from `cargo test` runners so a
-// skipped test is visible alongside `test ... ok` lines. Not routed
+// Test-only skip diagnostic — emitted from `cargo test` runners so an
+// allowed skip is visible alongside `test ... ok` lines. Not routed
 // through `tracing` because the test harness already captures stderr
 // and surfaces it on failure (issue 891).
 #[allow(clippy::print_stderr)]
-// Test-only: AETHER_REQUIRE_RUNTIME is the CI strict-mode toggle that turns a
-// missing wasm pre-build from a skip into a hard failure — a test harness
-// knob, not cap config.
-#[allow(clippy::disallowed_methods)]
 pub fn require_wasm(crate_name: &str) -> Option<PathBuf> {
-    let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
     // The else arm runs side effects (assert + eprintln); `map_or_else`
     // would bury that under closures with no clarity win.
     #[allow(clippy::option_if_let_else)]
@@ -172,14 +196,11 @@ pub fn require_wasm(crate_name: &str) -> Option<PathBuf> {
         Some(path)
     } else {
         assert!(
-            !strict,
-            "AETHER_REQUIRE_RUNTIME set but {crate_name}.wasm not pre-built; \
-             CI's `Pre-build component wasm for scenario tests` step is missing this crate",
+            wasm_skip_allowed(),
+            "SKIPPED (no wasm for {crate_name}): run `cargo xtask build-wasm` \
+             — set AETHER_ALLOW_WASM_SKIP=1 to ignore",
         );
-        eprintln!(
-            "skipping: {crate_name}.wasm not built; \
-             run `cargo build --target wasm32-unknown-unknown -p <crate>`",
-        );
+        eprintln!("skipping: {crate_name}.wasm not built; run `cargo xtask build-wasm`");
         None
     }
 }
