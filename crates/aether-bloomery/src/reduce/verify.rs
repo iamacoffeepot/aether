@@ -35,6 +35,11 @@ pub(super) fn reduce_verify_failed(
     if record.status != BloomStatus::Sealed {
         return Decisions::rejected(Outcome::VerifyFailedRejected(VerifyFailedError::UnknownOrInactiveBloom));
     }
+    // Journal decode interned unknown names by arrival order. The fold holds
+    // the vocabulary the bloom sealed, so remap every declared member onto
+    // the position that manifest declared before any roll accounting reads
+    // the bits.
+    let failed_verifiers = record.pipeline_manifest.intern_set(failed_verifiers);
     let Some(member) = record.spec.members().iter().find(|member| member.workpiece == *workpiece) else {
         return Decisions::rejected(Outcome::VerifyFailedRejected(VerifyFailedError::NotAMember(workpiece.clone())));
     };
@@ -128,8 +133,10 @@ fn counted_verdict(
 ) -> Decisions {
     let VerifyLine { record, bloom, member, cursor, targets } = *line;
     let workpiece = &member.workpiece;
-    let repeated_verifiers = failed_verifiers.intersection(cursor.seen_verify_failures);
-    let seen_verify_failures = cursor.seen_verify_failures.union(failed_verifiers);
+    let failed_verifiers = record.pipeline_manifest.intern_set(failed_verifiers);
+    let seen = record.pipeline_manifest.intern_set(cursor.seen_verify_failures);
+    let repeated_verifiers = failed_verifiers.intersection(seen);
+    let seen_verify_failures = seen.union(failed_verifiers);
     let rolls = cursor.repair_rolls + u32::from(!repeated_verifiers.is_empty());
 
     // The loop is bounded by N + B, and both halves are read off the record
