@@ -47,7 +47,7 @@ use aether_text::FontMetricsResult;
 use crate::set::{
     ActivationArms, WidgetDefaults, accept_font_metrics_result, apply_text_theme, clamp_optional_index,
     clamp_optional_selection, elide_to_width, measured_text_width, plate, pump_text_font_metrics,
-    push_control_outlines, push_triangle, quad, raised_plate, reply_draw, ring, text_origin_y, widget_chrome,
+    push_control_outlines, push_triangle, quad, raised_plate, reply_if_hidden, ring, text_origin_y, widget_chrome,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
@@ -754,12 +754,19 @@ impl WasmActor for DropdownWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        // `intrinsic` measures and caches, so it runs before the closure
-        // borrows `self` to build the two lanes.
+        if reply_if_hidden(ctx, &self.state) {
+            return;
+        }
+        // `intrinsic` measures and caches, so it takes `&mut self` and cannot
+        // run inside the shared borrow that builds the two lanes. That keeps
+        // this handler off `reply_draw`.
         let intrinsic = self.intrinsic();
-        reply_draw(ctx, &self.state, || {
-            WidgetDrawList::items(self.draw_items()).with_intrinsic(intrinsic).with_overlay(self.overlay_items())
-        });
+
+        if let Some(parent) = ctx.parent() {
+            parent.send(
+                &WidgetDrawList::items(self.draw_items()).with_intrinsic(intrinsic).with_overlay(self.overlay_items()),
+            );
+        }
     }
 }
 
