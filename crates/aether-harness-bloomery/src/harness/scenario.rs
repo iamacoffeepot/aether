@@ -13,8 +13,8 @@ use aether_actor::Addressable;
 use aether_bloomery::{
     BackendObjectId, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CandidateRef, ConfigKind, ConfigRegistry,
     Correspondence, Digest, Evidence, EvidenceKind, Fact, FakeKeyProvider, KeyId, MemberDependency, Membership,
-    Observation, Outcome, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Snapshot, StageCatalog,
-    StageId, Statement, VerifyFailureSet, ViewDocument, WorkpieceId, signed_approval,
+    ModelProcessInstructions, Observation, Outcome, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting,
+    Snapshot, StageCatalog, StageId, Statement, VerifyFailureSet, ViewDocument, WorkpieceId, signed_approval,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex};
@@ -24,7 +24,7 @@ use aether_chassis_bloomery::bloomery::{
     BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, DoctorReactorCapability, DoctorReport,
     DoctorTick, ExecutorReactorCapability, GithubConnectionConfig, IntegrateReactorCapability, IntegrateTick,
     JanitorReactorCapability, JanitorTick, LandReactorCapability, LandTick, NotifyConfig, ProposeReactorCapability,
-    ProposeTick, ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload,
+    ProposeTick, ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload, pin_instructions, reference_instructions,
 };
 use aether_chassis_bloomery::commission::task_text;
 use aether_chassis_bloomery::control::ObserveTick;
@@ -40,7 +40,7 @@ use aether_rpc::RpcServerHandle;
 use aether_substrate::chassis::builder::BuiltChassis;
 
 use super::digest;
-use super::drive::{member, passed};
+use super::drive::{member, member_with, passed};
 use super::roots::FixtureRoots;
 use super::{BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, Lane, POLL};
 use crate::oracle::{Oracle, is_answerable, liveness};
@@ -85,6 +85,12 @@ pub struct ScenarioHarness {
     artifacts_root: PathBuf,
     worktree_base: String,
     base: Digest,
+    /// The bloom-wide configuration every seal through this harness carries —
+    /// the authorized model-process instruction pin (ADR-0214) plus whatever
+    /// else the cell authored. Every model lane presents a validated pin before
+    /// it may dispatch, so a scenario that does not seal one observes refusals
+    /// instead of the behaviour it came for.
+    configs: ConfigRegistry,
     /// The spec of the last bloom sealed through this harness.
     ///
     /// Held because an amendment is a supersession (see
@@ -133,12 +139,18 @@ impl ScenarioHarness {
                 .expect("genesis correspondence records");
         }
 
-        let configs =
-            builder.wall_clock_secs.map_or_else(ConfigRegistry::default, |secs| author_catalog(&store_path, secs));
+        let mut configs = author_instructions(&store_path);
+        let authorized = configs
+            .address::<ModelProcessInstructions>()
+            .expect("the authored instruction bundle seals its own address")
+            .to_hex();
+        if let Some(secs) = builder.wall_clock_secs {
+            configs.overlay(author_catalog(&store_path, secs));
+        }
 
         let (chassis, coordinator, wire, fake) = match builder.coordinator {
             CoordinatorKind::InProcess => {
-                let env = in_process_env(&builder, &store_path, &artifacts_root, &worktree_base);
+                let env = in_process_env(&builder, &store_path, &artifacts_root, &worktree_base, &authorized);
                 let fake = builder.github_fixture.then(|| env.github.shared_fixture());
                 let chassis = BloomeryChassis::build(env).expect("the coordinator boots");
                 let port = chassis.handle::<RpcServerHandle>().expect("the RPC ingress published its port").local_port;
@@ -161,6 +173,7 @@ impl ScenarioHarness {
                     builder.heartbeat_silence_secs,
                     builder.poll_interval_secs,
                     builder.cas_land_enabled,
+                    &authorized,
                 );
                 (None, Some(child), Wire::from_stream(stream), None)
             }
@@ -177,6 +190,7 @@ impl ScenarioHarness {
             artifacts_root: PathBuf::from(artifacts_root),
             worktree_base,
             base: Digest::default(),
+            configs: configs.clone(),
             sealed: None,
             step_budget: builder.step_budget,
         };
@@ -450,8 +464,13 @@ impl ScenarioHarness {
         } else {
             self.base
         };
-        let spec =
-            super::draft(base, &members.iter().map(|(workpiece, scope)| member(workpiece, *scope)).collect::<Vec<_>>());
+        let spec = BloomDraft {
+            proposals: members.iter().map(|(workpiece, scope)| member(workpiece, *scope)).collect(),
+            base,
+            configs: self.configs.clone(),
+            ..BloomDraft::default()
+        }
+        .seal();
         let bloom = spec.id();
         let edges = edges
             .iter()
@@ -485,15 +504,46 @@ impl ScenarioHarness {
     /// scenario that seals as a *precondition* wants the panic — a fixture seal
     /// that quietly failed would surface later as an unrelated missing bloom.
     pub fn try_seal(&mut self, members: &[(&str, Digest)]) -> (BloomId, Outcome) {
+        let configured: Vec<_> =
+            members.iter().map(|(workpiece, scope)| (*workpiece, *scope, ConfigRegistry::default())).collect();
+        self.try_seal_configured(&configured)
+    }
+
+    /// Seal a multi-member bloom whose members carry their own sealed
+    /// registries, layered over the harness's bloom-wide one.
+    ///
+    /// The axis a scenario about per-member configuration needs and
+    /// [`seal_members`](Self::seal_members) cannot express: the reducer flattens
+    /// the member's registry over the bloom's at dispatch, so this is where a
+    /// scenario says "this member runs under a different pin than its siblings".
+    ///
+    /// # Panics
+    /// The seal was refused.
+    pub fn seal_configured(&mut self, members: &[(&str, Digest, ConfigRegistry)]) -> BloomId {
+        let (bloom, outcome) = self.try_seal_configured(members);
+        match outcome {
+            Outcome::Sealed(sealed) => assert_eq!(sealed, bloom, "the sealed id is the spec's content address"),
+            other => panic!("the fixture seal must seal: {other:?}"),
+        }
+        self.pass_outstanding_base_verify();
+        bloom
+    }
+
+    /// [`try_seal`](Self::try_seal) over members carrying their own registries.
+    ///
+    /// # Panics
+    /// The projection could not be read.
+    pub fn try_seal_configured(&mut self, members: &[(&str, Digest, ConfigRegistry)]) -> (BloomId, Outcome) {
         let base = if self.base == Digest::default() {
             self.view().mainline
         } else {
             self.base
         };
-        let spec =
-            super::draft(base, &members.iter().map(|(workpiece, scope)| member(workpiece, *scope)).collect::<Vec<_>>());
+        let proposals: Vec<_> =
+            members.iter().map(|(workpiece, scope, configs)| member_with(workpiece, *scope, configs.clone())).collect();
+        let spec = BloomDraft { proposals, base, configs: self.configs.clone(), ..BloomDraft::default() }.seal();
         let bloom = spec.id();
-        let key = members.iter().map(|(workpiece, _)| *workpiece).collect::<Vec<_>>().join("+");
+        let key = members.iter().map(|(workpiece, _, _)| *workpiece).collect::<Vec<_>>().join("+");
         let outcome = self.admit(&format!("fixture-seal-{key}"), Fact::Seal(spec.clone()));
         // Remembered only on success: a refused spec never became this
         // harness's bloom, and an amendment against it would supersede
@@ -826,6 +876,7 @@ fn in_process_env(
     store_path: &str,
     artifacts_root: &str,
     worktree_base: &str,
+    authorized_instructions: &str,
 ) -> BloomeryEnv {
     let github = if builder.github_fixture {
         GithubConnectionConfig {
@@ -841,6 +892,7 @@ fn in_process_env(
     let scripted = builder.lane == Lane::Scripted;
     let coordinator = CoordinatorConfig {
         store_path: store_path.to_owned(),
+        authorized_instruction_bundles: authorized_instructions.to_owned(),
         artifacts_root: Some(artifacts_root.to_owned()),
         poll_interval_secs: builder.poll_interval_secs,
         local_lane_enabled: scripted,
@@ -911,6 +963,7 @@ fn spawn_listening_coordinator(
     heartbeat_silence_secs: Option<u64>,
     poll_interval_secs: u64,
     cas_land_enabled: bool,
+    authorized_instructions: &str,
 ) -> (Coordinator, TcpStream) {
     let lane_program = crate::mock_lane_program();
     spawn_and_connect("lane-boundary-harness", COORDINATOR_HANDSHAKE_BUDGET, || {
@@ -923,6 +976,7 @@ fn spawn_listening_coordinator(
             cas_land_enabled,
             fixture_base_sha: repo.head(),
             heartbeat_silence_secs,
+            authorized_instructions,
         }
         .env();
         let env: Vec<_> = env.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect();
@@ -952,6 +1006,10 @@ pub struct ForkedLaneSettings<'a> {
     pub fixture_base_sha: &'a str,
     /// Optional `AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS`.
     pub heartbeat_silence_secs: Option<u64>,
+    /// `AETHER_BLOOMERY_AUTHORIZED_INSTRUCTIONS` — the instruction bundle the
+    /// child authorizes as model-process policy (ADR-0214). A child that omits
+    /// it authorizes nothing and refuses every model dispatch.
+    pub authorized_instructions: &'a str,
 }
 
 impl ForkedLaneSettings<'_> {
@@ -970,12 +1028,28 @@ impl ForkedLaneSettings<'_> {
             (String::from("AETHER_GITHUB_FIXTURE_BASE_SHA"), self.fixture_base_sha.to_owned()),
             (String::from("AETHER_BLOOMERY_OPERATOR_NAME"), String::from("lane harness")),
             (String::from("AETHER_BLOOMERY_OPERATOR_EMAIL"), String::from("lane-harness@example.test")),
+            (String::from("AETHER_BLOOMERY_AUTHORIZED_INSTRUCTIONS"), self.authorized_instructions.to_owned()),
         ];
         if let Some(secs) = self.heartbeat_silence_secs {
             env.push((String::from("AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS"), secs.to_string()));
         }
         env
     }
+}
+
+/// Author the scenario suite's model-process instruction bundle into the
+/// coordinator's own store and hand back the registry pinning it (ADR-0214).
+///
+/// Every scenario seals this, and the booted coordinator authorizes exactly this
+/// address, because the gate is fail-closed: a bloom with no authorized pin
+/// cannot start a model attempt, so a suite that skipped this would observe
+/// refusals in every scenario about something else. A scenario that is *about*
+/// the gate seals a member registry that overrides it.
+fn author_instructions(store_path: &str) -> ConfigRegistry {
+    pin_instructions(
+        &mut SqliteStore::open(store_path).expect("the coordinator's journal opens for writing"),
+        &reference_instructions(),
+    )
 }
 
 fn author_catalog(store_path: &str, wall_clock_secs: u64) -> ConfigRegistry {

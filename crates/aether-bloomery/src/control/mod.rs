@@ -267,6 +267,21 @@ topic_vocabulary! {
     /// memberless [`crate::Fact::Seal`] (ADR-0205). Appended so the prior
     /// topics' display spellings and ordering are unchanged.
     Proposal,
+    /// A dispatch the host refused before it reached a worker (host-minted,
+    /// ADR-0214): the instruction-provenance gate could not present a validated
+    /// prompt manifest, so the executor reactor enqueues the
+    /// [`Event`](crate::Event) bytes of the host fault the refusal amounts to and
+    /// drains them back out on its own next tick to admit.
+    ///
+    /// Host-minted for the reason [`ScopeDispatch`](Self::ScopeDispatch) is: no
+    /// [`Decision`] can project onto it, because the reducer decided a dispatch
+    /// the host then declined to make, so
+    /// [`of_decision`](Self::of_decision) never returns it. Its own topic rather
+    /// than a hop through process memory because a refusal that evaporates on a
+    /// restart leaves a parked member with nothing on the journal to say why.
+    /// Appended so the prior topics' display spellings and ordering are
+    /// unchanged.
+    RefusedDispatch,
 }
 
 impl Topic {
@@ -296,6 +311,7 @@ impl Topic {
             Self::ScopeDispatch => "topic:scope_dispatch",
             Self::BaseVerify => "topic:base_verify",
             Self::Proposal => "topic:proposal",
+            Self::RefusedDispatch => "topic:refused_dispatch",
         }
     }
 

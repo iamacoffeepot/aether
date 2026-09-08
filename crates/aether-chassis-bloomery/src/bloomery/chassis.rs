@@ -38,8 +38,8 @@ use crate::bloomery::{
     DoctorReactorSetup, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig,
     IntegrateReactorCapability, IntegrateReactorSetup, JanitorReactorCapability, JanitorReactorSetup,
     LandReactorCapability, LandReactorSetup, LaneProgram, MirrorReactorCapability, MirrorReactorSetup, NotifyConfig,
-    NotifyReactorCapability, NotifyReactorSetup, ProjectionShell, ProposeReactorCapability, ProposeReactorSetup,
-    SourceReplicaShell, SourceShell, candidate_push_at, github_push_url, webhook_sink,
+    NotifyReactorCapability, NotifyReactorSetup, ProcessPolicy, ProjectionShell, ProposeReactorCapability,
+    ProposeReactorSetup, SourceReplicaShell, SourceShell, candidate_push_at, github_push_url, webhook_sink,
 };
 use crate::control::{ControlCore, ControlSetup};
 use crate::session::{SessionConfig, SessionPoolCapability};
@@ -378,6 +378,7 @@ fn actor_setups(
             heartbeat_silence_secs: coordinator.heartbeat_silence_secs()?,
             repository: repository.clone(),
             disabled_missing: github.missing_connection_knobs(),
+            authorized_instructions: ProcessPolicy::parse(&coordinator.authorized_instruction_bundles),
             // Same refuse-origin pusher `candidate_publication` selected (#4842).
             pusher: Arc::clone(&pusher),
         },

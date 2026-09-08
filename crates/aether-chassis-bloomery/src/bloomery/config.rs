@@ -173,6 +173,26 @@ pub struct CoordinatorConfig {
     /// (*who* may sign) — the two are never folded (ADR-0151).
     #[config(env = "AETHER_APPROVAL_POLICY_FILE", default = "approval-policy.toml")]
     pub approval_policy_file: String,
+    /// The comma-separated content addresses of the model-process instruction
+    /// bundles this host operator authorizes as process policy (ADR-0214), each
+    /// the 64-character hex of an
+    /// [`ModelProcessInstructions`](aether_bloomery::ModelProcessInstructions)
+    /// configuration address.
+    ///
+    /// Host configuration rather than anything a bloom carries, which is the
+    /// whole point: a candidate can edit the instruction files in its checkout
+    /// and a request can name any digest it likes, and neither reaches this
+    /// list. Seeded into the store at executor-reactor boot and read from there
+    /// by the dispatch gate.
+    ///
+    /// The default authorizes nothing, and nothing authorized refuses every
+    /// model dispatch — the fail-closed arm ADR-0149 asks for. A deployment
+    /// enabling enforcement authors a bundle, records it as configuration,
+    /// names its address here, and seals blooms that pin it; an older bloom
+    /// carrying no pin cannot start another model attempt and needs a successor
+    /// (ADR-0214 §Migration).
+    #[config(env = "AETHER_BLOOMERY_AUTHORIZED_INSTRUCTIONS", default = "")]
+    pub authorized_instruction_bundles: String,
     /// Whether the executor mounts the local-process backend for the model lane
     /// (ADR-0150, #3586). On by default: the `construct.*` lanes route to a local
     /// process under ambient `claude` auth rather than a shared-runner wrapper,
