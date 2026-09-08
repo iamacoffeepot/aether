@@ -46,8 +46,8 @@
 // glob below.
 use crate::kinds::{EngineAlive, EngineDied, EngineRestartDue};
 use aether_kinds::{
-    ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine, TerminateEngine,
-    UploadBinary, UploadComponent,
+    ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SetArtifactPinned, SpawnEngine,
+    TerminateEngine, UploadBinary, UploadComponent,
 };
 use aether_rpc::RouteEnvelope;
 #[cfg(test)]

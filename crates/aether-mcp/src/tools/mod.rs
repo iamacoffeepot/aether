@@ -56,11 +56,11 @@ use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router
 use crate::args::ActorCostArgs;
 use crate::args::ActorLogsArgs;
 use crate::args::{
-    CaptureFrameArgs, CollectFailureEvidenceArgs, CompareComponentContractsArgs, ComponentSpec, DescribeComponentArgs,
-    DescribeHandlersArgs, DescribeKindsArgs, EngineMailSpec, ListBinariesArgs, ListComponentsArgs, ListEnginesArgs,
-    LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, ReplaceComponentArgs, ReplyEventJson, ReplyProjection,
-    SendMailArgs, SendMailTracedArgs, SpawnSubstrateArgs, TerminateSubstrateArgs, UploadBinaryArgs,
-    UploadComponentArgs,
+    ArtifactPinArgs, CaptureFrameArgs, CollectFailureEvidenceArgs, CompareComponentContractsArgs, ComponentSpec,
+    DescribeComponentArgs, DescribeHandlersArgs, DescribeKindsArgs, EngineMailSpec, ListBinariesArgs,
+    ListComponentsArgs, ListEnginesArgs, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, ReplaceComponentArgs,
+    ReplyEventJson, ReplyProjection, SendMailArgs, SendMailTracedArgs, SpawnSubstrateArgs, TerminateSubstrateArgs,
+    UploadBinaryArgs, UploadComponentArgs,
 };
 use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
@@ -256,7 +256,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Upload a binary into the hub's content-addressed store (ADR-0115). Pass `staged_path` — an absolute path to the binary on the fleet host — and an optional `name`. The hub reads the path itself (aether-mcp never reads the bytes — a binary is too large for the tool channel), sha256-hashes it, dedups against the store (a re-upload of identical bytes returns the same hash), forks `<binary> --describe` to capture its manifest (chassis kind, linked caps, build provenance), stores both, and points `name` (when given) at the hash. The store persists across a restart-hub. Returns {hash, name}."
+        description = "Upload a binary into the hub's content-addressed store (ADR-0115). Pass `staged_path` — an absolute path to the binary on the fleet host — an optional `name`, and optional `pin` (default false). The hub reads the path itself (aether-mcp never reads the bytes — a binary is too large for the tool channel), sha256-hashes it, dedups against the store (a re-upload of identical bytes returns the same hash), forks `<binary> --describe` to capture its manifest (chassis kind, linked caps, build provenance), stores both, and points `name` (when given) at the hash. pin:true records durable explicit eviction protection on the hash before this upload's eviction, including unnamed uploads; pin:false never clears an existing pin (use unpin_artifact). A name is a movable pointer and independently protects its target; unpin removes only the explicit flag. Fleet and MCP must ship the same release: the added pin field changes the typed kind schema. The store persists across a restart-hub. Returns {hash, name}."
     )]
     pub async fn upload_binary(&self, Parameters(args): Parameters<UploadBinaryArgs>) -> Result<String, McpError> {
         guard_response_size("upload_binary", components::upload_binary(self, args).await)
@@ -270,13 +270,27 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Upload a WASM component into the hub's content-addressed store (ADR-0116). Pass `staged_path` — an absolute path to the component .wasm on the fleet host — and an optional `name` (the component's Actor::NAMESPACE is the natural one). The hub reads the path itself (aether-mcp never reads the bytes — too large for the tool channel), sha256-hashes it, dedups against the store (a re-upload of identical bytes returns the same hash), reads its manifest straight from the wasm (no execution step — exported actor namespaces, handled kind ids, #[fallback] presence, build provenance), stores both, and points `name` (when given) at the hash. The store persists across a restart-hub. Then load it by selector with load_component — the host wasm path is gone from load_component / replace_component / boot manifests, surviving only here as the upload input. Returns {hash, name}."
+        description = "Upload a WASM component into the hub's content-addressed store (ADR-0116). Pass `staged_path` — an absolute path to the component .wasm on the fleet host — an optional `name` (the component's Actor::NAMESPACE is the natural one), and optional `pin` (default false). The hub reads the path itself (aether-mcp never reads the bytes — too large for the tool channel), sha256-hashes it, dedups against the store (a re-upload of identical bytes returns the same hash), reads its manifest straight from the wasm (no execution step — exported actor namespaces, handled kind ids, #[fallback] presence, build provenance), stores both, and points `name` (when given) at the hash. pin:true records durable explicit eviction protection on the hash before this upload's eviction, including unnamed uploads; pin:false never clears an existing pin (use unpin_artifact). A name is a movable pointer and independently protects its target; unpin removes only the explicit flag. Fleet and MCP must ship the same release: the added pin field changes the typed kind schema. The store persists across a restart-hub. Then load it by selector with load_component — the host wasm path is gone from load_component / replace_component / boot manifests, surviving only here as the upload input. Returns {hash, name}."
     )]
     pub async fn upload_component(
         &self,
         Parameters(args): Parameters<UploadComponentArgs>,
     ) -> Result<String, McpError> {
         guard_response_size("upload_component", components::upload_component(self, args).await)
+    }
+
+    #[tool(
+        description = "Pin a stored hub artifact by exact content hash (ADR-0115). Pass `hash` — the sha256 hex returned by upload_binary / upload_component. Names are never resolved. Hub-local: no engine_id, and aether-mcp does not read files. Records durable explicit eviction protection that survives restart-hub. A name is a separate movable pointer; pinning does not create a name. Runtime engines do not hold artifacts. Returns {hash, pinned: true}."
+    )]
+    pub async fn pin_artifact(&self, Parameters(args): Parameters<ArtifactPinArgs>) -> Result<String, McpError> {
+        guard_response_size("pin_artifact", components::pin_artifact(self, args).await)
+    }
+
+    #[tool(
+        description = "Unpin a stored hub artifact by exact content hash (ADR-0115). Pass `hash` — the sha256 hex returned by upload_binary / upload_component. Names are never resolved. Hub-local: no engine_id, and aether-mcp does not read files. Removes only the explicit pin flag; a name still protects the hash from LRU eviction. There is no delete or unname tool. Runtime engine protection is a separate issue and is not implemented here. Returns {hash, pinned: false}."
+    )]
+    pub async fn unpin_artifact(&self, Parameters(args): Parameters<ArtifactPinArgs>) -> Result<String, McpError> {
+        guard_response_size("unpin_artifact", components::unpin_artifact(self, args).await)
     }
 
     #[tool(

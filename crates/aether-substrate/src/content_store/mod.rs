@@ -208,6 +208,21 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
     }
 
     /// Ingest `bytes` content-addressed, recording `metadata` and
+    /// (optionally) pointing `name` at the resulting hash. Equivalent to
+    /// [`upload_with_pin`](Self::upload_with_pin) with `pin: false`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] when new content can't be
+    /// persisted — the bytes or the sidecar failed to write. A returned
+    /// error means nothing was indexed and no name was repointed, so the
+    /// caller must not treat the upload as stored: there is no hash to
+    /// hand out, and a later [`get`](Self::get) of one would miss.
+    pub fn upload(&mut self, bytes: &[u8], metadata: M, name: Option<String>) -> io::Result<String> {
+        self.upload_with_pin(bytes, metadata, name, false)
+    }
+
+    /// Ingest `bytes` content-addressed, recording `metadata` and
     /// (optionally) pointing `name` at the resulting hash. A re-upload of
     /// identical bytes dedups: the bytes aren't rewritten and the same
     /// hash comes back, but a fresh `name` still repoints. Returns the
@@ -221,26 +236,50 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
     /// between keeping and losing the peer's sidecar — bloomery records
     /// an artifact's derivation parents there.
     ///
+    /// `pin: true` records durable eviction protection in the entry's
+    /// first persisted sidecar (new content) or upgrades an existing
+    /// sidecar **before** this call's eviction step (dedup). `pin: false`
+    /// never clears an existing pin. Persistence uses the same
+    /// [`atomic_write`] rename as other sidecars; this is not an
+    /// fsync/power-loss guarantee beyond that.
+    ///
     /// # Errors
     ///
     /// Returns the underlying [`io::Error`] when new content can't be
-    /// persisted — the bytes or the sidecar failed to write. A returned
-    /// error means nothing was indexed and no name was repointed, so the
-    /// caller must not treat the upload as stored: there is no hash to
-    /// hand out, and a later [`get`](Self::get) of one would miss.
-    pub fn upload(&mut self, bytes: &[u8], metadata: M, name: Option<String>) -> io::Result<String> {
+    /// persisted, or when `pin: true` on a dedup cannot persist the pin.
+    /// A returned error means this call did not index a new hash, did not
+    /// claim a successful pin, and did not repoint a name.
+    pub fn upload_with_pin(
+        &mut self,
+        bytes: &[u8],
+        metadata: M,
+        name: Option<String>,
+        pin: bool,
+    ) -> io::Result<String> {
         let hash = hash_hex(bytes);
         self.adopt_from_disk(&hash);
         let clock = self.next_clock();
 
-        let stored = match self.entries.get_mut(&hash) {
+        let stored = if self.entries.contains_key(&hash) {
             // Dedup: bump recency so a re-uploaded entry isn't the first
-            // eviction target.
-            Some(entry) => {
+            // eviction target. Pin upgrades must land on disk before this
+            // call's eviction; `pin: false` leaves any existing pin alone.
+            if let Some(entry) = self.entries.get_mut(&hash) {
                 entry.last_access = clock;
+            }
+            if pin {
+                match self.try_set_pinned(&hash, true) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => {
+                        Err(io::Error::new(io::ErrorKind::NotFound, "content store: pinned hash missing after dedup"))
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
                 Ok(())
             }
-            None => self.persist_new(&hash, bytes, metadata, clock),
+        } else {
+            self.persist_new(&hash, bytes, metadata, clock, pin)
         };
 
         if stored.is_ok()
@@ -258,11 +297,13 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
 
     /// Write new content's bytes + sidecar and index it. A failure indexes
     /// nothing and leaves no partial entry on disk, so the store stays
-    /// consistent — the next upload of the same bytes retries.
-    fn persist_new(&mut self, hash: &str, bytes: &[u8], metadata: M, clock: u64) -> io::Result<()> {
+    /// consistent — the next upload of the same bytes retries. `pinned` is
+    /// written in that first sidecar so eviction cannot reclaim the entry
+    /// before an explicit follow-up pin would have a chance to run.
+    fn persist_new(&mut self, hash: &str, bytes: &[u8], metadata: M, clock: u64, pinned: bool) -> io::Result<()> {
         let (bytes_path, manifest_path) = self.entry_paths(hash);
         let uploaded_seq = self.next_seq;
-        let sidecar = SidecarRecord { metadata: metadata.clone(), uploaded_seq, pinned: false };
+        let sidecar = SidecarRecord { metadata: metadata.clone(), uploaded_seq, pinned };
 
         atomic_write(&bytes_path, bytes)?;
         if let Err(e) = write_sidecar(&manifest_path, &sidecar) {
@@ -275,8 +316,7 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
         }
 
         let bytes_len = bytes.len() as u64;
-        self.entries
-            .insert(hash.to_owned(), Entry { metadata, bytes_len, pinned: false, last_access: clock, uploaded_seq });
+        self.entries.insert(hash.to_owned(), Entry { metadata, bytes_len, pinned, last_access: clock, uploaded_seq });
         self.total_bytes = self.total_bytes.saturating_add(bytes_len);
         self.next_seq = self.next_seq.saturating_add(1);
         Ok(())
@@ -311,6 +351,34 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
     /// Pin an entry by hash. Convenience for `set_pinned(hash, true)`.
     pub fn pin(&mut self, hash: &str) -> bool {
         self.set_pinned(hash, true)
+    }
+
+    /// Persist a pin (or unpin) sidecar-first, then update memory.
+    ///
+    /// `Ok(false)` means this handle has no entry for `hash`. `Err` means
+    /// the sidecar write failed; in-memory state is unchanged, so a failed
+    /// unpin keeps prior protection. Equal in-memory state is still written
+    /// — an earlier best-effort [`set_pinned`](Self::set_pinned) may have
+    /// mutated memory without persisting. Persistence is the same
+    /// [`atomic_write`] rename other sidecars use, not an fsync/power-loss
+    /// guarantee beyond that.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] when the sidecar cannot be
+    /// written. The operator-facing callers map that error without
+    /// claiming success.
+    pub fn try_set_pinned(&mut self, hash: &str, pinned: bool) -> io::Result<bool> {
+        let Some(entry) = self.entries.get(hash) else {
+            return Ok(false);
+        };
+        let sidecar = SidecarRecord { metadata: entry.metadata.clone(), uploaded_seq: entry.uploaded_seq, pinned };
+        let (_, manifest_path) = self.entry_paths(hash);
+        write_sidecar(&manifest_path, &sidecar)?;
+        if let Some(entry) = self.entries.get_mut(hash) {
+            entry.pinned = pinned;
+        }
+        Ok(true)
     }
 
     /// Index an entry that is on disk but not in this handle's index —
