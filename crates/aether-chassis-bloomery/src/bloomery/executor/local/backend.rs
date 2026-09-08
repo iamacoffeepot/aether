@@ -2692,6 +2692,7 @@ impl ExecutorBackend for LocalExecutor {
                 handle.nonce.0.clone(),
                 CancellingHold { slot: run.slot, evidence_dir: run.evidence_dir.clone() },
             );
+            drop(registry);
             CancelReservation { backend: self, nonce: handle.nonce.0.clone(), run: Some(run) }
         };
 
