@@ -344,7 +344,7 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
         "{stem}: reconstructed Dropdown at the original alias must still open, step, and commit; log was:\n{joined}"
     );
     assert!(
-        log.iter().any(|message| message.contains("widget menu item activated")
+        log.iter().any(|message| message.contains("widget menu bar activated")
             && message.contains("menu=0")
             && message.contains("item=0")),
         "{stem}: reconstructed MenuBar at the original alias must still open and activate; log was:\n{joined}"
