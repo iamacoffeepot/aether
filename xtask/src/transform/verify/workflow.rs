@@ -1,5 +1,5 @@
 //! The `.github/workflows/ci.yml` reader behind the CI-parity tripwire, and
-//! the `.github/workflows/transform.yml` reader behind the verifier-bit one.
+//! the `.github/workflows/transform.yml` reader behind the mask-derivation one.
 //!
 //! [`super::verify_command`] owns each gate's program, argv, environment and
 //! verdict. CI invokes the typed `verify.*` command; asserting a second copy
@@ -7,9 +7,10 @@
 //! still agree (#4843, #4883). The tripwire therefore checks the structure:
 //! each mechanical job reaches its arm exactly once, no raw calibrated
 //! command remains, and the test job still threads its scheduling inputs.
-//! The transform workflow's jq ladder is the same move for a second file:
-//! [`aether_bloomery::VerifyFailure::ALL`] is the source, and a transcribed
-//! table is what drifted when containment was appended.
+//! The transform workflow used to carry a transcribed jq bit table of
+//! [`aether_bloomery::VerifyFailure::ALL`]; the lane now writes the interned
+//! `failure_mask` and the wrapper reads it, so that table is no longer a
+//! fifth copy of the vocabulary.
 //!
 //! Enough YAML to reach the keys the tripwires compare — top-level `on` and
 //! `concurrency`, `jobs.<job>.{runs-on,if,outputs,strategy}`, and
@@ -19,16 +20,13 @@
 //! yielding an empty comparison, because a workflow this reader cannot follow
 //! has to fail the tripwire loudly instead of passing it vacuously.
 
-use aether_bloomery::{VerifyFailure, VerifyFailureSet};
-
 /// The workflow Actions runs, embedded at compile time — `include_str!`
 /// registers it as a build input, so editing the gate rebuilds this crate and
 /// re-runs the tripwire.
 const CI_WORKFLOW: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml"));
 
-/// The transform workflow's verifier-bit ladder is the second copy of
-/// [`VerifyFailure::ALL`]; embedding it rebuilds this crate when the table is
-/// edited, the same way [`CI_WORKFLOW`] rebuilds when a gate's argv changes.
+/// The transform wrapper's mask derivation. Embedding it rebuilds this crate
+/// when the wrapper starts carrying a bit table again.
 const TRANSFORM_WORKFLOW: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/transform.yml"));
 
@@ -338,49 +336,13 @@ fn structural(line: &str) -> bool {
     !trimmed.is_empty() && !trimmed.starts_with('#')
 }
 
-/// The jq `verifier_bit` function body Actions runs, rendered from
-/// [`VerifyFailure::ALL`]. Paste over the matching block in
-/// `.github/workflows/transform.yml` when an identity is appended.
-#[must_use]
-pub fn verifier_bit_table() -> String {
-    let mut lines = Vec::with_capacity(VerifyFailure::ALL.len() + 3);
-    lines.push("            def verifier_bit:".to_owned());
-    for (index, identity) in VerifyFailure::ALL.into_iter().enumerate() {
-        let keyword = if index == 0 {
-            "if"
-        } else {
-            "elif"
-        };
-        // `bit` is crate-private; the public set stores that same value and
-        // `to_mask` hex-encodes it.
-        let bit = u16::from_str_radix(&VerifyFailureSet::one(identity).to_mask(), 16)
-            .expect("VerifyFailureSet::to_mask is four lowercase hex digits");
-        lines.push(format!(r#"              {keyword} . == "{}" then {bit}"#, identity.as_str()));
-    }
-    lines.push(r#"              else error("unknown verifier failure")"#.to_owned());
-    lines.push("              end;".to_owned());
-    lines.join("\n")
-}
-
-/// The `def verifier_bit: … end;` block in `workflow`, if the file still
-/// carries one. The tripwire compares this to [`verifier_bit_table`].
-fn checked_in_verifier_bit_table(workflow: &str) -> Option<String> {
-    let def = "def verifier_bit:";
-    let start = workflow.find(def)?;
-    let line_start = workflow[..start].rfind('\n').map_or(0, |index| index + 1);
-    let rest = &workflow[line_start..];
-    let close = "end;";
-    Some(rest[..rest.find(close)? + close.len()].to_owned())
-}
-
 mod tests {
     use std::fs;
     use std::path::Path;
 
     use super::{
-        TRANSFORM_WORKFLOW, cancel_in_progress, changes_code_output, checked_in_verifier_bit_table, concurrency_group,
-        job_if, job_names, job_runs_on, named_step, push_branches, step_with_id, steps, test_shard_matrix,
-        verifier_bit_table,
+        TRANSFORM_WORKFLOW, cancel_in_progress, changes_code_output, concurrency_group, job_if, job_names, job_runs_on,
+        named_step, push_branches, step_with_id, steps, test_shard_matrix,
     };
 
     /// ADR-0186's daily-branch prefix, the glob `on.push.branches` uses and the
@@ -393,18 +355,18 @@ mod tests {
     }
 
     #[test]
-    fn the_checked_in_verifier_bit_table_is_what_the_emitter_renders() {
-        // Tripwire: the pinned value is computed from VerifyFailure::ALL, so
-        // appending an identity moves the emitted table while the workflow's
-        // stays put — which is precisely how verify.containment started
-        // erroring the evidence gate instead of recording a verdict.
-        let emitted = verifier_bit_table();
-        assert_eq!(
-            checked_in_verifier_bit_table(TRANSFORM_WORKFLOW)
-                .expect("transform.yml must carry a def verifier_bit: … end; block"),
-            emitted,
-            "paste the emitted verifier_bit table into .github/workflows/transform.yml:\n{emitted}",
+    fn the_wrapper_reads_the_lanes_interned_mask_instead_of_a_bit_table() {
+        // Tripwire: the jq table was a compiled copy of the vocabulary. The
+        // lane now interns against the checkout's pipeline.toml and writes
+        // `failure_mask`; a table here would be a fifth copy again. Token
+        // width stays the wrapper's `printf '%04x'`, which is what
+        // `the_wrapper_renders_a_mask_token_width_the_decoder_accepts` reads.
+        assert!(TRANSFORM_WORKFLOW.contains(".failure_mask"), "the wrapper must read the interned mask the lane wrote");
+        assert!(
+            !TRANSFORM_WORKFLOW.contains("def verifier_bit:"),
+            "a checked-in bit table is a second copy of the vocabulary"
         );
+        assert!(TRANSFORM_WORKFLOW.contains("printf '%04x'"), "the artifact token stays four zero-padded hex digits");
     }
 
     #[test]
