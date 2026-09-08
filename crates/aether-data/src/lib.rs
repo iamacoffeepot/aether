@@ -100,6 +100,19 @@ pub use aether_data_derive::{Kind, Schema, Storage};
 #[cfg(feature = "derive")]
 pub use aether_data_derive::transform;
 
+/// Re-exported `#[kind]` attribute macro from `aether-data-derive`
+/// (issue #5729). Declares a mail kind and emits the derive stack the
+/// declaration sites otherwise repeat by hand:
+/// `#[aether_data::kind(name = "aether.fs.read")]` stands for `Debug`,
+/// `Clone`, `Kind`, `Schema`, `Serialize`, `Deserialize` plus the
+/// `#[kind(name = …)]` helper, with `copy` / `default` / `partial_eq` /
+/// `eq` / `pod` / `no_serde` / `derive(…)` naming the departures. Spell
+/// it fully qualified at the declaration site — the bare `#[kind(…)]`
+/// name belongs to the derives' inert helper attribute. Behind the
+/// `derive` feature like the other macros.
+#[cfg(feature = "derive")]
+pub use aether_data_derive::kind;
+
 /// Identifies a mail kind by a stable, namespaced string name (e.g.
 /// `"aether.tick"`, `"hello.npc_health"`) and a `u64` id derived from
 /// that name plus the kind's canonical schema bytes (ADR-0030 Phase 2,

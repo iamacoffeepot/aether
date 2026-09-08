@@ -30,13 +30,11 @@ The clipboard contract is a compact current exemplar:
 
 ```rust
 /// Request the current UTF-8 clipboard text.
-#[derive(aether_data::Kind, aether_data::Schema, Debug, Clone)]
-#[kind(name = "aether.clipboard.get_text")]
+#[aether_data::kind(name = "aether.clipboard.get_text")]
 pub struct GetClipboardText;
 
 /// Reply to `GetClipboardText`.
-#[derive(aether_data::Kind, aether_data::Schema, Debug, Clone)]
-#[kind(name = "aether.clipboard.get_text_result")]
+#[aether_data::kind(name = "aether.clipboard.get_text_result")]
 pub enum GetClipboardTextResult {
     Ok { text: String },
     Err { error: String },
@@ -44,9 +42,30 @@ pub enum GetClipboardTextResult {
 ```
 
 The canonical name is the operator-facing `kind_name`. Follow the owner's
-family. Derive `Kind` and `Schema` — `Schema` emits the structured wire codec
-(ADR-0188); a serde derive is not required to put the type on the mail path.
-Write docs for a caller, including reply, units, limits, and error meaning.
+family. Write docs for a caller, including reply, units, limits, and error
+meaning.
+
+`#[aether_data::kind]` declares the kind *and* emits the derive stack: `Kind`,
+`Schema`, `Debug`, `Clone`, `Serialize`, `Deserialize`. `Schema` is what puts
+the type on the mail path — it emits the structured wire codec (ADR-0188), and
+the serde pair is there for the JSON/TOML edges, not for mail. Options name the
+departures from that contract:
+
+| Option | Adds | Use for |
+|---|---|---|
+| `eq` | `PartialEq`, `Eq` | integer/string payloads compared in tests and logic |
+| `partial_eq` | `PartialEq` | float-carrying payloads, which cannot be `Eq` |
+| `copy` | `Copy` | small fixed-size payloads |
+| `default` | `Default` | payloads with a meaningful zero |
+| `pod` | `Copy`, `bytemuck::Pod`, `bytemuck::Zeroable`; drops serde | cast-encoded kinds — keep the `#[repr(C)]` above it, it is what makes the cast legal |
+| `no_serde` | — (drops `Serialize`/`Deserialize`) | kinds that never cross a JSON/TOML edge |
+| `derive(A, B)` | `A`, `B` verbatim | `Hash`, `PartialOrd`, and other one-off needs |
+
+A kind whose derive list this vocabulary cannot state exactly — no `Debug`, no
+`Clone`, one half of the serde pair — keeps the explicit
+`#[derive(…)]` + `#[kind(name = …)]` form. Both spellings produce the same
+type; the attribute is shorthand for the common contract, not a replacement for
+the derives.
 
 Reply is a handler contract, not a `Kind` associated type. Name/result shapes
 should make the pairing clear, but live handler inventory is what declares the
