@@ -33,8 +33,8 @@ use aether_text::FontMetricsResult;
 
 use crate::set::{
     WidgetDefaults, accept_font_metrics_result, approx_text_width, even_split_widths, measured_text_width,
-    pump_text_font_metrics, push_control_outlines, quad, raised_plate, reply_if_hidden, ring, slot_at_local_x,
-    slot_left, text_origin_y, widget_chrome,
+    pump_text_font_metrics, push_control_outlines, quad, raised_plate, reply_draw, ring, slot_at_local_x, slot_left,
+    text_origin_y, widget_chrome,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
@@ -607,17 +607,7 @@ impl WasmActor for MenuBarWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
-            return;
-        }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                content_height: None,
-                intrinsic: None,
-                items: self.draw_items(),
-                overlay: self.overlay_items(),
-            });
-        }
+        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()).with_overlay(self.overlay_items()));
     }
 }
 

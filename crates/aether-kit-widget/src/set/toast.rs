@@ -54,7 +54,7 @@ use aether_text::FontMetricsResult;
 
 use crate::set::{
     WidgetDefaults, accept_font_metrics_result, approx_text_width, measured_text_width, pump_text_font_metrics, quad,
-    raised_plate, reply_if_hidden, text_origin_y, widget_chrome, wrap_to_width,
+    raised_plate, reply_draw, text_origin_y, widget_chrome, wrap_to_width,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
@@ -403,17 +403,7 @@ impl WasmActor for ToastWidget {
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         let expired = self.age();
         report(ctx, expired, self.region_changed());
-        if reply_if_hidden(ctx, &self.state) {
-            return;
-        }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                content_height: None,
-                intrinsic: None,
-                items: Vec::new(),
-                overlay: self.overlay_items(),
-            });
-        }
+        reply_draw(ctx, &self.state, || WidgetDrawList::overlay(self.overlay_items()));
     }
 }
 

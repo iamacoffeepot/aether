@@ -553,26 +553,22 @@ pub(super) fn reply_if_hidden(ctx: &WasmCtx<'_>, state: &InteractionState) -> bo
         return false;
     }
     if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetDrawList { content_height: None, intrinsic: None, items: Vec::new(), overlay: Vec::new() });
+        parent.send(&WidgetDrawList::items(Vec::new()));
     }
     true
 }
 
-fn reply_with_draw_items(
-    ctx: &WasmCtx<'_>,
-    state: &InteractionState,
-    draw_items: impl FnOnce() -> Vec<WidgetDrawItem>,
-) {
+/// Reply one widget's draw for this frame, discharging the hidden branch of
+/// the always-reply compositing protocol first. `draw` runs only when the
+/// widget is visible, so a hidden widget builds no geometry, and the list it
+/// returns states only the lanes that widget actually fills
+/// ([`WidgetDrawList::items`] and friends).
+pub(super) fn reply_draw(ctx: &WasmCtx<'_>, state: &InteractionState, draw: impl FnOnce() -> WidgetDrawList) {
     if reply_if_hidden(ctx, state) {
         return;
     }
     if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetDrawList {
-            content_height: None,
-            intrinsic: None,
-            items: draw_items(),
-            overlay: Vec::new(),
-        });
+        parent.send(&draw());
     }
 }
 
@@ -1248,12 +1244,12 @@ pub(super) fn reply_single_line_edit(ctx: &WasmCtx<'_>, edit: SingleLineEdit<'_>
     if reply_if_hidden(ctx, edit.state) {
         return;
     }
-    let intrinsic = edit.intrinsic;
-    let items = single_line_edit_draw_items(&edit);
-    let overlay = single_line_edit_overlay(&edit);
+    let list = WidgetDrawList::items(single_line_edit_draw_items(&edit))
+        .with_intrinsic(edit.intrinsic)
+        .with_overlay(single_line_edit_overlay(&edit));
 
     if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetDrawList { content_height: None, intrinsic, items, overlay });
+        parent.send(&list);
     }
 }
 

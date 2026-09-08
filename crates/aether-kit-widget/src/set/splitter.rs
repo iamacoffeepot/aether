@@ -47,7 +47,7 @@ use core::mem;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{MouseButton, MouseButtonRelease, MouseMove, mouse_button};
 
-use crate::set::{WidgetDefaults, quad, reply_if_hidden, widget_chrome};
+use crate::set::{WidgetDefaults, quad, reply_draw, widget_chrome};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
 use crate::{
@@ -366,17 +366,7 @@ impl WasmActor for SplitterWidget {
         if self.take_owed_leave() {
             Self::report_hover(ctx, false);
         }
-        if reply_if_hidden(ctx, &self.state) {
-            return;
-        }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                content_height: None,
-                intrinsic: None,
-                items: self.draw_items(),
-                overlay: Vec::new(),
-            });
-        }
+        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()));
     }
 }
 

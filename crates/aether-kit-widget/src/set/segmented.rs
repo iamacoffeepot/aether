@@ -20,7 +20,7 @@ use aether_text::FontMetricsResult;
 use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{
     accept_font_metrics_result, clamp_option_index, clamp_selection, elide_to_width, measured_text_width,
-    pump_text_font_metrics, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y,
+    pump_text_font_metrics, push_control_outlines, quad, release_left, reply_draw, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
@@ -330,17 +330,7 @@ impl WasmActor for SegmentedWidget {
 
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
-            return;
-        }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                content_height: None,
-                intrinsic: None,
-                items: self.draw_items(),
-                overlay: Vec::new(),
-            });
-        }
+        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()));
     }
 }
 

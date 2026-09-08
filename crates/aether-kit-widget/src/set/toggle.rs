@@ -17,7 +17,7 @@ use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
 use aether_math::Rgba;
 
 use crate::set::defaults::{WidgetDefaults, widget_chrome};
-use crate::set::{ActivationArms, disc, push_control_outlines, reply_if_hidden, stadium, text_origin_y};
+use crate::set::{ActivationArms, disc, push_control_outlines, reply_draw, stadium, text_origin_y};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
 use crate::{
@@ -252,17 +252,7 @@ impl WasmActor for ToggleWidget {
 
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
-            return;
-        }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                content_height: None,
-                intrinsic: None,
-                items: self.draw_items(),
-                overlay: Vec::new(),
-            });
-        }
+        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()));
     }
 }
 

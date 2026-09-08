@@ -658,7 +658,7 @@ impl WasmActor for VirtualListWidget {
         let content_height = self.content_height();
         let items = self.draw_items();
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic, content_height, items, overlay: Vec::new() });
+            parent.send(&WidgetDrawList::items(items).with_intrinsic(intrinsic).with_content_height(content_height));
         }
     }
 }

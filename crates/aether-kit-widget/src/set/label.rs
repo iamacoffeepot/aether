@@ -303,7 +303,7 @@ impl WasmActor for LabelWidget {
         let overlay = self.overflow_overlay(size, measured);
         let intrinsic = measured.map(|text_width| [text_width, self.theme.row_height]);
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { content_height: None, intrinsic, items, overlay });
+            parent.send(&WidgetDrawList::items(items).with_intrinsic(intrinsic).with_overlay(overlay));
         }
     }
 

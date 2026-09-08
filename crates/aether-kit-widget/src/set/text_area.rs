@@ -16,9 +16,9 @@ use aether_text::FontMetricsResult;
 use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{
     accept_clipboard_paste, accept_font_metrics_result, apply_text_control_state, approx_text_width, edit_command,
-    plate, pump_text_font_metrics, push_control_outlines, quad, release_left, reply_with_draw_items,
-    report_clipboard_copy, run_edit_key, single_line_hit_byte, text_baseline_y, text_control_theme_state,
-    text_origin_y, update_text_modifiers,
+    plate, pump_text_font_metrics, push_control_outlines, quad, release_left, reply_draw, report_clipboard_copy,
+    run_edit_key, single_line_hit_byte, text_baseline_y, text_control_theme_state, text_origin_y,
+    update_text_modifiers,
 };
 use crate::state::InteractionState;
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState, TextSpan};
@@ -545,7 +545,7 @@ impl WasmActor for TextAreaWidget {
     #[handler::single]
     //noinspection DuplicatedCode -- actor macros require one collect handler per concrete widget type.
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        reply_with_draw_items(ctx, &self.state, || self.draw_items());
+        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()));
     }
 }
 

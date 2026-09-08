@@ -62,7 +62,7 @@ use aether_text::FontMetricsResult;
 use crate::set::{
     WidgetDefaults, accept_font_metrics_result, centered_text_x, clamp_option_index, clamp_selection, elide_to_width,
     even_split_widths, fit_row_widths, measured_text_width, pointer_wash, pump_text_font_metrics,
-    push_control_outlines, quad, release_left, reply_if_hidden, slot_at_local_x, spread_row_widths, text_origin_y,
+    push_control_outlines, quad, release_left, reply_draw, slot_at_local_x, spread_row_widths, text_origin_y,
     widget_chrome,
 };
 use crate::state::{InteractionState, emit_state_changed};
@@ -413,17 +413,7 @@ impl WasmActor for TabStripWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
-            return;
-        }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                content_height: None,
-                intrinsic: self.intrinsic(),
-                items: self.draw_items(),
-                overlay: Vec::new(),
-            });
-        }
+        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic()));
     }
 }
 

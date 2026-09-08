@@ -48,7 +48,7 @@ use aether_text::FontMetricsResult;
 use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{
     ActivationArms, ButtonFace, accept_font_metrics_result, button_face_width, pump_text_font_metrics, push_border,
-    push_button_face, reply_if_hidden,
+    push_button_face, reply_draw,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
@@ -222,17 +222,7 @@ impl WasmActor for ButtonWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
-            return;
-        }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                content_height: None,
-                intrinsic: self.intrinsic(),
-                items: self.draw_items(),
-                overlay: Vec::new(),
-            });
-        }
+        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic()));
     }
 }
 
