@@ -152,7 +152,7 @@ async fn terminate_substrate_bad_engine_id_is_tool_error() {
     let (_chassis, port) = boot_hub();
     let mcp = connect_mcp(port);
     let result =
-        mcp.terminate_substrate(Parameters(TerminateSubstrateArgs { engine_id: "not-a-uuid".to_owned() })).await;
+        mcp.terminate_substrate(Parameters(TerminateSubstrateArgs { engine_id: Some("not-a-uuid".to_owned()) })).await;
     assert!(result.is_err(), "a malformed engine_id should be a tool error");
 }
 

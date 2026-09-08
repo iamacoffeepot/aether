@@ -77,7 +77,7 @@ impl WasmActor for TcpLoadProbe {
                 let index = self.ensure_session(TcpLoadTopology::Outbound, &session_name);
                 self.sessions[index].established = true;
             }
-            ConnectResult::Err { addr, reason } => self.connect_failures.push(format!("{addr}: {reason}")),
+            ConnectResult::Err { addr, error } => self.connect_failures.push(format!("{addr}: {error}")),
         }
     }
 
