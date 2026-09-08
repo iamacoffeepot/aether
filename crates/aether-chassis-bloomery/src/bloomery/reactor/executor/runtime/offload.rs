@@ -151,6 +151,20 @@ enum AdapterAnswer {
     Publish(Result<(), String>),
 }
 
+/// A worker's hold on one of [`MAX_IN_FLIGHT`] slots, released on drop.
+struct Slot {
+    ledger: Arc<Mutex<Ledger>>,
+    call: AdapterCall,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if let Ok(mut ledger) = self.ledger.lock() {
+            ledger.in_flight.remove(&self.call);
+        }
+    }
+}
+
 /// The state the actor and its workers share: what is running, what has
 /// answered, and what this turn asked for.
 #[derive(Default)]
@@ -260,13 +274,6 @@ impl AdapterOffload {
         }
     }
 
-    /// Retire the worker whose completion just landed. Called from the
-    /// reactor's `#[handler(task)]` before it runs the cycle that consumes the
-    /// answer, so the freed slot is available to that same cycle's wants.
-    pub fn settle(&mut self, call: &AdapterCall) {
-        self.lock().in_flight.remove(call);
-    }
-
     fn spawn(
         &self,
         ctx: &mut NativeCtx<'_>,
@@ -280,6 +287,12 @@ impl AdapterOffload {
         let pusher = Arc::clone(pusher);
         let key = call.clone();
         ctx.dispatch_blocking_with(call, move || {
+            // The worker frees its own slot, and frees it last: the guard is
+            // declared first so it drops after the answer is filed, and it
+            // drops on a panicking call as surely as on an answering one. The
+            // ceiling therefore cannot be leaked by a worker that dies, and a
+            // turn can never see a call that is neither in flight nor answered.
+            let _slot = Slot { ledger: Arc::clone(&ledger), call: key.clone() };
             let answer = work.run(&shell, pusher.as_ref());
             if let Ok(mut ledger) = ledger.lock() {
                 ledger.answers.insert(key, answer);

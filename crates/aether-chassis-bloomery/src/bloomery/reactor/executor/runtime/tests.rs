@@ -52,7 +52,8 @@ use crate::bloomery::open_scope_run;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::{CoordinatorConfig, GithubConnectionConfig};
 use crate::bloomery::{
-    ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, UnconfiguredActionsBackend,
+    ExecutorPort, ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, Settled,
+    UnconfiguredActionsBackend,
 };
 use crate::session::SessionConfig;
 use crate::store::{
@@ -222,7 +223,7 @@ fn tick_clock_silent(now_unix_millis: u64, heartbeat_silence_millis: u64) -> Tic
 /// tests on a single instant.
 fn pull_and_admit(
     stores: Stores<'_>,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     claims: NameEvidenceClaims,
     tracked: &mut Vec<TrackedHandle>,
     clock: &TickClock,
@@ -3779,4 +3780,211 @@ fn an_inverted_observation_window_skips_heartbeat_and_still_honours_the_deadline
     assert_eq!(backend.cancelled(), vec![nonce.clone()], "the sealed deadline still terminates it");
     assert!(store.lookup_order(&nonce).unwrap().is_none(), "the overdue order is consumed once");
     assert_eq!(admits.len(), 1, "deadline admission fires on the inverted pull whose post-cycle sample is due");
+}
+
+/// The #5564 regression tier: the reactor's adapter calls run on workers, so no
+/// phase of a turn waits on the one in front of it.
+mod offloaded_adapter_calls {
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    use aether_bloomery::testing::digest;
+    use aether_bloomery::{
+        BloomId, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, StageCatalog, StageId, Topic, Transformation,
+        WorkHandle, WorkOrder,
+    };
+    use aether_data::{MailId, MailboxId, Source};
+    use aether_substrate::actor::native::NativeCtx;
+    use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_substrate::testing::fresh_substrate;
+
+    use super::super::offload::{AdapterOffload, MAX_IN_FLIGHT};
+    use super::{
+        CandidatePush, CapturingBackend, NOW_UNIX_MILLIS, NameEvidenceClaims, RecordingPush, Stores,
+        drain_and_dispatch, enqueue_construct_dispatch, pull_and_admit, tick_clock_at, track,
+    };
+    use crate::bloomery::{ExecutorPort, ExecutorPortError, ExecutorShell, Settled};
+    use crate::store::{SqliteStore, StoreBackend};
+
+    /// A backend whose `submit` parks until the test opens the gate. Everything
+    /// else answers at once, so the only thing a turn can be waiting on is that
+    /// one submit — which is exactly the shape of the production stall: a
+    /// `workflow_dispatch` round trip, or a lane's `git worktree add`.
+    #[derive(Default)]
+    struct LatchedSubmit {
+        gate: Mutex<bool>,
+        opened: Condvar,
+        submitted: Mutex<Vec<String>>,
+        cancelled: Mutex<Vec<String>>,
+    }
+
+    impl LatchedSubmit {
+        fn open(&self) {
+            *self.gate.lock().unwrap() = true;
+            self.opened.notify_all();
+        }
+
+        fn submitted(&self) -> Vec<String> {
+            self.submitted.lock().unwrap().clone()
+        }
+
+        fn cancelled(&self) -> Vec<String> {
+            self.cancelled.lock().unwrap().clone()
+        }
+    }
+
+    impl ExecutorBackend for LatchedSubmit {
+        type Error = ExecutorPortError;
+
+        fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+            let mut gate = self.gate.lock().unwrap();
+            while !*gate {
+                gate = self.opened.wait(gate).unwrap();
+            }
+            drop(gate);
+            self.submitted.lock().unwrap().push(order.nonce.0.clone());
+            Ok(WorkHandle::new(order.nonce.clone()))
+        }
+
+        fn inspect(&self, _handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+            Ok(ExecutionStatus::Unknown)
+        }
+
+        fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
+            self.cancelled.lock().unwrap().push(handle.nonce.0.clone());
+            Ok(())
+        }
+
+        fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// A binding whose self-mailbox is not registered: the completion wake is
+    /// warn-dropped, so these tests drive the turns themselves rather than
+    /// riding the actor loop. What they are asserting is what a turn can do
+    /// while a call is out, not how the wake is delivered.
+    fn binding() -> Arc<NativeBinding> {
+        let (_registry, mailer) = fresh_substrate();
+        Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x5564)))
+    }
+
+    fn work_order(nonce: &str) -> WorkOrder {
+        WorkOrder {
+            transformation: Transformation::for_member_stage(
+                &StageCatalog::binding_of(StageId::Construct),
+                digest(1),
+                digest(0xC0),
+                digest(0xB0),
+            ),
+            nonce: Nonce(nonce.to_owned()),
+        }
+    }
+
+    /// The failure #5564 names, as one assertion: a submit a worker is holding
+    /// must not stop the deadline sweep behind it.
+    ///
+    /// One member's order is already past its sealed deadline and must be
+    /// cancelled; a second member's dispatch is waiting in the outbox and its
+    /// submit never returns. Turn after turn, the drain hands that submit to a
+    /// worker and *keeps going* — inspect, expiry, cancel — so the overdue
+    /// order dies while the submit is still parked.
+    ///
+    /// Pre-fix the drain called `submit` inline, so the turn never reached
+    /// `expire_overdue_orders` at all: this loop would spin to its budget with
+    /// `cancelled()` empty, which is the production stall — a lane burning past
+    /// its wall clock because a peer's dispatch is slow.
+    #[test]
+    fn a_submit_a_worker_holds_does_not_stop_the_deadline_sweep() {
+        let mut store = SqliteStore::open(":memory:").unwrap();
+        let bloom = BloomId(digest(1));
+
+        // The order that must expire: dispatched through an immediate shell, so
+        // it is recorded and tracked before the latched one exists.
+        let setup = ExecutorShell::new(Arc::new(CapturingBackend::default()));
+        let (overdue_sequence, _) = enqueue_construct_dispatch(&mut store, bloom, "wp-overdue", 5);
+        let (handles, ack_through, _) = drain_and_dispatch(&mut store, &setup, NOW_UNIX_MILLIS).unwrap();
+        store.ack_topic(Topic::Dispatch, ack_through.expect("the setup dispatch submitted")).unwrap();
+        let mut tracked = track(handles);
+        let overdue_nonce = format!("dispatch-{overdue_sequence}");
+
+        // The dispatch whose submit will never come back.
+        enqueue_construct_dispatch(&mut store, bloom, "wp-blocked", 6);
+
+        let backend = Arc::new(LatchedSubmit::default());
+        let shell = ExecutorShell::new(Arc::clone(&backend));
+        let pusher: Arc<dyn CandidatePush> = Arc::new(RecordingPush::default());
+        let binding = binding();
+        let mut offload = AdapterOffload::new();
+
+        // Well past the setup order's sealed hour, so the sweep is due.
+        let sweep_at = NOW_UNIX_MILLIS + 7_200_000;
+        let budget = Instant::now() + Duration::from_secs(30);
+        while backend.cancelled().is_empty() && Instant::now() < budget {
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            {
+                let port = offload.port(&shell);
+                drain_and_dispatch(&mut store, &port, sweep_at).unwrap();
+                pull_and_admit(
+                    Stores { store: &mut store, artifacts: None },
+                    &port,
+                    NameEvidenceClaims,
+                    &mut tracked,
+                    &tick_clock_at(sweep_at),
+                    None,
+                );
+            }
+            offload.start_wanted(&mut ctx, &shell, &pusher);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert_eq!(
+            backend.cancelled(),
+            vec![overdue_nonce],
+            "the deadline sweep must terminate the overdue order while the peer submit is still parked",
+        );
+        assert!(backend.submitted().is_empty(), "the parked submit has not answered, so the sweep ran beside it");
+
+        // And the parked submit still lands once its call returns — nothing was
+        // lost by asking again every turn.
+        backend.open();
+        let budget = Instant::now() + Duration::from_secs(30);
+        while backend.submitted().is_empty() && Instant::now() < budget {
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            {
+                let port = offload.port(&shell);
+                drain_and_dispatch(&mut store, &port, sweep_at).unwrap();
+            }
+            offload.start_wanted(&mut ctx, &shell, &pusher);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(backend.submitted().len(), 1, "the released submit answered and the re-drive consumed it");
+    }
+
+    /// The ceiling holds: a turn that asks for more calls than the offload may
+    /// run starts exactly `MAX_IN_FLIGHT` workers and re-derives the rest next
+    /// turn. Without it a burst of tracked handles would spawn one thread each.
+    #[test]
+    fn the_offload_starts_at_most_the_ceiling_of_workers() {
+        let backend = Arc::new(LatchedSubmit::default());
+        let shell = ExecutorShell::new(Arc::clone(&backend));
+        let pusher: Arc<dyn CandidatePush> = Arc::new(RecordingPush::default());
+        let binding = binding();
+        let mut offload = AdapterOffload::new();
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+        {
+            let port = offload.port(&shell);
+            for index in 0..MAX_IN_FLIGHT + 2 {
+                assert!(
+                    matches!(port.submit(&work_order(&format!("n-{index}"))), Settled::InFlight),
+                    "a first ask is always in flight",
+                );
+            }
+        }
+        offload.start_wanted(&mut ctx, &shell, &pusher);
+
+        assert_eq!(offload.in_flight(), MAX_IN_FLIGHT, "the surplus asks wait for a free slot rather than a thread");
+        backend.open();
+    }
 }

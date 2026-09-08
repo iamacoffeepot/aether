@@ -3045,16 +3045,20 @@ impl NativeActor for ExecutorReactorCapability {
         run_dispatch_cycle(state, ctx);
     }
 
-    /// A blocking adapter call answered (ADR-0093 / #5564). Free the worker's
-    /// slot and run a cycle right here, so the answer is consumed at completion
-    /// rather than waiting out the poll interval — and so the freed slot goes
-    /// to whatever that same cycle asks for next.
+    /// A blocking adapter call answered (ADR-0093 / #5564). Run a cycle right
+    /// here, so the answer is consumed at completion rather than waiting out
+    /// the poll interval. The worker has already freed its own slot, so this
+    /// same cycle may start whatever it asks for next.
     ///
     /// No reply: the dispatch was started from a timer wake, which is nobody's
     /// caller. `release_no_reply` is the sanctioned discharge for that (ADR-0109).
     #[handler(task)]
     fn on_adapter_settled(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<(), AdapterCall>) {
-        state.offload.settle(done.context());
+        tracing::trace!(
+            target: "aether_chassis_bloomery::executor",
+            call = ?done.context(),
+            "blocking adapter call answered",
+        );
         done.release_no_reply();
         run_dispatch_cycle(state, ctx);
     }
