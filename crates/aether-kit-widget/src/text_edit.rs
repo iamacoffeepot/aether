@@ -498,7 +498,7 @@ pub struct SingleLineLayout {
 /// Single-flight cache for the font metrics a measured text control needs.
 /// It owns only request attribution and cache freshness; actors still send the
 /// actual capability mail so this helper remains independent of dispatch.
-pub(super) struct FontMetricsAdapter {
+pub struct FontMetricsAdapter {
     desired_font_id: u32,
     current_font_id: Option<u32>,
     inflight_font_id: Option<u32>,
@@ -506,14 +506,15 @@ pub(super) struct FontMetricsAdapter {
 }
 
 impl FontMetricsAdapter {
-    pub(super) const fn new(desired_font_id: u32) -> Self {
+    #[must_use]
+    pub const fn new(desired_font_id: u32) -> Self {
         Self { desired_font_id, current_font_id: None, inflight_font_id: None, metrics: None }
     }
 
     /// Adopt a desired font. Metrics from the old id stop being readable
     /// immediately, while an outstanding request remains attributed until its
     /// reply settles.
-    pub(super) fn set_desired(&mut self, desired_font_id: u32) {
+    pub fn set_desired(&mut self, desired_font_id: u32) {
         if self.desired_font_id == desired_font_id {
             return;
         }
@@ -523,12 +524,13 @@ impl FontMetricsAdapter {
     }
 
     /// Exact metrics only while the installed id is still desired.
-    pub(super) fn resolved(&self) -> Option<&CachedFontMetrics> {
+    #[must_use]
+    pub fn resolved(&self) -> Option<&CachedFontMetrics> {
         (self.current_font_id == Some(self.desired_font_id)).then_some(self.metrics.as_ref()).flatten()
     }
 
     /// Reserve the next request, coalescing while one is outstanding.
-    pub(super) fn take_pending_request(&mut self) -> Option<u32> {
+    pub fn take_pending_request(&mut self) -> Option<u32> {
         if self.inflight_font_id.is_some()
             || (self.current_font_id == Some(self.desired_font_id) && self.metrics.is_some())
         {
@@ -541,7 +543,7 @@ impl FontMetricsAdapter {
     /// Settle the outstanding request. Install successful metrics only when
     /// their id is still desired. Returns `true` when a newer desired id was
     /// deferred behind this flight and should now be pumped.
-    pub(super) fn accept_reply(&mut self, metrics: Option<CachedFontMetrics>) -> bool {
+    pub fn accept_reply(&mut self, metrics: Option<CachedFontMetrics>) -> bool {
         let Some(id) = self.inflight_font_id.take() else {
             return false;
         };

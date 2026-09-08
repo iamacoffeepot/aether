@@ -45,14 +45,14 @@ use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
 use aether_text::FontMetricsResult;
 
-use crate::set::defaults::WidgetDefaults;
+use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{
-    ActivationArms, ButtonFace, accept_font_metrics_result, apply_text_theme, button_face_width,
-    pump_text_font_metrics, push_border, push_button_face, reply_if_hidden,
+    ActivationArms, ButtonFace, accept_font_metrics_result, button_face_width, pump_text_font_metrics, push_border,
+    push_button_face, reply_draw,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
-use crate::theme::{SetTheme, Theme};
+use crate::theme::Theme;
 use crate::{
     ButtonActivated, ButtonConfig, ButtonEmphasis, ButtonTone, Collect, SetWidgetState, WidgetControlState,
     WidgetDrawItem, WidgetDrawList, WidgetFrame,
@@ -117,26 +117,11 @@ impl ButtonWidget {
     }
 }
 
+widget_chrome!(ButtonWidget, font_metrics);
+
 impl WidgetDefaults for ButtonWidget {
-    fn widget_frame(&mut self) -> &mut WidgetFrame {
-        &mut self.frame
-    }
-
-    fn widget_theme(&mut self) -> &mut Theme {
-        &mut self.theme
-    }
-
-    fn widget_state(&mut self) -> &mut InteractionState {
-        &mut self.state
-    }
-
     fn cancel_activation(&mut self) {
         self.clear_arms();
-    }
-
-    /// Restyle: adopt the fanned theme and request metrics for its font.
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
     }
 }
 
@@ -237,17 +222,7 @@ impl WasmActor for ButtonWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
-            return;
-        }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                content_height: None,
-                intrinsic: self.intrinsic(),
-                items: self.draw_items(),
-                overlay: Vec::new(),
-            });
-        }
+        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic()));
     }
 }
 
