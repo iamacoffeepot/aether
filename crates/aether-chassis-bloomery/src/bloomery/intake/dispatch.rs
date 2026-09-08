@@ -10,7 +10,7 @@ use aether_bloomery::{
 use aether_bloomery_github::{ExecutorError, GithubError};
 use aether_data::wire::to_vec;
 
-use crate::bloomery::executor::{ExecutorPortError, ExecutorShell, LocalExecutorError};
+use crate::bloomery::executor::{ExecutorPort, ExecutorPortError, LocalExecutorError};
 use crate::bloomery::provenance::{ProvenanceRefusal, admit_model_dispatch, gated, journal_refusal};
 use crate::store::{OutstandingOrder, RecordOutcome, StoreBackend};
 
@@ -259,7 +259,9 @@ impl DispatchError {
 /// before an order row exists and before anything reaches a worker, and the
 /// refusal is parked for the reactor to journal as the host fault it is. A future
 /// dispatch site cannot acquire a model lane without passing here, so the gate
-/// cannot be forgotten at a call site.
+/// cannot be forgotten at a call site. The gate is synchronous — it reads this
+/// process's own store — so it decides before the submit is handed out and a
+/// refused dispatch never reaches a worker at all.
 ///
 /// # Errors
 /// [`DispatchError::Provenance`] if the instruction-provenance gate refused
@@ -267,7 +269,7 @@ impl DispatchError {
 /// write faulted (nothing was submitted), or [`DispatchError::Submit`] if the
 /// executor refused the dispatch (the registry row is removed again first).
 pub fn dispatch_and_record(
-    shell: &ExecutorShell,
+    port: &dyn ExecutorPort,
     store: &mut dyn StoreBackend,
     record: &DispatchRecord,
     now_unix_millis: u64,
@@ -279,7 +281,7 @@ pub fn dispatch_and_record(
         return Err(DispatchError::Provenance(refusal));
     }
     record_dispatch_at(store, record, now_unix_millis).map_err(DispatchError::Store)?;
-    shell.submit(&record.to_order()).map_err(|error| {
+    port.submit(&record.to_order()).map_err(|error| {
         // Nothing reached the worker lane, so the row describes a dispatch that
         // does not exist; drop it rather than leave the deadline sweep to expire
         // an order no run was ever started for.

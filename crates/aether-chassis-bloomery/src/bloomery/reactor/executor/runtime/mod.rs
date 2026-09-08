@@ -56,16 +56,16 @@ use aether_bloomery_github::{GitObjectId, candidate_ref_name, member_checkpoint_
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 
 use super::ExecutorReactorCapability;
 use crate::artifacts::{ArtifactsCapabilityState, PutResult, resolve_root};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
-use crate::bloomery::ExecutorShell;
 use crate::bloomery::dispatch_model;
 use crate::bloomery::executor::OutstandingDispatch;
+use crate::bloomery::executor::{ExecutorPort, ExecutorShell, Settled};
 use crate::bloomery::intake::{
     Admission, AdmissionKey, AdmitDecision, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims,
     PendingObservation, UploadedEvidence, admit_uploaded, dispatch_and_record, dispatch_nonce, now_unix_millis,
@@ -83,6 +83,9 @@ use crate::control::ControlCore;
 use crate::store::{
     CANDIDATE_HASH_OCCASION_SEAL, OutstandingOrder, SqliteStore, StoreBackend, StoreConfigError, resolve_config,
 };
+
+mod offload;
+use offload::{AdapterCall, AdapterOffload, PendingPublish};
 
 mod scope;
 use scope::drain_and_dispatch_scope;
@@ -382,7 +385,7 @@ enum TerminationCause {
 /// destroy a lane that finished inside its budget.
 fn expire_overdue_orders(
     stores: Stores<'_>,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     tracked: &mut Vec<TrackedHandle>,
     unobserved: &[Nonce],
     now_unix_millis: u64,
@@ -443,7 +446,7 @@ fn warn_terminated(cause: TerminationCause, record: &DispatchRecord, deadline: u
 fn terminate_live_order(
     store: &mut dyn StoreBackend,
     artifacts: Option<&mut ArtifactsCapabilityState>,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     tracked: &mut Vec<TrackedHandle>,
     order: &OutstandingOrder,
     cause: TerminationCause,
@@ -467,14 +470,21 @@ fn terminate_live_order(
     // that no longer decodes is a reason to leave those running until the
     // process exits. The nonce is a plain column, so the cancel needs none
     // of the decoding below.
-    if let Err(error) = executor.cancel(&WorkHandle::new(nonce.clone())) {
-        tracing::warn!(
-            target: "aether_chassis_bloomery::executor",
-            nonce = %nonce.0,
-            %error,
-            "expired order's cancel failed; leaving it live to retry",
-        );
-        return None;
+    // The offload holds one cancel per nonce (#5564), so this sweep re-asking
+    // every tick is one worker call rather than one probe per poll interval —
+    // and the sweeps behind it keep running while it is out.
+    match executor.cancel(&WorkHandle::new(nonce.clone())) {
+        Settled::InFlight => return None,
+        Settled::Answered(Ok(())) => {}
+        Settled::Answered(Err(error)) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %nonce.0,
+                %error,
+                "expired order's cancel failed; leaving it live to retry",
+            );
+            return None;
+        }
     }
     let Some(record) = DispatchRecord::from_stored(order) else {
         latch_unterminable(tracked, &nonce);
@@ -594,7 +604,7 @@ fn drain_dispatch_topics(
     tracked: &mut Vec<TrackedHandle>,
     backoff: &mut Option<BackoffCursor>,
     store: &mut dyn StoreBackend,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) {
     // Drain + submit the newly-decided dispatches, acking the submitted prefix.
@@ -650,7 +660,7 @@ fn drain_dispatch_topics(
 /// verdict and a lane that is also overdue is charged as a deadline.
 fn expire_silent_orders(
     stores: Stores<'_>,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     tracked: &mut Vec<TrackedHandle>,
     pending: &[PendingObservation],
     unobserved: &[Nonce],
@@ -860,6 +870,10 @@ pub struct ExecutorReactorState {
     correspondence: Option<SharedCorrespondence>,
     // The candidate-ref push seam (ADR-0152); production shells git.
     pusher: Arc<dyn CandidatePush>,
+    // Every blocking adapter call this reactor makes, moved onto workers
+    // (#5564): the tick asks it for an answer and it hands the call out rather
+    // than making it inline.
+    offload: AdapterOffload,
 }
 
 impl ExecutorReactorState {
@@ -896,6 +910,7 @@ impl ExecutorReactorState {
             heartbeat_silence_millis: CoordinatorConfig::default().heartbeat_silence_secs.saturating_mul(1_000),
             correspondence: None,
             pusher: default_candidate_push(true),
+            offload: AdapterOffload::new(),
         }
     }
 
@@ -1224,7 +1239,7 @@ fn member_still_live(
 /// when nothing processed). A decode failure or a cancel fault stops the ack
 /// prefix at the last success, so the entry re-drains — the same policy
 /// `terminate_live_order` applies to a cancel it could not reach.
-fn drain_and_cancel(store: &mut dyn StoreBackend, executor: &ExecutorShell) -> rusqlite::Result<Option<u64>> {
+fn drain_and_cancel(store: &mut dyn StoreBackend, executor: &dyn ExecutorPort) -> rusqlite::Result<Option<u64>> {
     let entries = store.drain_topic(Topic::CancelDispatch)?;
     let mut ack_through = None;
     for entry in entries {
@@ -1239,7 +1254,7 @@ fn drain_and_cancel(store: &mut dyn StoreBackend, executor: &ExecutorShell) -> r
         match cancel_member_orders(store, executor, &payload, entry.sequence) {
             Ok(()) => ack_through = Some(entry.sequence),
             Err(CancelStop::Store(error)) => return Err(error),
-            Err(CancelStop::Unreached) => break,
+            Err(CancelStop::Unreached | CancelStop::InFlight) => break,
         }
     }
     Ok(ack_through)
@@ -1266,11 +1281,18 @@ fn drain_and_cancel(store: &mut dyn StoreBackend, executor: &ExecutorShell) -> r
 /// journal no-op rather than a second fact.
 fn observe_lane_writes(
     store: &mut dyn StoreBackend,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<Vec<Admit>> {
+    // A worker holds the sweep (#5564) — it shells `git` once per live lane, so
+    // it is exactly the kind of stall this handler must not take. Nothing is
+    // observed this turn; the lease facts land on the turn its answer does.
+    let Settled::Answered(observed_lanes) = executor.observe_writes() else {
+        return Ok(Vec::new());
+    };
+
     let mut admits = Vec::new();
-    for observed in executor.observe_writes() {
+    for observed in observed_lanes {
         let Some(order) = store.lookup_order(&observed.nonce.0)? else {
             continue;
         };
@@ -1321,6 +1343,9 @@ enum CancelStop {
     /// The executor could not be reached for one order, so the entry stays
     /// unacked and re-drives rather than leaving a lane burning.
     Unreached,
+    /// A worker holds the cancel (#5564): the entry stays unacked for the same
+    /// reason, but nothing has failed and nothing is warned.
+    InFlight,
 }
 
 /// Cancel and consume every outstanding order naming this bloom and workpiece.
@@ -1333,7 +1358,7 @@ enum CancelStop {
 /// nobody is waiting for.
 fn cancel_member_orders(
     store: &mut dyn StoreBackend,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     payload: &CancelDispatchPayload,
     sequence: u64,
 ) -> Result<(), CancelStop> {
@@ -1347,15 +1372,22 @@ fn cancel_member_orders(
         if !names_member {
             continue;
         }
-        if let Err(error) = executor.cancel(&WorkHandle::new(Nonce(nonce.clone()))) {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::executor",
-                sequence,
-                nonce = %nonce,
-                %error,
-                "withdrawn member's cancel failed; leaving the entry unacked to re-drive",
-            );
-            return Err(CancelStop::Unreached);
+        match executor.cancel(&WorkHandle::new(Nonce(nonce.clone()))) {
+            // A worker holds the kill (#5564). The entry stays unacked exactly
+            // as an unreached one does, but silently: nothing has failed, and
+            // the completion wake re-drives this drain.
+            Settled::InFlight => return Err(CancelStop::InFlight),
+            Settled::Answered(Ok(())) => {}
+            Settled::Answered(Err(error)) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    sequence,
+                    nonce = %nonce,
+                    %error,
+                    "withdrawn member's cancel failed; leaving the entry unacked to re-drive",
+                );
+                return Err(CancelStop::Unreached);
+            }
         }
         store.consume_order(&nonce).map_err(CancelStop::Store)?;
         tracing::info!(
@@ -1396,7 +1428,7 @@ enum DispatchSubmit {
 /// submit the order. The caller owns the ack-prefix / hold / stop policy.
 fn submit_dispatch_entry(
     store: &mut dyn StoreBackend,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     payload: DispatchPayload,
     sequence: u64,
     now_unix_millis: u64,
@@ -1481,7 +1513,7 @@ fn submit_dispatch_entry(
 /// fake-GitHub-backed shell without the mail harness.
 fn drain_and_dispatch(
     store: &mut dyn StoreBackend,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
     let entries = store.drain_topic(Topic::Dispatch)?;
@@ -1625,7 +1657,7 @@ fn compose_aggregate_task(
 
 fn drain_and_dispatch_aggregate(
     store: &mut dyn StoreBackend,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
     let entries = store.drain_topic(Topic::AggregateReview)?;
@@ -1747,7 +1779,7 @@ fn drain_and_dispatch_aggregate(
 /// gets the fold and runs.
 fn drain_and_dispatch_aggregate_verify(
     store: &mut dyn StoreBackend,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
     let entries = store.drain_topic(Topic::AggregateVerify)?;
@@ -1833,7 +1865,7 @@ fn drain_and_dispatch_aggregate_verify(
 /// base axis is the `base` the transformation checks out.
 fn drain_and_dispatch_base_verify(
     store: &mut dyn StoreBackend,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
     let entries = store.drain_topic(Topic::BaseVerify)?;
@@ -2004,7 +2036,7 @@ fn resolve_replay(
 /// — the ordering the integrate correspondence learned the hard way (#3667).
 fn drain_and_redispatch(
     store: &mut dyn StoreBackend,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
     let entries = store.drain_topic(Topic::Redispatch)?;
@@ -2248,22 +2280,24 @@ pub fn candidate_push_at(refuse: bool, repo: impl Into<PathBuf>, remote: impl In
     }
 }
 
-/// Push each admitted capture to its bloom ref (ADR-0152). A passing construct
-/// or refine goes to [`candidate_ref_name`]; a failing construct that still
-/// captured work goes to [`member_checkpoint_ref_name`]. Refine is in the
+/// Name the bloom ref each admitted capture publishes to (ADR-0152). A passing
+/// construct or refine goes to [`candidate_ref_name`]; a failing construct that
+/// still captured work goes to [`member_checkpoint_ref_name`]. Refine is in the
 /// passing arm because a composition weave-repair capture is the head landing
 /// will create its branch from — skipping it leaves that commit local-only and
-/// the land loop 422s on an object the source repository has never seen. Best-effort
-/// with loud warns: a failed push leaves the capture local-only — a downstream
-/// checkout of it will fail visibly and retry through the stage machinery, never
-/// silently run the wrong tree. A failed checkpoint push costs a resume, never
-/// correctness.
-fn push_admitted_candidates(
-    store: &mut dyn StoreBackend,
+/// the land loop 422s on an object the source repository has never seen.
+///
+/// The push itself shells `git` (a force-push to the hosted repo, or a local
+/// authority's `update-ref`), so it does not happen here: the caller queues each
+/// capture on the offload and journals the answer when a worker brings it back
+/// (#5564). Still best-effort — a failed push leaves the capture local-only, a
+/// downstream checkout of it fails visibly and retries through the stage
+/// machinery, and a failed checkpoint push costs a resume, never correctness.
+fn admitted_candidate_pushes(
     admissions: &[Admission],
     correspondence: Option<&SharedCorrespondence>,
-    pusher: &dyn CandidatePush,
-) {
+) -> Vec<PendingPublish> {
+    let mut pending = Vec::new();
     for admission in admissions {
         let (bloom, workpiece, candidate, target_ref, kind) = match &admission.event.fact {
             Fact::AttemptCompleted {
@@ -2287,28 +2321,41 @@ fn push_admitted_candidates(
         let Some(commit) = resolve_capture_commit(correspondence, workpiece, candidate) else {
             continue;
         };
-        let commit_hex = commit.to_hex();
-        match pusher.push(&commit_hex, &target_ref) {
-            Ok(()) => {
-                tracing::info!(
-                    target: "aether_chassis_bloomery::executor",
-                    workpiece = %workpiece.0,
-                    target_ref = %target_ref,
-                    "{kind} capture pushed",
-                );
-                journal_candidate_push(store, bloom, workpiece, &target_ref, &commit_hex, true);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    workpiece = %workpiece.0,
-                    target_ref = %target_ref,
-                    %error,
-                    "{kind} push failed; capture stays local-only",
-                );
-                journal_candidate_push(store, bloom, workpiece, &target_ref, &commit_hex, false);
-            }
+        pending.push(PendingPublish {
+            bloom: BloomId(bloom.0),
+            workpiece: workpiece.clone(),
+            target_ref,
+            commit_hex: commit.to_hex(),
+            kind,
+        });
+    }
+    pending
+}
+
+/// Journal every queued publication a worker has answered, reporting each the
+/// way the inline push used to (#5564): an `info` naming the ref it reached, a
+/// `warn` naming the capture that stayed local-only, and the candidate-hash row
+/// either way.
+fn journal_publications(store: &mut dyn StoreBackend, answered: Vec<(PendingPublish, Result<(), String>)>) {
+    for (capture, result) in answered {
+        let PendingPublish { bloom, workpiece, target_ref, commit_hex, kind } = capture;
+        let published = result.is_ok();
+        match result {
+            Ok(()) => tracing::info!(
+                target: "aether_chassis_bloomery::executor",
+                workpiece = %workpiece.0,
+                target_ref = %target_ref,
+                "{kind} capture pushed",
+            ),
+            Err(error) => tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                workpiece = %workpiece.0,
+                target_ref = %target_ref,
+                %error,
+                "{kind} push failed; capture stays local-only",
+            ),
         }
+        journal_candidate_push(store, &bloom, &workpiece, &target_ref, &commit_hex, published);
     }
 }
 
@@ -2508,15 +2555,19 @@ struct Clocks<'a, Now> {
 /// Production passes [`now_unix_millis`].
 ///
 /// The factored-out network side, unit-testable like [`drain_and_dispatch`].
+///
+/// Returns the admitted facts and the captures ADR-0152 wants published. The
+/// push is a `git` shell-out, so it is the caller's to queue on the offload and
+/// journal when a worker answers (#5564) — this pass names them, it does not
+/// perform them.
 fn pull_and_admit<Now: FnMut() -> u64>(
     stores: Stores<'_>,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     claims: NameEvidenceClaims,
     tracked: &mut Vec<TrackedHandle>,
     clocks: Clocks<'_, Now>,
     correspondence: Option<&SharedCorrespondence>,
-    pusher: &dyn CandidatePush,
-) -> Vec<Admit> {
+) -> (Vec<Admit>, Vec<PendingPublish>) {
     let Clocks { tick: clock, mut now } = clocks;
     let Stores { store, mut artifacts } = stores;
     let mut sink = CollectingSink::default();
@@ -2601,12 +2652,14 @@ fn pull_and_admit<Now: FnMut() -> u64>(
         );
     }
 
-    // Make each admitted passing capture reachable on the hosted repo before the
-    // fact reaches the reducer — the very next tick can dispatch the follow-on
-    // stage to a zero-secret Actions runner that must fetch it (ADR-0152).
-    push_admitted_candidates(store, &sink.0, correspondence, pusher);
+    // Name each admitted passing capture's publication so the caller can queue
+    // it: the follow-on stage can be dispatched to a zero-secret Actions runner
+    // that must fetch it, so it wants to be reachable on the hosted repo as
+    // soon as the push answers (ADR-0152).
+    let publications = admitted_candidate_pushes(&sink.0, correspondence);
 
-    sink.0.into_iter().map(|admission| admission.admit).chain(timed_out).chain(silenced).collect()
+    let admits = sink.0.into_iter().map(|admission| admission.admit).chain(timed_out).chain(silenced).collect();
+    (admits, publications)
 }
 
 /// Admit one scripted lane verdict against this reactor's own stores, returning
@@ -2628,7 +2681,7 @@ fn pull_and_admit<Now: FnMut() -> u64>(
 ///
 /// # What is substituted besides the verdict
 ///
-/// [`pull_and_admit`] ends by calling [`push_admitted_candidates`], which
+/// [`pull_and_admit`] ends by naming each admitted capture's push, which
 /// resolves an admitted capture's `checkout` through the correspondence store
 /// and publishes that commit at [`candidate_ref_name`]. This function does
 /// neither. A scenario's reactor comes up through
@@ -2727,6 +2780,110 @@ fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (Scripted
     }
 }
 
+/// One turn of the reactor's loop: drain + submit, sweep the lanes' writes,
+/// pull + admit, journal what the publisher answered, and hand every call this
+/// turn asked for to a worker.
+///
+/// Shared by the poll wake and the adapter-completion wake (#5564). Every phase
+/// runs on every turn no matter what is out on a worker, which is the whole
+/// point of the offload: a submit waiting on a `git` checkout no longer stops
+/// the withdrawal drain or the deadline sweep behind it. A phase whose adapter
+/// call is still in flight simply contributes nothing to this turn and re-asks,
+/// and the completion wake brings the turn that consumes the answer.
+fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>) {
+    let Some(shell) = state.executor.clone() else {
+        return;
+    };
+    let claims = state.claims;
+    let control_mailbox = state.control_mailbox;
+    let correspondence = state.correspondence.clone();
+
+    // Turn-start clock: every order this turn records takes its deadline from
+    // it, and lease observations use the same instant. Absolute deadlines
+    // sample again after intake. Heartbeat uses each inspect's observation
+    // window rather than turn-start or cycle-end now.
+    let clock = TickClock {
+        now_unix_millis: now_unix_millis(),
+        stale_warn_after: state.stale_warn_after,
+        heartbeat_silence_millis: state.heartbeat_silence_millis,
+    };
+
+    let (admits, publications) = if let Some(store) = state.store.as_mut() {
+        let executor = state.offload.port(&shell);
+        let mut admits = Vec::new();
+
+        // Skip the drain while inside a transient-failure backoff window (#3593) —
+        // paces the re-drive instead of hammering GitHub at the flat poll cadence.
+        let skip_drain = state.backoff.as_ref().is_some_and(|cursor| cursor.retry_after > Instant::now());
+        if !skip_drain {
+            drain_dispatch_topics(&mut state.tracked, &mut state.backoff, store, &executor, clock.now_unix_millis);
+        }
+
+        // Admit the dispatches the instruction-provenance gate refused on this
+        // drain or an earlier one (ADR-0214). Before the pull, so a member the
+        // gate stopped takes its machinery roll on the same turn the refusal
+        // happened rather than a poll interval later. The gate is synchronous —
+        // it reads this process's own store — so a refusal is always this
+        // turn's to admit, never a worker's to bring back.
+        match drain_refusals(store) {
+            Ok(refused) => admits.extend(refused),
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    %error,
+                    "refused-dispatch drain failed; the parked refusals re-drain next turn",
+                );
+            }
+        }
+
+        // Sweep the live construct lanes' working trees and admit what they
+        // have written (ADR-0204). Outside the backoff skip: the backoff paces
+        // a *dispatch* surface that is refusing, and an observation dispatches
+        // nothing — it reads directories this process owns. Before the pull, so
+        // a lane whose evidence lands this same turn has its final write set
+        // leased before the integration that releases it.
+        match observe_lane_writes(store, &executor, clock.now_unix_millis) {
+            Ok(observed) => admits.extend(observed),
+            Err(error) => {
+                tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "lane-write observation failed");
+            }
+        }
+
+        let (pulled, published) = pull_and_admit(
+            Stores { store, artifacts: state.artifacts.as_mut() },
+            &executor,
+            claims,
+            &mut state.tracked,
+            Clocks { tick: &clock, now: now_unix_millis },
+            correspondence.as_ref(),
+        );
+        admits.extend(pulled);
+        (admits, published)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    for admit in admits {
+        // Fire-and-forget: the control actor's on_admit is reliable local mail,
+        // and the reducer's idempotency key dedups a resend, so the settlement
+        // handle is not needed here.
+        let _ = ctx.send_envelope_detached(control_mailbox, Admit::ID, &admit.encode_into_bytes());
+    }
+
+    // The publish side, after the port's borrow ends: queue what this turn
+    // admitted, take what a worker already answered, and journal it.
+    for capture in publications {
+        state.offload.publish(capture);
+    }
+    let answered = state.offload.drain_publications();
+    if let Some(store) = state.store.as_mut() {
+        journal_publications(store, answered);
+    }
+
+    // Last, so it sees everything every phase above asked for.
+    state.offload.start_wanted(ctx, &shell, &state.pusher);
+}
+
 #[runtime]
 impl NativeActor for ExecutorReactorCapability {
     type State = ExecutorReactorState;
@@ -2776,6 +2933,7 @@ impl NativeActor for ExecutorReactorCapability {
                 heartbeat_silence_millis: config.heartbeat_silence_secs.saturating_mul(1_000),
                 correspondence: None,
                 pusher: config.pusher,
+                offload: AdapterOffload::new(),
             });
         };
 
@@ -2856,6 +3014,7 @@ impl NativeActor for ExecutorReactorCapability {
             heartbeat_silence_millis: config.heartbeat_silence_secs.saturating_mul(1_000),
             correspondence,
             pusher: config.pusher,
+            offload: AdapterOffload::new(),
         })
     }
 
@@ -2873,89 +3032,40 @@ impl NativeActor for ExecutorReactorCapability {
     }
 
     /// Poll wake: drain + submit the dispatch topic, then pull + admit matched
-    /// results. The GitHub calls run inline on the dispatcher (the poll cadence
-    /// spaces them); a detached-worker split is a follow-up if latency demands it.
+    /// results.
+    ///
+    /// The poll wake — and only the poll wake — opens a new offload round
+    /// (#5564). That is what still paces the adapter surface: every call runs
+    /// at most once per poll interval, exactly as it did when the tick made
+    /// them inline. Without it each answer's completion wake would re-ask the
+    /// call that just answered, and the reactor would probe the outside world
+    /// as fast as it replies.
     #[handler::single]
     fn on_dispatch_tick(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: DispatchTick) {
-        let Some(executor) = state.executor.clone() else {
-            return;
-        };
-        let claims = state.claims;
-        let control_mailbox = state.control_mailbox;
-        let Some(store) = state.store.as_mut() else {
-            return;
-        };
+        state.offload.open_round();
+        run_dispatch_cycle(state, ctx);
+    }
 
-        // Tick-start clock: every order this tick records takes its deadline
-        // from it, and lease observations use the same instant. Absolute
-        // deadlines sample again after intake. Heartbeat uses each inspect's
-        // observation window rather than tick-start or cycle-end now.
-        let clock = TickClock {
-            now_unix_millis: now_unix_millis(),
-            stale_warn_after: state.stale_warn_after,
-            heartbeat_silence_millis: state.heartbeat_silence_millis,
-        };
-
-        // Skip the drain while inside a transient-failure backoff window (#3593) —
-        // paces the re-drive instead of hammering GitHub at the flat poll cadence.
-        let skip_drain = state.backoff.as_ref().is_some_and(|cursor| cursor.retry_after > Instant::now());
-        if !skip_drain {
-            drain_dispatch_topics(&mut state.tracked, &mut state.backoff, store, &executor, clock.now_unix_millis);
-        }
-
-        // Admit the dispatches the instruction-provenance gate refused on this
-        // drain or an earlier one (ADR-0214). Before the pull, so a member the
-        // gate stopped takes its machinery roll on the same tick the refusal
-        // happened rather than a poll interval later.
-        match drain_refusals(store) {
-            Ok(admits) => {
-                for admit in admits {
-                    let _ = ctx.send_envelope_detached(control_mailbox, Admit::ID, &admit.encode_into_bytes());
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    %error,
-                    "refused-dispatch drain failed; the parked refusals re-drain next tick",
-                );
-            }
-        }
-
-        // Sweep the live construct lanes' working trees and admit what they
-        // have written (ADR-0204). Outside the backoff skip: the backoff paces
-        // a *dispatch* surface that is refusing, and an observation dispatches
-        // nothing — it reads directories this process owns. Before the pull, so
-        // a lane whose evidence lands this same tick has its final write set
-        // leased before the integration that releases it.
-        match observe_lane_writes(store, &executor, clock.now_unix_millis) {
-            Ok(admits) => {
-                for admit in admits {
-                    let _ = ctx.send_envelope_detached(control_mailbox, Admit::ID, &admit.encode_into_bytes());
-                }
-            }
-            Err(error) => {
-                tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "lane-write observation failed");
-            }
-        }
-
-        // Pull matched results and forward each admitted attempt to the control core.
-        let correspondence = state.correspondence.clone();
-        let pusher = Arc::clone(&state.pusher);
-        for admit in pull_and_admit(
-            Stores { store, artifacts: state.artifacts.as_mut() },
-            &executor,
-            claims,
-            &mut state.tracked,
-            Clocks { tick: &clock, now: now_unix_millis },
-            correspondence.as_ref(),
-            pusher.as_ref(),
-        ) {
-            // Fire-and-forget: the control actor's on_admit is reliable local mail,
-            // and the reducer's idempotency key dedups a resend, so the settlement
-            // handle is not needed here.
-            let _ = ctx.send_envelope_detached(control_mailbox, Admit::ID, &admit.encode_into_bytes());
-        }
+    /// A blocking adapter call answered (ADR-0093 / #5564). Run a cycle right
+    /// here, so the answer is consumed at completion rather than waiting out
+    /// the poll interval. The worker has already freed its own slot, so this
+    /// cycle hands it to whatever is left of the round's backlog.
+    ///
+    /// Deliberately *not* a new round: this turn acts on the answer and drains
+    /// the round the poll wake opened, and it cannot re-run a call that round
+    /// has already made.
+    ///
+    /// No reply: the dispatch was started from a timer wake, which is nobody's
+    /// caller. `release_no_reply` is the sanctioned discharge for that (ADR-0109).
+    #[handler(task)]
+    fn on_adapter_settled(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<(), AdapterCall>) {
+        tracing::trace!(
+            target: "aether_chassis_bloomery::executor",
+            call = ?done.context(),
+            "blocking adapter call answered",
+        );
+        done.release_no_reply();
+        run_dispatch_cycle(state, ctx);
     }
 
     /// Admit one scripted lane verdict for an order this reactor really
@@ -2971,7 +3081,7 @@ impl NativeActor for ExecutorReactorCapability {
     /// attempt the coordinator never ordered.
     ///
     /// The verdict is not the only substitution, and the other one is easy to
-    /// forget: [`admit_scripted`] omits [`push_admitted_candidates`], the tail
+    /// forget: [`admit_scripted`] omits [`admitted_candidate_pushes`], the tail
     /// [`pull_and_admit`] runs, so the ADR-0152 candidate push does not happen
     /// on this path and the fixture plants the candidate ref itself. See
     /// [`admit_scripted`] for what that leaves uncovered.
