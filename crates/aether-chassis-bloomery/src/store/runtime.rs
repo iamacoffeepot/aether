@@ -1908,11 +1908,12 @@ fn recorded_from_column(value: Option<i64>) -> Option<u64> {
 /// An [`OutstandingOrder`]'s columns as positional parameters matching
 /// [`ORDER_COLUMNS`], for the two tables that insert one. The deadline is
 /// clamped by the caller into `deadline`, which the array borrows; `lifecycle`
-/// is the column spelling of [`OutstandingOrder::lifecycle`].
+/// is the column spelling of [`OutstandingOrder::lifecycle`], already a
+/// `&dyn ToSql` so the unsized `str` column does not have to be borrowed here.
 fn order_params<'a>(
     order: &'a OutstandingOrder,
     deadline: &'a i64,
-    lifecycle: &'a str,
+    lifecycle: &'a dyn rusqlite::ToSql,
 ) -> [&'a dyn rusqlite::ToSql; 12] {
     [
         &order.nonce,
@@ -1926,7 +1927,7 @@ fn order_params<'a>(
         &order.configs,
         &order.profile,
         deadline,
-        &lifecycle,
+        lifecycle,
     ]
 }
 
@@ -1942,7 +1943,7 @@ impl StoreBackend for SqliteStore {
                 "INSERT OR IGNORE INTO outstanding_orders ({ORDER_COLUMNS}) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
             ),
-            order_params(order, &deadline, lifecycle).as_slice(),
+            order_params(order, &deadline, &lifecycle).as_slice(),
         )?;
         // The owner row outlives the outstanding row: consume deletes the
         // latter so intake can refuse a replayed nonce, but the janitor still
@@ -2012,7 +2013,7 @@ impl StoreBackend for SqliteStore {
                 "INSERT OR REPLACE INTO parked_question (question, {ORDER_COLUMNS}) \
                  VALUES (?13, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
             ),
-            [order_params(order, &deadline, lifecycle).as_slice(), &[&question as &dyn rusqlite::ToSql]]
+            [order_params(order, &deadline, &lifecycle).as_slice(), &[&question as &dyn rusqlite::ToSql]]
                 .concat()
                 .as_slice(),
         )?;
