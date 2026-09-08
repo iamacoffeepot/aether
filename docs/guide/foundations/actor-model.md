@@ -308,6 +308,42 @@ no routable source (session / broadcast mail) drops the emission with a warning.
 The `#[actor]` macro reads `K` off the `Multi<K>` marker, so
 `describe_component` reports the real `ReplyContract::Multi(K)` element kind.
 
+### Helpers that only send
+
+The class marker rides on the context type — `WasmCtx<'_>` is
+`WasmCtx<'_, Single>`, a manual handler holds `WasmCtx<'_, Manual>`, a multi
+handler `WasmCtx<'_, Multi<K>>` — which is what makes a stray `ctx.reply` in a
+single handler a compile error. One call deeper it buys nothing: a helper you
+factor out of a handler to *send* something never touches the reply channel,
+yet pinning one class makes it uncallable from the others and staying generic
+means carrying an `M: ReplyMode` parameter it doesn't read. `ctx.sends()` hands
+out `Sends<'_>` — the same addressing and outbound-mail verbs (`send`,
+`send_to`, `actor`, `resolve_actor`, `peer`, the detached family) with the
+marker dropped — so the helper takes `&mut Sends<'_>` and every handler class
+can call it:
+
+```rust
+fn announce(sends: &mut Sends<'_>, frame: &Frame) {
+    sends.actor::<RenderCapability>().send(frame);
+}
+
+#[handler::single]
+fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _t: Tick) {
+    announce(&mut ctx.sends(), &self.frame);        // Single
+}
+
+#[handler::manual]
+fn on_redraw(&mut self, ctx: &mut WasmCtx<'_, Manual>, _r: Redraw) {
+    announce(&mut ctx.sends(), &self.frame);        // Manual — same helper
+    ctx.reply(&Acknowledged);                       // reply stays on the ctx
+}
+```
+
+`reply` / `reply_to` / `emit` — and `send_with_context`, whose stashed context
+is recovered on the reply — stay on `WasmCtx<'_, M>`, so a helper that needs
+those still states which class it belongs to. That's the line: the reply class
+is load-bearing exactly where the reply is.
+
 ## Sharing handlers across a family
 
 A family of similar actors — the widgets in a set, the per-platform runtimes of
