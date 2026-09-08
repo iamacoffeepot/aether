@@ -205,11 +205,11 @@ pub(super) struct RepairPublication {
 /// One repair held across its admit: the reply obligation and the publication
 /// owed on an accepted outcome.
 ///
-/// The third multi-hop shape, and the only one whose second hop is a *host*
-/// effect rather than another mail. It is held for the same reason the others
-/// are — the answer is not the next reply — and, unlike them, because the effect
-/// is destructive: the ref it moves is the live address a running member's
-/// checkout resolves, so it must not be spent on a request the reducer refuses.
+/// The only multi-hop shape here whose second hop is a *host* effect rather than
+/// another mail. It is held for the same reason its siblings are — the answer is
+/// not the next reply — and, unlike them, because the effect is destructive: the
+/// ref it moves is the live address a running member's checkout resolves, so it
+/// must not be spent on a request the reducer refuses.
 #[cfg(feature = "github")]
 pub(super) struct PendingRepairPush {
     /// The held HTTP reply obligation.
