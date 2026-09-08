@@ -6,7 +6,7 @@ use crate::args::{ActorCostArgs, ActorCostResponse, ActorCostRow, ActorLogEntry,
 
 use super::Mcp;
 use super::envelope::engine_envelope_by_id;
-use super::ids::{parse_engine_id, parse_kind_id, static_kind_name};
+use super::ids::{parse_kind_id, static_kind_name};
 use super::render::{internal, internal_msg, json};
 
 /// Issue 963: render an `actor_logs` `LogTailResult::Err` into a
@@ -14,8 +14,8 @@ use super::render::{internal, internal_msg, json};
 /// unregistered-mailbox query reads as "that mailbox doesn't exist"
 /// rather than a bare relayed substrate string. Factored out so the
 /// formatting is unit-testable without standing up a live engine.
-pub(super) fn actor_logs_err_message(mailbox_name: &str, error: &str) -> String {
-    format!("actor_logs: mailbox \"{mailbox_name}\" — {error}")
+pub(super) fn actor_logs_err_message(address: &str, error: &str) -> String {
+    format!("actor_logs: mailbox \"{address}\" — {error}")
 }
 
 /// Map ADR-0023 §4's level string to the `0..=4` byte the
@@ -52,26 +52,27 @@ pub(super) fn level_to_str(level: u8) -> &'static str {
 }
 
 pub(super) async fn actor_logs(mcp: &Mcp, args: ActorLogsArgs) -> Result<String, McpError> {
-    let engine = parse_engine_id(&args.engine_id)?;
-    let engine_id_str = args.engine_id.clone();
-    let mailbox_name = args.mailbox_name.clone();
+    let (engine, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
+    let address = args.address.clone();
     let min_level = match args.level.as_deref() {
         Some(s) => Some(parse_level(s)?),
         None => None,
     };
     let request =
         aether_kinds::LogTail { max: args.max.unwrap_or(0), min_level, since: args.since, contains: args.contains };
-    let (mailbox_id, _) = mcp.resolve_engine_address(engine, &args.mailbox_name).await.map_err(internal)?;
+    let (mailbox_id, _) = mcp.resolve_engine_address(engine, &args.address).await.map_err(internal)?;
     let reply = mcp.session.call_one(engine_envelope_by_id(engine, mailbox_id, &request)).await.map_err(internal)?;
     match aether_kinds::LogTailResult::decode_from_bytes(&reply.payload) {
         Some(aether_kinds::LogTailResult::Ok { entries, next_since, truncated_before }) => {
             let response = ActorLogsResponse {
-                engine_id: engine_id_str,
-                mailbox_name,
+                engine_id,
+                address,
                 entries: entries
                     .into_iter()
                     .map(|e| ActorLogEntry {
-                        timestamp_unix_ms: e.timestamp_unix_ms,
+                        // The wire kind still spells this `timestamp_unix_ms`;
+                        // the tool boundary spells units out (issue 5715).
+                        timestamp_unix_millis: e.timestamp_unix_ms,
                         level: level_to_str(e.level).to_owned(),
                         target: e.target,
                         message: e.message,
@@ -90,16 +91,15 @@ pub(super) async fn actor_logs(mcp: &Mcp, args: ActorLogsArgs) -> Result<String,
         // "that mailbox doesn't exist" rather than a bare relayed
         // substrate string.
         Some(aether_kinds::LogTailResult::Err { error }) => {
-            Err(internal_msg(&actor_logs_err_message(&mailbox_name, &error)))
+            Err(internal_msg(&actor_logs_err_message(&args.address, &error)))
         }
         None => Err(internal_msg("undecodable LogTailResult")),
     }
 }
 
 pub(super) async fn actor_cost(mcp: &Mcp, args: ActorCostArgs) -> Result<String, McpError> {
-    let engine = parse_engine_id(&args.engine_id)?;
-    let engine_id_str = args.engine_id.clone();
-    let mailbox_name = args.mailbox_name.clone();
+    let (engine, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
+    let address = args.address.clone();
     // Optional kind filter: accept a tagged `knd-…` id or a raw
     // decimal `u64`, matching the rest of the MCP id surface.
     let kind = match args.kind_id.as_deref() {
@@ -107,13 +107,13 @@ pub(super) async fn actor_cost(mcp: &Mcp, args: ActorCostArgs) -> Result<String,
         None => None,
     };
     let request = CostTail { kind };
-    let (mailbox_id, _) = mcp.resolve_engine_address(engine, &args.mailbox_name).await.map_err(internal)?;
+    let (mailbox_id, _) = mcp.resolve_engine_address(engine, &args.address).await.map_err(internal)?;
     let reply = mcp.session.call_one(engine_envelope_by_id(engine, mailbox_id, &request)).await.map_err(internal)?;
     match CostTailResult::decode_from_bytes(&reply.payload) {
         Some(CostTailResult::Ok { rows }) => {
             let response = ActorCostResponse {
-                engine_id: engine_id_str,
-                mailbox_name,
+                engine_id,
+                address,
                 rows: rows
                     .into_iter()
                     .map(|r| ActorCostRow {
@@ -135,7 +135,7 @@ pub(super) async fn actor_cost(mcp: &Mcp, args: ActorCostArgs) -> Result<String,
             };
             json(&response)
         }
-        Some(CostTailResult::Err { error }) => Err(internal_msg(&format!("actor_cost: {mailbox_name} — {error}"))),
+        Some(CostTailResult::Err { error }) => Err(internal_msg(&format!("actor_cost: {} — {error}", args.address))),
         None => Err(internal_msg("undecodable CostTailResult")),
     }
 }

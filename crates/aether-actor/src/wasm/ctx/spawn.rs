@@ -5,7 +5,7 @@
 
 use aether_data::{Kind, MailboxId, mailbox_id_from_name};
 
-use super::{NO_INBOUND_SOURCE, WasmCtx, WasmInitCtx};
+use super::{InlineChild, NO_INBOUND_SOURCE, WasmCtx, WasmInitCtx};
 use crate::model::ctx::reply_mode::{Manual, ReplyMode};
 use crate::model::{Addressable, ChildOf, Instanced, NamespaceError, Subname, validate_namespace_segment};
 use crate::wasm::bridge::mail;
@@ -150,7 +150,17 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// can exist beneath distinct parents in one component cluster. The same
     /// executing id is recorded as the child's logical parent for relative
     /// addressing and replacement reconstruction.
-    pub fn spawn_inline_child<P, C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<MailboxId, SpawnError>
+    ///
+    /// What comes back is an [`InlineChild<C>`] rather than a bare
+    /// [`MailboxId`]: the call already names `C`, so the handle keeps it and
+    /// [`InlineChild::send`] checks every subsequent send against `C`'s
+    /// handler set. [`InlineChild::id`] reads the alias out for a by-id
+    /// surface (`despawn_inline_child`, a slot table keyed on `MailboxId`).
+    pub fn spawn_inline_child<P, C>(
+        &self,
+        subname: Subname<'_>,
+        config: &C::Config,
+    ) -> Result<InlineChild<C>, SpawnError>
     where
         P: WasmActor,
         // `ErasedWasmActor` is the boxing seam every `#[actor]` type emits
@@ -181,6 +191,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         // The executing actor is both the scoped host fold seed and the
         // logical parent recorded for relative addressing and reconstruction.
         install_inline_child::<C>(self.inline, alias, type_tag, full_subname, is_counter, self.mailbox, bytes, owned)
+            .map(InlineChild::new)
     }
 
     fn validate_spawn_parent<P: WasmActor>(&self) -> Result<ActorTypeTag, SpawnError> {
@@ -242,8 +253,8 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// ADR-0114: tear down an **inline child** spawned by
     /// [`Self::spawn_inline_child`]. Drops the child from this ctx's
     /// per-component [`Registry`] (running the child's `Drop`), so it
-    /// stops handling mail. `child` is the alias [`MailboxId`] that
-    /// `spawn_inline_child` returned (the registry key, the natural
+    /// stops handling mail. `child` is the alias [`MailboxId`] the spawn's
+    /// [`InlineChild::id`] reads out (the registry key, the natural
     /// handle). Returns `true` if a resident child was removed, `false` if
     /// the alias named no inline child — idempotent, so despawning an
     /// absent or already-gone alias is a clean `false`, not an error.
