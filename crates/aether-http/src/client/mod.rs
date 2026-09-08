@@ -119,8 +119,8 @@ pub struct HttpCapability;
 // off disk, lifts the `NAMESPACE` + `#[handler]` kinds out of the
 // `#[runtime] impl NativeActor` there, and emits the always-on identity
 // markers (`Addressable`, `HandlesKind<Fetch>`, the name-inventory entry)
-// against this struct. The handler kind those markers name (`Fetch`) is
-// imported at file root above.
+// against this struct, carrying that module's own imports so `Fetch` resolves
+// there.
 use aether_actor::actor;
 
 // The runtime half — the whole `aether_substrate`- / `ureq`-typed surface
