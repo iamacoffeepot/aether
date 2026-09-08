@@ -17,8 +17,7 @@ use aether_fs::FsMailboxExt;
 /// Context stored under each `aether.fs.read` request correlation while an
 /// audio load is in flight. One enum covers the shared `ReadResult` handler's
 /// track, instrument, and per-sample paths.
-#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize)]
-#[kind(name = "aether.audio.load_context")]
+#[aether_data::kind(name = "aether.audio.load_context")]
 pub enum AudioLoadContext {
     /// A `play_track` WAV read; carries the original reply route plus the
     /// synth-side track key and playback parameters.
