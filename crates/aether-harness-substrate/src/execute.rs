@@ -294,8 +294,8 @@ impl HarnessOp {
     /// [`HarnessActor::address`] or written out: an `#[actor(instanced)]`
     /// component resolves through `EmbeddedMany` rather than [`Embedded`],
     /// and a kind a wasm actor adopts from a `#[handler_set]` carries no
-    /// `HandlesKind` marker on that transport (ADR-0169), so [`Self::send`]
-    /// cannot compile-check it.
+    /// `HandlesKind` marker on that transport (ADR-0169), so
+    /// [`HarnessActor::send`] cannot compile-check it.
     ///
     /// A root capability is not reachable this way — it has no embed scope
     /// to render, so the address would be a live-nowhere string:
