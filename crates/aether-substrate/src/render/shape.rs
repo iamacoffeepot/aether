@@ -1,4 +1,4 @@
-//! Screen-space shape overlay pipeline (ADR-0213). A third pipeline in
+//! Shape overlay pipeline (ADR-0213). A third pipeline in
 //! the overlay pass beside the textured and premultiplied quad
 //! pipelines: each shape is one axis-aligned box — with a corner radius,
 //! an optional fill, an optional inside stroke, and an optional shadow —
@@ -7,6 +7,12 @@
 //! same painter position and the same scissor as any other overlay draw:
 //! it is one more [`super::quad::OverlayDraw`] source, not a pass and not
 //! a layer.
+//!
+//! A batch draws in either of the quad overlay's two projections: `Screen`
+//! reads the box's coordinates as absolute window pixels, `World` reads
+//! them as pixel offsets from an anchor projected through `view_proj`. The
+//! two share one vertex layout and one shader, differing only in the
+//! `is_screen` flag each vertex carries.
 //!
 //! The vocabulary is fixed and substrate-owned: callers supply six
 //! numbers and three colours, never WGSL, so the overlay lane stays a

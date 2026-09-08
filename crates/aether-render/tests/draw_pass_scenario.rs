@@ -29,10 +29,10 @@ use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::QuadBlend;
 use aether_render::{
-    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawPass, DrawSolidQuads,
-    DrawTexturedQuads, GeometrySlotSpec, OutputSlot, PassLoad, PassStage, ProgramDispatch, ProgramPass,
-    ProgramRegister, ProgramRegisterResult, SlotExtent, SlotSpec, SolidQuad, TextureFormat, TextureSampling,
-    TextureUsage, TexturedQuad, VertexAttribute, VertexFormat,
+    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawPass, DrawShapes, DrawTexturedQuads,
+    GeometrySlotSpec, OutputSlot, PassLoad, PassStage, ProgramDispatch, ProgramPass, ProgramRegister,
+    ProgramRegisterResult, Shape, SlotExtent, SlotSpec, TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
+    VertexAttribute, VertexFormat,
 };
 
 /// Skip (or panic under `AETHER_REQUIRE_RUNTIME`) when no wgpu adapter
@@ -214,13 +214,22 @@ fn output_overlay(texture_id: u32) -> DrawTexturedQuads {
     }
 }
 
-/// A small white quad in the frame's top-left corner: proof that the
+/// A small white square in the frame's top-left corner: proof that the
 /// frame's own passes ran when a scenario expects a dispatch to drop.
-fn control_quad() -> DrawSolidQuads {
-    DrawSolidQuads {
+fn control_quad() -> DrawShapes {
+    DrawShapes {
         space: QuadSpace::Screen,
         clip: None,
-        quads: vec![SolidQuad { x: 2.0, y: 2.0, width: 5.0, height: 5.0, color: Rgba::new(1.0, 1.0, 1.0, 1.0) }],
+        shapes: vec![Shape {
+            x: 2.0,
+            y: 2.0,
+            width: 5.0,
+            height: 5.0,
+            corner_radius: 0.0,
+            fill: Some(Rgba::new(1.0, 1.0, 1.0, 1.0)),
+            stroke: None,
+            shadow: None,
+        }],
     }
 }
 

@@ -54,8 +54,7 @@ the `RenderCapability` actor. It handles these payload kinds:
 | `aether.render.update_texture` | `{ texture_id, x, y, width, height, pixels }` | overwrite a sub-rect of a texture (atlas growth) |
 | `aether.render.destroy_texture` | `{ texture_id }` | release a registered texture; fire-and-forget |
 | `aether.render.draw_textured_quads` | `{ texture_id, space, clip, blend, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
-| `aether.render.draw_solid_quads` | `{ space, clip, quads }` | per-tick flat-colored alpha-blended rects; accumulates into the frame |
-| `aether.render.draw_screen_triangles` | `{ clip, triangles }` | per-tick window-pixel triangles at any orientation; accumulates into the frame |
+| `aether.render.draw_screen_triangles` | `{ space, clip, triangles }` | per-tick pixel-space triangles at any orientation; accumulates into the frame |
 | `aether.render.draw_shapes` | `{ space, clip, shapes }` | per-tick rounded, stroked, shadowed boxes evaluated as a distance field; accumulates into the frame |
 | `aether.render.material.textured` | `{ texture_id, blend, rects }` | per-tick depth-tested world-space textured rects |
 | `aether.render.material.coverage` | `{ texture_id, rects }` | per-tick depth-tested world-space coverage bands from an R8 texture |
@@ -90,6 +89,14 @@ time and squares its coverage, so a half-covered texel arrives at a quarter
 strength. `material.textured` carries the same field with the same meaning. An
 opaque source is unaffected either way, which is why the distinction only
 surfaces once a program's output is partially transparent.
+
+The field's presence follows one rule: `blend` appears exactly on the verbs
+that composite a caller-supplied *image* — `draw_textured_quads` and
+`material.textured` — because only the caller that produced those texels knows
+whether they were already scaled by their coverage. A verb whose colours the
+substrate rasterizes itself — `draw_shapes`, `draw_screen_triangles`,
+`material.coverage` — carries no `blend`: the fragment stage knows what it
+wrote, so there is nothing for the caller to declare.
 
 The create carries two role knobs (ADR-0170). `sampling` selects `Linear`
 filtering for color content or `Nearest` for label planes whose texel values
@@ -134,23 +141,25 @@ after the world pass, so they always land on top. The accumulate-per-frame
 contract matches `draw_triangle`: resend the batch every frame it should appear.
 The batch's `space` selects the projection — `Screen` rects are window pixels
 drawn under an ortho derived from the surface size; `World` anchors the quad in
-the scene through the camera's `view_proj`. `Screen`-space quads draw today; the
-`World` projection rides the same vocabulary and lands with the world-anchor
-path. Sprites, HUD images, and the `aether.text` capability all compose this
-surface.
+the scene through the camera's `view_proj` and reads its coordinates as pixel
+offsets from the projected anchor. All three overlay verbs carry the same
+field with the same meaning. Sprites, HUD images, and the `aether.text`
+capability all compose this surface.
 
 **Screen triangles are the overlay's free-form primitive.**
-`draw_screen_triangles` takes triangles whose three corners are window pixels
-— top-left origin, y down, one linear RGBA per corner interpolated across the
-face — and records them in the same overlay pass, through the same pipeline, in
-submission order with the quad batches. Either winding draws; the batch carries
-the same optional `clip` scissor. It exists because 2D content built from
+`draw_screen_triangles` takes triangles whose three corners are pixels — one
+linear RGBA per corner interpolated across the face — and records them in the
+same overlay pass, through the same pipeline, in submission order with the quad
+batches. Either winding draws; the batch carries the same optional `clip`
+scissor and the same `space`, so a gauge or a graph edge can hang off a
+world-space anchor exactly as a label does. It exists because 2D content built from
 rotated geometry had no aspect-correct path: a quad is `{x, y, width, height}`
 with no orientation, and `draw_triangle` is world-space, so with no camera
 loaded its identity `view_proj` spans `-1..=1` on both axes and stretches
-everything by the window's aspect ratio. Pixel coordinates are absolute, so a
-ribbon at an angle, a gauge, or a graph edge holds its proportions on any
-window without a camera actor publishing a projection for flat content.
+everything by the window's aspect ratio. Under `Screen` the pixel coordinates
+are absolute, so a ribbon at an angle, a gauge, or a graph edge holds its
+proportions on any window without a camera actor publishing a projection for
+flat content.
 
 **Shapes are the overlay's distance-field primitive**
 ([ADR-0213](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0213-gpu-shapes-for-the-widget-kit.md)).
@@ -167,7 +176,10 @@ same painter position and the same `clip` scissor as any other overlay batch,
 through its own pipeline: one more overlay draw, not a pass and not a layer.
 The vocabulary is fixed and substrate-owned — callers supply parameters, never
 WGSL — so the overlay lane stays a closed contract the widget kit's hole
-cutting can reason about.
+cutting can reason about. A `corner_radius` of `0.0` with a `fill` alone is a
+flat rectangle, which is why there is no separate flat-quad verb: the overlay's
+three verbs are one per fragment stage — sample a texture, evaluate a distance
+field, rasterize caller geometry.
 
 **World-space materials are textured and depth-tested** ([ADR-0140](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0140-render-material-pass.md)).
 The material pass records after the triangle pass and before the screen overlay,
@@ -233,7 +245,7 @@ guest-visible wire change.
 **The production headless chassis absorbs draw and camera mail.** It composes
 `HeadlessRenderCapability` on the same `aether.render` mailbox:
 `DrawTriangle`, `aether.view_projection`, `update_texture`, `destroy_texture`,
-`draw_textured_quads`, `draw_solid_quads`, `draw_screen_triangles`, `draw_shapes`, and
+`draw_textured_quads`, `draw_screen_triangles`, `draw_shapes`, and
 `aether.render.material.*` no-op (a desktop-built
 component mailing them every frame doesn't warn-storm), and
 `aether.render.capture_frame` and `create_texture` reply `Err` so a request

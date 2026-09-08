@@ -711,8 +711,7 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 WidgetDrawItem::Text { text, .. } => Some(text.as_str()),
-                WidgetDrawItem::Quad { .. }
-                | WidgetDrawItem::TexturedQuad { .. }
+                WidgetDrawItem::TexturedQuad { .. }
                 | WidgetDrawItem::Shape { .. }
                 | WidgetDrawItem::Triangle { .. } => None,
             })

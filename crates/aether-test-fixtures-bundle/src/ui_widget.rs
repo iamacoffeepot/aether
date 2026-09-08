@@ -11,7 +11,7 @@
 //! Its [`UiWidgetConfig`] selects the per-frame profile:
 //!
 //! - `redraw_each_tick = true` (naive) — rebuild and re-emit the full
-//!   `DrawSolidQuads` batch across the boundary every tick. This is the
+//!   `DrawShapes` batch across the boundary every tick. This is the
 //!   cost host-cached draw replay exists to remove.
 //! - `redraw_each_tick = false` (cached) — early-return on tick, emitting
 //!   nothing. This is the stable-frame floor: the irreducible boundary
@@ -28,7 +28,7 @@ use aether_kinds::{QuadSpace, Tick};
 use aether_lifecycle::LifecycleCapability;
 use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Rgba;
-use aether_render::{DrawSolidQuads, RenderCapability, SolidQuad};
+use aether_render::{DrawShapes, RenderCapability, Shape};
 use aether_test_fixtures_kinds::UiWidgetConfig;
 
 pub struct UiWidget {
@@ -54,7 +54,7 @@ impl WasmActor for UiWidget {
     /// One widget's per-frame work. In the cached profile the draw is
     /// unchanged, so the widget re-emits nothing and returns immediately —
     /// the measured cost is then the bare boundary crossing + dispatch. In
-    /// the naive profile it rebuilds the `DrawSolidQuads` batch and sends
+    /// the naive profile it rebuilds the `DrawShapes` batch and sends
     /// it across the boundary every frame — the measured cost adds the
     /// batch build + mail encode + send that host-cached replay removes.
     #[handler::single]
@@ -62,10 +62,19 @@ impl WasmActor for UiWidget {
         if !self.config.redraw_each_tick {
             return;
         }
-        let mut quads = Vec::new();
+        let mut shapes = Vec::new();
         for _ in 0..self.config.quad_count {
-            quads.push(SolidQuad { x: 0.0, y: 0.0, width: 4.0, height: 4.0, color: Rgba::new(0.2, 0.4, 0.8, 1.0) });
+            shapes.push(Shape {
+                x: 0.0,
+                y: 0.0,
+                width: 4.0,
+                height: 4.0,
+                corner_radius: 0.0,
+                fill: Some(Rgba::new(0.2, 0.4, 0.8, 1.0)),
+                stroke: None,
+                shadow: None,
+            });
         }
-        ctx.actor::<RenderCapability>().send(&DrawSolidQuads { space: QuadSpace::Screen, clip: None, quads });
+        ctx.actor::<RenderCapability>().send(&DrawShapes { space: QuadSpace::Screen, clip: None, shapes });
     }
 }

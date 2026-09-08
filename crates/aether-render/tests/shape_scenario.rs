@@ -1,6 +1,7 @@
 //! `draw_shapes` pixel scenarios (ADR-0213): the rounded-box distance
 //! field the overlay pass evaluates — radius, stroke, shadow, the circle
-//! at full radius, and the per-batch scissor — each read back from an
+//! at full radius, the per-batch scissor, and the world-anchored
+//! projection — each read back from an
 //! in-process `SubstrateHarness` capture. Skipped when no wgpu adapter is
 //! available; `AETHER_REQUIRE_RUNTIME=1` (CI) makes that skip a panic.
 
@@ -15,7 +16,7 @@ use aether_harness_substrate_capture::{
     RenderHarnessBuilderExt, RenderHarnessExt,
     test_helpers::{envelope, has_wgpu_adapter, pixel_is_lit, rgba_at},
 };
-use aether_kinds::{ClipRect, QuadSpace};
+use aether_kinds::{ClipRect, QuadScale, QuadSpace};
 use aether_math::Rgba;
 use aether_render::{DrawShapes, Shape, ShapeShadow, ShapeStroke};
 
@@ -193,4 +194,43 @@ fn a_shape_batch_is_bounded_by_its_clip() {
     assert_eq!(snapshot[0].shapes[0].corner_radius, 4.0);
     assert_eq!(snapshot[1].clip, None);
     assert_eq!(snapshot[1].shapes[0].x, 44.0);
+}
+
+/// A `World` shape hangs off the point its anchor projects to, not off the
+/// frame's origin: the box's pixel coordinates are offsets from the
+/// projected anchor, so with the default identity `view_proj` an anchor at
+/// clip `(0.5, 0.5)` puts the box three quarters across and one quarter
+/// down the frame. The named bugs: a World batch that fell through to the
+/// screen path would draw the box at its raw pixel coordinates (here,
+/// off-frame entirely); one that projected the anchor but dropped it would
+/// centre the box on the frame instead.
+#[test]
+fn a_world_shape_lands_where_its_anchor_projects() {
+    if !require_wgpu() {
+        return;
+    }
+    let (frame_width, frame_height) = (64u32, 48u32);
+    let mut harness = SubstrateHarness::builder().size(frame_width, frame_height).with_render().build().expect("boot");
+    let space = QuadSpace::World { anchor: [0.5, 0.5, 0.0], scale: QuadScale::Pixels };
+    let draw = envelope(
+        "aether.render",
+        &DrawShapes { space: space.clone(), clip: None, shapes: vec![box_shape(-8.0, -6.0, 16.0, 12.0, 3.0)] },
+    );
+
+    let captured = harness
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![draw], vec![]))])
+        .expect("capture a world-anchored shape");
+    let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode world shape png");
+    let bg = background_top_left(&img);
+
+    // Anchor clip (0.5, 0.5) maps to pixel (48, 12) on this frame, and the
+    // box is centred on it by its own negative offsets.
+    assert!(pixel_is_lit(&img, 48, 12, bg, TOLERANCE), "the box is painted on its projected anchor");
+    assert!(pixel_is_lit(&img, 41, 12, bg, TOLERANCE), "and reaches its left edge");
+    assert!(!pixel_is_lit(&img, 58, 12, bg, TOLERANCE), "and stops at its right edge");
+    assert!(!pixel_is_lit(&img, 32, 24, bg, TOLERANCE), "the frame's centre is not where the anchor sent it");
+
+    let snapshot = harness.committed_shape_snapshot();
+    assert_eq!(snapshot.len(), 1, "the world batch was recorded; snapshot: {snapshot:?}");
+    assert_eq!(snapshot[0].space, space, "and kept the projection it was sent under");
 }

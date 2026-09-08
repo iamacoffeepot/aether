@@ -120,8 +120,8 @@ use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Vec2;
 use aether_render::QuadBlend;
 use aether_render::{
-    DrawScreenTriangles, DrawShapes, DrawSolidQuads, DrawTexturedQuads, RenderCapability, ScreenTriangle, Shape,
-    SolidQuad, TexturedQuad as RenderTexturedQuad,
+    DrawScreenTriangles, DrawShapes, DrawTexturedQuads, RenderCapability, ScreenTriangle, Shape,
+    TexturedQuad as RenderTexturedQuad,
 };
 use aether_text::{DrawText, DrawTextBatch, TextCapability};
 
@@ -333,7 +333,6 @@ impl PreparedClip {
 
 #[derive(Debug, PartialEq)]
 enum DirectRun {
-    Solid { clip: PreparedClip, quads: Vec<SolidQuad> },
     Textured { texture_id: u32, clip: PreparedClip, quads: Vec<RenderTexturedQuad> },
     Shapes { clip: PreparedClip, shapes: Vec<Shape> },
     Triangles { clip: PreparedClip, triangles: Vec<ScreenTriangle> },
@@ -382,19 +381,6 @@ fn direct_runs(items: &[WidgetDrawItem]) -> Vec<DirectRun> {
                     triangles.push(triangle);
                 } else {
                     runs.push(DirectRun::Triangles { clip, triangles: vec![triangle] });
-                }
-            }
-            WidgetDrawItem::Quad { x, y, width, height, color, .. } => {
-                let Some(clip) = PreparedClip::for_item(item) else {
-                    continue;
-                };
-                let quad = SolidQuad { x: *x, y: *y, width: *width, height: *height, color: *color };
-                if let Some(DirectRun::Solid { clip: run_clip, quads }) = runs.last_mut()
-                    && *run_clip == clip
-                {
-                    quads.push(quad);
-                } else {
-                    runs.push(DirectRun::Solid { clip, quads: vec![quad] });
                 }
             }
             WidgetDrawItem::TexturedQuad { texture_id, x, y, width, height, u0, v0, u1, v1, tint, .. } => {
@@ -544,13 +530,13 @@ fn glyph_box(x: f32, y: f32, text: &str, size_pixels: f32) -> WidgetClipRect {
 /// holes that reach the run's own line take part ([`LaterFills::cut`]); a clip
 /// is a scissor bound and is routinely much larger than the glyphs inside it.
 ///
-/// [`WidgetDrawItem::covered_rect`] is what joins the hole set: a solid `Quad`,
-/// or a `Shape`'s fill box, with alpha exactly `1.0`, after geometry ∩ clip. A
-/// merely drawn fill — transparent or partial-alpha, out-of-range or
-/// non-finite alpha, a shape's shadow or stroke without a fill, or a textured
-/// quad — still goes out on the render hop and does not subtract text.
-/// Preserving glyphs under those draws is not true translucent text/quad
-/// interleaving; the split render/text pipeline remains.
+/// [`WidgetDrawItem::covered_rect`] is what joins the hole set: a `Shape`'s
+/// fill box, with alpha exactly `1.0`, after geometry ∩ clip. A merely drawn
+/// fill — transparent or partial-alpha, out-of-range or non-finite alpha, a
+/// shape's shadow or stroke without a fill, or a textured quad — still goes
+/// out on the render hop and does not subtract text. Preserving glyphs under
+/// those draws is not true translucent text/quad interleaving; the split
+/// render/text pipeline remains.
 ///
 /// The subtraction is **positional**, which is what makes a plate able to hold
 /// children *and* a control on that plate able to open over its own siblings.
@@ -639,13 +625,6 @@ pub fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
 fn emit_layer(ctx: &mut WasmCtx<'_, Manual>, items: &[WidgetDrawItem], later_overlay: &[WidgetDrawItem]) {
     for run in direct_runs(items) {
         match run {
-            DirectRun::Solid { clip, quads } => {
-                ctx.actor::<RenderCapability>().send(&DrawSolidQuads {
-                    space: QuadSpace::Screen,
-                    clip: clip.framebuffer(),
-                    quads,
-                });
-            }
             DirectRun::Textured { texture_id, clip, quads } => {
                 ctx.actor::<RenderCapability>().send(&DrawTexturedQuads {
                     texture_id,
@@ -663,7 +642,11 @@ fn emit_layer(ctx: &mut WasmCtx<'_, Manual>, items: &[WidgetDrawItem], later_ove
                 });
             }
             DirectRun::Triangles { clip, triangles } => {
-                ctx.actor::<RenderCapability>().send(&DrawScreenTriangles { clip: clip.framebuffer(), triangles });
+                ctx.actor::<RenderCapability>().send(&DrawScreenTriangles {
+                    space: QuadSpace::Screen,
+                    clip: clip.framebuffer(),
+                    triangles,
+                });
             }
         }
     }
@@ -682,15 +665,37 @@ mod tests {
     use core::slice::from_ref;
 
     fn quad(x: f32, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
-        WidgetDrawItem::Quad { x, y: 0.0, width: 1.0, height: 1.0, color: Rgba::WHITE, clip }
+        flat(x, 0.0, 1.0, 1.0).with_clip(clip)
     }
 
     fn fill(rect: WidgetClipRect) -> WidgetDrawItem {
-        fill_with(rect, Rgba::WHITE, None)
+        flat(rect.x, rect.y, rect.width, rect.height)
     }
 
     fn fill_with(rect: WidgetClipRect, color: Rgba, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
-        WidgetDrawItem::Quad { x: rect.x, y: rect.y, width: rect.width, height: rect.height, color, clip }
+        flat_with(rect.x, rect.y, rect.width, rect.height, color).with_clip(clip)
+    }
+
+    /// The radius-zero white `Shape` these tests stand in for any flat fill
+    /// with — what `set::quad` builds, without the `set` module's theme.
+    fn flat(x: f32, y: f32, width: f32, height: f32) -> WidgetDrawItem {
+        flat_with(x, y, width, height, Rgba::WHITE)
+    }
+
+    /// The same flat fill in a chosen color, because its alpha is what
+    /// decides whether the fill counts as known opaque coverage.
+    fn flat_with(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> WidgetDrawItem {
+        WidgetDrawItem::Shape {
+            x,
+            y,
+            width,
+            height,
+            corner_radius: 0.0,
+            fill: Some(color),
+            stroke: None,
+            shadow: None,
+            clip: None,
+        }
     }
 
     fn textured_fill(rect: WidgetClipRect, tint: Rgba) -> WidgetDrawItem {
@@ -765,9 +770,9 @@ mod tests {
         assert_eq!(runs.len(), 6);
         assert!(matches!(
             &runs[0],
-            DirectRun::Solid { clip, quads }
+            DirectRun::Shapes { clip, shapes }
                 if *clip == PreparedClip::Finite { rect: a }
-                    && quads.iter().map(|quad| quad.x).eq([0.0])
+                    && shapes.iter().map(|shape| shape.x).eq([0.0])
         ));
         assert!(
             matches!(
@@ -813,9 +818,9 @@ mod tests {
         ));
         assert!(matches!(
             &runs[5],
-            DirectRun::Solid { clip, quads }
+            DirectRun::Shapes { clip, shapes }
                 if *clip == PreparedClip::Finite { rect: b }
-                    && quads.iter().map(|quad| quad.x).eq([6.0, 7.0])
+                    && shapes.iter().map(|shape| shape.x).eq([6.0, 7.0])
         ));
     }
 
@@ -832,8 +837,8 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert!(matches!(
             &runs[0],
-            DirectRun::Solid { clip: PreparedClip::Unbounded, quads }
-                if quads.iter().map(|quad| quad.x).eq([1.0, 3.0])
+            DirectRun::Shapes { clip: PreparedClip::Unbounded, shapes }
+                if shapes.iter().map(|shape| shape.x).eq([1.0, 3.0])
         ));
     }
 
@@ -861,9 +866,9 @@ mod tests {
         assert_eq!(ordinary.len(), 3);
         assert!(matches!(
             &ordinary[0],
-            DirectRun::Solid { clip, quads }
+            DirectRun::Shapes { clip, shapes }
                 if *clip == PreparedClip::Finite { rect: a }
-                    && quads.iter().map(|quad| quad.x).eq([0.0])
+                    && shapes.iter().map(|shape| shape.x).eq([0.0])
         ));
         assert!(matches!(
             &ordinary[1],
@@ -873,18 +878,18 @@ mod tests {
         ));
         assert!(matches!(
             &ordinary[2],
-            DirectRun::Solid { clip, quads }
+            DirectRun::Shapes { clip, shapes }
                 if *clip == PreparedClip::Finite { rect: a }
-                    && quads.iter().map(|quad| quad.x).eq([2.0])
+                    && shapes.iter().map(|shape| shape.x).eq([2.0])
         ));
 
         let overlay = direct_runs(&list.overlay);
         assert_eq!(overlay.len(), 3);
         assert!(matches!(
             &overlay[0],
-            DirectRun::Solid { clip, quads }
+            DirectRun::Shapes { clip, shapes }
                 if *clip == PreparedClip::Finite { rect: b }
-                    && quads.iter().map(|quad| quad.x).eq([10.0])
+                    && shapes.iter().map(|shape| shape.x).eq([10.0])
         ));
         assert!(
             matches!(
@@ -917,14 +922,7 @@ mod tests {
             content_height: None,
             intrinsic: None,
             items: vec![text(12.0, "covered", Some(row(40.0))), text(12.0, "half", Some(row(64.0)))],
-            overlay: vec![WidgetDrawItem::Quad {
-                x: 10.0,
-                y: 40.0,
-                width: 200.0,
-                height: 36.0,
-                color: Rgba::WHITE,
-                clip: None,
-            }],
+            overlay: vec![flat(10.0, 40.0, 200.0, 36.0)],
         };
         let items = text_items(&list.items, &list.overlay);
         assert_eq!(items.len(), 1, "the wholly covered row sends no glyphs");
@@ -936,7 +934,7 @@ mod tests {
     #[test]
     fn later_fills_subtract_only_known_opaque_solid_coverage() {
         // Tripwire: an alpha-zero 100×24 overlay used to punch a hole from
-        // geometry alone and drop a clipped 12px label. Only a solid Quad
+        // geometry alone and drop a clipped 12px label. Only a shape fill
         // with alpha exactly 1.0 is known opaque coverage; textured tints
         // and every other alpha still draw, but they do not subtract text.
         // That is not translucent interleaving — quads still leave first.
@@ -1222,17 +1220,7 @@ mod tests {
             content_height: None,
             intrinsic: None,
             overlay: Vec::new(),
-            items: vec![
-                text(0.0, "header", Some(header)),
-                WidgetDrawItem::Quad {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 200.0,
-                    height: 24.0,
-                    color: Rgba::WHITE,
-                    clip: Some(viewport),
-                },
-            ],
+            items: vec![text(0.0, "header", Some(header)), flat(0.0, 0.0, 200.0, 24.0).with_clip(Some(viewport))],
         };
 
         let items = text_items(&list.items, &list.overlay);
@@ -1286,10 +1274,10 @@ mod tests {
     }
 
     /// ADR-0213: shapes and triangles plan like the other direct items —
-    /// adjacent ones coalesce by clip into one batch, a kind change flushes,
-    /// and painter order across kinds is kept. A planner that folded shapes
-    /// into the solid run would send them through the wrong kind; one that
-    /// never coalesced would cost a batch per plate.
+    /// adjacent ones coalesce by clip into one batch, a kind or clip change
+    /// flushes, and painter order across kinds is kept. A flat quad is a
+    /// radius-zero shape, so it joins the run beside it rather than splitting
+    /// it; a planner that never coalesced would cost a batch per plate.
     #[test]
     fn direct_planner_coalesces_adjacent_shapes_and_triangles_by_clip() {
         let clip = WidgetClipRect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
@@ -1312,15 +1300,14 @@ mod tests {
         let shape_xs = |run: &DirectRun| match run {
             DirectRun::Shapes { shapes, .. } => shapes.iter().map(|shape| shape.x).collect::<Vec<_>>(),
             DirectRun::Triangles { triangles, .. } => triangles.iter().map(|triangle| triangle.a.x).collect(),
-            DirectRun::Solid { quads, .. } => quads.iter().map(|quad| quad.x).collect(),
             DirectRun::Textured { .. } => unreachable!("no textured items here"),
         };
-        assert_eq!(runs.len(), 5, "shapes, quad, shapes, triangles, shapes: {runs:?}");
+        assert_eq!(runs.len(), 4, "shapes, shapes, triangles, shapes: {runs:?}");
         assert_eq!(
             runs.iter().map(shape_xs).collect::<Vec<_>>(),
-            vec![vec![0.0, 1.0], vec![2.0], vec![3.0], vec![4.0, 5.0], vec![6.0]]
+            vec![vec![0.0, 1.0, 2.0], vec![3.0], vec![4.0, 5.0], vec![6.0]]
         );
-        assert!(matches!(runs[3], DirectRun::Triangles { clip: PreparedClip::Finite { rect }, .. } if rect == clip));
+        assert!(matches!(runs[2], DirectRun::Triangles { clip: PreparedClip::Finite { rect }, .. } if rect == clip));
     }
 
     /// ADR-0213 §2: a shape covers its fill box and nothing more. A filled

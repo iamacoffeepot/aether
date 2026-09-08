@@ -2039,8 +2039,10 @@ field so every edge is anti-aliased at any fractional position. A radius at or
 above half the shorter side is a circle, a stroke with no fill is a ring, and a
 shadow with neither is a soft halo. A caret and a stepper arrow are one
 `WidgetDrawItem::Triangle` — three local corners with a colour each — where a
-stack of quad rows used to approximate them. `Quad` stays the flat fill: a row,
-a track, a selection band, a rule, a divider, a scroll bar's track.
+stack of quad rows used to approximate them. A flat fill — a row, a track, a
+selection band, a rule, a divider, a scroll bar's track — is the same `Shape`
+at `corner_radius: 0.0` with a fill and nothing else, so the kit has one
+rectangle item rather than two.
 
 The theme owns the numbers. `corner_radius_pixels` (one spacing unit at 1×),
 `stroke_width_pixels` (the hairline), `shadow_blur_pixels` (two units),
@@ -2050,7 +2052,7 @@ shadow is a measured number: `Theme::shadow_lift` is the contrast the raised
 surface reads at against the ground the shadow darkens, and a tripwire holds it
 above the bare surface step.
 
-The set draws through three helpers in `set/mod.rs`, so there is one plate and
+The set draws through six helpers in `set/mod.rs`, so there is one plate and
 not one per widget:
 
 - `plate(theme, x, y, width, height, fill, stroke)` — a rounded box at the
@@ -2063,6 +2065,12 @@ not one per widget:
 - `ring(theme, x, y, width, height, thickness, color)` — a stroke with no fill:
   the validation ring and the inset focus ring `push_control_outlines` draws,
   the keyboard focus ring on a button.
+- `quad(x, y, width, height, color)` — a square-cornered flat fill: a rule, a
+  seam, a caret, a selection band, a hover overlay.
+- `stadium(x, y, width, height, fill, stroke)` — rounded by half its shorter
+  side: a toggle's track, a scroll thumb, a pill.
+- `disc(x, y, size, fill, stroke)` — the stadium of a square box: a toggle's
+  knob, a radio's marker, a status dot.
 
 A shape takes part in the root's hole cutting by its **fill box** alone: a
 filled plate raised after a run cuts the run exactly as a quad does, while a
@@ -2074,7 +2082,7 @@ side.
 
 ## Local clipping and root emission
 
-`WidgetDrawItem::{Quad, TexturedQuad, Text, Shape, Triangle}.clip` uses
+`WidgetDrawItem::{TexturedQuad, Text, Shape, Triangle}.clip` uses
 `WidgetClipRect { x, y, width, height }` in the drawing widget's local pixel
 space.
 `WidgetDrawItem::TexturedQuad` also carries named destination and UV fields,
@@ -2089,12 +2097,12 @@ slot.
 
 Only the root has framebuffer coordinates. It converts the effective
 `WidgetClipRect` to the render/text `ClipRect` when it emits. In one pass over
-the non-text items, solids group into contiguous equal-clip batches, textured
-items group by contiguous equal `(texture_id, clip)` keys, and shapes and
-triangles each group into contiguous equal-clip batches of their own
-(`draw_shapes`, `draw_screen_triangles`). Kind, texture, and clip transitions
-flush; repeated keys are never regrouped across a transition. Every direct
-handler targets the same render recipient, whose FIFO preserves authored order. Text still follows the established later lane.
-Thus an unclipped all-solid tree remains one solid batch, while mixed items or
-distinct clips may produce several mails from the same single root render
-sender.
+the non-text items, textured items group by contiguous equal `(texture_id,
+clip)` keys, and shapes and triangles each group into contiguous equal-clip
+batches of their own (`draw_shapes`, `draw_screen_triangles`). Kind, texture,
+and clip transitions flush; repeated keys are never regrouped across a
+transition. Every direct handler targets the same render recipient, whose FIFO
+preserves authored order. Text still follows the established later lane.
+Thus an unclipped all-shape tree remains one `draw_shapes` batch, while mixed
+items or distinct clips may produce several mails from the same single root
+render sender.

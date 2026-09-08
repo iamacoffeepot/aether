@@ -47,7 +47,7 @@ use aether_text::FontMetricsResult;
 use crate::set::{
     ActivationArms, WidgetDefaults, accept_font_metrics_result, apply_text_theme, clamp_optional_index,
     clamp_optional_selection, elide_to_width, measured_text_width, plate, pump_text_font_metrics,
-    push_control_outlines, quad, raised_plate, reply_if_hidden, ring, text_origin_y,
+    push_control_outlines, push_triangle, quad, raised_plate, reply_if_hidden, ring, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
@@ -786,25 +786,15 @@ const CHEVRON_SIZE_RATIO: f32 = 0.5;
 /// name and the chevron, in spacing units.
 const CHEVRON_GAP_UNITS: u8 = 1;
 
-/// The rows the solid chevron triangle is drawn from. Four bars read as a
-/// triangle at every size the row heights in play produce, and stay legible
-/// without depending on a glyph the configured font may not carry.
-const CHEVRON_ROWS: usize = 4;
-
 /// A downward solid triangle whose bottom-right lands at `right_x`, centered
 /// vertically on `center_y` — the closed row's "there are alternatives" mark.
+/// One [`WidgetDrawItem::Triangle`] the render cap rasterizes, where a stack
+/// of four quad rows used to approximate the same wedge (ADR-0213).
 fn push_chevron(items: &mut Vec<WidgetDrawItem>, right_x: f32, center_y: f32, size: f32, color: Rgba) {
     if !size.is_finite() || size <= 0.0 || !right_x.is_finite() || !center_y.is_finite() {
         return;
     }
-    let row_height = size / CHEVRON_ROWS as f32;
-    let top = size.mul_add(-0.5, center_y);
-    let center_x = size.mul_add(-0.5, right_x);
-    for row in 0..CHEVRON_ROWS {
-        let width = size * (1.0 - row as f32 / CHEVRON_ROWS as f32);
-        let y = (row as f32).mul_add(row_height, top);
-        items.push(quad(width.mul_add(-0.5, center_x), y, width, row_height, color));
-    }
+    push_triangle(items, size.mul_add(-0.5, right_x), size.mul_add(-0.5, center_y), size, size, false, color);
 }
 
 /// The boot selection clamped into the option vector; `None` when there is
@@ -987,8 +977,7 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 WidgetDrawItem::Text { text, .. } => Some(text.as_str()),
-                WidgetDrawItem::Quad { .. }
-                | WidgetDrawItem::TexturedQuad { .. }
+                WidgetDrawItem::TexturedQuad { .. }
                 | WidgetDrawItem::Shape { .. }
                 | WidgetDrawItem::Triangle { .. } => None,
             })
@@ -1205,7 +1194,7 @@ mod tests {
         let fills: Vec<Rgba> = items
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { color, .. } => Some(*color),
+                WidgetDrawItem::Shape { fill, .. } => *fill,
                 _ => None,
             })
             .collect();

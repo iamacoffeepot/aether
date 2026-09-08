@@ -28,11 +28,10 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::keycode::{KEY_DOWN, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease};
-use aether_render::ShapeStroke;
 
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{
-    clamp_option_index, clamp_selection, push_control_outlines, release_left, reply_if_hidden, text_origin_y,
+    clamp_option_index, clamp_selection, disc, push_control_outlines, release_left, reply_if_hidden, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
@@ -134,20 +133,13 @@ impl RadioGroupWidget {
             } else {
                 self.state.supporting_theme_state(false)
             };
-            items.push(WidgetDrawItem::Shape {
-                x: pad,
-                y: marker_y,
-                width: marker,
-                height: marker,
-                corner_radius: marker * 0.5,
-                fill: Some(self.theme.fill(base, marker_state)),
-                stroke: Some(ShapeStroke {
-                    width_pixels: self.theme.stroke_width_pixels,
-                    color: self.theme.fill(self.theme.edge(), marker_state),
-                }),
-                shadow: None,
-                clip: None,
-            });
+            items.push(disc(
+                pad,
+                marker_y,
+                marker,
+                Some(self.theme.fill(base, marker_state)),
+                Some((self.theme.stroke_width_pixels, self.theme.fill(self.theme.edge(), marker_state))),
+            ));
             items.push(WidgetDrawItem::Text {
                 x: pad.mul_add(2.0, marker),
                 y: text_origin_y(row_y, row_height, size),

@@ -28,8 +28,8 @@ use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::QuadBlend;
 use aether_render::{
-    CreateTexture, CreateTextureResult, DestroyTexture, DrawSolidQuads, DrawTexturedQuads, InputSlot, OutputSlot,
-    PassRepeat, PassStage, ProgramPass, ProgramRegister, ProgramRegisterResult, SlotExtent, SlotSpec, SolidQuad,
+    CreateTexture, CreateTextureResult, DestroyTexture, DrawShapes, DrawTexturedQuads, InputSlot, OutputSlot,
+    PassRepeat, PassStage, ProgramPass, ProgramRegister, ProgramRegisterResult, Shape, SlotExtent, SlotSpec,
     TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
 };
 
@@ -81,14 +81,23 @@ fn register_reply(
         .expect("decode ProgramRegisterResult")
 }
 
-/// A magenta solid quad covering (8, 8)-(40, 40): the control draw every
+/// A magenta square covering (8, 8)-(40, 40): the control draw every
 /// scenario captures to prove the renderer is still alive after the
 /// rejected mail.
-fn control_quad() -> DrawSolidQuads {
-    DrawSolidQuads {
+fn control_quad() -> DrawShapes {
+    DrawShapes {
         space: QuadSpace::Screen,
         clip: None,
-        quads: vec![SolidQuad { x: 8.0, y: 8.0, width: 32.0, height: 32.0, color: Rgba::new(1.0, 0.0, 1.0, 1.0) }],
+        shapes: vec![Shape {
+            x: 8.0,
+            y: 8.0,
+            width: 32.0,
+            height: 32.0,
+            corner_radius: 0.0,
+            fill: Some(Rgba::new(1.0, 0.0, 1.0, 1.0)),
+            stroke: None,
+            shadow: None,
+        }],
     }
 }
 
