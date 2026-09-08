@@ -10,7 +10,7 @@
 //! `ReadResult` handler recovers them by probe-then-take.
 
 use aether_actor::{ActorInitError, Kind, MailSender, Manual, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_fs::{FsCapability, Read, ReadResult};
+use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
 use aether_test_fixtures_kinds::{
     FsContextDemuxReport, FsDemuxReport, RunFsContextDemux, RunFsDemux, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
 };
@@ -53,7 +53,7 @@ impl WasmActor for FsDemux {
         *self = Self::default();
 
         let fs = ctx.actor::<FsCapability>();
-        let read = Read { namespace: msg.namespace, path: msg.path };
+        let read = Read { addr: NamespaceAddr::new(msg.namespace, msg.path) };
         self.first = Some(fs.send_tracked(&read));
         self.second = Some(fs.send_tracked(&read));
     }
@@ -63,7 +63,7 @@ impl WasmActor for FsDemux {
         *self = Self::default();
 
         let fs = ctx.actor::<FsCapability>();
-        let read = Read { namespace: msg.namespace, path: msg.path };
+        let read = Read { addr: NamespaceAddr::new(msg.namespace, msg.path) };
         let _ = fs.send_with_context(&read, &FsDemuxContextA { payload: CONTEXT_A_PAYLOAD });
         let _ = fs.send_with_context(&read, &FsDemuxContextB { payload: CONTEXT_B_PAYLOAD });
     }

@@ -25,7 +25,7 @@ dist/
   components/
     <stem>.wasm
   bin/
-    aether-substrate
+    aether-desktop
     aether-headless
     aether-hub
 ```
@@ -40,6 +40,24 @@ depends on `aether-behavior`, exposes a `cdylib`, and does not depend on
 `aether-actor`. Host-carrying component variants are also built separately so
 the ordinary component artifact is not forced to carry the behavior interpreter.
 
+## Chassis binary inventory
+
+`xtask/src/inventory.rs` holds the one list of chassis binaries the workspace
+ships, and `cargo xtask bins` publishes it so a script or workflow reads the
+names instead of re-spelling them:
+
+```sh
+cargo xtask bins           # one `<package> <bin> <file>` line per binary
+cargo xtask bins --json    # the same, plus the depot filename per `--chassis`
+```
+
+`file` is the host-platform filename, so a Windows runner is told
+`aether-desktop.exe`. The `--json` form adds `package_chassis`, keyed by the
+values `cargo xtask package --chassis` accepts, which is how
+`.github/workflows/release.yml` finds the executable it renames for hand-out.
+Prefer this over hardcoding a binary name: that workflow is manually triggered,
+so nothing in CI catches a name that has gone stale.
+
 ## Package depot
 
 `cargo xtask package` is the shipping channel (ADR-0163 §1). It emits a depot
@@ -49,7 +67,7 @@ into `pack/objects/`.
 
 ```text
 <out>/
-  aether-substrate            # the chassis binary (desktop or headless; .exe on Windows)
+  aether-desktop              # the chassis binary (`aether-headless` under `--chassis headless`; .exe on Windows)
   pack/manifest               # the persisted, versioned package manifest
   pack/objects/<sha256>       # component wasm + config bytes, content-addressed
 ```
@@ -187,6 +205,7 @@ Validate a change at the boundary it touches:
 
 - Discovery and commands: `xtask/src/{main,inventory}.rs`
 - Version bump + lockfile regeneration: `xtask/src/bump.rs`
+- Published chassis-binary inventory: `xtask/src/bins.rs`
 - Autoload: `crates/aether-chassis/src/autoload.rs`
 - Boot manifest schema: `crates/aether-chassis/src/boot_manifest.rs`
 - Package manifest + store-backed boot: `crates/aether-chassis/src/package.rs`

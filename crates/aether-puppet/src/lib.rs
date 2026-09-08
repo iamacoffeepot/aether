@@ -849,8 +849,9 @@ impl WasmActor for Puppet {
     #[handler::manual]
     fn on_read(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: ReadResult) {
         let path = match mail {
-            ReadResult::Ok { ref path, .. } => path.clone(),
-            ReadResult::Err { ref path, ref error, .. } => {
+            ReadResult::Ok { ref addr, .. } => addr.path.clone(),
+            ReadResult::Err { ref addr, ref error, .. } => {
+                let path = &addr.path;
                 tracing::warn!(target: "aether_puppet", path = %path, error = ?error, "read failed");
                 let reason = format!("read {path} failed: {error:?}");
                 self.settle(ctx, &LoadResult::Err { reason });

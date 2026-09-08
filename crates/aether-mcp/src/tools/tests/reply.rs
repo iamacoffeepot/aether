@@ -17,7 +17,7 @@ fn decode_reply_events_decodes_known_substrate_kind() {
     let descriptors = descriptors::all();
     let desc =
         descriptors.iter().find(|d| d.name == "aether.fs.list").expect("aether.fs.list is in the static vocabulary");
-    let params = serde_json::json!({ "namespace": "save", "prefix": "" });
+    let params = serde_json::json!({ "addr": { "namespace": "save", "path": "" } });
     let payload = aether_codec::encode_schema(&params, &desc.schema).expect("encode list params");
     let kind = KindId(kind_id_from_parts(&desc.name, &desc.schema));
     let reply = MailEnvelope {
@@ -68,7 +68,7 @@ fn clean_decode_reply_omits_payload_bytes_key_in_json() {
     let descriptors = descriptors::all();
     let desc =
         descriptors.iter().find(|d| d.name == "aether.fs.list").expect("aether.fs.list is in the static vocabulary");
-    let params = serde_json::json!({ "namespace": "save", "prefix": "" });
+    let params = serde_json::json!({ "addr": { "namespace": "save", "path": "" } });
     let payload = aether_codec::encode_schema(&params, &desc.schema).expect("encode list params");
     let kind = KindId(kind_id_from_parts(&desc.name, &desc.schema));
     let reply = MailEnvelope {
