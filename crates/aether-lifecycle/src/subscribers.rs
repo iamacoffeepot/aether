@@ -4,9 +4,12 @@
 //! the native [`broadcast_to_subscribers`] fan-out the receive side calls
 //! once per advance.
 
-use aether_actor::{HandlesKind, WasmActorMailbox, WasmActorMailboxWithContext};
+use aether_actor::{HandlesKind, Publishes, WasmActorMailbox, WasmActorMailboxWithContext};
 use aether_data::{Kind, MailboxId};
-use aether_kinds::{LifecycleSubscribe, LifecycleSubscribeSelf, LifecycleUnsubscribe, LifecycleUnsubscribeSelf};
+use aether_kinds::{
+    InitCaps, InitComponents, LifecycleSubscribe, LifecycleSubscribeSelf, LifecycleUnsubscribe,
+    LifecycleUnsubscribeSelf, Present, Render, Shutdown, Tick,
+};
 
 use super::LifecycleCapability;
 
@@ -20,6 +23,23 @@ use aether_substrate::actor::native::{NativeActorMailbox, NativeActorMailboxWith
 use aether_substrate::mail::MailboxId as SubstrateMailboxId;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use std::collections::{BTreeMap, BTreeSet};
+
+// The stage kinds this cap broadcasts to its subscriber set, one
+// `Publishes` impl each — the compile-time gate on
+// `LifecycleMailboxExt::subscribe`. The list is the ADR-0082 stage
+// vocabulary a chassis lifecycle graph can declare as a state; the
+// runtime still fail-fasts on a stage *this* chassis's graph omits
+// (ADR-0082 §7), so the marker states what the cap can ever emit and
+// the reply states what it does emit here.
+//
+// `Quit` and `LifecycleAdvance` are absent on purpose: they travel
+// *into* the cap as signals, never out of it as a broadcast.
+impl Publishes<Tick> for LifecycleCapability {}
+impl Publishes<InitCaps> for LifecycleCapability {}
+impl Publishes<InitComponents> for LifecycleCapability {}
+impl Publishes<Render> for LifecycleCapability {}
+impl Publishes<Present> for LifecycleCapability {}
+impl Publishes<Shutdown> for LifecycleCapability {}
 
 /// Sender-side facade for callers addressing [`LifecycleCapability`]
 /// via `ctx.actor::<LifecycleCapability>()` (ADR-0082 §7, §12).
@@ -61,7 +81,14 @@ pub trait LifecycleMailboxExt: LifecycleMailboxForward {
     /// subscriber from the inbound's host-stamped `Source` (ADR-0083),
     /// so the call site spells out neither the stage id nor its own
     /// mailbox. This is the common form. Idempotent.
-    fn subscribe<K: Kind>(&self) {
+    ///
+    /// `K` is gated on `LifecycleCapability: Publishes<K>`, so a kind
+    /// this cap never broadcasts — a window device event, say — is a
+    /// compile error naming the capability that does publish it.
+    fn subscribe<K: Kind>(&self)
+    where
+        LifecycleCapability: Publishes<K>,
+    {
         self.forward(&LifecycleSubscribeSelf { stage: K::ID.0 });
     }
 
@@ -69,7 +96,10 @@ pub trait LifecycleMailboxExt: LifecycleMailboxForward {
     /// Add an *explicit* `mailbox` to the subscriber set for stage `K`.
     /// The rare cross-mailbox form; [`subscribe`](Self::subscribe)
     /// covers the self case. Idempotent.
-    fn subscribe_for<K: Kind>(&self, mailbox: MailboxId) {
+    fn subscribe_for<K: Kind>(&self, mailbox: MailboxId)
+    where
+        LifecycleCapability: Publishes<K>,
+    {
         self.forward(&LifecycleSubscribe { stage: K::ID.0, mailbox: mailbox.0 });
     }
 
@@ -77,14 +107,20 @@ pub trait LifecycleMailboxExt: LifecycleMailboxForward {
     /// unsubscribe the *calling* actor from stage `K`. Reflexive twin
     /// of [`subscribe`](Self::subscribe). Idempotent on "not currently
     /// subscribed."
-    fn unsubscribe<K: Kind>(&self) {
+    fn unsubscribe<K: Kind>(&self)
+    where
+        LifecycleCapability: Publishes<K>,
+    {
         self.forward(&LifecycleUnsubscribeSelf { stage: K::ID.0 });
     }
 
     /// Mail `aether.lifecycle.unsubscribe { stage, mailbox }` to the
     /// cap. Remove an *explicit* `mailbox` from the subscriber set for
     /// stage `K`. Idempotent on "not currently subscribed."
-    fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId) {
+    fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId)
+    where
+        LifecycleCapability: Publishes<K>,
+    {
         self.forward(&LifecycleUnsubscribe { stage: K::ID.0, mailbox: mailbox.0 });
     }
 }
