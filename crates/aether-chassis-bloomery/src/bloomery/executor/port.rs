@@ -8,7 +8,7 @@
 //! states the rule ("Never block in a handler"), ADR-0093 gives the shape that
 //! keeps it (hand the call to a worker, answer from a later handler turn).
 //!
-//! [`ExecutorPort`] is the same calls, with one more answer on the four that
+//! [`ExecutorPort`] is the same calls, with one more answer on the five that
 //! reach the outside world and can be handed out:
 //! [`Settled::InFlight`] — "a worker holds this call; ask again on a later
 //! turn". Every caller that drains, inspects, cancels, or sweeps takes the port
@@ -69,7 +69,7 @@ pub struct RunObservation {
 }
 
 /// The executor port every reactor helper calls: the [`ExecutorShell`] surface,
-/// with the two cheap answers left synchronous and the four that reach the
+/// with the one cheap answer left synchronous and the five that reach the
 /// outside world allowed to report [`Settled::InFlight`].
 ///
 /// [`observe_writes`](Self::observe_writes) is settled too, despite being local
@@ -83,20 +83,17 @@ pub trait ExecutorPort {
 
     /// Submit a fully-resolved work order, returning the nonce-carrying handle.
     ///
-    /// The one call that is *not* settled, and deliberately (#5564): the order
-    /// registry row is written before the submit runs — the local lane resolves
-    /// session reuse from that very row — so a submit a worker still holds
-    /// leaves a row for a dispatch that has not happened. That row is not
-    /// private bookkeeping: `outstanding_orders` is what the view, the doctor's
-    /// open-dispatch report, and every harness read as "this coordinator is
-    /// waiting on a run". Handing the submit out would publish a reservation as
-    /// a dispatch. Closing that needs a durable submit-intent row the readers
-    /// can tell apart, which is its own change; until then this call keeps the
-    /// dispatcher for its round trip.
+    /// Settled like the other adapter calls (#5564). The order registry row is
+    /// written *before* this runs, as `submitting`: the local lane still
+    /// resolves session reuse from that row, but readers that mean "waiting on
+    /// a run" ignore it until the worker's completion promotes the row to
+    /// `submitted`. [`Settled::InFlight`] is "not asked yet": the outbox entry
+    /// stays unacked and the next turn re-asks.
     ///
-    /// # Errors
-    /// The dispatch surface is unreachable or refused the dispatch.
-    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, ExecutorPortError>;
+    /// [`ExecutorShell`]'s inherent [`submit`](ExecutorShell::submit) stays
+    /// synchronous — the identity arm, used by boot-time reconciliation and
+    /// the unit suites driving a fake backend.
+    fn submit(&self, order: &WorkOrder) -> Settled<Result<WorkHandle, ExecutorPortError>>;
 
     /// Inspect the run the handle resolves to and, when it has completed,
     /// stream its evidence in the same call.
@@ -131,8 +128,8 @@ impl ExecutorPort for ExecutorShell {
         self.backend.backend_for(handle)
     }
 
-    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, ExecutorPortError> {
-        self.backend.submit(order)
+    fn submit(&self, order: &WorkOrder) -> Settled<Result<WorkHandle, ExecutorPortError>> {
+        Settled::Answered(self.backend.submit(order))
     }
 
     fn observe(&self, handle: &WorkHandle) -> Settled<Result<RunObservation, ExecutorPortError>> {

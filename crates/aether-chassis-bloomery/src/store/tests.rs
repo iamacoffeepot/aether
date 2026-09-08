@@ -8,8 +8,8 @@
 #![allow(clippy::unwrap_used)]
 
 use super::runtime::{
-    AppendOutcome, CANDIDATE_HASH_OCCASION_SEAL, CommitOutcome, JournalWrite, OutstandingOrder, ProofFactWrite,
-    RecordOutcome, SealOutcome, SqliteStore, StoreBackend,
+    AppendOutcome, CANDIDATE_HASH_OCCASION_SEAL, CommitOutcome, JournalWrite, OrderLifecycle, OutstandingOrder,
+    ProofFactWrite, RecordOutcome, SealOutcome, SqliteStore, StoreBackend,
 };
 use aether_bloomery::persisted::DECISIONS;
 use aether_bloomery::{MembershipMutation, OutboxPayload, Topic, ViewDocument, WorkpieceId, decode_row, encode_row};
@@ -441,6 +441,7 @@ fn order_due_at(nonce: &str, deadline_unix_millis: u64) -> OutstandingOrder {
         transformation: vec![7, 7],
         configs: vec![3, 3],
         deadline_unix_millis,
+        lifecycle: OrderLifecycle::Submitted,
     }
 }
 
@@ -643,6 +644,101 @@ fn list_outstanding_nonces_reflects_recorded_and_consumed_orders() {
     // Consuming one drops it from the enumeration; the other stays outstanding.
     assert!(store.consume_order("n-1").unwrap());
     assert_eq!(store.list_outstanding_nonces().unwrap(), vec!["n-2".to_owned()]);
+}
+
+#[test]
+fn a_submitting_row_is_not_a_live_dispatch() {
+    // Tripwire: `record_dispatch` writes the row before `submit` runs, so a
+    // submit a worker still holds must not show up as "waiting on a run" —
+    // that is the reservation-as-dispatch bug that blocked offloading submit
+    // (#5564). Lookup still sees the row: the local lane resolves session
+    // reuse from it during submit.
+    let mut store = memory();
+    let mut intent = order("n-intent");
+    intent.lifecycle = OrderLifecycle::Submitting;
+    store.record_order(&intent).unwrap();
+
+    assert_eq!(
+        store.list_outstanding_nonces().unwrap(),
+        Vec::<String>::new(),
+        "a submit-intent is not a live dispatch",
+    );
+    assert!(
+        store.list_expired_orders(intent.deadline_unix_millis).unwrap().is_empty(),
+        "a submit-intent is not overdue: there is no run to cancel",
+    );
+    assert_eq!(
+        store.lookup_order("n-intent").unwrap().expect("the reservation is still addressable").lifecycle,
+        OrderLifecycle::Submitting,
+        "session reuse still resolves the row while submit is in flight",
+    );
+
+    assert!(store.mark_order_submitted("n-intent").unwrap(), "the worker's completion promotes the row");
+    assert_eq!(store.list_outstanding_nonces().unwrap(), vec!["n-intent".to_owned()]);
+    assert_eq!(
+        store.lookup_order("n-intent").unwrap().unwrap().lifecycle,
+        OrderLifecycle::Submitted,
+        "a promoted row is a live dispatch",
+    );
+    assert!(!store.mark_order_submitted("n-intent").unwrap(), "promoting an already-submitted nonce is a no-op");
+}
+
+#[test]
+fn a_pre_lifecycle_order_migrates_as_submitted() {
+    // Existing rows were recorded by a build that submitted inline, so they
+    // *are* live dispatches. Inventing `submitting` would hide them from
+    // restart tracking and the view.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pre-lifecycle.db").to_str().unwrap().to_owned();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE outstanding_orders (
+             nonce                TEXT PRIMARY KEY,
+             bloom                BLOB NOT NULL,
+             workpiece            TEXT NOT NULL,
+             scope_revision       BLOB NOT NULL,
+             candidate            BLOB NOT NULL,
+             displayed_digest     BLOB NOT NULL,
+             stage                BLOB NOT NULL,
+             transformation       BLOB NOT NULL,
+             configs              BLOB NOT NULL,
+             profile              BLOB NOT NULL,
+             deadline_unix_millis INTEGER NOT NULL
+         );
+         CREATE TABLE parked_question (
+             bloom                BLOB NOT NULL,
+             question             BLOB NOT NULL,
+             nonce                TEXT NOT NULL,
+             workpiece            TEXT NOT NULL,
+             scope_revision       BLOB NOT NULL,
+             candidate            BLOB NOT NULL,
+             displayed_digest     BLOB NOT NULL,
+             stage                BLOB NOT NULL,
+             transformation       BLOB NOT NULL,
+             configs              BLOB NOT NULL,
+             profile              BLOB NOT NULL,
+             deadline_unix_millis INTEGER NOT NULL,
+             PRIMARY KEY (bloom, question)
+         );
+         PRAGMA user_version = 19;",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO outstanding_orders VALUES ('n-live', x'01', 'wp', x'02', x'03', x'03', x'04', \
+         x'05', x'06', x'07', 0)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut store = SqliteStore::open(&path).expect("a v19 store migrates the lifecycle column");
+    let found = store.lookup_order("n-live").unwrap().expect("the pre-column row survives");
+    assert_eq!(found.lifecycle, OrderLifecycle::Submitted, "existing rows default to submitted");
+    assert_eq!(
+        store.list_outstanding_nonces().unwrap(),
+        vec!["n-live".to_owned()],
+        "a migrated live dispatch is still a live dispatch",
+    );
 }
 
 #[test]

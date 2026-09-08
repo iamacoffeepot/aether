@@ -160,6 +160,53 @@ pub struct OutstandingOrder {
     /// what let a hung order outlive every one of them. Never replaced on
     /// re-record or rediscovery — a deadline that moves is not a deadline.
     pub deadline_unix_millis: u64,
+    /// Whether this row is a live dispatch or only a submit intent (#5564).
+    ///
+    /// The registry row is written *before* `submit` runs so the local lane can
+    /// resolve session reuse from it. Readers that mean "waiting on a run" —
+    /// the view, the doctor, harness `await_order`, restart tracking, deadline
+    /// and silence sweeps — look only at [`OrderLifecycle::Submitted`]. A
+    /// [`OrderLifecycle::Submitting`] row is a reservation: the outbox entry is
+    /// still unacked, no worker handle exists yet, and after a restart the drain
+    /// re-drives that entry against the same nonce rather than inserting a
+    /// second row.
+    pub lifecycle: OrderLifecycle,
+}
+
+/// Whether an outstanding-order row is a live dispatch or only a submit intent.
+///
+/// Persisted as the `lifecycle` column on `outstanding_orders` (and copied onto
+/// `parked_question` so the shared order-column spelling cannot drift). Existing
+/// rows migrate to [`Self::Submitted`]: they were recorded by a build that
+/// submitted inline, so they *are* live dispatches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderLifecycle {
+    /// `record_dispatch` has reserved the nonce; `submit` has not answered.
+    Submitting,
+    /// `submit` returned a handle. This is a live dispatch.
+    Submitted,
+}
+
+impl OrderLifecycle {
+    const SUBMITTING: &'static str = "submitting";
+    const SUBMITTED: &'static str = "submitted";
+
+    /// The column spelling this variant persists as.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Submitting => Self::SUBMITTING,
+            Self::Submitted => Self::SUBMITTED,
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        if value == Self::SUBMITTING {
+            Self::Submitting
+        } else {
+            Self::Submitted
+        }
+    }
 }
 
 /// The outcome of recording an [`OutstandingOrder`]: written, or its nonce was
@@ -345,11 +392,18 @@ pub trait StoreBackend: Send {
     /// row was removed. A consumed order makes a replayed nonce refuse — the
     /// consume-once semantics the trust boundary rests on.
     fn consume_order(&mut self, nonce: &str) -> rusqlite::Result<bool>;
-    /// Every nonce still outstanding — the restart recovery set (issue #3641):
-    /// the executor reactor's `init` seeds its in-memory tracked-handle set from
-    /// this so a dispatched-but-unresolved order is polled again after a
-    /// restart, rather than only from the (already-consumed-nothing) empty
-    /// vec `init` used to start with.
+    /// Promote a submit-intent row to a live dispatch (#5564). Returns whether a
+    /// `submitting` row was updated. Idempotent on an already-submitted nonce
+    /// (returns `false`); a consumed nonce also returns `false`.
+    fn mark_order_submitted(&mut self, nonce: &str) -> rusqlite::Result<bool>;
+    /// Every nonce still outstanding as a *live dispatch* — the restart recovery
+    /// set (issue #3641): the executor reactor's `init` seeds its in-memory
+    /// tracked-handle set from this so a dispatched-but-unresolved order is
+    /// polled again after a restart, rather than only from the
+    /// (already-consumed-nothing) empty vec `init` used to start with.
+    ///
+    /// Submit-intent (`submitting`) rows are omitted: they have no handle yet,
+    /// and the still-unacked outbox entry re-drives them (#5564).
     fn list_outstanding_nonces(&mut self) -> rusqlite::Result<Vec<String>>;
     /// Every outstanding order whose stored deadline is at or before
     /// `now_unix_millis` — the expiry set the executor reactor terminates
@@ -1117,7 +1171,12 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
 /// `19` is the outbox-result sidecar (`outbox_results`). Added empty with no
 /// backfill — an existing outbox row has no result until a reactor records
 /// one, and inventing a batch would attest an effect no reactor completed.
-const SCHEMA_VERSION: i64 = 19;
+///
+/// `20` is the outstanding-order lifecycle column (#5564): `submitting` while
+/// `submit` is in flight, `submitted` once a handle exists. Existing rows
+/// default to `submitted` — they were recorded by a build that submitted
+/// inline, so they are live dispatches. The journal is untouched.
+const SCHEMA_VERSION: i64 = 20;
 
 /// Historical TEXT stamp written beside v2 decisions rows before the digest
 /// column existed. Kept only so migration 17 can map it onto the v2 digest.
@@ -1306,6 +1365,18 @@ fn migrate_schema(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()>
     // an existing outbox row has no invented results.
     if !has_table(migration, "outbox_results")? {
         migration.execute_batch(OUTBOX_RESULTS_TABLE)?;
+    }
+
+    // Version 20 (#5564): submit-intent vs live dispatch. Existing rows are
+    // live dispatches — they were recorded by a build that submitted inline —
+    // so the default is `submitted`. Each order-bearing table is gated on its
+    // own column so a half-migrated store repairs on this open.
+    for table in ORDER_BEARING_TABLES {
+        if !has_column(migration, table, "lifecycle")? {
+            migration.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'submitted';"
+            ))?;
+        }
     }
 
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -1511,7 +1582,8 @@ CREATE TABLE IF NOT EXISTS outstanding_orders (
     transformation       BLOB NOT NULL,
     configs              BLOB NOT NULL,
     profile              BLOB NOT NULL,
-    deadline_unix_millis INTEGER NOT NULL
+    deadline_unix_millis INTEGER NOT NULL,
+    lifecycle            TEXT NOT NULL DEFAULT 'submitted'
 );
 CREATE TABLE IF NOT EXISTS parked_question (
     bloom                BLOB NOT NULL,
@@ -1526,6 +1598,7 @@ CREATE TABLE IF NOT EXISTS parked_question (
     configs              BLOB NOT NULL,
     profile              BLOB NOT NULL,
     deadline_unix_millis INTEGER NOT NULL,
+    lifecycle            TEXT NOT NULL DEFAULT 'submitted',
     PRIMARY KEY (bloom, question)
 );
 CREATE TABLE IF NOT EXISTS study_index (
@@ -1756,7 +1829,7 @@ fn is_constraint_violation(error: &rusqlite::Error) -> bool {
 /// `parked_question` keyed by the question that parked it — select through this
 /// one spelling, so they cannot drift apart column-wise.
 const ORDER_COLUMNS: &str = "nonce, bloom, workpiece, scope_revision, candidate, displayed_digest, stage, \
-                             transformation, configs, profile, deadline_unix_millis";
+                             transformation, configs, profile, deadline_unix_millis, lifecycle";
 
 /// The [`CandidateHash`] columns, in the order [`candidate_hash_from_row`] reads
 /// them. List and latest share this spelling so they cannot drift.
@@ -1795,6 +1868,7 @@ fn order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutstandingOrder>
         // no writer of ours produced. `0` reads as immediately expired, which
         // terminates the order accountably rather than trusting a corrupt one.
         deadline_unix_millis: u64::try_from(row.get::<_, i64>(10)?).unwrap_or_default(),
+        lifecycle: OrderLifecycle::parse(&row.get::<_, String>(11)?),
     })
 }
 
@@ -1833,8 +1907,13 @@ fn recorded_from_column(value: Option<i64>) -> Option<u64> {
 
 /// An [`OutstandingOrder`]'s columns as positional parameters matching
 /// [`ORDER_COLUMNS`], for the two tables that insert one. The deadline is
-/// clamped by the caller into `deadline`, which the array borrows.
-fn order_params<'a>(order: &'a OutstandingOrder, deadline: &'a i64) -> [&'a dyn rusqlite::ToSql; 11] {
+/// clamped by the caller into `deadline`, which the array borrows; `lifecycle`
+/// is the column spelling of [`OutstandingOrder::lifecycle`].
+fn order_params<'a>(
+    order: &'a OutstandingOrder,
+    deadline: &'a i64,
+    lifecycle: &'a str,
+) -> [&'a dyn rusqlite::ToSql; 12] {
     [
         &order.nonce,
         &order.bloom,
@@ -1847,6 +1926,7 @@ fn order_params<'a>(order: &'a OutstandingOrder, deadline: &'a i64) -> [&'a dyn 
         &order.configs,
         &order.profile,
         deadline,
+        lifecycle,
     ]
 }
 
@@ -1856,12 +1936,13 @@ impl StoreBackend for SqliteStore {
         // re-recorded nonce changes no column, so a redrive cannot extend the
         // allowance of an order already in flight.
         let deadline = deadline_column(order);
+        let lifecycle = order.lifecycle.as_str();
         let changed = self.conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO outstanding_orders ({ORDER_COLUMNS}) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
             ),
-            order_params(order, &deadline).as_slice(),
+            order_params(order, &deadline, lifecycle).as_slice(),
         )?;
         // The owner row outlives the outstanding row: consume deletes the
         // latter so intake can refuse a replayed nonce, but the janitor still
@@ -1890,9 +1971,18 @@ impl StoreBackend for SqliteStore {
         Ok(removed > 0)
     }
 
+    fn mark_order_submitted(&mut self, nonce: &str) -> rusqlite::Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE outstanding_orders SET lifecycle = ?2 WHERE nonce = ?1 AND lifecycle = ?3",
+            rusqlite::params![nonce, OrderLifecycle::Submitted.as_str(), OrderLifecycle::Submitting.as_str()],
+        )?;
+        Ok(updated > 0)
+    }
+
     fn list_outstanding_nonces(&mut self) -> rusqlite::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT nonce FROM outstanding_orders")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut stmt = self.conn.prepare("SELECT nonce FROM outstanding_orders WHERE lifecycle = ?1")?;
+        let rows =
+            stmt.query_map(rusqlite::params![OrderLifecycle::Submitted.as_str()], |row| row.get::<_, String>(0))?;
         rows.collect()
     }
 
@@ -1905,9 +1995,10 @@ impl StoreBackend for SqliteStore {
     fn list_expired_orders(&mut self, now_unix_millis: u64) -> rusqlite::Result<Vec<OutstandingOrder>> {
         let now = i64::try_from(now_unix_millis).unwrap_or(i64::MAX);
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {ORDER_COLUMNS} FROM outstanding_orders WHERE deadline_unix_millis <= ?1 ORDER BY nonce"
+            "SELECT {ORDER_COLUMNS} FROM outstanding_orders \
+             WHERE deadline_unix_millis <= ?1 AND lifecycle = ?2 ORDER BY nonce"
         ))?;
-        let rows = stmt.query_map(rusqlite::params![now], order_from_row)?;
+        let rows = stmt.query_map(rusqlite::params![now, OrderLifecycle::Submitted.as_str()], order_from_row)?;
         rows.collect()
     }
 
@@ -1915,12 +2006,15 @@ impl StoreBackend for SqliteStore {
         // `question` leads the parameter list so the order's own columns keep the
         // ?1.. positions `order_params` produces.
         let deadline = deadline_column(order);
+        let lifecycle = order.lifecycle.as_str();
         self.conn.execute(
             &format!(
                 "INSERT OR REPLACE INTO parked_question (question, {ORDER_COLUMNS}) \
-                 VALUES (?12, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+                 VALUES (?13, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
             ),
-            [order_params(order, &deadline).as_slice(), &[&question as &dyn rusqlite::ToSql]].concat().as_slice(),
+            [order_params(order, &deadline, lifecycle).as_slice(), &[&question as &dyn rusqlite::ToSql]]
+                .concat()
+                .as_slice(),
         )?;
         Ok(())
     }
@@ -2955,9 +3049,9 @@ impl StoreBackend for SqliteStore {
     fn list_bloom_dispatch_live(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<BloomDispatchLive>> {
         let mut stmt = self.conn.prepare(
             "SELECT nonce, workpiece, stage, displayed_digest FROM outstanding_orders \
-             WHERE bloom = ?1 ORDER BY nonce",
+             WHERE bloom = ?1 AND lifecycle = ?2 ORDER BY nonce",
         )?;
-        let rows = stmt.query_map(rusqlite::params![bloom], |row| {
+        let rows = stmt.query_map(rusqlite::params![bloom, OrderLifecycle::Submitted.as_str()], |row| {
             Ok(BloomDispatchLive {
                 nonce: row.get(0)?,
                 workpiece: row.get(1)?,

@@ -30,7 +30,8 @@ use aether_bloomery::{
 };
 use aether_chassis_bloomery::store::{
     AppendEvent, AppendEventResult, ClaimSeal, ClaimSealResult, DrainOutbox, DrainOutboxResult, EnqueueOutbox,
-    EnqueueOutboxResult, JournalWrite, OutstandingOrder, ReplayJournal, ReplayJournalResult, SqliteStore, StoreBackend,
+    EnqueueOutboxResult, JournalWrite, OrderLifecycle, OutstandingOrder, ReplayJournal, ReplayJournalResult,
+    SqliteStore, StoreBackend,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, mailbox_id_from_path};
@@ -215,6 +216,7 @@ fn plant_completed_order(store: &mut SqliteStore, worktrees: &Path, bloom: Bloom
             configs: to_vec(&ConfigRegistry::default()).unwrap(),
             profile: to_vec(&StageCatalog::profile_of(StageId::Construct)).unwrap(),
             deadline_unix_millis: u64::MAX / 2,
+            lifecycle: OrderLifecycle::Submitted,
         })
         .unwrap();
 

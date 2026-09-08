@@ -37,7 +37,7 @@ use super::strand::readopt_stranded_dispatches;
 use super::{
     BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState, GitCandidatePush,
     NameEvidenceClaims, Stores, TickClock, TrackedHandle, admitted_candidate_pushes, backoff_delay, candidate_push_at,
-    default_candidate_push, dispatch_origin, drain_and_dispatch, drain_and_dispatch_aggregate,
+    default_candidate_push, dispatch_origin, drain_and_cancel, drain_and_dispatch, drain_and_dispatch_aggregate,
     drain_and_dispatch_scope, drain_and_redispatch, fold_drain_backoff, is_silent, is_stale, journal_publications,
     next_backoff, observe_heartbeat, seed_dispatches, seed_tracked, select_stale_handles, silence_from,
     timeout_verdict,
@@ -58,7 +58,8 @@ use crate::bloomery::{
 use crate::bloomery::{authorize_instructions, reference_instructions};
 use crate::session::SessionConfig;
 use crate::store::{
-    CANDIDATE_HASH_OCCASION_SEAL, CommissionBackend, JournalWrite, OutstandingOrder, SqliteStore, StoreBackend,
+    CANDIDATE_HASH_OCCASION_SEAL, CommissionBackend, JournalWrite, OrderLifecycle, OutstandingOrder, SqliteStore,
+    StoreBackend,
 };
 use aether_bloomery_github::{LandingSource, candidate_ref_name, member_checkpoint_ref_name};
 
@@ -1417,6 +1418,7 @@ fn an_expired_order_that_does_not_decode_is_reclaimed_before_it_is_read() {
             configs: to_vec(&ConfigRegistry::default()).unwrap(),
             profile: to_vec(&StageCatalog::profile_of(StageId::Construct)).unwrap(),
             deadline_unix_millis: AT_THE_DEADLINE,
+            lifecycle: OrderLifecycle::Submitted,
         })
         .unwrap();
     let mut tracked = track(vec![WorkHandle::new(Nonce(nonce.clone()))]);
@@ -3807,8 +3809,10 @@ mod offloaded_adapter_calls {
 
     use aether_bloomery::testing::digest;
     use aether_bloomery::{
-        BloomId, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, ObservedLaneWrites, Topic, WorkHandle, WorkOrder,
+        BloomId, CancelDispatchPayload, ConfigRegistry, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce,
+        ObservedLaneWrites, StageCatalog, StageId, Topic, Transformation, WorkHandle, WorkOrder, WorkpieceId,
     };
+    use aether_data::wire::to_vec;
     use aether_data::{MailId, MailboxId, Source};
     use aether_substrate::actor::native::NativeCtx;
     use aether_substrate::actor::native::binding::NativeBinding;
@@ -3816,12 +3820,12 @@ mod offloaded_adapter_calls {
 
     use super::super::offload::{AdapterOffload, MAX_IN_FLIGHT};
     use super::{
-        CandidatePush, CapturingBackend, NOW_UNIX_MILLIS, NameEvidenceClaims, RecordingPush, Stores,
+        CandidatePush, CapturingBackend, NOW_UNIX_MILLIS, NameEvidenceClaims, RecordingPush, Stores, drain_and_cancel,
         drain_and_dispatch, enqueue_construct_dispatch, pull_and_admit, tick_clock_at, track,
     };
     use crate::bloomery::outbox::TopicOutbox;
     use crate::bloomery::{ExecutorPort, ExecutorPortError, ExecutorShell, Settled};
-    use crate::store::SqliteStore;
+    use crate::store::{OrderLifecycle, OutstandingOrder, SqliteStore};
 
     /// A backend whose lane-write sweep parks until the test opens the gate.
     ///
@@ -4021,5 +4025,235 @@ mod offloaded_adapter_calls {
 
         assert_eq!(offload.in_flight(), MAX_IN_FLIGHT, "the surplus asks wait for a free slot rather than a thread");
         backend.open();
+    }
+
+    /// A backend whose `submit` parks until the test opens the gate — the call
+    /// #5564 still left on the dispatcher after the other four moved.
+    #[derive(Default)]
+    struct LatchedSubmit {
+        gate: Mutex<bool>,
+        opened: Condvar,
+        submitted: Mutex<u32>,
+        cancelled: Mutex<Vec<String>>,
+    }
+
+    impl LatchedSubmit {
+        fn open(&self) {
+            *self.gate.lock().unwrap() = true;
+            self.opened.notify_all();
+        }
+
+        fn submitted(&self) -> u32 {
+            *self.submitted.lock().unwrap()
+        }
+
+        fn cancelled(&self) -> Vec<String> {
+            self.cancelled.lock().unwrap().clone()
+        }
+    }
+
+    impl ExecutorBackend for LatchedSubmit {
+        type Error = ExecutorPortError;
+
+        fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+            let mut gate = self.gate.lock().unwrap();
+            while !*gate {
+                gate = self.opened.wait(gate).unwrap();
+            }
+            drop(gate);
+            *self.submitted.lock().unwrap() += 1;
+            Ok(WorkHandle::new(order.nonce.clone()))
+        }
+
+        fn inspect(&self, _handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+            Ok(ExecutionStatus::Unknown)
+        }
+
+        fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
+            self.cancelled.lock().unwrap().push(handle.nonce.0.clone());
+            Ok(())
+        }
+
+        fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn live_order(nonce: &str, bloom: BloomId, workpiece: &str, deadline_unix_millis: u64) -> OutstandingOrder {
+        let transformation = Transformation::for_member_stage(
+            &StageCatalog::binding_of(StageId::Construct),
+            digest(1),
+            digest(0xC0),
+            digest(0xB0),
+        );
+        OutstandingOrder {
+            nonce: nonce.to_owned(),
+            bloom: bloom.0.as_bytes().to_vec(),
+            workpiece: workpiece.to_owned(),
+            scope_revision: digest(1).as_bytes().to_vec(),
+            candidate: digest(5).as_bytes().to_vec(),
+            displayed_digest: digest(5).as_bytes().to_vec(),
+            stage: to_vec(&StageId::Construct).unwrap(),
+            transformation: to_vec(&transformation).unwrap(),
+            configs: to_vec(&ConfigRegistry::default()).unwrap(),
+            profile: to_vec(&StageCatalog::profile_of(StageId::Construct)).unwrap(),
+            deadline_unix_millis,
+            lifecycle: OrderLifecycle::Submitted,
+        }
+    }
+
+    /// The remaining #5564 failure: a submit a worker holds must not count as a
+    /// live dispatch and must not stop the deadline sweep or a withdrawal cancel.
+    #[test]
+    fn a_parked_submit_does_not_stop_the_deadline_sweep_or_a_withdrawal_cancel() {
+        let mut store = SqliteStore::open(":memory:").unwrap();
+        let bloom = BloomId(digest(1));
+
+        let setup = ExecutorShell::new(Arc::new(CapturingBackend::default()));
+        let (overdue_sequence, _) = enqueue_construct_dispatch(&mut store, bloom, "wp-overdue", 5);
+        let (handles, ack_through, _) = drain_and_dispatch(&mut store, &setup, NOW_UNIX_MILLIS).unwrap();
+        store.ack_topic(Topic::Dispatch, ack_through.expect("the setup dispatch submitted")).unwrap();
+        let mut tracked = track(handles);
+        let overdue_nonce = format!("dispatch-{overdue_sequence}");
+
+        store.record_order(&live_order("n-withdraw", bloom, "wp-withdraw", u64::MAX / 2)).unwrap();
+        store
+            .enqueue_topic(
+                Topic::CancelDispatch,
+                &to_vec(&CancelDispatchPayload { bloom: bloom.0, workpiece: WorkpieceId("wp-withdraw".to_owned()) })
+                    .unwrap(),
+                None,
+            )
+            .unwrap();
+
+        let parked_sequence = enqueue_construct_dispatch(&mut store, bloom, "wp-parked", 6);
+        let parked_nonce = format!("dispatch-{parked_sequence}");
+
+        let backend = Arc::new(LatchedSubmit::default());
+        let shell = ExecutorShell::new(Arc::clone(&backend));
+        let pusher: Arc<dyn CandidatePush> = Arc::new(RecordingPush::default());
+        let binding = binding();
+        let mut offload = AdapterOffload::new();
+
+        let sweep_at = NOW_UNIX_MILLIS + 7_200_000;
+        let budget = Instant::now() + Duration::from_secs(30);
+        while (backend.cancelled().len() < 2) && Instant::now() < budget {
+            offload.open_round();
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            {
+                let port = offload.port(&shell);
+                let (handles, ack_through, transient) = drain_and_dispatch(&mut store, &port, NOW_UNIX_MILLIS).unwrap();
+                assert!(handles.is_empty(), "a submit a worker holds returns no handle");
+                assert!(ack_through.is_none(), "the outbox entry stays unacked while submit is in flight");
+                assert!(transient.is_none(), "in-flight is not a transient failure");
+                assert!(
+                    !store.list_outstanding_nonces().unwrap().iter().any(|nonce| nonce == &parked_nonce),
+                    "no outstanding_orders reader sees a parked submit as a live dispatch",
+                );
+                assert_eq!(
+                    store.lookup_order(&parked_nonce).unwrap().expect("the reservation is addressable").lifecycle,
+                    OrderLifecycle::Submitting,
+                    "session reuse still sees the submitting row",
+                );
+                pull_and_admit(
+                    Stores { store: &mut store, artifacts: None },
+                    &port,
+                    NameEvidenceClaims,
+                    &mut tracked,
+                    &tick_clock_at(sweep_at),
+                    None,
+                );
+                let _ = drain_and_cancel(&mut store, &port).unwrap();
+            }
+            offload.start_wanted(&mut ctx, &shell, &pusher);
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let cancelled = backend.cancelled();
+        assert!(
+            cancelled.contains(&overdue_nonce),
+            "the deadline sweep must terminate the overdue order while submit is still parked, got {cancelled:?}",
+        );
+        assert!(
+            cancelled.contains(&"n-withdraw".to_owned()),
+            "a withdrawal cancel must run beside the parked submit, got {cancelled:?}",
+        );
+        assert_eq!(backend.submitted(), 0, "the parked submit has not answered");
+
+        backend.open();
+        let release = Instant::now() + Duration::from_secs(5);
+        while backend.submitted() == 0 && Instant::now() < release {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(backend.submitted(), 1, "releasing the park runs submit once");
+
+        offload.open_round();
+        {
+            let port = offload.port(&shell);
+            let (handles, ack_through, _) = drain_and_dispatch(&mut store, &port, NOW_UNIX_MILLIS).unwrap();
+            assert_eq!(handles.len(), 1, "the handle is tracked once submit answers");
+            assert_eq!(handles[0].nonce.0, parked_nonce);
+            assert_eq!(ack_through, Some(parked_sequence), "the outbox entry is acked once submit answers");
+            assert_eq!(
+                store.lookup_order(&parked_nonce).unwrap().expect("the order remains").lifecycle,
+                OrderLifecycle::Submitted,
+            );
+            assert!(store.list_outstanding_nonces().unwrap().iter().any(|nonce| nonce == &parked_nonce));
+        }
+    }
+
+    /// A `submitting` row with no live worker after a restart is re-driven from
+    /// the still-unacked outbox entry, once, under the same nonce.
+    #[test]
+    fn a_submitting_row_is_re_driven_once_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("submit-intent.db").to_str().unwrap().to_owned();
+        let bloom = BloomId(digest(1));
+        let parked_sequence;
+        let parked_nonce;
+        {
+            let mut store = SqliteStore::open(&path).unwrap();
+            parked_sequence = enqueue_construct_dispatch(&mut store, bloom, "wp-restart", 7);
+            parked_nonce = format!("dispatch-{parked_sequence}");
+
+            let backend = Arc::new(LatchedSubmit::default());
+            let shell = ExecutorShell::new(Arc::clone(&backend));
+            let mut offload = AdapterOffload::new();
+            offload.open_round();
+            {
+                let port = offload.port(&shell);
+                let (handles, ack_through, _) = drain_and_dispatch(&mut store, &port, NOW_UNIX_MILLIS).unwrap();
+                assert!(handles.is_empty());
+                assert!(ack_through.is_none(), "crash before submit answers leaves the outbox unacked");
+            }
+            assert_eq!(
+                store.lookup_order(&parked_nonce).unwrap().expect("the intent survives").lifecycle,
+                OrderLifecycle::Submitting,
+            );
+            assert!(store.list_outstanding_nonces().unwrap().is_empty(), "restart tracking ignores the intent");
+            assert_eq!(backend.submitted(), 0, "no worker was started before the crash");
+        }
+
+        let mut store = SqliteStore::open(&path).unwrap();
+        assert_eq!(
+            store.lookup_order(&parked_nonce).unwrap().expect("the submitting row is durable").lifecycle,
+            OrderLifecycle::Submitting,
+        );
+        let backend = Arc::new(CapturingBackend::default());
+        let shell = ExecutorShell::new(Arc::clone(&backend));
+        let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+        assert_eq!(handles.len(), 1, "the unacked entry is re-driven");
+        assert_eq!(handles[0].nonce.0, parked_nonce);
+        assert_eq!(ack_through, Some(parked_sequence));
+        assert_eq!(backend.orders().len(), 1, "submit runs exactly once after restart");
+        assert_eq!(
+            store.lookup_order(&parked_nonce).unwrap().expect("the row was not duplicated").lifecycle,
+            OrderLifecycle::Submitted,
+        );
+
+        let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+        assert!(handles.is_empty(), "a second drain does not submit again");
+        assert_eq!(ack_through, Some(parked_sequence), "the already-submitted row acks the re-drained entry");
+        assert_eq!(backend.orders().len(), 1, "the nonce is submitted once");
     }
 }

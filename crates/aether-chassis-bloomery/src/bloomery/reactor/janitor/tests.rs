@@ -27,7 +27,7 @@ use crate::bloomery::{
     CapturedObjects, LaneOccupancy, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner,
 };
 use crate::store::membership::replay_snapshot;
-use crate::store::{JournalWrite, OutstandingOrder, SqliteStore, StoreBackend};
+use crate::store::{JournalWrite, OrderLifecycle, OutstandingOrder, SqliteStore, StoreBackend};
 
 /// Admit `fact` the way the coordinator does: decide it against the board the
 /// journal currently describes, and record that decision on the row.
@@ -129,6 +129,7 @@ pub fn order_for(nonce: &str, bloom: &BloomId) -> OutstandingOrder {
         transformation: vec![7, 7],
         configs: vec![3, 3],
         deadline_unix_millis: 1_700_000_060_000,
+        lifecycle: OrderLifecycle::Submitted,
     }
 }
 

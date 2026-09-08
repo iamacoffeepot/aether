@@ -29,8 +29,11 @@
 //! of every dispatch the reducer ever decided, payload intact — and asks, for
 //! each one's [`dispatch_nonce`]:
 //!
-//! - **Is the order still outstanding?** Then it is in flight and the other two
-//!   legs own it.
+//! - **Is the order still outstanding?** A `submitted` row is in flight and the
+//!   other two legs own it. A `submitting` row is a reservation, not a live
+//!   dispatch: `lookup_order` still finds it (so this recovery does not
+//!   re-queue an already-unacked outbox entry), and the drain re-drives `submit`
+//!   against that same nonce rather than inserting a second row (#5564).
 //! - **Was an order ever recorded for it?** `dispatch_owners` outlives the
 //!   consume, so a nonce absent from it never reached a worker lane: the entry
 //!   was acked by one of the deliberate park paths (a retired plan, a permanent

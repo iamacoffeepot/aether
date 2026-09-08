@@ -16,10 +16,9 @@
 //! offload keeps no backlog of deferred work — a buffered call would be a
 //! *stale* request replayed after the world moved. It keeps a ledger instead:
 //!
-//! `submit` is the one call that stays on the dispatcher, for a reason that is
-//! about visibility rather than blocking: its order registry row is written
-//! before it runs, and that row is what the view, the doctor, and every harness
-//! read as "waiting on a run". See [`ExecutorPort::submit`].
+//! `submit` is settled too (#5564): the order row is written as `submitting`
+//! before the call is handed out, so readers that mean "waiting on a run" do
+//! not see a reservation as a dispatch. See [`ExecutorPort::submit`].
 //!
 //! - `in_flight` — the calls a worker holds right now, keyed by [`AdapterCall`]
 //!   so a re-ask on the next turn recognizes its own call rather than starting
@@ -85,6 +84,8 @@ pub const MAX_IN_FLIGHT: usize = DEFAULT_MAX_IN_FLIGHT;
 /// is recognized while a different ref is its own call.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum AdapterCall {
+    /// `ExecutorPort::submit` for an order's nonce.
+    Submit(Nonce),
     /// `ExecutorPort::observe` for a tracked handle's nonce.
     Observe(Nonce),
     /// `ExecutorPort::cancel` for a nonce — the reactor's cancellation intent.
@@ -103,6 +104,7 @@ pub enum AdapterCall {
 /// keying on the payload would start a second run for it.
 #[derive(Clone, Debug)]
 enum AdapterWork {
+    Submit(WorkOrder),
     Observe(WorkHandle),
     Cancel(WorkHandle),
     ObserveWrites,
@@ -112,6 +114,7 @@ enum AdapterWork {
 impl AdapterWork {
     fn call(&self) -> AdapterCall {
         match self {
+            Self::Submit(order) => AdapterCall::Submit(order.nonce.clone()),
             Self::Observe(handle) => AdapterCall::Observe(handle.nonce.clone()),
             Self::Cancel(handle) => AdapterCall::Cancel(handle.nonce.clone()),
             Self::ObserveWrites => AdapterCall::ObserveWrites,
@@ -121,10 +124,12 @@ impl AdapterWork {
         }
     }
 
-    /// Run the call. The whole blocking surface of this reactor is these five
-    /// lines, and they only ever execute on a worker thread.
+    /// Run the call. The whole blocking surface of this reactor is these arms,
+    /// and they only ever execute on a worker thread. Submit uses the shell's
+    /// inherent synchronous method — the identity arm of the port.
     fn run(self, shell: &ExecutorShell, pusher: &dyn CandidatePush) -> AdapterAnswer {
         match self {
+            Self::Submit(order) => AdapterAnswer::Submit(shell.submit(&order)),
             Self::Observe(handle) => AdapterAnswer::Observe(shell.observe_run(&handle)),
             Self::Cancel(handle) => AdapterAnswer::Cancel(shell.cancel(&handle)),
             Self::ObserveWrites => AdapterAnswer::ObserveWrites(shell.observe_writes()),
@@ -137,6 +142,7 @@ impl AdapterWork {
 /// answers have five different types and none of them is worth erasing.
 #[derive(Debug)]
 enum AdapterAnswer {
+    Submit(Result<WorkHandle, ExecutorPortError>),
     Observe(Result<RunObservation, ExecutorPortError>),
     Cancel(Result<(), ExecutorPortError>),
     ObserveWrites(Vec<ObservedLaneWrites>),
@@ -372,11 +378,11 @@ impl ExecutorPort for OffloadedPort<'_> {
         ExecutorPort::backend_for(self.shell, handle)
     }
 
-    /// Straight through to the shell: the order registry row is written before
-    /// the submit runs, so handing it out would publish a reservation as a
-    /// dispatch (see [`ExecutorPort::submit`]).
-    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, ExecutorPortError> {
-        ExecutorPort::submit(self.shell, order)
+    fn submit(&self, order: &WorkOrder) -> Settled<Result<WorkHandle, ExecutorPortError>> {
+        match self.offload.take_or_want(AdapterWork::Submit(order.clone())) {
+            Some(AdapterAnswer::Submit(answer)) => Settled::Answered(answer),
+            _ => Settled::InFlight,
+        }
     }
 
     fn observe(&self, handle: &WorkHandle) -> Settled<Result<RunObservation, ExecutorPortError>> {

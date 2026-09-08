@@ -81,7 +81,8 @@ use crate::bloomery::testing::{ScriptedEvidence, ScriptedEvidenceResult, Scripte
 use crate::bloomery::{CoordinatorConfig, ExecutorReactorSetup};
 use crate::control::ControlCore;
 use crate::store::{
-    CANDIDATE_HASH_OCCASION_SEAL, OutstandingOrder, SqliteStore, StoreBackend, StoreConfigError, resolve_config,
+    CANDIDATE_HASH_OCCASION_SEAL, OrderLifecycle, OutstandingOrder, SqliteStore, StoreBackend, StoreConfigError,
+    resolve_config,
 };
 
 mod offload;
@@ -1169,12 +1170,18 @@ fn hold_overlapping_reconcile(
     Ok(true)
 }
 
-/// True when this outbox row already has an outstanding order — submitted on
+/// True when this outbox row already has a *live* dispatch — submitted on
 /// an earlier drain that could not ack past a held sibling. The nonce is the
-/// sequence, so the row is the proof this entry reached a worker; submitting
-/// again would start a second run for the same outbox row.
+/// sequence, so a `submitted` row is the proof this entry reached a worker;
+/// submitting again would start a second run for the same outbox row.
+///
+/// A `submitting` row is not this: it is a reservation the worker still holds,
+/// or a stale intent left by a restart with no live worker. Either way the
+/// drain must re-ask `submit` rather than treat the entry as done (#5564).
 fn dispatch_already_submitted(store: &mut dyn StoreBackend, sequence: u64) -> rusqlite::Result<bool> {
-    Ok(store.lookup_order(&dispatch_nonce(sequence).0)?.is_some())
+    Ok(store
+        .lookup_order(&dispatch_nonce(sequence).0)?
+        .is_some_and(|order| order.lifecycle == OrderLifecycle::Submitted))
 }
 
 /// Advance the contiguous ack prefix unless a held Reconcile earlier in this
@@ -1303,6 +1310,9 @@ fn observe_lane_writes(
         let Some(order) = store.lookup_order(&observed.nonce.0)? else {
             continue;
         };
+        if order.lifecycle != OrderLifecycle::Submitted {
+            continue;
+        }
         let Some(record) = DispatchRecord::from_stored(&order) else {
             continue;
         };
@@ -1426,6 +1436,8 @@ fn transformation_has_subject(inputs: &[Digest], sequence: u64, what: &str) -> b
 /// Outcome of overlaying and submitting one decoded dispatch entry.
 enum DispatchSubmit {
     Submitted(WorkHandle),
+    /// A worker holds `submit`; the outbox entry stays unacked (#5564).
+    InFlight,
     Parked,
     Refused,
     Transient,
@@ -1481,7 +1493,8 @@ fn submit_dispatch_entry(
         return Ok(DispatchSubmit::Parked);
     }
     match dispatch_and_record(executor, store, &record, now_unix_millis) {
-        Ok(handle) => Ok(DispatchSubmit::Submitted(handle)),
+        Ok(Settled::Answered(handle)) => Ok(DispatchSubmit::Submitted(handle)),
+        Ok(Settled::InFlight) => Ok(DispatchSubmit::InFlight),
         Err(error) if error.is_permanent() => {
             // A permanent refusal never clears on retry, so parking (acking
             // past it) is what "wedge the member" means here: the entry
@@ -1573,6 +1586,10 @@ fn drain_and_dispatch(
                 ack_if_unblocked(held, &mut ack_through, entry.sequence);
             }
             DispatchSubmit::Parked => ack_if_unblocked(held, &mut ack_through, entry.sequence),
+            // A worker holds this submit: "not asked yet". Do not ack past it,
+            // and do not set a transient failure — nothing failed, and the
+            // completion wake re-drives this drain.
+            DispatchSubmit::InFlight => break,
             DispatchSubmit::Refused => {
                 ack_if_unblocked(held, &mut ack_through, entry.sequence);
                 break;
@@ -1743,10 +1760,11 @@ fn drain_and_dispatch_aggregate(
             configs: payload.configs,
         };
         match dispatch_and_record(executor, store, &record, now_unix_millis) {
-            Ok(handle) => {
+            Ok(Settled::Answered(handle)) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
             }
+            Ok(Settled::InFlight) => break,
             Err(error) if error.is_permanent() => {
                 tracing::error!(
                     target: "aether_chassis_bloomery::executor",
@@ -1830,10 +1848,11 @@ fn drain_and_dispatch_aggregate_verify(
             configs: ConfigRegistry::default(),
         };
         match dispatch_and_record(executor, store, &record, now_unix_millis) {
-            Ok(handle) => {
+            Ok(Settled::Answered(handle)) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
             }
+            Ok(Settled::InFlight) => break,
             Err(error) if error.is_permanent() => {
                 tracing::error!(
                     target: "aether_chassis_bloomery::executor",
@@ -1908,10 +1927,11 @@ fn drain_and_dispatch_base_verify(
             configs: ConfigRegistry::default(),
         };
         match dispatch_and_record(executor, store, &record, now_unix_millis) {
-            Ok(handle) => {
+            Ok(Settled::Answered(handle)) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
             }
+            Ok(Settled::InFlight) => break,
             Err(error) if error.is_permanent() => {
                 tracing::error!(
                     target: "aether_chassis_bloomery::executor",
@@ -2074,7 +2094,7 @@ fn drain_and_redispatch(
         }
 
         match dispatch_and_record(executor, store, &record, now_unix_millis) {
-            Ok(handle) => {
+            Ok(Settled::Answered(handle)) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
                 // The replay is submitted and tracked, so the hold's row has done
@@ -2090,6 +2110,7 @@ fn drain_and_redispatch(
                     );
                 }
             }
+            Ok(Settled::InFlight) => break,
             Err(error) if error.is_permanent() => {
                 tracing::error!(
                     target: "aether_chassis_bloomery::executor",
