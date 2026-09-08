@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::{fs, io};
 
-use aether_bloomery::{BackendObjectId, is_model_lane};
+use aether_bloomery::{BackendObjectId, RETROSPECT_READ_COMMAND, is_model_lane};
 use aether_bloomery_git::command::{self, GitCommandError};
 
 use super::error::LocalExecutorError;
@@ -426,6 +426,14 @@ fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) 
         }
         if spec.seeded.is_some() {
             task_argv::push_value_flag(&mut args, "--seeded", checkout);
+        }
+        if spec.command == RETROSPECT_READ_COMMAND {
+            if let Some(bloom) = spec.bloom {
+                task_argv::push_value_flag(&mut args, "--bloom", bloom);
+            }
+            if let Some(receipt) = spec.receipt {
+                task_argv::push_value_flag(&mut args, "--receipt", receipt);
+            }
         }
     }
     Ok(args)
@@ -1055,6 +1063,36 @@ mod tests {
         assert!(!verify.iter().any(|arg| arg == "--seeded"), "verify is not a construct checkpoint: {verify:?}");
     }
 
+    #[test]
+    fn a_reader_dispatch_names_the_bloom_and_the_receipt() {
+        // Tripwire: the reader's prompt context slots are `--bloom` and
+        // `--receipt`. Dropping them here leaves the lane with an empty
+        // `## Bloom` / `## Receipt digest` and findings unbound to the
+        // landing they came from.
+        let evidence = Path::new("/tmp/evidence");
+        let worktree = Path::new("/tmp/slot");
+        let target = Path::new("/tmp/target");
+        let checkout = "abc123def456";
+        let mut reader = spec("retrospect.read", checkout, Some("base000"), None, evidence, worktree, target);
+        reader.bloom = Some("bloomhex");
+        reader.receipt = Some("receipthash");
+        let args = work_order_args(&reader, checkout, Some("base000")).expect("work-order args assemble");
+
+        assert!(args.windows(2).any(|pair| pair == ["--bloom", "bloomhex"]), "the bloom is named: {args:?}");
+        assert!(args.windows(2).any(|pair| pair == ["--receipt", "receipthash"]), "the receipt is named: {args:?}");
+        assert!(args.windows(2).any(|pair| pair == ["--diff-base", "base000"]), "the sealed base is named: {args:?}");
+        assert!(args.windows(2).any(|pair| pair == ["--subject", checkout]), "the landed head is named: {args:?}");
+
+        let construct = work_order_args(
+            &spec("construct.implement", checkout, None, None, evidence, worktree, target),
+            checkout,
+            None,
+        )
+        .expect("construct args assemble");
+        assert!(!construct.iter().any(|arg| arg == "--bloom"), "construct does not name a bloom: {construct:?}");
+        assert!(!construct.iter().any(|arg| arg == "--receipt"), "construct does not name a receipt: {construct:?}");
+    }
+
     fn spec<'a>(
         command: &'a str,
         checkout_hex: &'a str,
@@ -1082,6 +1120,8 @@ mod tests {
             resume: None,
             workpiece: None,
             stage: None,
+            bloom: None,
+            receipt: None,
         }
     }
 

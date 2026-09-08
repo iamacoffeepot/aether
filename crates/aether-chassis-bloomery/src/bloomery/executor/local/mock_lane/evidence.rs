@@ -20,7 +20,8 @@ use std::path::Path;
 use std::{fs, io};
 
 use aether_bloomery::{
-    CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND, VerifyFailure, VerifyFailureSet,
+    CONSTRUCT_IMPLEMENT_COMMAND, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND, VerifyFailure,
+    VerifyFailureSet,
 };
 use serde_json::{Value, json};
 
@@ -142,6 +143,9 @@ pub fn outcome_for(command: &str, nonce: &str, mode: LaneMode, subject: Option<&
     }
     if command == SCOPE_FILL_COMMAND {
         return scope_outcome(command, evidence_nonce, mode, subject);
+    }
+    if command == RETROSPECT_READ_COMMAND {
+        return retrospect_outcome(command, evidence_nonce, mode, subject);
     }
     if mode == LaneMode::Environment {
         return verify_environment_outcome(command, evidence_nonce);
@@ -276,6 +280,44 @@ fn scope_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: O
     Outcome { evidence: Some(evidence_bytes(&scope)), exit_code: 0, candidate: None }
 }
 
+/// A reader's evidence (ADR-0216): a pass stamps the work orders it will not
+/// fix; an environment run judged nothing. It produces no candidate — the
+/// bloom has already landed — and an empty array is a passing read with
+/// nothing to file, matching the real lane.
+fn retrospect_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: Option<&str>) -> Outcome {
+    let passed = authored_pass(mode);
+    let status = match mode {
+        LaneMode::Environment => "environment",
+        _ if passed => "pass",
+        _ => "fail",
+    };
+    let findings = if passed {
+        json!([
+            {
+                "title": "the drain re-reads a parked entry every tick",
+                "body": "The study drain acks past a parked entry, so the next tick re-selects it.",
+                "surface": ["crates/aether-chassis-bloomery/**"],
+            },
+            {
+                "title": "a refused emission logs no bloom id",
+                "body": "The refusal warn names the nonce and not the bloom, so it cannot be traced back.",
+                "surface": ["crates/aether-bloomery/**"],
+            },
+        ])
+    } else {
+        json!([])
+    };
+    let mut retrospect = json!({
+        "command": command,
+        "nonce": evidence_nonce,
+        "status": status,
+        "retrospect_findings": findings,
+        "result_record": result_record(false, Some("filed what the bloom will not fix.")),
+    });
+    stamp_claimed_subject(&mut retrospect, mode, subject);
+    Outcome { evidence: Some(evidence_bytes(&retrospect)), exit_code: 0, candidate: None }
+}
+
 fn verify_environment_outcome(command: &str, evidence_nonce: &str) -> Outcome {
     let findings = "Verification did not run. This host is missing tools or toolchain targets the verify lane \
          needs, so it cannot compute whether the candidate passes — which is not the same as the \
@@ -353,7 +395,8 @@ pub fn apply(outcome: &Outcome, worktree: &Path, out: &Path) -> io::Result<()> {
 #[allow(clippy::unwrap_used, reason = "a fixture asserting on evidence it just built reports a miss by panicking")]
 mod tests {
     use aether_bloomery::{
-        CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND, VerifyFailure, VerifyFailureSet,
+        CONSTRUCT_IMPLEMENT_COMMAND, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND,
+        VerifyFailure, VerifyFailureSet,
     };
     use serde_json::Value;
 
@@ -451,6 +494,21 @@ mod tests {
         let second = outcome(CONSTRUCT_IMPLEMENT_COMMAND, "n-2", LaneMode::Pass).candidate;
 
         assert!(first.is_some() && first != second, "a repair lap has to change something: {first:?} vs {second:?}");
+    }
+
+    #[test]
+    fn a_passing_reader_stamps_two_claims_and_no_candidate() {
+        // Tripwire: intake reads `retrospect_findings` as `RetrospectClaim` and
+        // files each one. A mock that fell through to the verify envelope would
+        // stamp `failed_verifiers` and no array, so a LaneHarness green path
+        // would admit a study with nothing filed.
+        let evidence = decoded(RETROSPECT_READ_COMMAND, LaneMode::Pass);
+
+        assert_eq!(evidence["status"], Value::String("pass".to_owned()));
+        assert_eq!(evidence["retrospect_findings"].as_array().map(Vec::len), Some(2));
+        assert_eq!(evidence["retrospect_findings"][0]["title"], "the drain re-reads a parked entry every tick");
+        assert!(evidence.get("failed_verifiers").is_none(), "the reader is not a mechanical gate");
+        assert!(outcome(RETROSPECT_READ_COMMAND, "n-1", LaneMode::Pass).candidate.is_none());
     }
 
     #[test]

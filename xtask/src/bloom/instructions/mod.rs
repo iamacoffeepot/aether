@@ -24,6 +24,8 @@
 
 mod bundle;
 
+pub(crate) use bundle::{RETROSPECT, RETROSPECT_FINDING_CONTRACT};
+
 use std::fs;
 use std::path::PathBuf;
 

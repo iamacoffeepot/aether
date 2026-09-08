@@ -128,6 +128,8 @@ pub fn args(command: impl Into<String>, out: PathBuf) -> TransformArgs {
         nonce: Some(format!("stub-{seq}")),
         subject: None,
         diff_base: None,
+        bloom: None,
+        receipt: None,
         harness: None,
         model: None,
         effort: None,

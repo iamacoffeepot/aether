@@ -20,6 +20,8 @@ mod roll;
 mod status;
 mod upgrade;
 
+pub(crate) use instructions::{RETROSPECT, RETROSPECT_FINDING_CONTRACT};
+
 use std::env;
 use std::path::{Path, PathBuf};
 
