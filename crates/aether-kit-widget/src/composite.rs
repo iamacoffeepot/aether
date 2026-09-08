@@ -293,17 +293,25 @@ mod tests {
     use super::*;
     use aether_math::Rgba;
 
+    /// A flat fill at `x`, its red channel carrying `tag` so a test can
+    /// name which item landed where.
     fn quad(x: f32, tag: f32) -> WidgetDrawItem {
-        WidgetDrawItem::Quad { x, y: 0.0, width: 1.0, height: 1.0, color: Rgba::new(tag, 0.0, 0.0, 1.0), clip: None }
+        WidgetDrawItem::Shape {
+            x,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            corner_radius: 0.0,
+            fill: Some(Rgba::new(tag, 0.0, 0.0, 1.0)),
+            stroke: None,
+            shadow: None,
+            texture: None,
+            clip: None,
+        }
     }
 
     fn clipped_quad(x: f32, tag: f32, clip: WidgetClipRect) -> WidgetDrawItem {
-        let mut item = quad(x, tag);
-        let WidgetDrawItem::Quad { clip: own, .. } = &mut item else {
-            unreachable!("quad helper always returns a quad")
-        };
-        *own = Some(clip);
-        item
+        quad(x, tag).with_clip(Some(clip))
     }
 
     fn textured(x: f32, y: f32, clip: WidgetClipRect) -> WidgetDrawItem {
@@ -386,12 +394,16 @@ mod tests {
         assert!(composite.fill(child, list(vec![quad(4.0, 0.5)])));
         assert_eq!(
             composite.flatten(None).items,
-            vec![WidgetDrawItem::Quad {
+            vec![WidgetDrawItem::Shape {
                 x: 1.0,
                 y: -2.0,
                 width: 1.0,
                 height: 1.0,
-                color: Rgba::new(0.5, 0.0, 0.0, 1.0),
+                corner_radius: 0.0,
+                fill: Some(Rgba::new(0.5, 0.0, 0.0, 1.0)),
+                stroke: None,
+                shadow: None,
+                texture: None,
                 clip: Some(clip),
             }],
         );
@@ -431,8 +443,7 @@ mod tests {
             .items
             .iter()
             .map(|item| match item {
-                WidgetDrawItem::Quad { x, .. }
-                | WidgetDrawItem::TexturedQuad { x, .. }
+                WidgetDrawItem::TexturedQuad { x, .. }
                 | WidgetDrawItem::Text { x, .. }
                 | WidgetDrawItem::Shape { x, .. } => *x,
                 WidgetDrawItem::Triangle { a, .. } => a.x,
@@ -533,12 +544,12 @@ mod tests {
         let mut clips = Vec::new();
         for item in &flat.items {
             let (x, tag, clip) = match item {
-                WidgetDrawItem::Quad { x, color, clip, .. } => (*x, color.r, *clip),
+                WidgetDrawItem::Shape { x, fill: Some(color), clip, .. } => (*x, color.r, *clip),
                 WidgetDrawItem::TexturedQuad { .. }
                 | WidgetDrawItem::Text { .. }
-                | WidgetDrawItem::Shape { .. }
+                | WidgetDrawItem::Shape { fill: None, .. }
                 | WidgetDrawItem::Triangle { .. } => {
-                    unreachable!("test builds only solid quads")
+                    unreachable!("test builds only flat fills")
                 }
             };
             xs.push(x);
@@ -597,12 +608,12 @@ mod tests {
             items
                 .iter()
                 .map(|item| match item {
-                    WidgetDrawItem::Quad { color, .. } => color.r,
+                    WidgetDrawItem::Shape { fill: Some(color), .. } => color.r,
                     WidgetDrawItem::TexturedQuad { .. }
                     | WidgetDrawItem::Text { .. }
-                    | WidgetDrawItem::Shape { .. }
+                    | WidgetDrawItem::Shape { fill: None, .. }
                     | WidgetDrawItem::Triangle { .. } => {
-                        unreachable!("test builds only solid quads")
+                        unreachable!("test builds only flat fills")
                     }
                 })
                 .collect::<Vec<_>>()
@@ -645,12 +656,12 @@ mod tests {
             .overlay
             .iter()
             .map(|item| match item {
-                WidgetDrawItem::Quad { color, .. } => color.r,
+                WidgetDrawItem::Shape { fill: Some(color), .. } => color.r,
                 WidgetDrawItem::TexturedQuad { .. }
                 | WidgetDrawItem::Text { .. }
-                | WidgetDrawItem::Shape { .. }
+                | WidgetDrawItem::Shape { fill: None, .. }
                 | WidgetDrawItem::Triangle { .. } => {
-                    unreachable!("test builds only solid quads")
+                    unreachable!("test builds only flat fills")
                 }
             })
             .collect::<Vec<_>>();

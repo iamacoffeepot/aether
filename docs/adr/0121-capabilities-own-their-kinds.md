@@ -22,7 +22,7 @@ One constraint bounds the move. `aether-capabilities` depends on `aether-substra
 3. **Must-stay rules — own what you can.** A capability owns the kinds it can; some stay central for two reasons. **(a) The cycle rule** — kinds the substrate core dispatches stay in `aether-kinds` (moving them would cycle `substrate → capabilities`):
    - **lifecycle** — `Tick` and the stage kinds; the scheduler dispatches `Tick` directly (`actor/native/binding.rs`).
    - **component** — the capability-registration kinds (`ComponentCapabilities`/`HandlerCapability`/`FallbackCapability`) the dispatcher reads (`actor/native/mod.rs`, `mail/capability.rs`).
-   - **window** — `SetWindowTitle` is core-dispatched (`actor/native/dispatch.rs`); the six-kind family stays whole rather than split for one stuck kind.
+   - **window** — `SetWindowTitle` is core-dispatched (`actor/native/dispatch.rs`); the six-kind family stays whole rather than split for one stuck kind. *(Amended: the `aether.window` family has since moved wholesale into `aether-window`'s own `kinds.rs` — the core dispatch it was pinned by is gone, and only `WindowId` / `WindowMode` remain shared primitives in `aether-kinds`.)*
    - **render's `FrameCheck` family** — the verification reductions the substrate's `capture.rs` consumes; the drawing kinds move, the verification kinds stay (a clean drawing-vs-verification line).
    - **`Mat4Apply`** — a math-primitive transform kind composing `aether_math` types, not a capability's mail protocol.
 

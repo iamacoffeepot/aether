@@ -673,7 +673,7 @@ mod tests {
         items
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { x, width, height, .. } if *height == strip.frame.height => {
+                WidgetDrawItem::Shape { x, width, height, .. } if *height == strip.frame.height => {
                     Some((x.max(0.0), (x + width).min(strip.frame.width)))
                 }
                 _ => None,
@@ -769,7 +769,7 @@ mod tests {
             .draw_items()
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { x, width, height, color, .. } if *height == strip.frame.height => {
+                WidgetDrawItem::Shape { x, width, height, fill: Some(color), .. } if *height == strip.frame.height => {
                     Some((*x, *width, *color))
                 }
                 _ => None,
@@ -785,7 +785,9 @@ mod tests {
             .draw_items()
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { x, y, width, height, color, .. } if *height < strip.frame.height => {
+                WidgetDrawItem::Shape { x, y, width, height, fill: Some(color), .. }
+                    if *height < strip.frame.height =>
+                {
                     Some((*y, *x, *width, *height, *color))
                 }
                 _ => None,
@@ -1010,10 +1012,10 @@ mod tests {
         let (tabs, underlines): (Vec<_>, Vec<_>) = items
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { y, height, color, .. } => Some((*y, *height, *color)),
+                WidgetDrawItem::Shape { y, height, fill: Some(color), .. } => Some((*y, *height, *color)),
                 WidgetDrawItem::Text { .. }
                 | WidgetDrawItem::TexturedQuad { .. }
-                | WidgetDrawItem::Shape { .. }
+                | WidgetDrawItem::Shape { fill: None, .. }
                 | WidgetDrawItem::Triangle { .. } => None,
             })
             .partition(|(_, height, _)| *height == strip.frame.height);

@@ -872,7 +872,7 @@ fn in_process_env(
     BloomeryEnv {
         rpc_port: 0,
         http_port: 0,
-        store: StoreConfig { path: store_path.to_owned() },
+        store: StoreConfig { path: store_path.to_owned(), ..StoreConfig::default() },
         artifacts: ArtifactsConfig { root: Some(artifacts_root.to_owned()) },
         github,
         // No webhook path, so the notification reactor mounts disabled (#5166):

@@ -552,6 +552,7 @@ mod tests {
     use std::fmt::Write as _;
     use std::time::{Duration, Instant};
 
+    use aether_actor::Addressable;
     use aether_harness_substrate::{HarnessOp, SubstrateHarness};
     use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter};
     use aether_harness_substrate_capture::visual::{Image, background_top_left, coverage, decode_png};
@@ -559,10 +560,15 @@ mod tests {
     use aether_kinds::QuadSpace;
     use aether_render::{
         CreateGeometryResult, CreateTextureResult, DrawTexturedQuads, PassStageKind, ProgramRegisterResult,
-        ProgramTimings, ProgramTimingsResult, TexturedQuad,
+        ProgramTimings, ProgramTimingsResult, RenderCapability, TexturedQuad,
     };
 
     use crate::deform::bone_uniform;
+
+    /// The render mailbox every scenario below addresses, read off the cap type
+    /// rather than repeated as a literal beside each op
+    /// (iamacoffeepot/aether#5720).
+    const RENDER: &str = <RenderCapability as Addressable>::NAMESPACE;
 
     const TRIANGLE: &[u8] = b"v -1 -1 0\nv 1 -1 0\nv 0 1 0\nf 1 2 3\n";
     const REAR_CUBE: &str = r"
@@ -717,7 +723,7 @@ f 4 5 8
 
     fn create_geometry(harness: &mut SubstrateHarness, label: &'static str, geometry: &CreateGeometry) -> u32 {
         let result = harness
-            .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", geometry))])
+            .execute(vec![(label, HarnessOp::send_and_await_reply(RENDER, geometry))])
             .expect("create geometry sequence")
             .reply::<CreateGeometryResult>(label)
             .expect("decode geometry reply");
@@ -737,7 +743,7 @@ f 4 5 8
             pixels: Vec::new(),
         };
         let result = harness
-            .execute(vec![("texture", HarnessOp::send_and_await_reply("aether.render", &texture))])
+            .execute(vec![("texture", HarnessOp::send_and_await_reply(RENDER, &texture))])
             .expect("create texture sequence")
             .reply::<CreateTextureResult>("texture")
             .expect("decode texture reply");
@@ -749,7 +755,7 @@ f 4 5 8
 
     fn register(harness: &mut SubstrateHarness, counts: [u32; 3]) -> u32 {
         let result = harness
-            .execute(vec![("register", HarnessOp::send_and_await_reply("aether.render", &program(counts)))])
+            .execute(vec![("register", HarnessOp::send_and_await_reply(RENDER, &program(counts)))])
             .expect("register sequence")
             .reply::<ProgramRegisterResult>("register")
             .expect("decode register reply");
@@ -826,7 +832,7 @@ f 4 5 8
                     .execute(vec![(
                         label,
                         HarnessOp::capture_with_mails(
-                            vec![envelope("aether.render", &mail), envelope("aether.render", &overlay(output))],
+                            vec![envelope(RENDER, &mail), envelope(RENDER, &overlay(output))],
                             Vec::new(),
                         ),
                     )])
@@ -861,7 +867,7 @@ f 4 5 8
         for _ in 0..6 {
             harness
                 .execute(vec![
-                    ("timed", HarnessOp::send_and_settle("aether.render", &dispatch(geometry_ids.clone()))),
+                    ("timed", HarnessOp::send_and_settle(RENDER, &dispatch(geometry_ids.clone()))),
                     ("timed_frame", HarnessOp::advance(1)),
                 ])
                 .expect("timed candidate dispatch");
@@ -906,10 +912,7 @@ f 4 5 8
 
         loop {
             let timing = harness
-                .execute(vec![(
-                    "timings",
-                    HarnessOp::send_and_await_reply("aether.render", &ProgramTimings { program_id }),
-                )])
+                .execute(vec![("timings", HarnessOp::send_and_await_reply(RENDER, &ProgramTimings { program_id }))])
                 .expect("timing query")
                 .reply::<ProgramTimingsResult>("timings")
                 .expect("decode timing reply");
@@ -962,7 +965,7 @@ f 4 5 8
                 .execute(vec![(
                     "full_width",
                     HarnessOp::capture_with_mails(
-                        vec![envelope("aether.render", &dispatch), envelope("aether.render", &overlay(output))],
+                        vec![envelope(RENDER, &dispatch), envelope(RENDER, &overlay(output))],
                         Vec::new(),
                     ),
                 )])
@@ -1030,7 +1033,7 @@ f 4 5 8
                 .execute(vec![(
                     "occluded",
                     HarnessOp::capture_with_mails(
-                        vec![envelope("aether.render", &dispatch), envelope("aether.render", &overlay(output))],
+                        vec![envelope(RENDER, &dispatch), envelope(RENDER, &overlay(output))],
                         Vec::new(),
                     ),
                 )])

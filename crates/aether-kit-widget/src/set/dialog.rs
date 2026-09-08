@@ -400,8 +400,8 @@ mod tests {
 
     fn rule(widget: &DialogWidget) -> (f32, f32, f32) {
         let items = widget.overlay_items();
-        let Some(&WidgetDrawItem::Quad { x, y, width, .. }) = items.last() else {
-            panic!("a titled plate ends in its rule, a quad: {items:?}");
+        let Some(&WidgetDrawItem::Shape { x, y, width, .. }) = items.last() else {
+            panic!("a titled plate ends in its rule, a flat shape: {items:?}");
         };
         (x, y, width)
     }

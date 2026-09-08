@@ -17,7 +17,7 @@ use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
 use aether_math::Rgba;
 
 use crate::set::defaults::WidgetDefaults;
-use crate::set::{ActivationArms, push_control_outlines, reply_if_hidden, text_origin_y};
+use crate::set::{ActivationArms, disc, push_control_outlines, reply_if_hidden, stadium, text_origin_y};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
 use crate::{
@@ -135,28 +135,21 @@ impl ToggleWidget {
         // A stadium track and a round knob: a radius of half the height is
         // what the shape primitive draws a circle at (ADR-0213).
         let mut items = Vec::new();
-        items.push(WidgetDrawItem::Shape {
-            x: 0.0,
-            y: track_y,
-            width: track_width,
-            height: track_height,
-            corner_radius: track_height * 0.5,
-            fill: Some(self.theme.fill(self.track_color(), state)),
-            stroke: None,
-            shadow: None,
-            clip: None,
-        });
-        items.push(WidgetDrawItem::Shape {
-            x: knob_x,
-            y: track_y + 2.0,
-            width: knob_size,
-            height: knob_size,
-            corner_radius: knob_size * 0.5,
-            fill: Some(self.theme.fill(self.knob_color(), self.state.supporting_theme_state(false))),
-            stroke: None,
-            shadow: None,
-            clip: None,
-        });
+        items.push(stadium(
+            0.0,
+            track_y,
+            track_width,
+            track_height,
+            Some(self.theme.fill(self.track_color(), state)),
+            None,
+        ));
+        items.push(disc(
+            knob_x,
+            track_y + 2.0,
+            knob_size,
+            Some(self.theme.fill(self.knob_color(), self.state.supporting_theme_state(false))),
+            None,
+        ));
 
         if !self.label.is_empty() {
             let size = self.theme.label_size_pixels;

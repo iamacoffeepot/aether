@@ -509,8 +509,8 @@ mod tests {
         widget.state.set_hovered(true);
         let items = widget.draw_items();
         assert_eq!(items.len(), 1);
-        let WidgetDrawItem::Quad { width, height, color, .. } = items[0] else {
-            panic!("the mark is a quad: {items:?}");
+        let WidgetDrawItem::Shape { width, height, fill: Some(color), .. } = items[0] else {
+            panic!("the mark is a flat fill: {items:?}");
         };
         assert!((width - 2.0).abs() < f32::EPSILON, "two logical pixels of mark: {width}");
         assert!((height - widget.frame.height).abs() < f32::EPSILON, "down the whole edge: {height}");

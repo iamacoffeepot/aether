@@ -290,8 +290,7 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 WidgetDrawItem::Text { text, .. } => Some(text.as_str()),
-                WidgetDrawItem::Quad { .. }
-                | WidgetDrawItem::TexturedQuad { .. }
+                WidgetDrawItem::TexturedQuad { .. }
                 | WidgetDrawItem::Shape { .. }
                 | WidgetDrawItem::Triangle { .. } => None,
             })
@@ -327,10 +326,9 @@ mod tests {
                 .draw_items()
                 .into_iter()
                 .filter_map(|item| match item {
-                    WidgetDrawItem::Quad { color, .. } => Some(color),
+                    WidgetDrawItem::Shape { fill, .. } => fill,
                     WidgetDrawItem::Text { .. }
                     | WidgetDrawItem::TexturedQuad { .. }
-                    | WidgetDrawItem::Shape { .. }
                     | WidgetDrawItem::Triangle { .. } => None,
                 })
                 .collect::<Vec<_>>()
@@ -422,8 +420,8 @@ mod tests {
         let rules = widget.rule_items(window, 100.0);
         assert_eq!(rules.len(), 2, "three rows, two rules");
         for (index, rule) in rules.iter().enumerate() {
-            let WidgetDrawItem::Quad { x, y, width, height, color, .. } = rule else {
-                panic!("a rule is a quad: {rule:?}");
+            let WidgetDrawItem::Shape { x, y, width, height, fill: Some(color), .. } = rule else {
+                panic!("a rule is a flat fill: {rule:?}");
             };
             #[allow(clippy::cast_precision_loss)] // test rows are tiny exact integers
             let expected_y = (index + 1) as f32 * 24.0;
@@ -436,7 +434,7 @@ mod tests {
             "one row has nothing to divide",
         );
         assert_eq!(
-            widget.draw_items().iter().filter(|item| matches!(item, WidgetDrawItem::Quad { height, .. } if (*height - ROW_RULE_THICKNESS).abs() < f32::EPSILON)).count(),
+            widget.draw_items().iter().filter(|item| matches!(item, WidgetDrawItem::Shape { height, .. } if (*height - ROW_RULE_THICKNESS).abs() < f32::EPSILON)).count(),
             2,
             "and the rules reach the list's own draw",
         );

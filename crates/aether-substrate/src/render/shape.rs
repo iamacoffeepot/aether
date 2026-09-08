@@ -1,4 +1,4 @@
-//! Screen-space shape overlay pipeline (ADR-0213). A third pipeline in
+//! Shape overlay pipeline (ADR-0213). A third pipeline in
 //! the overlay pass beside the textured and premultiplied quad
 //! pipelines: each shape is one axis-aligned box — with a corner radius,
 //! an optional fill, an optional inside stroke, and an optional shadow —
@@ -7,6 +7,12 @@
 //! same painter position and the same scissor as any other overlay draw:
 //! it is one more [`super::quad::OverlayDraw`] source, not a pass and not
 //! a layer.
+//!
+//! A batch draws in either of the quad overlay's two projections: `Screen`
+//! reads the box's coordinates as absolute window pixels, `World` reads
+//! them as pixel offsets from an anchor projected through `view_proj`. The
+//! two share one vertex layout and one shader, differing only in the
+//! `is_screen` flag each vertex carries.
 //!
 //! The vocabulary is fixed and substrate-owned: callers supply six
 //! numbers and three colours, never WGSL, so the overlay lane stays a
@@ -18,9 +24,12 @@ use std::slice;
 /// vec2<f32>` (8) + `local vec2<f32>` (8) + `half_size vec2<f32>` (8) +
 /// `params vec4<f32>` (16) + `fill vec4<f32>` (16) + `stroke vec4<f32>`
 /// (16) + `shadow vec4<f32>` (16) + `shadow_offset vec2<f32>` (8) +
-/// `is_screen u32` (4) = 112. [`push_screen_shape_vertices`] and
-/// [`push_world_shape_vertices`] write exactly this stride per vertex.
-pub const SHAPE_VERTEX_STRIDE: u64 = 112;
+/// `uv_rect vec4<f32>` (16) + `is_screen u32` (4) +
+/// `texture_premultiplied u32` (4) = 132. [`push_screen_shape_vertices`]
+/// and [`push_world_shape_vertices`] write exactly this stride per vertex,
+/// textured or not: one layout serves both shape pipelines, so painter
+/// order can interleave them inside one batch's vertex buffer.
+pub const SHAPE_VERTEX_STRIDE: u64 = 132;
 
 /// Vertices one shape expands to: two triangles, six vertices — the same
 /// cornering as a quad, over the box grown by its shadow.
@@ -57,6 +66,15 @@ pub struct ShapeParams {
     pub shadow_blur: f32,
     pub shadow_offset: [f32; 2],
     pub shadow: [f32; 4],
+    /// `[u0, v0, u1, v1]` — the texture sub-rect stretched across the box,
+    /// read only by the textured pipeline. `[0, 0, 1, 1]` for an untextured
+    /// shape, which never samples it.
+    pub uv_rect: [f32; 4],
+    /// Whether the sampled texel's colour was already scaled by its own
+    /// coverage. Rides the vertex rather than a third pipeline, because the
+    /// shader composes a premultiplied result either way and the two differ
+    /// by one multiply.
+    pub texture_premultiplied: bool,
 }
 
 impl ShapeParams {
@@ -87,12 +105,19 @@ impl ShapeParams {
     }
 }
 
-/// Owned GPU state for the shape overlay pipeline: the render pipeline and
-/// its per-frame vertex buffer. The viewport uniform (group 0) is the quad
-/// overlay's — both pipelines are built against the one layout, so the
-/// overlay pass binds it once and switches pipelines freely.
+/// Owned GPU state for the shape overlay pipelines: the two render
+/// pipelines and their shared per-frame vertex buffer. The viewport
+/// uniform (group 0) is the quad overlay's — every overlay pipeline is
+/// built against the one layout, so the pass binds it once and switches
+/// pipelines freely.
+///
+/// Two variants because a shape either samples a texture inside its fill
+/// or does not, and a pipeline layout that declares the group-1 texture
+/// bind cannot draw without one bound. They share `vs_main` and the one
+/// vertex layout; only the fragment entry point differs.
 pub struct ShapePipeline {
-    pub(super) pipeline: wgpu::RenderPipeline,
+    pub(super) plain: wgpu::RenderPipeline,
+    pub(super) textured: wgpu::RenderPipeline,
     pub(super) vertex_buffer: wgpu::Buffer,
 }
 
@@ -104,6 +129,7 @@ pub(super) fn build_shape_pipeline(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
     viewport_bind_group_layout: &wgpu::BindGroupLayout,
+    texture_bind_group_layout: &wgpu::BindGroupLayout,
 ) -> ShapePipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("aether shape shader"),
@@ -113,6 +139,11 @@ pub(super) fn build_shape_pipeline(
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("aether shape pipeline layout"),
         bind_group_layouts: &[Some(viewport_bind_group_layout)],
+        immediate_size: 0,
+    });
+    let textured_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("aether textured shape pipeline layout"),
+        bind_group_layouts: &[Some(viewport_bind_group_layout), Some(texture_bind_group_layout)],
         immediate_size: 0,
     });
 
@@ -138,41 +169,53 @@ pub(super) fn build_shape_pipeline(
             wgpu::VertexAttribute { offset: 84, shader_location: 7, format: wgpu::VertexFormat::Float32x4 },
             // shadow_offset: vec2<f32> at offset 100
             wgpu::VertexAttribute { offset: 100, shader_location: 8, format: wgpu::VertexFormat::Float32x2 },
-            // is_screen: u32 at offset 108
-            wgpu::VertexAttribute { offset: 108, shader_location: 9, format: wgpu::VertexFormat::Uint32 },
+            // uv_rect (u0, v0, u1, v1): vec4<f32> at offset 108
+            wgpu::VertexAttribute { offset: 108, shader_location: 9, format: wgpu::VertexFormat::Float32x4 },
+            // is_screen: u32 at offset 124
+            wgpu::VertexAttribute { offset: 124, shader_location: 10, format: wgpu::VertexFormat::Uint32 },
+            // texture_premultiplied: u32 at offset 128
+            wgpu::VertexAttribute { offset: 128, shader_location: 11, format: wgpu::VertexFormat::Uint32 },
         ],
     };
 
     // The fragment stage composes shadow, fill, and stroke into one
-    // premultiplied colour, so the target blends it as such.
+    // premultiplied colour, so the target blends it as such — the textured
+    // variant included, which premultiplies its sampled texel itself.
     let fragment_targets =
         [Some(super::color_target_state(color_format, wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING))];
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("aether shape pipeline"),
-        layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: slice::from_ref(&vertex_layout),
-        },
-        fragment: Some(super::fragment_state(&shader, "fs_main", &fragment_targets)),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None,
-            polygon_mode: wgpu::PolygonMode::Fill,
-            unclipped_depth: false,
-            conservative: false,
-        },
-        // Overlay content draws over the resolved world pass with no depth
-        // interaction, like the quad pipelines.
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState { count: super::MSAA_SAMPLE_COUNT, ..wgpu::MultisampleState::default() },
-        multiview_mask: None,
-        cache: None,
-    });
+    let build = |label, layout, entry_point| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(super::fragment_state(&shader, entry_point, &fragment_targets)),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            // Overlay content draws over the resolved world pass with no
+            // depth interaction, like the quad pipelines.
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: super::MSAA_SAMPLE_COUNT,
+                ..wgpu::MultisampleState::default()
+            },
+            multiview_mask: None,
+            cache: None,
+        })
+    };
+    let plain = build("aether shape pipeline", &pipeline_layout, "fs_main");
+    let textured = build("aether textured shape pipeline", &textured_pipeline_layout, "fs_textured");
 
     let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("aether shape vertex buffer"),
@@ -181,7 +224,7 @@ pub(super) fn build_shape_pipeline(
         mapped_at_creation: false,
     });
 
-    ShapePipeline { pipeline, vertex_buffer }
+    ShapePipeline { plain, textured, vertex_buffer }
 }
 
 /// Push the six vertices for one screen-space shape into `out` as raw
@@ -212,7 +255,7 @@ fn push_shape_vertices(out: &mut Vec<u8>, anchor: [f32; 3], shape: &ShapeParams,
     // cornering; cull mode is off so winding doesn't gate visibility.
     let corners = [(x0, y0), (x0, y1), (x1, y1), (x0, y0), (x1, y1), (x1, y0)];
     for (px, py) in corners {
-        let floats: [f32; 27] = [
+        let floats: [f32; 31] = [
             anchor[0],
             anchor[1],
             anchor[2],
@@ -240,9 +283,13 @@ fn push_shape_vertices(out: &mut Vec<u8>, anchor: [f32; 3], shape: &ShapeParams,
             shape.shadow[3],
             shape.shadow_offset[0],
             shape.shadow_offset[1],
+            shape.uv_rect[0],
+            shape.uv_rect[1],
+            shape.uv_rect[2],
+            shape.uv_rect[3],
         ];
         out.extend_from_slice(bytemuck::cast_slice(&floats));
-        out.extend_from_slice(bytemuck::cast_slice(&[u32::from(is_screen)]));
+        out.extend_from_slice(bytemuck::cast_slice(&[u32::from(is_screen), u32::from(shape.texture_premultiplied)]));
     }
 }
 
@@ -260,6 +307,8 @@ mod tests {
             shadow_blur: 0.0,
             shadow_offset: [0.0; 2],
             shadow: [0.0; 4],
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
+            texture_premultiplied: false,
         }
     }
 

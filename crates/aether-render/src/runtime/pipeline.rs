@@ -14,7 +14,8 @@ use aether_substrate::render::{
     SHAPE_VERTEX_STRIDE, ShapeParams, Targets, TextureBindings, build_main_pipeline, build_material_pipelines,
     build_quad_pipeline, build_texture_bindings, push_coverage_params, push_material_rect_vertices,
     push_screen_quad_vertices, push_screen_shape_vertices, push_screen_triangle_vertices, push_textured_params,
-    push_world_quad_vertices, push_world_shape_vertices, record_material_pass, record_quad_overlay_pass,
+    push_world_quad_vertices, push_world_shape_vertices, push_world_triangle_vertices, record_material_pass,
+    record_quad_overlay_pass,
 };
 
 use super::material::{MaterialBatch, accepts_coverage_texture};
@@ -56,7 +57,48 @@ fn shape_params(shape: &Shape) -> ShapeParams {
         shadow_blur: shape.shadow.as_ref().map_or(0.0, |shadow| shadow.blur_pixels),
         shadow_offset: shape.shadow.as_ref().map_or([0.0; 2], |shadow| shadow.offset),
         shadow: shape.shadow.as_ref().map_or([0.0; 4], |shadow| shadow.color.to_array()),
+        uv_rect: shape
+            .texture
+            .as_ref()
+            .map_or([0.0, 0.0, 1.0, 1.0], |texture| [texture.u0, texture.v0, texture.u1, texture.v1]),
+        texture_premultiplied: shape
+            .texture
+            .as_ref()
+            .is_some_and(|texture| matches!(texture.blend, QuadBlend::Premultiplied)),
     }
+}
+
+/// The registered texture a shape samples inside its fill, or `None` when
+/// it samples nothing. The run key the shape expansion splits a batch on,
+/// so consecutive shapes over one texture cost one draw.
+fn shape_texture_id(shape: &Shape) -> Option<u32> {
+    shape.texture.as_ref().map(|texture| texture.texture_id)
+}
+
+/// The group-1 bind group an overlay draw samples `texture_id` through,
+/// or `None` when the draw has to be dropped: the id is unregistered, the
+/// texture has not been realized on the GPU yet, or its format is a
+/// non-filterable data plane — which binds through the non-filtering
+/// layout no overlay pipeline was built against (ADR-0170), so drawing it
+/// would fail wgpu validation rather than look wrong. `verb` names the
+/// mail kind in the warn so the log says which sender to fix.
+fn sampled_bind_group<'a>(
+    registry: &'a TextureRegistry,
+    texture_id: u32,
+    verb: &'static str,
+) -> Option<&'a wgpu::BindGroup> {
+    let entry = registry.entries.get(&texture_id)?;
+    if !entry.format.filterable() {
+        tracing::warn!(
+            target: "aether_render",
+            texture_id,
+            verb,
+            format = ?entry.format,
+            "overlay draw over a non-filterable data-plane texture; dropping it",
+        );
+        return None;
+    }
+    Some(entry.realized.as_ref()?.bind_group())
 }
 
 /// The `SubstrateHarness`-only committed-overlay sinks
@@ -128,19 +170,28 @@ pub(super) fn record_overlay_batches(
 
     // First pass: realize / re-upload every texture the frame
     // references (Screen and World batches share the same atlas),
-    // mutably borrowing the registry. A shape batch samples nothing.
-    for batch in batches {
-        if matches!(batch.geometry, OverlayGeometry::Shapes { .. }) {
-            continue;
-        }
-        if let Some(entry) = registry.entries.get_mut(&batch.texture_id) {
+    // mutably borrowing the registry. A quad or triangle batch names one
+    // texture; a shape batch names one per shape that carries an image,
+    // and none for the shapes that do not.
+    let mut realize = |texture_id: u32, verb: &'static str| {
+        if let Some(entry) = registry.entries.get_mut(&texture_id) {
             entry.ensure_realized(&gpu.device, &gpu.queue, &gpu.texture_bindings);
         } else {
             tracing::warn!(
                 target: "aether_render",
-                texture_id = batch.texture_id,
-                "draw_textured_quads for unknown texture id; dropping the batch",
+                texture_id,
+                verb,
+                "overlay draw for unknown texture id; dropping it",
             );
+        }
+    };
+    for batch in batches {
+        if let OverlayGeometry::Shapes { shapes, .. } = &batch.geometry {
+            for texture_id in shapes.iter().filter_map(shape_texture_id) {
+                realize(texture_id, "draw_shapes");
+            }
+        } else {
+            realize(batch.texture_id, "draw_textured_quads");
         }
     }
 
@@ -154,48 +205,50 @@ pub(super) fn record_overlay_batches(
     for batch in batches {
         let clip = batch.clip.as_ref().map(|clip| [clip.x, clip.y, clip.width, clip.height]);
         if let OverlayGeometry::Shapes { space, shapes } = &batch.geometry {
-            let first_vertex = shape_vertex_index(shape_vertex_bytes.len());
-            match space {
-                QuadSpace::Screen => {
-                    for shape in shapes {
-                        push_screen_shape_vertices(&mut shape_vertex_bytes, &shape_params(shape));
+            // One draw per run of consecutive shapes over the same texture
+            // (or over none), so a batch mixing plates and images keeps its
+            // authored painter order at the cost of one draw per change.
+            for run in shapes.chunk_by(|a, b| shape_texture_id(a) == shape_texture_id(b)) {
+                let texture = match run.first().and_then(shape_texture_id) {
+                    None => None,
+                    Some(texture_id) => match sampled_bind_group(registry, texture_id, "draw_shapes") {
+                        Some(bind_group) => Some(bind_group),
+                        None => continue,
+                    },
+                };
+                let first_vertex = shape_vertex_index(shape_vertex_bytes.len());
+                match space {
+                    QuadSpace::Screen => {
+                        for shape in run {
+                            push_screen_shape_vertices(&mut shape_vertex_bytes, &shape_params(shape));
+                        }
+                    }
+                    QuadSpace::World { anchor, scale } => {
+                        let k = world_scale_factor(scale);
+                        for shape in run {
+                            push_world_shape_vertices(&mut shape_vertex_bytes, *anchor, &shape_params(shape), k);
+                        }
                     }
                 }
-                QuadSpace::World { anchor, scale } => {
-                    let k = world_scale_factor(scale);
-                    for shape in shapes {
-                        push_world_shape_vertices(&mut shape_vertex_bytes, *anchor, &shape_params(shape), k);
-                    }
+                let vertex_count = shape_vertex_index(shape_vertex_bytes.len()) - first_vertex;
+                if vertex_count > 0 {
+                    draws.push(OverlayDraw {
+                        source: OverlaySource::Shapes { texture },
+                        first_vertex,
+                        vertex_count,
+                        clip,
+                    });
                 }
-            }
-            let vertex_count = shape_vertex_index(shape_vertex_bytes.len()) - first_vertex;
-            if vertex_count > 0 {
-                draws.push(OverlayDraw { source: OverlaySource::Shapes, first_vertex, vertex_count, clip });
             }
             continue;
         }
-        let Some(entry) = registry.entries.get(&batch.texture_id) else {
-            continue;
-        };
-        if !entry.format.filterable() {
-            // A non-filterable data plane binds through the non-filtering
-            // layout, which the overlay pipeline was not built against
-            // (ADR-0170) — drawing it would fail wgpu validation.
-            tracing::warn!(
-                target: "aether_render",
-                texture_id = batch.texture_id,
-                format = ?entry.format,
-                "draw_textured_quads over a non-filterable data-plane texture; dropping the batch",
-            );
-            continue;
-        }
-        let Some(realized) = entry.realized.as_ref() else {
+        let Some(bind_group) = sampled_bind_group(registry, batch.texture_id, "draw_textured_quads") else {
             continue;
         };
         #[allow(clippy::cast_possible_truncation)]
         let first_vertex = (vertex_bytes.len() / QUAD_VERTEX_STRIDE as usize) as u32;
-        let vertices = match &batch.geometry {
-            OverlayGeometry::Quads { space: QuadSpace::Screen, quads } => {
+        let (vertices, blend) = match &batch.geometry {
+            OverlayGeometry::Quads { space: QuadSpace::Screen, blend, quads } => {
                 for quad in quads {
                     push_screen_quad_vertices(
                         &mut vertex_bytes,
@@ -204,9 +257,9 @@ pub(super) fn record_overlay_batches(
                         quad.tint.to_array(),
                     );
                 }
-                quads.len() * QUAD_VERTICES_PER_QUAD
+                (quads.len() * QUAD_VERTICES_PER_QUAD, composite_blend(*blend))
             }
-            OverlayGeometry::Quads { space: QuadSpace::World { anchor, scale }, quads } => {
+            OverlayGeometry::Quads { space: QuadSpace::World { anchor, scale }, blend, quads } => {
                 let k = world_scale_factor(scale);
                 for quad in quads {
                     push_world_quad_vertices(
@@ -218,18 +271,28 @@ pub(super) fn record_overlay_batches(
                         k,
                     );
                 }
-                quads.len() * QUAD_VERTICES_PER_QUAD
+                (quads.len() * QUAD_VERTICES_PER_QUAD, composite_blend(*blend))
             }
-            OverlayGeometry::ScreenTriangles(triangles) => {
+            OverlayGeometry::ScreenTriangles { space, triangles } => {
                 for triangle in triangles {
                     let corners = [&triangle.a, &triangle.b, &triangle.c];
-                    push_screen_triangle_vertices(
-                        &mut vertex_bytes,
-                        corners.map(|corner| [corner.x, corner.y]),
-                        corners.map(|corner| corner.color.to_array()),
-                    );
+                    let positions = corners.map(|corner| [corner.x, corner.y]);
+                    let tints = corners.map(|corner| corner.color.to_array());
+                    match space {
+                        QuadSpace::Screen => push_screen_triangle_vertices(&mut vertex_bytes, positions, tints),
+                        QuadSpace::World { anchor, scale } => push_world_triangle_vertices(
+                            &mut vertex_bytes,
+                            *anchor,
+                            positions,
+                            tints,
+                            world_scale_factor(scale),
+                        ),
+                    }
                 }
-                triangles.len() * QUAD_VERTICES_PER_TRIANGLE
+                // Flat per-vertex colours over the reserved white texture:
+                // the caller composited no image, so there is nothing that
+                // could already be premultiplied.
+                (triangles.len() * QUAD_VERTICES_PER_TRIANGLE, CompositeBlend::Straight)
             }
             OverlayGeometry::Shapes { .. } => unreachable!("shape batches are expanded above"),
         };
@@ -239,7 +302,7 @@ pub(super) fn record_overlay_batches(
             continue;
         }
         draws.push(OverlayDraw {
-            source: OverlaySource::Textured { bind_group: realized.bind_group(), blend: composite_blend(batch.blend) },
+            source: OverlaySource::Textured { bind_group, blend },
             first_vertex,
             vertex_count,
             clip,
@@ -281,7 +344,7 @@ pub(super) fn record_overlay_batches(
                 // report here. The snapshot is a quad-batch view of the
                 // committed overlay, and the pixels are what a triangle or
                 // shape scenario asserts on.
-                let OverlayGeometry::Quads { space, quads } = &batch.geometry else {
+                let OverlayGeometry::Quads { space, blend, quads } = &batch.geometry else {
                     continue;
                 };
                 let clip = batch.clip.as_ref().map(|clip| [clip.x, clip.y, clip.width, clip.height]);
@@ -296,7 +359,7 @@ pub(super) fn record_overlay_batches(
                         texture_id: batch.texture_id,
                         space: space.clone(),
                         clip: batch.clip.clone(),
-                        blend: batch.blend,
+                        blend: *blend,
                         quads: quads.clone(),
                     });
                 }

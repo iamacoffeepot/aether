@@ -51,7 +51,8 @@ pub use quad::{
     CompositeBlend, OverlayDraw, OverlaySource, QUAD_UNIFORM_BYTES, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE,
     QUAD_VERTICES_PER_QUAD, QUAD_VERTICES_PER_TRIANGLE, QuadPipeline, RealizedTexture, TextureBindings,
     build_quad_pipeline, build_texture_bindings, push_screen_quad_vertices, push_screen_triangle_vertices,
-    push_world_quad_vertices, realize_texture, realize_writable_texture, record_quad_overlay_pass, upload_texture_full,
+    push_world_quad_vertices, push_world_triangle_vertices, realize_texture, realize_writable_texture,
+    record_quad_overlay_pass, upload_texture_full,
 };
 pub use shape::{
     SHAPE_VERTEX_BUFFER_BYTES, SHAPE_VERTEX_STRIDE, SHAPE_VERTICES_PER_SHAPE, ShapeParams, push_screen_shape_vertices,

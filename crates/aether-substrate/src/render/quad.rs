@@ -142,8 +142,11 @@ pub enum OverlaySource<'a> {
     /// Textured quads or screen triangles: the group-1 bind group for the
     /// batch's texture, drawn through the pipeline `blend` selects.
     Textured { bind_group: &'a wgpu::BindGroup, blend: CompositeBlend },
-    /// Distance-field shapes, drawn through the shape pipeline; no texture.
-    Shapes,
+    /// Distance-field shapes, drawn through a shape pipeline. `texture` is
+    /// the group-1 bind group the run's shapes sample inside their fill
+    /// coverage, or `None` for shapes that sample nothing — the two select
+    /// the textured and the plain shape pipeline respectively.
+    Shapes { texture: Option<&'a wgpu::BindGroup> },
 }
 
 /// One draw inside the overlay pass: its source, and the vertex
@@ -312,9 +315,10 @@ pub fn build_quad_pipeline(
     };
     let straight = build("aether quad pipeline", wgpu::BlendState::ALPHA_BLENDING);
     let premultiplied = build("aether quad premultiplied pipeline", wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
-    // The shape pipeline (ADR-0213) shares the viewport layout so the
-    // overlay pass binds group 0 once for all three pipelines.
-    let shape = build_shape_pipeline(device, color_format, &viewport_bind_group_layout);
+    // The shape pipelines (ADR-0213) share the viewport layout so the
+    // overlay pass binds group 0 once for every pipeline, and the textured
+    // one shares the group-1 texture layout with the quad pipelines.
+    let shape = build_shape_pipeline(device, color_format, &viewport_bind_group_layout, &texture_bindings.layout);
 
     let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("aether quad vertex buffer"),
@@ -541,6 +545,24 @@ pub fn push_screen_triangle_vertices(out: &mut Vec<u8>, positions: [[f32; 2]; 3]
     }
 }
 
+/// Push the three vertices of one world-anchored triangle into `out` —
+/// the same expansion as [`push_screen_triangle_vertices`] with the
+/// corners read as pixel offsets from `anchor`, and `k` the world scale
+/// factor the quad overlay uses (`k < 0` Pixels mode, `k > 0` the
+/// Distance-mode reference distance). The world counterpart a gauge or a
+/// graph edge hanging off a point in the world is drawn through.
+pub fn push_world_triangle_vertices(
+    out: &mut Vec<u8>,
+    anchor: [f32; 3],
+    positions: [[f32; 2]; 3],
+    tints: [[f32; 4]; 3],
+    k: f32,
+) {
+    for (position, tint) in positions.into_iter().zip(tints) {
+        push_overlay_vertex(out, anchor, position, [0.5, 0.5], tint, k, false);
+    }
+}
+
 /// Write one overlay vertex into `out` in the unified world-aware
 /// layout: `anchor vec3`, `offset_px vec2`, `uv vec2`, `tint vec4`,
 /// `k f32`, `is_screen u32` — [`QUAD_VERTEX_STRIDE`] bytes. The single
@@ -692,9 +714,14 @@ pub fn record_quad_overlay_pass(
                 pass.set_vertex_buffer(0, pipeline.vertex_buffer.slice(..vertex_bytes.len() as u64));
                 pass.set_bind_group(1, bind_group, &[]);
             }
-            OverlaySource::Shapes => {
-                pass.set_pipeline(&pipeline.shape.pipeline);
+            OverlaySource::Shapes { texture } => {
                 pass.set_vertex_buffer(0, pipeline.shape.vertex_buffer.slice(..shape_vertex_bytes.len() as u64));
+                if let Some(bind_group) = texture {
+                    pass.set_pipeline(&pipeline.shape.textured);
+                    pass.set_bind_group(1, bind_group, &[]);
+                } else {
+                    pass.set_pipeline(&pipeline.shape.plain);
+                }
             }
         }
         pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);

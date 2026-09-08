@@ -73,7 +73,7 @@ use aether_kit_widget::{
 };
 use aether_math::Rgba;
 use aether_render::RenderCapability;
-use aether_render::{DrawShapes, DrawTexturedQuads, Shape, TexturedQuad, WHITE_TEXTURE_ID};
+use aether_render::{DrawShapes, DrawTexturedQuads, Shape, WHITE_TEXTURE_ID};
 use aether_test_fixtures_kinds::{DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig};
 use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult, TextCapability};
 
@@ -472,7 +472,18 @@ fn solid_leaf(subname: &str, width_pixels: f32, stripes: Vec<WidgetDrawItem>) ->
 }
 
 fn solid_quad(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> WidgetDrawItem {
-    WidgetDrawItem::Quad { x, y, width, height, color, clip: None }
+    WidgetDrawItem::Shape {
+        x,
+        y,
+        width,
+        height,
+        corner_radius: 0.0,
+        fill: Some(color),
+        stroke: None,
+        shadow: None,
+        texture: None,
+        clip: None,
+    }
 }
 
 fn scroll_child(
@@ -601,7 +612,7 @@ fn advanced_control_children() -> Vec<WidgetChildSpec> {
 }
 
 fn assert_advanced_control_snapshot(snapshot: &[DrawTexturedQuads], shapes: &[DrawShapes]) {
-    let toggle = &shapes_for(shapes, &row_clip(PANEL_Y)).shapes;
+    let toggle = shapes_for(shapes, &row_clip(PANEL_Y));
     assert_eq!(toggle.len(), 2, "toggle direct draw is track then knob, both shapes; shapes: {shapes:?}");
     let (track, knob) = (&toggle[0], &toggle[1]);
     assert_eq!(track.fill, Some(Theme::DEFAULT.accent), "the final toggle value is on");
@@ -611,33 +622,33 @@ fn assert_advanced_control_snapshot(snapshot: &[DrawTexturedQuads], shapes: &[Dr
     assert_eq!(track.corner_radius, track.height * 0.5, "and the track a stadium: {track:?}");
 
     let segment_y = PANEL_Y + ROW_HEIGHT + GAP;
-    let segmented = solid_for(snapshot, &row_clip(segment_y));
-    assert_eq!(segmented.quads.len(), 5, "three fills and two ordered dividers");
+    let segmented = fills(&shapes_for(shapes, &row_clip(segment_y)));
+    assert_eq!(segmented.len(), 5, "three fills and two ordered dividers");
     let segment_width = PANEL_WIDTH / 3.0;
-    assert_eq!(segmented.quads[0].x, PANEL_X);
-    assert_eq!(segmented.quads[0].width, segment_width);
-    assert_eq!(segmented.quads[1].x, PANEL_X + segment_width);
+    assert_eq!(segmented[0].x, PANEL_X);
+    assert_eq!(segmented[0].width, segment_width);
+    assert_eq!(segmented[1].x, PANEL_X + segment_width);
     assert_eq!(
-        segmented.quads[1].tint,
-        Theme::DEFAULT.selection,
+        segmented[1].fill,
+        Some(Theme::DEFAULT.selection),
         "middle segment remains selected, in the selection role"
     );
-    assert_eq!(segmented.quads[2].x, PANEL_X + segment_width);
-    assert_eq!(segmented.quads[2].width, 1.0, "divider follows its segment fill");
-    assert_eq!(segmented.quads[3].x, PANEL_X + segment_width * 2.0);
-    assert_eq!(segmented.quads[4].x, PANEL_X + segment_width * 2.0);
+    assert_eq!(segmented[2].x, PANEL_X + segment_width);
+    assert_eq!(segmented[2].width, 1.0, "divider follows its segment fill");
+    assert_eq!(segmented[3].x, PANEL_X + segment_width * 2.0);
+    assert_eq!(segmented[4].x, PANEL_X + segment_width * 2.0);
 
     let numeric_y = PANEL_Y + (ROW_HEIGHT + GAP) * 2.0;
     let numeric_plate = shapes_for(shapes, &row_clip(numeric_y));
     assert_eq!(
-        plate_fill(numeric_plate),
+        plate_fill(&numeric_plate),
         Some(Theme::DEFAULT.surface_raised),
         "the blurred numeric still fills its box"
     );
-    assert_stepper_column(numeric_plate, solid_for(snapshot, &row_clip(numeric_y)));
+    assert_stepper_column(&numeric_plate);
 
     let disabled_y = PANEL_Y + (ROW_HEIGHT + GAP) * 3.0;
-    let disabled = &shapes_for(shapes, &row_clip(disabled_y)).shapes[0];
+    let disabled = shapes_for(shapes, &row_clip(disabled_y))[0];
     assert_eq!(
         disabled.fill,
         Some(Theme::DEFAULT.fill(Theme::DEFAULT.surface_raised, ThemeState::Disabled)),
@@ -660,18 +671,20 @@ fn assert_advanced_control_snapshot(snapshot: &[DrawTexturedQuads], shapes: &[Dr
 /// end is what that looks like. The arrows are triangles now, which the
 /// overlay observation does not carry; the scenario counts their batch at
 /// the render cap instead.
-fn assert_stepper_column(plate: &DrawShapes, batch: &DrawTexturedQuads) {
+fn assert_stepper_column(chrome: &[&Shape]) {
     let column_left = PANEL_X + PANEL_WIDTH - ROW_HEIGHT;
-    let fills: Vec<&Shape> = plate.shapes.iter().filter(|shape| shape.fill.is_some()).collect();
-    assert_eq!(fills.len(), 1, "one plate for the whole control, steppers included; plate: {plate:?}");
-    assert_eq!((fills[0].x, fills[0].width), (PANEL_X, PANEL_WIDTH), "and it spans the slot");
+    let (plates, dividers): (Vec<&Shape>, Vec<&Shape>) =
+        fills(chrome).into_iter().partition(|shape| shape.width == PANEL_WIDTH);
 
-    let dividers: Vec<&TexturedQuad> = batch.quads.iter().filter(|quad| quad.tint == Theme::DEFAULT.outline).collect();
+    assert_eq!(plates.len(), 1, "one plate for the whole control, steppers included; chrome: {chrome:?}");
+    assert_eq!(plates[0].x, PANEL_X, "and it spans the slot");
+
     assert_eq!(dividers.len(), 1, "one hairline divides the arrows from the value they change");
     assert_eq!((dividers[0].x, dividers[0].width, dividers[0].height), (column_left, 1.0, ROW_HEIGHT));
-    assert!(
-        batch.quads.iter().all(|quad| quad.tint == Theme::DEFAULT.outline),
-        "the numeric paints its plate, one hairline, and its arrows — nothing else flat; batch: {batch:?}",
+    assert_eq!(
+        dividers[0].fill,
+        Some(Theme::DEFAULT.outline),
+        "the numeric paints its plate, one hairline, and its arrows — nothing else flat; chrome: {chrome:?}",
     );
 }
 
@@ -679,41 +692,42 @@ fn row_clip(y: f32) -> ClipRect {
     ClipRect { x: PANEL_X, y, width: PANEL_WIDTH, height: ROW_HEIGHT }
 }
 
-fn solid_for<'a>(snapshot: &'a [DrawTexturedQuads], clip: &ClipRect) -> &'a DrawTexturedQuads {
-    snapshot
-        .iter()
-        .find(|batch| batch.texture_id == WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(clip))
-        .unwrap_or_else(|| panic!("missing solid batch for {clip:?}; snapshot: {snapshot:?}"))
+/// A row's chrome under `clip` (ADR-0213) — the plates, rings, knobs, and
+/// flat fills, in draw order. One clip can own several batches: a triangle
+/// between two shapes ends the run and opens a new one, so a control whose
+/// arrows sit between its plate and its hairline draws both of those in
+/// separate batches under the one clip.
+fn shapes_for<'a>(shapes: &'a [DrawShapes], clip: &ClipRect) -> Vec<&'a Shape> {
+    let chrome: Vec<&Shape> =
+        shapes.iter().filter(|batch| batch.clip.as_ref() == Some(clip)).flat_map(|batch| &batch.shapes).collect();
+    assert!(!chrome.is_empty(), "missing shape batch for {clip:?}; shapes: {shapes:?}");
+    chrome
 }
 
-/// The shape batch (ADR-0213) under `clip` — the plates, rings, and knobs
-/// a row's chrome is drawn with, where a solid batch carries its flat fills.
-fn shapes_for<'a>(shapes: &'a [DrawShapes], clip: &ClipRect) -> &'a DrawShapes {
-    shapes
-        .iter()
-        .find(|batch| batch.clip.as_ref() == Some(clip))
-        .unwrap_or_else(|| panic!("missing shape batch for {clip:?}; shapes: {shapes:?}"))
-}
-
-/// The rings in a shape batch — the stroke-only shapes, which are the
+/// The rings among a row's shapes — the stroke-only ones, which are the
 /// validation and focus outlines — as `(stroke colour, y)`, in draw order.
-fn rings(batch: &DrawShapes) -> Vec<(Rgba, f32)> {
-    batch
-        .shapes
+fn rings(chrome: &[&Shape]) -> Vec<(Rgba, f32)> {
+    chrome
         .iter()
         .filter(|shape| shape.fill.is_none())
         .filter_map(|shape| shape.stroke.as_ref().map(|stroke| (stroke.color, shape.y)))
         .collect()
 }
 
-/// The fill of the first full-row plate in a shape batch.
-fn plate_fill(batch: &DrawShapes) -> Option<Rgba> {
-    batch.shapes.iter().find(|shape| shape.width == PANEL_WIDTH).and_then(|shape| shape.fill)
+/// The filled shapes among a row's, in draw order — the plates, bands, and
+/// hairlines a control paints, where a flat rect used to be a solid quad.
+fn fills<'a>(chrome: &[&'a Shape]) -> Vec<&'a Shape> {
+    chrome.iter().copied().filter(|shape| shape.fill.is_some()).collect()
 }
 
-/// The quads a standing scroll bar contributes to the solid batch: its
-/// track. The thumb is a shape (a stadium), read from the shape batch.
-const SCROLL_BAR_QUADS: usize = 1;
+/// The fill of the first full-row plate among a row's shapes.
+fn plate_fill(chrome: &[&Shape]) -> Option<Rgba> {
+    chrome.iter().find(|shape| shape.width == PANEL_WIDTH).and_then(|shape| shape.fill)
+}
+
+/// The filled shapes a standing scroll bar contributes to its list's batch:
+/// the flat track and the stadium thumb standing in it.
+const SCROLL_BAR_SHAPES: usize = 2;
 
 /// What a standing scroll bar takes off the right end of every row: its
 /// two-unit track plus the config's own gutter. A row is filled inside what is
@@ -728,37 +742,36 @@ fn virtual_list_clip() -> ClipRect {
 }
 
 fn assert_virtual_list_rows(
-    snapshot: &[DrawTexturedQuads],
     shapes: &[DrawShapes],
     selected_row_offset: usize,
     selected_tint: Rgba,
     outline_ring_count: usize,
 ) {
     let clip = virtual_list_clip();
-    let batch = solid_for(snapshot, &clip);
+    let chrome = shapes_for(shapes, &clip);
+    let painted = fills(&chrome);
     assert_eq!(
-        batch.quads.len(),
-        5 + SCROLL_BAR_QUADS,
-        "five realized row quads and the scroll bar's track only; snapshot: {snapshot:?}",
+        painted.len(),
+        5 + SCROLL_BAR_SHAPES,
+        "five realized row fills and the scroll bar's track and thumb only; shapes: {shapes:?}",
     );
-    let shape_batch = shapes_for(shapes, &clip);
     assert_eq!(
-        rings(shape_batch).len(),
+        rings(&chrome).len(),
         outline_ring_count,
         "the requested outlines and nothing else ring the list; shapes: {shapes:?}",
     );
-    assert_scroll_bar(batch, shape_batch);
-    for (row_offset, quad) in batch.quads[..5].iter().enumerate() {
-        assert_eq!(quad.x, PANEL_X);
-        assert_eq!(quad.y, PANEL_Y + row_offset as f32 * ROW_HEIGHT);
-        assert_eq!(quad.width, PANEL_WIDTH - scroll_bar_gutter(), "a row fill stops where the bar's gutter starts");
-        assert_eq!(quad.height, ROW_HEIGHT);
-        let expected_tint = if row_offset == selected_row_offset {
+    assert_scroll_bar(&painted);
+    for (row_offset, row) in painted[..5].iter().enumerate() {
+        assert_eq!(row.x, PANEL_X);
+        assert_eq!(row.y, PANEL_Y + row_offset as f32 * ROW_HEIGHT);
+        assert_eq!(row.width, PANEL_WIDTH - scroll_bar_gutter(), "a row fill stops where the bar's gutter starts");
+        assert_eq!(row.height, ROW_HEIGHT);
+        let expected_fill = if row_offset == selected_row_offset {
             selected_tint
         } else {
             Theme::DEFAULT.surface_raised
         };
-        assert_eq!(quad.tint, expected_tint, "row offset {row_offset} has the wrong selection/state fill");
+        assert_eq!(row.fill, Some(expected_fill), "row offset {row_offset} has the wrong selection/state fill");
     }
 }
 
@@ -767,18 +780,13 @@ fn assert_virtual_list_rows(
 /// the `outline` and `text_muted` roles rather than in colours of their own,
 /// and the thumb is a proper part of the track: a thumb as long as the track
 /// is a bar that says nothing about how much is off screen.
-fn assert_scroll_bar(batch: &DrawTexturedQuads, shapes: &DrawShapes) {
-    let track = &batch.quads[5];
-    let thumb = shapes
-        .shapes
-        .iter()
-        .find(|shape| shape.x == track.x)
-        .unwrap_or_else(|| panic!("the thumb stands in the track's column as a shape; shapes: {shapes:?}"));
-    assert_eq!(track.tint, Theme::DEFAULT.outline, "the track is the outline role; batch: {batch:?}");
+fn assert_scroll_bar(painted: &[&Shape]) {
+    let (track, thumb) = (painted[5], painted[6]);
+    assert_eq!(track.fill, Some(Theme::DEFAULT.outline), "the track is the outline role; track: {track:?}");
     assert_eq!(
         thumb.fill,
         Some(Theme::DEFAULT.fill(Theme::DEFAULT.text_muted, ThemeState::Normal)),
-        "and the thumb the muted-text one; shapes: {shapes:?}",
+        "and the thumb the muted-text one; thumb: {thumb:?}",
     );
     assert_eq!(thumb.corner_radius, thumb.width * 0.5, "the thumb is a stadium: {thumb:?}");
     assert_eq!((track.x, track.width), (thumb.x, thumb.width), "both stand in the same column");
@@ -831,14 +839,14 @@ fn assert_initial_control_snapshot(snapshot: &[DrawTexturedQuads], shapes: &[Dra
 
     let disabled_batch = shapes_for(shapes, &row_clip(PANEL_Y + ROW_HEIGHT + GAP));
     assert_eq!(
-        plate_fill(disabled_batch),
+        plate_fill(&disabled_batch),
         Some(Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Disabled)),
         "disabled button fill uses the shared disabled role",
     );
 
-    let value_batch = solid_for(snapshot, &row_clip(slider_y));
-    assert_eq!(value_batch.quads.len(), 2, "track + fill; the outlines are rings in the shape batch");
-    let value_rings = rings(shapes_for(shapes, &row_clip(slider_y)));
+    let value_batch = shapes_for(shapes, &row_clip(slider_y));
+    assert_eq!(fills(&value_batch).len(), 2, "track + fill; the outlines are the rings beside them");
+    let value_rings = rings(&value_batch);
     assert_eq!(
         value_rings,
         vec![(Theme::DEFAULT.error, slider_y), (Theme::DEFAULT.accent, slider_y + BORDER)],
@@ -847,7 +855,7 @@ fn assert_initial_control_snapshot(snapshot: &[DrawTexturedQuads], shapes: &[Dra
 
     let hover_batch = shapes_for(shapes, &row_clip(hover_y));
     assert_eq!(
-        plate_fill(hover_batch),
+        plate_fill(&hover_batch),
         Some(Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Hover)),
         "the final sibling owns hover after lost-before-gained delivery",
     );
@@ -861,12 +869,12 @@ fn assert_updated_control_snapshot(snapshot: &[DrawTexturedQuads], shapes: &[Dra
         "runtime visible=true restores drawing in the retained first slot; shapes: {shapes:?}",
     );
     assert_eq!(
-        rings(shapes_for(shapes, &row_clip(slider_y))).first().map(|(color, _)| *color),
+        rings(&shapes_for(shapes, &row_clip(slider_y))).first().map(|(color, _)| *color),
         Some(Theme::DEFAULT.warning),
         "runtime validation changes the outer role without resetting the slider",
     );
     assert_eq!(
-        plate_fill(shapes_for(shapes, &row_clip(hover_y))),
+        plate_fill(&shapes_for(shapes, &row_clip(hover_y))),
         Some(Theme::DEFAULT.accent),
         "child→empty hover emits HoverLost and restores the normal fill",
     );
@@ -887,7 +895,7 @@ fn assert_stationary_hover_survives_focus_traversal(harness: &mut SubstrateHarne
         ])
         .expect("stationary hover survives focus traversal");
     assert_eq!(
-        plate_fill(shapes_for(&harness.committed_shape_snapshot(), &row_clip(hover_y))),
+        plate_fill(&shapes_for(&harness.committed_shape_snapshot(), &row_clip(hover_y))),
         Some(Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Hover)),
         "Tab focus changes must not clear root-owned hover while the pointer stays still",
     );
@@ -2130,35 +2138,34 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
     {
         let snapshot = harness.committed_overlay_snapshot();
         let shapes = harness.committed_shape_snapshot();
-        let plate = &shapes_for(&shapes, &area_clip).shapes;
-        assert_eq!(
-            plate.len(),
-            1,
-            "the box and no focus ring: this area took focus from a pointer press, and a ring marks keyboard \
+        let chrome = shapes_for(&shapes, &area_clip);
+        assert!(
+            rings(&chrome).is_empty(),
+            "no focus ring: this area took focus from a pointer press, and a ring marks keyboard \
              focus only; shapes: {shapes:?}",
         );
+        let painted = fills(&chrome);
+        assert_eq!(painted.len(), 4, "the box, two selection bands, and the caret between them; shapes: {shapes:?}");
         assert_eq!(
-            (plate[0].x, plate[0].y, plate[0].width, plate[0].height),
+            (painted[0].x, painted[0].y, painted[0].width, painted[0].height),
             (PANEL_X, PANEL_Y, PANEL_WIDTH, area_height)
         );
-        assert_eq!(plate[0].fill, Some(Theme::DEFAULT.surface_raised));
-        let solid = solid_for(&snapshot, &area_clip);
-        assert_eq!(solid.quads.len(), 3, "two selection bands + caret; snapshot: {snapshot:?}");
-        assert_eq!(solid.quads[0].x, last_selection_x);
-        assert_eq!(solid.quads[0].y, selection_top);
-        assert_eq!(solid.quads[0].width, metrics.caret_x("last", 4, size) - metrics.caret_x("last", 3, size),);
-        assert_eq!(solid.quads[0].height, selection_height);
-        assert_eq!(solid.quads[0].tint, Theme::DEFAULT.accent);
-        assert_eq!(solid.quads[1].x, last_selection_x);
-        assert_eq!(solid.quads[1].y, selection_top);
-        assert_eq!(solid.quads[1].width, 1.0);
-        assert_eq!(solid.quads[1].height, selection_height);
-        assert_eq!(solid.quads[1].tint, Theme::DEFAULT.accent);
-        assert_eq!(solid.quads[2].x, content_x);
-        assert_eq!(solid.quads[2].y, selection_top + row_height);
-        assert_eq!(solid.quads[2].width, metrics.caret_x("tail", 3, size));
-        assert_eq!(solid.quads[2].height, selection_height);
-        assert_eq!(solid.quads[2].tint, Theme::DEFAULT.accent);
+        assert_eq!(painted[0].fill, Some(Theme::DEFAULT.surface_raised));
+        assert_eq!(painted[1].x, last_selection_x);
+        assert_eq!(painted[1].y, selection_top);
+        assert_eq!(painted[1].width, metrics.caret_x("last", 4, size) - metrics.caret_x("last", 3, size),);
+        assert_eq!(painted[1].height, selection_height);
+        assert_eq!(painted[1].fill, Some(Theme::DEFAULT.accent));
+        assert_eq!(painted[2].x, last_selection_x);
+        assert_eq!(painted[2].y, selection_top);
+        assert_eq!(painted[2].width, 1.0);
+        assert_eq!(painted[2].height, selection_height);
+        assert_eq!(painted[2].fill, Some(Theme::DEFAULT.accent));
+        assert_eq!(painted[3].x, content_x);
+        assert_eq!(painted[3].y, selection_top + row_height);
+        assert_eq!(painted[3].width, metrics.caret_x("tail", 3, size));
+        assert_eq!(painted[3].height, selection_height);
+        assert_eq!(painted[3].fill, Some(Theme::DEFAULT.accent));
         let area_glyphs: Vec<_> = snapshot
             .iter()
             .filter(|batch| batch.texture_id != WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(&area_clip))
@@ -2238,25 +2245,24 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
     );
 
     {
-        let snapshot = harness.committed_overlay_snapshot();
         let shapes = harness.committed_shape_snapshot();
-        assert_eq!(
-            shapes_for(&shapes, &area_clip).shapes.len(),
-            1,
-            "the box and still no focus ring behind it: focus here came from a pointer press; shapes: {shapes:?}",
+        let chrome = shapes_for(&shapes, &area_clip);
+        assert!(
+            rings(&chrome).is_empty(),
+            "still no focus ring behind the box: focus here came from a pointer press; shapes: {shapes:?}",
         );
-        let solid = solid_for(&snapshot, &area_clip);
-        assert_eq!(solid.quads.len(), 2, "IME cursor band + underline; snapshot: {snapshot:?}");
-        assert_eq!(solid.quads[0].x, preedit_x);
-        assert_eq!(solid.quads[0].y, selection_top);
-        assert_eq!(solid.quads[0].width, metrics.caret_x("üx", 1, size));
-        assert_eq!(solid.quads[0].height, selection_height);
-        assert_eq!(solid.quads[0].tint, Theme::DEFAULT.accent);
-        assert_eq!(solid.quads[1].x, preedit_x);
-        assert_eq!(solid.quads[1].y, underline_y);
-        assert_eq!(solid.quads[1].width, metrics.caret_x("üx", 2, size));
-        assert_eq!(solid.quads[1].height, 1.0);
-        assert_eq!(solid.quads[1].tint, Theme::DEFAULT.accent);
+        let painted = fills(&chrome);
+        assert_eq!(painted.len(), 3, "the box, the IME cursor band, and its underline; shapes: {shapes:?}");
+        assert_eq!(painted[1].x, preedit_x);
+        assert_eq!(painted[1].y, selection_top);
+        assert_eq!(painted[1].width, metrics.caret_x("üx", 1, size));
+        assert_eq!(painted[1].height, selection_height);
+        assert_eq!(painted[1].fill, Some(Theme::DEFAULT.accent));
+        assert_eq!(painted[2].x, preedit_x);
+        assert_eq!(painted[2].y, underline_y);
+        assert_eq!(painted[2].width, metrics.caret_x("üx", 2, size));
+        assert_eq!(painted[2].height, 1.0);
+        assert_eq!(painted[2].fill, Some(Theme::DEFAULT.accent));
     }
 
     // Committed input replaces the selected `t\ntai`; Ctrl+Enter emits the
@@ -2408,23 +2414,19 @@ fn a_pointer_press_leaves_no_focus_ring_while_tab_traversal_draws_one() {
         ])
         .expect("pointer then keyboard focus");
 
-    let snapshot = harness.committed_overlay_snapshot();
     let shapes = harness.committed_shape_snapshot();
-    let pressed = solid_for(&snapshot, &row_clip(pressed_y));
+    let pressed = shapes_for(&shapes, &row_clip(pressed_y));
     assert_eq!(
-        pressed.quads.len(),
+        fills(&pressed).len(),
         2,
-        "a pointer-focused slider draws its track and fill and nothing more; snapshot: {snapshot:?}",
+        "a pointer-focused slider draws its track and fill and nothing more; shapes: {shapes:?}",
     );
-    assert!(
-        shapes.iter().all(|batch| batch.clip.as_ref() != Some(&row_clip(pressed_y))),
-        "and no ring; shapes: {shapes:?}",
-    );
+    assert!(rings(&pressed).is_empty(), "and no ring; shapes: {shapes:?}");
 
-    let tabbed = solid_for(&snapshot, &row_clip(tabbed_y));
-    assert_eq!(tabbed.quads.len(), 2, "track + fill; the focus ring is a shape; snapshot: {snapshot:?}");
+    let tabbed = shapes_for(&shapes, &row_clip(tabbed_y));
+    assert_eq!(fills(&tabbed).len(), 2, "track + fill, with the focus ring beside them; shapes: {shapes:?}");
     assert_eq!(
-        rings(shapes_for(&shapes, &row_clip(tabbed_y))),
+        rings(&tabbed),
         vec![(Theme::DEFAULT.accent, tabbed_y)],
         "the Tab-focused slider's ring is drawn in the accent role, and rings the slot itself with no validation \
          ring to inset past",
@@ -3009,7 +3011,7 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
         .execute(vec![("initial", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new()))])
         .expect("initial virtual-list capture");
     let initial = harness.committed_overlay_snapshot();
-    assert_virtual_list_rows(&initial, &harness.committed_shape_snapshot(), 0, Theme::DEFAULT.selection, 0);
+    assert_virtual_list_rows(&harness.committed_shape_snapshot(), 0, Theme::DEFAULT.selection, 0);
     assert_five_virtual_list_glyph_rows(&initial);
 
     let panel = panel_address();
@@ -3059,15 +3061,9 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
 
     let paged = harness.committed_overlay_snapshot();
     let paged_shapes = harness.committed_shape_snapshot();
-    assert_virtual_list_rows(
-        &paged,
-        &paged_shapes,
-        4,
-        Theme::DEFAULT.fill(Theme::DEFAULT.selection, ThemeState::Hover),
-        2,
-    );
+    assert_virtual_list_rows(&paged_shapes, 4, Theme::DEFAULT.fill(Theme::DEFAULT.selection, ThemeState::Hover), 2);
     assert_five_virtual_list_glyph_rows(&paged);
-    let paged_rings = rings(shapes_for(&paged_shapes, &virtual_list_clip()));
+    let paged_rings = rings(&shapes_for(&paged_shapes, &virtual_list_clip()));
     assert_eq!(paged_rings[0].0, Theme::DEFAULT.warning, "the outer validation outline must precede focus");
     assert_eq!(paged_rings[1].0, Theme::DEFAULT.accent, "the focus outline must remain visible inset after validation");
 
@@ -3114,7 +3110,6 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
     // event alone.
     let tail = harness.committed_overlay_snapshot();
     assert_virtual_list_rows(
-        &tail,
         &harness.committed_shape_snapshot(),
         4,
         Theme::DEFAULT.fill(Theme::DEFAULT.selection, ThemeState::Hover),

@@ -1,6 +1,7 @@
 //! `draw_shapes` pixel scenarios (ADR-0213): the rounded-box distance
 //! field the overlay pass evaluates — radius, stroke, shadow, the circle
-//! at full radius, and the per-batch scissor — each read back from an
+//! at full radius, the per-batch scissor, the world-anchored projection,
+//! and the image sampled inside a rounded fill — each read back from an
 //! in-process `SubstrateHarness` capture. Skipped when no wgpu adapter is
 //! available; `AETHER_REQUIRE_RUNTIME=1` (CI) makes that skip a panic.
 
@@ -15,9 +16,12 @@ use aether_harness_substrate_capture::{
     RenderHarnessBuilderExt, RenderHarnessExt,
     test_helpers::{envelope, has_wgpu_adapter, pixel_is_lit, rgba_at},
 };
-use aether_kinds::{ClipRect, QuadSpace};
+use aether_kinds::{ClipRect, QuadScale, QuadSpace};
 use aether_math::Rgba;
-use aether_render::{DrawShapes, Shape, ShapeShadow, ShapeStroke};
+use aether_render::{
+    CreateTexture, CreateTextureResult, DrawShapes, QuadBlend, Shape, ShapeShadow, ShapeStroke, ShapeTexture,
+    TextureFormat, TextureSampling, TextureUsage,
+};
 
 /// Whether the scenario can run: a wgpu adapter is present, or the CI
 /// gate demands one.
@@ -33,7 +37,7 @@ fn require_wgpu() -> bool {
 /// One white box at `(x, y)` of `width` × `height` with `corner_radius`,
 /// no stroke and no shadow — the parts the individual scenarios add.
 fn box_shape(x: f32, y: f32, width: f32, height: f32, corner_radius: f32) -> Shape {
-    Shape { x, y, width, height, corner_radius, fill: Some(Rgba::WHITE), stroke: None, shadow: None }
+    Shape { x, y, width, height, corner_radius, fill: Some(Rgba::WHITE), stroke: None, shadow: None, texture: None }
 }
 
 /// Capture one `draw_shapes` batch in a `width` × `height` frame and
@@ -193,4 +197,105 @@ fn a_shape_batch_is_bounded_by_its_clip() {
     assert_eq!(snapshot[0].shapes[0].corner_radius, 4.0);
     assert_eq!(snapshot[1].clip, None);
     assert_eq!(snapshot[1].shapes[0].x, 44.0);
+}
+
+/// A `World` shape hangs off the point its anchor projects to, not off the
+/// frame's origin: the box's pixel coordinates are offsets from the
+/// projected anchor, so with the default identity `view_proj` an anchor at
+/// clip `(0.5, 0.5)` puts the box three quarters across and one quarter
+/// down the frame. The named bugs: a World batch that fell through to the
+/// screen path would draw the box at its raw pixel coordinates (here,
+/// off-frame entirely); one that projected the anchor but dropped it would
+/// centre the box on the frame instead.
+#[test]
+fn a_world_shape_lands_where_its_anchor_projects() {
+    if !require_wgpu() {
+        return;
+    }
+    let (frame_width, frame_height) = (64u32, 48u32);
+    let mut harness = SubstrateHarness::builder().size(frame_width, frame_height).with_render().build().expect("boot");
+    let space = QuadSpace::World { anchor: [0.5, 0.5, 0.0], scale: QuadScale::Pixels };
+    let draw = envelope(
+        "aether.render",
+        &DrawShapes { space: space.clone(), clip: None, shapes: vec![box_shape(-8.0, -6.0, 16.0, 12.0, 3.0)] },
+    );
+
+    let captured = harness
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![draw], vec![]))])
+        .expect("capture a world-anchored shape");
+    let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode world shape png");
+    let bg = background_top_left(&img);
+
+    // Anchor clip (0.5, 0.5) maps to pixel (48, 12) on this frame, and the
+    // box is centred on it by its own negative offsets.
+    assert!(pixel_is_lit(&img, 48, 12, bg, TOLERANCE), "the box is painted on its projected anchor");
+    assert!(pixel_is_lit(&img, 41, 12, bg, TOLERANCE), "and reaches its left edge");
+    assert!(!pixel_is_lit(&img, 58, 12, bg, TOLERANCE), "and stops at its right edge");
+    assert!(!pixel_is_lit(&img, 32, 24, bg, TOLERANCE), "the frame's centre is not where the anchor sent it");
+
+    let snapshot = harness.committed_shape_snapshot();
+    assert_eq!(snapshot.len(), 1, "the world batch was recorded; snapshot: {snapshot:?}");
+    assert_eq!(snapshot[0].space, space, "and kept the projection it was sent under");
+}
+
+/// A `Shape` with a `texture` samples the image inside the fill's coverage
+/// (iamacoffeepot/aether#5709): the box's own 0..1 coordinate maps across
+/// the caller's uv sub-rect, so a two-colour texture reads left-colour on
+/// the box's left and right-colour on its right — and the corner radius
+/// still cuts the image, which is the whole point. The named bugs: a
+/// fragment stage that composed the flat `fill` and ignored the texture
+/// (both halves one colour); a uv mapping that collapsed or flipped (both
+/// halves the same colour, or swapped); and coverage applied to the flat
+/// fill but not the texel (a square-cornered image inside a rounded box).
+#[test]
+fn a_textured_shape_samples_the_image_inside_its_rounded_coverage() {
+    if !require_wgpu() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+    // Two texels side by side: opaque red, then opaque blue. A linear
+    // sample a quarter and three quarters across the box lands within a
+    // few percent of each texel centre, so the two reads are unambiguous.
+    let created = harness
+        .execute(vec![(
+            "create",
+            HarnessOp::send_and_await_reply(
+                "aether.render",
+                &CreateTexture {
+                    width: 2,
+                    height: 1,
+                    format: TextureFormat::Rgba8,
+                    sampling: TextureSampling::Linear,
+                    usage: TextureUsage::Sampled,
+                    pixels: vec![255, 0, 0, 255, 0, 0, 255, 255],
+                },
+            ),
+        )])
+        .expect("create the two-colour texture");
+    let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
+    };
+
+    // A 32x32 box at (16, 8) rounded all the way: a circle centred on
+    // (32, 24) with a radius of 16.
+    let mut disc = box_shape(16.0, 8.0, 32.0, 32.0, 16.0);
+    disc.texture = Some(ShapeTexture { texture_id, u0: 0.0, v0: 0.0, u1: 1.0, v1: 1.0, blend: QuadBlend::Straight });
+    let draw = envelope("aether.render", &DrawShapes { space: QuadSpace::Screen, clip: None, shapes: vec![disc] });
+
+    let captured = harness
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![draw], vec![]))])
+        .expect("capture a textured shape");
+    let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode textured shape png");
+    let bg = background_top_left(&img);
+
+    let left = rgba_at(&img, 24, 24);
+    let right = rgba_at(&img, 40, 24);
+    assert!(left[0] > left[2], "the box's left quarter reads the texture's red texel, not its blue one: {left:?}");
+    assert!(right[2] > right[0], "the box's right quarter reads the blue texel: {right:?}");
+
+    // The bounding box's corner is outside the circle, so the image is cut
+    // by the distance field exactly as a flat fill would be.
+    assert!(!pixel_is_lit(&img, 17, 9, bg, TOLERANCE), "the rounded coverage cuts the image at the corner");
+    assert!(pixel_is_lit(&img, 32, 9, bg, TOLERANCE), "and leaves it painted where the circle reaches the top edge");
 }

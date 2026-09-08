@@ -49,20 +49,13 @@ pub use kinds::*;
 use core::f32::consts::FRAC_PI_3;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_component::ComponentHostCapability;
-use aether_component::component::ComponentHostWasmExt;
+use aether_component::component::PeerCtxExt;
 use aether_kinds::{Key, KeyRelease, Tick, keycode};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_math::{TAU, Vec2, Vec3};
 use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 
 use crate::camera::{CameraComponent, CameraOrbitSet, CameraTopdownSet, OrbitParams, TopdownParams};
-
-/// Load name of the camera component instance the controller drives — the
-/// `aether_kit_commons@aether.kit.camera` export's default load name (ADR-0096), the
-/// address `.loaded::<CameraComponent>(_)` resolves. Distinct from
-/// [`ControllerConfig::camera`], which names a camera *within* that component.
-const CAMERA_COMPONENT: &str = "aether.kit.camera";
 
 /// Compiled baseline orbit pose the controller seeds into the target camera:
 /// a three-quarter overhead look at the world origin, far enough back to frame
@@ -180,16 +173,12 @@ impl WasmActor for CameraController {
         match &mut self.shadow {
             Shadow::Orbit(orbit) => {
                 if let Some(params) = step_orbit(orbit, held, &self.config) {
-                    ctx.actor::<ComponentHostCapability>()
-                        .loaded::<CameraComponent>(CAMERA_COMPONENT)
-                        .send(&CameraOrbitSet { name: camera, params });
+                    ctx.peer::<CameraComponent>().send(&CameraOrbitSet { name: camera, params });
                 }
             }
             Shadow::Topdown(topdown) => {
                 if let Some(params) = step_topdown(topdown, held, &self.config) {
-                    ctx.actor::<ComponentHostCapability>()
-                        .loaded::<CameraComponent>(CAMERA_COMPONENT)
-                        .send(&CameraTopdownSet { name: camera, params });
+                    ctx.peer::<CameraComponent>().send(&CameraTopdownSet { name: camera, params });
                 }
             }
         }
@@ -203,30 +192,26 @@ impl CameraController {
         let camera = self.config.camera.clone();
         match &self.shadow {
             Shadow::Orbit(orbit) => {
-                ctx.actor::<ComponentHostCapability>().loaded::<CameraComponent>(CAMERA_COMPONENT).send(
-                    &CameraOrbitSet {
-                        name: camera,
-                        params: OrbitParams {
-                            distance: Some(orbit.distance),
-                            pitch: Some(orbit.pitch),
-                            yaw: Some(orbit.yaw),
-                            speed: Some(0.0),
-                            fov_y_rad: Some(SEED_FOV),
-                            target: Some([orbit.target.x, orbit.target.y, orbit.target.z]),
-                        },
+                ctx.peer::<CameraComponent>().send(&CameraOrbitSet {
+                    name: camera,
+                    params: OrbitParams {
+                        distance: Some(orbit.distance),
+                        pitch: Some(orbit.pitch),
+                        yaw: Some(orbit.yaw),
+                        speed: Some(0.0),
+                        fov_y_rad: Some(SEED_FOV),
+                        target: Some([orbit.target.x, orbit.target.y, orbit.target.z]),
                     },
-                );
+                });
             }
             Shadow::Topdown(topdown) => {
-                ctx.actor::<ComponentHostCapability>().loaded::<CameraComponent>(CAMERA_COMPONENT).send(
-                    &CameraTopdownSet {
-                        name: camera,
-                        params: TopdownParams {
-                            center: Some([topdown.center.x, topdown.center.y]),
-                            extent: Some(topdown.extent),
-                        },
+                ctx.peer::<CameraComponent>().send(&CameraTopdownSet {
+                    name: camera,
+                    params: TopdownParams {
+                        center: Some([topdown.center.x, topdown.center.y]),
+                        extent: Some(topdown.extent),
                     },
-                );
+                });
             }
         }
     }

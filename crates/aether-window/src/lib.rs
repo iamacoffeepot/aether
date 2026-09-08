@@ -33,6 +33,13 @@ use aether_kinds::{
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::{NativeActorMailbox, NativeActorMailboxWithContext};
 
+/// The one declaration of the `aether.window` mailbox name.
+///
+/// Every implementation identity — headless, `desktop`, `synthetic` — reads
+/// its `NAMESPACE` from this const rather than repeating the literal, so the
+/// shared mailbox has a single naming authority (iamacoffeepot/aether#5720).
+/// Each of those three reads is `#[cfg]`-gated on a runtime feature, which is
+/// why a grep of this file alone makes the const look unreferenced.
 const WINDOW_NAMESPACE: &str = "aether.window";
 
 /// Shared logical namespace for named window child identities.

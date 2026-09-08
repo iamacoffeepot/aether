@@ -37,8 +37,7 @@ pub enum ThemeState {
 /// Schema-only (no `Kind`): `Theme` is only ever a nested field inside
 /// a widget's `Config` or inside [`SetTheme`], never a top-level mail
 /// payload on its own, mirroring the established nested-struct
-/// precedent `SolidQuad`
-/// (`crates/aether-render/src/kinds.rs`).
+/// precedent `Shape` (`crates/aether-render/src/kinds.rs`).
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Theme {
     /// Base background fill — panel / window backdrop.

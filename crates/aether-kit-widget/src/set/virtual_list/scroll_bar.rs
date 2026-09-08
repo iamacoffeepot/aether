@@ -6,9 +6,9 @@
 //! the one window the list already had, so a wheel, a drag and a keyboard
 //! reveal all move it by moving that window.
 
-use crate::set::quad;
 use crate::set::virtual_list::scroll::ScrollSpan;
 use crate::set::virtual_list::{VirtualListWidget, valid_frame};
+use crate::set::{quad, stadium};
 use crate::theme::ThemeState;
 use crate::{VirtualListConfig, WidgetDrawItem, WidgetFrame};
 
@@ -197,17 +197,14 @@ impl VirtualListWidget {
         };
         [
             quad(bar.left, 0.0, bar.width, bar.height, self.theme.outline),
-            WidgetDrawItem::Shape {
-                x: bar.left,
-                y: bar.thumb_top,
-                width: bar.width,
-                height: bar.thumb_height,
-                corner_radius: bar.width * 0.5,
-                fill: Some(self.theme.fill(self.theme.text_muted, thumb_state)),
-                stroke: None,
-                shadow: None,
-                clip: None,
-            },
+            stadium(
+                bar.left,
+                bar.thumb_top,
+                bar.width,
+                bar.thumb_height,
+                Some(self.theme.fill(self.theme.text_muted, thumb_state)),
+                None,
+            ),
         ]
     }
 }
@@ -243,7 +240,7 @@ mod tests {
         let metrics = widget.font_metrics.resolved().expect("the test table is installed");
         for item in widget.draw_items() {
             match item {
-                WidgetDrawItem::Quad { x, width, .. } | WidgetDrawItem::Shape { x, width, .. } => {
+                WidgetDrawItem::Shape { x, width, .. } => {
                     assert!(x + width <= bar.left || x >= bar.left, "a row fill straddles the bar's left edge");
                 }
                 WidgetDrawItem::Text { x, text, .. } => {

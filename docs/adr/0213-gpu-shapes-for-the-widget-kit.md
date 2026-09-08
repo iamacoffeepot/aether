@@ -102,6 +102,29 @@ the studio's real widget count. Until then the per-tick resend stands.
   has a remedy that is not another colour.
 - The kit's draw vocabulary grows from three items to four; ADR-0117's rules
   (submission order, holes, no layer) are untouched.
+- Decision 1 calls the primitive screen-space, but the shipped kind carries the
+  quad overlay's full `QuadSpace`: `push_world_shape_vertices` and `shape.wgsl`'s
+  World branch project an anchor through `view_proj` and read the box's
+  coordinates as pixel offsets from it, exactly as a `World` textured quad does.
+  Read "screen-space" there as "in pixel units", not as "`Screen` only".
+- `aether.render.draw_solid_quads` retires into this kind
+  (iamacoffeepot/aether#5708): a `SolidQuad` is a `Shape` at `corner_radius: 0.0`
+  with a fill and nothing else, and the retired verb had no fragment stage of its
+  own — the cap rewrote each quad onto a reserved white texture. The kit's
+  `WidgetDrawItem::Quad` retires with it, so `set::quad` returns a radius-zero
+  `Shape` and the overlay's three surviving verbs are one per fragment stage:
+  sample a texture, evaluate a distance field, rasterize caller geometry. The
+  cost is honest — a flat rect goes from 52 to 112 bytes per vertex, so the
+  shared 4 MiB overlay cap holds about 6.2k rects a frame instead of 13.4k, far
+  above anything the kit or the console draws.
+- `Shape` gains an optional `texture` (iamacoffeepot/aether#5709) sampled inside
+  the fill's coverage, so a rounded avatar, a thumbnail at the panel's radius,
+  and a circular icon are expressible — the one thing the overlay could not draw
+  at all, since `draw_textured_quads` gave the image with square corners and
+  `draw_shapes` gave the corners with no image. It costs a second shape pipeline
+  variant (the group-1 texture bind), 20 more bytes of vertex, and a draw split
+  at each texture transition inside a batch. The kit's image widget draws through
+  it, so it is rounded like every other face in the set.
 - Follow-on work, in order: (a) render cap: `Shape`, `draw_shapes`, `shape.wgsl`,
   the overlay pipeline, headless absorb, a SubstrateHarness pixel test for radius,
   stroke, and shadow; (b) kit: `WidgetDrawItem::Shape`, `direct_runs`, theme tokens,

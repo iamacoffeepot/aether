@@ -189,12 +189,12 @@ pub struct CountReport {
 
 /// Typed config for the `ui_widget` fixture (issue 1793 widget-actor
 /// cost spike). `redraw_each_tick` selects the per-frame cost profile:
-/// `true` re-emits the full `DrawSolidQuads` batch across the wasm
+/// `true` re-emits the full `DrawShapes` batch across the wasm
 /// boundary every tick (the naive actor-backed widget), `false`
 /// early-returns on tick (the stable-frame floor a host-cached-replay
 /// widget pays before the host replays its retained batch — the guest is
 /// still dispatched, it just emits nothing). `quad_count` is the draw
-/// weight: how many `SolidQuad`s the batch carries when it does emit, so
+/// weight: how many flat `Shape`s the batch carries when it does emit, so
 /// the measurement can scale the per-frame re-emit cost with widget
 /// visual complexity.
 #[derive(
