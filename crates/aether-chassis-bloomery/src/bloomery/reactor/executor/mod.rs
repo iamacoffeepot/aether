@@ -55,6 +55,9 @@ pub struct ExecutorReactorSetup {
     /// policy (ADR-0214), resolved from the coordinator's configuration at boot
     /// and seeded into the store the dispatch gate reads.
     pub authorized_instructions: ProcessPolicy,
+    /// Whether this host dispatches the bloom-level reader after a landing
+    /// (ADR-0216 §4). Off, the study drain journals each read as missing.
+    pub retrospect_reader_enabled: bool,
     /// The candidate-ref push seam (ADR-0152); chosen at boot by
     /// `default_candidate_push`, which is crate-private and so is named here
     /// rather than linked.

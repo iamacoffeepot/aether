@@ -40,7 +40,9 @@ const SECOND: &str = "wp-1";
 
 #[test]
 fn a_reader_files_findings_that_no_door_will_seal() {
-    let mut harness = FixtureHarness::start("reader-files-findings");
+    // The reader is off by default (ADR-0216 §4), and this scenario is about
+    // what one file, so it turns it on.
+    let mut harness = FixtureHarness::start_with_reader("reader-files-findings");
     let base = harness.view().mainline;
     let bloom = harness.seal_member(FIRST, digest(0x51));
     walk_to_landing(&mut harness, bloom, FIRST, 0xC1);

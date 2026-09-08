@@ -605,6 +605,7 @@ fn drain_dispatch_topics(
     backoff: &mut Option<BackoffCursor>,
     store: &mut dyn StoreBackend,
     executor: &dyn ExecutorPort,
+    reader_enabled: bool,
     now_unix_millis: u64,
 ) {
     // Drain + submit the newly-decided dispatches, acking the submitted prefix.
@@ -648,8 +649,9 @@ fn drain_dispatch_topics(
     // Drain + submit the bloom-level readers a landing decided (ADR-0216).
     // Last of the submitting drains because it is last on the line: its
     // subject only exists once a bloom has landed, so nothing else this tick
-    // can be waiting behind it.
-    let studies = drain_and_dispatch_study(store, executor, now_unix_millis);
+    // can be waiting behind it. `reader_enabled` off drains the same rows and
+    // journals each as a declined read instead of submitting it.
+    let studies = drain_and_dispatch_study(store, executor, reader_enabled, now_unix_millis);
     fold_submitted_drain(tracked, backoff, store, Topic::Study, "study", studies);
 }
 
@@ -865,6 +867,10 @@ pub struct ExecutorReactorState {
     // How long a known-heartbeat local lane may stay silent before this host
     // cancels it (ADR-0195 §8). Always nonzero: chassis boot refuses `0`.
     heartbeat_silence_millis: u64,
+    // Whether this host spends the bloom-level reader's seat after a landing
+    // (ADR-0216 §4). Off by default; off, the study drain journals each read as
+    // missing instead of submitting it.
+    retrospect_reader_enabled: bool,
     // The correspondence the push side resolves an admitted capture's commit
     // through (ADR-0152); `None` on a disabled reactor.
     correspondence: Option<SharedCorrespondence>,
@@ -908,6 +914,7 @@ impl ExecutorReactorState {
             backoff: None,
             stale_warn_after: stale_warn_after(CoordinatorConfig::default().stale_warn_after_secs),
             heartbeat_silence_millis: CoordinatorConfig::default().heartbeat_silence_secs.saturating_mul(1_000),
+            retrospect_reader_enabled: CoordinatorConfig::default().retrospect_reader_enabled,
             correspondence: None,
             pusher: default_candidate_push(true),
             offload: AdapterOffload::new(),
@@ -2816,7 +2823,14 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
         // paces the re-drive instead of hammering GitHub at the flat poll cadence.
         let skip_drain = state.backoff.as_ref().is_some_and(|cursor| cursor.retry_after > Instant::now());
         if !skip_drain {
-            drain_dispatch_topics(&mut state.tracked, &mut state.backoff, store, &executor, clock.now_unix_millis);
+            drain_dispatch_topics(
+                &mut state.tracked,
+                &mut state.backoff,
+                store,
+                &executor,
+                state.retrospect_reader_enabled,
+                clock.now_unix_millis,
+            );
         }
 
         // Admit the dispatches the instruction-provenance gate refused on this
@@ -2931,6 +2945,7 @@ impl NativeActor for ExecutorReactorCapability {
                 backoff: None,
                 stale_warn_after: stale_warn_after(config.stale_warn_after_secs),
                 heartbeat_silence_millis: config.heartbeat_silence_secs.saturating_mul(1_000),
+                retrospect_reader_enabled: config.retrospect_reader_enabled,
                 correspondence: None,
                 pusher: config.pusher,
                 offload: AdapterOffload::new(),
@@ -3012,6 +3027,7 @@ impl NativeActor for ExecutorReactorCapability {
             backoff: None,
             stale_warn_after: stale_warn_after(config.stale_warn_after_secs),
             heartbeat_silence_millis: config.heartbeat_silence_secs.saturating_mul(1_000),
+            retrospect_reader_enabled: config.retrospect_reader_enabled,
             correspondence,
             pusher: config.pusher,
             offload: AdapterOffload::new(),

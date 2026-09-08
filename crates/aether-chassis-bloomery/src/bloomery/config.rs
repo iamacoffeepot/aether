@@ -193,6 +193,32 @@ pub struct CoordinatorConfig {
     /// (ADR-0214 §Migration).
     #[config(env = "AETHER_BLOOMERY_AUTHORIZED_INSTRUCTIONS", default = "")]
     pub authorized_instruction_bundles: String,
+    /// Whether this host dispatches the bloom-level reader after a landing
+    /// (ADR-0216 §4). Off by default.
+    ///
+    /// The seat the reader runs on is the owner's call, and ADR-0216 leaves it
+    /// open: standing per bloom, operator-triggered, or a cheaper seat. Without
+    /// this knob that call would be folded into bundle authorization, because
+    /// the ADR-0214 gate validates every instruction field before any model
+    /// lane dispatches — so the first authorized bundle has to carry the
+    /// reader's text, and a bundle that carries it would start a standing
+    /// opus read on every landed bloom the moment construct and review became
+    /// dispatchable. This separates the two: authorizing a bundle enables the
+    /// three lanes that were always there, and the reader waits here.
+    ///
+    /// Off, the study drain journals each undispatched read the way the
+    /// provenance gate journals a refusal — [`Fact::StudyCompleted`] with
+    /// `passed: false` and a legible reason — so a bloom lands with its study
+    /// missing rather than with the reader silently skipped.
+    ///
+    /// Named `AETHER_BLOOMERY_RETROSPECT_READER_ENABLED` rather than under this
+    /// struct's `AETHER_GITHUB` prefix, for the same reason the heartbeat
+    /// allowance is: what this host is willing to spend per landing is a
+    /// property of the deployment, not of the GitHub connection.
+    ///
+    /// [`Fact::StudyCompleted`]: aether_bloomery::Fact::StudyCompleted
+    #[config(env = "AETHER_BLOOMERY_RETROSPECT_READER_ENABLED", default = false)]
+    pub retrospect_reader_enabled: bool,
     /// Whether the executor mounts the local-process backend for the model lane
     /// (ADR-0150, #3586). On by default: the `construct.*` lanes route to a local
     /// process under ambient `claude` auth rather than a shared-runner wrapper,
@@ -504,6 +530,7 @@ impl Default for CoordinatorConfig {
             store_path: ":memory:".to_owned(),
             approval_policy_file: "approval-policy.toml".to_owned(),
             authorized_instruction_bundles: String::new(),
+            retrospect_reader_enabled: false,
             local_lane_enabled: true,
             local_lane_commands: "construct.,review.,scope.".to_owned(),
             local_worktree_base: ".bloomery/local-worktrees".to_owned(),
