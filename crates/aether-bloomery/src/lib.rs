@@ -89,6 +89,7 @@ pub use calibration::CalibrationLedger;
 pub use calibration::CapabilityCell;
 pub use calibration::CapabilityLedger;
 pub use calibration::LEDGER_CAVEAT;
+pub use calibration::StoreClass;
 pub use calibration::VerifierFailures;
 pub use control::Admit;
 pub use control::AdmitResult;

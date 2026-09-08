@@ -11,10 +11,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aether_actor::Addressable;
 use aether_bloomery::{
-    BackendObjectId, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CandidateRef, ConfigKind, ConfigRegistry,
-    Correspondence, Digest, Evidence, EvidenceKind, Fact, FakeKeyProvider, KeyId, MemberDependency, Membership,
-    ModelProcessInstructions, Observation, Outcome, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting,
-    Snapshot, StageCatalog, StageId, Statement, VerifyFailureSet, ViewDocument, WorkpieceId, signed_approval,
+    BackendObjectId, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CalibrationDocument, CandidateRef,
+    ConfigKind, ConfigRegistry, Correspondence, Digest, Evidence, EvidenceKind, Fact, FakeKeyProvider, KeyId,
+    MemberDependency, Membership, ModelProcessInstructions, Observation, Outcome, Provenance, SCOPE_REVISION_SCHEMA,
+    ScopeRevision, ScopeRouting, Snapshot, StageCatalog, StageId, Statement, StoreClass, VerifyFailureSet,
+    ViewDocument, WorkpieceId, signed_approval,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex};
@@ -249,6 +250,26 @@ impl ScenarioHarness {
     /// The doctor's latest pass, as `GET /view` overlays it.
     pub fn doctor(&mut self) -> Option<DoctorReport> {
         self.wire.doctor()
+    }
+
+    /// The calibration read (ADR-0184): the capability ledger this coordinator
+    /// folded from its own journal, beside the study grade.
+    pub fn calibration(&mut self) -> CalibrationDocument {
+        self.wire.calibration()
+    }
+
+    /// The class the coordinator's journal records on disk (ADR-0184) — read
+    /// through a second, non-claiming connection, the way `--check-store` and
+    /// any other operator read does.
+    ///
+    /// # Panics
+    /// The journal could not be opened or its class stamp did not read.
+    #[must_use]
+    pub fn journal_class(&self) -> StoreClass {
+        SqliteStore::open(&self.store_path)
+            .expect("the journal opens")
+            .journal_class()
+            .expect("the journal records a class")
     }
 
     /// One bloom's view.

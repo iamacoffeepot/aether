@@ -9,7 +9,7 @@
 //! person can find. Each title is sized to its text plus padding; a press
 //! on a title opens that menu's items in the widget's overlay
 //! ([`crate::WidgetDrawList::overlay`]) below the title, under the root's
-//! pointer grab ([`crate::MenuBarOpenChanged`]); while open, the pointer moving
+//! pointer grab ([`crate::WidgetOpenChanged`]); while open, the pointer moving
 //! over another title opens that one instead. A press on an enabled item
 //! activates it ([`crate::MenuBarActivated`]) and closes; Escape or a press
 //! elsewhere closes without activating. Items advertise their accelerator
@@ -40,8 +40,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{Theme, ThemeState};
 use crate::{
-    Collect, FocusLost, HoverLost, Menu, MenuBarActivated, MenuBarConfig, MenuBarOpenChanged, MenuItem, SetWidgetState,
-    WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, FocusLost, HoverLost, Menu, MenuBarActivated, MenuBarConfig, MenuItem, SetWidgetState, WidgetDismiss,
+    WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetOpenChanged,
 };
 
 /// Thickness, in pixels, of the plate's outline ring and of an item divider.
@@ -77,7 +77,7 @@ impl MenuBarEffects {
             parent.send(&activated);
         }
         if let Some(open) = self.open_changed {
-            parent.send(&MenuBarOpenChanged { open });
+            parent.send(&WidgetOpenChanged { open });
         }
     }
 }
@@ -122,6 +122,26 @@ impl MenuBarWidget {
             })
             .collect();
         measured.unwrap_or_else(|| even_split_widths(self.menus.len(), self.frame.width, self.theme.space(1)))
+    }
+
+    /// The width the row of titles actually needs, and a row's height.
+    ///
+    /// The bar already measures every title to lay the row out
+    /// ([`Self::title_widths`]); this is that measurement reported up instead
+    /// of only consumed, so a host docks the bar at the width its own menus
+    /// ask for rather than at a guess that either wastes the pane or splits
+    /// the titles evenly and cuts the long one.
+    ///
+    /// `None` until the theme font's metrics land — `title_widths` answers an
+    /// even split until then, which is the interim layout for a frame or two
+    /// and not a width anything should be sized from.
+    fn intrinsic(&self) -> Option<[f32; 2]> {
+        self.font_metrics.resolved()?;
+        let gap = self.theme.space(1);
+        let widths = self.title_widths();
+        let gaps: f32 = widths.iter().skip(1).map(|_| gap).sum();
+
+        Some([widths.iter().sum::<f32>() + gaps, self.theme.row_height])
     }
 
     /// The title under a window-pixel pointer position. The bar holds the
@@ -462,7 +482,7 @@ impl WidgetDefaults for MenuBarWidget {
 
 /// A menu bar. Spawned inline by a panel root with a [`MenuBarConfig`];
 /// reports [`crate::MenuBarActivated`] on an activation and
-/// [`crate::MenuBarOpenChanged`] as its menus open and close.
+/// [`crate::WidgetOpenChanged`] as its menus open and close.
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send
@@ -600,14 +620,28 @@ impl WasmActor for MenuBarWidget {
         }
     }
 
+    /// Put every menu away without activating anything — the host's own
+    /// Escape. A bar with nothing open does nothing and stays silent.
+    ///
+    /// # Agent
+    /// Send to a bar whose open menu must go away because something else took
+    /// the screen.
+    #[handler::single]
+    fn on_dismiss(&mut self, ctx: &mut WasmCtx<'_>, _dismiss: WidgetDismiss) {
+        self.dismiss().emit(ctx);
+    }
+
     /// Reply the bar's local draw: the row of titles as ordinary items, the
-    /// open menu's plate as overlay.
+    /// open menu's plate as overlay, and the width its own titles ask a layout
+    /// for.
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()).with_overlay(self.overlay_items()));
+        reply_draw(ctx, &self.state, || {
+            WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic()).with_overlay(self.overlay_items())
+        });
     }
 }
 

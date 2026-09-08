@@ -13,14 +13,18 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use aether_bloomery::encode_hex;
 use aether_bloomery::persisted::{decode_recorded_decisions, decode_recorded_event};
+use aether_bloomery::{StoreClass, encode_hex};
 
 use super::{SqliteStore, StoreBackend as _};
 
 /// What `--check-store` found: per-stamp row tallies and every decode refusal.
 #[derive(Debug, Default)]
 pub struct StoreCheck {
+    /// Which world this journal records (ADR-0184), or `None` when its class
+    /// stamp did not read — which is a refusal, because a coordinator refuses
+    /// the same open.
+    pub class: Option<StoreClass>,
     /// Journal rows examined.
     pub journal_rows: usize,
     /// Config rows present (counted, not decoded — they resolve lazily).
@@ -44,6 +48,7 @@ impl StoreCheck {
     #[must_use]
     pub fn render(&self) -> String {
         let mut out = String::new();
+        let _ = writeln!(out, "journal class: {}", self.class.map_or("unreadable", StoreClass::as_str));
         let _ = writeln!(out, "journal rows: {}", self.journal_rows);
         let _ = writeln!(out, "config rows:  {}", self.config_rows);
         for (stamp, count) in &self.event_stamps {
@@ -78,6 +83,10 @@ impl StoreCheck {
 pub fn check_store(path: &str) -> rusqlite::Result<StoreCheck> {
     let mut store = SqliteStore::open(path)?;
     let mut check = StoreCheck { config_rows: store.load_configs()?.len(), ..StoreCheck::default() };
+    match store.journal_class() {
+        Ok(class) => check.class = Some(class),
+        Err(error) => check.refusals.push(format!("journal class: {error}")),
+    }
     for record in store.replay_journal()? {
         check.journal_rows += 1;
         let stamp = |digest: Option<&[u8]>| digest.map_or_else(|| String::from("absent"), encode_hex);

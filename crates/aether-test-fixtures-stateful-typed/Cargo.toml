@@ -20,5 +20,13 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 serde = { workspace = true, default-features = false, features = ["derive"] }
 
+# cargo-machete (the CI unused-deps gate) scans source without expanding
+# macros, so it cannot see that `serde` is reached only through the
+# `#[aether_data::kind(...)]` expansion on `CounterState`, which emits
+# `::serde::Serialize` / `::serde::Deserialize`. The crate names serde
+# nowhere in source; the dependency is real.
+[package.metadata.cargo-machete]
+ignored = ["serde"] # aether-suppression-request: serde is used only through the #[aether_data::kind] expansion, invisible to a source-only scan
+
 [lints]
 workspace = true
