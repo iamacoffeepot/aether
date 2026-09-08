@@ -25,6 +25,7 @@ mod operator;
 mod orphan_claim;
 mod price;
 mod process_instructions;
+pub(crate) mod process_instructions_pre_reader;
 mod profile;
 mod proof;
 mod question;
