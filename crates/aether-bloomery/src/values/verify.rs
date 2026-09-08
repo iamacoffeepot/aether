@@ -285,10 +285,9 @@ impl VerifyFailure {
     /// This identity's index in [`Self::ALL`], or `None` for one the compiled
     /// vocabulary does not name.
     ///
-    /// What a fixed-width table indexed by the compiled vocabulary needs, and
-    /// the honest answer for an identity outside it: the ADR-0184 ledger's
-    /// per-identity columns key on the string rather than the position in the
-    /// slice that follows this one (#5817).
+    /// What a fixed-width table indexed by the compiled vocabulary needs. The
+    /// ADR-0184 ledger no longer uses it: its columns key on the identity
+    /// string through the bloom's recorded manifest (ADR-0215).
     #[must_use]
     pub fn compiled_position(self) -> Option<usize> {
         let position = usize::from(self.position());

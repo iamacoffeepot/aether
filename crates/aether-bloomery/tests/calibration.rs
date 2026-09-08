@@ -15,9 +15,9 @@ use aether_data::wire::to_vec;
 
 use aether_bloomery::{
     AgentSelection, BloomId, CalibrationLedger, CandidateRef, CapabilityCell, CapabilityLedger, ConfigKind, Decision,
-    Decisions, Digest, Event, Evidence, EvidenceKind, Fact, Harness, ModelOverride, Outcome, ReasoningEffort,
-    ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, StageOverride, StoreClass, StudyCost,
-    StudyRecord, Unproducible, VerifyFailure, VerifyFailureSet, reduce,
+    Decisions, Digest, Event, Evidence, EvidenceKind, Fact, Harness, ModelOverride, Outcome, PipelineManifest,
+    ReasoningEffort, ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, StageOverride,
+    StoreClass, StudyCost, StudyRecord, Unproducible, VerifyFailure, VerifyFailureSet, VerifyGateSet, reduce,
 };
 use common::{claim, digest, draft_with_member_override, event, membership, workpiece};
 
@@ -42,15 +42,30 @@ struct Journal {
 impl Journal {
     /// Seal a one-member bloom whose member seals `override_`, and fold the seal.
     fn sealed(override_: &ModelOverride) -> Self {
-        let (draft, configs) = draft_with_member_override(1, membership(MEMBER, REVISION), override_);
+        Self::sealed_on(override_, None)
+    }
+
+    /// Seal under an optional authored pipeline manifest so the fold records a
+    /// vocabulary other than the compiled ten.
+    fn sealed_on(override_: &ModelOverride, manifest: Option<&PipelineManifest>) -> Self {
+        let (mut draft, mut configs) = draft_with_member_override(1, membership(MEMBER, REVISION), override_);
+        if let Some(manifest) = manifest {
+            draft.configs.insert::<PipelineManifest>(manifest.address());
+            configs.insert(
+                manifest.address(),
+                PipelineManifest::NAME,
+                to_vec(manifest).expect("manifest encodes"),
+                None,
+            );
+        }
         let spec = draft.seal();
         let bloom = spec.id();
-        let mut journal = Self {
-            snapshot: Snapshot::new(digest(1)).with_green_base(digest(1)),
-            ledger: CalibrationLedger::default(),
-            configs,
-            bloom,
+        let snapshot = Snapshot::new(digest(1));
+        let snapshot = match manifest {
+            Some(manifest) => snapshot.with_green_base_under(digest(1), VerifyGateSet::base_of(manifest).digest()),
+            None => snapshot.with_green_base(digest(1)),
         };
+        let mut journal = Self { snapshot, ledger: CalibrationLedger::default(), configs, bloom };
         journal.admit(&event("seal", Fact::Seal(spec)));
         journal
     }
@@ -314,8 +329,16 @@ fn a_refused_verify_verdict_charges_nothing() {
     let ledger = journal.ledger.report(StoreClass::Live, |_| None);
     let construct = cell(&ledger, StageId::Construct).expect("the seal dispatched Construct");
 
-    assert_eq!(construct.failures, Vec::new(), "a refused verdict is not an observation of anything");
-    assert_eq!(verdicts(construct, VerifyFailure::Clippy), 0);
+    assert_eq!(verdicts(construct, VerifyFailure::Clippy), 0, "a refused verdict is not an observation of anything");
+    assert_eq!(
+        construct
+            .failures
+            .iter()
+            .find(|failures| failures.verifier == VerifyFailure::Clippy)
+            .map(|failures| failures.verdicts),
+        Some(0),
+        "a declared identity that never failed is a zero column, not an empty vector",
+    );
 }
 
 // Tripwire: the honesty boundary is carried on the document, not left to a
@@ -434,4 +457,61 @@ fn boot_replay_rebuilds_the_ledger_exactly_as_live_commits_built_it_because_door
     let want = vec![first.resolve(StageId::Construct, &profile), second.resolve(StageId::Construct, &profile)];
     let got: Vec<_> = live.cells.iter().map(|cell| cell.agent.clone()).collect();
     assert_eq!(got, want, "each override keyed its own Construct cell, so equality is not both paths ignoring configs");
+}
+
+// Tripwire (ADR-0215): a sealed vocabulary past the compiled ten interned a
+// verdict at position 10, and the ledger's fixed array had no column there, so
+// the count vanished. Keying on the identity string through the recorded
+// manifest keeps it under its own name.
+#[test]
+fn a_verdict_naming_an_eleventh_identity_counts_under_that_name() {
+    let mut manifest = PipelineManifest::compiled();
+    manifest.verifiers.identities.push(String::from("verify.novel"));
+    let novel = manifest.intern("verify.novel").expect("the eleventh identity interns");
+
+    let mut journal = Journal::sealed_on(&escalating(), Some(&manifest));
+    let captured = CandidateRef { tree: digest(TREE), checkout: digest(TREE + 1) };
+    journal.completed("construct", StageId::Construct, Some(captured));
+    journal.verify_failed("verify-failed", &[novel]);
+
+    let ledger = journal.ledger.report(StoreClass::Live, |_| None);
+    let construct = cell(&ledger, StageId::Construct).expect("Construct wrote the candidate");
+    assert_eq!(verdicts(construct, novel), 1, "the eleventh identity is a column of its own, not dropped");
+    assert_eq!(
+        construct.failures.iter().find(|failures| failures.verifier == novel).map(|failures| failures.verdicts),
+        Some(1),
+    );
+}
+
+// Tripwire (ADR-0184 / ADR-0215): omitting an identity from the sealed
+// vocabulary is not a zero. Zero means declared and never failed; absence
+// means this bloom's vocabulary does not contain it.
+#[test]
+fn an_identity_the_manifest_omits_renders_as_not_declared_rather_than_zero() {
+    let mut manifest = PipelineManifest::compiled();
+    manifest.verifiers.identities.retain(|identity| identity != VerifyFailure::Docs.as_str());
+    for runs in manifest.verifiers.runs.values_mut() {
+        runs.retain(|identity| identity != VerifyFailure::Docs.as_str());
+    }
+
+    let mut journal = Journal::sealed_on(&escalating(), Some(&manifest));
+    let captured = CandidateRef { tree: digest(TREE), checkout: digest(TREE + 1) };
+    journal.completed("construct", StageId::Construct, Some(captured));
+
+    let ledger = journal.ledger.report(StoreClass::Live, |_| None);
+    let construct = cell(&ledger, StageId::Construct).expect("Construct is measured");
+    assert!(
+        construct.failures.iter().all(|failures| failures.verifier != VerifyFailure::Docs),
+        "omitted from the sealed vocabulary is not a zero column: {:?}",
+        construct.failures,
+    );
+    assert_eq!(
+        construct
+            .failures
+            .iter()
+            .find(|failures| failures.verifier == VerifyFailure::Clippy)
+            .map(|failures| failures.verdicts),
+        Some(0),
+        "a declared identity that never failed is a zero, not an omission",
+    );
 }
