@@ -27,7 +27,7 @@ use syn::{Attribute, Data, DeriveInput, LitStr, Path, Token};
 /// than as a field per option so adding the next contract knob doesn't
 /// grow a wide boolean record.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Flag {
+pub enum Flag {
     Copy,
     Default,
     PartialEq,
@@ -55,7 +55,7 @@ impl Flag {
 }
 
 /// The parsed argument list of one `#[aether_data::kind(...)]`.
-pub(crate) struct KindArgs {
+pub struct KindArgs {
     name: LitStr,
     flags: Vec<Flag>,
     extra: Vec<Path>,
@@ -104,7 +104,7 @@ impl KindArgs {
 /// Parse the attribute's argument list. Every option is a bare flag
 /// except `name = "..."` (required, once) and the `derive(...)` escape
 /// hatch, which appends its paths verbatim.
-pub(crate) fn parse_args(attr: &TokenStream2) -> syn::Result<KindArgs> {
+pub fn parse_args(attr: &TokenStream2) -> syn::Result<KindArgs> {
     let mut name: Option<LitStr> = None;
     let mut flags: Vec<Flag> = Vec::new();
     let mut extra: Vec<Path> = Vec::new();
@@ -151,7 +151,7 @@ pub(crate) fn parse_args(attr: &TokenStream2) -> syn::Result<KindArgs> {
 /// re-emitted verbatim rather than reprinted from the parsed
 /// `DeriveInput`, so doc comments, `#[repr(C)]`, `#[serde(...)]` field
 /// attributes and formatting survive byte-for-byte.
-pub(crate) fn expand(args: &KindArgs, item: &TokenStream2) -> syn::Result<TokenStream2> {
+pub fn expand(args: &KindArgs, item: &TokenStream2) -> syn::Result<TokenStream2> {
     let parsed: DeriveInput = syn::parse2(item.clone())?;
     reject_redundant_attrs(&parsed.attrs)?;
     if let Data::Union(u) = &parsed.data {
