@@ -119,7 +119,7 @@ pub use study::{StudyCall, StudyCost, StudyRecord};
 pub use suppression::{SuppressionDisposition, SuppressionRequest, SuppressionVerdict};
 pub use surface::{SurfacePathRequest, SurfaceRequest};
 pub use timeout::TimeoutRecord;
-pub use verify::{VerifyFailure, VerifyFailureSet};
+pub use verify::{DeclaredIdentity, MAX_VERIFIER_IDENTITY_BYTES, VerifyFailure, VerifyFailureSet};
 pub use workpiece_builder::{FIELD_ENTRY_SCHEMA, FieldEntry, WorkpieceBuilder, WorkpieceRefusal};
 
 use alloc::string::String;

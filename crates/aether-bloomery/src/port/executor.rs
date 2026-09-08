@@ -121,12 +121,21 @@ pub struct LaneObservation {
     /// backend decodes the equivalent mask from the artifact name. Empty on a
     /// pass and on every non-Verify lane.
     ///
-    /// On both transports this is the same value the reference's `name` carries
-    /// — the local backend composes that mask from what it reports here, the
-    /// Actions backend reads this out of that mask — so it is a second
-    /// rendering of the name channel, never an independent one. Intake reads
-    /// the set off the name and has nothing here to cross-check it against.
+    /// A mask token already carries positions the lane interned against its
+    /// own compiled vocabulary and needs no further intern. A JSON body
+    /// carries *names*; those ride [`Self::failed_verifier_names`] to the
+    /// admission door, which interns them against the bloom's sealed
+    /// vocabulary. The set here is then the interned mask, not an independent
+    /// channel.
     pub failed_verifiers: VerifyFailureSet,
+    /// Identity names the JSON evidence path still has in hand (ADR-0215).
+    ///
+    /// A `u16` mask cannot recover which appended identity a subset named, so
+    /// the local backend carries the strings here and intake interns each
+    /// against the sealed [`crate::PipelineManifest`]. Empty on the Actions
+    /// mask path — those bits were already written — and on every lane that
+    /// stamped no `failed_verifiers` array.
+    pub failed_verifier_names: Vec<String>,
     /// What the attempt cost (#4679) — reported by a backend that reads the
     /// run's evidence bytes itself (the local executor, from the result
     /// record's token/cost columns); `None` from the name-only Actions lane,

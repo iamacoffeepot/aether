@@ -423,8 +423,10 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
                     // so it reports neither a capture, findings, nor a cost — an
                     // attempt run here is unmeasured and writes no study row, rather
                     // than writing a row of zeroes that would read as free. The
-                    // failure set is the name's mask; every other observation field
-                    // stays at its empty default.
+                    // failure set is the name's mask, whose bits the lane already
+                    // interned against its compiled vocabulary; names stay empty
+                    // because that intern needs no replay at the door. Every other
+                    // observation field stays at its empty default.
                     observation: LaneObservation { failed_verifiers, ..LaneObservation::default() },
                 }
             })

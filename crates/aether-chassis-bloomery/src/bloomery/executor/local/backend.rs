@@ -2308,6 +2308,11 @@ impl LocalExecutor {
         } else {
             Some(VerifyFailureSet::EMPTY)
         };
+        let failed_verifier_names = if is_verify {
+            parse_failed_verifier_names(bytes)
+        } else {
+            Vec::new()
+        };
         // Verdict from the run's own evidence, lane-specific. The construct lane's
         // gate classifies a terminal `result` with `is_error == false` three ways
         // (#3596, #5292): a produced candidate advances, a clean empty candidate
@@ -2410,6 +2415,7 @@ impl LocalExecutor {
         let judgement = Judgement {
             verdict,
             failed_verifiers: failed_verifiers.unwrap_or_default(),
+            failed_verifier_names,
             violating_paths,
             surface_request,
             // Read off every lane's evidence, not only a verify's: the umbrella
@@ -2535,6 +2541,7 @@ fn synthesized_executor_fault(
 struct Judgement {
     verdict: StageVerdict,
     failed_verifiers: VerifyFailureSet,
+    failed_verifier_names: Vec<String>,
     violating_paths: Vec<String>,
     /// The paths a declining construct-family lane asked for (ADR-0207).
     surface_request: Option<SurfaceRequest>,
@@ -2551,9 +2558,17 @@ fn judged_evidence_ref(
     candidate: Option<CandidateRef>,
     judgement: Judgement,
 ) -> EvidenceRef {
-    let Judgement { verdict, failed_verifiers, violating_paths, surface_request, suppression_requests, narrowing } =
-        judgement;
+    let Judgement {
+        verdict,
+        failed_verifiers,
+        failed_verifier_names,
+        violating_paths,
+        surface_request,
+        suppression_requests,
+        narrowing,
+    } = judgement;
     let overlay = apply_containment(verdict, failed_verifiers, parse_findings(bytes), &violating_paths);
+    let failed_verifier_names = names_carried_to_intake(failed_verifier_names, overlay.failed_verifiers);
     let detail = Digest::of_wire_bytes(bytes);
     let (cost, calls) = parse_measured(bytes).map_or((None, None), |(cost, calls)| (Some(cost), calls));
     EvidenceRef {
@@ -2574,6 +2589,7 @@ fn judged_evidence_ref(
             candidate,
             findings: overlay.findings,
             failed_verifiers: overlay.failed_verifiers,
+            failed_verifier_names,
             cost,
             calls,
             session_reuse_arm: parse_session_reuse_arm(bytes),
@@ -3185,6 +3201,30 @@ fn parse_failed_verifiers(bytes: &[u8]) -> Option<VerifyFailureSet> {
     value
         .get("failed_verifiers")
         .map_or(Some(VerifyFailureSet::EMPTY), |failures| serde_json::from_value(failures.clone()).ok())
+}
+
+/// The identity names the evidence JSON still has in hand. Intake interns them
+/// against the bloom's sealed vocabulary; the set decoder above is not the
+/// thing that assigns a bit to a fresh verdict.
+fn parse_failed_verifier_names(bytes: &[u8]) -> Vec<String> {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| value.get("failed_verifiers").cloned())
+        .and_then(|failures| {
+            failures.as_array().map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect())
+        })
+        .unwrap_or_default()
+}
+
+/// Carry every identity the overlay named, including one the host added
+/// (containment), so admission interned the names the journaled set will hold.
+fn names_carried_to_intake(mut names: Vec<String>, overlay: VerifyFailureSet) -> Vec<String> {
+    for failure in overlay.iter() {
+        if !names.iter().any(|name| name == failure.as_str()) {
+            names.push(failure.as_str().to_owned());
+        }
+    }
+    names
 }
 
 // The evidence's top-level `findings` prose — what the review critic stamped
