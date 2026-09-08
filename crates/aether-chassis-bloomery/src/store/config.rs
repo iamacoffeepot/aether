@@ -49,8 +49,8 @@ impl StoreConfig {
     ///
     /// # Errors
     /// The value is a name outside the vocabulary. Argv and file overlays store
-    /// the knob as a string and bypass [`parse_store_class`], so this is the
-    /// gate every ingress passes through.
+    /// the knob as a string and bypass the confique `parse_env` hook, so this
+    /// is the gate every ingress passes through.
     pub fn class(&self) -> Result<StoreClass, UnknownStoreClass> {
         if self.class.trim().is_empty() {
             return Ok(StoreClass::Live);

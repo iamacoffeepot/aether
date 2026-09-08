@@ -925,6 +925,7 @@ impl ControlCoreState {
         Self {
             snapshot: Snapshot::default(),
             calibration: CalibrationLedger::default(),
+            store_class: StoreClass::Live,
             metrics: MetricsLedger::default(),
             configs: ResolvedConfigs::default(),
             spend: SpendWindow::default(),
