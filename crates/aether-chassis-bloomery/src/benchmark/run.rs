@@ -35,8 +35,7 @@ use std::fmt;
 
 use aether_bloomery::{
     BloomDraft, BloomId, BloomSpec, ConfigRegistry, ContentAddressed, Digest, Evidence, EvidenceKind, Membership,
-    ModelOverride, ModelProcessInstructions, Observation, Outcome, Provenance, Statement, StoreClass, WorkpieceId,
-    digest_of,
+    ModelOverride, ModelProcessInstructions, Observation, Provenance, Statement, StoreClass, WorkpieceId, digest_of,
 };
 use aether_bloomery_git::short_hex;
 use aether_data::Kind;

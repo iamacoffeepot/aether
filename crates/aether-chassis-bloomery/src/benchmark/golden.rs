@@ -26,7 +26,6 @@ use std::fmt;
 
 use aether_bloomery::{ContentAddressed, Digest, digest_of};
 use aether_bloomery_git::{ChecksState, GitDataApi, PullRequestApi, fixture::FakeGithub};
-use serde::{Deserialize, Serialize};
 
 /// One golden task: a landed pull request read back as a runnable work order.
 ///
@@ -35,7 +34,10 @@ use serde::{Deserialize, Serialize};
 /// enforces rather than a column a report could read past — and `ChecksState`
 /// carries no check names on the passing arm, so a stored copy would say
 /// nothing the refusal does not.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+///
+/// A wire kind, not a plain value: a run's rendered state carries the tasks it
+/// drew, and that document crosses a mailbox on its way to the operator.
+#[aether_data::kind(name = "aether.bloomery.golden_task", eq)]
 pub struct GoldenTask {
     /// The landed pull request this task was drawn from.
     pub pull_request: u64,
@@ -81,7 +83,7 @@ impl ContentAddressed for GoldenTask {
 /// set's content digest, which moves when the base moves *and* when the task
 /// list does, so a report naming it pins exactly which comparison produced its
 /// cells; the base alone would let two different task lists share a version.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[aether_data::kind(name = "aether.bloomery.golden_task_set", eq)]
 pub struct GoldenTaskSet {
     /// What an operator calls this set.
     pub name: String,
