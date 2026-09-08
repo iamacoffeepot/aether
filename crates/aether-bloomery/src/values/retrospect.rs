@@ -26,6 +26,7 @@ use alloc::borrow::ToOwned;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
@@ -240,11 +241,9 @@ impl RetrospectFinding {
     pub fn intent_words(&self) -> String {
         let mut words = format!("# {}\n\n{}\n\n## Surface\n\n", self.title, self.body);
         for glob in &self.surface {
-            words.push_str("- `");
-            words.push_str(glob);
-            words.push_str("`\n");
+            let _ = writeln!(words, "- `{glob}`");
         }
-        words.push_str(&format!("\nDerived from bloom receipt `{}` by the ADR-0216 reader.\n", self.receipt.to_hex()));
+        let _ = writeln!(words, "\nDerived from bloom receipt `{}` by the ADR-0216 reader.", self.receipt.to_hex());
         words
     }
 }
