@@ -1,7 +1,8 @@
-//! The settle pump's poll-granularity knob (issue 4453), sitting beside
-//! [`crate::settlement_config`] because the two govern the same wait from
-//! opposite ends: that one bounds how long the pump is willing to wait at
-//! all, this one how finely it looks while waiting.
+//! The settle pump's poll-granularity knob (issue 4453), the harness-side
+//! counterpart to [`SettlementConfig`](aether_substrate::config::SettlementConfig):
+//! the two govern the same wait from opposite ends — that one bounds how long
+//! the pump is willing to wait at all, this one how finely it looks while
+//! waiting.
 
 use std::time::Duration;
 

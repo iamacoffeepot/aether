@@ -54,6 +54,11 @@ aether-derive = { path = "../aether-derive" }
 aether-kinds = { path = "../aether-kinds" }
 arc-swap = { workspace = true }
 bytemuck = { workspace = true }
+# ADR-0090 unit g: `#[derive(aether_substrate::Config)]` emits a clap-shaped
+# `*Overlay` beside every resolved config struct. `SettlementConfig` (issue
+# #5706) is the crate's own such knob, so the codegen needs clap here the same
+# way every cap crate that carries a derive-`Config` does.
+clap = { workspace = true }
 # ADR-0090: typed, layered config resolution. Backs the env-shaped
 # `*Layer` structs that resolve each chassis-resolved config's `from_env`.
 # `default-features = false` keeps it env-only — no TOML/YAML file
@@ -161,12 +166,14 @@ aether-kit-commons = { path = "../aether-kit-commons" }
 # wasm by stem, so the code never imports the crate.
 aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
 
-# cargo-machete's source-only scan cannot see the wasm-coupling dev-dep:
-# the tests load the fixture's built wasm by stem rather than importing
-# the crate, so the cargo edge exists purely for determinator /
-# dist-pre-build visibility (iamacoffeepot/aether#3766).
+# cargo-machete's source-only scan cannot see two edges here. The
+# wasm-coupling dev-dep: the tests load the fixture's built wasm by stem rather
+# than importing the crate, so the cargo edge exists purely for determinator /
+# dist-pre-build visibility (iamacoffeepot/aether#3766). And `clap`, which is
+# reached only through the `#[derive(aether_substrate::Config)]` codegen on
+# `SettlementConfig` (`#[derive(clap::Args)]` on the emitted overlay).
 [package.metadata.cargo-machete]
-ignored = ["aether-test-fixtures-bundle"]
+ignored = ["aether-test-fixtures-bundle", "clap"] # aether-suppression-request: the fixture edge exists for determinator/dist visibility (its wasm is loaded by stem, never imported) and `clap` only through the `#[derive(aether_substrate::Config)]` expansion on `SettlementConfig`
 
 [lints]
 workspace = true

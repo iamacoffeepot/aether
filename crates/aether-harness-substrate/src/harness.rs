@@ -43,10 +43,9 @@ use aether_trace::walk::TreeWalk;
 use crate::cap::SubstrateHarnessCapability;
 use crate::poll_config::PollConfig;
 use crate::pump_stats::PumpStats;
-use crate::settlement_config::SettlementConfig;
 use aether_actor::{Addressable, Root};
 use aether_fs::NamespaceRoots;
-use aether_substrate::config::ConfigMember;
+use aether_substrate::config::{ConfigMember, SettlementConfig};
 use aether_substrate::{
     EgressEvent, HubOutbound, Mailer, NativeActor, PassiveChassis, RecordingBackend, RingCapacities, SchedulerTuning,
     Source, SourceAddr, SubstrateBoot,
@@ -57,7 +56,7 @@ use super::chassis::{
     ComposeFn, FrameHook, RenderHookWiring, SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv,
     WORKERS,
 };
-use super::events::{ChassisEvent, EventReceiver, channel as event_channel};
+use aether_substrate_harness_cap::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use std::error;
 use std::thread;
 

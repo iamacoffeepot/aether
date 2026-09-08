@@ -9,6 +9,7 @@ members = [
     "crates/aether-chassis-hub",
     "crates/aether-harness-substrate",
     "crates/aether-harness-substrate-capture",
+    "crates/aether-substrate-harness-cap",
     "crates/aether-codec",
     "crates/aether-data",
     "crates/aether-kinds",

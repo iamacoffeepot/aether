@@ -17,7 +17,7 @@ use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
 use aether_math::Rgba;
 
 use crate::set::defaults::WidgetDefaults;
-use crate::set::{ActivationArms, push_control_outlines, quad, reply_if_hidden, text_origin_y};
+use crate::set::{ActivationArms, push_control_outlines, reply_if_hidden, text_origin_y};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
 use crate::{
@@ -132,15 +132,31 @@ impl ToggleWidget {
         };
         let state = self.state.theme_state(self.pressed());
 
+        // A stadium track and a round knob: a radius of half the height is
+        // what the shape primitive draws a circle at (ADR-0213).
         let mut items = Vec::new();
-        items.push(quad(0.0, track_y, track_width, track_height, self.theme.fill(self.track_color(), state)));
-        items.push(quad(
-            knob_x,
-            track_y + 2.0,
-            knob_size,
-            knob_size,
-            self.theme.fill(self.knob_color(), self.state.supporting_theme_state(false)),
-        ));
+        items.push(WidgetDrawItem::Shape {
+            x: 0.0,
+            y: track_y,
+            width: track_width,
+            height: track_height,
+            corner_radius: track_height * 0.5,
+            fill: Some(self.theme.fill(self.track_color(), state)),
+            stroke: None,
+            shadow: None,
+            clip: None,
+        });
+        items.push(WidgetDrawItem::Shape {
+            x: knob_x,
+            y: track_y + 2.0,
+            width: knob_size,
+            height: knob_size,
+            corner_radius: knob_size * 0.5,
+            fill: Some(self.theme.fill(self.knob_color(), self.state.supporting_theme_state(false))),
+            stroke: None,
+            shadow: None,
+            clip: None,
+        });
 
         if !self.label.is_empty() {
             let size = self.theme.label_size_pixels;
@@ -283,12 +299,12 @@ mod tests {
         }
     }
 
-    /// The track's fill and the knob's, in draw order — the first two quads
-    /// the toggle pushes, before any outline.
+    /// The track's fill and the knob's, in draw order — the first two
+    /// filled shapes the toggle pushes, before any outline.
     fn track_and_knob(switch: &ToggleWidget) -> (Rgba, Rgba) {
         let items = switch.draw_items();
         let mut fills = items.iter().filter_map(|item| match item {
-            WidgetDrawItem::Quad { color, .. } => Some(*color),
+            WidgetDrawItem::Shape { fill: Some(color), .. } => Some(*color),
             _ => None,
         });
         (fills.next().expect("the track is drawn first"), fills.next().expect("the knob is drawn on it"))

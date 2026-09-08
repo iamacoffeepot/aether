@@ -201,7 +201,6 @@ dependencies = [
  "aether-component",
  "aether-data",
  "aether-fs",
- "aether-harness-substrate",
  "aether-http",
  "aether-inventory",
  "aether-kinds",
@@ -264,12 +263,12 @@ dependencies = [
  "aether-clipboard",
  "aether-component",
  "aether-data",
- "aether-harness-substrate",
  "aether-http",
  "aether-kinds",
  "aether-lifecycle",
  "aether-render",
  "aether-substrate",
+ "aether-substrate-harness-cap",
  "aether-window",
  "anyhow",
  "clap",
@@ -294,9 +293,12 @@ dependencies = [
  "aether-lifecycle",
  "aether-render",
  "aether-substrate",
+ "aether-substrate-harness-cap",
  "aether-tcp",
  "aether-text",
  "anyhow",
+ "clap",
+ "confique",
  "crossbeam-channel",
  "tracing",
 ]
@@ -311,13 +313,13 @@ dependencies = [
  "aether-clipboard",
  "aether-component",
  "aether-data",
- "aether-harness-substrate",
  "aether-harness-substrate-capture",
  "aether-http",
  "aether-kinds",
  "aether-lifecycle",
  "aether-render",
  "aether-substrate",
+ "aether-substrate-harness-cap",
  "aether-window",
  "anyhow",
  "clap",
@@ -335,7 +337,6 @@ dependencies = [
  "aether-data",
  "aether-fleet",
  "aether-harness-fleet",
- "aether-harness-substrate",
  "aether-kinds",
  "aether-rpc",
  "aether-substrate",
@@ -541,6 +542,7 @@ dependencies = [
  "aether-kinds",
  "aether-lifecycle",
  "aether-substrate",
+ "aether-substrate-harness-cap",
  "aether-trace",
  "aether-window",
  "anyhow",
@@ -867,6 +869,7 @@ dependencies = [
  "aether-test-fixtures-kinds",
  "arc-swap",
  "bytemuck",
+ "clap",
  "confique",
  "crossbeam-channel",
  "crossbeam-deque",
@@ -884,6 +887,17 @@ dependencies = [
  "wasmtime",
  "wat",
  "wgpu",
+]
+
+[[package]]
+name = "aether-substrate-harness-cap"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-kinds",
+ "aether-substrate",
+ "inventory",
 ]
 
 [[package]]

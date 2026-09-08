@@ -16,8 +16,14 @@
 //! force every consumer through the proc-macro toolchain even when they
 //! just want the runtime traits.
 //!
-//! `Kind` emits the `aether_data::Kind` impl (`const NAME`, `const ID`,
-//! optional `const IS_INPUT`) plus the `#[link_section]` statics for
+//! The attribute grammar is exactly one key: `#[kind(name = "…")]`, a string
+//! literal, required. `parse_kind_attr` rejects anything else. The naming
+//! grammar the literal must follow is written out in
+//! `docs/guide/systems/mail-and-kinds.md` and enforced by
+//! `crates/aether-kinds/tests/kind_name_grammar.rs`.
+//!
+//! `Kind` emits the `aether_data::Kind` impl (`const NAME`, `const ID`) plus
+//! the `#[link_section]` statics for
 //! both `aether.kinds` (canonical schema bytes) and
 //! `aether.kinds.labels` (nominal sidecar). The ID is
 //! `fnv1a_64_prefixed(KIND_DOMAIN, canonical_bytes_of(name, schema))`,

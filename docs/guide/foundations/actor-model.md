@@ -308,6 +308,42 @@ no routable source (session / broadcast mail) drops the emission with a warning.
 The `#[actor]` macro reads `K` off the `Multi<K>` marker, so
 `describe_component` reports the real `ReplyContract::Multi(K)` element kind.
 
+### Helpers that only send
+
+The class marker rides on the context type — `WasmCtx<'_>` is
+`WasmCtx<'_, Single>`, a manual handler holds `WasmCtx<'_, Manual>`, a multi
+handler `WasmCtx<'_, Multi<K>>` — which is what makes a stray `ctx.reply` in a
+single handler a compile error. One call deeper it buys nothing: a helper you
+factor out of a handler to *send* something never touches the reply channel,
+yet pinning one class makes it uncallable from the others and staying generic
+means carrying an `M: ReplyMode` parameter it doesn't read. `ctx.sends()` hands
+out `Sends<'_>` — the same addressing and outbound-mail verbs (`send`,
+`send_to`, `actor`, `resolve_actor`, `peer`, the detached family) with the
+marker dropped — so the helper takes `&mut Sends<'_>` and every handler class
+can call it:
+
+```rust
+fn announce(sends: &mut Sends<'_>, frame: &Frame) {
+    sends.actor::<RenderCapability>().send(frame);
+}
+
+#[handler::single]
+fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _t: Tick) {
+    announce(&mut ctx.sends(), &self.frame);        // Single
+}
+
+#[handler::manual]
+fn on_redraw(&mut self, ctx: &mut WasmCtx<'_, Manual>, _r: Redraw) {
+    announce(&mut ctx.sends(), &self.frame);        // Manual — same helper
+    ctx.reply(&Acknowledged);                       // reply stays on the ctx
+}
+```
+
+`reply` / `reply_to` / `emit` — and `send_with_context`, whose stashed context
+is recovered on the reply — stay on `WasmCtx<'_, M>`, so a helper that needs
+those still states which class it belongs to. That's the line: the reply class
+is load-bearing exactly where the reply is.
+
 ## Sharing handlers across a family
 
 A family of similar actors — the widgets in a set, the per-platform runtimes of
@@ -511,8 +547,8 @@ host mailbox: `loaded_default::<Camera>()` folds `Camera::NAMESPACE` from the
 held host regardless of the caller's own parent, and `loaded::<Camera>(load_name)`
 does the same for an explicit load name. Keep `LoadResult.mailbox_id` for direct by-id
 addressing. `LoadResult.name` is the canonical rendered address for
-external/string addressing; do not pass it to `loaded`, `peer_named`,
-`resolve_actor`, or `send_to_named`.
+external/string addressing — `send_to_named` resolves one — but it is not a
+subname, so do not pass it to `loaded`, `peer_named`, or `resolve_actor`.
 
 Because the lineage is the address, two actors collide exactly when they would
 occupy the same position — same parent, same name. The substrate enforces one
@@ -586,9 +622,10 @@ mailbox, and calls `R::resolve(selected_mailbox.0, key)`. The built-in `Many`
 resolver selects the current actor, so a child instance resolves beneath its
 caller; another keyed resolver can deliberately select a different declared
 scope. By contrast, `send_to_named(name, payload)` has no recipient type or
-resolver: it hashes `name` as one flat mailbox name. Use that only for an
-actually flat registered name, never for a rendered lineage path or as a
-substitute for keyed typed resolution.
+resolver: it folds `name` the way the registry folds a written name, so a
+rendered lineage path addresses its actor just as a root cap name does. Use it
+for a name you only know at runtime, never as a substitute for keyed typed
+resolution.
 
 `ctx.spawn_child` works on both hosts. A native capability names only the child
 type, and can spawn an `Instanced` native actor when that child declares

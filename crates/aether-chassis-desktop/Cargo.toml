@@ -30,7 +30,10 @@ aether-render = { path = "../aether-render", features = ["desktop"] }
 aether-window = { path = "../aether-window", features = ["desktop"] }
 aether-audio = { path = "../aether-audio", features = ["runtime"] }
 aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
-aether-harness-substrate = { path = "../aether-harness-substrate" }
+# The fail-fast `aether.substrate_harness` stub desktop composes so an MCP
+# `advance` errors instead of hanging (issue #5706 split it out of the
+# 13k-line harness crate this used to name).
+aether-substrate-harness-cap = { path = "../aether-substrate-harness-cap" }
 aether-lifecycle = { path = "../aether-lifecycle" }
 aether-component = { path = "../aether-component" }
 aether-http = { path = "../aether-http" }
