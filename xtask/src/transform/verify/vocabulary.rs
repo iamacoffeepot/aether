@@ -23,18 +23,13 @@ pub(super) fn checkout_vocabulary() -> &'static PipelineManifest {
 }
 
 fn load_vocabulary() -> PipelineManifest {
-    match located_manifest_path() {
-        None => {
-            // A checkout with no pipeline.toml keeps the compiled vocabulary in
-            // the lane for now. Refusal of a manifestless base is slice 9 (#5819).
-            PipelineManifest::compiled()
-        }
-        Some(path) => {
-            let text = fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
-            PipelineManifest::from_toml(&text)
-                .unwrap_or_else(|err| panic!("{PIPELINE_MANIFEST_PATH} is not a usable pipeline manifest: {err}"))
-        }
-    }
+    // A checkout with no pipeline.toml keeps the compiled vocabulary in the
+    // lane for now. Refusal of a manifestless base is slice 9 (#5819).
+    located_manifest_path().map_or_else(PipelineManifest::compiled, |path| {
+        let text = fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        PipelineManifest::from_toml(&text)
+            .unwrap_or_else(|err| panic!("{PIPELINE_MANIFEST_PATH} is not a usable pipeline manifest: {err}"))
+    })
 }
 
 /// `pipeline.toml` at the checkout root, or beside this crate when tests run

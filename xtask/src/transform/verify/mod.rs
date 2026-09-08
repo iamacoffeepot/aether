@@ -890,6 +890,7 @@ const SCOPE_LOG: &str = "verify.scope.log";
 /// The complete ordered spawn list `verify.check` and `verify.base` fan out to
 /// on this checkout — `[verifiers.runs]` for that command, less identities that
 /// are not a process (`verify.preflight` is attributed, never spawned).
+#[cfg(test)]
 fn verify_check_members() -> Vec<&'static str> {
     Position::Fold.members()
 }

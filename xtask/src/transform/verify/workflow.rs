@@ -361,12 +361,12 @@ mod tests {
         // `failure_mask`; a table here would be a fifth copy again. Token
         // width stays the wrapper's `printf '%04x'`, which is what
         // `the_wrapper_renders_a_mask_token_width_the_decoder_accepts` reads.
-        assert!(TRANSFORM_WORKFLOW.contains(".failure_mask"), "the wrapper must read the interned mask the lane wrote",);
+        assert!(TRANSFORM_WORKFLOW.contains(".failure_mask"), "the wrapper must read the interned mask the lane wrote");
         assert!(
             !TRANSFORM_WORKFLOW.contains("def verifier_bit:"),
-            "a checked-in bit table is a second copy of the vocabulary",
+            "a checked-in bit table is a second copy of the vocabulary"
         );
-        assert!(TRANSFORM_WORKFLOW.contains("printf '%04x'"), "the artifact token stays four zero-padded hex digits",);
+        assert!(TRANSFORM_WORKFLOW.contains("printf '%04x'"), "the artifact token stays four zero-padded hex digits");
     }
 
     #[test]

@@ -537,11 +537,9 @@ pub fn run(args: &TransformArgs) -> Result<()> {
 /// The interned bit-or of `failures`, which the Actions wrapper prints as the
 /// four-hex artifact token. Zero when the envelope omits the set.
 fn interned_mask_bits(failures: Option<&VerifyFailureSet>) -> u16 {
-    failures
-        .map(|set| {
-            u16::from_str_radix(&set.to_mask(), 16).expect("VerifyFailureSet::to_mask is four lowercase hex digits")
-        })
-        .unwrap_or(0)
+    failures.map_or(0, |set| {
+        u16::from_str_radix(&set.to_mask(), 16).expect("VerifyFailureSet::to_mask is four lowercase hex digits")
+    })
 }
 
 /// Refuse CI scheduling inputs on every command except `verify.test`.
