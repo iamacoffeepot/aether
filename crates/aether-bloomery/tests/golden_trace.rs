@@ -316,9 +316,17 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // step carries one more effect. The drift is that single added row in the land
 // step; every prior step is unchanged, and the stream still reaches Landed. An
 // intended, coordinated break, recomputed.
+// Repinned again for ADR-0215, which lands on top of it: seal and supersede
+// record the lane vocabulary they resolved (`Decision::RecordPipelineManifest`)
+// beside the catalog, so every seal step's decided output gains that effect
+// too — the same mechanism as #4944's repin above. The scripted draft seals no
+// manifest, so the compiled vocabulary's bytes are what the stream carries.
+// This pin is the merged stream, in which the land step carries the study
+// dispatch and every seal step the manifest record; neither branch's own pin
+// names it. An intended, coordinated break, recomputed.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0xbd, 0xd1, 0xb3, 0xd4, 0xb3, 0x3b, 0x5f, 0xbf, 0x7d, 0x6e, 0xec, 0xd6, 0x3d, 0x6a, 0xb9, 0x2e, 0x40, 0x06, 0xda,
-    0xf5, 0x4d, 0x2c, 0xd7, 0xd2, 0x45, 0x7d, 0x3d, 0x7d, 0xab, 0xc4, 0x65, 0xc7,
+    0x97, 0x48, 0x8a, 0x27, 0x63, 0xcb, 0x6c, 0xbf, 0xd8, 0x07, 0x40, 0xd3, 0xd2, 0xe6, 0x28, 0x4b, 0x48, 0xf4, 0x00,
+    0x10, 0x57, 0x4c, 0xde, 0x31, 0x77, 0x28, 0x5f, 0x25, 0x7e, 0x42, 0xcd, 0xab,
 ];
 
 #[test]

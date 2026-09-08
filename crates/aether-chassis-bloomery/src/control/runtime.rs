@@ -1515,6 +1515,7 @@ fn collect_decision_blooms(effect: &Decision, into: &mut BTreeSet<BloomId>) {
         | Decision::RecordVerifyProof { bloom, .. }
         | Decision::RecordVerifyReuse { bloom, .. }
         | Decision::RecordStageCatalog { bloom, .. }
+        | Decision::RecordPipelineManifest { bloom, .. }
         | Decision::RecordCompositionFinding { bloom, .. }
         | Decision::RecordAdjudication { bloom, .. }
         | Decision::RecordOperatorRepair { bloom, .. }
@@ -1760,6 +1761,7 @@ fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError>
         | Decision::AdvanceMainline { .. }
         | Decision::RecordObservation { .. }
         | Decision::RecordStageCatalog { .. }
+        | Decision::RecordPipelineManifest { .. }
         | Decision::RecordCompositionFinding { .. }
         | Decision::RecordAdjudication { .. }
         | Decision::RecordOperatorRepair { .. }
