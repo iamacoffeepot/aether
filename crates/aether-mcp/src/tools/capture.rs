@@ -14,7 +14,7 @@ use rmcp::model::{CallToolResult, Content};
 use crate::args::{CaptureCheckSpec, CaptureFrameArgs};
 
 use super::envelope::engine_envelope;
-use super::ids::{parse_engine_id, parse_window_id};
+use super::ids::parse_window_id;
 use super::render::{internal, internal_msg};
 use super::{MailEnvelope, Mcp, RENDER_CAP};
 
@@ -386,7 +386,7 @@ pub(super) fn save_capture_png(path: &Path, bytes: &[u8]) -> Result<(PathBuf, us
 }
 
 pub(super) async fn capture_frame(mcp: &Mcp, args: CaptureFrameArgs) -> Result<CallToolResult, McpError> {
-    let engine = parse_engine_id(&args.engine_id)?;
+    let (engine, _) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
     // A relative save_path is invalid-params before anything else runs
     // (iamacoffeepot/aether#2962) — mirrors the bad-bundle abort
     // posture: a bad param never touches the wire.

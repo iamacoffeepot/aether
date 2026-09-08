@@ -19,7 +19,7 @@ use super::{drain_and_integrate, drain_and_splice};
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::SourceShell;
 use crate::bloomery::outbox::TopicOutbox;
-use crate::store::{SqliteStore, StoreBackend};
+use crate::store::{JournalWrite, SqliteStore, StoreBackend};
 use aether_bloomery_github::candidate_ref_name;
 
 fn shell(fake: FakeGithub) -> SourceShell {
@@ -70,6 +70,66 @@ fn admitted_key(admit: &aether_bloomery::Admit) -> IdempotencyKey {
     from_bytes::<Event>(&admit.event).unwrap().idempotency_key
 }
 
+fn decoded_event(admit: &aether_bloomery::Admit) -> Event {
+    from_bytes(&admit.event).unwrap()
+}
+
+fn journal_event(store: &mut SqliteStore, event: &Event) {
+    let bytes = to_vec(event).unwrap();
+    store
+        .append_event(&JournalWrite {
+            idempotency_key: &event.idempotency_key.0,
+            event: &bytes,
+            decisions: b"decided",
+            decider: "test",
+        })
+        .unwrap();
+}
+
+fn assert_unacked(store: &mut SqliteStore, topic: Topic, sequence: u64, ack_through: Option<u64>) {
+    assert_eq!(ack_through, None, "receipt persistence is not acknowledgement; the journal is");
+    assert_eq!(
+        store.drain_topic(topic).unwrap().first().map(|entry| entry.sequence),
+        Some(sequence),
+        "the entry stays undelivered until the journal holds every result key",
+    );
+}
+
+fn confirm_journaled(
+    store: &mut SqliteStore,
+    source: &SourceShell,
+    topic: Topic,
+    admits: &[aether_bloomery::Admit],
+) -> u64 {
+    for admit in admits {
+        journal_event(store, &decoded_event(admit));
+    }
+    let (replayed, ack_through) = match topic {
+        Topic::Integrate => drain_and_integrate(store, source, None).unwrap(),
+        Topic::Splice => drain_and_splice(store, source, None).unwrap(),
+        other => panic!("unexpected topic {other:?}"),
+    };
+    assert!(replayed.is_empty(), "a journaled receipt does not re-admit");
+    let sequence = ack_through.expect("the journaled prefix acknowledges");
+    store.ack_topic(topic, sequence).unwrap();
+    sequence
+}
+
+fn file_store_path() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bloomery.db").to_str().unwrap().to_owned();
+    (dir, path)
+}
+
+fn integration_ref(bloom: &BloomId) -> String {
+    format!("heads/bloom/{}/integration", short_hex(&bloom.0))
+}
+
+fn retarget_integration(fake: &FakeGithub, bloom: &BloomId) {
+    let foreign = fake.create_commit("foreign", "tree-foreign", &[]).unwrap();
+    fake.seed_ref(&integration_ref(bloom), &foreign.sha);
+}
+
 // ADR-0152 — a completed claim set folds its candidate onto the integration
 // branch (bootstrapping the namespace itself) and admits a `Fact::Resolve`
 // carrying the integrated tree, a landable head distinct from it, and the
@@ -87,7 +147,7 @@ fn a_completed_claim_set_folds_and_admits_a_resolve() {
     let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
 
     assert_eq!(admits.len(), 1, "a folded bloom admits one resolve");
-    assert_eq!(ack_through, Some(sequence), "the folded entry is acked");
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
     let (resolved_bloom, tree, head, lineage) = decoded_resolve(&admits[0]);
     assert_eq!(resolved_bloom, bloom);
     assert_eq!(tree, candidate, "the integrated tree is the folded candidate");
@@ -127,7 +187,7 @@ fn a_multi_member_fold_merges_every_members_candidate() {
     let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
 
     assert_eq!(admits.len(), 1, "a multi-member fold resolves rather than failing closed");
-    assert_eq!(ack_through, Some(sequence), "the folded entry is acked");
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
     let (_, tree, head, lineage) = decoded_resolve(&admits[0]);
     assert_ne!(tree, second, "a tree-replace would have produced exactly the last member's candidate");
     assert_ne!(tree, first, "nor the first member's — the fold combined them");
@@ -164,7 +224,7 @@ fn a_multi_tip_join_admits_splice_assembled_not_resolve() {
     let (admits, ack_through) = drain_and_splice(&mut store, &source, None).unwrap();
 
     assert_eq!(admits.len(), 1, "a clean join admits one assembled splice");
-    assert_eq!(ack_through, Some(sequence), "the spliced entry is acked");
+    assert_unacked(&mut store, Topic::Splice, sequence, ack_through);
     let event: Event = from_bytes(&admits[0].event).unwrap();
     match event.fact {
         Fact::SpliceAssembled { bloom: assembled_bloom, workpiece, tree, head } => {
@@ -197,7 +257,7 @@ fn an_inheriting_successor_adopts_the_predecessors_candidate_refs_before_folding
     let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
 
     assert_eq!(admits.len(), 1, "the inherited work folds under the successor");
-    assert_eq!(ack_through, Some(sequence));
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
     assert!(
         fake.ref_exists(candidate_ref_name(&successor, "wp-0").trim_start_matches("refs/")),
         "the candidate ref now lives in the successor's namespace, so its fold reads only its own refs",
@@ -219,7 +279,7 @@ fn an_inherited_member_with_no_predecessor_ref_refuses_rather_than_folding_a_par
     let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
 
     assert_eq!(admits.len(), 1, "a set missing a member's work admits the refusal rather than resolving");
-    assert_eq!(ack_through, Some(sequence), "the refusal is definitive — acked, never re-driven");
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
     let event: Event = from_bytes(&admits[0].event).unwrap();
     match event.fact {
         Fact::FoldRefused { bloom: refused, refusal } => {
@@ -256,7 +316,7 @@ fn a_twice_superseded_bloom_adopts_the_grandparent_candidate_ref() {
     let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
 
     assert_eq!(admits.len(), 1, "the inherited work folds under the successor");
-    assert_eq!(ack_through, Some(sequence));
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
     let _ = decoded_resolve(&admits[0]);
     assert!(
         fake.ref_exists(candidate_ref_name(&successor, "wp-0").trim_start_matches("refs/")),
@@ -309,7 +369,7 @@ fn a_mixed_supersession_adopts_the_inherited_ref_and_keeps_the_re_run_capture() 
     let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
 
     assert_eq!(admits.len(), 1, "the mixed set folds instead of stalling on a ref addressed under another bloom");
-    assert_eq!(ack_through, Some(sequence));
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
     assert_eq!(
         fake.ref_target(candidate_ref_name(&successor, "wp-0").trim_start_matches("refs/")),
         Some(transferred),
@@ -325,7 +385,7 @@ fn a_mixed_supersession_adopts_the_inherited_ref_and_keeps_the_re_run_capture() 
 // refusing in prose. The later member is the one that reconciles; the
 // folded checkpoint is the tree it collided with; the overlay names the
 // paths. Re-driving the same trees cannot resolve it, so the entry is
-// acked once the fact is admitted.
+// retained once the fact is persisted.
 #[test]
 fn a_conflicting_member_admits_fold_conflict_instead_of_refusing() {
     let (first, second) = (digest(0xAB), digest(0xAC));
@@ -344,7 +404,7 @@ fn a_conflicting_member_admits_fold_conflict_instead_of_refusing() {
     let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
 
     assert_eq!(admits.len(), 1, "a collision admits FoldConflict, not a resolve");
-    assert_eq!(ack_through, Some(sequence), "the collision is acked — it is not re-driven");
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
     let event: Event = from_bytes(&admits[0].event).unwrap();
     match event.fact {
         Fact::FoldConflict { bloom: collided, workpiece, checkpoint, evidence, .. } => {
@@ -401,7 +461,7 @@ fn a_collision_settles_the_fold_before_any_member_reconciles() {
 
     let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
 
-    assert_eq!(ack_through, Some(sequence), "the settled pass is acked, not re-driven");
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
     let conflicts: Vec<(WorkpieceId, Digest, Digest)> = admits
         .iter()
         .map(|admit| match from_bytes::<Event>(&admit.event).unwrap().fact {
@@ -448,17 +508,17 @@ fn a_re_collision_at_the_same_checkpoint_admits_under_the_new_candidates_key() {
     let source = shell(fake.clone());
     let mut store = SqliteStore::open(":memory:").unwrap();
 
-    enqueue_integration(&mut store, bloom, base, vec![first, second]);
+    let first_sequence = enqueue_integration(&mut store, bloom, base, vec![first, second]);
     let (first_lap, ack) = drain_and_integrate(&mut store, &source, None).unwrap();
-    store.ack_topic(Topic::Integrate, ack.unwrap()).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, first_sequence, ack);
+    assert_eq!(confirm_journaled(&mut store, &source, Topic::Integrate, &first_lap), first_sequence);
 
     seed_candidate_branch(&fake, &bloom, "wp-1", "tree-retried");
-    enqueue_integration(&mut store, bloom, base, vec![first, retried]);
+    let second_sequence = enqueue_integration(&mut store, bloom, base, vec![first, retried]);
     let (second_lap, ack) = drain_and_integrate(&mut store, &source, None).unwrap();
-    store.ack_topic(Topic::Integrate, ack.unwrap()).unwrap();
-
-    enqueue_integration(&mut store, bloom, base, vec![first, retried]);
-    let (replayed, _) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, second_sequence, ack);
+    let (replayed, ack) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, second_sequence, ack);
 
     assert!(
         matches!(from_bytes::<Event>(&first_lap[0].event).unwrap().fact, Fact::FoldConflict { .. }),
@@ -498,9 +558,10 @@ fn an_ancestry_corrected_re_collision_admits_under_the_new_checkout_key() {
     let source = shell(fake.clone());
     let mut store = SqliteStore::open(":memory:").unwrap();
 
-    enqueue_integration(&mut store, bloom, base, vec![first, second]);
+    let first_sequence = enqueue_integration(&mut store, bloom, base, vec![first, second]);
     let (first_lap, ack) = drain_and_integrate(&mut store, &source, None).unwrap();
-    store.ack_topic(Topic::Integrate, ack.unwrap()).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, first_sequence, ack);
+    assert_eq!(confirm_journaled(&mut store, &source, Topic::Integrate, &first_lap), first_sequence);
 
     let parent = fake.create_commit("parent", "tree-parent", &[]).unwrap();
     let repaired = fake.create_commit("wp-1", "tree-b", &[parent.sha]).unwrap();
@@ -508,12 +569,11 @@ fn an_ancestry_corrected_re_collision_admits_under_the_new_checkout_key() {
     assert_eq!(repaired.tree, "tree-b", "the tree identity is unchanged");
     fake.seed_ref(candidate_ref_name(&bloom, "wp-1").trim_start_matches("refs/"), &repaired.sha);
 
-    enqueue_integration(&mut store, bloom, base, vec![first, second]);
+    let second_sequence = enqueue_integration(&mut store, bloom, base, vec![first, second]);
     let (second_lap, ack) = drain_and_integrate(&mut store, &source, None).unwrap();
-    store.ack_topic(Topic::Integrate, ack.unwrap()).unwrap();
-
-    enqueue_integration(&mut store, bloom, base, vec![first, second]);
-    let (replayed, _) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, second_sequence, ack);
+    let (replayed, ack) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, second_sequence, ack);
 
     assert!(
         matches!(from_bytes::<Event>(&first_lap[0].event).unwrap().fact, Fact::FoldConflict { .. }),
@@ -587,9 +647,10 @@ fn a_reconciled_candidate_re_folds_to_a_resolve() {
     let source = shell(fake.clone());
     let mut store = SqliteStore::open(":memory:").unwrap();
 
-    enqueue_integration(&mut store, bloom, base, vec![first, second]);
+    let conflict_sequence = enqueue_integration(&mut store, bloom, base, vec![first, second]);
     let (conflicted, ack) = drain_and_integrate(&mut store, &source, None).unwrap();
-    store.ack_topic(Topic::Integrate, ack.unwrap()).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, conflict_sequence, ack);
+    assert_eq!(confirm_journaled(&mut store, &source, Topic::Integrate, &conflicted), conflict_sequence);
     assert!(
         matches!(from_bytes::<Event>(&conflicted[0].event).unwrap().fact, Fact::FoldConflict { .. }),
         "the first drain journals the collision",
@@ -600,7 +661,7 @@ fn a_reconciled_candidate_re_folds_to_a_resolve() {
     let sequence = enqueue_integration(&mut store, bloom, base, vec![first, reconciled]);
     let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
 
-    assert_eq!(ack_through, Some(sequence));
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
     assert_eq!(admits.len(), 1, "the reconciled candidate folds instead of colliding again");
     let (_, tree, head, lineage) = decoded_resolve(&admits[0]);
     assert_ne!(tree, first, "the fold combined both members");
@@ -625,19 +686,18 @@ fn a_second_integration_of_the_same_bloom_admits_under_its_own_key() {
     let mut store = SqliteStore::open(":memory:").unwrap();
     let bloom = BloomId(digest(1));
 
-    enqueue_integration(&mut store, bloom, base, vec![first]);
+    let first_sequence = enqueue_integration(&mut store, bloom, base, vec![first]);
     let (first_lap, ack) = drain_and_integrate(&mut store, &source, None).unwrap();
-    store.ack_topic(Topic::Integrate, ack.unwrap()).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, first_sequence, ack);
+    assert_eq!(confirm_journaled(&mut store, &source, Topic::Integrate, &first_lap), first_sequence);
 
     // The finding sent the member back around; the repaired attempt captured a
     // different candidate, so this lap folds a different tree.
-    enqueue_integration(&mut store, bloom, base, vec![second]);
+    let second_sequence = enqueue_integration(&mut store, bloom, base, vec![second]);
     let (second_lap, ack) = drain_and_integrate(&mut store, &source, None).unwrap();
-    store.ack_topic(Topic::Integrate, ack.unwrap()).unwrap();
-
-    // The same second-lap decision replayed — a crash before its ack landed.
-    enqueue_integration(&mut store, bloom, base, vec![second]);
-    let (replayed, _) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, second_sequence, ack);
+    let (replayed, ack) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, second_sequence, ack);
 
     assert_eq!(decoded_resolve(&second_lap[0]).1, second, "the second lap folded the repaired candidate");
     assert_ne!(
@@ -652,11 +712,9 @@ fn a_second_integration_of_the_same_bloom_admits_under_its_own_key() {
     );
 }
 
-// ADR-0152 — a drain interrupted between the final integrate and the resolve
-// admit recovers on re-drain: the branch already sits at the candidate, nothing
-// re-folds, and the head comes back from the branch position's recorded
-// `head ↔ commit` correspondence. Catches the wedge where a crash in that
-// window strands a fully-folded bloom un-resolvable.
+// ADR-0152 — two distinct replay shapes. An original undelivered row resends
+// the retained resolve without re-folding. A newly enqueued same payload after
+// journal+ack is Unrecorded and recovers the head from the branch position.
 #[test]
 fn a_re_drain_after_the_fold_recovers_the_head_without_re_integrating() {
     let candidate = digest(0xAB);
@@ -665,19 +723,277 @@ fn a_re_drain_after_the_fold_recovers_the_head_without_re_integrating() {
     let mut store = SqliteStore::open(":memory:").unwrap();
     let bloom = BloomId(digest(1));
 
-    enqueue_integration(&mut store, bloom, base, vec![candidate]);
+    let first_sequence = enqueue_integration(&mut store, bloom, base, vec![candidate]);
     let (first, first_ack) = drain_and_integrate(&mut store, &source, None).unwrap();
-    store.ack_topic(Topic::Integrate, first_ack.unwrap()).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, first_sequence, first_ack);
+    let (retained, retained_ack) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, first_sequence, retained_ack);
+    assert_eq!(retained[0].event, first[0].event, "the original undelivered row resends the retained resolve");
+    assert_eq!(confirm_journaled(&mut store, &source, Topic::Integrate, &first), first_sequence);
 
-    // The same decision re-enqueued (modeling a crash before the first ack /
-    // a replayed outbox): the branch is already at the candidate.
+    // A newly enqueued same payload: the branch is already at the candidate.
     let sequence = enqueue_integration(&mut store, bloom, base, vec![candidate]);
     let (second, second_ack) = drain_and_integrate(&mut store, &source, None).unwrap();
 
-    assert_eq!(second_ack, Some(sequence));
-    assert_eq!(second.len(), 1, "the re-drain still admits the resolve");
+    assert_unacked(&mut store, Topic::Integrate, sequence, second_ack);
+    assert_eq!(second.len(), 1, "the newly enqueued row still admits the resolve");
     let (_, first_tree, first_head, _) = decoded_resolve(&first[0]);
     let (_, second_tree, second_head, _) = decoded_resolve(&second[0]);
     assert_eq!(second_tree, first_tree);
     assert_eq!(second_head, first_head, "the recovered head is the one the fold produced, not a re-mint");
+}
+
+// Tripwire: a crash after the fold and before control journals the admit must
+// not re-effect. The receipt row is the retained Resolve; a later source
+// mutation that would refuse on re-fold still resends the original bytes.
+#[test]
+fn a_persisted_resolve_survives_source_mutation_without_re_effect() {
+    let candidate = digest(0xAB);
+    let (fake, base) = seeded(&candidate);
+    let source = shell(fake.clone());
+    let (_dir, path) = file_store_path();
+    let mut store = SqliteStore::open(&path).unwrap();
+    let bloom = BloomId(digest(1));
+    let sequence = enqueue_integration(&mut store, bloom, base, vec![candidate]);
+
+    let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
+    let (resolved_bloom, tree, head, _) = decoded_resolve(&admits[0]);
+    let retained = admits[0].event.clone();
+    let key = admitted_key(&admits[0]);
+    retarget_integration(&fake, &bloom);
+    let commits = fake.create_commit_count();
+    drop(store);
+
+    let mut store = SqliteStore::open(&path).unwrap();
+    let (again, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
+    assert_eq!(again[0].event, retained, "the retained resolve bytes do not change");
+    let (again_bloom, again_tree, again_head, _) = decoded_resolve(&again[0]);
+    assert_eq!(again_bloom, resolved_bloom);
+    assert_eq!(again_tree, tree);
+    assert_eq!(again_head, head);
+    assert_eq!(admitted_key(&again[0]), key);
+    assert_eq!(fake.create_commit_count(), commits, "replay must not re-fold");
+}
+
+// Tripwire: a spliced join is the same receipt shape as Resolve. Mutating the
+// scratch branch after persistence must not assemble a different tree.
+#[test]
+fn a_persisted_splice_survives_source_mutation_without_re_effect() {
+    let (first, second) = (digest(0xAB), digest(0xAC));
+    let (fake, base) = seeded(&first);
+    fake.seed_git_object(&second);
+    let bloom = BloomId(digest(1));
+    seed_candidate_branch(&fake, &bloom, "wp-a", "tree-a");
+    seed_candidate_branch(&fake, &bloom, "wp-c", "tree-c");
+    let source = shell(fake.clone());
+    let (_dir, path) = file_store_path();
+    let mut store = SqliteStore::open(&path).unwrap();
+    let payload = SplicePayload {
+        bloom: bloom.0,
+        workpiece: WorkpieceId("wp-b".into()),
+        base,
+        members: vec![
+            MemberCandidate { workpiece: WorkpieceId("wp-a".into()), candidate: first },
+            MemberCandidate { workpiece: WorkpieceId("wp-c".into()), candidate: second },
+        ],
+        adopt_from: None,
+    };
+    let sequence = store.enqueue_topic(Topic::Splice, &to_vec(&payload).unwrap(), None).unwrap();
+
+    let (admits, ack_through) = drain_and_splice(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Splice, sequence, ack_through);
+    let retained = admits[0].event.clone();
+    let key = admitted_key(&admits[0]);
+    let namespace = super::splice_namespace(&bloom, &WorkpieceId("wp-b".into()));
+    retarget_integration(&fake, &namespace);
+    let commits = fake.create_commit_count();
+    drop(store);
+
+    let mut store = SqliteStore::open(&path).unwrap();
+    let (again, ack_through) = drain_and_splice(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Splice, sequence, ack_through);
+    assert_eq!(again[0].event, retained);
+    assert_eq!(admitted_key(&again[0]), key);
+    assert!(matches!(decoded_event(&again[0]).fact, Fact::SpliceAssembled { .. }));
+    assert_eq!(fake.create_commit_count(), commits, "replay must not re-splice");
+}
+
+// Tripwire: a refusal is now a retained result, not an immediate ack. Seeding
+// the missing ref after persistence must not fold a resolve.
+#[test]
+fn a_persisted_refusal_survives_a_now_valid_source() {
+    let candidate = digest(0xAB);
+    let (fake, base) = seeded(&candidate);
+    let (predecessor, successor) = (BloomId(digest(1)), BloomId(digest(2)));
+    let source = shell(fake.clone());
+    let (_dir, path) = file_store_path();
+    let mut store = SqliteStore::open(&path).unwrap();
+    let sequence = enqueue_integration_adopting(&mut store, successor, base, vec![candidate], Some(predecessor.0));
+
+    let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
+    assert!(matches!(decoded_event(&admits[0]).fact, Fact::FoldRefused { .. }));
+    let retained = admits[0].event.clone();
+    seed_candidate_branch(&fake, &predecessor, "wp-0", "tree-a");
+    let commits = fake.create_commit_count();
+    drop(store);
+
+    let mut store = SqliteStore::open(&path).unwrap();
+    let (again, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
+    assert_eq!(again[0].event, retained);
+    assert!(matches!(decoded_event(&again[0]).fact, Fact::FoldRefused { .. }));
+    assert_eq!(fake.create_commit_count(), commits, "replay must not re-fold the now-valid set");
+}
+
+// Tripwire: a FoldConflict receipt must not re-merge after the collision is
+// cleared. Re-effect would admit Resolve and drop the reconcile.
+#[test]
+fn a_persisted_conflict_survives_a_cleared_merge() {
+    let (first, second) = (digest(0xAB), digest(0xAC));
+    let (fake, base) = seeded(&first);
+    fake.seed_git_object(&second);
+    let bloom = BloomId(digest(1));
+    seed_candidate_branch(&fake, &bloom, "wp-0", "tree-a");
+    seed_candidate_branch(&fake, &bloom, "wp-1", "tree-b");
+    let integration = format!("bloom/{}/integration", short_hex(&bloom.0));
+    let candidate = format!("bloom/{}/candidate/wp-1", short_hex(&bloom.0));
+    fake.seed_merge_conflict_paths(&integration, &candidate, vec!["crates/overlap.rs".into()]);
+    let source = shell(fake.clone());
+    let (_dir, path) = file_store_path();
+    let mut store = SqliteStore::open(&path).unwrap();
+    let sequence = enqueue_integration(&mut store, bloom, base, vec![first, second]);
+
+    let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
+    assert!(matches!(decoded_event(&admits[0]).fact, Fact::FoldConflict { .. }));
+    let retained = admits[0].event.clone();
+    let key = admitted_key(&admits[0]);
+    fake.clear_merge_conflict(&integration, &candidate);
+    let commits = fake.create_commit_count();
+    drop(store);
+
+    let mut store = SqliteStore::open(&path).unwrap();
+    let (again, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
+    assert_eq!(again[0].event, retained);
+    assert_eq!(admitted_key(&again[0]), key);
+    assert!(matches!(decoded_event(&again[0]).fact, Fact::FoldConflict { .. }));
+    assert_eq!(fake.create_commit_count(), commits, "replay must not re-merge a cleared collision");
+}
+
+// Tripwire: a pending earlier receipt blocks the prefix. A later valid row
+// must not fold while the earlier result is still waiting on the journal.
+#[test]
+fn an_earlier_pending_result_holds_later_rows() {
+    let (first_candidate, second_candidate) = (digest(0xAB), digest(0xAC));
+    let (fake, base) = seeded(&first_candidate);
+    fake.seed_git_object(&second_candidate);
+    let source = shell(fake.clone());
+    let (_dir, path) = file_store_path();
+    let mut store = SqliteStore::open(&path).unwrap();
+    let first = BloomId(digest(1));
+    let second = BloomId(digest(2));
+    let first_sequence = enqueue_integration(&mut store, first, base, vec![first_candidate]);
+    let second_sequence = enqueue_integration(&mut store, second, base, vec![second_candidate]);
+
+    let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_eq!(ack_through, None, "the earlier receipt is not acknowledgement");
+    assert_eq!(decoded_resolve(&admits[0]).0, first);
+    assert_eq!(
+        store.drain_topic(Topic::Integrate).unwrap().iter().map(|entry| entry.sequence).collect::<Vec<_>>(),
+        vec![first_sequence, second_sequence],
+    );
+    assert!(fake.ref_exists(&integration_ref(&first)));
+    assert!(
+        !fake.ref_exists(&integration_ref(&second)),
+        "the later row must not fold while the earlier receipt is pending",
+    );
+
+    retarget_integration(&fake, &first);
+    drop(store);
+    let mut store = SqliteStore::open(&path).unwrap();
+    let (again, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_eq!(ack_through, None);
+    assert_eq!(again[0].event, admits[0].event);
+    assert_eq!(
+        store.drain_topic(Topic::Integrate).unwrap().iter().map(|entry| entry.sequence).collect::<Vec<_>>(),
+        vec![first_sequence, second_sequence],
+    );
+    assert!(!fake.ref_exists(&integration_ref(&second)), "a reopened pending prefix still holds the later row");
+}
+
+// Tripwire: two FoldConflict keys are AND, not OR. Journaling the first key
+// still leaves the batch pending; the second key releases only that prefix.
+#[test]
+fn two_fold_conflict_results_require_both_journal_keys() {
+    let candidates: Vec<Digest> = (0xA0..0xA4).map(digest).collect();
+    let (fake, base) = seeded(&candidates[0]);
+    for candidate in &candidates[1..] {
+        fake.seed_git_object(candidate);
+    }
+    let bloom = BloomId(digest(1));
+    for index in 0..candidates.len() {
+        seed_candidate_branch(&fake, &bloom, &format!("wp-{index}"), &format!("tree-{index}"));
+    }
+    let integration = format!("bloom/{}/integration", short_hex(&bloom.0));
+    let candidate_ref = |workpiece: &str| format!("bloom/{}/candidate/{workpiece}", short_hex(&bloom.0));
+    for conflicted in ["wp-1", "wp-3"] {
+        fake.seed_merge_conflict_paths(&integration, &candidate_ref(conflicted), vec!["crates/overlap.rs".into()]);
+    }
+    let source = shell(fake.clone());
+    let (_dir, path) = file_store_path();
+    let mut store = SqliteStore::open(&path).unwrap();
+    let sequence = enqueue_integration(&mut store, bloom, base, candidates);
+
+    let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
+    assert_eq!(admits.len(), 2, "both conflicted members are one retained batch");
+    let first = decoded_event(&admits[0]);
+    let second = decoded_event(&admits[1]);
+    journal_event(&mut store, &first);
+    for conflicted in ["wp-1", "wp-3"] {
+        fake.clear_merge_conflict(&integration, &candidate_ref(conflicted));
+    }
+    drop(store);
+
+    let mut store = SqliteStore::open(&path).unwrap();
+    let (pending, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
+    assert_eq!(pending.len(), 2, "one journaled key is not the whole batch");
+    assert_eq!(pending[0].event, admits[0].event);
+    assert_eq!(pending[1].event, admits[1].event);
+
+    journal_event(&mut store, &second);
+    let (done, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert!(done.is_empty(), "both keys journaled means no re-admit");
+    assert_eq!(ack_through, Some(sequence), "the second key releases only this prefix");
+}
+
+// Tripwire: control journaled the admit, then the process died before ack.
+// Restart observes the keys and acknowledges without replaying the effect.
+#[test]
+fn a_journaled_result_acks_without_replaying_effect() {
+    let candidate = digest(0xAB);
+    let (fake, base) = seeded(&candidate);
+    let source = shell(fake.clone());
+    let (_dir, path) = file_store_path();
+    let mut store = SqliteStore::open(&path).unwrap();
+    let bloom = BloomId(digest(1));
+    let sequence = enqueue_integration(&mut store, bloom, base, vec![candidate]);
+
+    let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
+    journal_event(&mut store, &decoded_event(&admits[0]));
+    retarget_integration(&fake, &bloom);
+    let commits = fake.create_commit_count();
+    drop(store);
+
+    let mut store = SqliteStore::open(&path).unwrap();
+    let (again, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
+    assert!(again.is_empty(), "a journaled receipt does not re-admit");
+    assert_eq!(ack_through, Some(sequence), "the restart observes the key and acknowledges");
+    assert_eq!(fake.create_commit_count(), commits, "journal-before-ack must not re-fold");
 }

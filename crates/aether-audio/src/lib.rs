@@ -90,6 +90,12 @@ pub use runtime::{AudioConfig, AudioConfigLayer, AudioOverlay};
 #[actor(singleton, root)]
 pub struct AudioCapability;
 
+// The fail-fast companion's identity lives in `headless.rs` (always-on, like
+// the [`AudioCapability`] ZST above); its runtime half is the nested
+// `runtime::headless` module, covered by the `mod runtime;` gate.
+mod headless;
+pub use headless::HeadlessAudioCapability;
+
 // The `#[actor]` attribute path stays always-on (the macro divides what it
 // emits). Everything that names an `aether_substrate` or cpal/synth type — the
 // handler/init ctx, the runtime state, the worker, the fan-out helpers, `Drop`,

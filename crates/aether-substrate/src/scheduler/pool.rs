@@ -76,14 +76,14 @@ pub enum BudgetTemplate {
     /// `BATCH_MAX_USEC` wallclock.
     Standard,
     /// Custom (mostly for tests).
-    Custom { max_mails: u32, max_usec: u64 },
+    Custom { max_mails: u32, max_micros: u64 },
 }
 
 impl BudgetTemplate {
     fn build(&self) -> BatchBudget {
         match *self {
             Self::Standard => BatchBudget::standard(),
-            Self::Custom { max_mails, max_usec } => BatchBudget::custom(max_mails, Duration::from_micros(max_usec)),
+            Self::Custom { max_mails, max_micros } => BatchBudget::custom(max_mails, Duration::from_micros(max_micros)),
         }
     }
 }
@@ -471,7 +471,7 @@ mod tests {
         let handle = Pool::start(
             PoolConfig {
                 workers: 1,
-                budget_template: BudgetTemplate::Custom { max_mails: 4, max_usec: BATCH_MAX_USEC_TEST },
+                budget_template: BudgetTemplate::Custom { max_mails: 4, max_micros: BATCH_MAX_MICROS_TEST },
             },
             Arc::new(PanicAborter),
         );
@@ -852,5 +852,5 @@ mod tests {
     // Reuse the standard wallclock budget for fairness tests — 200µs
     // is enough for the test harness to dispatch a handful of
     // counters before yielding.
-    const BATCH_MAX_USEC_TEST: u64 = BATCH_MAX_USEC;
+    const BATCH_MAX_MICROS_TEST: u64 = BATCH_MAX_USEC;
 }
