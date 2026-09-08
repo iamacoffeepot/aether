@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::StageId;
 use crate::values::stage::dispatched_command;
-use crate::values::{AgentProfile, Harness, ReasoningEffort, StageCatalog, is_model_lane};
+use crate::values::{AgentProfile, Harness, PipelineManifest, ReasoningEffort, StageCatalog, is_model_lane};
 
 /// A per-workpiece override of *how* the model lanes run for this workpiece
 /// (ADR-0149 §The line, #3511). This is runtime configuration sealed into the
@@ -154,12 +154,40 @@ impl ModelOverride {
     /// [`OverrideError::StageRunsNoModel`] when a keyed stage is unbound or
     /// dispatches no model transformation.
     pub fn validate(&self, catalog: &StageCatalog) -> Result<(), OverrideError> {
+        self.refuse_a_stage_running_no_model(catalog, is_model_lane)
+    }
+
+    /// [`validate`](Self::validate), answering the model-lane question from the
+    /// vocabulary the base declared rather than the one this binary compiled
+    /// (ADR-0215).
+    ///
+    /// The seal door takes this one, because the split decides which dispatches
+    /// carry a credential and a resolved model and that is the repository's
+    /// statement about its own lanes. The compiled sibling stays for callers
+    /// holding no manifest — the `xtask` seat-profile check is the one that
+    /// does.
+    ///
+    /// # Errors
+    ///
+    /// [`OverrideError::StageRunsNoModel`] when a keyed stage is unbound, or
+    /// dispatches a command the manifest does not declare a model lane.
+    pub fn validate_against(&self, catalog: &StageCatalog, manifest: &PipelineManifest) -> Result<(), OverrideError> {
+        self.refuse_a_stage_running_no_model(catalog, |command| manifest.is_model_lane(command))
+    }
+
+    /// The one walk both doors run, over whichever answer to "is this a model
+    /// lane" its caller holds.
+    fn refuse_a_stage_running_no_model(
+        &self,
+        catalog: &StageCatalog,
+        is_model: impl Fn(&str) -> bool,
+    ) -> Result<(), OverrideError> {
         self.per_stage
             .keys()
             .find(|stage| {
                 !catalog
                     .binding(**stage)
-                    .is_some_and(|binding| dispatched_command(binding.stage).is_some_and(is_model_lane))
+                    .is_some_and(|binding| dispatched_command(binding.stage).is_some_and(&is_model))
             })
             .map_or(Ok(()), |stage| Err(OverrideError::StageRunsNoModel(*stage)))
     }
@@ -182,7 +210,7 @@ pub struct ResolvedModel {
 mod tests {
     use super::*;
     use crate::digest::Digest;
-    use crate::values::{ToolPolicy, Transformation};
+    use crate::values::{REVIEW_CRITIC_COMMAND, ToolPolicy, Transformation};
 
     fn profile(model: &str, effort: ReasoningEffort) -> AgentProfile {
         AgentProfile { harness: Harness::Claude, model: String::from(model), effort, tools: ToolPolicy::Full }
@@ -320,6 +348,41 @@ mod tests {
         }
 
         assert_eq!(ModelOverride::default().validate(&line), Ok(()), "overriding nothing is always sealable");
+    }
+
+    // Tripwire: the seal door judges an override against the vocabulary the
+    // *base* declared, not the one this binary compiled (ADR-0215). A
+    // `validate_against` that reached for the compiled disjunction anyway would
+    // pass every assertion above and every existing seal test, because this
+    // repository's two answers agree — and would silently pin a model onto a
+    // stage whose lane the checkout it is about to dispatch against implements
+    // as a compiler run: a credential and a resolved model handed to a lane that
+    // wants neither, and an operator believing a choice took effect.
+    #[test]
+    fn an_override_is_judged_against_the_vocabulary_the_base_declared() {
+        let line = StageCatalog::line();
+        let on_review = ModelOverride {
+            per_stage: BTreeMap::from([(
+                StageId::Review,
+                StageOverride { agent: Some(claude("claude-opus-5")), reasoning_effort: None },
+            )]),
+            ..ModelOverride::default()
+        };
+        assert_eq!(on_review.validate(&line), Ok(()), "the compiled vocabulary runs a model at Review");
+
+        let mut mechanical_critic = PipelineManifest::compiled();
+        mechanical_critic.lanes.model.retain(|command| command != REVIEW_CRITIC_COMMAND);
+        mechanical_critic.lanes.mechanical.push(String::from(REVIEW_CRITIC_COMMAND));
+
+        assert_eq!(
+            on_review.validate_against(&line, &mechanical_critic),
+            Err(OverrideError::StageRunsNoModel(StageId::Review)),
+        );
+        assert_eq!(
+            on_review.validate_against(&line, &PipelineManifest::compiled()),
+            Ok(()),
+            "a base declaring what this binary compiles admits what the compiled check admits",
+        );
     }
 
     fn command_the_stage_dispatches(stage: StageId) -> Option<String> {
