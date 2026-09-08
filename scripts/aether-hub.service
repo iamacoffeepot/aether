@@ -31,17 +31,18 @@ StartLimitBurst=5
 Type=simple
 EnvironmentFile=%h/.config/aether/hub.env
 
-# Reap what the previous run left under the engines cap's store root. Every
-# spawn materializes the resolved substrate binary to
-# ${AETHER_FLEET_STORE_ROOT}/<engine-id>/substrate — a full copy of a chassis
-# binary per engine — and nothing removes that directory when the engine dies,
-# so anything surviving here belongs to a run that died with the hub. This is
-# safe at exactly this moment because no engine is running: the substrates are
-# this unit's children and went down with it. Give each hub on a host its own
-# AETHER_FLEET_STORE_ROOT, or this reap deletes a live engine's executable out
-# from under its neighbour. It never touches AETHER_BINARY_STORE_DIR, which is
-# the content-addressed store of uploaded binaries and components and is meant
-# to outlive a restart.
+# Backstop reap of the engines cap's store root. Every spawn materializes the
+# resolved substrate binary to ${AETHER_FLEET_STORE_ROOT}/<engine-id>/substrate
+# — a full copy of a chassis binary per engine. The hub reclaims each of those
+# as its engine leaves supervision and sweeps whatever an earlier process left
+# when it starts (issue 5502), so this line now covers only what neither could:
+# a root the hub can no longer read, or a leftover that is not one of its own
+# uuid-named engine dirs. This is safe at exactly this moment because no engine
+# is running: the substrates are this unit's children and went down with it.
+# Give each hub on a host its own AETHER_FLEET_STORE_ROOT, or this reap deletes
+# a live engine's executable out from under its neighbour. It never touches
+# AETHER_BINARY_STORE_DIR, which is the content-addressed store of uploaded
+# binaries and components and is meant to outlive a restart.
 ExecStartPre=/bin/sh -euc 'mkdir -p "${AETHER_FLEET_STORE_ROOT:?}"; rm -rf -- "${AETHER_FLEET_STORE_ROOT:?}"/*'
 
 # The wrapper below exists because ExecStart= takes a literal path for the

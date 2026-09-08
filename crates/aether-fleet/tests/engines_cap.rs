@@ -723,6 +723,80 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The per-engine scratch dirs currently under an engine store root —
+    /// the uuid-named dirs `prepare_fork` materializes a binary into.
+    fn engine_dirs_under(root: &Path) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(root) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| Uuid::parse_str(name).is_ok())
+            .collect()
+    }
+
+    /// Every spawn copies the resolved chassis binary to
+    /// `<engine store root>/<engine id>/<app name>` before it forks, and
+    /// nothing in production ever removed one — on a long-lived hub that is
+    /// a disk leak proportional to spawn count, under bare uuids with no
+    /// shared prefix to sweep by hand. This drives the whole real path: the
+    /// store resolves, `prepare_fork` materializes, process creation fails
+    /// on the absent interpreter, and the terminal `SpawnFailed` has to
+    /// reclaim what was already written (issue 5502).
+    #[test]
+    fn a_failed_spawn_reclaims_the_binary_it_materialized() {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = env::temp_dir().join(format!("aether-engcap-reap-{}-{nanos}", process::id()));
+        let store_dir = dir.join("store");
+        let root = dir.join("engines");
+        let bytes = format!("#!{}\n", dir.join("missing").display());
+        let hash = write_inert_binary_store(&store_dir, bytes.as_bytes());
+        let (_registry, chassis, mailer, cells) = boot(inert_store_config(&store_dir, &root));
+
+        let spawn = drive(&mailer, &inert_spawn(&hash), Duration::from_secs(10), || {
+            cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take()
+        });
+        assert!(
+            matches!(spawn, SpawnEngineResult::Err { engine_id: Some(_), .. }),
+            "the fork must fail after the materialize for this to prove anything: {spawn:?}",
+        );
+        assert!(
+            engine_dirs_under(&root).is_empty(),
+            "a failed spawn leaves no materialized binary behind: {:?}",
+            engine_dirs_under(&root),
+        );
+
+        drop(chassis);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Reaping at each death cannot cover a hub killed outright, or a host
+    /// that refuses to unlink a running image, so a fresh hub sweeps what
+    /// an earlier one left under its store root. It must reclaim only its
+    /// own engine dirs: the root is operator-settable and can share a
+    /// directory with anything, including the sibling artifact store.
+    #[test]
+    fn boot_sweeps_engine_dirs_an_earlier_hub_left_behind() {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = env::temp_dir().join(format!("aether-engcap-sweep-{}-{nanos}", process::id()));
+        let root = dir.join("engines");
+        let leftover = root.join(Uuid::from_u128(0xDEAD).simple().to_string());
+        let bystander = root.join("not-an-engine-dir");
+        fs::create_dir_all(&leftover).expect("test setup: a leftover engine dir");
+        fs::create_dir_all(&bystander).expect("test setup: a bystander dir sharing the root");
+        fs::write(leftover.join("substrate"), b"materialized-by-a-hub-that-is-gone")
+            .expect("test setup: the leftover materialized binary");
+
+        let (_registry, chassis, _mailer, _cells) = boot(inert_store_config(&dir.join("store"), &root));
+
+        assert!(!leftover.exists(), "a fresh hub reclaims the engine dirs an earlier one left");
+        assert!(bystander.exists(), "the sweep touches only the dirs the cap itself creates");
+
+        drop(chassis);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// Tripwire: `prepare_fork`'s `Command::spawn` `map_err` used to format
     /// `exec_path` into `SpawnFailed.detail`. Bare non-executable text hits
     /// the platform ENOEXEC shell fallback and becomes a later child-exit;
