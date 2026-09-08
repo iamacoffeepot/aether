@@ -135,6 +135,28 @@ pub const LEDGER_CAVEAT: &str = concat!(
     "artifact resolved.",
 );
 
+/// The cost boundary every rendered ledger carries beside [`LEDGER_CAVEAT`]
+/// (ADR-0184 §Consequences).
+///
+/// A second caveat rather than more sentences inside the first, because it is
+/// about a different half of the table: [`LEDGER_CAVEAT`] bounds what the
+/// failure columns saw, this bounds what the cost columns are worth. A harness
+/// that under-reports its token columns produces a cheap-looking cell, and no
+/// column here can tell that apart from a cheap one — the sealed price table
+/// bounds it (an unpriced record is counted as
+/// [`unpriced`](CapabilityCell::unpriced), never as free) but cannot correct it.
+///
+/// Rendered, never folded: nothing in [`CalibrationLedger::report`] adjusts a
+/// count for it, because a measurement that silently compensated for a harness's
+/// self-reporting would be an estimate wearing a measurement's name.
+pub const COST_CAVEAT: &str = concat!(
+    "Cost is as honest as the harness that reported the tokens: one that under-reports its token columns ",
+    "produces a cheap-looking cell, and no column here can tell that from a cheap one. The sealed price ",
+    "table bounds this — an unpriced record is counted as unpriced, never as free — so read a cell's cost ",
+    "beside its samples and unpriced counts rather than on its own. This caveat is rendered, never folded: ",
+    "no count below is adjusted for it.",
+);
+
 /// The verifier-identity vocabulary's width — the per-cell failure counters are
 /// one slot per identity, so a new identity widens them with the vocabulary.
 const IDENTITIES: usize = VerifyFailure::ALL.len();
@@ -226,6 +248,11 @@ pub struct CapabilityLedger {
     pub cells: Vec<CapabilityCell>,
     /// [`LEDGER_CAVEAT`], carried on the document so a rendering cannot drop it.
     pub caveat: String,
+    /// [`COST_CAVEAT`], carried beside [`caveat`](Self::caveat) for the reason
+    /// that one is: the under-reporting boundary belongs in the rendered output
+    /// and never inside the measurement, so it rides the document rather than
+    /// adjusting a column.
+    pub cost_caveat: String,
     /// Which journal these cells were folded from (ADR-0184). Carried for the
     /// same reason as the caveat: a benchmark cell rendered without it reads as
     /// a measurement of work the estate actually did.
@@ -234,7 +261,12 @@ pub struct CapabilityLedger {
 
 impl Default for CapabilityLedger {
     fn default() -> Self {
-        Self { cells: Vec::new(), caveat: String::from(LEDGER_CAVEAT), store: StoreClass::Live }
+        Self {
+            cells: Vec::new(),
+            caveat: String::from(LEDGER_CAVEAT),
+            cost_caveat: String::from(COST_CAVEAT),
+            store: StoreClass::Live,
+        }
     }
 }
 
@@ -386,6 +418,7 @@ impl CalibrationLedger {
         CapabilityLedger {
             cells: cells.into_values().map(Accumulator::into_cell).collect(),
             caveat: String::from(LEDGER_CAVEAT),
+            cost_caveat: String::from(COST_CAVEAT),
             store,
         }
     }
