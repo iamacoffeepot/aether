@@ -639,7 +639,7 @@ impl VerifyFailureSet {
     /// Insert `identity` in position order, or keep the existing occupant of
     /// that bit.
     const fn push_declared(mut self, identity: DeclaredIdentity) -> Self {
-        if usize::from(self.declared_len) >= DECLARED_SLOTS {
+        if self.declared_len >= DECLARED_SLOTS as u8 {
             return self;
         }
         let mut index = 0;
