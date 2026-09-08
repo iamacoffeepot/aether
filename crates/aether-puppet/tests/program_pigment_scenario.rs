@@ -184,7 +184,7 @@ fn register(harness: &mut SubstrateHarness, mail: &ProgramRegister) -> u32 {
         .expect("register sequence");
     match registered.reply::<ProgramRegisterResult>("register").expect("decode ProgramRegisterResult") {
         ProgramRegisterResult::Ok { program_id } => program_id,
-        ProgramRegisterResult::Err { reason } => panic!("register failed: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("register failed: {error}"),
     }
 }
 

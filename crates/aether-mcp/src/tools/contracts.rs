@@ -8,7 +8,6 @@ use serde_json::Value;
 
 use crate::args::CompareComponentContractsArgs;
 
-use super::ids::parse_engine_id;
 use super::render::{internal, json};
 use super::{Mcp, SchemaType};
 
@@ -75,17 +74,25 @@ pub(super) async fn compare_component_contracts(
     mcp: &Mcp,
     args: CompareComponentContractsArgs,
 ) -> Result<String, McpError> {
-    let baseline_engine = parse_engine_id(&args.baseline.engine_id)?;
-    let candidate_engine = parse_engine_id(&args.candidate.engine_id)?;
-    let baseline = snapshot_subject(mcp, baseline_engine, &args.baseline.component).await.map_err(internal)?;
-    let candidate = snapshot_subject(mcp, candidate_engine, &args.candidate.component).await.map_err(internal)?;
+    let (baseline_engine, baseline_engine_id) = mcp.resolve_engine(args.baseline.engine_id.as_deref()).await?;
+    let (candidate_engine, candidate_engine_id) = mcp.resolve_engine(args.candidate.engine_id.as_deref()).await?;
+    let baseline =
+        snapshot_subject(mcp, baseline_engine, baseline_engine_id, &args.baseline.address).await.map_err(internal)?;
+    let candidate = snapshot_subject(mcp, candidate_engine, candidate_engine_id, &args.candidate.address)
+        .await
+        .map_err(internal)?;
     json(&diff_contracts(baseline, candidate))
 }
 
-async fn snapshot_subject(mcp: &Mcp, engine: EngineId, component: &str) -> anyhow::Result<ContractSnapshot> {
-    let observed = mcp.strict_component_snapshot(engine, component).await?;
+async fn snapshot_subject(
+    mcp: &Mcp,
+    engine: EngineId,
+    engine_id: String,
+    address: &str,
+) -> anyhow::Result<ContractSnapshot> {
+    let observed = mcp.strict_component_snapshot(engine, address).await?;
     let identity = ContractIdentity {
-        engine_id: engine.0.to_string(),
+        engine_id,
         canonical_lineage: observed.canonical_lineage,
         mailbox_id: tagged_id::encode(observed.mailbox_id.0).unwrap_or_else(|| format!("{:#x}", observed.mailbox_id.0)),
     };
@@ -97,7 +104,7 @@ async fn snapshot_subject(mcp: &Mcp, engine: EngineId, component: &str) -> anyho
             reply: reply_snapshot(&observed.kinds, handler.reply)?,
         };
         if handlers.insert(handler.name.clone(), contract).is_some() {
-            anyhow::bail!("component {component:?} advertises duplicate handler {}", handler.name);
+            anyhow::bail!("component {address:?} advertises duplicate handler {}", handler.name);
         }
     }
     let config = observed

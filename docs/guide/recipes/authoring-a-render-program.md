@@ -410,7 +410,7 @@ fn on_registered(&mut self, _ctx: &mut WasmCtx<'_>, result: ProgramRegisterResul
         ProgramRegisterResult::Ok { program_id } => self.program_id = Some(program_id),
         // Err is also the headless chassis's fail-fast reply — disable
         // the feature for the session rather than re-registering.
-        ProgramRegisterResult::Err { reason } => tracing::warn!(%reason, "program register refused"),
+        ProgramRegisterResult::Err { error } => tracing::warn!(%error, "program register refused"),
     }
 }
 ```

@@ -144,7 +144,7 @@ fn register_reply(
 
 fn register_err(harness: &mut SubstrateHarness, label: &'static str, mail: &ProgramRegister) -> String {
     match register_reply(harness, label, mail) {
-        ProgramRegisterResult::Err { reason } => reason,
+        ProgramRegisterResult::Err { error } => error,
         ProgramRegisterResult::Ok { program_id } => panic!("register ({label}) must reject; got program {program_id}"),
     }
 }
@@ -233,7 +233,7 @@ fn register_validation_classes_reply_distinguishable_errors() {
         ProgramRegisterResult::Ok { program_id } => {
             assert_eq!(program_id, 0, "rejected registers must not consume ids");
         }
-        ProgramRegisterResult::Err { reason } => panic!("the valid ping-pong program must register: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("the valid ping-pong program must register: {error}"),
     }
 }
 
@@ -286,7 +286,7 @@ fn ping_pong_program_writes_expected_pixels_into_output() {
     );
     let program_id = match register_reply(&mut harness, "register", &ping_pong_register()) {
         ProgramRegisterResult::Ok { program_id } => program_id,
-        ProgramRegisterResult::Err { reason } => panic!("register failed: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("register failed: {error}"),
     };
 
     // Blob bytes 0..4: threshold 0.5 (pass 0's window). Bytes 4..8:
@@ -361,7 +361,7 @@ fn mismatched_binding_dispatch_drops_and_frame_survives() {
     );
     let program_id = match register_reply(&mut harness, "register", &ping_pong_register()) {
         ProgramRegisterResult::Ok { program_id } => program_id,
-        ProgramRegisterResult::Err { reason } => panic!("register failed: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("register failed: {error}"),
     };
 
     let uniforms: Vec<u8> = [0.5f32, 1.0].iter().flat_map(|value| value.to_le_bytes()).collect();
@@ -444,7 +444,7 @@ fn cached_pass_setup_follows_an_updated_texture_and_a_rebind() {
     let output_id = create_2x2(&mut harness, "create_output", Vec::new());
     let program_id = match register_reply(&mut harness, "register", &ping_pong_register()) {
         ProgramRegisterResult::Ok { program_id } => program_id,
-        ProgramRegisterResult::Err { reason } => panic!("register failed: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("register failed: {error}"),
     };
 
     let uniforms: Vec<u8> = [0.5f32, 1.0].iter().flat_map(|value| value.to_le_bytes()).collect();
