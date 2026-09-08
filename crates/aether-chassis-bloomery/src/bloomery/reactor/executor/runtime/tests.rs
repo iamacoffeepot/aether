@@ -3825,7 +3825,7 @@ mod offloaded_adapter_calls {
     };
     use crate::bloomery::outbox::TopicOutbox;
     use crate::bloomery::{ExecutorPort, ExecutorPortError, ExecutorShell, Settled};
-    use crate::store::{OrderLifecycle, OutstandingOrder, SqliteStore};
+    use crate::store::{OrderLifecycle, OutstandingOrder, SqliteStore, StoreBackend};
 
     /// A backend whose lane-write sweep parks until the test opens the gate.
     ///
@@ -4126,7 +4126,7 @@ mod offloaded_adapter_calls {
             )
             .unwrap();
 
-        let parked_sequence = enqueue_construct_dispatch(&mut store, bloom, "wp-parked", 6);
+        let (parked_sequence, _) = enqueue_construct_dispatch(&mut store, bloom, "wp-parked", 6);
         let parked_nonce = format!("dispatch-{parked_sequence}");
 
         let backend = Arc::new(LatchedSubmit::default());
@@ -4213,7 +4213,7 @@ mod offloaded_adapter_calls {
         let parked_nonce;
         {
             let mut store = SqliteStore::open(&path).unwrap();
-            parked_sequence = enqueue_construct_dispatch(&mut store, bloom, "wp-restart", 7);
+            parked_sequence = enqueue_construct_dispatch(&mut store, bloom, "wp-restart", 7).0;
             parked_nonce = format!("dispatch-{parked_sequence}");
 
             let backend = Arc::new(LatchedSubmit::default());

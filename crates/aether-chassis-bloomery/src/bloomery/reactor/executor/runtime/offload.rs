@@ -104,11 +104,16 @@ pub enum AdapterCall {
 /// keying on the payload would start a second run for it.
 #[derive(Clone, Debug)]
 enum AdapterWork {
-    Submit(WorkOrder),
+    /// Boxed: `WorkOrder` is the transformation plus nonce, far larger than
+    /// the other variants, and identity is the nonce on [`AdapterCall`].
+    Submit(Box<WorkOrder>),
     Observe(WorkHandle),
     Cancel(WorkHandle),
     ObserveWrites,
-    Publish { commit_hex: String, target_ref: String },
+    Publish {
+        commit_hex: String,
+        target_ref: String,
+    },
 }
 
 impl AdapterWork {
@@ -379,7 +384,7 @@ impl ExecutorPort for OffloadedPort<'_> {
     }
 
     fn submit(&self, order: &WorkOrder) -> Settled<Result<WorkHandle, ExecutorPortError>> {
-        match self.offload.take_or_want(AdapterWork::Submit(order.clone())) {
+        match self.offload.take_or_want(AdapterWork::Submit(Box::new(order.clone()))) {
             Some(AdapterAnswer::Submit(answer)) => Settled::Answered(answer),
             _ => Settled::InFlight,
         }
