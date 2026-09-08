@@ -1081,6 +1081,7 @@ fn a_timeout_is_an_executor_fault_on_every_dispatched_stage() {
         StageId::AggregateVerify,
         StageId::AggregateReview,
         StageId::Scope,
+        StageId::Study,
     ] {
         assert_eq!(
             timeout_verdict(stage),

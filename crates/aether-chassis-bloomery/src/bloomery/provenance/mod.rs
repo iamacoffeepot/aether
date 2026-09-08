@@ -289,6 +289,13 @@ pub fn refusal_fault(record: &DispatchRecord, refusal: &ProvenanceRefusal) -> Ev
         IdempotencyKey(format!("aether.bloomery.provenance_refusal:{}:{}", record.bloom.0.to_hex(), record.nonce.0));
     let fact = if record.stage == StageId::AggregateReview {
         Fact::AggregateReviewExecutorFault { bloom: record.bloom, evidence }
+    } else if record.stage == StageId::Study {
+        // The bloom-level reader (ADR-0216) has no member axis and no bloom
+        // left to stop: it is dispatched at the landing, so a refusal here is
+        // the study going missing and nothing else. Routed as the reader's own
+        // fact rather than the member one, whose empty workpiece would name no
+        // member of a bloom that has already released them all.
+        Fact::StudyCompleted { bloom: record.bloom, passed: false, evidence }
     } else {
         Fact::MemberExecutorFault {
             bloom: record.bloom,

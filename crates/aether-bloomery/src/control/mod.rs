@@ -282,6 +282,17 @@ topic_vocabulary! {
     /// Appended so the prior topics' display spellings and ordering are
     /// unchanged.
     RefusedDispatch,
+    /// The bloom-level reader's dispatch (reducer-minted, from
+    /// [`Decision::DispatchStudy`]), drained by the executor reactor, which
+    /// runs the `retrospect.read` lane over what the bloom landed under a
+    /// bloom-level order record (ADR-0216).
+    ///
+    /// Its own topic rather than a second payload shape on the two aggregate
+    /// ones, for the reason [`ScopeDispatch`](Self::ScopeDispatch) states: each
+    /// drain decodes fail-stop, so a foreign payload on a shared topic parks
+    /// every sibling behind it. Appended so the prior topics' display spellings
+    /// and ordering are unchanged.
+    Study,
 }
 
 impl Topic {
@@ -312,6 +323,7 @@ impl Topic {
             Self::BaseVerify => "topic:base_verify",
             Self::Proposal => "topic:proposal",
             Self::RefusedDispatch => "topic:refused_dispatch",
+            Self::Study => "topic:study",
         }
     }
 
@@ -337,6 +349,7 @@ impl Topic {
             Decision::DispatchOrphanClaimRelease { .. } => Some(Self::OrphanClaimRelease),
             Decision::DispatchBaseVerify { .. } => Some(Self::BaseVerify),
             Decision::DispatchProposal { .. } => Some(Self::Proposal),
+            Decision::DispatchStudy { .. } => Some(Self::Study),
             Decision::CancelDispatch { .. } => Some(Self::CancelDispatch),
             Decision::ReleaseMemberClaimRef { .. } => Some(Self::MemberClaimRelease),
             Decision::ClaimMembership { .. }
@@ -679,6 +692,32 @@ pub struct AggregateVerifyPayload {
     /// The [`AgentProfile`] the bloom's sealed stage catalog calibrates
     /// `AggregateVerify` at (ADR-0174).
     pub profile: AgentProfile,
+}
+
+/// The payload a [`Topic::Study`] outbox row carries — the bloom-level
+/// `retrospect.read` lane over what a bloom landed (ADR-0216).
+///
+/// Shaped like [`AggregateReviewPayload`] minus its pass discriminator: the
+/// reader runs once per bloom with a retry budget of one, so there is no second
+/// pass to name and no roll to project. Defined here (always compiled) so the
+/// host reactor can decode it inward, cycle-free — like [`OutboxPayload`] /
+/// [`DispatchPayload`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct StudyPayload {
+    /// The landed bloom being read.
+    pub bloom: Digest,
+    /// The reader-lane transformation to submit — its `inputs[0]` the landing
+    /// receipt's digest the returned evidence binds, its `checkout` the landed
+    /// head, and its `diff_base` the bloom's sealed base.
+    pub transformation: Transformation,
+    /// The [`AgentProfile`] the bloom's sealed stage catalog calibrates `Study`
+    /// at (ADR-0174).
+    pub profile: AgentProfile,
+    /// The bloom-wide configuration this read runs under (ADR-0174). The
+    /// reactor resolves the sealed [`crate::ModelOverride`] from it at dispatch,
+    /// and the ADR-0214 provenance gate resolves the instruction pin from it —
+    /// the reader is a model lane, so both apply.
+    pub configs: ConfigRegistry,
 }
 
 /// The payload a [`Topic::BaseVerify`] outbox row carries — the whole-workspace

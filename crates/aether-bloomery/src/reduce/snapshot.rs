@@ -1633,6 +1633,7 @@ impl Snapshot {
             | Decision::DispatchSplice { .. }
             | Decision::DispatchAggregateVerify { .. }
             | Decision::DispatchAggregateReview { .. }
+            | Decision::DispatchStudy { .. }
             | Decision::DispatchLand { .. } => self.apply_dispatch_effect(effect),
             // Wholly snapshot-inert, like EmitReceipt's outbox row: a re-dispatch
             // replays a held work order host-side under a fresh nonce rather than
@@ -2034,6 +2035,7 @@ impl Snapshot {
                 (bloom, DispatchKey::Bloom { stage: StageId::AggregateReview })
             }
             Decision::DispatchLand { bloom, .. } => (bloom, DispatchKey::Bloom { stage: StageId::Land }),
+            Decision::DispatchStudy { bloom, .. } => (bloom, DispatchKey::Bloom { stage: StageId::Study }),
             _ => return,
         };
 

@@ -480,8 +480,14 @@ fn admits_member_executor_fault(stage: StageId) -> bool {
 /// It becomes a red receipt, which raises the day-level `base_alert` an
 /// operator can act on; refusing it instead leaves every sealed member withheld
 /// with nothing on the view to say why.
+///
+/// The bloom-level reader is the fourth (ADR-0216). A read whose executor never
+/// reached a verdict is exactly the "study missing" case the ADR names, and it
+/// has to be admitted rather than refused: a refusal leaves the order live, and
+/// nothing will ever answer it — the bloom has landed and no retry is bought.
 fn admits_executor_fault(stage: StageId) -> bool {
-    matches!(stage, StageId::AggregateReview | StageId::BaseVerify) || admits_member_executor_fault(stage)
+    matches!(stage, StageId::AggregateReview | StageId::BaseVerify | StageId::Study)
+        || admits_member_executor_fault(stage)
 }
 
 /// The finding a weave repair was dispatched to repair: the composition's own
@@ -855,6 +861,18 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
         }
     } else if record.stage == StageId::BaseVerify {
         base_verify_event(&record, upload, evidence)
+    } else if record.stage == StageId::Study {
+        // The bloom-level reader (ADR-0216): a bloom-level order, no member
+        // axis, and no implication — a retrospective names no owner the
+        // reducer could route to, because the bloom it read has landed. One
+        // fact for a verdict and for an executor fault alike: neither retries,
+        // neither wedges, and the reducer files both the same way. The
+        // difference a reader downstream cares about rides `passed` and the
+        // evidence kind.
+        Event {
+            idempotency_key: AdmissionKey::StudyCompleted.of(&record.nonce.0),
+            fact: Fact::StudyCompleted { bloom: record.bloom, passed: verdict_passed(upload.verdict), evidence },
+        }
     } else {
         // An out-of-line stage never comes from a well-formed dispatch; refuse it
         // rather than folding a non-line result into the member's resolution. The

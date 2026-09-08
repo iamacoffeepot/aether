@@ -3,6 +3,10 @@ journal's decisions or event column is expected to move those bytes, and
 `cargo xtask fixtures regen` rewrites them in place. Tests only compare;
 `cargo xtask fixtures check` reports staleness without writing.
 
+The `pre-*.bin` files are the opposite: rows a previous binary actually
+wrote, kept so each registered upcast is exercised against real bytes.
+They have no regen command and are never rewritten.
+
 `schema-digests.txt` pins a *history*: one kind-and-digest line per
 persisted shape, oldest first. A shape change appends a line and
 registers an upcast. Regenerating this file only appends a newly current

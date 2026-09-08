@@ -130,6 +130,13 @@ fn dispatch_aggregate_review(bloom: BloomId) -> Decision {
     }
 }
 
+/// The bloom-level reader a landing decides (ADR-0216). Shaped like the
+/// aggregate review's row minus its pass counter: the reader runs once, so
+/// there is no roll for the fixture to freeze.
+fn dispatch_study(bloom: BloomId) -> Decision {
+    Decision::DispatchStudy { bloom, transformation: transformation(), profile: profile(), configs: configs() }
+}
+
 fn dispatch_aggregate_verify(bloom: BloomId) -> Decision {
     Decision::DispatchAggregateVerify { bloom, transformation: transformation(), roll: 3, profile: profile() }
 }
@@ -476,6 +483,7 @@ pub fn representative() -> Decisions {
         .chain(refusal_records(bloom, workpiece))
         .chain(base_verify_records())
         .chain(proposal_records())
+        .chain([dispatch_study(bloom)])
         .collect(),
     }
 }

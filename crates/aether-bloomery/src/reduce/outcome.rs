@@ -10,8 +10,8 @@ use super::{
     AggregateVerifyError, AttemptCompletedError, BaseReverifyError, Decision, FoldConflictError, GrantAttemptsError,
     HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
     NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ProposalError,
-    ResolveError, SealError, SpliceError, SupersedeError, SuppressionDispositionError, SurfaceRequestedError,
-    VerifyFailedError, WithdrawError,
+    ResolveError, SealError, SpliceError, StudyError, SupersedeError, SuppressionDispositionError,
+    SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -815,6 +815,20 @@ pub enum Outcome {
     /// An operator proposal was refused. Appended so every prior outcome keeps
     /// its wire discriminant.
     ProposalRejected(ProposalError),
+    /// The bloom-level reader's result was filed on the landed bloom's evidence
+    /// log (ADR-0216). Appended so every prior outcome keeps its wire
+    /// discriminant.
+    StudyRecorded {
+        /// The landed bloom that was read.
+        bloom: BloomId,
+        /// Whether the read reached a verdict. A `false` here is the "study
+        /// missing" case: the record says the read ran and produced nothing to
+        /// stand behind, and the bloom stays landed either way.
+        passed: bool,
+    },
+    /// A study result was refused. Appended so every prior outcome keeps its
+    /// wire discriminant.
+    StudyRejected(StudyError),
 }
 
 impl Outcome {

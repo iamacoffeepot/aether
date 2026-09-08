@@ -833,6 +833,31 @@ pub enum Fact {
         /// bound to the proposal's own digest.
         authorization: Evidence,
     },
+    /// The bloom-level reader finished (ADR-0216): the `retrospect.read` lane
+    /// dispatched at the landing returned a verdict, or the host accounted for
+    /// one it could not get.
+    ///
+    /// One fact for both, because the reducer does the same thing with either.
+    /// A read that judged its subject and a read whose executor never reached
+    /// one differ in `passed` and in the evidence's
+    /// [`EvidenceKind`](crate::EvidenceKind) — `ExecutorFault` for the second —
+    /// and neither re-opens the landed bloom, re-dispatches the lane, or wedges
+    /// anything. The two aggregate gates split their fault into its own fact
+    /// because a fault there buys a retry inside a sealed budget; this binding
+    /// has one attempt and no budget to spend, so there is no second decision
+    /// for a second fact to carry.
+    ///
+    /// Appended past [`Fact::ProposeChange`] so every prior fact keeps its wire
+    /// discriminant.
+    StudyCompleted {
+        /// The landed bloom that was read.
+        bloom: BloomId,
+        /// Whether the read reached a verdict it stands behind.
+        passed: bool,
+        /// The evidence the read produced, bound to the receipt digest the
+        /// order displayed.
+        evidence: Evidence,
+    },
 }
 
 impl Fact {

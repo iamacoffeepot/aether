@@ -838,3 +838,19 @@ pub enum ProposalError {
     /// one.
     SubjectMismatch,
 }
+
+/// Why a bloom-level study result was refused (ADR-0216).
+///
+/// Both refusals are addressing errors: the result names a bloom this journal
+/// cannot file it against. Neither is a judgement about the read, and neither
+/// moves a bloom — a refused study is the study staying missing.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum StudyError {
+    /// No bloom is recorded under that id.
+    UnknownBloom,
+    /// The bloom exists and has not landed, so nothing produced the receipt
+    /// this read claims to be about. The reader is dispatched at the landing
+    /// and only there, so a result arriving against an unlanded bloom names a
+    /// dispatch this reducer never decided.
+    NotLanded,
+}
