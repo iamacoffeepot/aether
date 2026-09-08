@@ -69,6 +69,7 @@ use crate::composite::Composite;
 use crate::focus::{
     AvailabilityEffects, Focus, FocusDirection, FocusEligibility, FocusRect, FocusTransition, HoverTransition,
 };
+use crate::layout::{Cell, Column, Row};
 use crate::set::{
     ButtonWidget, DropdownWidget, ImageWidget, LabelWidget, MenuBarWidget, NumericWidget, RadioGroupWidget,
     SegmentedWidget, SliderWidget, TabStripWidget, TextAreaWidget, TextFieldWidget, ToggleWidget, VirtualListWidget,
@@ -212,13 +213,7 @@ impl WidgetPanel {
         }
         self.spawned = true;
 
-        let x = self.config.x;
-        let width = self.config.width;
         let row = self.theme.row_height;
-        let gap = self.theme.gap;
-        let mut y = self.config.y;
-
-        let row_rect = |y: f32, width: f32, height: f32| WidgetFrame { x, y, width, height };
 
         let specs = if self.config.children.is_empty() {
             reference_stack(&self.theme)
@@ -226,33 +221,27 @@ impl WidgetPanel {
             self.config.children.clone()
         };
 
-        let mut first = true;
-        for spec in &specs {
-            // Decode the concrete config, spawn the kind's actor, and derive
-            // the row height + focusability from that config — plus the
-            // spawned type's `NAMESPACE` for the membership record, carried
-            // as data because the type is erased past this match. `None`
-            // from any arm (an undecodable config, a spawn failure, or a
-            // rejected container) skips the slot entirely so the stack
-            // stays honest.
-            let placed = spawn_widget_child(ctx, spec, ChildLayout::Panel { row_height_pixels: row });
-            let Some(placed) = placed else {
-                continue;
-            };
-            if !first {
-                y += gap;
-            }
-            first = false;
-            self.place(
-                ctx,
-                &placed,
-                row_rect(y, placed.width_pixels.unwrap_or(width), placed.height_pixels),
-                spec.subname.clone(),
-            );
-            y += placed.height_pixels;
+        // Decode the concrete config, spawn the kind's actor, and derive the
+        // row height + focusability from that config — plus the spawned
+        // type's `NAMESPACE` for the membership record, carried as data
+        // because the type is erased past that match. `None` from any arm
+        // (an undecodable config, a spawn failure, or a rejected container)
+        // skips the slot entirely so the stack stays honest.
+        let spawned: Vec<(SpawnedChild, String)> = specs
+            .iter()
+            .filter_map(|spec| {
+                spawn_widget_child(ctx, spec, ChildLayout::Panel { row_height_pixels: row })
+                    .map(|child| (child, spec.subname.clone()))
+            })
+            .collect();
+
+        let placed =
+            stack_column(&self.config, self.theme.gap).place(&stack_rows(spawned.iter().map(|(child, _)| child)));
+        for ((child, name), (_, frame)) in spawned.iter().zip(placed.frames) {
+            self.place(ctx, child, frame, name.clone());
         }
 
-        self.panel_height = y - self.config.y;
+        self.panel_height = placed.height;
         // Replay only a live update that beat the first Tick. Spawning with no such
         // update must keep each child's own config theme.
         if self.pending_style {
@@ -346,6 +335,34 @@ impl WidgetPanel {
             .and_then(|id| self.children.iter().find(|child| child.id == id))
             .map_or("unknown", |child| child.name.as_str())
     }
+}
+
+/// The [`Column`] the panel stacks its children down: the top-left and width
+/// its config names, with the live theme's `gap` between rows.
+///
+/// The panel owns layout, so this is the one place the stack's geometry is
+/// stated. `gap` is passed rather than read off the config because the theme
+/// the panel actually fans down is the one whose spacing the children draw to.
+fn stack_column(config: &PanelConfig, gap: f32) -> Column {
+    Column { origin: Vec2::new(config.x, config.y), width: config.width, gap }
+}
+
+/// One [`Row`] per spawned child, in spec order, keyed by that child's mailbox.
+///
+/// Each row is the height the child's own config asked for. A child that named
+/// its own width ([`SpawnedChild::width_pixels`] — a button sized to its label)
+/// gets exactly that width; one that did not takes the whole column. A spec
+/// that failed to spawn never reaches here, so it contributes neither a row nor
+/// the gap that would have preceded it.
+fn stack_rows<'a>(children: impl IntoIterator<Item = &'a SpawnedChild>) -> Vec<Row<MailboxId>> {
+    children
+        .into_iter()
+        .map(|child| {
+            let cell =
+                child.width_pixels.map_or_else(|| Cell::share(child.id, 1.0), |pixels| Cell::fixed(child.id, pixels));
+            Row::cells(child.height_pixels, vec![cell])
+        })
+        .collect()
 }
 
 /// Decode, spawn, and derive one panel child's static/dynamic routing profile.
@@ -1638,6 +1655,53 @@ impl WasmActor for WidgetPanel {
 #[cfg(test)]
 mod dispatch_tests {
     use super::*;
+
+    /// A spawned child reduced to the three fields the stack reads: which
+    /// mailbox it is, whether it named its own width, and how tall it is.
+    /// Everything else on `SpawnedChild` is routing, not layout.
+    fn child(id: u64, width_pixels: Option<f32>, height_pixels: f32) -> SpawnedChild {
+        SpawnedChild {
+            id: MailboxId(id),
+            width_pixels,
+            height_pixels,
+            pointer_eligible: false,
+            focusable: false,
+            state: WidgetControlState::default(),
+            type_namespace: "test",
+            scroll_viewport: None,
+            host_scroll_strip_units: None,
+            wheel_eligible: false,
+        }
+    }
+
+    // Tripwire: the panel's vertical stack, pinned rect by rect against the
+    // hand-rolled loop it replaced. The three things that loop got right and
+    // a layout rewrite can silently lose: one gap *between* rows and none
+    // after the last (an off-by-one there slides every child down by a gap
+    // and mis-reports the background's height), a child that named its own
+    // width keeping exactly that width instead of being stretched to the
+    // pane, and the reported `panel_height` being the occupied extent rather
+    // than the extent plus a trailing gap.
+    #[test]
+    fn the_stack_gaps_between_rows_only_and_keeps_a_self_sized_child_at_its_own_width() {
+        let config = PanelConfig { x: 10.0, y: 20.0, width: 300.0, ..PanelConfig::default() };
+        let children = vec![child(1, None, 24.0), child(2, Some(80.0), 24.0), child(3, None, 48.0)];
+
+        let placed = stack_column(&config, 8.0).place(&stack_rows(&children));
+
+        let rect = |id: u64| {
+            let frame = placed.frame(&MailboxId(id)).expect("every spawned child is placed");
+            [frame.x, frame.y, frame.width, frame.height]
+        };
+        assert_eq!(rect(1), [10.0, 20.0, 300.0, 24.0]);
+        assert_eq!(rect(2), [10.0, 52.0, 80.0, 24.0], "a self-sized child is not stretched to the pane");
+        assert_eq!(rect(3), [10.0, 84.0, 300.0, 48.0]);
+        // 24 + 8 + 24 + 8 + 48 — the background chrome's height, no trailing gap.
+        assert_eq!(placed.height, 112.0);
+
+        let empty: Vec<SpawnedChild> = Vec::new();
+        assert_eq!(stack_column(&config, 8.0).place(&stack_rows(&empty)).height, 0.0, "an empty stack takes no height");
+    }
 
     #[test]
     fn nested_scroll_requires_the_exact_named_assigned_extent() {
