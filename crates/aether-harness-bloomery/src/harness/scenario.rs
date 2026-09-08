@@ -809,6 +809,17 @@ impl ScenarioHarness {
         }
     }
 
+    /// Park the next dispatch the fixture GitHub receives for `delay` — a slow
+    /// `workflow_dispatch` round trip (#5564), the condition the executor's
+    /// handler must not wait on. One-shot: every later dispatch is at speed.
+    ///
+    /// # Panics
+    /// This is a fixture-cell method; a cell with no fixture GitHub has no
+    /// dispatch to stall.
+    pub fn stall_next_dispatch(&self, delay: Duration) {
+        self.fake().stall_next_dispatch(delay);
+    }
+
     pub(super) fn fake(&self) -> &FakeGithub {
         self.fake.as_ref().expect("this method is a fixture-cell method")
     }
