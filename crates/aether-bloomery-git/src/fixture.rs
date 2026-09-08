@@ -597,6 +597,38 @@ impl FakeGithub {
         self.seed_ref(name, &sha);
     }
 
+    /// Point `name` (a `heads/…` ref) back at `base`, discarding whatever it
+    /// advanced to.
+    ///
+    /// A rewrite, not a fast-forward, and the fixture's whole reason for
+    /// existing under ADR-0184: a work order lands exactly once on a real
+    /// repository, so "the same task under four profiles" is unrunnable there —
+    /// but a benchmark run can reset this ref between cells and replay the same
+    /// order over the same tree. Nothing is minted: `base` must already name a
+    /// commit the fixture holds, so a reset can never invent history the cells
+    /// are then measured against.
+    ///
+    /// `base` is a bloomery digest and a ref holds a git object, and the two
+    /// coincide only for a commit this fixture minted itself. The genesis base
+    /// is the counter-case — an all-zero sentinel that names the repository's
+    /// head only through the correspondence, and one git refuses outright as its
+    /// null oid — so the correspondence is consulted first and the digest's own
+    /// hex is the fallback.
+    ///
+    /// # Errors
+    /// [`GitDataError::MissingObject`] when `base` resolves to no commit here.
+    pub fn reset_ref_to(&self, name: &str, base: &Digest) -> Result<(), GitDataError> {
+        let corresponding = self
+            .resolve_backend_object(base)
+            .map_err(|error| GitDataError::MissingObject(error.to_string()))?
+            .and_then(|object| GitObjectId::try_from(object).ok())
+            .map(|object| object.to_hex());
+
+        let sha = self.commit_at(corresponding.as_deref().unwrap_or(&to_hex(base)))?;
+        self.lock().refs.insert(name.to_owned(), sha);
+        Ok(())
+    }
+
     /// The commit digest ref `name` points at, if it exists — the digest-typed
     /// [`ref_target`](Self::ref_target).
     #[must_use]

@@ -11,15 +11,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aether_actor::Addressable;
 use aether_bloomery::{
-    BackendObjectId, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CalibrationDocument, CandidateRef,
-    ConfigKind, ConfigRegistry, Correspondence, Digest, Evidence, EvidenceKind, Fact, FakeKeyProvider, KeyId,
-    MemberDependency, Membership, ModelProcessInstructions, Observation, Outcome, Provenance, SCOPE_REVISION_SCHEMA,
-    ScopeRevision, ScopeRouting, Snapshot, StageCatalog, StageId, Statement, StoreClass, VerifyFailureSet,
-    ViewDocument, WorkpieceId, signed_approval,
+    AgentSelection, BackendObjectId, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CalibrationDocument,
+    CandidateRef, ConfigKind, ConfigRegistry, Correspondence, Digest, Evidence, EvidenceKind, Fact, FakeKeyProvider,
+    Harness, KeyId, MemberDependency, Membership, ModelOverride, ModelProcessInstructions, Observation, Outcome,
+    Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Snapshot, StageCatalog, StageId, Statement,
+    StoreClass, VerifyFailureSet, ViewDocument, WorkpieceId, signed_approval,
 };
 use aether_bloomery_github::fixture::FakeGithub;
-use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex};
+use aether_bloomery_github::{
+    ChecksState, GitDataApi, NewPullRequest, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex,
+};
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, GetResult};
+use aether_chassis_bloomery::benchmark::{BenchmarkRunnerCapability, BenchmarkTick};
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, read_ledger};
 use aether_chassis_bloomery::bloomery::{
     BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, DoctorReactorCapability, DoctorReport,
@@ -289,11 +292,29 @@ impl ScenarioHarness {
         self.wire.post(path, body)
     }
 
+    /// `GET path` against the coordinator's REST control ingress.
+    #[must_use]
+    pub fn get(&self, path: &str) -> (u16, String) {
+        self.wire.request("GET", path, "")
+    }
+
     /// [`post`](Self::post) with the method left to the caller — the shaping
     /// doors are `PATCH`, and a draft is handed its base through one.
     #[must_use]
     pub fn request(&self, method: &str, path: &str, body: &str) -> (u16, String) {
         self.wire.request(method, path, body)
+    }
+
+    /// One benchmark run's rendered state (ADR-0184), read through the door an
+    /// operator reads it through.
+    ///
+    /// # Panics
+    /// The door refused the read, or answered a body that is not JSON.
+    #[must_use]
+    pub fn benchmark_run(&self, run: u64) -> serde_json::Value {
+        let (status, body) = self.get(&format!("/benchmark/{run}"));
+        assert_eq!(status, 200, "the benchmark run must read back: {body}");
+        serde_json::from_str(&body).expect("the benchmark door answers JSON")
     }
 
     /// Admit one reducer fact through the control core's wire ingress.
@@ -1173,6 +1194,82 @@ impl ScenarioHarness {
             .expect("the work-order description persists");
     }
 
+    /// Seed one landed pull request the benchmark door can draw a golden task
+    /// from (ADR-0184): an issue carrying the work order, a green landing on a
+    /// head of its own, and a proposal whose prose closes that issue.
+    ///
+    /// All four things a golden task is made of, placed the way an operator
+    /// stages real landed history onto a calibration host's fixture — so a
+    /// scenario about the run itself does not have to know which of them the
+    /// extraction reads from where.
+    ///
+    /// # Panics
+    /// The fixture refused to open the proposal, which only a duplicate head
+    /// can cause.
+    #[must_use]
+    pub fn seed_landed_pull_request(&self, issue: u64, order: &str) -> u64 {
+        let branch = format!("landed-{issue}");
+        let head = self.fake().seed_commit(&format!("tree-{issue}"));
+        self.fake().seed_ref(&format!("heads/{branch}"), &head);
+        self.fake().seed_checks(&head, ChecksState::Passed);
+        self.fake().seed_issue(issue, order);
+
+        let proposal = self
+            .fake()
+            .create_pull_request(&NewPullRequest {
+                title: format!("feat(x): issue {issue}"),
+                body: format!("Closes #{issue}"),
+                head: branch,
+                base: "main".to_owned(),
+            })
+            .expect("the fixture opens the landing proposal");
+        self.fake().merge_pull_request(proposal.number, &format!("merge-{issue}"));
+
+        proposal.number
+    }
+
+    /// The instruction bundle this harness pinned at boot and authorized through
+    /// the coordinator's own configuration (ADR-0214).
+    ///
+    /// The address a sealed bloom has to name bloom-wide before any of its model
+    /// lanes will dispatch, which a scenario that seals through a door rather
+    /// than through [`seal_members`](Self::seal_members) has to supply itself.
+    ///
+    /// # Panics
+    /// The harness pinned no bundle, which its own boot rules out.
+    #[must_use]
+    pub fn instructions(&self) -> Digest {
+        self.configs.address::<ModelProcessInstructions>().expect("the harness pins an instruction bundle at boot")
+    }
+
+    /// Record a member-wide [`ModelOverride`] through `POST /configs` and hand
+    /// back the address a benchmark cell names it by.
+    ///
+    /// Through the door rather than straight into the store, because the address
+    /// a cell is named by is the one the authoring route computed: a scenario
+    /// that content-addressed the value itself would still pass if the two ever
+    /// diverged, and the run would then seal a cell nothing resolves.
+    ///
+    /// # Panics
+    /// The route refused the write, or answered a body without an address.
+    #[must_use]
+    pub fn record_model_override(&self, model: &str) -> Digest {
+        let value = ModelOverride {
+            agent: Some(AgentSelection { harness: Harness::Claude, model: model.to_owned() }),
+            ..ModelOverride::default()
+        };
+        let request = serde_json::json!({
+            "kind": ModelOverride::NAME,
+            "value": serde_json::to_value(&value).expect("a model override renders as JSON"),
+        });
+
+        let (status, body) = self.post("/configs", &request.to_string());
+        assert_eq!(status, 200, "the config write must land: {body}");
+        let written: serde_json::Value = serde_json::from_str(&body).expect("the config route answers JSON");
+        Digest::from_hex(written["digest"].as_str().expect("the config route answers an address"))
+            .expect("the answered address is 32 hex-encoded bytes")
+    }
+
     /// Wake the land reactor until `bloom` reaches `want`.
     ///
     /// # Panics
@@ -1259,6 +1356,23 @@ impl ScenarioHarness {
     /// Wake the propose reactor once.
     pub fn propose_tick(&mut self) {
         self.wire.tick(<ProposeReactorCapability as Addressable>::resolve(0, ()), &ProposeTick::default());
+    }
+
+    /// Wake the benchmark runner once (ADR-0184) — how a scenario advances a
+    /// run's sequence without waiting out its poll cadence.
+    pub fn benchmark_tick(&mut self) {
+        self.wire.tick(<BenchmarkRunnerCapability as Addressable>::resolve(0, ()), &BenchmarkTick::default());
+    }
+
+    /// The commit the fixture's mainline ref currently points at.
+    ///
+    /// # Panics
+    /// This is a fixture-cell method and the backend is not the fixture, or the
+    /// mainline ref is absent.
+    #[must_use]
+    pub fn fixture_mainline(&self) -> Digest {
+        const MAINLINE_REF: &str = "heads/main";
+        self.fake().ref_digest(MAINLINE_REF).expect("the fixture holds a mainline ref")
     }
 
     /// Wake the control core's mainline observer once.

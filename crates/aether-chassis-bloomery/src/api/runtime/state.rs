@@ -32,7 +32,7 @@ use aether_actor::{HandlesKind, Manual};
 use aether_bloomery::EnumerateClaims;
 use aether_bloomery::{
     Admit, ApprovalPolicy, BloomDraft, BloomId, Event, MemberDependency, MetricsQuery, Query, ResolvedConfigs,
-    SpendQuery, Statement, Workpiece, WorkpieceId,
+    SpendQuery, Statement, StoreClass, Workpiece, WorkpieceId,
 };
 use aether_data::wire::to_vec;
 use aether_data::{Kind, MailId, MailboxId};
@@ -44,6 +44,7 @@ use aether_substrate::{InboundMail, Mailer};
 
 use super::response::error_response;
 use crate::artifacts::{ArtifactsCapability, GetRange};
+use crate::benchmark::{BenchmarkRunnerCapability, ReadBenchmark, StartBenchmark};
 #[cfg(feature = "github")]
 use crate::bloomery::{ArchiveRecords, CandidatePush, DoctorReport, JanitorReactorCapability, ListArchive};
 // The control core is a native sibling cap since the wasm-boundary retirement
@@ -188,6 +189,11 @@ pub struct ApiCapabilityState {
     /// only once the reducer has admitted the repair (issue #5560).
     #[cfg(feature = "github")]
     pub(super) repair_pushes: HashMap<u64, PendingRepairPush>,
+    /// Which world this coordinator's journal records (ADR-0184), resolved at
+    /// boot from the backend selector. `POST /benchmark` is refused outright
+    /// unless it is [`StoreClass::Trial`], so the class has to be readable from
+    /// inside a synchronous route rather than fetched per request.
+    pub(super) store_class: StoreClass,
 }
 
 /// The candidate-ref publication a derived repair owes once its admit lands: the
@@ -466,6 +472,11 @@ pub(super) enum Routed {
     ListOpenWorkpieces(ListCommissions),
     /// Await N commission loads, then gate and admit (#5048).
     DeferredCommissionSeal(Box<PendingCommissionSealSetup>),
+    /// Relay a benchmark start to the runner; its `StartBenchmarkResult`
+    /// answers (ADR-0184).
+    StartBenchmark(StartBenchmark),
+    /// Relay a benchmark read to the runner; its `ReadBenchmarkResult` answers.
+    ReadBenchmark(ReadBenchmark),
     /// Await a signing-cap verify, then persist the commission write.
     DeferredCommissionVerify {
         /// The verify dispatch correlation the reply will echo.
@@ -616,6 +627,8 @@ pub(super) fn finish(
             );
             http::Outcome::Deferred
         }
+        Routed::StartBenchmark(request) => ctx.defer(&request).to::<BenchmarkRunnerCapability>(),
+        Routed::ReadBenchmark(request) => ctx.defer(&request).to::<BenchmarkRunnerCapability>(),
         Routed::DeferredCommissionVerify { correlation, write } => {
             state
                 .commission_verifying
