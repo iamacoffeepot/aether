@@ -439,6 +439,15 @@ is not a catalog. The `200` `{digest,kind}` is the address a draft registry
 seals under. A partial `PATCH` preserves the existing registry, while a
 present `configs` object replaces it.
 
+A member may name configuration of its own only while it resolves `auto`. An
+above-`auto` member is authorized by a statement signed over its scope
+revision, and a member's registry is chosen when the draft is patched — long
+after the commission was approved — so no signature can cover it. Seal refuses
+such a member and names the kind: ADR-0174 binds the member's configuration
+into the subject its approval attests, and an operator cannot change which
+model runs for an approved workpiece without re-approval. Name the
+configuration bloom-wide instead.
+
 To have the bloom carry the policy it was admitted under rather than inherit
 the coordinator's file, author one and name it bloom-wide **before** seal.
 `POST /commissions/{id}/approvals/auto` still resolves the **host file**,

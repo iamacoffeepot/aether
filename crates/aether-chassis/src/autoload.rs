@@ -17,7 +17,7 @@ use std::path::Path;
 use aether_actor::root_mailbox;
 use aether_component::ComponentHostCapability;
 use aether_data::Kind as _;
-use aether_kinds::LoadComponent;
+use aether_kinds::{LoadComponent, replica_load_name};
 use aether_substrate::Mail;
 use aether_substrate::actor::wasm::kind_manifest;
 use aether_substrate::config::ConfigError;
@@ -77,13 +77,16 @@ pub fn boot_manifest_autoload(path: &Path) -> Result<Vec<AutoloadComponent>, Con
 ///
 /// An entry with no `replicas` set stays a single unmodified
 /// `AutoloadComponent` (today's byte-identical behaviour). Otherwise each
-/// instance is named `{base}-{index}` for `index` in `0..replicas` — every
-/// instance suffixed, no bare-name special case for index 0 — where `base`
-/// follows the same precedence the component host itself applies when
-/// resolving a load's name (`caller name > export > wasm-declared entry
-/// namespace`, `aether-component`'s `handle_load` step 4), so a
-/// replicated load's derived name matches what an unreplicated load of the
-/// same entry would have resolved to.
+/// instance is named by [`replica_load_name`] — replica 0 claims the bare
+/// `base`, later replicas `{base}-{index}` — where `base` follows the same
+/// precedence the component host itself applies when resolving a load's name
+/// (`caller name > export > wasm-declared entry namespace`,
+/// `aether-component`'s `handle_load` step 4), so a replicated load's derived
+/// name matches what an unreplicated load of the same entry would have
+/// resolved to. The bare instance is what keeps a replicated component
+/// reachable through bare-type peer addressing
+/// (iamacoffeepot/aether#5727); `replicas: 1` is therefore exactly an
+/// unreplicated load.
 ///
 /// # Errors
 ///
@@ -131,7 +134,7 @@ pub fn expand_replicas(packed: PackedComponent) -> Result<Vec<AutoloadComponent>
         .map(|index| AutoloadComponent {
             wasm: packed.wasm.clone(),
             config: packed.config.clone(),
-            name: Some(format!("{base}-{index}")),
+            name: Some(replica_load_name(&base, index)),
             export: packed.export.clone(),
         })
         .collect())
@@ -191,13 +194,16 @@ mod tests {
     fn expand_replicas_fans_out_named_instances_with_shared_config() {
         // A 3-replica entry must yield 3 autoload components, each carrying
         // the same wasm + config bytes (one shared load spec) but a
-        // distinct `{base}-{index}` name — the bug this catches is a
-        // fan-out that drops an instance or lets two instances collide on
-        // the same name.
+        // distinct name — the bare base for replica 0, `{base}-{index}`
+        // after it. The bug this catches is a fan-out that drops an
+        // instance or lets two instances collide on the same name.
         let entries = expand_replicas(packed(Some(3))).expect("3 replicas expand");
         assert_eq!(entries.len(), 3);
-        for (index, entry) in entries.iter().enumerate() {
-            assert_eq!(entry.name.as_deref(), Some(format!("handler-{index}").as_str()));
+        assert_eq!(
+            entries.iter().map(|entry| entry.name.clone()).collect::<Vec<_>>(),
+            vec![Some("handler".to_owned()), Some("handler-1".to_owned()), Some("handler-2".to_owned())],
+        );
+        for entry in &entries {
             assert_eq!(entry.wasm, vec![0, 1, 2, 3]);
             assert_eq!(entry.config, vec![9, 9, 9]);
             assert_eq!(entry.export, None);

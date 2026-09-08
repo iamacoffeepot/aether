@@ -21,15 +21,15 @@
 //! `SubstrateHarness::builder().namespace_roots(...)` rather than env-var
 //! mutation.
 
-use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate::{HarnessActor, HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::{
     envelope, init_save_sandbox, require_runtime, test_namespace_roots, write_fixture,
 };
 use aether_harness_substrate_capture::visual::{Image, decode_png, differs_from_background};
 use aether_kinds::{LoadComponent, LoadResult, MeshLoadResult, Render, WindowId, WindowSize};
-use aether_kit_commons::camera::{CameraOrbitSet, OrbitParams};
-use aether_kit_commons::mesh::LoadMesh;
+use aether_kit_commons::camera::{CameraComponent, CameraOrbitSet, OrbitParams};
+use aether_kit_commons::mesh::{LoadMesh, MeshViewer};
 use core::f32::consts::FRAC_PI_2;
 
 // Force linkage of `aether-kit-commons`'s `inventory::submit!` `KindDescriptor`
@@ -49,17 +49,18 @@ const OUTLINE_WINDOW_WIDTH: u32 = 768;
 const OUTLINE_WINDOW_HEIGHT: u32 = 576;
 const OUTLINE_WINDOW_ID: WindowId = WindowId(1);
 
-/// Full mailbox address the substrate registers for the loaded
-/// component (issue 634 Phase 4 PR 1). Mail to the bare
-/// `COMPONENT_NAME` warn-drops as unknown — agents address the
-/// trampoline by its full `aether.embedded:NAME` form,
-/// which is what `LoadResult.name` returns. Built from
-/// The `/`-rendered lineage a loaded component registers at (ADR-0099
-/// §4): the component host `aether.component` `/`-joined to the
-/// trampoline node — exactly what `LoadResult.name` reports.
-fn component_address() -> String {
-    use aether_actor::Addressable;
-    format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, COMPONENT_NAME)
+/// Typed sender for the loaded viewer. `HarnessOp::loaded` renders the
+/// `/`-joined lineage the substrate registers the trampoline under
+/// (ADR-0099 §4) — exactly what `LoadResult.name` reports — from the
+/// component identity, so mail cannot go to the bare `COMPONENT_NAME`,
+/// which warn-drops as unknown.
+fn viewer() -> HarnessActor<MeshViewer> {
+    HarnessOp::loaded::<MeshViewer>(COMPONENT_NAME)
+}
+
+/// Typed sender for the peer camera the outline scenario poses.
+fn camera() -> HarnessActor<CameraComponent> {
+    HarnessOp::loaded::<CameraComponent>(CAMERA_COMPONENT_NAME)
 }
 
 const BOX_DSL: &[u8] = b"(box 1 1 1 :color 0)\n";
@@ -72,11 +73,6 @@ f 1 2 3 4
 ";
 const BAD_DSL: &[u8] = b"(box not-a-number 1 1)\n";
 const OUTLINED_PLATE_DSL: &[u8] = b"(box 2 2 0.002 :color 6)\n";
-
-fn loaded_component_address(name: &str) -> String {
-    use aether_actor::Addressable;
-    format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
-}
 
 fn load_kit_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str, name: &str) {
     let loaded = harness
@@ -114,13 +110,8 @@ fn load_viewer(harness: &mut SubstrateHarness, wasm_path: &Path) {
     load_kit_export(harness, &wasm, "aether.kit.mesh", COMPONENT_NAME);
 }
 
-fn capture_outlined_mesh(
-    harness: &mut SubstrateHarness,
-    camera_address: &str,
-    viewer_address: &str,
-    label: &'static str,
-) -> Vec<u8> {
-    let mails = vec![envelope(camera_address, &Render), envelope(viewer_address, &Render)];
+fn capture_outlined_mesh(harness: &mut SubstrateHarness, label: &'static str) -> Vec<u8> {
+    let mails = vec![envelope(camera().address(), &Render), envelope(viewer().address(), &Render)];
     let captured = harness
         .execute(vec![(label, HarnessOp::capture_with_mails(mails, Vec::new()))])
         .expect("capture outlined mesh");
@@ -188,26 +179,18 @@ fn edge_on_outline_stays_visible_and_keeps_apparent_width() {
 
     load_kit_export(&mut harness, &wasm, "aether.kit.camera", CAMERA_COMPONENT_NAME);
     load_kit_export(&mut harness, &wasm, "aether.kit.mesh", COMPONENT_NAME);
-    let camera = loaded_component_address(CAMERA_COMPONENT_NAME);
-    let viewer = component_address();
     let loaded = harness
         .execute(vec![
             (
                 "aspect",
-                HarnessOp::send_and_settle(
-                    camera.as_str(),
-                    &WindowSize {
-                        window: OUTLINE_WINDOW_ID,
-                        width: OUTLINE_WINDOW_WIDTH,
-                        height: OUTLINE_WINDOW_HEIGHT,
-                        scale_factor: 1.0,
-                    },
-                ),
+                camera().send(&WindowSize {
+                    window: OUTLINE_WINDOW_ID,
+                    width: OUTLINE_WINDOW_WIDTH,
+                    height: OUTLINE_WINDOW_HEIGHT,
+                    scale_factor: 1.0,
+                }),
             ),
-            (
-                "load_mesh",
-                HarnessOp::send_and_await_reply(viewer.as_str(), &LoadMesh { namespace: "save".to_owned(), path }),
-            ),
+            ("load_mesh", viewer().send_and_await_reply(&LoadMesh { namespace: "save".to_owned(), path })),
         ])
         .expect("set aspect + load edge-on fixture");
     let reply = loaded.reply::<MeshLoadResult>("load_mesh").expect("decode MeshLoadResult");
@@ -224,20 +207,14 @@ fn edge_on_outline_stays_visible_and_keeps_apparent_width() {
             target: Some([0.0, 0.0, 0.0]),
         },
     };
-    harness
-        .execute(vec![("edge_on", HarnessOp::send_and_settle(camera.as_str(), &orbit(4.0, FRAC_PI_2)))])
-        .expect("set edge-on orbit");
-    let edge_on = capture_outlined_mesh(&mut harness, &camera, &viewer, "edge_on_capture");
+    harness.execute(vec![("edge_on", camera().send(&orbit(4.0, FRAC_PI_2)))]).expect("set edge-on orbit");
+    let edge_on = capture_outlined_mesh(&mut harness, "edge_on_capture");
 
-    harness
-        .execute(vec![("near", HarnessOp::send_and_settle(camera.as_str(), &orbit(2.5, 0.0)))])
-        .expect("set near face-on orbit");
-    let near = capture_outlined_mesh(&mut harness, &camera, &viewer, "near_capture");
+    harness.execute(vec![("near", camera().send(&orbit(2.5, 0.0)))]).expect("set near face-on orbit");
+    let near = capture_outlined_mesh(&mut harness, "near_capture");
 
-    harness
-        .execute(vec![("far", HarnessOp::send_and_settle(camera.as_str(), &orbit(8.0, 0.0)))])
-        .expect("set far face-on orbit");
-    let far = capture_outlined_mesh(&mut harness, &camera, &viewer, "far_capture");
+    harness.execute(vec![("far", camera().send(&orbit(8.0, 0.0)))]).expect("set far face-on orbit");
+    let far = capture_outlined_mesh(&mut harness, "far_capture");
 
     let edge_on_image = decode_png(&edge_on).expect("decode edge-on capture");
     let near_image = decode_png(&near).expect("decode near capture");
@@ -294,10 +271,7 @@ fn dsl_box_loads_and_renders() {
     let result = harness
         .execute(vec![
             ("prime", HarnessOp::advance(1)),
-            (
-                "load_mesh",
-                HarnessOp::send_and_settle(component_address(), &LoadMesh { namespace: "save".to_owned(), path }),
-            ),
+            ("load_mesh", viewer().send(&LoadMesh { namespace: "save".to_owned(), path })),
             ("post", HarnessOp::advance(5)),
             ("snap", HarnessOp::capture()),
         ])
@@ -332,10 +306,7 @@ fn obj_quad_loads_and_renders() {
     let result = harness
         .execute(vec![
             ("prime", HarnessOp::advance(1)),
-            (
-                "load_mesh",
-                HarnessOp::send_and_settle(component_address(), &LoadMesh { namespace: "save".to_owned(), path }),
-            ),
+            ("load_mesh", viewer().send(&LoadMesh { namespace: "save".to_owned(), path })),
             ("post", HarnessOp::advance(5)),
             ("snap", HarnessOp::capture()),
         ])
@@ -374,10 +345,7 @@ fn parse_failure_keeps_prior_mesh() {
     harness
         .execute(vec![
             ("prime", HarnessOp::advance(1)),
-            (
-                "load_good",
-                HarnessOp::send_and_settle(component_address(), &LoadMesh { namespace: "save".to_owned(), path: good }),
-            ),
+            ("load_good", viewer().send(&LoadMesh { namespace: "save".to_owned(), path: good })),
             ("post_good", HarnessOp::advance(5)),
         ])
         .expect("prime + good load");
@@ -390,10 +358,7 @@ fn parse_failure_keeps_prior_mesh() {
     // non-clear-color geometry.
     let result = harness
         .execute(vec![
-            (
-                "load_bad",
-                HarnessOp::send_and_settle(component_address(), &LoadMesh { namespace: "save".to_owned(), path: bad }),
-            ),
+            ("load_bad", viewer().send(&LoadMesh { namespace: "save".to_owned(), path: bad })),
             ("post_bad", HarnessOp::advance(5)),
             ("snap", HarnessOp::capture()),
         ])
@@ -429,10 +394,7 @@ fn good_dsl_load_replies_ok() {
     let result = harness
         .execute(vec![(
             "load_mesh",
-            HarnessOp::send_and_await_reply(
-                component_address(),
-                &LoadMesh { namespace: "save".to_owned(), path: path.clone() },
-            ),
+            viewer().send_and_await_reply(&LoadMesh { namespace: "save".to_owned(), path: path.clone() }),
         )])
         .expect("load + reply");
 
@@ -468,10 +430,7 @@ fn bad_dsl_load_replies_err() {
     let result = harness
         .execute(vec![(
             "load_mesh",
-            HarnessOp::send_and_await_reply(
-                component_address(),
-                &LoadMesh { namespace: "save".to_owned(), path: path.clone() },
-            ),
+            viewer().send_and_await_reply(&LoadMesh { namespace: "save".to_owned(), path: path.clone() }),
         )])
         .expect("load + reply");
 
@@ -504,10 +463,10 @@ fn overlapping_loads_reply_to_their_own_requesters() {
     load_viewer(&mut harness, &wasm_path);
 
     let first = harness
-        .send_deferred(&component_address(), &LoadMesh { namespace: "save".to_owned(), path: dsl_path.clone() })
+        .send_deferred(viewer().address(), &LoadMesh { namespace: "save".to_owned(), path: dsl_path.clone() })
         .expect("enqueue first mesh load");
     let second = harness
-        .send_deferred(&component_address(), &LoadMesh { namespace: "save".to_owned(), path: obj_path.clone() })
+        .send_deferred(viewer().address(), &LoadMesh { namespace: "save".to_owned(), path: obj_path.clone() })
         .expect("enqueue second mesh load");
 
     let second_reply = harness.await_deferred::<MeshLoadResult>(second).expect("second load replies");

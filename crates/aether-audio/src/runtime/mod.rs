@@ -18,6 +18,7 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 
 use aether_data::{MailboxId, Source, SourceAddr};
+use aether_substrate::session_ids::SessionIds;
 
 use aether_actor::runtime;
 
@@ -117,11 +118,14 @@ pub struct AudioCapabilityState {
     /// flight, keyed by a minted assembly id.
     pub assemblies: HashMap<u64, BankAssembly>,
     /// Monotonic source of [`BankAssembly`] keys.
-    pub next_assembly_id: u64,
-    /// Next instrument id to assign a loaded bank — starts at
+    pub assembly_ids: SessionIds<u64>,
+    /// Source of the instrument ids loaded banks are assigned — starts at
     /// `BUILTINS.len()` and counts up in load order (ADR-0103 §4),
-    /// matching the synth's append-only bank table.
-    pub next_instrument_id: u8,
+    /// matching the synth's append-only bank table. The synth addresses a
+    /// bank by a `u8`, so this window is small enough to reach: past it
+    /// `load_instrument` replies `Err` rather than aliasing a resident
+    /// bank.
+    pub instrument_ids: SessionIds<u8>,
     pub thread: Option<JoinHandle<()>>,
     pub shutdown: Option<mpsc::Sender<()>>,
 }
@@ -132,8 +136,8 @@ impl AudioCapabilityState {
             sender: None,
             sample_rate: None,
             assemblies: HashMap::new(),
-            next_assembly_id: 0,
-            next_instrument_id: builtin_id_ceiling(),
+            assembly_ids: SessionIds::new(),
+            instrument_ids: SessionIds::range(builtin_id_ceiling(), u8::MAX),
             thread: None,
             shutdown: None,
         }
@@ -181,8 +185,8 @@ impl NativeActor for AudioCapability {
                 #[allow(clippy::cast_precision_loss)]
                 sample_rate: Some(sample_rate as f32),
                 assemblies: HashMap::new(),
-                next_assembly_id: 0,
-                next_instrument_id: builtin_id_ceiling(),
+                assembly_ids: SessionIds::new(),
+                instrument_ids: SessionIds::range(builtin_id_ceiling(), u8::MAX),
                 thread: Some(thread),
                 shutdown: Some(shutdown),
             }),

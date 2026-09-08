@@ -18,8 +18,6 @@
 //! numbers and three colours, never WGSL, so the overlay lane stays a
 //! closed contract the widget kit's hole cutting can reason about.
 
-use std::slice;
-
 /// Bytes per expanded shape vertex: `anchor vec3<f32>` (12) + `offset_px
 /// vec2<f32>` (8) + `local vec2<f32>` (8) + `half_size vec2<f32>` (8) +
 /// `params vec4<f32>` (16) + `fill vec4<f32>` (16) + `stroke vec4<f32>`
@@ -131,10 +129,7 @@ pub(super) fn build_shape_pipeline(
     viewport_bind_group_layout: &wgpu::BindGroupLayout,
     texture_bind_group_layout: &wgpu::BindGroupLayout,
 ) -> ShapePipeline {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("aether shape shader"),
-        source: wgpu::ShaderSource::Wgsl(SHAPE_SHADER_WGSL.into()),
-    });
+    let shader = super::overlay_shader_module(device, "aether shape shader", SHAPE_SHADER_WGSL);
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("aether shape pipeline layout"),
@@ -180,39 +175,23 @@ pub(super) fn build_shape_pipeline(
 
     // The fragment stage composes shadow, fill, and stroke into one
     // premultiplied colour, so the target blends it as such — the textured
-    // variant included, which premultiplies its sampled texel itself.
-    let fragment_targets =
-        [Some(super::color_target_state(color_format, wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING))];
-    let build = |label, layout, entry_point| {
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: slice::from_ref(&vertex_layout),
+    // variant included, which premultiplies its sampled texel itself. Overlay
+    // content draws over the resolved world pass with no depth interaction,
+    // like the quad pipelines.
+    let build = |label, layout, fragment_entry| {
+        super::render_pipeline(
+            device,
+            super::RenderPipelineSpec {
+                label,
+                layout,
+                shader: &shader,
+                fragment_entry,
+                vertex_layout: &vertex_layout,
+                color_format,
+                blend: wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+                depth: None,
             },
-            fragment: Some(super::fragment_state(&shader, entry_point, &fragment_targets)),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            // Overlay content draws over the resolved world pass with no
-            // depth interaction, like the quad pipelines.
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: super::MSAA_SAMPLE_COUNT,
-                ..wgpu::MultisampleState::default()
-            },
-            multiview_mask: None,
-            cache: None,
-        })
+        )
     };
     let plain = build("aether shape pipeline", &pipeline_layout, "fs_main");
     let textured = build("aether textured shape pipeline", &textured_pipeline_layout, "fs_textured");

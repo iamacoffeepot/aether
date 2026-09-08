@@ -12,7 +12,7 @@
 //! It can supply the coordinates, and those are the half that must not be
 //! guessed: a drawn eye in the wrong place is worse than no eye.
 
-use aether_math::{Vec2, Vec3};
+use aether_math::{Aabb, Vec2, Vec3};
 
 use crate::easel::palette::{EYE_CLASS, LIPS_CLASS};
 use crate::labels::Labels;
@@ -141,10 +141,9 @@ fn nose(mesh: &Mesh, eyes: &[(f32, Anchor)], lips: &Anchor) -> Option<Anchor> {
 /// rather than the box centre because a label boundary that wanders on one
 /// side should move the mark by a fraction of that, not by half of it.
 fn bounds(cells: &[Vec3]) -> Anchor {
-    let (lo, hi) = cells.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(l, h), &p| {
-        (Vec3::new(l.x.min(p.x), l.y.min(p.y), l.z.min(p.z)), Vec3::new(h.x.max(p.x), h.y.max(p.y), h.z.max(p.z)))
-    });
+    let cell_bounds = Aabb::from_points(cells);
+    let half = cell_bounds.extents() * 0.5;
     let mean = cells.iter().fold(Vec3::splat(0.0), |a, &p| a + p) / cells.len() as f32;
 
-    Anchor { centre: Vec2::new(mean.x, mean.y), half: Vec2::new((hi.x - lo.x) * 0.5, (hi.y - lo.y) * 0.5), front: hi.z }
+    Anchor { centre: Vec2::new(mean.x, mean.y), half: Vec2::new(half.x, half.y), front: cell_bounds.max.z }
 }

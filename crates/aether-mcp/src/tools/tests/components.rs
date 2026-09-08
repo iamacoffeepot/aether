@@ -3,7 +3,105 @@ use super::super::test_support::*;
 #[allow(clippy::wildcard_imports)]
 use super::super::*;
 use crate::tools::components::{binary_listing_response, component_listing_response, store_listing_response};
-use aether_kinds::{ListComponentBinariesResult, ListEngineBinariesResult};
+use aether_actor::actor;
+use aether_kinds::{
+    ListComponentBinariesResult, ListEngineBinariesResult, SetArtifactPinned, SetArtifactPinnedResult, UploadBinary,
+    UploadBinaryResult, UploadComponent, UploadComponentResult,
+};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::chassis::error::BootError;
+use aether_substrate::testing::boot_authority;
+use std::sync::{Arc, Mutex};
+
+/// Hub-local fleet double for pin/upload forwarding tests. Installed at
+/// `aether.fleet` so engine=None Calls land as the typed kinds themselves
+/// (an engine-routed Call would arrive as `RouteEnvelope` and these
+/// handlers would not fire). It never reads `staged_path`.
+#[derive(Clone)]
+struct FleetLocalCells {
+    binary: Arc<Mutex<Vec<UploadBinary>>>,
+    component: Arc<Mutex<Vec<UploadComponent>>>,
+    pins: Arc<Mutex<Vec<SetArtifactPinned>>>,
+    binary_reply: Arc<Mutex<UploadBinaryResult>>,
+    component_reply: Arc<Mutex<UploadComponentResult>>,
+    pin_reply: Arc<Mutex<SetArtifactPinnedResult>>,
+}
+
+impl FleetLocalCells {
+    fn new() -> Self {
+        Self {
+            binary: Arc::new(Mutex::new(Vec::new())),
+            component: Arc::new(Mutex::new(Vec::new())),
+            pins: Arc::new(Mutex::new(Vec::new())),
+            binary_reply: Arc::new(Mutex::new(UploadBinaryResult::Ok { hash: "bin-hash".to_owned(), name: None })),
+            component_reply: Arc::new(Mutex::new(UploadComponentResult::Ok {
+                hash: "cmp-hash".to_owned(),
+                name: None,
+            })),
+            pin_reply: Arc::new(Mutex::new(SetArtifactPinnedResult::Ok { hash: "pin-hash".to_owned(), pinned: true })),
+        }
+    }
+}
+
+struct FleetLocalSink {
+    cells: FleetLocalCells,
+}
+
+#[actor(singleton, root)]
+impl NativeActor for FleetLocalSink {
+    type Config = ();
+    type Params = FleetLocalCells;
+    const NAMESPACE: &'static str = "aether.fleet";
+
+    fn init((): (), cells: FleetLocalCells, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { cells })
+    }
+
+    #[handler::single]
+    fn on_upload_binary(&mut self, _ctx: &mut NativeCtx<'_>, mail: UploadBinary) -> UploadBinaryResult {
+        self.cells.binary.lock().expect("binary log mutex").push(mail);
+        self.cells.binary_reply.lock().expect("binary reply mutex").clone()
+    }
+
+    #[handler::single]
+    fn on_upload_component(&mut self, _ctx: &mut NativeCtx<'_>, mail: UploadComponent) -> UploadComponentResult {
+        self.cells.component.lock().expect("component log mutex").push(mail);
+        self.cells.component_reply.lock().expect("component reply mutex").clone()
+    }
+
+    #[handler::single]
+    fn on_set_artifact_pinned(&mut self, _ctx: &mut NativeCtx<'_>, mail: SetArtifactPinned) -> SetArtifactPinnedResult {
+        self.cells.pins.lock().expect("pin log mutex").push(mail);
+        self.cells.pin_reply.lock().expect("pin reply mutex").clone()
+    }
+}
+
+fn boot_hub_with_fleet_local_sink(cells: FleetLocalCells) -> (PassiveChassis<TestChassis>, u16) {
+    let registry = Arc::new(Registry::new());
+    for descriptor in descriptors::all() {
+        let _ = registry.register_kind_with_descriptor(&boot_authority(), descriptor);
+    }
+    let (outbound, _rx) = HubOutbound::attached_loopback();
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<TraceDispatchCapability>(())
+        .with_actor::<FleetLocalSink>(cells)
+        .with_actor_configured::<RpcServerCapability>(
+            RpcServerParams {
+                peer_kind: PeerKind::Substrate {
+                    engine_name: "test-hub".into(),
+                    engine_version: "0.1.0".into(),
+                    kinds: vec![],
+                },
+                route_target: None,
+            },
+            RpcServerConfig { port: Some(0) },
+        )
+        .build_passive()
+        .expect("fleet-local sink hub boots");
+    let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
+    (chassis, port)
+}
 
 /// Small typed-config-shaped schema for component config encoding tests.
 fn config_struct_schema() -> SchemaType {
@@ -258,13 +356,16 @@ fn replica_base_name_follows_name_export_namespace_precedence() {
     assert_eq!(replica_base_name(None, None, None), None);
 }
 
-/// `replica_names` suffixes every instance — no bare-name special case
-/// for index 0 — so `replicas: 1` differs from an omitted field only by
-/// the `-0` suffix.
+/// `replica_names` names replica 0 for the bare base and suffixes the rest,
+/// so a fan-out registers the name a peer's `ctx.peer::<R>()` folds and
+/// `replicas: 1` loads exactly what an omitted field loads. The bug this
+/// catches is a boot-readiness prediction that drifts from the names the
+/// chassis fan-out actually registers — `spawn_substrate` would then wait
+/// out its readiness budget on a name nothing ever claims.
 #[test]
-fn replica_names_suffixes_every_instance() {
-    assert_eq!(replica_names("handler", 3), vec!["handler-0", "handler-1", "handler-2"],);
-    assert_eq!(replica_names("handler", 1), vec!["handler-0"]);
+fn replica_names_claim_the_bare_base_then_suffix() {
+    assert_eq!(replica_names("handler", 3), vec!["handler", "handler-1", "handler-2"],);
+    assert_eq!(replica_names("handler", 1), vec!["handler"]);
 }
 
 /// `reject_replicas_out_of_range` rejects 0 and values above [`MAX_REPLICAS`]
@@ -381,4 +482,162 @@ async fn replace_component_bad_mailbox_address_is_tool_error() {
         }))
         .await;
     assert!(result.is_err(), "a malformed mbx- address should be a tool error");
+}
+
+#[test]
+fn upload_binary_args_default_pin_is_false() {
+    let args: UploadBinaryArgs =
+        serde_json::from_value(serde_json::json!({ "staged_path": "/tmp/bin" })).expect("decode");
+    assert!(!args.pin, "omitted pin JSON-defaults to false");
+    assert!(args.name.is_none());
+}
+
+#[test]
+fn upload_binary_args_explicit_pin_true() {
+    let args: UploadBinaryArgs =
+        serde_json::from_value(serde_json::json!({ "staged_path": "/tmp/bin", "pin": true })).expect("decode");
+    assert!(args.pin);
+}
+
+#[test]
+fn upload_component_args_default_and_explicit_pin() {
+    let defaulted: UploadComponentArgs =
+        serde_json::from_value(serde_json::json!({ "staged_path": "/tmp/c.wasm" })).expect("decode");
+    assert!(!defaulted.pin);
+    let pinned: UploadComponentArgs =
+        serde_json::from_value(serde_json::json!({ "staged_path": "/tmp/c.wasm", "pin": true })).expect("decode");
+    assert!(pinned.pin);
+}
+
+#[tokio::test]
+async fn upload_binary_forwards_default_and_explicit_pin_hub_local() {
+    let cells = FleetLocalCells::new();
+    let (_chassis, port) = boot_hub_with_fleet_local_sink(cells.clone());
+    let mcp = connect_mcp(port);
+    let missing = "/no-such-aether-pin-fixture.bin";
+
+    let out = mcp
+        .upload_binary(Parameters(UploadBinaryArgs { staged_path: missing.to_owned(), name: None, pin: false }))
+        .await
+        .expect("scripted upload ok");
+    assert_eq!(out, r#"{"hash":"bin-hash","name":null}"#);
+
+    *cells.binary_reply.lock().expect("binary reply mutex") =
+        UploadBinaryResult::Ok { hash: "pinned-hash".to_owned(), name: Some("keep".to_owned()) };
+    let pinned_out = mcp
+        .upload_binary(Parameters(UploadBinaryArgs {
+            staged_path: missing.to_owned(),
+            name: Some("keep".to_owned()),
+            pin: true,
+        }))
+        .await
+        .expect("scripted pinned upload ok");
+    assert_eq!(pinned_out, r#"{"hash":"pinned-hash","name":"keep"}"#);
+
+    let forwarded = cells.binary.lock().expect("binary log mutex").clone();
+    assert_eq!(forwarded.len(), 2, "both uploads must reach the hub-local fleet handler");
+    assert_eq!(forwarded[0].staged_path, missing);
+    assert!(!forwarded[0].pin);
+    assert!(forwarded[0].name.is_none());
+    assert_eq!(forwarded[1].staged_path, missing);
+    assert!(forwarded[1].pin);
+    assert_eq!(forwarded[1].name.as_deref(), Some("keep"));
+}
+
+#[tokio::test]
+async fn upload_binary_propagates_typed_error() {
+    let cells = FleetLocalCells::new();
+    *cells.binary_reply.lock().expect("binary reply mutex") =
+        UploadBinaryResult::Err { error: "describe failed".to_owned() };
+    let (_chassis, port) = boot_hub_with_fleet_local_sink(cells);
+    let mcp = connect_mcp(port);
+    let err = mcp
+        .upload_binary(Parameters(UploadBinaryArgs {
+            staged_path: "/no-such-aether-pin-fixture.bin".to_owned(),
+            name: None,
+            pin: true,
+        }))
+        .await
+        .expect_err("typed Err is a tool error");
+    assert!(err.to_string().contains("describe failed"), "got {err}");
+}
+
+#[tokio::test]
+async fn upload_component_forwards_pin_hub_local_and_errors() {
+    let cells = FleetLocalCells::new();
+    let (_chassis, port) = boot_hub_with_fleet_local_sink(cells.clone());
+    let mcp = connect_mcp(port);
+    let missing = "/no-such-aether-pin-fixture.wasm";
+
+    let out = mcp
+        .upload_component(Parameters(UploadComponentArgs { staged_path: missing.to_owned(), name: None, pin: true }))
+        .await
+        .expect("scripted component upload ok");
+    assert_eq!(out, r#"{"hash":"cmp-hash","name":null}"#);
+
+    *cells.component_reply.lock().expect("component reply mutex") =
+        UploadComponentResult::Err { error: "unparseable wasm".to_owned() };
+    let err = mcp
+        .upload_component(Parameters(UploadComponentArgs { staged_path: missing.to_owned(), name: None, pin: false }))
+        .await
+        .expect_err("typed Err is a tool error");
+    assert!(err.to_string().contains("unparseable wasm"), "got {err}");
+
+    let forwarded = cells.component.lock().expect("component log mutex").clone();
+    assert_eq!(forwarded.len(), 2, "ok and error uploads must both reach the hub-local handler");
+    assert_eq!(forwarded[0].staged_path, missing);
+    assert!(forwarded[0].pin);
+    assert!(forwarded[0].name.is_none());
+    assert_eq!(forwarded[1].staged_path, missing);
+    assert!(!forwarded[1].pin);
+    assert!(forwarded[1].name.is_none());
+}
+
+#[tokio::test]
+async fn pin_and_unpin_artifact_forward_exact_hash_and_bit() {
+    let cells = FleetLocalCells::new();
+    let (_chassis, port) = boot_hub_with_fleet_local_sink(cells.clone());
+    let mcp = connect_mcp(port);
+
+    let pin_out =
+        mcp.pin_artifact(Parameters(ArtifactPinArgs { hash: "abc".to_owned() })).await.expect("scripted pin ok");
+    assert_eq!(pin_out, r#"{"hash":"pin-hash","pinned":true}"#);
+
+    *cells.pin_reply.lock().expect("pin reply mutex") =
+        SetArtifactPinnedResult::Ok { hash: "abc".to_owned(), pinned: false };
+    let unpin_out =
+        mcp.unpin_artifact(Parameters(ArtifactPinArgs { hash: "abc".to_owned() })).await.expect("scripted unpin ok");
+    assert_eq!(unpin_out, r#"{"hash":"abc","pinned":false}"#);
+
+    let forwarded = cells.pins.lock().expect("pin log mutex").clone();
+    assert_eq!(forwarded.len(), 2);
+    assert_eq!(forwarded[0].hash, "abc");
+    assert!(forwarded[0].pinned);
+    assert_eq!(forwarded[1].hash, "abc");
+    assert!(!forwarded[1].pinned);
+}
+
+#[tokio::test]
+async fn pin_and_unpin_artifact_propagate_typed_errors() {
+    let cells = FleetLocalCells::new();
+    *cells.pin_reply.lock().expect("pin reply mutex") =
+        SetArtifactPinnedResult::Err { error: "no stored artifact has hash \"missing\"".to_owned() };
+    let (_chassis, port) = boot_hub_with_fleet_local_sink(cells.clone());
+    let mcp = connect_mcp(port);
+    let pin_err = mcp
+        .pin_artifact(Parameters(ArtifactPinArgs { hash: "missing".to_owned() }))
+        .await
+        .expect_err("typed pin Err is a tool error");
+    assert!(pin_err.to_string().contains("no stored artifact has hash"), "got {pin_err}");
+    let unpin_err = mcp
+        .unpin_artifact(Parameters(ArtifactPinArgs { hash: "missing".to_owned() }))
+        .await
+        .expect_err("typed unpin Err is a tool error");
+    assert!(unpin_err.to_string().contains("no stored artifact has hash"), "got {unpin_err}");
+    let forwarded = cells.pins.lock().expect("pin log mutex").clone();
+    assert_eq!(forwarded.len(), 2);
+    assert_eq!(forwarded[0].hash, "missing");
+    assert!(forwarded[0].pinned);
+    assert_eq!(forwarded[1].hash, "missing");
+    assert!(!forwarded[1].pinned);
 }

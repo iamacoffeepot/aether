@@ -864,6 +864,7 @@ dependencies = [
  "aether-harness-substrate",
  "aether-kinds",
  "aether-kit-commons",
+ "aether-math",
  "aether-test-fixtures-bundle",
  "aether-test-fixtures-kinds",
  "arc-swap",

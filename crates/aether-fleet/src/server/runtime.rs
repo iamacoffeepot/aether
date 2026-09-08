@@ -17,13 +17,13 @@ use aether_actor::runtime;
 pub use aether_actor::{Manual, Single};
 pub use aether_data::{EngineId, Kind, MailboxId, Uuid};
 use aether_kinds::{
-    BinarySelector, ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine,
-    TerminateEngine, UploadBinary, UploadComponent,
+    BinarySelector, ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SetArtifactPinned,
+    SpawnEngine, TerminateEngine, UploadBinary, UploadComponent,
 };
 pub use aether_kinds::{
     DeadEngineDescriptor, DeathReason, EngineDescriptor, ListComponentBinariesResult, ListEngineBinariesResult,
-    ListEnginesResult, ResolveComponentResult, SpawnEngineResult, TerminateEngineResult, UploadBinaryResult,
-    UploadComponentResult,
+    ListEnginesResult, ResolveComponentResult, SetArtifactPinnedResult, SpawnEngineResult, TerminateEngineResult,
+    UploadBinaryResult, UploadComponentResult,
 };
 use aether_rpc::RouteEnvelope;
 pub use aether_substrate::Mail;
@@ -36,6 +36,7 @@ pub use aether_substrate::mail::SourceAddr;
 pub use aether_substrate::mail::mailer::Mailer;
 pub use std::collections::HashMap;
 pub use std::collections::VecDeque;
+use std::fs;
 use std::io;
 pub use std::path::{Path, PathBuf};
 pub use std::process::{Child, Command, Stdio};
@@ -48,9 +49,9 @@ pub use std::time::{Duration, Instant};
 // runtime half.
 pub use super::artifacts::{
     bootstrap_ingest, exec_file_name, ingest_binary, ingest_component, realize_executable, resolve_component,
-    resolve_selector,
+    resolve_selector, set_artifact_pinned,
 };
-pub use super::fleet::{free_local_port, resolve_fleet_store_root, settle_err};
+pub use super::fleet::{engine_dir, free_local_port, resolve_fleet_store_root, settle_err, sweep_engine_dirs};
 
 /// How many recently-died engines [`FleetServer`]
 /// retains for `list_engines`' `recently_died` sidecar (issue 1906). A small
@@ -78,8 +79,10 @@ pub struct DeadRecord {
 /// not the caller's `BinarySelector`. A bare name or attribute query
 /// resolves against whatever the store holds *now*, so replaying it could
 /// silently restart a crashed engine onto a different binary than the one
-/// that crashed; the hash cannot. The hash is still re-resolved at
-/// restart time, because the store's LRU may have evicted it since.
+/// that crashed; the hash cannot. The hash is still re-resolved at restart
+/// time — a recipe names content, not a materialized path — and the store
+/// is told to hold it for as long as the lineage can still replay it
+/// (issue 5686), so the content it names is there to resolve.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpawnRecipe {
     /// Content hash of the binary this engine was forked from.
@@ -240,6 +243,13 @@ pub struct EngineEntry {
 /// route, and terminate cannot observe a reservation as a supervised engine.
 pub struct PendingEngine {
     pub rpc_port: u16,
+    /// Content hash of the binary this birth was forked from. The recipe
+    /// itself rides the staged birth's [`FleetSpawnContext`], which is not
+    /// state this cap can read, so the hash is kept here — it is what
+    /// [`FleetServerState::refresh_binary_holds`] needs to keep the store
+    /// from reclaiming a binary an engine is already running while its
+    /// supervision is still committing.
+    pub hash: String,
     /// A Live proxy can report its death from the activation catch-up wake
     /// before the parent's later task completion runs. Latch only the first
     /// report so completion cannot install a corpse or duplicate its death.
@@ -396,6 +406,104 @@ pub struct FleetServerState {
 }
 
 impl FleetServerState {
+    /// Re-derive which stored binaries supervision is currently running
+    /// and hand the set to the store, which spares them from LRU eviction
+    /// (issue 5686).
+    ///
+    /// Without this the only protections are a name and an operator pin,
+    /// and neither covers a running engine: `upload_binary` repointing
+    /// `default` at fresh bytes leaves the previously-named hash unnamed
+    /// and immediately reclaimable *while an engine forked from it is
+    /// still alive* — and a restart of that engine then finds no recipe to
+    /// replay. The operator's pin stays the operator's: supervision never
+    /// sets or clears it, so the two protections cannot overwrite each
+    /// other.
+    ///
+    /// Every lineage state that owes a re-fork is a holder — a committed
+    /// engine, a birth still staging, and a restart waiting out its
+    /// backoff — so a lineage stays protected across the gaps where it
+    /// owns no live process. Deriving the whole set from those three maps
+    /// is what makes several engines sharing one hash correct without a
+    /// reference count: the hash leaves the set exactly when the last of
+    /// them is gone.
+    ///
+    /// Called at each supervision transition rather than before each
+    /// ingest. The cap is single-threaded and the store evicts only inside
+    /// an upload handler, so no reclaim can observe the set between the
+    /// transitions of one handler's turn.
+    fn refresh_binary_holds(&mut self) {
+        self.store.set_holds(
+            self.engines
+                .values()
+                .map(|entry| entry.supervision.recipe.hash.clone())
+                .chain(self.pending_engines.values().map(|pending| pending.hash.clone()))
+                .chain(self.pending_restarts.values().map(|supervision| supervision.recipe.hash.clone()))
+                .collect(),
+        );
+    }
+
+    /// Reserve the pending row for a staged proxy birth and hold the
+    /// binary it was forked from. The one entry point into
+    /// [`FleetServerState::pending_engines`], shared by the requested-spawn
+    /// and restart paths so neither can register a birth the store does
+    /// not know is running.
+    pub fn begin_pending_spawn(&mut self, engine_id: EngineId, rpc_port: u16, hash: String) {
+        let replaced = self.pending_engines.insert(engine_id, PendingEngine { rpc_port, hash, early_death: None });
+        debug_assert!(replaced.is_none(), "fresh engine ids cannot replace a pending spawn");
+        self.refresh_binary_holds();
+    }
+
+    /// Drop a supervised engine at the operator's request, releasing the
+    /// hold on its binary, and hand back the entry so the caller can record
+    /// the death and forward the terminate. `None` when no engine has that
+    /// id.
+    pub fn retire_engine(&mut self, engine_id: EngineId) -> Option<EngineEntry> {
+        let entry = self.engines.remove(&engine_id)?;
+        self.refresh_binary_holds();
+        self.reap_engine_dir(engine_id);
+        Some(entry)
+    }
+
+    /// Reclaim the scratch dir a fork materialized this engine's binary
+    /// into (issue 5502).
+    ///
+    /// Every spawn copies the resolved content bytes to
+    /// `<fleet store root>/<engine id>/<app name>` and forks that, so an
+    /// engine that leaves supervision without this leaks a whole binary to
+    /// disk under a bare uuid — unbounded growth proportional to spawn
+    /// count on a long-lived hub, with nothing to correlate it back to.
+    /// Called at every exit from supervision: a terminate, a reported
+    /// death, a birth that never committed, and an abandoned re-fork
+    /// attempt.
+    ///
+    /// Best-effort. The dir may not exist (a failure before the
+    /// materialize) and unlinking a running image is refused on some
+    /// hosts; either way the boot sweep is the backstop, so a failure is
+    /// logged and the death proceeds. The engine id is logged rather than
+    /// the path, which ADR-0115 keeps host-side.
+    fn reap_engine_dir(&self, engine_id: EngineId) {
+        match fs::remove_dir_all(engine_dir(&self.fleet_store_root, engine_id)) {
+            // A spawn that failed before the materialize left no dir at all.
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                target: "aether_substrate::fleet_server",
+                engine_id = %engine_id.0,
+                error = ?e.kind(),
+                "engine store: could not reclaim the engine's materialized binary; the next hub boot sweeps it",
+            ),
+        }
+    }
+
+    /// Record a `SpawnFailed` death against an engine id that never became
+    /// supervised and reclaim what its fork already materialized. The
+    /// shared terminal step for every birth that burned an id without
+    /// producing an engine (issue 2423, issue 5502).
+    fn abandon_spawn(&mut self, engine_id: EngineId, rpc_port: u16, detail: String) {
+        self.record_death(engine_id.0.to_string(), rpc_port, DeathReason::SpawnFailed { detail });
+        self.reap_engine_dir(engine_id);
+    }
+
     /// Push a [`DeadRecord`] onto the recently-died ring, evicting the
     /// oldest entry once the ring is full (issue 1906).
     pub fn record_death(&mut self, engine_id: String, rpc_port: u16, reason: DeathReason) {
@@ -411,7 +519,7 @@ impl FleetServerState {
     /// reap. For the failures after an `engine_id` has been minted but
     /// before the engine was ever registered alive.
     fn fail_spawn(&mut self, engine_id: EngineId, rpc_port: u16, error: String) -> SpawnEngineResult {
-        self.record_death(engine_id.0.to_string(), rpc_port, DeathReason::SpawnFailed { detail: error.clone() });
+        self.abandon_spawn(engine_id, rpc_port, error.clone());
         SpawnEngineResult::Err { engine_id: Some(engine_id.0.to_string()), error }
     }
 
@@ -451,6 +559,9 @@ impl FleetServerState {
         let token = self.next_restart_token;
         self.next_restart_token += 1;
         self.pending_restarts.insert(token, supervision);
+        // The lineage owns no process across the backoff, so this is the
+        // one window where only the filed recipe holds its binary.
+        self.refresh_binary_holds();
         tracing::warn!(
             target: "aether_substrate::fleet_server",
             engine_id = %engine_id,
@@ -488,7 +599,7 @@ impl FleetServerState {
         // unbundled application after the file it executed and draws that
         // name as the menu bar's first title, so the spawn's own
         // `--app-name` names the file (`exec_file_name`, ADR-0212).
-        let exec_path = self.fleet_store_root.join(engine_id.0.simple().to_string()).join(exec_file_name(&recipe.args));
+        let exec_path = engine_dir(&self.fleet_store_root, engine_id).join(exec_file_name(&recipe.args));
         realize_executable(exec_source, &exec_path)
             .map_err(|e| post(prepare_fork_io_detail("materializing", &recipe.hash, &e)))?;
 
@@ -523,11 +634,14 @@ impl FleetServerState {
         let hash = supervision.recipe.hash.clone();
 
         // Re-resolve rather than trusting a path captured at spawn time:
-        // the store's LRU may have evicted this content since, in which
-        // case the recipe is no longer runnable and the engine simply
-        // stays dead. Its death is already recorded — there is no engine
-        // id for this attempt, so there is nothing honest to key a second
-        // record on.
+        // the recipe carries the content hash, not a materialized path, so
+        // the store is asked again where those bytes are. The filed
+        // restart held the hash across the backoff (issue 5686), so LRU
+        // cannot have reclaimed it; a peer handle on the same root still
+        // can, and then the recipe is no longer runnable and the engine
+        // simply stays dead. Its death is already recorded — there is no
+        // engine id for this attempt, so there is nothing honest to key a
+        // second record on.
         let Some(artifact) = resolve_selector(&mut self.store, &hash_selector(&hash)) else {
             tracing::error!(
                 target: "aether_substrate::fleet_server",
@@ -561,7 +675,7 @@ impl FleetServerState {
                     error = %error,
                     "engine restart: the re-fork failed; the engine stays dead",
                 );
-                self.record_death(engine_id.0.to_string(), rpc_port, DeathReason::SpawnFailed { detail: error });
+                self.abandon_spawn(engine_id, rpc_port, error);
                 return;
             }
         };
@@ -584,8 +698,7 @@ impl FleetServerState {
 
         match staged {
             Ok(_) => {
-                let replaced = self.pending_engines.insert(engine_id, PendingEngine { rpc_port, early_death: None });
-                debug_assert!(replaced.is_none(), "fresh engine ids cannot replace a pending spawn");
+                self.begin_pending_spawn(engine_id, rpc_port, hash);
                 tracing::warn!(
                     target: "aether_substrate::fleet_server",
                     engine_id = %engine_id.0,
@@ -606,7 +719,7 @@ impl FleetServerState {
                     error = %error,
                     "engine restart: the replacement proxy did not come up; the engine stays dead",
                 );
-                self.record_death(engine_id.0.to_string(), rpc_port, DeathReason::SpawnFailed { detail: error });
+                self.abandon_spawn(engine_id, rpc_port, error);
             }
         }
     }
@@ -623,12 +736,13 @@ impl FleetServerState {
         let pending = self.pending_engines.remove(&engine_id)?;
         debug_assert_eq!(pending.rpc_port, rpc_port, "spawn completion must match its pending engine");
 
-        Some(match outcome {
+        let reply = match outcome {
             ProxySpawnOutcome::Rejected(error) => self.fail_spawn(engine_id, rpc_port, error),
             ProxySpawnOutcome::Applied(proxy_mailbox) => {
                 if let Some(reason) = pending.early_death {
                     let error = format!("proxy died before supervision committed: {reason:?}");
                     self.record_death(engine_id.0.to_string(), rpc_port, reason);
+                    self.reap_engine_dir(engine_id);
                     SpawnEngineResult::Err { engine_id: Some(engine_id.0.to_string()), error }
                 } else {
                     self.engines.insert(
@@ -645,7 +759,13 @@ impl FleetServerState {
                     SpawnEngineResult::Ok { engine_id: engine_id.0.to_string(), rpc_port }
                 }
             }
-        })
+        };
+
+        // The birth left `pending_engines` either way: it is a committed
+        // engine holding its own binary now, or it is over and the hold
+        // its reservation carried is released.
+        self.refresh_binary_holds();
+        Some(reply)
     }
 
     /// Reconcile a proxy death against pending and committed supervision.
@@ -662,6 +782,13 @@ impl FleetServerState {
         }
         if let Some(entry) = self.engines.remove(&engine_id) {
             self.record_death(engine_id.0.to_string(), entry.rpc_port, reason);
+            // The corpse no longer runs its binary. A restart filed by the
+            // caller takes the hold back the same turn, before anything can
+            // reclaim it — the store entry, that is; the successor forks a
+            // fresh dir of its own, so this engine's materialized copy goes
+            // with it.
+            self.refresh_binary_holds();
+            self.reap_engine_dir(engine_id);
             return EngineDeathDisposition::LiveRemoved(Box::new(entry.supervision));
         }
         EngineDeathDisposition::Unknown
@@ -693,6 +820,22 @@ impl NativeActor for FleetServer {
         let mut store = ArtifactStore::open(&store_dir, config.binary_disk_budget_bytes)
             .map_err(|e| BootError::Other(Box::new(e)))?;
         bootstrap_ingest(&mut store, &config.binary_bootstrap);
+
+        // Reclaim the per-engine dirs an earlier hub process left under the
+        // fleet store root (issue 5502). A hub that has just started
+        // supervises nothing, so every engine dir there is a leftover: the
+        // backstop for the deaths that could not reap their own dir — a hub
+        // killed outright, or a host that refuses to unlink a running image.
+        let fleet_store_root = resolve_fleet_store_root(config.fleet_store_root.as_deref());
+        let reclaimed = sweep_engine_dirs(&fleet_store_root);
+        if reclaimed > 0 {
+            tracing::info!(
+                target: "aether_substrate::fleet_server",
+                reclaimed,
+                "engine store sweep: reclaimed engine dirs left by an earlier hub process",
+            );
+        }
+
         Ok(FleetServerState {
             engines: HashMap::new(),
             pending_engines: HashMap::new(),
@@ -701,7 +844,7 @@ impl NativeActor for FleetServer {
             heartbeat: config.heartbeat_params(),
             connect_budget: config.connect_budget(),
             spawn_attempts: config.spawn_attempts(),
-            fleet_store_root: resolve_fleet_store_root(config.fleet_store_root.as_deref()),
+            fleet_store_root,
             recently_died: VecDeque::new(),
             store,
             self_mailbox: ctx.self_id(),
@@ -858,9 +1001,7 @@ impl NativeActor for FleetServer {
 
             match result {
                 Ok(_) => {
-                    let replaced =
-                        state.pending_engines.insert(engine_id, PendingEngine { rpc_port, early_death: None });
-                    debug_assert!(replaced.is_none(), "fresh engine ids cannot replace a pending spawn");
+                    state.begin_pending_spawn(engine_id, rpc_port, recipe.hash.clone());
                     return;
                 }
                 Err((e, returned)) => {
@@ -879,6 +1020,12 @@ impl NativeActor for FleetServer {
                             attempts,
                             "engine spawn: substrate exited during startup (likely a stolen RPC port); re-forking on a fresh port",
                         );
+                        // The abandoned attempt burned an id, a port, and a
+                        // materialized copy of the binary. The next attempt
+                        // mints all three afresh, so this one's dir is
+                        // reclaimed here rather than left behind by a spawn
+                        // that ultimately succeeded (issue 5502).
+                        state.reap_engine_dir(engine_id);
                         continue;
                     }
                     owed.reply(ctx, &state.fail_spawn(engine_id, rpc_port, last_error));
@@ -967,7 +1114,7 @@ impl NativeActor for FleetServer {
             }
         };
 
-        let Some(entry) = state.engines.remove(&engine_id) else {
+        let Some(entry) = state.retire_engine(engine_id) else {
             return TerminateEngineResult::Err { error: format!("no supervised engine {}", mail.engine_id) };
         };
 
@@ -1099,6 +1246,10 @@ impl NativeActor for FleetServer {
     fn on_restart_due(state: &mut Self::State, ctx: &mut NativeCtx<'_, Single, Self>, mail: EngineRestartDue) {
         if let Some(supervision) = state.pending_restarts.remove(&mail.token) {
             state.restart_engine(ctx, supervision);
+            // The filed restart is no longer pending: it either became a
+            // staged birth that took the hold on its binary, or it failed
+            // and the lineage is over, releasing it.
+            state.refresh_binary_holds();
         }
     }
 
@@ -1123,18 +1274,23 @@ impl NativeActor for FleetServer {
     /// Ingest a binary into the hub's content-addressed store.
     ///
     /// # Agent
-    /// Send `UploadBinary { staged_path, name }`. The hub reads the
+    /// Send `UploadBinary { staged_path, name, pin }`. The hub reads the
     /// staged path itself (aether-mcp never reads the bytes — too
     /// large for the tool channel), sha256-hashes it, dedups against
     /// the store, forks `staged_path --describe` to capture its
     /// `BinaryManifest`, stores both, and points `name` (when set) at
-    /// the hash. Reply: `UploadBinaryResult::Ok { hash, name }`, or
+    /// the hash. `pin: true` records durable explicit protection before
+    /// eviction; `pin: false` never clears an existing pin. Reply:
+    /// `UploadBinaryResult::Ok { hash, name }`, or
     /// `Err { error }` for an unreadable path, a `--describe` that
     /// failed or didn't yield a parseable manifest, or a store write
-    /// that didn't land — an `Ok` hash is always resolvable.
+    /// that didn't land. `Ok` means this ingest succeeded; unnamed
+    /// unpinned content remains eligible for same-call or later budget
+    /// eviction. A name or `pin: true` retains the hash; unpin removes
+    /// only the explicit flag, so a remaining name still protects.
     #[handler::single]
     fn on_upload_binary(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UploadBinary) -> UploadBinaryResult {
-        match ingest_binary(&mut state.store, &mail.staged_path, mail.name.clone()) {
+        match ingest_binary(&mut state.store, &mail.staged_path, mail.name.clone(), mail.pin) {
             Ok(hash) => UploadBinaryResult::Ok { hash, name: mail.name },
             Err(error) => UploadBinaryResult::Err { error },
         }
@@ -1161,23 +1317,50 @@ impl NativeActor for FleetServer {
     /// (ADR-0116, issue 1956).
     ///
     /// # Agent
-    /// Send `UploadComponent { staged_path, name }`. The hub reads the
+    /// Send `UploadComponent { staged_path, name, pin }`. The hub reads the
     /// staged path itself (aether-mcp never reads the bytes — too large
     /// for the tool channel), sha256-hashes it, dedups against the
     /// store, reads the manifest straight from the wasm (no execution
     /// step), stores both, and points `name` (when set) at the hash.
-    /// Reply: `UploadComponentResult::Ok { hash, name }`, or
+    /// `pin: true` records durable explicit protection before eviction;
+    /// `pin: false` never clears an existing pin. Reply:
+    /// `UploadComponentResult::Ok { hash, name }`, or
     /// `Err { error }` for an unreadable path, an unparseable wasm, or a
-    /// store write that didn't land — an `Ok` hash is always resolvable.
+    /// store write that didn't land. `Ok` means this ingest succeeded;
+    /// unnamed unpinned content remains eligible for same-call or later
+    /// budget eviction. A name or `pin: true` retains the hash; unpin
+    /// removes only the explicit flag, so a remaining name still protects.
     #[handler::single]
     fn on_upload_component(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
         mail: UploadComponent,
     ) -> UploadComponentResult {
-        match ingest_component(&mut state.store, &mail.staged_path, mail.name.clone()) {
+        match ingest_component(&mut state.store, &mail.staged_path, mail.name.clone(), mail.pin) {
             Ok(hash) => UploadComponentResult::Ok { hash, name: mail.name },
             Err(error) => UploadComponentResult::Err { error },
+        }
+    }
+
+    /// Set or clear durable explicit pin protection on one stored
+    /// content hash.
+    ///
+    /// # Agent
+    /// Send `SetArtifactPinned { hash, pinned }`. `hash` is an exact
+    /// stored content hash — names are never resolved. `pinned: true`
+    /// pins; `pinned: false` unpins only the explicit flag (a name still
+    /// protects). Reply: `SetArtifactPinnedResult::Ok { hash, pinned }`
+    /// after a successful persist, or `Err { error }` for an unknown hash
+    /// or a persistence failure. A failed unpin keeps prior protection.
+    #[handler::single]
+    fn on_set_artifact_pinned(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: SetArtifactPinned,
+    ) -> SetArtifactPinnedResult {
+        match set_artifact_pinned(&mut state.store, &mail.hash, mail.pinned) {
+            Ok((hash, pinned)) => SetArtifactPinnedResult::Ok { hash, pinned },
+            Err(error) => SetArtifactPinnedResult::Err { error },
         }
     }
 

@@ -19,11 +19,15 @@ use serde::Serialize;
 use super::hex::{self, digest_from_hex, hex_encode};
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed, VerifyPending, admit};
+#[cfg(feature = "github")]
+use super::state::{PendingRepairPush, RepairPublication};
 use crate::api::dto::{
     AdjudicateRequest, GrantRequest, HoldRequest, OutcomeView, ReleaseAcceptedView, RepairRequest, RetryRequest,
     SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest,
 };
 use crate::bloomery::DoctorReport;
+#[cfg(feature = "github")]
+use crate::bloomery::push_candidate;
 use crate::control::ControlCore;
 use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
 
@@ -217,11 +221,19 @@ impl ApiCapabilityState {
     /// suite and the delta-confirm review still run over the operator's tree.
     /// Only the model lap is skipped.
     ///
-    /// `from_commit` / `from_worktree` (#5032) run first, on the host: the
-    /// chassis derives the pair, records correspondence, and pushes the
-    /// candidate ref, then admits the same fact the low-level form does. A
-    /// failure there is a `422` that names the precondition, so it never
-    /// becomes a journaled repair of a candidate the verifying lane cannot see.
+    /// `from_commit` / `from_worktree` (#5032) name a source the chassis derives
+    /// the pair from, recording both correspondence rows so the verifying lane
+    /// can resolve them. A failure there is a `422` that names the precondition,
+    /// so it never becomes a journaled repair of a candidate that cannot be
+    /// resolved.
+    ///
+    /// What the derivation deliberately does **not** do is publish the candidate
+    /// ref. Deriving is additive — two correspondence rows keyed by digests
+    /// nothing else names — but the ref is the live address the member's own
+    /// checkout resolves, and force-pushing it before the reducer has ruled on
+    /// the request destroys a running member's candidate on a repair the reducer
+    /// then refuses (issue #5560). The publication is owed instead on the
+    /// admitted outcome, in [`settle_repair`](Self::settle_repair).
     pub(super) fn repair(&self, id: &str, workpiece: &str, body: &[u8]) -> Routed {
         let bloom = match digest_from_hex(id) {
             Some(digest) => BloomId(digest),
@@ -235,12 +247,17 @@ impl ApiCapabilityState {
         if let Some(refusal) = unstated(&reason, &operator) {
             return Routed::Reply(refusal);
         }
-        let candidate = match resolve_repair_candidate(self, &bloom, workpiece, candidate, from_commit, from_worktree) {
-            Ok(candidate) => candidate,
+        let resolved = match resolve_repair_candidate(self, candidate, from_commit, from_worktree) {
+            Ok(resolved) => resolved,
             Err(response) => return Routed::Reply(response),
         };
 
-        let repair = OperatorRepair { workpiece: WorkpieceId(workpiece.to_owned()), candidate, reason, operator };
+        let repair = OperatorRepair {
+            workpiece: WorkpieceId(workpiece.to_owned()),
+            candidate: resolved.candidate,
+            reason,
+            operator,
+        };
         let key = idempotency_key.unwrap_or_else(|| {
             format!(
                 "aether.bloomery.repair:{}:{}",
@@ -248,8 +265,19 @@ impl ApiCapabilityState {
                 hex_encode(digest_of(&repair).as_bytes())
             )
         });
+        let event = Event { idempotency_key: IdempotencyKey(key), fact: Fact::OperatorRepair { bloom, repair } };
 
-        admit(&Event { idempotency_key: IdempotencyKey(key), fact: Fact::OperatorRepair { bloom, repair } })
+        #[cfg(feature = "github")]
+        if let Some(commit_hex) = resolved.publication {
+            return match to_vec(&event) {
+                Ok(bytes) => Routed::RepairAdmit {
+                    request: Admit { event: bytes },
+                    publication: Box::new(RepairPublication { bloom, workpiece: workpiece.to_owned(), commit_hex }),
+                },
+                Err(error) => Routed::Reply(error_response(500, &format!("event encode failed: {error}"))),
+            };
+        }
+        admit(&event)
     }
 
     /// `POST /blooms/{id}/members/{workpiece}/retry` — run the member's current
@@ -571,6 +599,84 @@ impl ApiCapabilityState {
     }
 }
 
+/// The repair door's second half: the host effect it owes an *admitted* repair.
+#[cfg(feature = "github")]
+impl ApiCapabilityState {
+    /// Force-push a held repair's candidate ref now that the reducer has ruled,
+    /// then answer the operator (issue #5560).
+    ///
+    /// Returns `Some(mail)` when this admit reply belongs to no held repair, so
+    /// the ordinary rendering runs; `None` once it has answered its own.
+    ///
+    /// The ref moves only on [`Outcome::OperatorRepairAccepted`]. Every refusal
+    /// the reducer raises at this door — a held bloom, a member that is not
+    /// wedged, one that has already resolved (ADR-0181) — now reaches the
+    /// operator with the live candidate ref exactly as it was; before, the push
+    /// ran while the request was still being parsed, so a refused repair still
+    /// overwrote the ref a running member's checkout resolves.
+    ///
+    /// The remaining window is the other way round: an admitted repair whose
+    /// push then fails. That leaves the member dispatched at `Verify` against a
+    /// ref that was never published, which the checkout gate already refuses as
+    /// machinery rather than judging (ADR-0195) — a stopped member with a stated
+    /// cause, rather than a destroyed ref nobody asked to move. The `500` says
+    /// both halves so the operator knows the repair is journaled and only the
+    /// publication is owed; re-POSTing the same body republishes it.
+    pub(super) fn settle_repair(&mut self, ctx: &NativeCtx<'_, Manual>, mail: AdmitResult) -> Option<AdmitResult> {
+        let Some(PendingRepairPush { inbound, publication }) =
+            self.repair_pushes.remove(&ctx.reply_target().correlation_id)
+        else {
+            return Some(mail);
+        };
+        if !admitted_repair(&mail) {
+            inbound.reply(&admit_response(mail));
+            return None;
+        }
+
+        let RepairPublication { bloom, workpiece, commit_hex } = publication;
+        let response = self
+            .publish_repaired_candidate(&bloom, &workpiece, &commit_hex)
+            .map_or_else(|refusal| refusal, |()| admit_response(mail));
+        inbound.reply(&response);
+        None
+    }
+
+    /// Force-push one admitted repair's candidate to the workpiece's ref, or the
+    /// `500` that says the repair is journaled and only its publication is owed.
+    fn publish_repaired_candidate(
+        &self,
+        bloom: &BloomId,
+        workpiece: &str,
+        commit_hex: &str,
+    ) -> Result<(), HttpServerResponse> {
+        let Some(pusher) = self.pusher.as_ref() else {
+            return Err(error_response(500, "the repair was admitted but this chassis mounts no candidate-ref pusher"));
+        };
+        push_candidate(pusher.as_ref(), bloom, workpiece, commit_hex).map_err(|error| {
+            error_response(
+                500,
+                &format!(
+                    "the repair was admitted but publishing its candidate ref failed: {error}; the member refuses \
+                     its verify as machinery until the ref is published"
+                ),
+            )
+        })
+    }
+}
+
+/// Whether an admit reply is the reducer *accepting* an operator repair — the
+/// one answer that earns the candidate-ref publication. Anything else, refusal
+/// or admit fault, leaves the ref where it is.
+#[cfg(feature = "github")]
+fn admitted_repair(result: &AdmitResult) -> bool {
+    match result {
+        AdmitResult::Ok { outcome } => {
+            matches!(from_bytes::<Outcome>(outcome), Ok(Outcome::OperatorRepairAccepted { .. }))
+        }
+        AdmitResult::Err { .. } => false,
+    }
+}
+
 /// The one source a repair body is allowed to name.
 #[derive(Debug)]
 enum RepairSource {
@@ -595,31 +701,51 @@ fn repair_source(
     }
 }
 
+/// What a repair body resolved to: the pair the fact will carry, and — for a
+/// derived source — the commit the door still owes the member's candidate ref
+/// once the reducer has admitted the repair (issue #5560).
+struct ResolvedRepairCandidate {
+    /// The `(tree, checkout)` pair `Fact::OperatorRepair` carries.
+    candidate: CandidateRef,
+    /// The git commit hex to force-push to the member's candidate ref, or
+    /// `None` when the operator handed the pair over directly: nothing was
+    /// derived from a commit, so there is nothing to publish.
+    #[cfg(feature = "github")]
+    publication: Option<String>,
+}
+
 /// Pick the candidate the repair will admit: the operator-supplied pair, or
 /// one derived from a reachable commit. Exactly one source is accepted.
 fn resolve_repair_candidate(
     state: &ApiCapabilityState,
-    bloom: &BloomId,
-    workpiece: &str,
     candidate: Option<CandidateRef>,
     from_commit: Option<String>,
     from_worktree: Option<String>,
-) -> Result<CandidateRef, HttpServerResponse> {
+) -> Result<ResolvedRepairCandidate, HttpServerResponse> {
     match repair_source(candidate, from_commit, from_worktree)? {
-        RepairSource::Candidate(candidate) => Ok(candidate),
-        source => derive_repair_candidate(state, bloom, workpiece, &source),
+        RepairSource::Candidate(candidate) => Ok(ResolvedRepairCandidate {
+            candidate,
+            #[cfg(feature = "github")]
+            publication: None,
+        }),
+        source => derive_repair_candidate(state, &source),
     }
 }
 
+/// Derive the pair from a commit and record both correspondence rows, without
+/// touching the candidate ref.
+///
+/// Takes neither the bloom nor the workpiece, because it addresses nothing: the
+/// ref those two name is published later, from the admitted outcome. The pusher
+/// is still checked here so a chassis that could never publish refuses the
+/// request at the door rather than journaling a repair it cannot complete.
 fn derive_repair_candidate(
     state: &ApiCapabilityState,
-    bloom: &BloomId,
-    workpiece: &str,
     source: &RepairSource,
-) -> Result<CandidateRef, HttpServerResponse> {
+) -> Result<ResolvedRepairCandidate, HttpServerResponse> {
     #[cfg(not(feature = "github"))]
     {
-        let _ = (state, bloom, workpiece, source);
+        let _ = (state, source);
         Err(error_response(
             422,
             "this chassis cannot derive a candidate from a commit: the GitHub source runtime is not mounted",
@@ -630,36 +756,38 @@ fn derive_repair_candidate(
     {
         use std::path::Path;
 
-        use crate::bloomery::{CandidateSource, prepare_candidate};
+        use crate::bloomery::{CandidateSource, derive_candidate};
 
-        let (Some(correspondence), Some(pusher)) = (state.correspondence.as_ref(), state.pusher.as_ref()) else {
+        let Some(correspondence) = state.correspondence.as_ref() else {
             return Err(error_response(
                 422,
                 "this chassis cannot derive a candidate from a commit: no correspondence store is mounted",
             ));
         };
-        let prepared = match source {
-            RepairSource::FromCommit(commit) => prepare_candidate(
-                correspondence.as_ref(),
-                pusher.as_ref(),
-                bloom,
-                workpiece,
-                CandidateSource::Commit(commit),
-                Path::new("."),
-            ),
-            RepairSource::FromWorktree(path) => prepare_candidate(
-                correspondence.as_ref(),
-                pusher.as_ref(),
-                bloom,
-                workpiece,
-                CandidateSource::Worktree(Path::new(path)),
-                Path::new("."),
-            ),
+        if state.pusher.is_none() {
+            return Err(error_response(
+                422,
+                "this chassis cannot derive a candidate from a commit: no candidate-ref pusher is mounted, so an \
+                 admitted repair could never be published",
+            ));
+        }
+        let derived = match source {
+            RepairSource::FromCommit(commit) => {
+                derive_candidate(correspondence.as_ref(), CandidateSource::Commit(commit), Path::new("."))
+            }
+            RepairSource::FromWorktree(path) => {
+                derive_candidate(correspondence.as_ref(), CandidateSource::Worktree(Path::new(path)), Path::new("."))
+            }
             RepairSource::Candidate(_) => {
                 return Err(error_response(500, "derive_repair_candidate was handed a pre-built candidate"));
             }
         };
-        prepared.map_err(|error| error_response(422, &error.to_string()))
+        derived
+            .map(|derived| ResolvedRepairCandidate {
+                candidate: derived.candidate,
+                publication: Some(derived.commit_hex),
+            })
+            .map_err(|error| error_response(422, &error.to_string()))
     }
 }
 
