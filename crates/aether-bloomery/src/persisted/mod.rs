@@ -64,7 +64,9 @@ use crate::digest::{Digest, encode_hex, schema_digest};
 use crate::reduce::decisions_v1::DecisionsV1;
 use crate::reduce::{Decisions, Event};
 use crate::values::process_instructions_pre_reader::ModelProcessInstructionsPreReader;
-use crate::values::{ApprovalPolicy, ModelOverride, ModelProcessInstructions, PriceTable, SpendCeiling, StageCatalog};
+use crate::values::{
+    ApprovalPolicy, ModelOverride, ModelProcessInstructions, PipelineManifest, PriceTable, SpendCeiling, StageCatalog,
+};
 
 pub use rendering::{RenderError, render_schema};
 
@@ -402,6 +404,17 @@ pub static MODEL_PROCESS_INSTRUCTIONS: PersistedKind = PersistedKind {
     current: OnceLock::new(),
 };
 
+/// The [`PersistedKind`] for the sealed [`PipelineManifest`] a base declares
+/// (ADR-0215). Host-derived rather than operator-authored, and persisted like
+/// any other sealed configuration, so its shape is stamped and pinned like one.
+pub static PIPELINE_MANIFEST: PersistedKind = PersistedKind {
+    name: PipelineManifest::NAME,
+    schema: &<PipelineManifest as Schema>::SCHEMA,
+    bootstrap: Bootstrap::Current,
+    upcasts: &[],
+    current: OnceLock::new(),
+};
+
 /// The [`PersistedKind`] for sealed [`PriceTable`].
 pub static PRICE_TABLE: PersistedKind = PersistedKind {
     name: PriceTable::NAME,
@@ -436,6 +449,7 @@ pub static PERSISTED_KINDS: &[&PersistedKind] = &[
     &APPROVAL_POLICY,
     &MODEL_OVERRIDE,
     &MODEL_PROCESS_INSTRUCTIONS,
+    &PIPELINE_MANIFEST,
     &PRICE_TABLE,
     &SPEND_CEILING,
     &STAGE_CATALOG,

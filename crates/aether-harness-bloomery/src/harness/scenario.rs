@@ -289,6 +289,13 @@ impl ScenarioHarness {
         self.wire.post(path, body)
     }
 
+    /// [`post`](Self::post) with the method left to the caller — the shaping
+    /// doors are `PATCH`, and a draft is handed its base through one.
+    #[must_use]
+    pub fn request(&self, method: &str, path: &str, body: &str) -> (u16, String) {
+        self.wire.request(method, path, body)
+    }
+
     /// Admit one reducer fact through the control core's wire ingress.
     pub fn admit(&mut self, key: &str, fact: Fact) -> Outcome {
         self.wire.admit(key, fact)
