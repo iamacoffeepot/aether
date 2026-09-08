@@ -17,7 +17,7 @@ use aether_bloomery::{
     AgentSelection, BloomId, CalibrationLedger, CandidateRef, CapabilityCell, CapabilityLedger, ConfigKind, Decision,
     Decisions, Digest, Event, Evidence, EvidenceKind, Fact, Harness, ModelOverride, Outcome, PipelineManifest,
     ReasoningEffort, ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, StageOverride,
-    StoreClass, StudyCost, StudyRecord, Unproducible, VerifyFailure, VerifyFailureSet, reduce,
+    StoreClass, StudyCost, StudyRecord, Unproducible, VerifyFailure, VerifyFailureSet, VerifyGateSet, reduce,
 };
 use common::{claim, digest, draft_with_member_override, event, membership, workpiece};
 
@@ -60,12 +60,12 @@ impl Journal {
         }
         let spec = draft.seal();
         let bloom = spec.id();
-        let mut journal = Self {
-            snapshot: Snapshot::new(digest(1)).with_green_base(digest(1)),
-            ledger: CalibrationLedger::default(),
-            configs,
-            bloom,
+        let snapshot = Snapshot::new(digest(1));
+        let snapshot = match manifest {
+            Some(manifest) => snapshot.with_green_base_under(digest(1), VerifyGateSet::base_of(manifest).digest()),
+            None => snapshot.with_green_base(digest(1)),
         };
+        let mut journal = Self { snapshot, ledger: CalibrationLedger::default(), configs, bloom };
         journal.admit(&event("seal", Fact::Seal(spec)));
         journal
     }

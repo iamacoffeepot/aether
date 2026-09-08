@@ -301,11 +301,19 @@ impl Snapshot {
     /// `verify.base`.
     #[cfg(any(test, feature = "testing"))]
     #[must_use]
-    pub fn with_green_base(mut self, base: Digest) -> Self {
+    pub fn with_green_base(self, base: Digest) -> Self {
+        self.with_green_base_under(base, VerifyGateSet::base().digest())
+    }
+
+    /// Stamp a green receipt for `base` under `gate_set`, so a bloom whose
+    /// sealed vocabulary is not the compiled one still sees a proven tree.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn with_green_base_under(mut self, base: Digest, gate_set: Digest) -> Self {
         let receipt = BaseReceipt {
             base,
             tree: base,
-            gate_set: VerifyGateSet::base().digest(),
+            gate_set,
             verdict: BaseVerdict::Green {
                 evidence: Evidence {
                     subject: base,
