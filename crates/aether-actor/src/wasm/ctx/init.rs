@@ -51,7 +51,13 @@ impl WasmInitCtx<'_> {
     /// Resolve a mailbox by name and bind it to kind `K`, producing a
     /// typed [`Mailbox<K>`]. Pure compile-time construction; the returned
     /// token is pure addressing.
+    ///
+    /// The by-name escape hatch, for a target the component knows only as a
+    /// runtime string. A component that knows the peer's *type* addresses it
+    /// through `ctx.actor::<C>()` from `wire` onwards, which resolves through
+    /// the ADR-0099 lineage carry instead of freezing a name.
     #[must_use]
+    #[allow(clippy::disallowed_methods)] // aether-suppression-request: the SDK's one sanctioned wrapper over the by-name token constructor, so the free fn stays gated for everyone else
     pub const fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K> {
         resolve_mailbox::<K>(name)
     }

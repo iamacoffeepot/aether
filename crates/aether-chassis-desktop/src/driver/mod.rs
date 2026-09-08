@@ -18,9 +18,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use aether_actor::Addressable;
+use aether_actor::{Addressable, root_mailbox};
 use aether_data::Kind;
-use aether_data::{encode_empty, mailbox_id_from_name};
+use aether_data::encode_empty;
 use aether_kinds::{Quit, Tick, WindowId as EngineWindowId};
 use aether_render::{Frame, Occluded, RenderCapability, RenderCapabilityState, RenderParams, RenderTuningConfig};
 use aether_substrate::actor::native::PumpedSlot;
@@ -494,18 +494,11 @@ impl DriverCapability for DesktopDriverCapability {
             let _ = render_mail_proxy.send_event(UserEvent::WindowMail);
         }));
 
-        // Chassis route-freezing: the pumped render actor's own id (its
-        // NAMESPACE), the recipient for the per-frame `Frame` request and the
-        // `Occluded` forward. ctx-less, no sibling resolver in scope — the
-        // lifecycle route below uses the same escape hatch.
-        #[allow(clippy::disallowed_methods)]
-        let render_mailbox = mailbox_id_from_name(<RenderCapability as Addressable>::NAMESPACE);
-
-        // Chassis route-freezing: the desktop driver wires its event loop to
-        // the lifecycle cap's own id (its NAMESPACE) at construction time —
-        // ctx-less, no sibling resolver in scope.
-        #[allow(clippy::disallowed_methods)]
-        let lifecycle_mailbox = mailbox_id_from_name(<aether_lifecycle::LifecycleCapability as Addressable>::NAMESPACE);
+        // The recipient for the per-frame `Frame` request and the `Occluded`
+        // forward. ctx-less driver setup, so the root-pinned resolver answers
+        // directly — the lifecycle route below is the same shape.
+        let render_mailbox = root_mailbox::<RenderCapability>();
+        let lifecycle_mailbox = root_mailbox::<aether_lifecycle::LifecycleCapability>();
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
 
         // The watcher sends the window-owned `Quit` event directly; the

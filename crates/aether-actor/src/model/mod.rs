@@ -253,6 +253,25 @@ pub trait Addressable: Sized + Send + 'static {
 /// an instance currently exists.
 pub trait Root: Addressable {}
 
+/// The mailbox of a root-pinned singleton, resolved with no caller in hand.
+///
+/// Boot and driver code addresses a chassis capability before any actor ctx
+/// exists, so it cannot reach the target through `ctx.actor::<C>()`. It gets
+/// the same address anyway: [`One`] pins to the root and ignores the caller's
+/// carry (ADR-0099 §3), so the seed is [`MailboxId::NONE`] and the answer is
+/// the depth-1 fixed point — `resolve` stays the single derivation rather
+/// than the caller re-deriving `hash(NAMESPACE)` beside it.
+///
+/// The bound is the point. `C: Root` says the identity may sit without an
+/// actor parent, and `Resolver = One` says its address does not depend on
+/// one. An [`Embedded`] or [`Many`] actor — whose mailbox is knowable only
+/// under some caller's lineage — is a compile error here rather than a
+/// silently wrong depth-1 hash.
+#[must_use]
+pub fn root_mailbox<C: Root + Addressable<Resolver = One>>() -> MailboxId {
+    C::resolve(MailboxId::NONE.0, ())
+}
+
 /// Placement permission for an actor identity that may appear directly
 /// beneath logical parent `P` (ADR-0166).
 ///

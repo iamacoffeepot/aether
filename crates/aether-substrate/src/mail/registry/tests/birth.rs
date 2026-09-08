@@ -16,8 +16,10 @@ use crate::mail::registry::effect::{
 };
 use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::relay::RouteRelayLease;
-use crate::mail::registry::{DropError, InboxHandler, MailboxEntry, OwnedDispatch, Registry, noop_handler};
-use crate::mail::{KindId, Mail, MailRef, MailboxId};
+use crate::mail::registry::{
+    DropError, InboxHandler, MailboxEntry, OwnedDispatch, Registry, canonical_mailbox_id, noop_handler,
+};
+use crate::mail::{KindId, Mail, MailRef};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::{Pool, PoolConfig, SeizeHandle, WakeSink};
 use crate::testing::boot_authority as auth;
@@ -39,8 +41,8 @@ fn prepared_births_publish_together_then_promote_independently_with_exact_cost_c
         RegistryQueueCapacities::default(),
     );
     let scheduled = Arc::new(AtomicUsize::new(0));
-    let first_id = MailboxId::from_name("prepared-first");
-    let second_id = MailboxId::from_name("prepared-second");
+    let first_id = canonical_mailbox_id("prepared-first");
+    let second_id = canonical_mailbox_id("prepared-second");
     let expected = vec![first_id, second_id];
     let (first_id, first_cell, _, first) = prepared_test_spawn(
         &registry,
@@ -96,7 +98,7 @@ fn rejected_batch_does_not_cancel_an_existing_prepared_birth() {
         RegistryQueueCapacities::default(),
     );
     let scheduled = Arc::new(AtomicUsize::new(0));
-    let id = MailboxId::from_name("prepared-cancel-rollback");
+    let id = canonical_mailbox_id("prepared-cancel-rollback");
     let (_, _, cancelled, effect) = prepared_test_spawn(
         &registry,
         &mailer,
@@ -141,7 +143,7 @@ fn bootstrap_then_parked_then_live_mail_is_deterministic_and_stale_barrier_is_co
     );
     let deliveries = Arc::new(Mutex::new(Vec::new()));
     let scheduled = Arc::new(AtomicUsize::new(0));
-    let id = MailboxId::from_name("prepared-fifo");
+    let id = canonical_mailbox_id("prepared-fifo");
     let (_, _, _, effect) =
         prepared_test_spawn(&registry, &mailer, "prepared-fifo", Arc::clone(&deliveries), scheduled, vec![id], 1);
     let completion = registry.submit(EffectBatch::new(vec![effect])).unwrap();
@@ -181,7 +183,7 @@ fn bootstrap_then_parked_then_live_mail_is_deterministic_and_stale_barrier_is_co
     assert_eq!(counter.live_roots(), 0, "malformed private control mail is consumed and balanced");
     assert_eq!(*deliveries.lock().unwrap(), [1, 2, 4, 3]);
 
-    let unknown_id = MailboxId::from_name("unknown-activation-control");
+    let unknown_id = canonical_mailbox_id("unknown-activation-control");
     let unknown = activation_barrier(unknown_id, token, 1);
     mailer.record_sent(unknown.mail_id, unknown.root, None, unknown_id, unknown_id, unknown.kind);
     mailer.push(unknown);
@@ -274,7 +276,7 @@ fn starting_tokens_are_unique_stale_safe_and_transactional() {
     assert_eq!(registry.route_generation(), before_rollback, "rejected transaction publishes no partial Starting");
 
     let name = "token-reuse";
-    let id = MailboxId::from_name(name);
+    let id = canonical_mailbox_id(name);
     let first = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
     owner.run_once();
     let first_token = starting_token(&first.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
@@ -317,7 +319,7 @@ fn starting_parks_fifo_and_owner_close_routes_every_accepted_mail_once() {
         RegistryQueueCapacities::default(),
     );
     let name = "starting-close-fifo";
-    let id = MailboxId::from_name(name);
+    let id = canonical_mailbox_id(name);
     let reserved = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
     owner.run_once();
     let _token = starting_token(&reserved.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());

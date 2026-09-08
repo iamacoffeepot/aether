@@ -85,7 +85,7 @@ pub use actor::native::{HandlerSpawnBuilder, SpawnOutcome, SpawnReceipt};
 pub use actor::registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError};
 #[cfg(feature = "wasm")]
 pub use actor::wasm::component::{Component, ComponentCtx};
-pub use aether_actor::Addressable;
+pub use aether_actor::{Addressable, root_mailbox};
 pub use aether_actor::{Emit, Manual, Multi, ReplyMode, Single};
 pub use aether_derive::{Config, StageArgv};
 #[cfg(feature = "wasm")]

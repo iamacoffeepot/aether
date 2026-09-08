@@ -49,6 +49,7 @@ pub use handlers::{InboxHandler, InlineHandler, noop_handler};
 pub(crate) use mailbox::{CapturedDisposition, RouteContinuation, RouteEndpoint, SeizeCell};
 pub use mailbox::{MailboxEntry, Registry, RouteResolution};
 pub use metrics::RegistryQueueMetrics;
+pub(crate) use names::canonical_mailbox_id;
 pub(crate) use owner::ParkAdmission;
 pub(crate) use owner::RegistryOwnerLease;
 pub(crate) use relay::RouteRelayHandle;

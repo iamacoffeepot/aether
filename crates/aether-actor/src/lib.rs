@@ -66,7 +66,7 @@ pub use model::slot::Slot;
 pub use model::{
     Actor, Addressable, CallerAddressable, CallerScope, CallerScoped, ChildOf, EMBEDDED_SCOPE, Embedded, EmbeddedMany,
     HandlesKind, Instanced, Lifecycle, Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Publishes, Resolve, Root,
-    Singleton, Subname, validate_namespace_segment,
+    Singleton, Subname, root_mailbox, validate_namespace_segment,
 };
 pub use request_context::{
     REQUEST_CONTEXT_CAPACITY, RequestContextTable, compose_state_envelope, split_state_envelope,
