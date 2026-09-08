@@ -25,6 +25,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod affected;
+mod bins;
 mod bloom;
 mod build_wasm;
 mod cargo;
@@ -42,6 +43,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::affected::AffectedArgs;
+use crate::bins::BinsArgs;
 use crate::bloom::BloomArgs;
 use crate::build_wasm::BuildWasmArgs;
 use crate::dev_component::DevComponentArgs;
@@ -103,6 +105,10 @@ enum Commands {
     /// Append one field write to a `scope.fill` run's call log. The value
     /// arrives by file so multi-paragraph prose survives the transport.
     Scope(ScopeArgs),
+    /// Print the chassis-binary inventory (`inventory::CHASSIS_BINS`) so a
+    /// script or workflow reads the shipped binary names instead of
+    /// re-spelling them (issue 5707).
+    Bins(BinsArgs),
 }
 
 fn main() -> Result<()> {
@@ -119,5 +125,6 @@ fn main() -> Result<()> {
         Commands::Bloom(args) => bloom::run(&args),
         Commands::Symbols(args) => symbols::run(&args),
         Commands::Scope(args) => scope::run(&args),
+        Commands::Bins(args) => bins::run(&args),
     }
 }

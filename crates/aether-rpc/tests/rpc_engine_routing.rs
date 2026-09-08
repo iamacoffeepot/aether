@@ -23,7 +23,7 @@
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
 use aether_fleet::{FleetConfig, FleetServer};
-use aether_fs::{List, ListResult};
+use aether_fs::{List, ListResult, NamespaceAddr};
 use aether_kinds::descriptors;
 use aether_kinds::{BinarySelector, SpawnEngine, SpawnEngineResult, TerminateEngine};
 use aether_rpc::RpcServerHandle;
@@ -277,7 +277,7 @@ mod tests {
             2,
             Some(engine_id),
             "aether.fs",
-            &List { namespace: "save".to_owned(), prefix: String::new() },
+            &List { addr: NamespaceAddr::new("save", String::new()) },
         );
         assert_eq!(
             routed_kind,
