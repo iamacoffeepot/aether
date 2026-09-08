@@ -132,9 +132,9 @@ mod tests {
     /// A loaded component's id is the ADR-0099 §3 lineage fold over
     /// `[aether.component, aether.embedded:<name>]`. The loaded facade first
     /// traverses the declared host-to-trampoline edge, then exposes that same
-    /// mailbox under the guest recipient type. Direct typed resolution,
-    /// default and named peer lookup, and `resolve_embedded` must agree with
-    /// it.
+    /// mailbox under the guest recipient type. Direct typed resolution, the
+    /// nameless `loaded_default` host route, default and named peer lookup,
+    /// and `resolve_embedded` must agree with it.
     #[test]
     fn loaded_composes_the_canonical_trampoline_address() {
         // The ctx binding (sender + inline registry) is irrelevant to id
@@ -148,6 +148,7 @@ mod tests {
         let host = WasmActorMailbox::<ComponentHostCapability>::__new(parent.0, 0, &registry);
         let name = Guest::NAMESPACE;
         let camera = host.loaded::<Guest>(name);
+        let default_loaded = host.loaded_default::<Guest>();
         let trampoline = host.resolve::<WasmTrampoline>(name);
         let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(caller.0, &registry, NO_INBOUND_SOURCE);
         let default_peer = ctx.peer::<Guest>();
@@ -155,6 +156,7 @@ mod tests {
 
         assert_eq!(camera.mailbox_id(), trampoline.mailbox_id());
         assert_eq!(camera.mailbox_id(), resolve_embedded(name));
+        assert_eq!(camera.mailbox_id(), default_loaded.mailbox_id());
         assert_eq!(camera.mailbox_id(), default_peer.mailbox_id());
         assert_eq!(camera.mailbox_id(), named_peer.mailbox_id());
     }

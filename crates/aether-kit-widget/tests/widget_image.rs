@@ -22,8 +22,8 @@ use aether_kit_widget::{
 };
 use aether_math::Rgba;
 use aether_render::{
-    CreateTexture, CreateTextureResult, DestroyTexture, DrawTexturedQuads, TextureFormat, TextureSampling,
-    TextureUsage, TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
+    CreateTexture, CreateTextureResult, DestroyTexture, QuadBlend, Shape, ShapeTexture, TextureFormat, TextureSampling,
+    TextureUsage,
 };
 
 const PANEL_X: f32 = 8.0;
@@ -137,19 +137,35 @@ fn capture(harness: &mut SubstrateHarness, panel: &str) -> Image {
     decode_png(captured.captured("capture").expect("capture bytes")).expect("decode image capture")
 }
 
-fn image_batch(snapshot: &[DrawTexturedQuads], texture_id: u32) -> &DrawTexturedQuads {
-    let matching: Vec<_> = snapshot.iter().filter(|batch| batch.texture_id == texture_id).collect();
-    assert_eq!(matching.len(), 1, "exactly one batch uses texture {texture_id}");
-    matching[0]
+/// The image's face as it lands in a committed batch
+/// (iamacoffeepot/aether#5709): a box at the theme's corner radius sampling
+/// the texture inside its fill, with the widget's tint as that fill.
+fn image_shape(texture_id: u32, frame: [f32; 4], uv: [f32; 4], tint: Rgba) -> Shape {
+    let [x, y, width, height] = frame;
+    let [u0, v0, u1, v1] = uv;
+    Shape {
+        x,
+        y,
+        width,
+        height,
+        corner_radius: theme().corner_radius_pixels,
+        fill: Some(tint),
+        stroke: None,
+        shadow: None,
+        texture: Some(ShapeTexture { texture_id, u0, v0, u1, v1, blend: QuadBlend::Straight }),
+    }
 }
 
-fn assert_image_batch(snapshot: &[DrawTexturedQuads], texture_id: u32, expected_quad: RenderTexturedQuad) {
-    assert_eq!(snapshot.len(), 2, "panel background plus one image batch");
-    assert_eq!(snapshot[0].texture_id, WHITE_TEXTURE_ID);
-    let batch = image_batch(snapshot, texture_id);
-    assert_eq!(batch.space, QuadSpace::Screen);
-    assert_eq!(batch.clip, Some(ClipRect { x: PANEL_X, y: PANEL_Y, width: PANEL_WIDTH, height: ROW_HEIGHT }));
-    assert_eq!(batch.quads, vec![expected_quad]);
+/// The image's own batch, under the panel background that must still sit
+/// behind it. Both are shapes now: the image samples its texture inside a
+/// rounded fill, so the frame carries no textured-quad batch at all.
+fn assert_image_shape(harness: &SubstrateHarness, expected: Shape) {
+    assert!(harness.committed_overlay_snapshot().is_empty(), "a textured shape leaves no textured-quad batch");
+    let shapes = harness.committed_shape_snapshot();
+    assert_eq!(shapes.len(), 2, "the panel background, then the image over it");
+    assert_eq!(shapes[1].space, QuadSpace::Screen);
+    assert_eq!(shapes[1].clip, Some(ClipRect { x: PANEL_X, y: PANEL_Y, width: PANEL_WIDTH, height: ROW_HEIGHT }));
+    assert_eq!(shapes[1].shapes, vec![expected]);
 }
 
 #[test]
@@ -169,20 +185,9 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
     let image = format!("{panel}/{}:image", aether_component::WasmTrampoline::NAMESPACE);
 
     let fill_pixels = capture(&mut harness, &panel);
-    assert_image_batch(
-        &harness.committed_overlay_snapshot(),
-        first_texture_id,
-        RenderTexturedQuad {
-            x: PANEL_X,
-            y: PANEL_Y,
-            width: PANEL_WIDTH,
-            height: ROW_HEIGHT,
-            u0: 0.0,
-            v0: 0.0,
-            u1: 1.0,
-            v1: 1.0,
-            tint,
-        },
+    assert_image_shape(
+        &harness,
+        image_shape(first_texture_id, [PANEL_X, PANEL_Y, PANEL_WIDTH, ROW_HEIGHT], [0.0, 0.0, 1.0, 1.0], tint),
     );
     let red =
         target_color_stats(&fill_pixels, [255, 0, 0], 24, Some(Rect { min_x: 9, min_y: 10, max_x: 12, max_y: 13 }));
@@ -191,31 +196,11 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
     for (fit, expected) in [
         (
             ImageFit::Contain,
-            RenderTexturedQuad {
-                x: PANEL_X,
-                y: PANEL_Y + 2.5,
-                width: PANEL_WIDTH,
-                height: 15.0,
-                u0: 0.0,
-                v0: 0.0,
-                u1: 1.0,
-                v1: 1.0,
-                tint,
-            },
+            image_shape(first_texture_id, [PANEL_X, PANEL_Y + 2.5, PANEL_WIDTH, 15.0], [0.0, 0.0, 1.0, 1.0], tint),
         ),
         (
             ImageFit::Cover,
-            RenderTexturedQuad {
-                x: PANEL_X,
-                y: PANEL_Y,
-                width: PANEL_WIDTH,
-                height: ROW_HEIGHT,
-                u0: 0.125,
-                v0: 0.0,
-                u1: 0.875,
-                v1: 1.0,
-                tint,
-            },
+            image_shape(first_texture_id, [PANEL_X, PANEL_Y, PANEL_WIDTH, ROW_HEIGHT], [0.125, 0.0, 0.875, 1.0], tint),
         ),
     ] {
         harness
@@ -225,7 +210,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
             )])
             .expect("reconfigure image fit");
         let _ = capture(&mut harness, &panel);
-        assert_image_batch(&harness.committed_overlay_snapshot(), first_texture_id, expected);
+        assert_image_shape(&harness, expected);
     }
 
     let natural = ImageConfig {
@@ -238,20 +223,9 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         .execute(vec![("reconfigure_natural", HarnessOp::send_and_settle(&image, &natural))])
         .expect("configure oversized natural image");
     let _ = capture(&mut harness, &panel);
-    assert_image_batch(
-        &harness.committed_overlay_snapshot(),
-        first_texture_id,
-        RenderTexturedQuad {
-            x: PANEL_X - 10.0,
-            y: PANEL_Y - 5.0,
-            width: 50.0,
-            height: 30.0,
-            u0: 0.0,
-            v0: 0.0,
-            u1: 1.0,
-            v1: 1.0,
-            tint,
-        },
+    assert_image_shape(
+        &harness,
+        image_shape(first_texture_id, [PANEL_X - 10.0, PANEL_Y - 5.0, 50.0, 30.0], [0.0, 0.0, 1.0, 1.0], tint),
     );
 
     let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
@@ -259,29 +233,21 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         .execute(vec![("hide", HarnessOp::send_and_settle(&image, &SetWidgetState { state: hidden }))])
         .expect("hide image");
     let _ = capture(&mut harness, &panel);
-    let hidden_snapshot = harness.committed_overlay_snapshot();
-    assert_eq!(hidden_snapshot.len(), 1, "hidden image leaves only panel chrome");
-    assert_eq!(hidden_snapshot[0].texture_id, WHITE_TEXTURE_ID);
+    assert_eq!(harness.committed_shape_snapshot().len(), 1, "a hidden image leaves only the panel chrome");
 
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
     harness
         .execute(vec![("disable", HarnessOp::send_and_settle(&image, &SetWidgetState { state: disabled }))])
         .expect("disable image");
     let _ = capture(&mut harness, &panel);
-    assert_image_batch(
-        &harness.committed_overlay_snapshot(),
-        first_texture_id,
-        RenderTexturedQuad {
-            x: PANEL_X - 10.0,
-            y: PANEL_Y - 5.0,
-            width: 50.0,
-            height: 30.0,
-            u0: 0.0,
-            v0: 0.0,
-            u1: 1.0,
-            v1: 1.0,
-            tint: Rgba::new(tint.r, tint.g, tint.b, tint.a * 0.25),
-        },
+    assert_image_shape(
+        &harness,
+        image_shape(
+            first_texture_id,
+            [PANEL_X - 10.0, PANEL_Y - 5.0, 50.0, 30.0],
+            [0.0, 0.0, 1.0, 1.0],
+            Rgba::new(tint.r, tint.g, tint.b, tint.a * 0.25),
+        ),
     );
 
     let replacement = ImageConfig {
@@ -297,25 +263,17 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         .execute(vec![("replace", HarnessOp::send_and_settle(&image, &replacement))])
         .expect("replace image config in place");
     let _ = capture(&mut harness, &panel);
-    let replacement_snapshot = harness.committed_overlay_snapshot();
     assert!(
-        replacement_snapshot.iter().all(|batch| batch.texture_id != first_texture_id),
-        "replacement frame must not retain the old texture batch",
+        harness
+            .committed_shape_snapshot()
+            .iter()
+            .flat_map(|batch| &batch.shapes)
+            .all(|shape| { shape.texture.as_ref().is_none_or(|texture| texture.texture_id != first_texture_id) }),
+        "replacement frame must not retain the old texture",
     );
-    assert_image_batch(
-        &replacement_snapshot,
-        second_texture_id,
-        RenderTexturedQuad {
-            x: PANEL_X + 10.0,
-            y: PANEL_Y + 2.0,
-            width: 10.0,
-            height: 16.0,
-            u0: 0.0,
-            v0: 0.0,
-            u1: 1.0,
-            v1: 1.0,
-            tint: Rgba::WHITE,
-        },
+    assert_image_shape(
+        &harness,
+        image_shape(second_texture_id, [PANEL_X + 10.0, PANEL_Y + 2.0, 10.0, 16.0], [0.0, 0.0, 1.0, 1.0], Rgba::WHITE),
     );
 
     harness

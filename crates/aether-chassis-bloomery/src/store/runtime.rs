@@ -40,6 +40,7 @@ use aether_data::wire::{from_bytes, to_vec};
 use aether_kinds::descriptors;
 use std::collections::HashSet;
 use std::iter::repeat_n;
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::bloomery::{ScopeRunRefusal, open_scope_run};
@@ -3068,13 +3069,16 @@ pub fn resolved_configs(store: &mut dyn StoreBackend) -> rusqlite::Result<aether
 /// dispatcher owns.
 pub struct StoreCapabilityState {
     backend: SqliteStore,
+    /// [`StoreConfig::boot_replay_hold_millis`](super::StoreConfig) as a
+    /// duration; zero holds nothing.
+    boot_replay_hold: Duration,
 }
 
 impl StoreCapabilityState {
     /// Build state over an explicit store — the seam the handler tests drive.
     #[must_use]
     pub fn new(backend: SqliteStore) -> Self {
-        Self { backend }
+        Self { backend, boot_replay_hold: Duration::ZERO }
     }
 
     /// Persist a verified approval, refusing a scope that names a workpiece
@@ -3116,7 +3120,10 @@ impl NativeActor for StoreCapability {
     fn init(config: super::StoreConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<StoreCapabilityState, BootError> {
         let store = SqliteStore::open_as_holder(&config.path).map_err(|error| BootError::Other(Box::new(error)))?;
         tracing::info!(target: "aether_chassis_bloomery::store", path = %config.path, "store opened (WAL), journal claimed");
-        Ok(StoreCapabilityState { backend: store })
+        Ok(StoreCapabilityState {
+            backend: store,
+            boot_replay_hold: Duration::from_millis(config.boot_replay_hold_millis),
+        })
     }
 
     #[handler::single]
@@ -3247,6 +3254,14 @@ impl NativeActor for StoreCapability {
         _ctx: &mut NativeCtx<'_>,
         _mail: ReplayJournal,
     ) -> ReplayJournalResult {
+        // The hold widens the boot window on purpose (issue 5765): the
+        // control core refuses reads until this reply has folded, and a
+        // fixture proving that refusal needs the window to outlast its own
+        // handshake. Blocking this actor is the point — no other store mail
+        // is due before the fold — and the default holds nothing.
+        if !state.boot_replay_hold.is_zero() {
+            thread::sleep(state.boot_replay_hold);
+        }
         match state.backend.replay_journal() {
             Ok(records) => ReplayJournalResult::Ok { records },
             Err(error) => ReplayJournalResult::Err { error: error.to_string() },

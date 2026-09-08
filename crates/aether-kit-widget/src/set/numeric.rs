@@ -39,8 +39,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, TextEditState, TextSpan};
 use crate::theme::{SetTheme, Theme, ThemeState};
 use crate::{
-    Collect, FocusLost, HoverLost, NumericChanged, NumericConfig, SetWidgetState, WidgetControlState, WidgetDrawItem,
-    WidgetFrame,
+    Collect, FocusLost, HoverLost, NumericChanged, NumericConfig, SetValue, SetWidgetState, WidgetControlState,
+    WidgetDrawItem, WidgetFrame,
 };
 
 /// Retained edit-buffer bound; comfortably exceeds every canonical finite
@@ -50,10 +50,6 @@ const NUMERIC_EDIT_MAX_CHARS: u32 = 32;
 /// How much of a stepper button the arrow inside it fills, on both axes. Small
 /// enough that the arrow reads as a mark on a button rather than as the button.
 const ARROW_EXTENT_FRACTION: f32 = 0.45;
-
-/// Rows [`push_triangle`] uses for one arrow at the sizes a stepper button
-/// comes to — only a `Vec::with_capacity` hint, never a correctness bound.
-const TRIANGLE_ROWS_PER_ARROW: usize = 8;
 
 /// How long a stepper button must be held before it starts repeating, in the
 /// root's per-frame `Collect`s — half a second at sixty a second. Long enough
@@ -214,6 +210,18 @@ impl NumericWidget {
         widget.committed_value = initial;
         widget.edit = TextEditState::new(Self::canonical(initial));
         widget
+    }
+
+    /// Pull the committed value back inside bounds that have just moved, and
+    /// rewrite the buffer only if that changed the number. A buffer left alone
+    /// is a half-typed entry the reader still owns; one rewritten is the
+    /// editor refusing to display a value it no longer holds.
+    fn reclamp(&mut self) {
+        let clamped = self.normalize(self.committed_value).or_else(|| self.normalize(0.0)).unwrap_or(0.0);
+        if clamped != self.committed_value {
+            self.committed_value = clamped;
+            self.edit = TextEditState::new(Self::canonical(clamped));
+        }
     }
 
     fn bounds(&self) -> NumericBounds {
@@ -462,7 +470,9 @@ impl NumericWidget {
     /// same surface lifted — never a second box beside the value.
     fn stepper_items(&self, column: StepperColumn, box_fill: Rgba) -> Vec<WidgetDrawItem> {
         let theme = &self.theme;
-        let mut items = Vec::with_capacity(3 + TRIANGLE_ROWS_PER_ARROW * 2);
+        // The hairline, plus an arrow and at most one touched-button overlay
+        // for each of the two directions.
+        let mut items = Vec::with_capacity(5);
         for direction in [StepDirection::Up, StepDirection::Down] {
             let (top, height) = column.button_span(direction);
             let button_state = self.stepper_state(direction);
@@ -581,6 +591,11 @@ impl WasmActor for NumericWidget {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
+    /// Re-bound and restyle in place from a re-sent config. `initial` seeds the
+    /// value only at `init`; the committed value is re-clamped into the new
+    /// range instead, and the buffer is rewritten only when that clamp actually
+    /// moved it — so re-bounding a field does not eat a half-typed number.
+    /// [`SetValue`] sets the value on purpose.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: NumericConfig) {
         self.min = config.min;
@@ -588,13 +603,7 @@ impl WasmActor for NumericWidget {
         self.step = config.step;
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
-        let initial = self.normalize(config.initial).or_else(|| self.normalize(0.0)).unwrap_or(0.0);
-        self.committed_value = initial;
-        self.edit = TextEditState::new(Self::canonical(initial));
-        self.dragging = false;
-        self.paste_pending = false;
-        self.hovered_stepper = None;
-        self.pressed_stepper = None;
+        self.reclamp();
         self.apply_control_state(ctx, config.state);
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
@@ -602,6 +611,15 @@ impl WasmActor for NumericWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
+    }
+
+    /// Push a value from the host: normalized into the current bounds, written
+    /// into the buffer, and silent — no [`NumericChanged`], since the host set
+    /// what it would be told about.
+    #[handler::single]
+    fn on_set_value(&mut self, _ctx: &mut WasmCtx<'_>, set: SetValue) {
+        self.committed_value = self.normalize(set.value).unwrap_or(self.committed_value);
+        self.edit = TextEditState::new(Self::canonical(self.committed_value));
     }
 
     #[handler::single]
@@ -617,9 +635,9 @@ impl WasmActor for NumericWidget {
     /// through the set's shared vocabulary, so the numeric buffer honours the
     /// same select-all / copy / cut / paste, Delete, Home/End, and word-motion
     /// chords a text field does — Cmd as well as Ctrl. A repeated press is
-    /// another edit, never a suppressed repeat: round-4 note 14 wants a held
-    /// arrow to keep stepping, and the platform's key repeat is exactly a
-    /// stream of presses ([`NumericWidget::key_step`]).
+    /// another edit, never a suppressed repeat: a held arrow keeps stepping,
+    /// and the platform's key repeat is exactly a stream of presses
+    /// ([`NumericWidget::key_step`]).
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if !self.state.is_available() {
@@ -1082,7 +1100,7 @@ mod tests {
         let fills: Vec<_> = items
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { x, y, width, height, color, .. }
+                WidgetDrawItem::Shape { x, y, width, height, fill: Some(color), .. }
                     if (*width - column.width).abs() < 1e-4 && *height > 1.0 =>
                 {
                     Some((*x, *y, *color))
@@ -1097,11 +1115,11 @@ mod tests {
         assert!(
             !items
                 .iter()
-                .any(|item| matches!(item, WidgetDrawItem::Quad { color, .. } if *color == Theme::DEFAULT.surface)),
+                .any(|item| matches!(item, WidgetDrawItem::Shape { fill: Some(color), .. } if *color == Theme::DEFAULT.surface)),
             "no part of the column fills itself from a second surface role; items were {items:?}",
         );
         let hairlines = items.iter().filter(|item| {
-            matches!(item, WidgetDrawItem::Quad { x, width, height, color, .. }
+            matches!(item, WidgetDrawItem::Shape { x, width, height, fill: Some(color), .. }
                 if *x == column.left && *width == 1.0 && *height == column.height && *color == Theme::DEFAULT.outline)
         });
         assert_eq!(hairlines.count(), 1, "one hairline is the whole seam; items were {items:?}");

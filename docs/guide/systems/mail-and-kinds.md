@@ -127,7 +127,7 @@ The lower-level `send_tracked(&request)` / `ctx.in_reply_to()` pair is still
 available when the request id itself is the domain key. `in_reply_to()` returns
 `None` for ordinary inbound requests, uncorrelated mail, and inline-cluster local
 dispatches that never crossed the host envelope boundary. Echoed payload fields
-such as `namespace` + `path` on `aether.fs.read_result` remain useful domain
+such as the echoed `addr` on `aether.fs.read_result` remain useful domain
 context, but exact duplicate-safe matching belongs to the request context or
 envelope request id. Multi emissions and detached data phases still carry their
 own domain-level correlation in their payloads.
@@ -197,6 +197,57 @@ recipe).
 - **Bare names** (`"camera"`, `"player"`) are not registered and warn-drop
   silently. If mail seems to vanish, check the address first.
 
+## Naming a kind
+
+A kind name is a wire contract, not a label. `Kind::ID` is
+`fnv1a_64_prefixed(KIND_DOMAIN, canonical(name, schema))`, so renaming a kind
+mints a different id and every peer that already routes on the old one stops
+matching. You get one shot at the name; spend it under this grammar.
+
+```text
+aether.<family>[.<sub>].<verb>_<noun>      command
+aether.<family>[.<sub>].<noun>_<past>      event
+aether.<family>[.<sub>].<verb>_<noun>_result   reply
+aether.<family>.config                     capability boot config
+```
+
+- **The family segment is mandatory.** A name is at least
+  `<root>.<family>.<leaf>`. `aether.render.destroy_texture` is a kind;
+  `aether.draw_triangle` is a family with no room to grow a sibling.
+- **Commands lead with the verb.** `create_texture`, `load_font`,
+  `set_master_gain`. A bare verb leaf is fine where the family already supplies
+  the noun — `aether.fs.read`, `aether.fs.write` — but the verb still leads.
+- **Events read `<noun>_<past participle>`**: `aether.tcp.session_closed`,
+  `aether.kit.widget.state_changed`. Carrying the noun is what keeps an event
+  clear of the command that causes it. `aether.window.close` against
+  `aether.window.closed` is the shape to avoid: one letter apart, and a typo in
+  either direction routes silently to the wrong kind.
+- **`_result` is the only reply suffix.** Not `_reply`, `_ack`, `_report`,
+  `_complete`, or a bare `.response` segment. A reply is
+  `<request>_result` and nothing else, so a caller can name the reply from the
+  request without a lookup.
+- **`.config` is the only config suffix.** A capability's boot config
+  (ADR-0090) is `aether.<family>.config` — its own segment, never a
+  `<something>_config` leaf.
+- **Segments are lowercase `snake_case`.** A dash appears only where it names a
+  dash-sibling namespace (`aether.kit.camera-controller.config`), never as a
+  word separator inside a segment.
+
+The two families to copy are **`aether.fs`** — six bare verbs under one family,
+each paired with `<verb>_result` — and **`aether.store`**, two dozen
+`<verb>_<noun>` / `<verb>_<noun>_result` pairs with no third spelling anywhere
+in it.
+
+The grammar is enforced as a test, not as a lint or a macro:
+`crates/aether-kinds/tests/kind_name_grammar.rs` scans every
+`#[kind(name = "…")]` declaration in `crates/` and checks the four mechanical
+rules above (family segment, segment casing, reply suffix, config suffix).
+Names that predate the grammar are listed in
+`crates/aether-kinds/tests/kind_name_allow_list.txt`; the test fails on a
+violator that is not on that list **and** on a list entry that is no longer a
+violator, so the file only ever shrinks. Fixing an entry means renaming a kind,
+which means changing its id — a deliberate per-family decision, not a drive-by.
+
 ## How to extend or reuse it
 
 The mail spine is the thing you extend *through*, so most extension is "teach
@@ -205,7 +256,8 @@ the system a new kind" or "stand up a new mailbox":
 - **A new message shape →** add a kind. See the [Adding a substrate
   kind](../recipes/adding-a-substrate-kind.md) recipe: define the type in the
   right kind crate, derive `Kind`/`Schema`, add a handler — the descriptor that
-  surfaces it on the MCP wire registers itself.
+  surfaces it on the MCP wire registers itself. Name it under [Naming a
+  kind](#naming-a-kind) before you write the struct.
 - **A new mailbox →** stand up an actor to own it. A native one is a chassis
   capability (the *Adding a chassis capability* recipe); a wasm one is a
   component (the *Writing a component* recipe). Either way it's the same actor

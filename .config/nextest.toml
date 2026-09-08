@@ -55,6 +55,16 @@ slow-timeout = { period = "120s", terminate-after = 1 }
 filter = "package(=aether-component-ui-tests) & binary(route_bounds)"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
+# The `Publishes<K>` subscribe-bound harness is the same shape one crate over,
+# and pays the same nested-cold-build cost: trybuild compiles a fresh project
+# per fixture. Its graph is narrower still — both cap dependencies are taken
+# `default-features = false`, so the ADR-0122 identity halves come in without
+# the substrate or wasmtime — but a cold two-core runner is far enough past the
+# 60s default that it needs the same bounded guard rather than the default cap.
+[[profile.ci.overrides]]
+filter = "package(=aether-subscribe-ui-tests) & binary(subscribe_bounds)"
+slow-timeout = { period = "300s", terminate-after = 1 }
+
 # The fleetharness replace binary also cold-loads `aether_kit_commons.wasm` and
 # was measured in #2805 around 156.8s against the 180s bundle cap. Keep the
 # package-wide cap intact and widen only this known slow binary. This override

@@ -6,9 +6,9 @@
 //! the one window the list already had, so a wheel, a drag and a keyboard
 //! reveal all move it by moving that window.
 
-use crate::set::quad;
 use crate::set::virtual_list::scroll::ScrollSpan;
 use crate::set::virtual_list::{VirtualListWidget, valid_frame};
+use crate::set::{quad, stadium};
 use crate::theme::ThemeState;
 use crate::{VirtualListConfig, WidgetDrawItem, WidgetFrame};
 
@@ -22,8 +22,8 @@ const MIN_THUMB_RATIO: f32 = 1.5;
 /// frame's right edge, and the thumb standing in it.
 ///
 /// The thumb's `height` is the visible share of the whole item vector and its
-/// `top` is where the reader is, which is the pair of facts round-4 note 3
-/// asked for. Both are derived from `first_index` every frame — the bar holds
+/// `top` is where the reader is — the two facts a scroll bar exists to say.
+/// Both are derived from `first_index` every frame — the bar holds
 /// no scroll state of its own, so a wheel, a drag, and a keyboard reveal all
 /// move it by moving the one window the list already had.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -197,12 +197,13 @@ impl VirtualListWidget {
         };
         [
             quad(bar.left, 0.0, bar.width, bar.height, self.theme.outline),
-            quad(
+            stadium(
                 bar.left,
                 bar.thumb_top,
                 bar.width,
                 bar.thumb_height,
-                self.theme.fill(self.theme.text_muted, thumb_state),
+                Some(self.theme.fill(self.theme.text_muted, thumb_state)),
+                None,
             ),
         ]
     }
@@ -239,7 +240,7 @@ mod tests {
         let metrics = widget.font_metrics.resolved().expect("the test table is installed");
         for item in widget.draw_items() {
             match item {
-                WidgetDrawItem::Quad { x, width, .. } => {
+                WidgetDrawItem::Shape { x, width, .. } => {
                     assert!(x + width <= bar.left || x >= bar.left, "a row fill straddles the bar's left edge");
                 }
                 WidgetDrawItem::Text { x, text, .. } => {
@@ -247,6 +248,7 @@ mod tests {
                     assert!(right < bar.left, "{text:?} runs to {right}, past the bar at {}", bar.left);
                 }
                 WidgetDrawItem::TexturedQuad { .. } => panic!("a list draws no textures"),
+                WidgetDrawItem::Triangle { .. } => panic!("a list draws no triangles"),
             }
         }
 

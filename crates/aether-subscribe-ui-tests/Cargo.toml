@@ -1,0 +1,26 @@
+[package]
+name = "aether-subscribe-ui-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Compile-time contract for the `Publishes<K>` gate on the two subscribe
+# surfaces (`LifecycleCapability` stages, `WindowCapability` device events).
+# Deliberately its own package for the same reason as
+# `aether-component-ui-tests`: trybuild promotes its host package's
+# dev-dependencies into each generated fixture project, and both cap crates
+# carry substrate harness dev-dependencies that would otherwise enter the
+# nested cold build.
+[dev-dependencies]
+trybuild = "1"
+aether-actor = { path = "../aether-actor" }
+aether-kinds = { path = "../aether-kinds" }
+# Identity halves only (ADR-0122): the facade, its `Publishes` markers, and
+# the bound under test are all always-on, so the fixture never needs the
+# substrate-typed runtime half of either cap.
+aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
+aether-window = { path = "../aether-window", default-features = false }
+
+[lints]
+workspace = true

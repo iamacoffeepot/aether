@@ -168,15 +168,15 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
     /// obligation rather than truncating the trace at the send. Reach
     /// for [`Self::send_detached`] for the rare fire-and-forget send
     /// that should start its own chain.
+    ///
+    /// [`Self::send_tracked`] with the minted id dropped — the two differ
+    /// only in whether the caller keeps that id.
     pub fn send<K>(&self, payload: &K)
     where
         R: HandlesKind<K>,
         K: Kind,
     {
-        let bytes = payload.encode_into_bytes();
-        // 2b: buffer into the actor's send-side ring with the captured
-        // in-flight lineage. Flushed at handler end by `NativeCtx`'s `Drop`.
-        let _ = self.binding.push_envelope_buffered(self.mailbox, K::ID.0, &bytes, 1, self.parent, self.root);
+        let _ = self.send_tracked(payload);
     }
 
     /// Send a slice of payloads as a contiguous batch. Cast-only.
@@ -202,13 +202,15 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
     /// linkage, so any reply the recipient issues inherits the
     /// *recipient's* tree rather than the sender's. Reply-correlated
     /// requests always go through [`Self::send`].
+    ///
+    /// [`Self::send_detached_tracked`] with the minted id dropped — the two
+    /// differ only in whether the caller keeps that id.
     pub fn send_detached<K>(&self, payload: &K)
     where
         R: HandlesKind<K>,
         K: Kind,
     {
-        let bytes = payload.encode_into_bytes();
-        let _ = self.binding.push_envelope_buffered(self.mailbox, K::ID.0, &bytes, 1, None, None);
+        let _ = self.send_detached_tracked(payload);
     }
 
     /// Like [`Self::send_detached`] but returns the minted `MailId` — the
@@ -256,6 +258,8 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
+        // 2b: buffer into the actor's send-side ring with the captured
+        // in-flight lineage. Flushed at handler end by `NativeCtx`'s `Drop`.
         self.binding.push_envelope_buffered(self.mailbox, K::ID.0, &bytes, 1, self.parent, self.root)
     }
 

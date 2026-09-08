@@ -150,9 +150,14 @@ fn on_open_panel(&mut self, ctx: &mut WasmCtx<'_>, _: OpenPanel) {
 
 The `ChildOf<RootManager>` bound rejects a missing placement at compile time.
 At runtime the ctx also verifies that its actual registry actor tag is
-`RootManager` before config encoding or the sibling-spawn host call. Inline
-composition uses the same rule with
-`spawn_inline_child::<RootManager, Panel>(...)`. The dynamic
+`RootManager` before config encoding or the sibling-spawn host call.
+
+Inline composition spells it `ctx.spawn_inline::<Panel>(subname, &config)` —
+the child type and nothing else, because a `composable` module child may sit
+beneath any parent its module exports, and the ctx already knows which one is
+running. Use `spawn_inline_child::<RootManager, Panel>(...)` for the
+`child_of(Parent)` edge, where the declared placement really does name one
+parent and checking it against the ctx is the point. The dynamic
 `spawn_inline_child_by_tag` form remains available for data-driven assembly,
 but its generated export resolver rejects unknown exports, non-instanced
 actors, and actors without an exact-or-`composable` relationship to the actual

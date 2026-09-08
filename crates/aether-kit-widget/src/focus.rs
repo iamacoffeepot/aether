@@ -101,13 +101,13 @@ impl Focus {
     /// Drop the layout table — the entries, and only the entries.
     ///
     /// A root rebuilds this table whenever its layout changes, which during a
-    /// drag is *every frame of the drag*: the studio's left pane rebuilt on
-    /// every `SplitterMoved`. So a rebuild is a statement about where the
+    /// drag is *every frame of the drag*: a pane being resized rebuilds on
+    /// every `SplitterChanged`. So a rebuild is a statement about where the
     /// children are, never about whether the person is still holding the
     /// button — focus, hover, the drag capture, and the modal grab all survive
     /// it. A `clear` that dropped the capture ended the resize on its first
     /// pixel, and a `clear` that dropped the hover left the strip lit with
-    /// nothing to send it a `HoverLost` (round-5 notes 1 and 14).
+    /// nothing to send it a `HoverLost`.
     ///
     /// What survives is validated against the table that replaces it, entry by
     /// entry, at every read: a child the rebuild did not re-register routes
@@ -558,7 +558,7 @@ mod tests {
     #[test]
     fn a_relayout_keeps_the_drag_it_was_routing_and_still_reports_the_hover_it_left() {
         // Tripwire: round-5 notes 1 and 14. A root that rebuilds its table on
-        // every `SplitterMoved` rebuilds it on the drag's first pixel, so a
+        // every `SplitterChanged` rebuilds it on the drag's first pixel, so a
         // `clear` that dropped the capture made the pane unresizable — and one
         // that dropped the hover left the strip lit, because the widget only
         // goes unlit when a `HoverLost` reaches it.

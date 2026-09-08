@@ -849,8 +849,9 @@ impl WasmActor for Puppet {
     #[handler::manual]
     fn on_read(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: ReadResult) {
         let path = match mail {
-            ReadResult::Ok { ref path, .. } => path.clone(),
-            ReadResult::Err { ref path, ref error, .. } => {
+            ReadResult::Ok { ref addr, .. } => addr.path.clone(),
+            ReadResult::Err { ref addr, ref error, .. } => {
+                let path = &addr.path;
                 tracing::warn!(target: "aether_puppet", path = %path, error = ?error, "read failed");
                 let reason = format!("read {path} failed: {error:?}");
                 self.settle(ctx, &LoadResult::Err { reason });
@@ -1301,8 +1302,8 @@ impl WasmActor for Puppet {
     fn on_program_registered(&mut self, _ctx: &mut WasmCtx<'_>, result: ProgramRegisterResult) {
         let result = match result {
             ProgramRegisterResult::Ok { program_id } => Ok(program_id),
-            ProgramRegisterResult::Err { reason } => {
-                tracing::info!(target: "aether_puppet", reason = %reason, "layer disabled: program register refused");
+            ProgramRegisterResult::Err { error } => {
+                tracing::info!(target: "aether_puppet", error = %error, "layer disabled: program register refused");
                 Err(())
             }
         };
@@ -1342,8 +1343,8 @@ impl WasmActor for Puppet {
     fn on_geometry_created(&mut self, _ctx: &mut WasmCtx<'_>, result: CreateGeometryResult) {
         let result = match result {
             CreateGeometryResult::Ok { geometry_id } => Ok(geometry_id),
-            CreateGeometryResult::Err { reason } => {
-                tracing::info!(target: "aether_puppet", reason = %reason, "layer disabled: create_geometry refused");
+            CreateGeometryResult::Err { error } => {
+                tracing::info!(target: "aether_puppet", error = %error, "layer disabled: create_geometry refused");
                 Err(())
             }
         };

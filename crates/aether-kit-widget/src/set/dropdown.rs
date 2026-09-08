@@ -45,15 +45,16 @@ use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
 use crate::set::{
-    ActivationArms, WidgetDefaults, accept_font_metrics_result, apply_text_theme, elide_to_width, measured_text_width,
-    pump_text_font_metrics, push_control_outlines, push_rect_border, quad, reply_if_hidden, text_origin_y,
+    ActivationArms, WidgetDefaults, accept_font_metrics_result, apply_text_theme, clamp_optional_index,
+    clamp_optional_selection, elide_to_width, measured_text_width, plate, pump_text_font_metrics,
+    push_control_outlines, push_triangle, quad, raised_plate, reply_if_hidden, ring, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 use crate::{
     Collect, DropdownConfig, DropdownHover, DropdownOpenChanged, DropdownOption, DropdownSelected, FocusLost,
-    HoverLost, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    HoverLost, SetSelection, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 /// Which way a keyboard step moves the highlighted row of an open list.
@@ -219,7 +220,7 @@ impl DropdownWidget {
             height: 0.0,
         });
         parent.send(&DropdownHover {
-            option: next.and_then(|index| u32::try_from(index).ok()),
+            index: next.and_then(|index| u32::try_from(index).ok()),
             x: row.x,
             y: row.y,
             width: row.width,
@@ -239,6 +240,30 @@ impl DropdownWidget {
         self.highlighted_index = Some(highlight);
         self.first_index = revealed_first_index(highlight, self.first_row(), self.open_row_count, self.options.len());
         DropdownEffects::opened()
+    }
+
+    /// The presentation half of a re-sent config: the options, the placeholder,
+    /// the open row count, and the theme, with the current choice re-clamped
+    /// into the new option vector.
+    ///
+    /// `initial` is a seed and seeds only what holds nothing: it is read while
+    /// the dropdown has no choice — at `init`, and on the config that first
+    /// gives it options — and ignored once there is one to preserve. `state` is
+    /// not its business at all; it travels its own lane so a state change can
+    /// be reported.
+    fn reconfigure(&mut self, config: DropdownConfig) {
+        self.options = config.options;
+        self.selected_index = self.selected_index.map_or_else(
+            || clamp_optional_index(config.initial, self.options.len()),
+            |index| clamp_optional_selection(Some(index), self.options.len()),
+        );
+        self.placeholder = config.placeholder;
+        self.open_row_count = usize::try_from(config.open_row_count).unwrap_or(usize::MAX);
+        self.first_index = 0;
+        self.arms.clear();
+        self.font_metrics.set_desired(config.theme.font_id);
+        self.theme = config.theme;
+        self.forget_measurements();
     }
 
     /// Close the list without changing the choice. A no-op — and silent —
@@ -333,8 +358,8 @@ impl DropdownWidget {
     /// draw has to charge itself the same thing or the reservation is a
     /// number nobody honours. Drawn against the bare frame instead, a run
     /// wider than the row ran under the mark and out the other side for the
-    /// slot clip to cut — `Choose an ascendancy` ended flush against the
-    /// chevron with no gap at all, which is the owner's note. Charging the
+    /// slot clip to cut, ending flush against the chevron with no gap at all —
+    /// so the mark read as the last letter of the word. Charging the
     /// column stops the run one spacing unit short of the mark at every
     /// width, so a name that was cut says so and the mark keeps its air.
     ///
@@ -385,7 +410,7 @@ impl DropdownWidget {
     /// the closed row could ever read, one `pad` either side, and the chevron
     /// column; by one theme row. `None` until the font's advances resolve, so
     /// a cell is never sized from a guess it would then visibly resize away
-    /// from (the studio's gap 26).
+    /// from.
     ///
     /// The placeholder counts as one of those runs. It is what the closed row
     /// reads while nothing is chosen, so a cell that fitted only the options
@@ -424,7 +449,15 @@ impl DropdownWidget {
         let size = self.theme.label_size_pixels;
 
         let mut items = Vec::new();
-        items.push(quad(0.0, 0.0, width, height, self.theme.fill(self.theme.surface_raised, theme_state)));
+        items.push(plate(
+            &self.theme,
+            0.0,
+            0.0,
+            width,
+            height,
+            Some(self.theme.fill(self.theme.surface_raised, theme_state)),
+            None,
+        ));
         let (text, ink) = self.closed_row_text();
         let run = self.closed_row_run(text);
         if !run.is_empty() {
@@ -467,7 +500,7 @@ impl DropdownWidget {
         let list_height = rows as f32 * row_height;
         let first_index = self.first_row();
         let mut items = Vec::with_capacity(rows.saturating_mul(2).saturating_add(5));
-        items.push(quad(0.0, top, width, list_height, self.theme.surface_raised));
+        items.push(raised_plate(&self.theme, 0.0, top, width, list_height, self.theme.surface_raised, None));
         for (row_offset, option) in self.options[first_index..first_index + rows].iter().enumerate() {
             let index = first_index + row_offset;
             let row_y = (row_offset as f32).mul_add(row_height, top);
@@ -502,7 +535,7 @@ impl DropdownWidget {
                 clip: None,
             });
         }
-        push_rect_border(&mut items, 0.0, top, width, list_height, 1.0, self.theme.outline);
+        items.push(ring(&self.theme, 0.0, top, width, list_height, self.theme.stroke_width_pixels, self.theme.outline));
         items
     }
 }
@@ -562,8 +595,9 @@ impl WidgetDefaults for DropdownWidget {
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send
-/// it its `DropdownConfig` again to replace the options or the choice in
-/// place. It reports the width its widest option needs on its draw list's
+/// it its `DropdownConfig` again to replace the options or the theme in place
+/// — that holds the current choice, re-clamped into the new options, and
+/// closes an open list. Send it [`SetSelection`] to move the choice. It reports the width its widest option needs on its draw list's
 /// `intrinsic` once the theme font's metrics resolve, so a host can size the
 /// cell it sits in to the control rather than to a share of the row.
 #[actor(instanced, composable, handler_set(WidgetDefaults))]
@@ -574,7 +608,7 @@ impl WasmActor for DropdownWidget {
     fn init(config: DropdownConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         let font_id = config.theme.font_id;
         Ok(DropdownWidget {
-            selected_index: initial_selection(config.initial_selected_index, config.options.len()),
+            selected_index: clamp_optional_index(config.initial, config.options.len()),
             options: config.options,
             placeholder: config.placeholder,
             open_row_count: usize::try_from(config.open_row_count).unwrap_or(usize::MAX),
@@ -607,26 +641,38 @@ impl WasmActor for DropdownWidget {
         self.forget_measurements();
     }
 
-    /// Replace the options / choice / theme in place from a re-sent config.
-    /// A list that was open closes, so the root gives up its pointer grab.
+    /// Replace the options / theme in place from a re-sent config, holding the
+    /// current choice and re-clamping it into the new option vector.
+    /// `initial` seeds the dropdown only at `init`;
+    /// [`SetSelection`] moves the choice.
+    ///
+    /// A list that was open closes: its rows are the vector that just changed,
+    /// so the root gives up its pointer grab rather than keeping it over a list
+    /// of options nobody asked for.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: DropdownConfig) {
         let closed = self.dismiss();
-        self.selected_index = initial_selection(config.initial_selected_index, config.options.len());
-        self.options = config.options;
-        self.placeholder = config.placeholder;
-        self.open_row_count = usize::try_from(config.open_row_count).unwrap_or(usize::MAX);
-        self.first_index = 0;
-        self.arms.clear();
-        self.font_metrics.set_desired(config.theme.font_id);
-        self.theme = config.theme;
-        self.forget_measurements();
+        let state = config.state.clone();
+        self.reconfigure(config);
+
         closed.emit(ctx);
-        if self.state.replace(config.state) {
+        if self.state.replace(state) {
             emit_state_changed(ctx, &self.state);
         }
         self.settle_hovered_option(ctx);
         pump_text_font_metrics(ctx, &mut self.font_metrics);
+    }
+
+    /// Push the current choice from the host, clamped into the options and
+    /// `None` for no choice at all. Silent — no [`DropdownSelected`]. An open
+    /// list stays open, with its keyboard highlight following the new choice.
+    #[handler::single]
+    fn on_set_selection(&mut self, ctx: &mut WasmCtx<'_>, set: SetSelection) {
+        self.selected_index = clamp_optional_index(set.index, self.options.len());
+        if self.open {
+            self.highlighted_index = Some(self.selected_index.unwrap_or(0));
+        }
+        self.settle_hovered_option(ctx);
     }
 
     /// Update external availability; a dropdown that can no longer be chosen
@@ -740,34 +786,19 @@ const CHEVRON_SIZE_RATIO: f32 = 0.5;
 /// name and the chevron, in spacing units.
 const CHEVRON_GAP_UNITS: u8 = 1;
 
-/// The rows the solid chevron triangle is drawn from. Four bars read as a
-/// triangle at every size the row heights in play produce, and stay legible
-/// without depending on a glyph the configured font may not carry.
-const CHEVRON_ROWS: usize = 4;
-
 /// A downward solid triangle whose bottom-right lands at `right_x`, centered
 /// vertically on `center_y` — the closed row's "there are alternatives" mark.
+/// One [`WidgetDrawItem::Triangle`] the render cap rasterizes, where a stack
+/// of four quad rows used to approximate the same wedge (ADR-0213).
 fn push_chevron(items: &mut Vec<WidgetDrawItem>, right_x: f32, center_y: f32, size: f32, color: Rgba) {
     if !size.is_finite() || size <= 0.0 || !right_x.is_finite() || !center_y.is_finite() {
         return;
     }
-    let row_height = size / CHEVRON_ROWS as f32;
-    let top = size.mul_add(-0.5, center_y);
-    let center_x = size.mul_add(-0.5, right_x);
-    for row in 0..CHEVRON_ROWS {
-        let width = size * (1.0 - row as f32 / CHEVRON_ROWS as f32);
-        let y = (row as f32).mul_add(row_height, top);
-        items.push(quad(width.mul_add(-0.5, center_x), y, width, row_height, color));
-    }
+    push_triangle(items, size.mul_add(-0.5, right_x), size.mul_add(-0.5, center_y), size, size, false, color);
 }
 
 /// The boot selection clamped into the option vector; `None` when there is
 /// nothing to select or nothing was asked for.
-fn initial_selection(initial_selected_index: Option<u32>, option_count: usize) -> Option<usize> {
-    let index = usize::try_from(initial_selected_index?).ok()?;
-    (option_count > 0).then(|| index.min(option_count - 1))
-}
-
 /// The realized window's origin moved the least distance that makes
 /// `highlight` visible: unchanged while the row is already inside the window,
 /// otherwise pulled to the window's near edge. Clamped so the window never
@@ -836,6 +867,32 @@ mod tests {
             advances: Vec::new(),
         })));
         widget
+    }
+
+    fn config(option_count: usize) -> DropdownConfig {
+        DropdownConfig {
+            options: (0..option_count).map(|index| DropdownOption::from(format!("option {index}"))).collect(),
+            open_row_count: 3,
+            ..DropdownConfig::default()
+        }
+    }
+
+    #[test]
+    fn a_re_sent_config_holds_the_choice_and_clamps_it_into_the_new_options() {
+        // Tripwire: `on_config` used to reseed from `initial`,
+        // so a host that replaced the option labels — a refresh loop that
+        // re-sends every child its config — cleared the reader's choice. The
+        // seed is read at `init` alone now; `SetSelection` moves the choice.
+        let mut widget = dropdown(6, 3, Some(4));
+
+        widget.reconfigure(config(6));
+        assert_eq!(widget.selected_index, Some(4), "same-length options hold the choice");
+
+        widget.reconfigure(config(2));
+        assert_eq!(widget.selected_index, Some(1), "a shorter vector pulls it back to the last option");
+
+        widget.reconfigure(config(0));
+        assert_eq!(widget.selected_index, None, "no options is no choice");
     }
 
     #[test]
@@ -920,7 +977,9 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 WidgetDrawItem::Text { text, .. } => Some(text.as_str()),
-                WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+                WidgetDrawItem::TexturedQuad { .. }
+                | WidgetDrawItem::Shape { .. }
+                | WidgetDrawItem::Triangle { .. } => None,
             })
             .collect()
     }
@@ -1135,7 +1194,7 @@ mod tests {
         let fills: Vec<Rgba> = items
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { color, .. } => Some(*color),
+                WidgetDrawItem::Shape { fill, .. } => *fill,
                 _ => None,
             })
             .collect();
@@ -1167,14 +1226,14 @@ mod tests {
         // from precisely the row the reader is looking at.
         let theme = Theme::DEFAULT;
         let mut widget = dropdown(6, 3, Some(1));
-        widget.options[1] = DropdownOption::from("Astral Plate").with_ink(TextInk::RarityRare);
+        widget.options[1] = DropdownOption::from("Astral Plate").with_ink(TextInk::Tier3);
         widget.open = true;
 
-        assert_eq!(widget.closed_row_text(), ("Astral Plate", theme.rarity_rare));
+        assert_eq!(widget.closed_row_text(), ("Astral Plate", theme.tier_3));
         assert!(
             widget.overlay_items().iter().any(|item| matches!(
                 item,
-                WidgetDrawItem::Text { text, color, .. } if text == "Astral Plate" && *color == theme.rarity_rare
+                WidgetDrawItem::Text { text, color, .. } if text == "Astral Plate" && *color == theme.tier_3
             )),
             "the open list writes the current option in its own ink too",
         );
@@ -1220,13 +1279,5 @@ mod tests {
         );
 
         assert_eq!(dropdown(6, 3, Some(0)).intrinsic(), None, "an unmeasured dropdown asks for nothing");
-    }
-
-    #[test]
-    fn the_boot_selection_clamps_for_nonempty_and_empty_option_vectors() {
-        assert_eq!(initial_selection(None, 5), None, "no choice asked for is no choice");
-        assert_eq!(initial_selection(Some(0), 0), None);
-        assert_eq!(initial_selection(Some(99), 5), Some(4));
-        assert_eq!(initial_selection(Some(2), 5), Some(2));
     }
 }

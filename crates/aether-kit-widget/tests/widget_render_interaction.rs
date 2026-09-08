@@ -73,7 +73,7 @@ use aether_kit_widget::{
 };
 use aether_math::Rgba;
 use aether_render::RenderCapability;
-use aether_render::{DrawTexturedQuads, TexturedQuad, WHITE_TEXTURE_ID};
+use aether_render::{DrawShapes, DrawTexturedQuads, Shape, WHITE_TEXTURE_ID};
 use aether_test_fixtures_kinds::{DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig};
 use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult, TextCapability};
 
@@ -472,7 +472,18 @@ fn solid_leaf(subname: &str, width_pixels: f32, stripes: Vec<WidgetDrawItem>) ->
 }
 
 fn solid_quad(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> WidgetDrawItem {
-    WidgetDrawItem::Quad { x, y, width, height, color, clip: None }
+    WidgetDrawItem::Shape {
+        x,
+        y,
+        width,
+        height,
+        corner_radius: 0.0,
+        fill: Some(color),
+        stroke: None,
+        shadow: None,
+        texture: None,
+        clip: None,
+    }
 }
 
 fn scroll_child(
@@ -506,7 +517,7 @@ fn virtual_list_child(subname: &str, state: WidgetControlState) -> WidgetChildSp
         clip: None,
         config: VirtualListConfig {
             items: (0..200).map(|index| VirtualListRow::from(format!("{index:03}"))).collect(),
-            initial_selected_index: Some(0),
+            initial: Some(0),
             empty_text: String::new(),
             ruled: false,
             visible_row_count: 5,
@@ -559,7 +570,7 @@ fn toggle_child(subname: &str, label: &str, initial: bool, state: WidgetControlS
     }
 }
 
-fn segmented_child(subname: &str, options: &[&str], initial_index: u32, state: WidgetControlState) -> WidgetChildSpec {
+fn segmented_child(subname: &str, options: &[&str], initial: u32, state: WidgetControlState) -> WidgetChildSpec {
     WidgetChildSpec {
         subname: subname.to_owned(),
         kind: WidgetKind::Segmented,
@@ -567,7 +578,7 @@ fn segmented_child(subname: &str, options: &[&str], initial_index: u32, state: W
         clip: None,
         config: SegmentedConfig {
             options: options.iter().map(|option| (*option).to_owned()).collect(),
-            initial_index,
+            initial,
             theme: Theme::DEFAULT,
             state,
         }
@@ -600,101 +611,80 @@ fn advanced_control_children() -> Vec<WidgetChildSpec> {
     ]
 }
 
-fn assert_advanced_control_snapshot(snapshot: &[DrawTexturedQuads]) {
-    let toggle = solid_for(snapshot, &row_clip(PANEL_Y));
-    assert_eq!(toggle.quads.len(), 2, "toggle direct draw is track then knob");
-    assert_eq!(toggle.quads[0].tint, Theme::DEFAULT.accent, "the final toggle value is on");
-    assert_eq!(toggle.quads[1].tint, Theme::DEFAULT.accent_text, "the on knob uses accent text");
-    assert!(
-        toggle.quads[1].x > toggle.quads[0].x + toggle.quads[0].width * 0.5,
-        "the on knob sits in the track's right half",
-    );
+fn assert_advanced_control_snapshot(snapshot: &[DrawTexturedQuads], shapes: &[DrawShapes]) {
+    let toggle = shapes_for(shapes, &row_clip(PANEL_Y));
+    assert_eq!(toggle.len(), 2, "toggle direct draw is track then knob, both shapes; shapes: {shapes:?}");
+    let (track, knob) = (&toggle[0], &toggle[1]);
+    assert_eq!(track.fill, Some(Theme::DEFAULT.accent), "the final toggle value is on");
+    assert_eq!(knob.fill, Some(Theme::DEFAULT.accent_text), "the on knob uses accent text");
+    assert!(knob.x > track.x + track.width * 0.5, "the on knob sits in the track's right half");
+    assert_eq!(knob.corner_radius, knob.width * 0.5, "the knob is a circle: {knob:?}");
+    assert_eq!(track.corner_radius, track.height * 0.5, "and the track a stadium: {track:?}");
 
     let segment_y = PANEL_Y + ROW_HEIGHT + GAP;
-    let segmented = solid_for(snapshot, &row_clip(segment_y));
-    assert_eq!(segmented.quads.len(), 5, "three fills and two ordered dividers");
+    let segmented = fills(&shapes_for(shapes, &row_clip(segment_y)));
+    assert_eq!(segmented.len(), 5, "three fills and two ordered dividers");
     let segment_width = PANEL_WIDTH / 3.0;
-    assert_eq!(segmented.quads[0].x, PANEL_X);
-    assert_eq!(segmented.quads[0].width, segment_width);
-    assert_eq!(segmented.quads[1].x, PANEL_X + segment_width);
+    assert_eq!(segmented[0].x, PANEL_X);
+    assert_eq!(segmented[0].width, segment_width);
+    assert_eq!(segmented[1].x, PANEL_X + segment_width);
     assert_eq!(
-        segmented.quads[1].tint,
-        Theme::DEFAULT.selection,
+        segmented[1].fill,
+        Some(Theme::DEFAULT.selection),
         "middle segment remains selected, in the selection role"
     );
-    assert_eq!(segmented.quads[2].x, PANEL_X + segment_width);
-    assert_eq!(segmented.quads[2].width, 1.0, "divider follows its segment fill");
-    assert_eq!(segmented.quads[3].x, PANEL_X + segment_width * 2.0);
-    assert_eq!(segmented.quads[4].x, PANEL_X + segment_width * 2.0);
+    assert_eq!(segmented[2].x, PANEL_X + segment_width);
+    assert_eq!(segmented[2].width, 1.0, "divider follows its segment fill");
+    assert_eq!(segmented[3].x, PANEL_X + segment_width * 2.0);
+    assert_eq!(segmented[4].x, PANEL_X + segment_width * 2.0);
 
     let numeric_y = PANEL_Y + (ROW_HEIGHT + GAP) * 2.0;
-    let numeric = solid_for(snapshot, &row_clip(numeric_y));
-    assert_eq!(numeric.quads[0].tint, Theme::DEFAULT.surface_raised, "the blurred numeric still fills its own box");
-    assert_eq!(numeric.quads[0].width, PANEL_WIDTH, "and the box is still the whole slot");
-    assert_stepper_column(numeric, numeric_y);
+    let numeric_plate = shapes_for(shapes, &row_clip(numeric_y));
+    assert_eq!(
+        plate_fill(&numeric_plate),
+        Some(Theme::DEFAULT.surface_raised),
+        "the blurred numeric still fills its box"
+    );
+    assert_stepper_column(&numeric_plate);
 
     let disabled_y = PANEL_Y + (ROW_HEIGHT + GAP) * 3.0;
-    let disabled = solid_for(snapshot, &row_clip(disabled_y));
+    let disabled = shapes_for(shapes, &row_clip(disabled_y))[0];
     assert_eq!(
-        disabled.quads[0].tint,
-        Theme::DEFAULT.fill(Theme::DEFAULT.surface_raised, ThemeState::Disabled),
+        disabled.fill,
+        Some(Theme::DEFAULT.fill(Theme::DEFAULT.surface_raised, ThemeState::Disabled)),
         "disabled toggle stays off and uses disabled presentation",
     );
 
     let hidden_clip = row_clip(PANEL_Y + (ROW_HEIGHT + GAP) * 5.0);
     assert!(
-        snapshot.iter().all(|batch| batch.clip.as_ref() != Some(&hidden_clip)),
+        snapshot.iter().all(|batch| batch.clip.as_ref() != Some(&hidden_clip))
+            && shapes.iter().all(|batch| batch.clip.as_ref() != Some(&hidden_clip)),
         "hidden numeric retains its slot but contributes no overlay batch",
     );
 }
 
-/// The numeric's anatomy, as it lands in the composited batch: **one** fill
-/// over the whole slot, a hairline a row height in from its right end, and a
-/// quad-built arrow centered in each half of the column that hairline closes
-/// off. An untouched stepper column paints no surface of its own — the owner's
-/// note was that the field and its arrows read as two elements fighting, and a
-/// second fill at the right end is what that looks like.
-///
-/// Reads the roles rather than a quad count, because the arrows are a stack of
-/// rows whose number follows the button height — a count would pin the
-/// rasterization of the triangle, which is not what this asserts.
-fn assert_stepper_column(batch: &DrawTexturedQuads, row_y: f32) {
+/// The numeric's anatomy, as it lands in the composited batches: **one**
+/// plate over the whole slot (a shape, ADR-0213), a hairline a row height in
+/// from its right end, and nothing else flat. An untouched stepper column
+/// paints no surface of its own — the owner's note was that the field and
+/// its arrows read as two elements fighting, and a second fill at the right
+/// end is what that looks like. The arrows are triangles now, which the
+/// overlay observation does not carry; the scenario counts their batch at
+/// the render cap instead.
+fn assert_stepper_column(chrome: &[&Shape]) {
     let column_left = PANEL_X + PANEL_WIDTH - ROW_HEIGHT;
-    let quads_with =
-        |tint: Rgba| -> Vec<&TexturedQuad> { batch.quads.iter().filter(|quad| quad.tint == tint).collect() };
+    let (plates, dividers): (Vec<&Shape>, Vec<&Shape>) =
+        fills(chrome).into_iter().partition(|shape| shape.width == PANEL_WIDTH);
 
-    let fills = quads_with(Theme::DEFAULT.surface_raised);
-    assert_eq!(fills.len(), 1, "one fill for the whole control, steppers included; batch: {batch:?}");
-    assert_eq!((fills[0].x, fills[0].width), (PANEL_X, PANEL_WIDTH), "and it spans the slot");
+    assert_eq!(plates.len(), 1, "one plate for the whole control, steppers included; chrome: {chrome:?}");
+    assert_eq!(plates[0].x, PANEL_X, "and it spans the slot");
 
-    let dividers = quads_with(Theme::DEFAULT.outline);
     assert_eq!(dividers.len(), 1, "one hairline divides the arrows from the value they change");
     assert_eq!((dividers[0].x, dividers[0].width, dividers[0].height), (column_left, 1.0, ROW_HEIGHT));
-
-    let arrows = quads_with(Theme::DEFAULT.fill(Theme::DEFAULT.text_primary, ThemeState::Normal));
-    assert!(arrows.len() >= 2, "each button carries an arrow built from quad rows; batch: {batch:?}");
-    let column_center = column_left + ROW_HEIGHT * 0.5;
-    for row in &arrows {
-        assert!(
-            (row.x + row.width * 0.5 - column_center).abs() < 0.01,
-            "every arrow row is centered in the column; row {row:?}",
-        );
-        assert!(row.width <= ROW_HEIGHT, "an arrow never outgrows its button");
-    }
-    assert!(
-        arrows.iter().any(|row| row.y < row_y + ROW_HEIGHT * 0.5)
-            && arrows.iter().any(|row| row.y >= row_y + ROW_HEIGHT * 0.5),
-        "both buttons carry one, not one button twice",
-    );
-
-    let painted = [
-        Theme::DEFAULT.surface_raised,
-        Theme::DEFAULT.outline,
-        Theme::DEFAULT.fill(Theme::DEFAULT.text_primary, ThemeState::Normal),
-    ];
-    assert!(
-        batch.quads.iter().all(|quad| painted.contains(&quad.tint)),
-        "the numeric paints one fill, one hairline, and its arrows — nothing else; batch: {batch:?}",
+    assert_eq!(
+        dividers[0].fill,
+        Some(Theme::DEFAULT.outline),
+        "the numeric paints its plate, one hairline, and its arrows — nothing else flat; chrome: {chrome:?}",
     );
 }
 
@@ -702,15 +692,42 @@ fn row_clip(y: f32) -> ClipRect {
     ClipRect { x: PANEL_X, y, width: PANEL_WIDTH, height: ROW_HEIGHT }
 }
 
-fn solid_for<'a>(snapshot: &'a [DrawTexturedQuads], clip: &ClipRect) -> &'a DrawTexturedQuads {
-    snapshot
-        .iter()
-        .find(|batch| batch.texture_id == WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(clip))
-        .unwrap_or_else(|| panic!("missing solid batch for {clip:?}; snapshot: {snapshot:?}"))
+/// A row's chrome under `clip` (ADR-0213) — the plates, rings, knobs, and
+/// flat fills, in draw order. One clip can own several batches: a triangle
+/// between two shapes ends the run and opens a new one, so a control whose
+/// arrows sit between its plate and its hairline draws both of those in
+/// separate batches under the one clip.
+fn shapes_for<'a>(shapes: &'a [DrawShapes], clip: &ClipRect) -> Vec<&'a Shape> {
+    let chrome: Vec<&Shape> =
+        shapes.iter().filter(|batch| batch.clip.as_ref() == Some(clip)).flat_map(|batch| &batch.shapes).collect();
+    assert!(!chrome.is_empty(), "missing shape batch for {clip:?}; shapes: {shapes:?}");
+    chrome
 }
 
-/// The two quads a standing scroll bar contributes: its track and its thumb.
-const SCROLL_BAR_QUADS: usize = 2;
+/// The rings among a row's shapes — the stroke-only ones, which are the
+/// validation and focus outlines — as `(stroke colour, y)`, in draw order.
+fn rings(chrome: &[&Shape]) -> Vec<(Rgba, f32)> {
+    chrome
+        .iter()
+        .filter(|shape| shape.fill.is_none())
+        .filter_map(|shape| shape.stroke.as_ref().map(|stroke| (stroke.color, shape.y)))
+        .collect()
+}
+
+/// The filled shapes among a row's, in draw order — the plates, bands, and
+/// hairlines a control paints, where a flat rect used to be a solid quad.
+fn fills<'a>(chrome: &[&'a Shape]) -> Vec<&'a Shape> {
+    chrome.iter().copied().filter(|shape| shape.fill.is_some()).collect()
+}
+
+/// The fill of the first full-row plate among a row's shapes.
+fn plate_fill(chrome: &[&Shape]) -> Option<Rgba> {
+    chrome.iter().find(|shape| shape.width == PANEL_WIDTH).and_then(|shape| shape.fill)
+}
+
+/// The filled shapes a standing scroll bar contributes to its list's batch:
+/// the flat track and the stadium thumb standing in it.
+const SCROLL_BAR_SHAPES: usize = 2;
 
 /// What a standing scroll bar takes off the right end of every row: its
 /// two-unit track plus the config's own gutter. A row is filled inside what is
@@ -725,31 +742,36 @@ fn virtual_list_clip() -> ClipRect {
 }
 
 fn assert_virtual_list_rows(
-    snapshot: &[DrawTexturedQuads],
+    shapes: &[DrawShapes],
     selected_row_offset: usize,
     selected_tint: Rgba,
-    outline_quad_count: usize,
+    outline_ring_count: usize,
 ) {
     let clip = virtual_list_clip();
-    let batch = solid_for(snapshot, &clip);
+    let chrome = shapes_for(shapes, &clip);
+    let painted = fills(&chrome);
     assert_eq!(
-        batch.quads.len(),
-        5 + SCROLL_BAR_QUADS + outline_quad_count,
-        "five realized row quads, the scroll bar's track and thumb, and the requested outlines only; \
-         snapshot: {snapshot:?}",
+        painted.len(),
+        5 + SCROLL_BAR_SHAPES,
+        "five realized row fills and the scroll bar's track and thumb only; shapes: {shapes:?}",
     );
-    assert_scroll_bar(batch);
-    for (row_offset, quad) in batch.quads[..5].iter().enumerate() {
-        assert_eq!(quad.x, PANEL_X);
-        assert_eq!(quad.y, PANEL_Y + row_offset as f32 * ROW_HEIGHT);
-        assert_eq!(quad.width, PANEL_WIDTH - scroll_bar_gutter(), "a row fill stops where the bar's gutter starts");
-        assert_eq!(quad.height, ROW_HEIGHT);
-        let expected_tint = if row_offset == selected_row_offset {
+    assert_eq!(
+        rings(&chrome).len(),
+        outline_ring_count,
+        "the requested outlines and nothing else ring the list; shapes: {shapes:?}",
+    );
+    assert_scroll_bar(&painted);
+    for (row_offset, row) in painted[..5].iter().enumerate() {
+        assert_eq!(row.x, PANEL_X);
+        assert_eq!(row.y, PANEL_Y + row_offset as f32 * ROW_HEIGHT);
+        assert_eq!(row.width, PANEL_WIDTH - scroll_bar_gutter(), "a row fill stops where the bar's gutter starts");
+        assert_eq!(row.height, ROW_HEIGHT);
+        let expected_fill = if row_offset == selected_row_offset {
             selected_tint
         } else {
             Theme::DEFAULT.surface_raised
         };
-        assert_eq!(quad.tint, expected_tint, "row offset {row_offset} has the wrong selection/state fill");
+        assert_eq!(row.fill, Some(expected_fill), "row offset {row_offset} has the wrong selection/state fill");
     }
 }
 
@@ -758,15 +780,15 @@ fn assert_virtual_list_rows(
 /// the `outline` and `text_muted` roles rather than in colours of their own,
 /// and the thumb is a proper part of the track: a thumb as long as the track
 /// is a bar that says nothing about how much is off screen.
-fn assert_scroll_bar(batch: &DrawTexturedQuads) {
-    let bar = &batch.quads[5..5 + SCROLL_BAR_QUADS];
-    let (track, thumb) = (&bar[0], &bar[1]);
-    assert_eq!(track.tint, Theme::DEFAULT.outline, "the track is the outline role; batch: {batch:?}");
+fn assert_scroll_bar(painted: &[&Shape]) {
+    let (track, thumb) = (painted[5], painted[6]);
+    assert_eq!(track.fill, Some(Theme::DEFAULT.outline), "the track is the outline role; track: {track:?}");
     assert_eq!(
-        thumb.tint,
-        Theme::DEFAULT.fill(Theme::DEFAULT.text_muted, ThemeState::Normal),
-        "and the thumb the muted-text one; batch: {batch:?}",
+        thumb.fill,
+        Some(Theme::DEFAULT.fill(Theme::DEFAULT.text_muted, ThemeState::Normal)),
+        "and the thumb the muted-text one; thumb: {thumb:?}",
     );
+    assert_eq!(thumb.corner_radius, thumb.width * 0.5, "the thumb is a stadium: {thumb:?}");
     assert_eq!((track.x, track.width), (thumb.x, thumb.width), "both stand in the same column");
     assert_eq!(track.x + track.width, PANEL_X + PANEL_WIDTH, "flush with the list's right edge");
     assert_eq!(track.y, PANEL_Y, "the track is the whole viewport");
@@ -807,54 +829,53 @@ fn assert_five_virtual_list_glyph_rows(snapshot: &[DrawTexturedQuads]) {
     }
 }
 
-fn assert_initial_control_snapshot(snapshot: &[DrawTexturedQuads], slider_y: f32, hover_y: f32) {
+fn assert_initial_control_snapshot(snapshot: &[DrawTexturedQuads], shapes: &[DrawShapes], slider_y: f32, hover_y: f32) {
     let hidden_clip = row_clip(PANEL_Y);
     assert!(
-        snapshot.iter().all(|batch| batch.clip.as_ref() != Some(&hidden_clip)),
-        "the hidden first child retains its slot but contributes no solid or glyph batch",
+        snapshot.iter().all(|batch| batch.clip.as_ref() != Some(&hidden_clip))
+            && shapes.iter().all(|batch| batch.clip.as_ref() != Some(&hidden_clip)),
+        "the hidden first child retains its slot but contributes no solid, shape, or glyph batch",
     );
 
-    let disabled_batch = solid_for(snapshot, &row_clip(PANEL_Y + ROW_HEIGHT + GAP));
+    let disabled_batch = shapes_for(shapes, &row_clip(PANEL_Y + ROW_HEIGHT + GAP));
     assert_eq!(
-        disabled_batch.quads[0].tint,
-        Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Disabled),
+        plate_fill(&disabled_batch),
+        Some(Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Disabled)),
         "disabled button fill uses the shared disabled role",
     );
 
-    let value_batch = solid_for(snapshot, &row_clip(slider_y));
-    assert_eq!(value_batch.quads.len(), 10, "track + fill + two four-quad outlines");
-    assert!(
-        value_batch.quads[2..6].iter().all(|quad| quad.tint == Theme::DEFAULT.error),
-        "the outer validation ring uses the error role",
-    );
-    assert!(
-        value_batch.quads[6..10].iter().all(|quad| quad.tint == Theme::DEFAULT.accent),
-        "the inset focus ring remains visible after validation",
-    );
-    assert_eq!(value_batch.quads[2].y, slider_y);
-    assert_eq!(value_batch.quads[6].y, slider_y + BORDER);
-
-    let hover_batch = solid_for(snapshot, &row_clip(hover_y));
+    let value_batch = shapes_for(shapes, &row_clip(slider_y));
+    assert_eq!(fills(&value_batch).len(), 2, "track + fill; the outlines are the rings beside them");
+    let value_rings = rings(&value_batch);
     assert_eq!(
-        hover_batch.quads[0].tint,
-        Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Hover),
+        value_rings,
+        vec![(Theme::DEFAULT.error, slider_y), (Theme::DEFAULT.accent, slider_y + BORDER)],
+        "the outer validation ring uses the error role and the inset focus ring remains visible after it",
+    );
+
+    let hover_batch = shapes_for(shapes, &row_clip(hover_y));
+    assert_eq!(
+        plate_fill(&hover_batch),
+        Some(Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Hover)),
         "the final sibling owns hover after lost-before-gained delivery",
     );
 }
 
-fn assert_updated_control_snapshot(snapshot: &[DrawTexturedQuads], slider_y: f32, hover_y: f32) {
+fn assert_updated_control_snapshot(snapshot: &[DrawTexturedQuads], shapes: &[DrawShapes], slider_y: f32, hover_y: f32) {
+    let first_slot = row_clip(PANEL_Y);
     assert!(
-        !solid_for(snapshot, &row_clip(PANEL_Y)).quads.is_empty(),
-        "runtime visible=true restores drawing in the retained first slot",
+        snapshot.iter().any(|batch| batch.clip.as_ref() == Some(&first_slot))
+            || shapes.iter().any(|batch| batch.clip.as_ref() == Some(&first_slot)),
+        "runtime visible=true restores drawing in the retained first slot; shapes: {shapes:?}",
     );
     assert_eq!(
-        solid_for(snapshot, &row_clip(slider_y)).quads[2].tint,
-        Theme::DEFAULT.warning,
+        rings(&shapes_for(shapes, &row_clip(slider_y))).first().map(|(color, _)| *color),
+        Some(Theme::DEFAULT.warning),
         "runtime validation changes the outer role without resetting the slider",
     );
     assert_eq!(
-        solid_for(snapshot, &row_clip(hover_y)).quads[0].tint,
-        Theme::DEFAULT.accent,
+        plate_fill(&shapes_for(shapes, &row_clip(hover_y))),
+        Some(Theme::DEFAULT.accent),
         "child→empty hover emits HoverLost and restores the normal fill",
     );
 }
@@ -874,8 +895,8 @@ fn assert_stationary_hover_survives_focus_traversal(harness: &mut SubstrateHarne
         ])
         .expect("stationary hover survives focus traversal");
     assert_eq!(
-        solid_for(&harness.committed_overlay_snapshot(), &row_clip(hover_y)).quads[0].tint,
-        Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Hover),
+        plate_fill(&shapes_for(&harness.committed_shape_snapshot(), &row_clip(hover_y))),
+        Some(Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Hover)),
         "Tab focus changes must not clear root-owned hover while the pointer stays still",
     );
 }
@@ -1129,12 +1150,21 @@ fn panel_renders_every_text_row_inside_its_frame() {
     let rows = text_rows();
     let right = PANEL_X + PANEL_WIDTH;
     let (button_top, _) = row_band(BUTTON_ROW, 1.0);
+    // A plated row's corners are rounded (ADR-0213) and show the surface
+    // through, so its region starts and ends one corner radius in — the
+    // glyphs never reach a corner, and the corner is not a glyph.
+    let corner = Theme::DEFAULT.corner_radius_pixels;
     let checks: Vec<FrameCheck> = rows
         .iter()
         .map(|r| {
+            let inset = if r.background == SURFACE_SRGB {
+                0.0
+            } else {
+                corner
+            };
             check(
                 FrameReduction::BoundingBox,
-                rect(r.glyph_left, r.top, right, r.top + ROW_HEIGHT),
+                rect(r.glyph_left + inset, r.top, right - inset, r.top + ROW_HEIGHT),
                 r.background,
                 PARTITION_TOLERANCE,
             )
@@ -1313,12 +1343,15 @@ fn radio_click_moves_marker_into_clicked_row() {
         ])
         .expect("radio click");
 
-    // The marker is a `marker × marker` accent quad at local `x ∈ [pad, pad +
-    // marker]`, vertically centered in each option row. Score it per row against
-    // the raised surface an *un*selected marker paints, so only the selected
-    // (accent) marker lights up.
+    // The marker is a `marker × marker` disc at local `x ∈ [pad, pad +
+    // marker]`, vertically centered in each option row, ringed in the edge
+    // token. Score the disc's *inside* — the box inset a quarter of the
+    // marker, clear of the ring and of the corners the circle leaves — per
+    // row against the raised surface an *un*selected marker paints, so only
+    // the selected (selection-filled) marker lights up.
     let (radio_top, _) = row_band(RADIO_ROW, 3.0);
     let marker = (ROW_HEIGHT * 0.5).max(4.0);
+    let inset = marker * 0.25;
     let marker_left = PANEL_X + PAD;
     let checks: Vec<FrameCheck> = (0..3usize)
         .map(|i| {
@@ -1326,7 +1359,12 @@ fn radio_click_moves_marker_into_clicked_row() {
             let marker_top = row_top + (ROW_HEIGHT - marker) * 0.5;
             check(
                 FrameReduction::Coverage,
-                rect(marker_left, marker_top, marker_left + marker + 1.0, marker_top + marker),
+                rect(
+                    marker_left + inset,
+                    marker_top + inset,
+                    marker_left + marker - inset,
+                    marker_top + marker - inset,
+                ),
                 SURFACE_RAISED_SRGB,
                 PARTITION_TOLERANCE,
             )
@@ -1494,7 +1532,7 @@ fn button_press_renders_pressed_state_and_reports_click() {
     let log = panel_log_messages(&mut harness);
     let joined = log.join("\n");
     assert!(
-        log.iter().any(|m| m.contains("widget button clicked")),
+        log.iter().any(|m| m.contains("widget button activated")),
         "a press then release inside the button should fire a click; log was:\n{joined}",
     );
 }
@@ -1603,10 +1641,10 @@ fn hovering_overflowing_text_reveals_it_on_an_overlay_plate() {
     // the stack that can outgrow it.
     let plate_rects = |harness: &SubstrateHarness| -> Vec<(f32, f32, f32, f32)> {
         harness
-            .committed_overlay_snapshot()
+            .committed_shape_snapshot()
             .iter()
-            .filter(|batch| batch.texture_id == WHITE_TEXTURE_ID && batch.clip.is_none())
-            .flat_map(|batch| batch.quads.iter().map(|quad| (quad.x, quad.y, quad.width, quad.height)))
+            .filter(|batch| batch.clip.is_none())
+            .flat_map(|batch| batch.shapes.iter().map(|shape| (shape.x, shape.y, shape.width, shape.height)))
             .filter(|(_, _, width, _)| *width > PANEL_WIDTH)
             .collect()
     };
@@ -2099,33 +2137,35 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
 
     {
         let snapshot = harness.committed_overlay_snapshot();
-        let solid = solid_for(&snapshot, &area_clip);
-        assert_eq!(
-            solid.quads.len(),
-            4,
-            "background + two selection bands + caret, and no focus ring: this area took focus from a pointer \
-             press, and a ring marks keyboard focus only; snapshot: {snapshot:?}",
+        let shapes = harness.committed_shape_snapshot();
+        let chrome = shapes_for(&shapes, &area_clip);
+        assert!(
+            rings(&chrome).is_empty(),
+            "no focus ring: this area took focus from a pointer press, and a ring marks keyboard \
+             focus only; shapes: {shapes:?}",
         );
-        assert_eq!(solid.quads[0].x, PANEL_X);
-        assert_eq!(solid.quads[0].y, PANEL_Y);
-        assert_eq!(solid.quads[0].width, PANEL_WIDTH);
-        assert_eq!(solid.quads[0].height, area_height);
-        assert_eq!(solid.quads[0].tint, Theme::DEFAULT.surface_raised);
-        assert_eq!(solid.quads[1].x, last_selection_x);
-        assert_eq!(solid.quads[1].y, selection_top);
-        assert_eq!(solid.quads[1].width, metrics.caret_x("last", 4, size) - metrics.caret_x("last", 3, size),);
-        assert_eq!(solid.quads[1].height, selection_height);
-        assert_eq!(solid.quads[1].tint, Theme::DEFAULT.accent);
-        assert_eq!(solid.quads[2].x, last_selection_x);
-        assert_eq!(solid.quads[2].y, selection_top);
-        assert_eq!(solid.quads[2].width, 1.0);
-        assert_eq!(solid.quads[2].height, selection_height);
-        assert_eq!(solid.quads[2].tint, Theme::DEFAULT.accent);
-        assert_eq!(solid.quads[3].x, content_x);
-        assert_eq!(solid.quads[3].y, selection_top + row_height);
-        assert_eq!(solid.quads[3].width, metrics.caret_x("tail", 3, size));
-        assert_eq!(solid.quads[3].height, selection_height);
-        assert_eq!(solid.quads[3].tint, Theme::DEFAULT.accent);
+        let painted = fills(&chrome);
+        assert_eq!(painted.len(), 4, "the box, two selection bands, and the caret between them; shapes: {shapes:?}");
+        assert_eq!(
+            (painted[0].x, painted[0].y, painted[0].width, painted[0].height),
+            (PANEL_X, PANEL_Y, PANEL_WIDTH, area_height)
+        );
+        assert_eq!(painted[0].fill, Some(Theme::DEFAULT.surface_raised));
+        assert_eq!(painted[1].x, last_selection_x);
+        assert_eq!(painted[1].y, selection_top);
+        assert_eq!(painted[1].width, metrics.caret_x("last", 4, size) - metrics.caret_x("last", 3, size),);
+        assert_eq!(painted[1].height, selection_height);
+        assert_eq!(painted[1].fill, Some(Theme::DEFAULT.accent));
+        assert_eq!(painted[2].x, last_selection_x);
+        assert_eq!(painted[2].y, selection_top);
+        assert_eq!(painted[2].width, 1.0);
+        assert_eq!(painted[2].height, selection_height);
+        assert_eq!(painted[2].fill, Some(Theme::DEFAULT.accent));
+        assert_eq!(painted[3].x, content_x);
+        assert_eq!(painted[3].y, selection_top + row_height);
+        assert_eq!(painted[3].width, metrics.caret_x("tail", 3, size));
+        assert_eq!(painted[3].height, selection_height);
+        assert_eq!(painted[3].fill, Some(Theme::DEFAULT.accent));
         let area_glyphs: Vec<_> = snapshot
             .iter()
             .filter(|batch| batch.texture_id != WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(&area_clip))
@@ -2205,24 +2245,24 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
     );
 
     {
-        let snapshot = harness.committed_overlay_snapshot();
-        let solid = solid_for(&snapshot, &area_clip);
-        assert_eq!(
-            solid.quads.len(),
-            3,
-            "background + IME cursor band + underline, and still no focus ring behind them: focus here came \
-             from a pointer press; snapshot: {snapshot:?}",
+        let shapes = harness.committed_shape_snapshot();
+        let chrome = shapes_for(&shapes, &area_clip);
+        assert!(
+            rings(&chrome).is_empty(),
+            "still no focus ring behind the box: focus here came from a pointer press; shapes: {shapes:?}",
         );
-        assert_eq!(solid.quads[1].x, preedit_x);
-        assert_eq!(solid.quads[1].y, selection_top);
-        assert_eq!(solid.quads[1].width, metrics.caret_x("üx", 1, size));
-        assert_eq!(solid.quads[1].height, selection_height);
-        assert_eq!(solid.quads[1].tint, Theme::DEFAULT.accent);
-        assert_eq!(solid.quads[2].x, preedit_x);
-        assert_eq!(solid.quads[2].y, underline_y);
-        assert_eq!(solid.quads[2].width, metrics.caret_x("üx", 2, size));
-        assert_eq!(solid.quads[2].height, 1.0);
-        assert_eq!(solid.quads[2].tint, Theme::DEFAULT.accent);
+        let painted = fills(&chrome);
+        assert_eq!(painted.len(), 3, "the box, the IME cursor band, and its underline; shapes: {shapes:?}");
+        assert_eq!(painted[1].x, preedit_x);
+        assert_eq!(painted[1].y, selection_top);
+        assert_eq!(painted[1].width, metrics.caret_x("üx", 1, size));
+        assert_eq!(painted[1].height, selection_height);
+        assert_eq!(painted[1].fill, Some(Theme::DEFAULT.accent));
+        assert_eq!(painted[2].x, preedit_x);
+        assert_eq!(painted[2].y, underline_y);
+        assert_eq!(painted[2].width, metrics.caret_x("üx", 2, size));
+        assert_eq!(painted[2].height, 1.0);
+        assert_eq!(painted[2].fill, Some(Theme::DEFAULT.accent));
     }
 
     // Committed input replaces the selected `t\ntai`; Ctrl+Enter emits the
@@ -2291,7 +2331,12 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
         ])
         .expect("state snapshot");
 
-    assert_initial_control_snapshot(&harness.committed_overlay_snapshot(), slider_y, hover_y);
+    assert_initial_control_snapshot(
+        &harness.committed_overlay_snapshot(),
+        &harness.committed_shape_snapshot(),
+        slider_y,
+        hover_y,
+    );
     assert_stationary_hover_survives_focus_traversal(&mut harness, &panel, hover_y);
 
     // Moving to empty clears hover; runtime mail reveals the hidden slot and
@@ -2321,7 +2366,12 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
         ])
         .expect("runtime state update snapshot");
 
-    assert_updated_control_snapshot(&harness.committed_overlay_snapshot(), slider_y, hover_y);
+    assert_updated_control_snapshot(
+        &harness.committed_overlay_snapshot(),
+        &harness.committed_shape_snapshot(),
+        slider_y,
+        hover_y,
+    );
 }
 
 /// The focus ring is keyboard focus's marker and nothing else's.
@@ -2364,21 +2414,23 @@ fn a_pointer_press_leaves_no_focus_ring_while_tab_traversal_draws_one() {
         ])
         .expect("pointer then keyboard focus");
 
-    let snapshot = harness.committed_overlay_snapshot();
-    let pressed = solid_for(&snapshot, &row_clip(pressed_y));
+    let shapes = harness.committed_shape_snapshot();
+    let pressed = shapes_for(&shapes, &row_clip(pressed_y));
     assert_eq!(
-        pressed.quads.len(),
+        fills(&pressed).len(),
         2,
-        "a pointer-focused slider draws its track and fill and nothing more; snapshot: {snapshot:?}",
+        "a pointer-focused slider draws its track and fill and nothing more; shapes: {shapes:?}",
     );
+    assert!(rings(&pressed).is_empty(), "and no ring; shapes: {shapes:?}");
 
-    let tabbed = solid_for(&snapshot, &row_clip(tabbed_y));
-    assert_eq!(tabbed.quads.len(), 6, "track + fill + a four-quad focus ring; snapshot: {snapshot:?}");
-    assert!(
-        tabbed.quads[2..6].iter().all(|quad| quad.tint == Theme::DEFAULT.accent),
-        "the Tab-focused slider's ring is drawn in the accent role",
+    let tabbed = shapes_for(&shapes, &row_clip(tabbed_y));
+    assert_eq!(fills(&tabbed).len(), 2, "track + fill, with the focus ring beside them; shapes: {shapes:?}");
+    assert_eq!(
+        rings(&tabbed),
+        vec![(Theme::DEFAULT.accent, tabbed_y)],
+        "the Tab-focused slider's ring is drawn in the accent role, and rings the slot itself with no validation \
+         ring to inset past",
     );
-    assert_eq!(tabbed.quads[2].y, tabbed_y, "and it rings the slot itself, with no validation ring to inset past");
 }
 
 fn drive_toggle_and_segmented(harness: &mut SubstrateHarness, panel: &str) {
@@ -2605,7 +2657,11 @@ fn assert_advanced_control_raster(harness: &mut SubstrateHarness) {
     assert!(bounding_box(&verdict.results[2]).is_some(), "canonical numeric text must remain raster-visible");
 
     let snapshot = harness.committed_overlay_snapshot();
-    assert_advanced_control_snapshot(&snapshot);
+    assert_advanced_control_snapshot(&snapshot, &harness.committed_shape_snapshot());
+    assert!(
+        harness.count_observed("aether.render.draw_screen_triangles") >= 1,
+        "the numeric's arrows reach the render cap as screen triangles",
+    );
     // The value's glyphs carry the numeric's own content clip (round-4
     // note 6) intersected with its slot row: the box less the stepper column
     // and one pad, so nothing the reader typed can reach the arrows.
@@ -2955,7 +3011,7 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
         .execute(vec![("initial", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new()))])
         .expect("initial virtual-list capture");
     let initial = harness.committed_overlay_snapshot();
-    assert_virtual_list_rows(&initial, 0, Theme::DEFAULT.selection, 0);
+    assert_virtual_list_rows(&harness.committed_shape_snapshot(), 0, Theme::DEFAULT.selection, 0);
     assert_five_virtual_list_glyph_rows(&initial);
 
     let panel = panel_address();
@@ -3004,17 +3060,12 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
     );
 
     let paged = harness.committed_overlay_snapshot();
-    assert_virtual_list_rows(&paged, 4, Theme::DEFAULT.fill(Theme::DEFAULT.selection, ThemeState::Hover), 8);
+    let paged_shapes = harness.committed_shape_snapshot();
+    assert_virtual_list_rows(&paged_shapes, 4, Theme::DEFAULT.fill(Theme::DEFAULT.selection, ThemeState::Hover), 2);
     assert_five_virtual_list_glyph_rows(&paged);
-    let paged_solids = solid_for(&paged, &virtual_list_clip());
-    assert!(
-        paged_solids.quads[7..11].iter().all(|quad| quad.tint == Theme::DEFAULT.warning),
-        "the outer validation outline must precede focus",
-    );
-    assert!(
-        paged_solids.quads[11..15].iter().all(|quad| quad.tint == Theme::DEFAULT.accent),
-        "the focus outline must remain visible inset after validation",
-    );
+    let paged_rings = rings(&shapes_for(&paged_shapes, &virtual_list_clip()));
+    assert_eq!(paged_rings[0].0, Theme::DEFAULT.warning, "the outer validation outline must precede focus");
+    assert_eq!(paged_rings[1].0, Theme::DEFAULT.accent, "the focus outline must remain visible inset after validation");
 
     for _ in 0..45 {
         harness
@@ -3046,7 +3097,7 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
         tail_log.iter().any(|message| {
             message.contains("widget virtual list selected")
                 && message.contains("widget=inventory")
-                && message.contains("selected_index=199")
+                && message.contains("index=199")
         }),
         "paging must reach and attribute the final item; log was:\n{}",
         tail_log.join("\n"),
@@ -3058,7 +3109,12 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
     // recomputing its hover from the window rather than from the last pointer
     // event alone.
     let tail = harness.committed_overlay_snapshot();
-    assert_virtual_list_rows(&tail, 4, Theme::DEFAULT.fill(Theme::DEFAULT.selection, ThemeState::Hover), 8);
+    assert_virtual_list_rows(
+        &harness.committed_shape_snapshot(),
+        4,
+        Theme::DEFAULT.fill(Theme::DEFAULT.selection, ThemeState::Hover),
+        2,
+    );
     assert_five_virtual_list_glyph_rows(&tail);
 
     let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };

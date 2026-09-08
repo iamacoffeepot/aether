@@ -370,7 +370,7 @@ pub struct CreateGeometry {
 #[kind(name = "aether.render.create_geometry_result")]
 pub enum CreateGeometryResult {
     Ok { geometry_id: u32 },
-    Err { reason: String },
+    Err { error: String },
 }
 
 /// `aether.render.update_geometry` — replace a previously-created
@@ -430,6 +430,15 @@ pub struct DestroyGeometry {
 /// un-premultiply wants a colour in the texels coverage did not reach,
 /// and writing one there multiplies it by its own zero alpha on the way
 /// in. So the choice belongs at the composite, which is here.
+///
+/// Which verbs carry it follows from that: a `blend` field appears
+/// exactly where the caller composites an *image of its own* —
+/// [`DrawTexturedQuads`] and [`DrawMaterialTextured`] — because only the
+/// caller that produced those texels knows whether they were already
+/// scaled by their coverage. A verb whose colours the substrate itself
+/// rasterizes ([`DrawShapes`], [`DrawScreenTriangles`],
+/// [`DrawMaterialCoverage`]) carries no `blend`: the fragment stage
+/// knows what it wrote, so there is nothing for the caller to declare.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QuadBlend {
     /// Colour and coverage independent. Every sender before ADR-0172
@@ -486,41 +495,110 @@ pub struct DrawTexturedQuads {
     pub quads: Vec<TexturedQuad>,
 }
 
-/// One flat-colored quad in a `DrawSolidQuads` batch. `(x, y)` is the
-/// top-left corner and `(width, height)` the size, both in the unit
-/// the batch's `space` selects — window pixels for `Screen`, pixel
-/// offsets from the anchor for `World`. `color` is a linear RGBA value;
-/// the alpha channel scales the blend. Not a kind on its own — only
-/// addressable inside `DrawSolidQuads.quads`.
+/// The stroke a [`Shape`] draws just inside its edge: `width_pixels`
+/// wide, in the unit the batch's `space` selects, in linear RGBA `color`.
+/// It lies over the fill, so a translucent stroke shows the fill through
+/// it. Not a kind on its own — only addressable inside `Shape.stroke`.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct SolidQuad {
+pub struct ShapeStroke {
+    pub width_pixels: f32,
+    pub color: Rgba,
+}
+
+/// The shadow a [`Shape`] casts: the same rounded box moved by `offset`
+/// (`[x, y]`, y down, in the batch's unit) with its edge feathered over
+/// `blur_pixels` each side, in linear RGBA `color`. It lies under the
+/// fill and the stroke, so with an opaque fill only the part that
+/// escapes the box is seen; with no fill it is a soft halo. Not a kind on
+/// its own — only addressable inside `Shape.shadow`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ShapeShadow {
+    pub blur_pixels: f32,
+    pub offset: [f32; 2],
+    pub color: Rgba,
+}
+
+/// The image a [`Shape`] draws inside its fill: the sub-rect
+/// `(u0, v0)`–`(u1, v1)` of the registered texture `texture_id`
+/// (`0,0` top-left to `1,1` bottom-right), stretched across the shape's
+/// box and sampled only where the fill covers — so the corner radius, the
+/// circle, and the anti-aliased edge apply to the image exactly as they
+/// apply to a flat colour. A rounded avatar, a thumbnail at the panel's
+/// radius, and a circular icon are this and nothing else.
+///
+/// The shape's `fill` multiplies the sampled texel the way
+/// [`TexturedQuad`]'s `tint` does — `Rgba::WHITE` draws the image
+/// unmodified, and a `Shape` with a `texture` but no `fill` draws no image
+/// at all, because there is no fill coverage to sample into. `blend` says
+/// whether the texel's colour was already scaled by its own coverage,
+/// exactly as it does on [`DrawTexturedQuads`]. An unknown, unrealized, or
+/// non-filterable `texture_id` warn-drops the shapes that name it.
+///
+/// Not a kind on its own — only addressable inside `Shape.texture`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ShapeTexture {
+    pub texture_id: u32,
+    pub u0: f32,
+    pub v0: f32,
+    pub u1: f32,
+    pub v1: f32,
+    pub blend: QuadBlend,
+}
+
+/// One shape in a `DrawShapes` batch (ADR-0213): an axis-aligned box —
+/// `(x, y)` the top-left corner, `(width, height)` the size, in the unit
+/// the batch's `space` selects — with its corners rounded by
+/// `corner_radius`, filled with `fill` when given, stroked inside its edge
+/// by `stroke` when given, and shadowed by `shadow` when given. The three
+/// parts compose shadow under fill under stroke, every edge anti-aliased.
+/// A radius at or above half the shorter side is a circle (or a stadium);
+/// a stroke with no fill is a ring; a shadow with neither is a soft halo;
+/// a `corner_radius` of `0.0` with a `fill` alone is the flat rect the
+/// retired `draw_solid_quads` drew. A `texture` draws an image inside the
+/// fill's coverage instead of a flat colour, so the same box is also a
+/// rounded avatar or a circular icon.
+/// Not a kind on its own — only addressable inside `DrawShapes.shapes`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Shape {
     pub x: f32,
     pub y: f32,
     pub width: f32,
     pub height: f32,
-    pub color: Rgba,
+    pub corner_radius: f32,
+    pub fill: Option<Rgba>,
+    pub stroke: Option<ShapeStroke>,
+    pub shadow: Option<ShapeShadow>,
+    pub texture: Option<ShapeTexture>,
 }
 
-/// `aether.render.draw_solid_quads` — draw a batch of flat-colored,
-/// alpha-blended quads in the projection `space` selects. Accumulated
-/// per frame with the same immediate-mode contract as
-/// `aether.draw_triangle`: send it every frame the quads should appear,
-/// or they vanish next frame. Reuses the textured-quad overlay pipeline
-/// with a reserved internal 1×1 white texture tinted by `color` — no
-/// new GPU pipeline. Fire-and-forget; no reply.
+/// `aether.render.draw_shapes` — draw a batch of rounded, stroked,
+/// shadowed boxes (ADR-0213) in the projection `space` selects, evaluated
+/// as a signed distance field on the GPU. Accumulated per frame with the
+/// same immediate-mode contract as `aether.draw_triangle`: send it every
+/// frame the shapes should appear, or they vanish next frame. Rides the
+/// overlay pass at the same painter position and under the same scissor
+/// as the quad batches, through its own pipeline — one more overlay
+/// draw, not a pass and not a layer. A batch may mix untextured shapes
+/// with shapes naming different textures; the record path splits it into
+/// draws at each texture transition, so painter order inside the batch is
+/// the order the shapes were listed in. The vocabulary is fixed and
+/// substrate-owned: callers supply parameters, never WGSL.
+/// Fire-and-forget; no reply.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.draw_solid_quads")]
-pub struct DrawSolidQuads {
+#[kind(name = "aether.render.draw_shapes")]
+pub struct DrawShapes {
     pub space: QuadSpace,
     /// Optional framebuffer-pixel scissor applied to this batch. `None`
     /// leaves the draw unclipped.
     pub clip: Option<ClipRect>,
-    pub quads: Vec<SolidQuad>,
+    pub shapes: Vec<Shape>,
 }
 
-/// One corner of a [`ScreenTriangle`]. `(x, y)` is a window-pixel
-/// position with the top-left origin and y pointing down — the same
-/// convention `QuadSpace::Screen` quads address in. `color` is a linear
+/// One corner of a [`ScreenTriangle`]. `(x, y)` is a position in the
+/// unit the batch's `space` selects — window pixels with the top-left
+/// origin and y pointing down for `Screen`, pixel offsets from the
+/// anchor for `World` — the same convention a quad's corners address
+/// in. `color` is a linear
 /// RGBA value whose alpha scales the blend; the three corner colors
 /// interpolate across the face, so a single flat fill repeats one color
 /// and a gradient states three. Not a kind on its own — only addressable
@@ -532,10 +610,10 @@ pub struct ScreenVertex {
     pub color: Rgba,
 }
 
-/// One triangle in a `DrawScreenTriangles` batch — three window-pixel
-/// corners at any orientation. Either winding draws (the overlay
-/// pipeline does not cull). Not a kind on its own — only addressable
-/// inside `DrawScreenTriangles.triangles`.
+/// One triangle in a `DrawScreenTriangles` batch — three corners at any
+/// orientation, in the unit the batch's `space` selects. Either winding
+/// draws (the overlay pipeline does not cull). Not a kind on its own —
+/// only addressable inside `DrawScreenTriangles.triangles`.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ScreenTriangle {
     pub a: ScreenVertex,
@@ -544,12 +622,19 @@ pub struct ScreenTriangle {
 }
 
 /// `aether.render.draw_screen_triangles` — draw a batch of
-/// alpha-blended triangles whose corners are window pixels. The
-/// aspect-correct 2D counterpart to `aether.draw_triangle`: pixel
-/// coordinates are absolute, so a rotated shape keeps its proportions
-/// on any window, and no camera has to publish a projection for flat
-/// content. Where `draw_solid_quads` fills axis-aligned rects, this
-/// fills arbitrary geometry — ribbons at an angle, gauges, graph edges.
+/// alpha-blended triangles whose corners are pixels. The aspect-correct
+/// 2D counterpart to `aether.draw_triangle`: coordinates are pixels
+/// rather than world units, so a rotated shape keeps its proportions on
+/// any window. Where `draw_shapes` fills rounded axis-aligned boxes,
+/// this fills arbitrary geometry — ribbons at an angle, gauges, graph
+/// edges, a caret.
+///
+/// `space` selects the projection exactly as it does on
+/// [`DrawTexturedQuads`] and [`DrawShapes`]: `Screen` puts the corners
+/// at absolute window pixels, so flat content needs no camera at all;
+/// `World` reads them as pixel offsets from a projected anchor, so a
+/// gauge or a graph edge can hang off a point in the world the way a
+/// label already can.
 ///
 /// Rides the same overlay pass and pipeline as the quad batches
 /// (ADR-0105), in the second pass after the world pass: alpha-blended,
@@ -560,6 +645,7 @@ pub struct ScreenTriangle {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.render.draw_screen_triangles")]
 pub struct DrawScreenTriangles {
+    pub space: QuadSpace,
     /// Optional framebuffer-pixel scissor applied to this batch. `None`
     /// leaves the draw unclipped.
     pub clip: Option<ClipRect>,
@@ -953,7 +1039,7 @@ pub struct ProgramRegister {
 #[kind(name = "aether.render.program.register_result")]
 pub enum ProgramRegisterResult {
     Ok { program_id: u32 },
-    Err { reason: String },
+    Err { error: String },
 }
 
 /// `aether.render.program.dispatch` — execute a registered program once
@@ -1083,14 +1169,15 @@ pub struct ProgramTimings {
 /// `Absent` means the instrument is not running and says why (no
 /// adapter support, or disabled by configuration); it is not an error
 /// and a caller should read it as "this device cannot answer", not "this
-/// program is free". `Err` is a genuine failure — an unknown
+/// program is free" — hence its payload is `reason`, not the `error`
+/// every failure arm carries. `Err` is a genuine failure — an unknown
 /// `program_id`, or no booted render GPU.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.render.program.timings_result")]
 pub enum ProgramTimingsResult {
     Ok { program_id: u32, rows: Vec<PassTimingRow> },
     Absent { reason: String },
-    Err { reason: String },
+    Err { error: String },
 }
 
 #[cfg(test)]

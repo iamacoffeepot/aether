@@ -29,10 +29,10 @@ use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::QuadBlend;
 use aether_render::{
-    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawPass, DrawSolidQuads,
-    DrawTexturedQuads, GeometrySlotSpec, OutputSlot, PassLoad, PassStage, ProgramDispatch, ProgramPass,
-    ProgramRegister, ProgramRegisterResult, SlotExtent, SlotSpec, SolidQuad, TextureFormat, TextureSampling,
-    TextureUsage, TexturedQuad, VertexAttribute, VertexFormat,
+    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawPass, DrawShapes, DrawTexturedQuads,
+    GeometrySlotSpec, OutputSlot, PassLoad, PassStage, ProgramDispatch, ProgramPass, ProgramRegister,
+    ProgramRegisterResult, Shape, SlotExtent, SlotSpec, TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
+    VertexAttribute, VertexFormat,
 };
 
 /// Skip (or panic under `AETHER_REQUIRE_RUNTIME`) when no wgpu adapter
@@ -156,7 +156,7 @@ fn create_geometry(
         .expect("create_geometry sequence");
     match created.reply::<CreateGeometryResult>(label).expect("decode CreateGeometryResult") {
         CreateGeometryResult::Ok { geometry_id } => geometry_id,
-        CreateGeometryResult::Err { reason } => panic!("create_geometry ({label}) failed: {reason}"),
+        CreateGeometryResult::Err { error } => panic!("create_geometry ({label}) failed: {error}"),
     }
 }
 
@@ -181,13 +181,13 @@ fn register_reply(
 fn registered_id(harness: &mut SubstrateHarness, label: &'static str, mail: &ProgramRegister) -> u32 {
     match register_reply(harness, label, mail) {
         ProgramRegisterResult::Ok { program_id } => program_id,
-        ProgramRegisterResult::Err { reason } => panic!("register ({label}) failed: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("register ({label}) failed: {error}"),
     }
 }
 
 fn register_err(harness: &mut SubstrateHarness, label: &'static str, mail: &ProgramRegister) -> String {
     match register_reply(harness, label, mail) {
-        ProgramRegisterResult::Err { reason } => reason,
+        ProgramRegisterResult::Err { error } => error,
         ProgramRegisterResult::Ok { program_id } => panic!("register ({label}) must reject; got program {program_id}"),
     }
 }
@@ -214,13 +214,23 @@ fn output_overlay(texture_id: u32) -> DrawTexturedQuads {
     }
 }
 
-/// A small white quad in the frame's top-left corner: proof that the
+/// A small white square in the frame's top-left corner: proof that the
 /// frame's own passes ran when a scenario expects a dispatch to drop.
-fn control_quad() -> DrawSolidQuads {
-    DrawSolidQuads {
+fn control_quad() -> DrawShapes {
+    DrawShapes {
         space: QuadSpace::Screen,
         clip: None,
-        quads: vec![SolidQuad { x: 2.0, y: 2.0, width: 5.0, height: 5.0, color: Rgba::new(1.0, 1.0, 1.0, 1.0) }],
+        shapes: vec![Shape {
+            x: 2.0,
+            y: 2.0,
+            width: 5.0,
+            height: 5.0,
+            corner_radius: 0.0,
+            fill: Some(Rgba::new(1.0, 1.0, 1.0, 1.0)),
+            stroke: None,
+            shadow: None,
+            texture: None,
+        }],
     }
 }
 
@@ -426,7 +436,7 @@ fn vertex_layout_mismatch_replies_a_distinguishable_error() {
         ProgramRegisterResult::Ok { program_id } => {
             assert_eq!(program_id, 0, "rejected registers must not consume ids");
         }
-        ProgramRegisterResult::Err { reason } => panic!("the matching draw program must register: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("the matching draw program must register: {error}"),
     }
 }
 

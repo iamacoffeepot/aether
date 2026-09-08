@@ -30,12 +30,14 @@ use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease};
 
 use crate::set::defaults::WidgetDefaults;
-use crate::set::{clamp_option_index, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y};
+use crate::set::{
+    clamp_option_index, clamp_selection, disc, push_control_outlines, release_left, reply_if_hidden, text_origin_y,
+};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
 use crate::{
-    Collect, RadioConfig, RadioSelected, SetWidgetState, WidgetControlState, WidgetDrawItem, WidgetDrawList,
-    WidgetFrame,
+    Collect, RadioConfig, RadioSelected, SetSelection, SetWidgetState, WidgetControlState, WidgetDrawItem,
+    WidgetDrawList, WidgetFrame,
 };
 
 /// Which way an arrow key moves the selection.
@@ -131,7 +133,13 @@ impl RadioGroupWidget {
             } else {
                 self.state.supporting_theme_state(false)
             };
-            items.push(quad(pad, marker_y, marker, marker, self.theme.fill(base, marker_state)));
+            items.push(disc(
+                pad,
+                marker_y,
+                marker,
+                Some(self.theme.fill(base, marker_state)),
+                Some((self.theme.stroke_width_pixels, self.theme.fill(self.theme.edge(), marker_state))),
+            ));
             items.push(WidgetDrawItem::Text {
                 x: pad.mul_add(2.0, marker),
                 y: text_origin_y(row_y, row_height, size),
@@ -171,14 +179,15 @@ impl WidgetDefaults for RadioGroupWidget {
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
-/// its `RadioConfig` again to replace the options or theme in place.
+/// its `RadioConfig` again to replace the options or theme in place — that
+/// holds the current choice. Send it [`SetSelection`] to move the choice.
 #[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for RadioGroupWidget {
     type Config = RadioConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.radio";
 
     fn init(config: RadioConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        let selected = clamp_option_index(config.initial_index, config.options.len());
+        let selected = clamp_option_index(config.initial, config.options.len());
         Ok(RadioGroupWidget {
             options: config.options,
             selected,
@@ -189,11 +198,13 @@ impl WasmActor for RadioGroupWidget {
         })
     }
 
-    /// Replace the options / theme in place, re-clamping the selection.
+    /// Replace the options / theme in place, re-clamping the selection into
+    /// the new vector. `initial` seeds the group only at `init`, so a
+    /// re-sent config does not move the reader's choice; [`SetSelection`] does.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: RadioConfig) {
-        self.selected = clamp_option_index(config.initial_index, config.options.len());
         self.options = config.options;
+        self.selected = clamp_selection(self.selected, self.options.len());
         self.theme = config.theme;
         self.apply_control_state(ctx, config.state);
     }
@@ -201,6 +212,16 @@ impl WasmActor for RadioGroupWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
+    }
+
+    /// Push the chosen row from the host, clamped into the options. Silent —
+    /// no [`RadioSelected`]. A `None` index is ignored: a radio group always
+    /// has a selection.
+    #[handler::single]
+    fn on_set_selection(&mut self, _ctx: &mut WasmCtx<'_>, set: SetSelection) {
+        if let Some(index) = set.index {
+            self.selected = clamp_option_index(index, self.options.len());
+        }
     }
 
     /// A left click selects the row under the cursor.
