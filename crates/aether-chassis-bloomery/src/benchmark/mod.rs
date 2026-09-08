@@ -14,11 +14,14 @@
 //!
 //! - [`golden`] — what a landed pull request is, read back as a runnable task,
 //!   and what a *set* of them is as a versioned value.
-//! - [`run`] — the seal as a pure plan: a set plus cells plus a sample size
-//!   becomes one [`BloomSpec`](aether_bloomery::BloomSpec) whose members are the
-//!   `(task, cell, sample)` triples. One bloom, many members — the coordinator
-//!   admits one active bloom at a time, and [`run`] says why that costs the
-//!   measurement nothing.
+//! - [`run`] — the sequence as a pure plan: a set plus cells plus a sample size
+//!   becomes one [`BloomSpec`](aether_bloomery::BloomSpec) per
+//!   `(task, cell, sample)`, in sealing order.
+//! - [`runner`] — the capability that walks that sequence: seal, watch to a
+//!   terminal status, reset the fixture mainline to the golden-task base, seal
+//!   the next.
+//! - [`kinds`] — what crosses between the door and the runner, and the run an
+//!   operator reads back.
 //! - `api::runtime::benchmark` — the operator door, which is the only part that
 //!   reads a repository, admits a fact, or holds a request.
 //!
@@ -39,13 +42,20 @@
 //! diff-similarity score would be a second, unattested column beside it.
 
 pub mod golden;
+pub mod kinds;
 pub mod run;
+pub mod runner;
 
 #[cfg(test)]
 mod tests;
 
 pub use golden::{GoldenTask, GoldenTaskError, GoldenTaskSet, extract};
-pub use run::{
-    BenchmarkAdmission, BenchmarkMemberView, BenchmarkPlan, BenchmarkRefusal, BenchmarkReport, CellAddress,
-    MAX_BENCHMARK_MEMBERS, PlannedMember, RunSpec, benchmark_workpiece, plan, require_trial_mode,
+pub use kinds::{
+    BenchmarkCell, BenchmarkCellState, BenchmarkRun, BenchmarkStatus, BenchmarkTick, RUN_VOLATILITY, ReadBenchmark,
+    ReadBenchmarkResult, StartBenchmark, StartBenchmarkResult,
 };
+pub use run::{
+    BenchmarkPlan, BenchmarkRefusal, CellAddress, MAX_BENCHMARK_BLOOMS, PlannedBloom, PlannedCell, RunSpec,
+    benchmark_workpiece, plan, require_trial_mode,
+};
+pub use runner::{BenchmarkRunnerCapability, BenchmarkRunnerSetup, BenchmarkRunnerState};

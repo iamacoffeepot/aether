@@ -85,7 +85,6 @@ use aether_bloomery::{
     AdmitResult, EnumerateClaimsResult, LoadConfigsResult, MetricsQueryResult, QueryResult, QuerySelector,
     ResolvedConfigs, SpendQueryResult, StoreClass,
 };
-use aether_bloomery_git::fixture::FakeGithub;
 use aether_http as http;
 use aether_http::{HttpServerResponse, RegisterRouteResult};
 use aether_kinds::trace::Settled;
@@ -107,6 +106,7 @@ use state::{Routed, SealVerify, VerifyPending, finish};
 use super::BloomeryApiCapability;
 
 use crate::artifacts::{ArtifactsCapabilityState, GetRange, GetRangeResult, resolve_root};
+use crate::benchmark::{ReadBenchmark, ReadBenchmarkResult, StartBenchmarkResult};
 use crate::bloomery::load_policy;
 #[cfg(feature = "github")]
 use crate::bloomery::{
@@ -210,9 +210,6 @@ pub struct ApiParams {
     /// store proved it against the journal's own stamp — so it rides `Params`
     /// rather than being a knob this cap resolves.
     pub store_class: StoreClass,
-    /// The in-memory repository a benchmark run replays landed history from,
-    /// present exactly when the backend selector named the fixture.
-    pub fixture: Option<FakeGithub>,
 }
 
 #[http::router]
@@ -276,8 +273,6 @@ impl NativeActor for BloomeryApiCapability {
             seal_verifications: HashMap::new(),
             control_token: params.control_token,
             store_class: params.store_class,
-            fixture: params.fixture,
-            benchmarks: HashMap::new(),
             #[cfg(feature = "github")]
             doctor: None,
             commission_verifying: HashMap::new(),
@@ -750,11 +745,25 @@ impl NativeActor for BloomeryApiCapability {
     }
 
     /// `POST /benchmark` — replay landed history across profile cells, sealing
-    /// one bloom whose members are the `(golden task, cell, sample)` triples
-    /// (ADR-0184). Refused `409` on a live-classed coordinator.
+    /// one bloom per `(golden task, cell, sample)` in sequence (ADR-0184).
+    /// Answers `202` with a handle; refused `409` on a live-classed coordinator.
     #[http::route(Post, "/benchmark")]
     fn on_post_benchmark(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = benchmark::post(state, &ctx, ctx.request());
+        let routed = benchmark::post(state, ctx.request());
+        finish(state, ctx, routed)
+    }
+
+    /// `GET /benchmark/{run}` — read one run's progress (ADR-0184).
+    #[http::route(Get, "/benchmark/{run}")]
+    fn on_get_benchmark(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        run: http::Path<String>,
+    ) -> http::Outcome {
+        let routed = match run.0.parse() {
+            Ok(run) => Routed::ReadBenchmark(ReadBenchmark { run }),
+            Err(error) => Routed::Reply(error_response(400, &format!("benchmark run handle is not a number: {error}"))),
+        };
         finish(state, ctx, routed)
     }
 
@@ -989,12 +998,6 @@ impl NativeActor for BloomeryApiCapability {
     /// rendering runs only on the ones it does not claim.
     #[handler::manual]
     fn on_admit_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: AdmitResult) {
-        // A benchmark run answers with its own report rather than the shared
-        // outcome rendering, so it is offered this reply first and the rest of
-        // the chain runs only on the ones it does not claim.
-        let Some(mail) = state.settle_benchmark(ctx, mail) else {
-            return;
-        };
         #[cfg(feature = "github")]
         let Some(mail) = state.settle_repair(ctx, mail) else {
             return;
@@ -1044,6 +1047,26 @@ impl NativeActor for BloomeryApiCapability {
                 }
             }
         }
+    }
+
+    /// The runner's answer to a benchmark start (ADR-0184).
+    #[http::reply]
+    fn on_start_benchmark_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: StartBenchmarkResult,
+    ) -> HttpServerResponse {
+        benchmark::start_response(mail)
+    }
+
+    /// The runner's answer to a benchmark read.
+    #[http::reply]
+    fn on_read_benchmark_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: ReadBenchmarkResult,
+    ) -> HttpServerResponse {
+        benchmark::read_response(mail)
     }
 
     #[http::reply]
@@ -1344,11 +1367,6 @@ impl NativeActor for BloomeryApiCapability {
             inbound.reply(&error_response(504, "commission store read settled without a reply"));
         } else if let Some(load) = state.seal_commission_loads.remove(&mail.root.correlation_id) {
             state.fail_commission_seal(load.seal, 504, "commission store read settled without a reply");
-        } else {
-            // A benchmark run's seal settled without a reply; its report can
-            // never be written, so the held request is failed closed rather
-            // than waiting out the ingress timeout. A miss is a no-op.
-            state.fail_benchmark(mail.root.correlation_id, "a benchmark seal settled without a reply");
         }
     }
 }

@@ -1,31 +1,34 @@
-//! Planning one benchmark run: the per-cell seal, as a value (ADR-0184).
+//! Planning one benchmark run: the per-cell blooms, as a value (ADR-0184).
 //!
 //! A run takes a [`GoldenTaskSet`] and a list of profile cells and produces one
-//! member per `(task, cell, sample)` — same order, same base, differing only in
-//! the [`ModelOverride`] each member seals.
+//! **bloom** per `(task, cell, sample)` — same order, same base, differing only
+//! in the [`ModelOverride`] its single member seals. That is ADR-0184's stated
+//! mechanism, and the plan is the ordered list of those blooms.
 //!
-//! # One bloom, many members — not one bloom per cell
+//! # Why the blooms are a sequence, and why one bloom of members is wrong
 //!
-//! ADR-0184 words the mechanism as sealing "one bloom per profile cell". The
-//! coordinator does not admit that shape: the reducer permits one **active**
-//! bloom at a time and answers every sibling
-//! [`SealRejected(ActiveBloomExists)`](aether_bloomery::Outcome::SealRejected),
-//! so a run of four blooms measures the first and refuses the rest. Sealing them
-//! in sequence instead is not the same experiment — each cell would replay
-//! against whatever the estate's mainline had become — and it is not a request
-//! an operator can wait on.
+//! The reducer permits one **active** bloom at a time, so the run seals them one
+//! at a time: the next cell's bloom is sealed only once the previous one reaches
+//! a terminal status, and between them the fixture's mainline is reset to
+//! [`base`](GoldenTaskSet::base) so every cell replays the same order over the
+//! same tree. The reset is what makes "the same task under four profiles"
+//! runnable at all, and it is exactly what the live repository cannot offer —
+//! which is ADR-0184's own reason for benchmarking against the fixture.
 //!
-//! So a run is one bloom whose **members** are the cells. That is the shape the
-//! coordinator is built for, and the measurement is untouched: the capability
-//! ledger keys its rows on `(harness, model, effort) × stage` recomputed from
-//! each *member's* sealed registry (ADR-0184 §The agent is recomputed), so four
-//! members under two overrides fold into exactly the two cells four blooms would
-//! have. What changes is only that the cells run concurrently under one base
-//! rather than serially under four.
+//! Folding the cells into one bloom's membership instead would satisfy the
+//! one-active-bloom rule while destroying the measurement. Every member of a
+//! bloom is woven together at Integrate, and these members are N implementations
+//! of *the same task over the same base*: the fold collides by construction,
+//! Reconcile laps get charged to members for colliding with their siblings, and
+//! AggregateVerify / AggregateReview / Land judge a tree carrying four
+//! implementations of one feature merged together. The Construct and Verify
+//! columns would survive — the ledger keys those per member's agent — but
+//! ADR-0184 measures *the line*, and every column past the fold would be a
+//! measurement of the cells' interaction rather than of the cell.
 //!
 //! Everything here is pure: nothing reads a store, admits a fact, or touches a
 //! repository, so the shape of a run is testable without a coordinator and the
-//! door next door is left with only the hops.
+//! runner next door is left with only the sequencing.
 
 use std::error::Error;
 use std::fmt;
@@ -41,18 +44,18 @@ use serde::{Deserialize, Serialize};
 
 use super::golden::{GoldenTask, GoldenTaskSet};
 
-/// Ceiling on how many members one run's bloom may carry.
+/// Ceiling on how many blooms one run may seal.
 ///
-/// A run's member count is the product of three operator-supplied numbers, so it
+/// A run's bloom count is the product of three operator-supplied numbers, so it
 /// is the one input here that grows multiplicatively: four cells at sample size
-/// four over eight tasks is a hundred and twenty-eight members, each of which
-/// dispatches a model lane that costs money, and all of them at once. The cap
-/// refuses the request outright rather than sealing a prefix of it, because a
-/// partially-sealed benchmark is a comparison with a hole in it — the cells that
+/// four over eight tasks is a hundred and twenty-eight blooms, each of which
+/// dispatches a model lane that costs money — and, because they are sequential,
+/// a hundred and twenty-eight whole bloom lifetimes end to end. The cap refuses
+/// the request outright rather than sealing a prefix of it, because a
+/// partially-sealed benchmark is a comparison with a hole in it: the cells that
 /// fit measured the task and the ones that did not are silently absent from the
-/// table. Well under the seal door's own `MAX_SEAL_MEMBERS`, because these
-/// members all run at once rather than merely all existing.
-pub const MAX_BENCHMARK_MEMBERS: usize = 64;
+/// table.
+pub const MAX_BENCHMARK_BLOOMS: usize = 64;
 
 /// The words the trial approval's supporting observation asserts — the sibling
 /// of the approve gate's auto-tier record.
@@ -86,8 +89,8 @@ pub enum BenchmarkRefusal {
     NoCells,
     /// The request asked for no samples per cell.
     NoSamples,
-    /// The run would seal more than [`MAX_BENCHMARK_MEMBERS`] members.
-    TooManyMembers(usize),
+    /// The run would seal more than [`MAX_BENCHMARK_BLOOMS`] blooms.
+    TooManyBlooms(usize),
     /// A sealed address resolves to no stored configuration.
     ///
     /// One variant for both the cells and the instruction bundle, because both
@@ -124,8 +127,8 @@ impl fmt::Display for BenchmarkRefusal {
             Self::NoTasks => write!(f, "a benchmark run needs at least one landed pull request to replay"),
             Self::NoCells => write!(f, "a benchmark run needs at least one profile cell to compare"),
             Self::NoSamples => write!(f, "a benchmark run needs a sample size of at least one"),
-            Self::TooManyMembers(members) => {
-                write!(f, "this run would seal {members} members; one run is capped at {MAX_BENCHMARK_MEMBERS}")
+            Self::TooManyBlooms(blooms) => {
+                write!(f, "this run would seal {blooms} blooms; one run is capped at {MAX_BENCHMARK_BLOOMS}")
             }
             Self::UnresolvableConfig { address, expected } => {
                 write!(f, "no stored `{expected}` at address {}", address.to_hex())
@@ -139,13 +142,14 @@ impl fmt::Display for BenchmarkRefusal {
 
 impl Error for BenchmarkRefusal {}
 
-/// One member a run seals: which cell and sample of which task it is.
+/// What one cell of a run measures — the order, the selector, and the
+/// repetition — independent of the bloom that will carry it.
 ///
-/// Content-addressed, because its digest is what the member pins as its scope
-/// revision: the pin has to name the exact order, cell and repetition the
-/// approval binds, and this value is exactly that.
+/// Content-addressed, because its digest is what the bloom's single member pins
+/// as its scope revision: the pin has to name the exact order, cell and
+/// repetition the approval binds, and this value is exactly that.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct PlannedMember {
+pub struct PlannedCell {
     /// The member's workpiece, which is also its claim and candidate-ref name.
     pub workpiece: WorkpieceId,
     /// The work order this member replays, recorded as its dispatch description
@@ -159,91 +163,38 @@ pub struct PlannedMember {
     pub sample: u32,
 }
 
-impl ContentAddressed for PlannedMember {
-    const DOMAIN: &'static str = "aether.bloomery.benchmark_member";
+impl ContentAddressed for PlannedCell {
+    const DOMAIN: &'static str = "aether.bloomery.benchmark_cell";
 }
 
-/// A planned run: the set it replays, the one bloom that carries it, and what
-/// each of that bloom's members measures.
+/// One bloom a run seals, in sequence position order.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct BenchmarkPlan {
-    /// The set, and with it the base the bloom seals on.
-    pub set: GoldenTaskSet,
-    /// The frozen spec — every member, on one base, under one instruction
-    /// bundle.
+pub struct PlannedBloom {
+    /// The frozen spec — one member, sealing this cell's override on the set's
+    /// base under the run's instruction bundle.
     pub spec: BloomSpec,
-    /// One entry per `(task, cell, sample)`, in that nesting order.
-    pub members: Vec<PlannedMember>,
+    /// What this bloom measures.
+    pub cell: PlannedCell,
 }
 
-impl BenchmarkPlan {
-    /// The bloom this run seals.
+impl PlannedBloom {
+    /// The bloom's identity.
     #[must_use]
-    pub fn bloom(&self) -> BloomId {
+    pub fn id(&self) -> BloomId {
         self.spec.id()
     }
 }
 
-/// What the control core answered for the run's seal.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum BenchmarkAdmission {
-    /// The reducer's own answer. A run reports it verbatim rather than
-    /// collapsing it to a boolean: a seal that came back
-    /// [`Duplicate`](aether_bloomery::Outcome::Duplicate) or
-    /// [`SealRejected`](aether_bloomery::Outcome::SealRejected) measured
-    /// nothing, and that has to be visible in the run's own output rather than
-    /// inferred from a ledger that is short every cell.
-    Admitted(Outcome),
-    /// The admit itself faulted — the bytes did not decode, or the commit
-    /// failed — so the run has no bloom at all.
-    Refused(String),
-}
-
-/// One member of a run's bloom, as an operator reads it back.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct BenchmarkMemberView {
-    /// The member's workpiece.
-    pub workpiece: String,
-    /// The landed pull request its order came from.
-    pub pull_request: u64,
-    /// The cell selector it seals — what the ledger's rows are attributable to.
-    pub cell: Digest,
-    /// Which repetition within the cell it is.
-    pub sample: u32,
-}
-
-/// A finished run, as the operator door renders it.
-///
-/// The caveats ride here for the reason they ride
-/// [`CapabilityLedger`](aether_bloomery::CapabilityLedger): a run's own output is
-/// where a reader first meets its cells, so the boundary those cells are read
-/// under has to arrive with them rather than waiting for a later
-/// `GET /calibration`. Rendered, never folded — nothing in the run adjusts a
-/// count for either.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct BenchmarkReport {
-    /// The set that was replayed.
-    pub set: String,
-    /// Its version — the digest that pins exactly which comparison these blooms
-    /// belong to (see [`GoldenTaskSet`]).
-    pub set_version: Digest,
-    /// The base every bloom sealed on.
-    pub base: Digest,
-    /// The tasks drawn, in the order they were named.
-    pub tasks: Vec<GoldenTask>,
-    /// The bloom the run sealed.
-    pub bloom: BloomId,
-    /// What the control core answered for that seal.
-    pub admission: BenchmarkAdmission,
-    /// One entry per member, in `(task, cell, sample)` order.
-    pub members: Vec<BenchmarkMemberView>,
-    /// The ledger's own honesty boundary
-    /// ([`LEDGER_CAVEAT`](aether_bloomery::LEDGER_CAVEAT)).
-    pub caveat: String,
-    /// The under-reporting boundary
-    /// ([`COST_CAVEAT`](aether_bloomery::COST_CAVEAT)), beside the ledger's own
-    /// and never inside a count.
-    pub cost_caveat: String,
+/// A planned run: the set it replays and the blooms it will seal, in the order
+/// it will seal them.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct BenchmarkPlan {
+    /// The set, and with it the base every bloom seals on and mainline is reset
+    /// to between them.
+    pub set: GoldenTaskSet,
+    /// One entry per `(task, cell, sample)`, in that nesting order — which is
+    /// also the sealing order.
+    pub blooms: Vec<PlannedBloom>,
 }
 
 /// What one run compares, beside the set it replays.
@@ -251,9 +202,9 @@ pub struct BenchmarkReport {
 pub struct RunSpec {
     /// One recorded [`ModelOverride`] address per profile cell.
     pub cells: Vec<CellAddress>,
-    /// How many members to seal per `(task, cell)`.
+    /// How many blooms to seal per `(task, cell)`.
     pub samples: u32,
-    /// The [`ModelProcessInstructions`] bundle the bloom pins bloom-wide.
+    /// The [`ModelProcessInstructions`] bundle every bloom pins bloom-wide.
     ///
     /// Named by the operator rather than supplied by the door, for the reason a
     /// draft names its own (ADR-0214): a bloom may only start a model attempt
@@ -265,16 +216,17 @@ pub struct RunSpec {
     pub instructions: Digest,
 }
 
-/// Plan a run over `set`: one bloom, one member per `(task, cell, sample)`.
+/// Plan a run over `set`: one bloom per `(task, cell, sample)`, in sealing
+/// order.
 ///
 /// `resolve` answers what kind a sealed address is filed under, `None` when the
 /// address resolves to nothing — the caller's window onto stored configuration,
 /// taken as a closure so this stays a pure function of the values it is handed.
 ///
 /// # Errors
-/// [`BenchmarkRefusal`] for an empty cell list, a zero sample size, a run over
-/// the member cap, or an address that does not resolve to the kind it is sealed
-/// as.
+/// [`BenchmarkRefusal`] for an empty task or cell list, a zero sample size, a
+/// run over the bloom cap, or an address that does not resolve to the kind it is
+/// sealed as.
 pub fn plan(
     set: GoldenTaskSet,
     run: &RunSpec,
@@ -296,25 +248,25 @@ pub fn plan(
 
     let per_cell = usize::try_from(run.samples).unwrap_or(usize::MAX);
     let count = set.tasks.len().saturating_mul(run.cells.len()).saturating_mul(per_cell);
-    if count > MAX_BENCHMARK_MEMBERS {
-        return Err(BenchmarkRefusal::TooManyMembers(count));
+    if count > MAX_BENCHMARK_BLOOMS {
+        return Err(BenchmarkRefusal::TooManyBlooms(count));
     }
 
-    let (version, samples) = (set.version(), run.samples);
+    let (base, version, samples) = (set.base, set.version(), run.samples);
     let mut configs = ConfigRegistry::default();
     configs.insert::<ModelProcessInstructions>(run.instructions);
 
-    let members: Vec<PlannedMember> = set
+    let blooms = set
         .tasks
         .iter()
         .flat_map(|task| {
-            run.cells.iter().flat_map(|cell| (0..samples).map(|sample| planned_member(task, *cell, sample)))
+            run.cells
+                .iter()
+                .flat_map(|cell| (0..samples).map(|sample| planned_bloom(base, version, &configs, task, *cell, sample)))
         })
         .collect();
-    let proposals = members.iter().map(|member| membership(version, member)).collect();
 
-    let spec = BloomDraft { proposals, base: set.base, configs, ..BloomDraft::default() }.seal();
-    Ok(BenchmarkPlan { set, spec, members })
+    Ok(BenchmarkPlan { set, blooms })
 }
 
 /// Refuse an address that does not resolve to `expected`.
@@ -330,47 +282,55 @@ fn resolves_as(
     }
 }
 
-/// What one `(task, cell, sample)` measures.
-fn planned_member(task: &GoldenTask, cell: CellAddress, sample: u32) -> PlannedMember {
-    PlannedMember {
-        workpiece: WorkpieceId(benchmark_workpiece(task.pull_request, cell, sample)),
-        order: task.order.clone(),
-        pull_request: task.pull_request,
-        cell,
-        sample,
-    }
-}
-
-/// Freeze one planned member into the membership the bloom seals.
+/// Freeze one `(task, cell, sample)` into the bloom that measures it.
 ///
-/// The scope revision is the member's own planned content, and nothing writes a
+/// The scope revision is the cell's own planned content, and nothing writes a
 /// `ScopeRevision` row at it. A benchmark member's work order is the landed
 /// issue text, carried to the lane as its dispatch description the way every
 /// sealed member's is; inventing a scope revision would put a second, divergent
 /// copy of that text in the commission store. What the pin has to do is name the
 /// order the approval binds, and this digest does that.
-fn membership(version: Digest, planned: &PlannedMember) -> Membership {
-    let mut configs = ConfigRegistry::default();
-    configs.insert::<ModelOverride>(planned.cell);
+fn planned_bloom(
+    base: Digest,
+    version: Digest,
+    configs: &ConfigRegistry,
+    task: &GoldenTask,
+    address: CellAddress,
+    sample: u32,
+) -> PlannedBloom {
+    let cell = PlannedCell {
+        workpiece: WorkpieceId(benchmark_workpiece(task.pull_request, address, sample)),
+        order: task.order.clone(),
+        pull_request: task.pull_request,
+        cell: address,
+        sample,
+    };
 
+    let mut member_configs = ConfigRegistry::default();
+    member_configs.insert::<ModelOverride>(address);
     let mut member = Membership {
-        workpiece: planned.workpiece.clone(),
-        scope_revision: digest_of(planned),
-        configs,
+        workpiece: cell.workpiece.clone(),
+        scope_revision: digest_of(&cell),
+        configs: member_configs,
         approval: Evidence { subject: Digest::default(), kind: EvidenceKind::Approval, detail: Digest::default() },
     };
     member.approval = trial_approval(member.subject(), version);
-    member
+
+    PlannedBloom {
+        spec: BloomDraft { proposals: vec![member], base, configs: configs.clone(), ..BloomDraft::default() }.seal(),
+        cell,
+    }
 }
 
-/// The workpiece one benchmark member covers.
+/// The workpiece one benchmark bloom's member covers.
 ///
 /// Every cell and every sample gets its own workpiece rather than replaying one
-/// name, and that is forced twice over. A bloom's membership is keyed by
-/// workpiece, so two samples of one cell sharing a name are one member the seal
-/// door refuses as a duplicate — a run of four that measured two. And a
-/// workpiece is what a resolution claim and a candidate ref are named by, so
-/// members running at once cannot share one.
+/// name, and that is forced twice over. A sealed spec is addressed by its own
+/// content, so two samples of one cell sharing a workpiece would seal to the
+/// same bloom id and the second would be admitted as a duplicate of the first —
+/// a run of four that measured two. And the reducer refuses a re-seal of a
+/// `(workpiece, scope_revision)` a landed bloom already resolved, so a run whose
+/// first cell landed could not seal its second at all.
 ///
 /// The cell's short hex is in the name so a bloom is attributable to its
 /// selector by inspection, which is what an operator reading a claim ref or a

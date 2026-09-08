@@ -11,7 +11,7 @@ use aether_bloomery_git::{ChecksState, NewPullRequest, PullRequestApi, fixture::
 use aether_data::Kind;
 
 use super::golden::{GoldenTask, GoldenTaskError, GoldenTaskSet, extract};
-use super::run::{BenchmarkRefusal, MAX_BENCHMARK_MEMBERS, RunSpec, plan};
+use super::run::{BenchmarkRefusal, MAX_BENCHMARK_BLOOMS, PlannedBloom, RunSpec, plan};
 
 /// The tree a seeded landing's head carries — the reference answer extraction
 /// reads back.
@@ -155,49 +155,44 @@ fn extraction_refuses_a_landing_that_is_not_one() {
 }
 
 // The whole mechanism, in one assertion: two cells at sample size two over one
-// golden task are four *distinct* members of one bloom, each sealing its own
+// golden task are four *distinct* blooms, each with one member sealing its own
 // cell address, all on the set's one base and under one instruction bundle.
 //
-// Tripwire: a bloom's membership is keyed by workpiece, so a plan that reused one
-// name across samples would collapse two members into one — a run of four that
-// measured two — while every per-cell assertion below still held.
+// Tripwire: a sealed spec is addressed by its own content, so a plan that reused
+// one workpiece across samples would produce two identical bloom ids — and the
+// second seal would be deduplicated into the first, leaving a run of four that
+// measured two while every per-cell assertion below still held.
 #[test]
-fn two_cells_at_sample_size_two_are_four_members_attributable_to_their_cells() {
+fn two_cells_at_sample_size_two_are_four_blooms_attributable_to_their_cells() {
     let cells = [cell(0xC1), cell(0xC2)];
 
     let planned = plan(task_set(vec![task(5820)]), &run_spec(&cells, 2), recorded())
         .expect("two resolvable cells at sample size two plan");
 
-    assert_eq!(planned.members.len(), 4);
-    let names: BTreeSet<_> = planned.members.iter().map(|member| member.workpiece.clone()).collect();
-    assert_eq!(names.len(), 4, "every sample is its own member");
+    assert_eq!(planned.blooms.len(), 4);
+    let ids: BTreeSet<_> = planned.blooms.iter().map(PlannedBloom::id).collect();
+    assert_eq!(ids.len(), 4, "every sample is its own bloom, sealed in its own turn");
 
-    let sealed = planned.spec.members();
-    assert_eq!(sealed.len(), 4, "the one bloom carries every planned member: {sealed:?}");
-    assert_eq!(planned.spec.base(), planned.set.base, "the bloom seals on the set's base");
-    assert_eq!(
-        planned.spec.configs().address::<ModelProcessInstructions>(),
-        Some(INSTRUCTIONS),
-        "the bloom pins the authorized instruction bundle, or no member's model lane dispatches (ADR-0214)"
-    );
+    for bloom in &planned.blooms {
+        assert_eq!(bloom.spec.base(), planned.set.base, "every cell replays the same base");
+        assert_eq!(
+            bloom.spec.configs().address::<ModelProcessInstructions>(),
+            Some(INSTRUCTIONS),
+            "every bloom pins the authorized instruction bundle, or its model lane never dispatches (ADR-0214)"
+        );
 
-    for member in sealed {
+        let member = &bloom.spec.members()[0];
         assert!(member.approval.validates(&member.subject()), "the trial approval binds its own member subject");
-        let planned = planned
-            .members
-            .iter()
-            .find(|planned| planned.workpiece == member.workpiece)
-            .expect("every sealed member was planned");
         assert_eq!(
             member.configs.address::<ModelOverride>(),
-            Some(planned.cell),
+            Some(bloom.cell.cell),
             "the member seals its cell's override address, which is what the ledger attributes to"
         );
-        assert_eq!(planned.order, "an order", "every cell replays the same work order");
+        assert_eq!(bloom.cell.order, "an order", "every cell replays the same work order");
     }
 
     assert_eq!(
-        cells.map(|address| planned.members.iter().filter(|member| member.cell == address).count()),
+        cells.map(|address| planned.blooms.iter().filter(|bloom| bloom.cell.cell == address).count()),
         [2, 2],
         "each cell got its sample size"
     );
@@ -251,11 +246,11 @@ fn a_cell_that_is_not_a_resolvable_override_is_refused() {
 // a partially-sealed benchmark is a comparison with a hole in it, and the cells
 // that fit are indistinguishable from a complete table.
 #[test]
-fn a_run_over_the_member_ceiling_seals_nothing() {
-    let over = vec![task(1); MAX_BENCHMARK_MEMBERS + 1];
+fn a_run_over_the_bloom_ceiling_seals_nothing() {
+    let over = vec![task(1); MAX_BENCHMARK_BLOOMS + 1];
 
     assert_eq!(
         plan(task_set(over), &run_spec(&[cell(0xC1)], 1), recorded()),
-        Err(BenchmarkRefusal::TooManyMembers(MAX_BENCHMARK_MEMBERS + 1))
+        Err(BenchmarkRefusal::TooManyBlooms(MAX_BENCHMARK_BLOOMS + 1))
     );
 }

@@ -190,6 +190,32 @@ impl Wire {
         value.get("doctor").cloned().and_then(|doctor| serde_json::from_value(doctor).ok())
     }
 
+    /// `GET path` against the coordinator's REST control ingress, answering the
+    /// status code and the raw body — the read half of [`post`](Self::post), for
+    /// a door whose answer is a document rather than an outcome.
+    ///
+    /// # Panics
+    /// The REST port was never bound, or the ingress did not answer a
+    /// well-formed response.
+    #[must_use]
+    pub fn get(&self, path: &str) -> (u16, String) {
+        let port = self.http_port.expect("the coordinator bound a REST control ingress");
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the REST ingress accepts");
+        let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).expect("the request writes");
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).expect("the ingress answers");
+
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let status = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or_else(|| panic!("no status code in {text}"));
+        let body = text.split_once("\r\n\r\n").map_or_else(String::new, |(_, body)| body.to_owned());
+        (status, body)
+    }
+
     /// `POST path` against the coordinator's REST control ingress, answering the
     /// status code and the raw body.
     ///

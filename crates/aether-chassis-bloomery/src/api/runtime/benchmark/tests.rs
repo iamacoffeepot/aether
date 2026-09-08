@@ -52,7 +52,7 @@ fn a_live_classed_coordinator_refuses_before_it_reads_the_body() {
 
 // A benchmark run is an operator act, gated the way `/hold`, `/repair` and
 // `/supersede` are: a blank reason or an unnamed operator is refused rather than
-// defaulted, so the journal never carries a run nobody owns.
+// defaulted, so the journal never carries a sequence of blooms nobody owns.
 #[test]
 fn a_trial_coordinator_still_refuses_an_unstated_run() {
     let refusal = refused(StoreClass::Trial, &body("   "));

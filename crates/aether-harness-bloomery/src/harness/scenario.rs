@@ -22,6 +22,7 @@ use aether_bloomery_github::{
     ChecksState, GitDataApi, NewPullRequest, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex,
 };
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, GetResult};
+use aether_chassis_bloomery::benchmark::{BenchmarkRunnerCapability, BenchmarkTick};
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, read_ledger};
 use aether_chassis_bloomery::bloomery::{
     BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, DoctorReactorCapability, DoctorReport,
@@ -289,6 +290,24 @@ impl ScenarioHarness {
     #[must_use]
     pub fn post(&self, path: &str, body: &str) -> (u16, String) {
         self.wire.post(path, body)
+    }
+
+    /// `GET path` against the coordinator's REST control ingress.
+    #[must_use]
+    pub fn get(&self, path: &str) -> (u16, String) {
+        self.wire.get(path)
+    }
+
+    /// One benchmark run's rendered state (ADR-0184), read through the door an
+    /// operator reads it through.
+    ///
+    /// # Panics
+    /// The door refused the read, or answered a body that is not JSON.
+    #[must_use]
+    pub fn benchmark_run(&self, run: u64) -> serde_json::Value {
+        let (status, body) = self.get(&format!("/benchmark/{run}"));
+        assert_eq!(status, 200, "the benchmark run must read back: {body}");
+        serde_json::from_str(&body).expect("the benchmark door answers JSON")
     }
 
     /// Admit one reducer fact through the control core's wire ingress.
@@ -1319,6 +1338,23 @@ impl ScenarioHarness {
     /// Wake the propose reactor once.
     pub fn propose_tick(&mut self) {
         self.wire.tick(<ProposeReactorCapability as Addressable>::resolve(0, ()), &ProposeTick::default());
+    }
+
+    /// Wake the benchmark runner once (ADR-0184) — how a scenario advances a
+    /// run's sequence without waiting out its poll cadence.
+    pub fn benchmark_tick(&mut self) {
+        self.wire.tick(<BenchmarkRunnerCapability as Addressable>::resolve(0, ()), &BenchmarkTick::default());
+    }
+
+    /// The commit the fixture's mainline ref currently points at.
+    ///
+    /// # Panics
+    /// This is a fixture-cell method and the backend is not the fixture, or the
+    /// mainline ref is absent.
+    #[must_use]
+    pub fn fixture_mainline(&self) -> Digest {
+        const MAINLINE_REF: &str = "heads/main";
+        self.fake().ref_digest(MAINLINE_REF).expect("the fixture holds a mainline ref")
     }
 
     /// Wake the control core's mainline observer once.

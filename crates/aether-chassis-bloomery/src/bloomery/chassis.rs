@@ -29,6 +29,7 @@ use aether_trace::TraceDispatchCapability;
 use super::local_landing::LocalLanding;
 use crate::api::{ApiParams, BloomeryApiCapability};
 use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
+use crate::benchmark::{BenchmarkRunnerCapability, BenchmarkRunnerSetup};
 use crate::bloomery::CoordinatorConfig;
 use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::doctor::KitReport;
@@ -765,6 +766,11 @@ impl BootableChassis for BloomeryChassis {
         // decides both. `None` off the fixture backend, which is the same
         // condition under which `POST /benchmark` is refused outright.
         let fixture = github.uses_fixture().then(|| github.shared_fixture());
+        // The ref a benchmark run resets between cells — the `heads/…` short
+        // form the fixture keys its refs by — and the cadence it watches the
+        // sealed bloom on.
+        let mainline_ref = coordinator.mainline().git_ref().to_owned();
+        let benchmark_poll_secs = coordinator.poll_interval_secs;
         // Capture the tier-policy path before `github` is moved into the source
         // cap below; the api cap's pre-seal approve gate loads it at init (#3583).
         let approval_policy_file = coordinator.approval_policy_file.clone();
@@ -880,7 +886,14 @@ impl BootableChassis for BloomeryChassis {
                 artifacts_root,
                 control_token: coordinator.http_control_token,
                 store_class,
+            })
+            // The benchmark sequencer (ADR-0184). It holds the fixture, so a
+            // coordinator that is not in trial mode mounts it refusing.
+            .with_actor::<BenchmarkRunnerCapability>(BenchmarkRunnerSetup {
                 fixture,
+                store_class,
+                mainline_ref: mainline_ref.to_owned(),
+                poll_interval_secs: benchmark_poll_secs,
             }))
     }
     #[cfg(not(feature = "github"))]
@@ -938,10 +951,15 @@ impl BootableChassis for BloomeryChassis {
                 artifacts_root,
                 control_token: coordinator.http_control_token,
                 store_class,
-                // No GitHub adapter is linked, so no fixture repository is
-                // mounted and `POST /benchmark` has nothing to replay — which
-                // the live class above already refuses first.
+            })
+            // No GitHub adapter is linked, so no fixture repository is mounted
+            // and a benchmark run has nothing to replay — which the live class
+            // above already refuses first.
+            .with_actor::<BenchmarkRunnerCapability>(BenchmarkRunnerSetup {
                 fixture: None,
+                store_class,
+                mainline_ref: String::new(),
+                poll_interval_secs: coordinator.poll_interval_secs,
             }))
     }
 }

@@ -34,7 +34,6 @@ use aether_bloomery::{
     Admit, ApprovalPolicy, BloomDraft, BloomId, Event, MemberDependency, MetricsQuery, Query, ResolvedConfigs,
     SpendQuery, Statement, StoreClass, Workpiece, WorkpieceId,
 };
-use aether_bloomery_git::fixture::FakeGithub;
 use aether_data::wire::to_vec;
 use aether_data::{Kind, MailId, MailboxId};
 use aether_http as http;
@@ -45,7 +44,7 @@ use aether_substrate::{InboundMail, Mailer};
 
 use super::response::error_response;
 use crate::artifacts::{ArtifactsCapability, GetRange};
-use crate::benchmark::BenchmarkPlan;
+use crate::benchmark::{BenchmarkRunnerCapability, ReadBenchmark, StartBenchmark};
 #[cfg(feature = "github")]
 use crate::bloomery::{ArchiveRecords, CandidatePush, DoctorReport, JanitorReactorCapability, ListArchive};
 // The control core is a native sibling cap since the wasm-boundary retirement
@@ -91,13 +90,6 @@ pub(super) const MAX_SEAL_MEMBERS: usize = 256;
 /// so a second load round without a ceiling could amplify one seal into an
 /// unbounded number of store reads (issue #5305).
 pub(super) const MAX_SEAL_DEPENDENCY_LOADS: usize = 256;
-
-/// Ceiling on the outstanding benchmark-run count (ADR-0184). One held run keeps
-/// its whole plan — the sealed spec and every golden task's work-order text — so
-/// the map is capped the way `seals` is. Low, because a benchmark run is a
-/// deliberate operator act that spends model lanes: several in flight at once is
-/// a mistake being made repeatedly rather than a load to accommodate.
-pub(super) const MAX_OPEN_BENCHMARKS: usize = 8;
 
 /// The control-plane REST router state: the pre-seal shaping maps plus the
 /// multi-hop join tables. A direct one-request/one-reply route holds nothing
@@ -202,35 +194,6 @@ pub struct ApiCapabilityState {
     /// unless it is [`StoreClass::Trial`], so the class has to be readable from
     /// inside a synchronous route rather than fetched per request.
     pub(super) store_class: StoreClass,
-    /// The in-memory repository a benchmark run draws landed history from.
-    /// `Some` exactly when the backend selector named the fixture, which is the
-    /// same condition that makes the journal trial-classed.
-    pub(super) fixture: Option<FakeGithub>,
-    /// Benchmark runs held across their seal, keyed by that seal's `Admit`
-    /// dispatch correlation.
-    pub(super) benchmarks: HashMap<u64, HeldBenchmark>,
-}
-
-/// One benchmark run held across its seal (ADR-0184).
-///
-/// Held rather than relayed because the answer is the *run's* report — the set
-/// version and the caveats its cells are read under — and the shared admit
-/// renderer knows only the reducer's outcome. The correlation is carried rather
-/// than keyed on at construction because [`finish`] is what owns the map, the
-/// same split [`PendingCommissionSealSetup`] makes.
-pub(super) struct PendingBenchmark {
-    /// The seal's `Admit` dispatch correlation, filled before the hold.
-    pub(super) correlation: u64,
-    /// The plan the report is rendered from.
-    pub(super) planned: BenchmarkPlan,
-}
-
-/// A benchmark run once [`finish`] has taken its reply obligation.
-pub(super) struct HeldBenchmark {
-    /// The held HTTP reply obligation.
-    pub(super) inbound: InboundMail,
-    /// The plan the report is rendered from.
-    pub(super) planned: BenchmarkPlan,
 }
 
 /// The candidate-ref publication a derived repair owes once its admit lands: the
@@ -509,9 +472,11 @@ pub(super) enum Routed {
     ListOpenWorkpieces(ListCommissions),
     /// Await N commission loads, then gate and admit (#5048).
     DeferredCommissionSeal(Box<PendingCommissionSealSetup>),
-    /// Await the control core's seal for one benchmark run (ADR-0184); its
-    /// admit renders the run's report.
-    DeferredBenchmark(Box<PendingBenchmark>),
+    /// Relay a benchmark start to the runner; its `StartBenchmarkResult`
+    /// answers (ADR-0184).
+    StartBenchmark(StartBenchmark),
+    /// Relay a benchmark read to the runner; its `ReadBenchmarkResult` answers.
+    ReadBenchmark(ReadBenchmark),
     /// Await a signing-cap verify, then persist the commission write.
     DeferredCommissionVerify {
         /// The verify dispatch correlation the reply will echo.
@@ -662,11 +627,8 @@ pub(super) fn finish(
             );
             http::Outcome::Deferred
         }
-        Routed::DeferredBenchmark(held) => {
-            let PendingBenchmark { correlation, planned } = *held;
-            state.benchmarks.insert(correlation, HeldBenchmark { inbound: ctx.take_inbound(), planned });
-            http::Outcome::Deferred
-        }
+        Routed::StartBenchmark(request) => ctx.defer(&request).to::<BenchmarkRunnerCapability>(),
+        Routed::ReadBenchmark(request) => ctx.defer(&request).to::<BenchmarkRunnerCapability>(),
         Routed::DeferredCommissionVerify { correlation, write } => {
             state
                 .commission_verifying

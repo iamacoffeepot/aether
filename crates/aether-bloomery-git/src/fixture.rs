@@ -581,6 +581,25 @@ impl FakeGithub {
         self.seed_ref(name, &sha);
     }
 
+    /// Point `name` (a `heads/…` ref) back at `base`, discarding whatever it
+    /// advanced to.
+    ///
+    /// A rewrite, not a fast-forward, and the fixture's whole reason for
+    /// existing under ADR-0184: a work order lands exactly once on a real
+    /// repository, so "the same task under four profiles" is unrunnable there —
+    /// but a benchmark run can reset this ref between cells and replay the same
+    /// order over the same tree. Nothing is minted: `base` must already name a
+    /// commit the fixture holds, so a reset can never invent history the cells
+    /// are then measured against.
+    ///
+    /// # Errors
+    /// [`GitDataError::MissingObject`] when `base` names no commit here.
+    pub fn reset_ref_to(&self, name: &str, base: &Digest) -> Result<(), GitDataError> {
+        let sha = self.commit_at(&to_hex(base))?;
+        self.lock().refs.insert(name.to_owned(), sha);
+        Ok(())
+    }
+
     /// The commit digest ref `name` points at, if it exists — the digest-typed
     /// [`ref_target`](Self::ref_target).
     #[must_use]
