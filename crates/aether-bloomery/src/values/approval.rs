@@ -67,8 +67,7 @@ pub struct ApprovalRule {
 /// entry would choose the tier that decides whether that member may be
 /// admitted, which is self-authorization; the host refuses a member-scoped entry
 /// rather than resolving or ignoring it.
-#[derive(aether_data::Kind, aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[kind(name = "aether.bloomery.approval_policy")]
+#[aether_data::kind(name = "aether.bloomery.approval_policy", eq)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalPolicy {
     /// The tier a path no rule matches is admitted at.

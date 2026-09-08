@@ -266,18 +266,15 @@ impl ResolvedConfigs {
 mod tests {
     use aether_data::Kind;
     use aether_data::wire::to_vec;
-    use serde::{Deserialize, Serialize};
 
     use super::*;
 
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-    #[kind(name = "aether.bloomery.test_resolve_alpha")]
+    #[aether_data::kind(name = "aether.bloomery.test_resolve_alpha", eq)]
     struct Alpha {
         setting: u32,
     }
 
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-    #[kind(name = "aether.bloomery.test_resolve_beta")]
+    #[aether_data::kind(name = "aether.bloomery.test_resolve_beta", eq)]
     struct Beta {
         other: String,
     }

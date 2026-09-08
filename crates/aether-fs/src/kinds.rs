@@ -72,8 +72,7 @@ impl NamespaceAddr {
 /// `aether.fs.read` — request the substrate read a file and reply
 /// with its bytes. Mailed to the `"aether.fs"` mailbox; reply
 /// lands via `reply_mail` as `ReadResult`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.fs.read")]
+#[aether_data::kind(name = "aether.fs.read")]
 pub struct Read {
     pub addr: NamespaceAddr,
 }
@@ -85,8 +84,7 @@ pub struct Read {
 /// `send_tracked` and match it against `ctx.in_reply_to()` instead.
 /// `Ok` carries the full file contents; `Err` carries an `FsError`
 /// variant.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.fs.read_result")]
+#[aether_data::kind(name = "aether.fs.read_result")]
 pub enum ReadResult {
     Ok {
         addr: NamespaceAddr,
@@ -116,8 +114,7 @@ impl ReadResult {
 /// temporary sibling and `rename`s on success so a crash
 /// mid-write leaves either the old contents or the new, never a
 /// torn file. Reply: `WriteResult`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.fs.write")]
+#[aether_data::kind(name = "aether.fs.write")]
 pub struct Write {
     pub addr: NamespaceAddr,
     #[serde(with = "aether_data::bytes")]
@@ -131,8 +128,7 @@ pub struct Write {
 /// `ctx.in_reply_to()`. `Err` carries an `FsError` — `Forbidden` for
 /// read-only namespaces (e.g. `assets://`), `AdapterError` for
 /// disk-full / permission / rename failures.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.fs.write_result")]
+#[aether_data::kind(name = "aether.fs.write_result")]
 pub enum WriteResult {
     Ok { addr: NamespaceAddr },
     Err { addr: NamespaceAddr, error: FsError },
@@ -159,8 +155,7 @@ impl WriteResult {
 /// namespace-address struct; the write sandbox applies on the `to`
 /// side: a read-only or unknown namespace replies with `Forbidden` /
 /// `UnknownNamespace`. Reply: `CopyResult`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.fs.copy")]
+#[aether_data::kind(name = "aether.fs.copy")]
 pub struct Copy {
     pub from: String,
     pub to: NamespaceAddr,
@@ -174,8 +169,7 @@ pub struct Copy {
 /// `Forbidden` for a read-only destination namespace or a `to.path`
 /// that contains `..` / a leading `/`, `UnknownNamespace` if
 /// `to.namespace` was not registered.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.fs.copy_result")]
+#[aether_data::kind(name = "aether.fs.copy_result")]
 pub enum CopyResult {
     Ok { from: String, to: NamespaceAddr },
     Err { from: String, to: NamespaceAddr, error: FsError },
@@ -197,8 +191,7 @@ impl CopyResult {
 /// Missing files surface as `NotFound` (not silent success) so
 /// callers that care about the distinction can tell; callers
 /// that don't ignore it. Reply: `DeleteResult`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.fs.delete")]
+#[aether_data::kind(name = "aether.fs.delete")]
 pub struct Delete {
     pub addr: NamespaceAddr,
 }
@@ -208,8 +201,7 @@ pub struct Delete {
 /// by `send_tracked` / `ctx.in_reply_to()`. `Ok` on successful
 /// removal; `Err` on any adapter-reported failure, including
 /// `NotFound` for a file that wasn't there to delete.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.fs.delete_result")]
+#[aether_data::kind(name = "aether.fs.delete_result")]
 pub enum DeleteResult {
     Ok { addr: NamespaceAddr },
     Err { addr: NamespaceAddr, error: FsError },
@@ -232,8 +224,7 @@ impl DeleteResult {
 /// under the namespace root rather than opened as a file, and an empty
 /// `addr.path` lists the root. Callers that want a tree walk paginate
 /// themselves. Reply: `ListResult`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.fs.list")]
+#[aether_data::kind(name = "aether.fs.list")]
 pub struct List {
     pub addr: NamespaceAddr,
 }
@@ -246,8 +237,7 @@ pub struct List {
 /// entry back into a read. Empty `entries` means "namespace exists,
 /// nothing matched"; `Err { UnknownNamespace }` means the namespace
 /// itself wasn't registered.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.fs.list_result")]
+#[aether_data::kind(name = "aether.fs.list_result")]
 pub enum ListResult {
     Ok { addr: NamespaceAddr, entries: Vec<String> },
     Err { addr: NamespaceAddr, error: FsError },
@@ -341,8 +331,7 @@ pub enum FsFetchError {
 /// the folded output. An empty `transforms` list returns the raw file
 /// bytes immediately (`output_kind: None`). Mailed to the `"aether.fs"`
 /// mailbox; reply lands via `reply_mail` as `FsFetchResult`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.fs.fetch")]
+#[aether_data::kind(name = "aether.fs.fetch")]
 pub struct FsFetch {
     pub addr: NamespaceAddr,
     /// Ordered list of transforms to apply. Each `TransformId` names
@@ -357,8 +346,7 @@ pub struct FsFetch {
 /// output bytes (`data`) and the `output_kind` of the last transform
 /// (`None` when `transforms` was empty, i.e. a raw-read). `Err`
 /// carries a structured `FsFetchError`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.fs.fetch_result")]
+#[aether_data::kind(name = "aether.fs.fetch_result")]
 pub enum FsFetchResult {
     Ok {
         addr: NamespaceAddr,

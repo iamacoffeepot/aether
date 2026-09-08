@@ -63,10 +63,7 @@ impl<'de> WireDecode<'de> for WindowId {
 /// `keycode`. Dispatched on press only (no repeat). Released keys
 /// arrive as `KeyRelease`. Unmapped winit keys (any `KeyCode` variant
 /// the substrate doesn't translate) produce no mail.
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, aether_data::Kind, aether_data::Schema, Serialize, Deserialize,
-)]
-#[kind(name = "aether.key")]
+#[aether_data::kind(name = "aether.key", copy, default, eq)]
 pub struct Key {
     pub window: WindowId,
     pub code: u32,
@@ -76,10 +73,7 @@ pub struct Key {
 /// the same `code` value the press carried. Components tracking
 /// hold-to-act semantics (e.g. WASD movement) pair subscription to
 /// both kinds so they can clear state on release.
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, aether_data::Kind, aether_data::Schema, Serialize, Deserialize,
-)]
-#[kind(name = "aether.key_release")]
+#[aether_data::kind(name = "aether.key_release", copy, default, eq)]
 pub struct KeyRelease {
     pub window: WindowId,
     pub code: u32,
@@ -94,8 +88,7 @@ pub struct KeyRelease {
 /// coordinates are physical pixels, the same space `WindowSize` and
 /// `QuadSpace::Screen` speak, so hit-testing a click against screen-space
 /// geometry needs no scale conversion.
-#[derive(Copy, Clone, Debug, Default, PartialEq, aether_data::Kind, aether_data::Schema, Serialize, Deserialize)]
-#[kind(name = "aether.mouse_button")]
+#[aether_data::kind(name = "aether.mouse_button", copy, default, partial_eq)]
 pub struct MouseButton {
     pub window: WindowId,
     pub button: u32,
@@ -109,8 +102,7 @@ pub struct MouseButton {
 /// drag pair subscription to both kinds so they can commit on release.
 /// `x` / `y` are physical pixels, the same space `WindowSize` and
 /// `QuadSpace::Screen` speak.
-#[derive(Copy, Clone, Debug, Default, PartialEq, aether_data::Kind, aether_data::Schema, Serialize, Deserialize)]
-#[kind(name = "aether.mouse_button_release")]
+#[aether_data::kind(name = "aether.mouse_button_release", copy, default, partial_eq)]
 pub struct MouseButtonRelease {
     pub window: WindowId,
     pub button: u32,
@@ -124,8 +116,7 @@ pub struct MouseButtonRelease {
 /// cursor needs no external cursor correlation. `x` / `y` — and a
 /// touchpad's pixel-precise deltas — are physical pixels, the same space
 /// `WindowSize` and `QuadSpace::Screen` speak.
-#[derive(Copy, Clone, Debug, Default, PartialEq, aether_data::Kind, aether_data::Schema, Serialize, Deserialize)]
-#[kind(name = "aether.mouse_wheel")]
+#[aether_data::kind(name = "aether.mouse_wheel", copy, default, partial_eq)]
 pub struct MouseWheel {
     pub window: WindowId,
     pub delta_x: f32,
@@ -142,8 +133,7 @@ pub struct MouseWheel {
 /// `scale_factor` anywhere in it. A consumer that genuinely wants logical
 /// pixels divides by `WindowSize.scale_factor`; the conversion runs away
 /// from this kind, never toward it.
-#[derive(Copy, Clone, Debug, Default, PartialEq, aether_data::Kind, aether_data::Schema, Serialize, Deserialize)]
-#[kind(name = "aether.mouse_move")]
+#[aether_data::kind(name = "aether.mouse_move", copy, default, partial_eq)]
 pub struct MouseMove {
     pub window: WindowId,
     pub x: f32,
@@ -183,8 +173,7 @@ pub struct MouseMove {
 /// subscribes to this kind and caches the latest value; the initial value
 /// arrives right after the component's auto-subscribe fires, without any
 /// request/reply dance.
-#[derive(Copy, Clone, Debug, Default, PartialEq, aether_data::Kind, aether_data::Schema, Serialize, Deserialize)]
-#[kind(name = "aether.window_size")]
+#[aether_data::kind(name = "aether.window_size", copy, default, partial_eq)]
 pub struct WindowSize {
     pub window: WindowId,
     pub width: u32,
@@ -213,8 +202,7 @@ pub struct WindowSize {
 ///
 /// Carries a `String`, so it rides the structured wire path shared by the
 /// window-tagged input family (`Kind::encode_into_bytes` → `encode_wire`).
-#[derive(Clone, Debug, Default, PartialEq, Eq, aether_data::Kind, aether_data::Schema, Serialize, Deserialize)]
-#[kind(name = "aether.text_input")]
+#[aether_data::kind(name = "aether.text_input", default, eq)]
 pub struct TextInput {
     pub window: WindowId,
     pub text: String,
@@ -228,8 +216,7 @@ pub struct TextInput {
 /// the IME gives no span). Empty `text` means the composition was
 /// cleared — the widget drops any preedit it was showing. Published by
 /// the desktop chassis only. Rides the structured wire path.
-#[derive(Clone, Debug, Default, PartialEq, Eq, aether_data::Kind, aether_data::Schema, Serialize, Deserialize)]
-#[kind(name = "aether.ime_preedit")]
+#[aether_data::kind(name = "aether.ime_preedit", default, eq)]
 pub struct ImePreedit {
     pub window: WindowId,
     pub text: String,
@@ -248,10 +235,7 @@ pub struct ImePreedit {
 /// Windows key elsewhere. A late subscriber holds the all-false default
 /// until the first `ModifiersChanged` arrives — the same warm-up every
 /// stream has. Carries `bool`s, so it rides the structured wire path.
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, aether_data::Kind, aether_data::Schema, Serialize, Deserialize,
-)]
-#[kind(name = "aether.modifiers")]
+#[aether_data::kind(name = "aether.modifiers", copy, default, eq)]
 // Four named bool fields are the wire contract: a machine consumer reads
 // `{ "shift": true }` off the JSON schema directly rather than decoding a
 // packed bit mask. A two-variant-enum refactor would defeat that.

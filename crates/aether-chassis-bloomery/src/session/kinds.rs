@@ -90,8 +90,7 @@ pub struct SessionManifest {
 /// matching the deposited session's `head_hash` (#3422), so a head that moved on
 /// `origin/main` between deposit and resume is a real cache miss. Reply:
 /// [`AcquireResult`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.session.acquire")]
+#[aether_data::kind(name = "aether.session.acquire")]
 pub struct Acquire {
     /// The `{model, effort, task}` identity to match.
     pub key: SessionKey,
@@ -104,8 +103,7 @@ pub struct Acquire {
 /// resuming attempt records as its `parent_receipt` on the eventual
 /// [`Release`]); `None` means no eligible session exists and the runner starts
 /// cold; `Err` carries a backend failure.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.session.acquire_result")]
+#[aether_data::kind(name = "aether.session.acquire_result", eq)]
 pub enum AcquireResult {
     /// An eligible session was leased.
     Leased {
@@ -130,8 +128,7 @@ pub enum AcquireResult {
 /// key: a warm release (with the `lease` `acquire` issued) updates the row a
 /// resume leased, and a cold release (`lease` = `None`) inserts a fresh row the
 /// runner wants to pool. Reply: [`ReleaseResult`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.session.release")]
+#[aether_data::kind(name = "aether.session.release")]
 pub struct Release {
     /// The `{model, effort, task}` identity to deposit under.
     pub key: SessionKey,
@@ -145,8 +142,7 @@ pub struct Release {
 
 /// Reply to [`Release`]. `Ok` when the session was deposited (inserted or
 /// updated) unleased; `Err` carries a backend failure.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.session.release_result")]
+#[aether_data::kind(name = "aether.session.release_result", eq)]
 pub enum ReleaseResult {
     /// The session was deposited into the pool, unleased.
     Ok,

@@ -384,7 +384,7 @@ mod tests {
     use aether_data::KindId as DataKindId;
     use alloc::string::String;
     use alloc::vec::Vec;
-    use serde::{Deserialize, Serialize};
+    use serde::Serialize;
 
     /// Hand-rolled `Kind` with a stable test sentinel id so the
     /// decode tests can fabricate mismatched `Mail` frames without
@@ -403,8 +403,7 @@ mod tests {
     }
 
     /// Structured-shape kind for the schema-driven `decode_kind` path.
-    #[derive(::aether_data::Kind, ::aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
-    #[kind(name = "test.fake_structured")]
+    #[aether_data::kind(name = "test.fake_structured", partial_eq)]
     struct FakeStructured {
         tag: String,
         ids: Vec<u32>,
@@ -554,16 +553,14 @@ mod tests {
     // mismatch between framing and decode surfaces here before either
     // diverges from the ADR's wire shape.
 
-    #[derive(::aether_data::Kind, ::aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
-    #[kind(name = "test.state.struct")]
+    #[aether_data::kind(name = "test.state.struct", partial_eq)]
     struct StateStruct {
         tag: u32,
         label: String,
         items: Vec<u32>,
     }
 
-    #[derive(::aether_data::Kind, ::aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
-    #[kind(name = "test.state.other")]
+    #[aether_data::kind(name = "test.state.other", partial_eq)]
     struct OtherState {
         flag: bool,
     }

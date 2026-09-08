@@ -803,8 +803,7 @@ pub struct MemberClaimReleasePayload {
 /// the separate `append_event` / `claim_seal` / `enqueue_outbox` mails (three
 /// transactions; a crash between them breaks atomicity), and a wasm actor
 /// cannot hold a `SQLite` transaction open across host round-trips.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.commit")]
+#[aether_data::kind(name = "aether.store.commit", eq)]
 pub struct Commit {
     /// The event's idempotency key — the inbox dedup axis. A key already
     /// journaled makes the whole commit a [`CommitResult::Duplicate`] no-op.
@@ -838,8 +837,7 @@ pub struct Commit {
 /// correlate the reply to the admit it is still holding a reply handle for —
 /// the store is addressed by runtime name (`send_to_named`), which carries no
 /// typed reply context, so the key is the correlation axis.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.commit_result")]
+#[aether_data::kind(name = "aether.store.commit_result", eq)]
 pub enum CommitResult {
     /// The whole decision committed atomically at this journal sequence.
     Applied {
@@ -873,8 +871,7 @@ pub enum CommitResult {
 /// Read the whole journal, in sequence order — the recovery replay source
 /// (ADR-0149 §Migration step 1). The control actor sends this from `wire` at
 /// boot; its reply rebuilds the snapshot.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.replay_journal")]
+#[aether_data::kind(name = "aether.store.replay_journal", eq)]
 pub struct ReplayJournal;
 
 /// One journaled event, in the [`ReplayJournalResult`] stream.
@@ -913,8 +910,7 @@ pub struct JournalRecord {
 }
 
 /// Reply to [`ReplayJournal`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.replay_journal_result")]
+#[aether_data::kind(name = "aether.store.replay_journal_result", eq)]
 pub enum ReplayJournalResult {
     /// The journal, in sequence order.
     Ok {
@@ -938,8 +934,7 @@ pub enum ReplayJournalResult {
 /// registries the caller is trying to resolve. A miss is driven by an operator
 /// authoring a new configuration, so re-reading on one is bounded by how fast a
 /// person can write them.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.load_configs")]
+#[aether_data::kind(name = "aether.store.load_configs", eq)]
 pub struct LoadConfigs;
 
 /// One stored configuration, in the [`LoadConfigsResult`] stream.
@@ -960,8 +955,7 @@ pub struct ConfigRecord {
 }
 
 /// Reply to [`LoadConfigs`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.load_configs_result")]
+#[aether_data::kind(name = "aether.store.load_configs_result", eq)]
 pub enum LoadConfigsResult {
     /// Every stored configuration.
     Ok {
@@ -981,8 +975,7 @@ pub enum LoadConfigsResult {
 /// store family uses), so an external RPC client or a peer capability admits a
 /// fact without the control actor sharing its typed value vocabulary over the
 /// wire.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.bloomery.admit")]
+#[aether_data::kind(name = "aether.bloomery.admit", eq)]
 pub struct Admit {
     /// The event's canonical `aether_data::wire` bytes (an encoded
     /// [`Event`](crate::reduce::Event)).
@@ -994,8 +987,7 @@ pub struct Admit {
 /// event resolved to, as canonical `aether_data::wire` bytes. A caller decodes
 /// it back into an `Outcome` to learn whether the fact sealed, integrated,
 /// landed, or was refused (and why).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.bloomery.admit_result")]
+#[aether_data::kind(name = "aether.bloomery.admit_result", eq)]
 pub enum AdmitResult {
     /// The event reduced (and durably committed) to an outcome; `outcome` is
     /// the wire-encoded [`Outcome`](crate::reduce::Outcome).
@@ -1017,8 +1009,7 @@ pub enum AdmitResult {
 /// come from here rather than rebuilding a snapshot per request. What to read
 /// is named by one [`QuerySelector`], and the answer is the [`QueryResult`] arm
 /// that matches it.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.bloomery.query")]
+#[aether_data::kind(name = "aether.bloomery.query", eq)]
 pub struct Query {
     /// Which resource this read asks for.
     pub selector: QuerySelector,
@@ -1077,8 +1068,7 @@ pub enum QuerySelector {
 /// `aether_data::wire` bytes — a [`ViewDocument`](crate::port::ViewDocument)
 /// for a whole-document read, or a [`BloomView`](crate::port::BloomView) for a
 /// single-bloom read.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.bloomery.query_result")]
+#[aether_data::kind(name = "aether.bloomery.query_result", eq)]
 pub enum QueryResult {
     /// The whole live projection, wire-encoded
     /// [`ViewDocument`](crate::port::ViewDocument).
@@ -1159,8 +1149,7 @@ pub enum MetricsView {
 }
 
 /// Read the metrics ledger the control core folded beside its snapshot.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.bloomery.metrics_query")]
+#[aether_data::kind(name = "aether.bloomery.metrics_query", eq)]
 pub struct MetricsQuery {
     /// Which document to render.
     pub view: MetricsView,
@@ -1177,8 +1166,7 @@ pub struct MetricsQuery {
 }
 
 /// Reply to [`MetricsQuery`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.bloomery.metrics_result")]
+#[aether_data::kind(name = "aether.bloomery.metrics_result", eq)]
 pub enum MetricsQueryResult {
     /// Wire-encoded document for the requested view.
     Ok {
@@ -1198,13 +1186,11 @@ pub enum MetricsQueryResult {
 }
 
 /// Read the window spend [`measure`](crate::measure) already computes.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
-#[kind(name = "aether.bloomery.spend_query")]
+#[aether_data::kind(name = "aether.bloomery.spend_query", default, eq)]
 pub struct SpendQuery;
 
 /// Reply to [`SpendQuery`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.bloomery.spend_result")]
+#[aether_data::kind(name = "aether.bloomery.spend_result", eq)]
 pub enum SpendQueryResult {
     /// Wire-encoded [`SpendWindow`](crate::SpendWindow).
     Ok {

@@ -15,12 +15,9 @@
 //! reason to key or filter on any of these fields, so nothing here needs the
 //! typed axis the store's `idempotency_key` / `members` fields have.
 
-use serde::{Deserialize, Serialize};
-
 /// Snapshot the source at `base` (an `aether_data::wire`-encoded
 /// [`aether_bloomery::Digest`]).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.source.snapshot")]
+#[aether_data::kind(name = "aether.source.snapshot")]
 pub struct Snapshot {
     /// The `aether_data::wire`-encoded base [`aether_bloomery::Digest`].
     #[serde(with = "aether_data::bytes")]
@@ -28,8 +25,7 @@ pub struct Snapshot {
 }
 
 /// Reply to [`Snapshot`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.source.snapshot_result")]
+#[aether_data::kind(name = "aether.source.snapshot_result", eq)]
 pub enum SnapshotResult {
     /// The snapshot succeeded.
     Ok {
@@ -46,8 +42,7 @@ pub enum SnapshotResult {
 
 /// Record an integration checkpoint for `bloom` at `tree` (both
 /// `aether_data::wire`-encoded).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.source.checkpoint")]
+#[aether_data::kind(name = "aether.source.checkpoint")]
 pub struct RecordCheckpoint {
     /// The `aether_data::wire`-encoded [`aether_bloomery::BloomId`].
     #[serde(with = "aether_data::bytes")]
@@ -58,8 +53,7 @@ pub struct RecordCheckpoint {
 }
 
 /// Reply to [`RecordCheckpoint`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.source.checkpoint_result")]
+#[aether_data::kind(name = "aether.source.checkpoint_result", eq)]
 pub enum RecordCheckpointResult {
     /// The checkpoint was recorded.
     Ok {
@@ -75,8 +69,7 @@ pub enum RecordCheckpointResult {
 }
 
 /// Enumerate `bloom`'s recorded checkpoints (for successor reuse).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.source.checkpoints")]
+#[aether_data::kind(name = "aether.source.checkpoints")]
 pub struct ListCheckpoints {
     /// The `aether_data::wire`-encoded [`aether_bloomery::BloomId`].
     #[serde(with = "aether_data::bytes")]
@@ -84,8 +77,7 @@ pub struct ListCheckpoints {
 }
 
 /// Reply to [`ListCheckpoints`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.source.checkpoints_result")]
+#[aether_data::kind(name = "aether.source.checkpoints_result", eq)]
 pub enum ListCheckpointsResult {
     /// The recorded checkpoints, each `aether_data::wire`-encoded.
     Ok {
@@ -101,8 +93,7 @@ pub enum ListCheckpointsResult {
 
 /// Integrate `candidate` onto `bloom`'s integration branch, guarded by the
 /// `expected` checkpoint (all `aether_data::wire`-encoded).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.source.integrate")]
+#[aether_data::kind(name = "aether.source.integrate")]
 pub struct Integrate {
     /// The `aether_data::wire`-encoded [`aether_bloomery::BloomId`].
     #[serde(with = "aether_data::bytes")]
@@ -116,8 +107,7 @@ pub struct Integrate {
 }
 
 /// Reply to [`Integrate`], mirroring [`aether_bloomery::IntegrateOutcome`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.source.integrate_result")]
+#[aether_data::kind(name = "aether.source.integrate_result", eq)]
 pub enum IntegrateResult {
     /// The candidate integrated; the branch now carries this tree.
     Integrated {
@@ -150,8 +140,7 @@ pub enum IntegrateResult {
 
 /// Propose landing `bloom`'s `new_head` onto mainline, guarded by
 /// `expected_base` (all `aether_data::wire`-encoded).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.source.land")]
+#[aether_data::kind(name = "aether.source.land")]
 pub struct Land {
     /// The `aether_data::wire`-encoded [`aether_bloomery::BloomId`].
     #[serde(with = "aether_data::bytes")]
@@ -165,8 +154,7 @@ pub struct Land {
 }
 
 /// Reply to [`Land`], mirroring [`aether_bloomery::LandOutcome`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.source.land_result")]
+#[aether_data::kind(name = "aether.source.land_result", eq)]
 pub enum LandResult {
     /// The resolved head was proposed; mainline has not moved yet. Watch the
     /// proposal with [`PollLand`] to see where it ends up.
@@ -199,8 +187,7 @@ pub enum LandResult {
 
 /// Read where the land proposal `number`, previously issued for `bloom` against
 /// `expected_base`, has got to (digests `aether_data::wire`-encoded).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.source.poll_land")]
+#[aether_data::kind(name = "aether.source.poll_land")]
 pub struct PollLand {
     /// The `aether_data::wire`-encoded [`aether_bloomery::BloomId`].
     #[serde(with = "aether_data::bytes")]
@@ -213,8 +200,7 @@ pub struct PollLand {
 }
 
 /// Reply to [`PollLand`], mirroring the GitHub landing watch states.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.source.poll_land_result")]
+#[aether_data::kind(name = "aether.source.poll_land_result", eq)]
 pub enum PollLandResult {
     /// Still open. Mainline has not moved; keep watching.
     Open,

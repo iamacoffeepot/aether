@@ -3,8 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Persist a new open commission and its intent statement.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.create_commission")]
+#[aether_data::kind(name = "aether.store.create_commission")]
 pub struct CreateCommission {
     /// The workpiece this commission is.
     pub id: String,
@@ -14,8 +13,7 @@ pub struct CreateCommission {
 }
 
 /// Reply to [`CreateCommission`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.create_commission_result")]
+#[aether_data::kind(name = "aether.store.create_commission_result", eq)]
 pub enum CreateCommissionResult {
     /// The intent was stored; `digest` is its content address.
     Ok {
@@ -38,8 +36,7 @@ pub enum CreateCommissionResult {
 }
 
 /// Store an immutable scope revision and advance `current`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.write_scope_revision")]
+#[aether_data::kind(name = "aether.store.write_scope_revision")]
 pub struct WriteScopeRevision {
     /// Canonical [`aether_bloomery::ScopeRevision`] bytes.
     #[serde(with = "aether_data::bytes")]
@@ -53,8 +50,7 @@ pub struct WriteScopeRevision {
 }
 
 /// Reply to [`WriteScopeRevision`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.write_scope_revision_result")]
+#[aether_data::kind(name = "aether.store.write_scope_revision_result", eq)]
 pub enum WriteScopeRevisionResult {
     /// The revision was stored (or was already the current tip).
     Ok {
@@ -101,8 +97,7 @@ pub enum WriteScopeRevisionResult {
 }
 
 /// Persist an approval whose signature the caller has already verified.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.record_commission_approval")]
+#[aether_data::kind(name = "aether.store.record_commission_approval")]
 pub struct RecordCommissionApproval {
     /// The workpiece the caller addressed. The revision named by the
     /// statement must belong to this commission.
@@ -113,8 +108,7 @@ pub struct RecordCommissionApproval {
 }
 
 /// Reply to [`RecordCommissionApproval`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.record_commission_approval_result")]
+#[aether_data::kind(name = "aether.store.record_commission_approval_result", eq)]
 pub enum RecordCommissionApprovalResult {
     /// The approval was stored (or was already present).
     Ok {
@@ -144,16 +138,14 @@ pub enum RecordCommissionApprovalResult {
 }
 
 /// Load one commission and recompute its current revision from canonical bytes.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.load_commission")]
+#[aether_data::kind(name = "aether.store.load_commission")]
 pub struct LoadCommission {
     /// The workpiece this commission is.
     pub id: String,
 }
 
 /// Reply to [`LoadCommission`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.load_commission_result")]
+#[aether_data::kind(name = "aether.store.load_commission_result", eq)]
 pub enum LoadCommissionResult {
     /// The commission exists; index columns were recomputed from stored bytes.
     Ok {
@@ -197,8 +189,7 @@ pub enum LoadCommissionResult {
 }
 
 /// List commissions, optionally filtered by status.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.list_commissions")]
+#[aether_data::kind(name = "aether.store.list_commissions")]
 pub struct ListCommissions {
     /// Lifecycle filter, or `None` for every commission.
     pub status: Option<String>,
@@ -221,8 +212,7 @@ pub struct ListedCommission {
 }
 
 /// Reply to [`ListCommissions`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.list_commissions_result")]
+#[aether_data::kind(name = "aether.store.list_commissions_result", eq)]
 pub enum ListCommissionsResult {
     /// Matching commissions, in workpiece-id order.
     Ok {
@@ -237,8 +227,7 @@ pub enum ListCommissionsResult {
 }
 
 /// Persist the GitHub issue number a commission projector created.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.record_commission_projection")]
+#[aether_data::kind(name = "aether.store.record_commission_projection")]
 pub struct RecordCommissionProjection {
     /// The workpiece this commission is.
     pub id: String,
@@ -247,8 +236,7 @@ pub struct RecordCommissionProjection {
 }
 
 /// Reply to [`RecordCommissionProjection`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.record_commission_projection_result")]
+#[aether_data::kind(name = "aether.store.record_commission_projection_result", eq)]
 pub enum RecordCommissionProjectionResult {
     /// The number is now recorded.
     Ok {
@@ -270,8 +258,7 @@ pub enum RecordCommissionProjectionResult {
 }
 
 /// Store a signed cancel and close the commission.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.cancel_commission")]
+#[aether_data::kind(name = "aether.store.cancel_commission")]
 pub struct CancelCommission {
     /// The workpiece this commission is.
     pub id: String,
@@ -281,8 +268,7 @@ pub struct CancelCommission {
 }
 
 /// Reply to [`CancelCommission`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.cancel_commission_result")]
+#[aether_data::kind(name = "aether.store.cancel_commission_result", eq)]
 pub enum CancelCommissionResult {
     /// The commission is now cancelled.
     Ok {
@@ -309,8 +295,7 @@ pub enum CancelCommissionResult {
 }
 
 /// Put a commission stranded outside `open` back into the line.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.reopen_commission")]
+#[aether_data::kind(name = "aether.store.reopen_commission")]
 pub struct ReopenCommission {
     /// The workpiece this commission is.
     pub id: String,
@@ -322,8 +307,7 @@ pub struct ReopenCommission {
 }
 
 /// Reply to [`ReopenCommission`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.reopen_commission_result")]
+#[aether_data::kind(name = "aether.store.reopen_commission_result", eq)]
 pub enum ReopenCommissionResult {
     /// The commission is open again.
     Ok {
@@ -363,8 +347,7 @@ pub enum ReopenCommissionResult {
 
 /// Open a pre-bloom scoping run (ADR-0208, #5304): write its `enqueued` row
 /// and its `Topic::ScopeDispatch` outbox row in one transaction.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.enqueue_scope_run")]
+#[aether_data::kind(name = "aether.store.enqueue_scope_run")]
 pub struct EnqueueScopeRun {
     /// The workpiece this commission is.
     pub id: String,
@@ -374,8 +357,7 @@ pub struct EnqueueScopeRun {
 }
 
 /// Reply to [`EnqueueScopeRun`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.enqueue_scope_run_result")]
+#[aether_data::kind(name = "aether.store.enqueue_scope_run_result", eq)]
 pub enum EnqueueScopeRunResult {
     /// The run was journaled and its outbox row landed at `sequence`.
     Ok {

@@ -1,7 +1,5 @@
 //! Diagnostic and actor-monitoring kind vocabulary.
 
-use bytemuck::{Pod, Zeroable};
-
 /// Diagnostic the hub emits back to an originating engine when mail
 /// that engine bubbled up (ADR-0037) doesn't resolve at the hub
 /// either. Lands on the engine's `aether.diagnostics` sink, which
@@ -14,8 +12,7 @@ use bytemuck::{Pod, Zeroable};
 /// ADR-0030 / issue #186) so agents can map it back to a name in
 /// tooling. `kind_id` is the kind the original mail carried.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.mail.unresolved")]
+#[aether_data::kind(name = "aether.mail.unresolved", pod, default, eq)]
 pub struct UnresolvedMail {
     pub recipient_mailbox_id: aether_data::MailboxId,
     pub kind_id: aether_data::KindId,
@@ -34,8 +31,7 @@ pub struct UnresolvedMail {
 /// purely additive if a future revision wants to surface trap vs
 /// shutdown vs cooperative close.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.actor.monitor_notice")]
+#[aether_data::kind(name = "aether.actor.monitor_notice", pod, default, eq)]
 pub struct MonitorNotice {
     pub target: aether_data::MailboxId,
 }

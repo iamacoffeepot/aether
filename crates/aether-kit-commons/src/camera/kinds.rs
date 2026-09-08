@@ -70,8 +70,7 @@ pub enum ModeInit {
 /// swap an existing camera's mode in place. Newly-created cameras
 /// are not made active automatically; pair with `CameraSetActive`
 /// or rely on the bootstrap `"main"` camera.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.camera.create")]
+#[aether_data::kind(name = "aether.kit.camera.create")]
 pub struct CameraCreate {
     pub name: String,
     pub mode: ModeInit,
@@ -81,8 +80,7 @@ pub struct CameraCreate {
 /// name isn't bound. If the destroyed camera was the active one
 /// the publish stream pauses (no `aether.view_projection` mail goes out)
 /// until another camera is made active.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.camera.destroy")]
+#[aether_data::kind(name = "aether.kit.camera.destroy")]
 pub struct CameraDestroy {
     pub name: String,
 }
@@ -92,8 +90,7 @@ pub struct CameraDestroy {
 /// tick. Errors if the name isn't bound. Inactive cameras still
 /// tick (orbit yaw keeps accumulating, etc.) so re-activating
 /// later doesn't snap.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.camera.set_active")]
+#[aether_data::kind(name = "aether.kit.camera.set_active")]
 pub struct CameraSetActive {
     pub name: String,
 }
@@ -101,8 +98,7 @@ pub struct CameraSetActive {
 /// `aether.kit.camera.set_mode` — swap an existing camera's mode in
 /// place. State for the prior mode is discarded; the new mode is
 /// seeded from the supplied params + per-mode compiled defaults.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.camera.set_mode")]
+#[aether_data::kind(name = "aether.kit.camera.set_mode")]
 pub struct CameraSetMode {
     pub name: String,
     pub mode: ModeInit,
@@ -114,8 +110,7 @@ pub struct CameraSetMode {
 /// `Some` field overwrites; `None` leaves the current value
 /// alone, so partial pokes (e.g. just `distance`) ride a single
 /// kind without restating the rest.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.camera.orbit.set")]
+#[aether_data::kind(name = "aether.kit.camera.orbit.set")]
 pub struct CameraOrbitSet {
     pub name: String,
     pub params: OrbitParams,
@@ -124,8 +119,7 @@ pub struct CameraOrbitSet {
 /// `aether.kit.camera.topdown.set` — apply topdown-mode field deltas
 /// to the named camera. Same semantics as `CameraOrbitSet` but for
 /// the orthographic mode's `center` / `extent`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.camera.topdown.set")]
+#[aether_data::kind(name = "aether.kit.camera.topdown.set")]
 pub struct CameraTopdownSet {
     pub name: String,
     pub params: TopdownParams,
@@ -133,14 +127,12 @@ pub struct CameraTopdownSet {
 
 /// `aether.kit.camera.eye` — request the active camera's world-space eye.
 /// The source-bound reply is [`CameraEyeResult`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy)]
-#[kind(name = "aether.kit.camera.eye")]
+#[aether_data::kind(name = "aether.kit.camera.eye", copy)]
 pub struct CameraEyeRequest;
 
 /// `aether.kit.camera.eye_result` — source-bound response to
 /// [`CameraEyeRequest`]. `eye` is `None` while no live camera is active.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
-#[kind(name = "aether.kit.camera.eye_result")]
+#[aether_data::kind(name = "aether.kit.camera.eye_result", copy, partial_eq)]
 pub struct CameraEyeResult {
     /// Active camera position in world-space `(x, y, z)` coordinates.
     pub eye: Option<[f32; 3]>,

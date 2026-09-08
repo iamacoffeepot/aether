@@ -11,7 +11,6 @@
 
 use aether_bloomery::{AuthorityDoor, Digest, Tier};
 use aether_data::wire::to_vec;
-use serde::{Deserialize, Serialize};
 
 /// Verify `statement`'s author signature against the host-custodied
 /// authorized-signer allowlist (ADR-0151 key policy), as authority for exactly
@@ -25,8 +24,7 @@ use serde::{Deserialize, Serialize};
 /// seal path from the member's scope revision, the answer route from the
 /// question the request named, the release route by recomputing the request
 /// digest from the typed target in the body.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.signing.verify")]
+#[aether_data::kind(name = "aether.signing.verify")]
 pub struct Verify {
     /// The `aether_data::wire`-encoded [`aether_bloomery::Statement`] to verify.
     #[serde(with = "aether_data::bytes")]
@@ -70,8 +68,7 @@ pub fn authority_bytes(door: AuthorityDoor, binding: Digest) -> Vec<u8> {
 }
 
 /// Reply to [`Verify`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.signing.verify_result")]
+#[aether_data::kind(name = "aether.signing.verify_result", eq)]
 pub enum VerifyResult {
     /// The statement and the authority both decoded; `verified` is whether the
     /// author signature checks against an allowlisted signer over the

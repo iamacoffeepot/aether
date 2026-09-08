@@ -25,8 +25,7 @@ use serde::{Deserialize, Serialize};
 /// harness captures replay the last committed accumulators when the producer
 /// was idle; desktop always commits current. Not addressed by wasm guests —
 /// the pumping chassis driver is its sole sender.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.render.frame")]
+#[aether_data::kind(name = "aether.render.frame", default, eq)]
 pub struct Frame {
     pub replay_cache_when_idle: bool,
     /// Engine window targets dirtied by this application turn. The render
@@ -42,10 +41,7 @@ pub struct Frame {
 /// `MailId` field) so the settlement registry's notice-mail bridge
 /// (`subscribe_settlement_mail`) delivers it directly. Chassis-internal —
 /// the settlement bridge is its sole sender.
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
-)]
-#[kind(name = "aether.render.pre_settled")]
+#[aether_data::kind(name = "aether.render.pre_settled", copy, default, eq)]
 pub struct PreSettled {
     pub mail_id: MailId,
 }
@@ -55,10 +51,7 @@ pub struct PreSettled {
 /// `RenderCapability::on_occluded` fail-fasts a pending capture when the
 /// window becomes occluded (relocating `fail_capture_if_occluded` into the
 /// actor, issue 1317). Chassis-internal — the driver is its sole sender.
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
-)]
-#[kind(name = "aether.render.occluded")]
+#[aether_data::kind(name = "aether.render.occluded", copy, default, eq)]
 pub struct Occluded {
     pub window: WindowId,
     pub occluded: bool,
@@ -83,8 +76,7 @@ pub struct Vertex {
 /// `count` field is the number of triangles in the payload when
 /// sent as a slice.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.draw_triangle")]
+#[aether_data::kind(name = "aether.draw_triangle", pod, default, partial_eq)]
 pub struct DrawTriangle {
     pub verts: [Vertex; 3],
 }
@@ -107,8 +99,7 @@ pub const DRAW_TRIANGLE_BYTES: usize = size_of::<DrawTriangle>();
 /// `ViewProjection` arrives, the uniform holds identity and vertices render
 /// in clip-space 1:1 (the pre-camera behaviour).
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.view_projection")]
+#[aether_data::kind(name = "aether.view_projection", pod, default, partial_eq)]
 pub struct ViewProjection {
     pub view_proj: [f32; 16],
 }
@@ -214,8 +205,7 @@ pub enum TextureUsage {
 /// the id is assigned — the wgpu texture is realized lazily at the
 /// next frame record. Reply: `CreateTextureResult`. Desktop-only — the
 /// headless chassis replies `Err` (fail-fast, ADR-0105).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.create_texture")]
+#[aether_data::kind(name = "aether.render.create_texture")]
 pub struct CreateTexture {
     pub width: u32,
     pub height: u32,
@@ -236,8 +226,7 @@ pub struct CreateTexture {
 /// length that doesn't match the texture format's byte count (or isn't
 /// empty for a `Writable` texture), or `Linear` sampling on the
 /// non-filterable `R32Float` format.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.create_texture_result")]
+#[aether_data::kind(name = "aether.render.create_texture_result")]
 pub enum CreateTextureResult {
     Ok { texture_id: u32 },
     Err { error: String },
@@ -252,8 +241,7 @@ pub enum CreateTextureResult {
 /// render target with no CPU staging) logs and drops. The staged
 /// pixels update immediately; the GPU texture re-uploads at the next
 /// frame record.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.update_texture")]
+#[aether_data::kind(name = "aether.render.update_texture")]
 pub struct UpdateTexture {
     pub texture_id: u32,
     pub x: u32,
@@ -269,8 +257,7 @@ pub struct UpdateTexture {
 /// Fire-and-forget; an unknown `texture_id` or the reserved internal
 /// white-texture id logs and drops. Dropping the registry entry releases
 /// staged pixels and any realized GPU resources.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.destroy_texture")]
+#[aether_data::kind(name = "aether.render.destroy_texture")]
 pub struct DestroyTexture {
     pub texture_id: u32,
 }
@@ -349,8 +336,7 @@ pub fn vertex_stride_bytes(layout: &[VertexAttribute]) -> usize {
 /// content riding the uniform blob, never per-frame re-creation. Reply:
 /// `CreateGeometryResult`. Desktop-only — the headless chassis replies
 /// `Err` (fail-fast, ADR-0105).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.create_geometry")]
+#[aether_data::kind(name = "aether.render.create_geometry")]
 pub struct CreateGeometry {
     pub layout: Vec<VertexAttribute>,
     #[serde(with = "aether_data::bytes")]
@@ -366,8 +352,7 @@ pub struct CreateGeometry {
 /// validation class: an empty layout, a vertex byte length that does
 /// not divide by the layout stride, an index byte length that does not
 /// divide by four, or an index outside the vertex count.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.create_geometry_result")]
+#[aether_data::kind(name = "aether.render.create_geometry_result")]
 pub enum CreateGeometryResult {
     Ok { geometry_id: u32 },
     Err { error: String },
@@ -383,8 +368,7 @@ pub enum CreateGeometryResult {
 /// next GPU use. Per-frame updates are for view-dependent geometry that
 /// is small by nature (the ink ribbons) — a deforming mesh poses
 /// through the uniform blob instead.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.update_geometry")]
+#[aether_data::kind(name = "aether.render.update_geometry")]
 pub struct UpdateGeometry {
     pub geometry_id: u32,
     #[serde(with = "aether_data::bytes")]
@@ -398,8 +382,7 @@ pub struct UpdateGeometry {
 /// mirroring `destroy_texture`. Fire-and-forget; an unknown
 /// `geometry_id` logs and drops. Dropping the registry entry releases
 /// the staged bytes and any realized GPU buffers.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.destroy_geometry")]
+#[aether_data::kind(name = "aether.render.destroy_geometry")]
 pub struct DestroyGeometry {
     pub geometry_id: u32,
 }
@@ -480,8 +463,7 @@ pub struct TexturedQuad {
 /// should appear, or they vanish next frame. `texture_id` is a
 /// registry id from a prior `CreateTexture`; an unknown id warn-drops
 /// the batch. Fire-and-forget; no reply.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.draw_textured_quads")]
+#[aether_data::kind(name = "aether.render.draw_textured_quads")]
 pub struct DrawTexturedQuads {
     pub texture_id: u32,
     pub space: QuadSpace,
@@ -584,8 +566,7 @@ pub struct Shape {
 /// the order the shapes were listed in. The vocabulary is fixed and
 /// substrate-owned: callers supply parameters, never WGSL.
 /// Fire-and-forget; no reply.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.draw_shapes")]
+#[aether_data::kind(name = "aether.render.draw_shapes")]
 pub struct DrawShapes {
     pub space: QuadSpace,
     /// Optional framebuffer-pixel scissor applied to this batch. `None`
@@ -642,8 +623,7 @@ pub struct ScreenTriangle {
 /// frame with the same immediate-mode contract as `aether.draw_triangle`
 /// — resend every frame the triangles should appear, or they vanish next
 /// frame. Fire-and-forget; no reply.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.draw_screen_triangles")]
+#[aether_data::kind(name = "aether.render.draw_screen_triangles")]
 pub struct DrawScreenTriangles {
     pub space: QuadSpace,
     /// Optional framebuffer-pixel scissor applied to this batch. `None`
@@ -691,8 +671,7 @@ pub struct MaterialTexturedRect {
 /// decals, and splats. `texture_id` comes from `CreateTexture`; an
 /// unknown texture warn-drops the batch at record time. Fire-and-forget,
 /// immediate-mode: resend every frame the material should be visible.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.material.textured")]
+#[aether_data::kind(name = "aether.render.material.textured")]
 pub struct DrawMaterialTextured {
     pub texture_id: u32,
     /// How the sampled texel lays over the target, exactly as it means
@@ -718,8 +697,7 @@ pub struct MaterialCoverageRect {
 /// callers provide data (texture id + rect parameters), not WGSL. A
 /// non-R8 texture or unknown texture warn-drops the batch at record time.
 /// Fire-and-forget, immediate-mode.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.material.coverage")]
+#[aether_data::kind(name = "aether.render.material.coverage")]
 pub struct DrawMaterialCoverage {
     pub texture_id: u32,
     pub rects: Vec<MaterialCoverageRect>,
@@ -1012,8 +990,7 @@ pub struct ProgramPass {
 /// headless chassis replies `Err` (fail-fast, ADR-0105), and a register
 /// before the render GPU boots (desktop: before the first window
 /// attaches) replies `Err` rather than parking.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.program.register")]
+#[aether_data::kind(name = "aether.render.program.register")]
 pub struct ProgramRegister {
     pub wgsl: String,
     pub bindings: Vec<SlotSpec>,
@@ -1035,8 +1012,7 @@ pub struct ProgramRegister {
 /// validation), a graph-check message naming the offending pass and
 /// slot, or `pipeline creation failed` (a wgpu validation error caught
 /// by the register's error scope).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.program.register_result")]
+#[aether_data::kind(name = "aether.render.program.register_result")]
 pub enum ProgramRegisterResult {
     Ok { program_id: u32 },
     Err { error: String },
@@ -1068,8 +1044,7 @@ pub enum ProgramRegisterResult {
 /// pass, and binding in the render actor's log ring, the same
 /// convention as an unknown texture id in `draw_textured_quads`. The
 /// headless chassis absorbs it (no-op).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.program.dispatch")]
+#[aether_data::kind(name = "aether.render.program.dispatch")]
 pub struct ProgramDispatch {
     pub program_id: u32,
     pub bindings: Vec<u32>,
@@ -1086,8 +1061,7 @@ pub struct ProgramDispatch {
 /// drops. Dropping the entry releases the program's compiled pipelines;
 /// pooled transient textures stay in the shared pool for other
 /// programs. The headless chassis absorbs it (no-op).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.program.destroy")]
+#[aether_data::kind(name = "aether.render.program.destroy")]
 pub struct ProgramDestroy {
     pub program_id: u32,
 }
@@ -1157,8 +1131,7 @@ pub struct PassTimingRow {
 /// the selected adapter offers it; where the adapter does not, or where
 /// the operator turned the instrument off, the reply is `Absent` with
 /// the reason rather than a table of zeros.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.program.timings")]
+#[aether_data::kind(name = "aether.render.program.timings")]
 pub struct ProgramTimings {
     pub program_id: u32,
 }
@@ -1172,8 +1145,7 @@ pub struct ProgramTimings {
 /// program is free" — hence its payload is `reason`, not the `error`
 /// every failure arm carries. `Err` is a genuine failure — an unknown
 /// `program_id`, or no booted render GPU.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.render.program.timings_result")]
+#[aether_data::kind(name = "aether.render.program.timings_result")]
 pub enum ProgramTimingsResult {
     Ok { program_id: u32, rows: Vec<PassTimingRow> },
     Absent { reason: String },

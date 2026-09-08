@@ -6,8 +6,6 @@
 //! (ADR-0090). A bare load with no `config_path` boots the compiled
 //! [`Default`], which is the framing the puppet itself starts at, turning.
 
-use serde::{Deserialize, Serialize};
-
 /// Init-config for [`Turntable`](crate::Turntable): how fast to turn and the
 /// rest of the pose it holds fixed while the azimuth sweeps.
 ///
@@ -16,8 +14,7 @@ use serde::{Deserialize, Serialize};
 /// `config` bytes of the `aether.component.load` that instantiates it (or
 /// `load_component`'s `config_path`). Omitting config bytes boots
 /// [`TurntableConfig::default()`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.puppet-turntable.config")]
+#[aether_data::kind(name = "aether.puppet-turntable.config")]
 pub struct TurntableConfig {
     /// Whether the motor is engaged. `false` parks the turntable — it stays
     /// loaded, holds the pose it was configured with, and sends nothing at

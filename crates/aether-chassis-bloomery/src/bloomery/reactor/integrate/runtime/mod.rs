@@ -53,7 +53,6 @@ use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
-use serde::{Deserialize, Serialize};
 
 use super::IntegrateReactorCapability;
 use crate::artifacts::{ArtifactsCapabilityState, PutResult, resolve_root};
@@ -72,8 +71,7 @@ use aether_bloomery_github::candidate_ref_name;
 /// The self-addressed wake the poll timer fires each interval; its handler
 /// drains the integrate topic and folds each entry. Zero-field — the timer
 /// carries only the schedule.
-#[derive(Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.bloomery.integrate.integrate_tick")]
+#[aether_data::kind(name = "aether.bloomery.integrate.integrate_tick", default)]
 pub struct IntegrateTick {}
 
 /// Runtime state for [`IntegrateReactorCapability`]. The shell + store are `Some`

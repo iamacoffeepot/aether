@@ -27,8 +27,7 @@ pub const MEMORY_FONT_NAMESPACE: &str = "memory";
 /// the file the same way `aether.fs.read` does (e.g. `"assets"` /
 /// `"fonts/RobotoMono.ttf"`). The capability forwards the read,
 /// parses the font off the hot path, and replies `LoadFontResult`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.text.load_font")]
+#[aether_data::kind(name = "aether.text.load_font")]
 pub struct LoadFont {
     pub namespace: String,
     pub path: String,
@@ -39,8 +38,7 @@ pub struct LoadFont {
 /// embed a small fallback font and need to register it without staging
 /// through `aether.fs`. `name` is used as the memory-backed font key
 /// and the human-readable name in `LoadFontResult::Ok`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.text.load_font_bytes")]
+#[aether_data::kind(name = "aether.text.load_font_bytes")]
 pub struct LoadFontBytes {
     pub name: String,
     #[serde(with = "aether_data::bytes")]
@@ -52,8 +50,7 @@ pub struct LoadFontBytes {
 /// and `resident_bytes` (the parsed TTF's byte length). `Err` echoes
 /// the `namespace` / `path` for diagnostics plus a human-readable reason
 /// — a bad path, or a file fontdue could not parse as a font.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.text.load_font_result")]
+#[aether_data::kind(name = "aether.text.load_font_result")]
 pub enum LoadFontResult {
     Ok { font_id: u32, name: String, resident_bytes: u64 },
     Err { namespace: String, path: String, error: String },
@@ -72,8 +69,7 @@ pub enum LoadFontResult {
 /// `origin` along the baseline; `World { anchor, scale }` anchors it
 /// in the scene. An unknown `font_id` warn-drops. Fire-and-forget; no
 /// reply.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.text.draw")]
+#[aether_data::kind(name = "aether.text.draw")]
 pub struct DrawText {
     pub font_id: u32,
     pub text: String,
@@ -93,8 +89,7 @@ pub struct DrawText {
 /// follows the same immediate-mode contract; the capability preserves vector
 /// order while coalescing adjacent compatible glyph quad runs. Fire-and-
 /// forget; no reply.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.text.draw_batch")]
+#[aether_data::kind(name = "aether.text.draw_batch")]
 pub struct DrawTextBatch {
     pub items: Vec<DrawText>,
 }
@@ -119,8 +114,7 @@ pub enum FontRef {
 /// references the font by id or by path; an unresident path loads on
 /// the miss, reusing the `aether.fs` fetch + parse path. The cap
 /// replies `FontMetricsResult`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.text.font_metrics")]
+#[aether_data::kind(name = "aether.text.font_metrics")]
 pub struct FontMetricsRequest {
     pub font: FontRef,
 }
@@ -128,8 +122,7 @@ pub struct FontMetricsRequest {
 /// Reply to `FontMetricsRequest`. `Ok` carries the resolved
 /// `FontMetrics` table; `Err` carries a human-readable reason — an
 /// unknown `font_id`, a bad path, or a file fontdue could not parse.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.text.font_metrics_result")]
+#[aether_data::kind(name = "aether.text.font_metrics_result")]
 pub enum FontMetricsResult {
     Ok { metrics: FontMetrics },
     Err { error: String },

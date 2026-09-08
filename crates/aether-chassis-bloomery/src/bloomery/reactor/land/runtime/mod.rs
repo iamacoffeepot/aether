@@ -85,7 +85,6 @@ use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
-use serde::{Deserialize, Serialize};
 
 use super::LandReactorCapability;
 use aether_bloomery_github::{
@@ -109,8 +108,7 @@ mod receipt;
 /// The self-addressed wake the poll timer fires each interval; its handler drains
 /// the land topic and issues each land. Zero-field — the timer carries only the
 /// schedule.
-#[derive(Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.bloomery.land.land_tick")]
+#[aether_data::kind(name = "aether.bloomery.land.land_tick", default)]
 pub struct LandTick {}
 
 /// Catch-up cadence for closing GitHub issues named by terminal commissions.

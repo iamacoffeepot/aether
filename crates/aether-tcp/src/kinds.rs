@@ -22,8 +22,7 @@ use serde::{Deserialize, Serialize};
 /// nested actor, so a `String` here would exclude the loaded wasm
 /// components that are the field's main audience. Reply:
 /// `BindListenerResult`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.tcp.bind_listener")]
+#[aether_data::kind(name = "aether.tcp.bind_listener")]
 pub struct BindListener {
     pub addr: String,
     pub name: Option<String>,
@@ -40,8 +39,7 @@ pub struct BindListener {
 /// [`MailboxId`](aether_data::MailboxId) exactly as [`BindListener`]'s;
 /// `None` leaves the session observer-less and drops inbound bytes.
 /// Reply: [`ConnectResult`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.tcp.connect")]
+#[aether_data::kind(name = "aether.tcp.connect")]
 pub struct Connect {
     pub addr: String,
     pub name: Option<String>,
@@ -61,8 +59,7 @@ pub struct Connect {
 /// mailbox as a wire id, usable wherever a `MailboxId` is taken (a
 /// `consumer` field, say); it renders as a tagged `mbx-…` string over
 /// JSON and round-trips exactly (ADR-0064).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.tcp.connect_result")]
+#[aether_data::kind(name = "aether.tcp.connect_result")]
 pub enum ConnectResult {
     Ok { session_name: String, session_id: aether_data::MailboxId, peer: String },
     Err { addr: String, error: String },
@@ -81,8 +78,7 @@ pub enum ConnectResult {
 /// (ADR-0064). Agents addressing the listener as a mail *recipient*
 /// still use `listener_name` (the deterministic full name), since
 /// `recipient_name` is a name surface.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.tcp.bind_listener_result")]
+#[aether_data::kind(name = "aether.tcp.bind_listener_result")]
 pub enum BindListenerResult {
     Ok { listener_name: String, listener_id: aether_data::MailboxId, local_port: u16 },
     Err { addr: String, error: String },
@@ -95,8 +91,7 @@ pub enum BindListenerResult {
 /// `MonitorNotice` arrives. Asynchronous reply: the response
 /// only fires after the listener's accept thread has joined
 /// and its slot has tombstoned.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.tcp.unbind_listener")]
+#[aether_data::kind(name = "aether.tcp.unbind_listener")]
 pub struct UnbindListener {
     pub listener_name: String,
 }
@@ -107,8 +102,7 @@ pub struct UnbindListener {
 /// already tombstoned at the time of the unbind request,
 /// duplicate requests while an unbind is in progress, or fan-out
 /// failures.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.tcp.unbind_listener_result")]
+#[aether_data::kind(name = "aether.tcp.unbind_listener_result")]
 pub enum UnbindListenerResult {
     Ok { listener_name: String },
     Err { listener_name: String, error: String },
@@ -118,8 +112,7 @@ pub enum UnbindListenerResult {
 /// the singleton knows about. The cap reaches for
 /// `chassis.resolve_actors::<TcpListenerActor>()` (Phase 5)
 /// and walks the live fleet. Reply: `ListListenersResult`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.tcp.list_listeners")]
+#[aether_data::kind(name = "aether.tcp.list_listeners", default)]
 pub struct ListListeners {}
 
 /// One entry in `ListListenersResult`. `name` is the subname
@@ -135,8 +128,7 @@ pub struct ListenerInfo {
 /// Reply to `ListListeners`. No `Err` arm: this is an enumeration of
 /// the live fleet, and an enumeration cannot miss — no listeners is an
 /// empty list, not a failure.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.tcp.list_listeners_result")]
+#[aether_data::kind(name = "aether.tcp.list_listeners_result", default)]
 pub struct ListListenersResult {
     pub listeners: Vec<ListenerInfo>,
 }
@@ -147,8 +139,7 @@ pub struct ListListenersResult {
 /// calls `ctx.shutdown()`. Fire-and-forget at the kind level
 /// (the close response rides via the cap's monitor on the
 /// listener, not via this kind).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.tcp.close")]
+#[aether_data::kind(name = "aether.tcp.close", default)]
 pub struct Close {}
 
 /// `aether.tcp.connection_ready` — sidecar accept thread → listener
@@ -159,8 +150,7 @@ pub struct Close {}
 /// the mpsc and spawns a `TcpSessionActor` per pending stream.
 /// Empty payload — the actual stream rides the mpsc, not the mail
 /// envelope (a live `TcpStream` is not wire-shaped).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.tcp.connection_ready")]
+#[aether_data::kind(name = "aether.tcp.connection_ready", default)]
 pub struct ConnectionReady {}
 
 /// `aether.tcp.connect_ready` — sidecar dial thread → capability
@@ -168,8 +158,7 @@ pub struct ConnectionReady {}
 /// connections: the dial thread pushes its `TcpStream` or error over
 /// an mpsc and fires this fieldless mail so the cap can drain the
 /// channel, spawn the session actor, and complete the parked reply.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.tcp.connect_ready")]
+#[aether_data::kind(name = "aether.tcp.connect_ready")]
 pub struct ConnectReady {}
 
 /// `aether.tcp.session_data_ready` — sidecar read thread → session
@@ -179,8 +168,7 @@ pub struct ConnectReady {}
 /// drains the mpsc, reassembles length-prefixed frames, and delivers
 /// each complete frame as [`SessionData`] to the session's bound
 /// consumer. Empty payload.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.tcp.session_data_ready")]
+#[aether_data::kind(name = "aether.tcp.session_data_ready", default)]
 pub struct SessionDataReady {}
 
 /// `aether.tcp.session_data` — one reassembled length-prefix frame
@@ -188,8 +176,7 @@ pub struct SessionDataReady {}
 /// Carries the session subname (`conn-N`), the peer address as a
 /// string, and the complete frame body. Structured-shaped
 /// (variable-length payload) — agents drain via `receive_mail`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.tcp.session_data")]
+#[aether_data::kind(name = "aether.tcp.session_data")]
 pub struct SessionData {
     pub session_name: String,
     pub peer: String,
@@ -203,8 +190,7 @@ pub struct SessionData {
 /// on the dispatcher thread (writes are typically fast and
 /// dispatcher-thread initiated, so a sidecar isn't needed for
 /// the write path).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.tcp.session_write")]
+#[aether_data::kind(name = "aether.tcp.session_write")]
 pub struct SessionWrite {
     #[serde(with = "aether_data::bytes")]
     pub bytes: Vec<u8>,
@@ -215,16 +201,14 @@ pub struct SessionWrite {
 /// resolved by subname. The session's handler calls
 /// `ctx.shutdown()`; the close fan-out fires `MonitorNotice` to
 /// the parent actor that spawned it.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.tcp.session_close")]
+#[aether_data::kind(name = "aether.tcp.session_close", default)]
 pub struct SessionClose {}
 
 /// `aether.tcp.session_closed` — delivered to the session's configured
 /// consumer on peer EOF, read error, or frame rejection. Carries the
 /// session subname, the peer address, and a human-readable reason. A
 /// trailing partial frame at close is dropped and noted in the reason.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.tcp.session_closed")]
+#[aether_data::kind(name = "aether.tcp.session_closed")]
 pub struct SessionClosed {
     pub session_name: String,
     pub peer: String,

@@ -41,7 +41,6 @@ use aether_kit_widget::{
     BehaviorHostSpec, PanelConfig, RadioConfig, ScriptRef, SetWidgetState, SliderConfig, Theme, WidgetChildSpec,
     WidgetControlState, WidgetKind,
 };
-use serde::{Deserialize, Serialize};
 
 /// Local twin of `aether_behavior::host::SetScript` (`aether.behavior.set_script`),
 /// so the swap steps (S4/S5) drive the host without a dev-dependency on the
@@ -50,16 +49,14 @@ use serde::{Deserialize, Serialize};
 /// and wire bytes match the host's real kind; drift is caught by this scenario
 /// (a swap that fails to decode). Mirrors the fixture crate's `SliderChanged`
 /// twin strategy.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.behavior.set_script")]
+#[aether_data::kind(name = "aether.behavior.set_script")]
 struct SetScript {
     bytes: Vec<u8>,
 }
 
 /// Local twin of `aether_behavior::host::LoadScriptResult`
 /// (`aether.behavior.load_script_result`) — the `SetScript` reply.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.behavior.load_script_result")]
+#[aether_data::kind(name = "aether.behavior.load_script_result")]
 enum LoadScriptResult {
     Ok { resident_bytes: u64 },
     Err { error: String },

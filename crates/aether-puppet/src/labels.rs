@@ -14,7 +14,6 @@
 //! reconstruct by assumption.
 
 use aether_math::Vec3;
-use serde::{Deserialize, Serialize};
 
 use crate::npy;
 
@@ -82,8 +81,7 @@ pub fn class_in(vocabulary: &[String], name: &str) -> Option<u8> {
 ///
 /// Cell order is C-order `(x, y, z)`: z varies fastest. `classes` is
 /// one-based from the cells' point of view; cell `0` remains unlabelled.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.puppet.material_field")]
+#[aether_data::kind(name = "aether.puppet.material_field", partial_eq)]
 pub struct MaterialField {
     pub dimensions: [u32; 3],
     #[serde(with = "aether_data::bytes")]

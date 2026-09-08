@@ -27,13 +27,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use serde::{Deserialize, Serialize};
-
 /// Acquire `bloom`'s claim refs — one per member workpiece plus the single
 /// mainline-admission ref — all-or-nothing (ADR-0150 §The claim registry,
 /// mirroring [`aether_bloomery::SourceBackend::claim_seal`](crate::port::SourceBackend::claim_seal)).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.source.claim_seal")]
+#[aether_data::kind(name = "aether.source.claim_seal")]
 pub struct ClaimSeal {
     /// The `aether_data::wire`-encoded claiming [`BloomId`](crate::ids::BloomId).
     #[serde(with = "aether_data::bytes")]
@@ -47,8 +44,7 @@ pub struct ClaimSeal {
 /// [`aether_bloomery::SourceBackend::transfer_seal`](crate::port::SourceBackend::transfer_seal)):
 /// fast-forward the `carried` refs and the admission ref, fresh-acquire
 /// `net_new`, release `dropped`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.source.transfer_seal")]
+#[aether_data::kind(name = "aether.source.transfer_seal")]
 pub struct TransferSeal {
     /// The `aether_data::wire`-encoded predecessor [`BloomId`](crate::ids::BloomId).
     #[serde(with = "aether_data::bytes")]
@@ -68,8 +64,7 @@ pub struct TransferSeal {
 /// Release `bloom`'s claim refs — the member workpieces plus the admission ref —
 /// each by a fast-forward CAS to a tombstone (ADR-0150 §The claim registry,
 /// mirroring [`aether_bloomery::SourceBackend::release_seal`](crate::port::SourceBackend::release_seal)).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.source.release_seal")]
+#[aether_data::kind(name = "aether.source.release_seal")]
 pub struct ReleaseSeal {
     /// The `aether_data::wire`-encoded releasing [`BloomId`](crate::ids::BloomId).
     #[serde(with = "aether_data::bytes")]
@@ -84,14 +79,12 @@ pub struct ReleaseSeal {
 /// The boot reconcile drives this once after the V1 re-assert / re-release to
 /// detect the deep-heal states — a tombstoned ref to sweep, a ref stranded on a
 /// superseded predecessor to complete.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.source.enumerate_claims")]
+#[aether_data::kind(name = "aether.source.enumerate_claims")]
 pub struct EnumerateClaims;
 
 /// Reply to [`EnumerateClaims`]: every live claim ref as a wire-encoded
 /// [`ClaimRefState`](crate::port::ClaimRefState).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.source.enumerate_claims_result")]
+#[aether_data::kind(name = "aether.source.enumerate_claims_result", eq)]
 pub enum EnumerateClaimsResult {
     /// The enumeration succeeded.
     Ok {
@@ -111,8 +104,7 @@ pub enum EnumerateClaimsResult {
 /// fast-forward one carried/admission ref from `predecessor` to `successor`. A
 /// ref already at the successor is the no-op that lets the boot re-drive
 /// converge. Shares the [`ClaimResult`] reply.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.source.complete_transfer")]
+#[aether_data::kind(name = "aether.source.complete_transfer")]
 pub struct CompleteTransfer {
     /// The `aether_data::wire`-encoded predecessor [`BloomId`](crate::ids::BloomId).
     #[serde(with = "aether_data::bytes")]
@@ -132,8 +124,7 @@ pub struct CompleteTransfer {
 /// An **empty** `bloom` is the `None` holder — the tombstone-sweep case that
 /// authorizes no live holder; a non-empty `bloom` releases that holder's ref.
 /// Replies [`CompleteReleaseResult`], not the shared [`ClaimResult`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.source.complete_release")]
+#[aether_data::kind(name = "aether.source.complete_release")]
 pub struct CompleteRelease {
     /// The `aether_data::wire`-encoded expected-holder [`BloomId`](crate::ids::BloomId),
     /// or **empty** for the holder-agnostic tombstone sweep (`None`).
@@ -155,8 +146,7 @@ pub struct CompleteRelease {
 /// The seal / transfer / release-seal operations keep [`ClaimResult`] — they are
 /// all-or-nothing over a ref set, where "every ref reached the target state" is
 /// the whole answer.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.source.complete_release_result")]
+#[aether_data::kind(name = "aether.source.complete_release_result", eq)]
 pub enum CompleteReleaseResult {
     /// The expected holder held the ref and it was released.
     Released,
@@ -182,8 +172,7 @@ pub enum CompleteReleaseResult {
 /// share one reply because they return the same outcome — a clean
 /// [`Held`](ClaimResult::Held) refusal is not an error (the
 /// [`LandOutcome`](crate::port::LandOutcome) shape).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.source.claim_result")]
+#[aether_data::kind(name = "aether.source.claim_result", eq)]
 pub enum ClaimResult {
     /// Every targeted ref was acquired / transferred / released.
     Acquired,
@@ -214,8 +203,7 @@ pub enum ClaimResult {
 /// admitted before then is decided against a partial snapshot: it reads an
 /// empty bloom map, finds nothing in flight, and advances mainline out from
 /// under the very land the replay is about to fold.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.source.observe_mainline")]
+#[aether_data::kind(name = "aether.source.observe_mainline")]
 pub struct ObserveMainline {
     /// The snapshot mainline to classify the observed head against — a
     /// wire-encoded [`Digest`](crate::digest::Digest). Genesis or undecodable
@@ -225,8 +213,7 @@ pub struct ObserveMainline {
 }
 
 /// Reply to [`ObserveMainline`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.source.observe_mainline_result")]
+#[aether_data::kind(name = "aether.source.observe_mainline_result", eq)]
 pub enum ObserveMainlineResult {
     /// The observation succeeded.
     Ok {

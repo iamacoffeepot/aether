@@ -13,7 +13,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_data::{Kind, KindId, Schema};
+use aether_data::{KindId, Schema};
 use serde::{Deserialize, Serialize};
 
 /// The wrapped child the host interposes on: the child actor's type tag
@@ -57,8 +57,7 @@ pub enum ScriptSource {
 }
 
 /// The behavior host's boot config (ADR-0137). Handed to `init` by value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Kind, Schema)]
-#[kind(name = "aether.behavior.host_config")]
+#[aether_data::kind(name = "aether.behavior.host_config", eq)]
 pub struct HostConfig {
     /// The wrapped child the host spawns and interposes on.
     pub child: ChildSpec,
@@ -118,8 +117,7 @@ impl Default for HostConfig {
 /// `aether.behavior.load_script` — swap the running script for one fetched
 /// from an `aether.fs` namespace. Replies `LoadScriptResult` once the read
 /// settles through the behavior host's request context.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Kind, Schema)]
-#[kind(name = "aether.behavior.load_script")]
+#[aether_data::kind(name = "aether.behavior.load_script", eq)]
 pub struct LoadScript {
     /// The `aether.fs` namespace prefix.
     pub namespace: String,
@@ -130,8 +128,7 @@ pub struct LoadScript {
 /// `aether.behavior.set_script` — swap the running script for inline bytes.
 /// The synchronous counterpart of `LoadScript`; the reply *is* the handler's
 /// return value (`#[handler::single]`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Kind, Schema)]
-#[kind(name = "aether.behavior.set_script")]
+#[aether_data::kind(name = "aether.behavior.set_script", eq)]
 pub struct SetScript {
     /// The replacement script's wasm bytes.
     #[serde(with = "aether_data::bytes")]
@@ -141,8 +138,7 @@ pub struct SetScript {
 /// Reply to `LoadScript` / `SetScript` — mirrors `aether.fs.read_result`'s
 /// Ok/Err shape. `Ok` reports the resident script's byte count; `Err`
 /// carries the failure text, and the prior running script is kept.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Kind, Schema)]
-#[kind(name = "aether.behavior.load_script_result")]
+#[aether_data::kind(name = "aether.behavior.load_script_result", eq)]
 pub enum LoadScriptResult {
     /// The swap succeeded; `resident_bytes` is the new script's size.
     Ok {

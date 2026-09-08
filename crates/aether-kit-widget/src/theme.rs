@@ -574,8 +574,7 @@ impl Default for Theme {
 /// widget surface redraws every tick (immediate mode), the next frame
 /// draws with the new tokens — one frame of restyle latency, no
 /// invalidation.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.widget.set_theme")]
+#[aether_data::kind(name = "aether.kit.widget.set_theme")]
 pub struct SetTheme {
     pub theme: Theme,
 }

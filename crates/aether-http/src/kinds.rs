@@ -110,8 +110,7 @@ pub enum HttpError {
 /// `timeout_ms` overrides the chassis default
 /// (`AETHER_HTTP_TIMEOUT_MS`, default 30000) when set; `None`
 /// uses the default.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.fetch")]
+#[aether_data::kind(name = "aether.http.fetch")]
 pub struct Fetch {
     pub request_id: u64,
     pub url: String,
@@ -132,8 +131,7 @@ pub struct Fetch {
 /// not round-trip. `Ok` carries the HTTP status, response headers,
 /// and response body (bounded by `AETHER_HTTP_MAX_BODY_BYTES`,
 /// default 16MB); `Err` carries an `HttpError` variant.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.fetch_result")]
+#[aether_data::kind(name = "aether.http.fetch_result")]
 pub enum FetchResult {
     Ok {
         request_id: u64,
@@ -163,8 +161,7 @@ pub enum FetchResult {
 /// peer's address in `SocketAddr` display form (`ip:port`, IPv6
 /// bracketed), supplied by the cap for handler-side logging /
 /// rate-limit / allowlisting (ADR-0108 §6).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.request")]
+#[aether_data::kind(name = "aether.http.server.request")]
 pub struct HttpServerRequest {
     pub method: HttpMethod,
     pub path: String,
@@ -179,8 +176,7 @@ pub struct HttpServerRequest {
 /// to the waiting client by the server capability (ADR-0108). `status`
 /// is the raw HTTP status code; `body` is raw bytes so binary responses
 /// round-trip without loss.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.response")]
+#[aether_data::kind(name = "aether.http.server.response")]
 pub struct HttpServerResponse {
     pub status: u16,
     pub headers: Vec<HttpHeader>,
@@ -210,8 +206,7 @@ pub struct HttpServerResponse {
 /// `Content-Length`) and begins the stream. Replied like [`HttpServerResponse`]
 /// (correlation-echoed), so the cap keys the new stream by the request's
 /// in-flight correlation id.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.response_stream_open")]
+#[aether_data::kind(name = "aether.http.server.response_stream_open")]
 pub struct HttpResponseStreamOpen {
     pub status: u16,
     pub headers: Vec<HttpHeader>,
@@ -223,8 +218,7 @@ pub struct HttpResponseStreamOpen {
 /// learns its `stream_id` from the first credit mail (the cap sets it to the
 /// request's dispatch correlation id) and pauses when its accumulated credit
 /// reaches zero.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.stream_credit")]
+#[aether_data::kind(name = "aether.http.server.stream_credit")]
 pub struct HttpStreamCredit {
     pub stream_id: u64,
     pub credit: u32,
@@ -234,8 +228,7 @@ pub struct HttpStreamCredit {
 /// stream named by `stream_id` (ADR-0128). Consumes one unit of credit; the
 /// cap frames it as one chunked-transfer chunk to the peer. `body` is raw
 /// bytes so binary downloads stream without loss.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.response_chunk")]
+#[aether_data::kind(name = "aether.http.server.response_chunk")]
 pub struct HttpResponseChunk {
     pub stream_id: u64,
     #[serde(with = "aether_data::bytes")]
@@ -245,8 +238,7 @@ pub struct HttpResponseChunk {
 /// `aether.http.server.response_stream_end` — handler → cap terminator on the
 /// stream named by `stream_id` (ADR-0128). The cap writes the terminating
 /// zero-length chunk and closes the connection.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.response_stream_end")]
+#[aether_data::kind(name = "aether.http.server.response_stream_end")]
 pub struct HttpResponseStreamEnd {
     pub stream_id: u64,
 }
@@ -277,8 +269,7 @@ pub struct HttpResponseStreamEnd {
 /// follow as [`HttpRequestChunk`] mails on the stream named by `stream_id`.
 /// The handler learns its `stream_id` here and stamps it on every
 /// [`HttpRequestCredit`] it sends back.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.request_stream_open")]
+#[aether_data::kind(name = "aether.http.server.request_stream_open")]
 pub struct HttpRequestStreamOpen {
     pub stream_id: u64,
     pub method: HttpMethod,
@@ -292,8 +283,7 @@ pub struct HttpRequestStreamOpen {
 /// the cap's send window; the handler replenishes by mailing
 /// [`HttpRequestCredit`] as it drains chunks. `body` is raw bytes so binary
 /// uploads stream without loss.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.request_chunk")]
+#[aether_data::kind(name = "aether.http.server.request_chunk")]
 pub struct HttpRequestChunk {
     pub stream_id: u64,
     #[serde(with = "aether_data::bytes")]
@@ -307,8 +297,7 @@ pub struct HttpRequestChunk {
 /// [`HttpServerResponse`] to *this* mail — the cap keys the response on the
 /// terminator's envelope correlation — so a streamed upload still answers with
 /// one ordinary response.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.request_stream_end")]
+#[aether_data::kind(name = "aether.http.server.request_stream_end")]
 pub struct HttpRequestStreamEnd {
     pub stream_id: u64,
 }
@@ -320,8 +309,7 @@ pub struct HttpRequestStreamEnd {
 /// at which point the unread bytes back up into the kernel receive buffer and
 /// TCP backpressure blocks the peer's send — so a fast peer cannot outrun a
 /// slow handler unboundedly.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.request_credit")]
+#[aether_data::kind(name = "aether.http.server.request_credit")]
 pub struct HttpRequestCredit {
     pub stream_id: u64,
     pub credit: u32,
@@ -351,8 +339,7 @@ pub struct HttpRequestCredit {
 /// `Sec-WebSocket-Accept` itself. Replied like [`HttpServerResponse`]
 /// (correlation-echoed), so the cap keys the accept on the request's in-flight
 /// correlation id.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.websocket.accept")]
+#[aether_data::kind(name = "aether.http.server.websocket.accept")]
 pub struct WebSocketAccept {
     pub subprotocol: Option<String>,
     pub headers: Vec<HttpHeader>,
@@ -375,8 +362,7 @@ pub struct WebSocketAccept {
 /// table, exactly as it routes an [`HttpResponseChunk`]; the send routes
 /// identically from any causal chain, so a handler can push with no inbound
 /// message in flight. An unknown or torn-down `stream_id` drops the message.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.websocket.message")]
+#[aether_data::kind(name = "aether.http.server.websocket.message")]
 pub struct WebSocketMessage {
     pub stream_id: u64,
     pub binary: bool,
@@ -391,8 +377,7 @@ pub struct WebSocketMessage {
 /// code (`1000` = normal); `reason` is the optional UTF-8 reason phrase.
 /// `stream_id` names the connection like [`WebSocketMessage`]'s (ADR-0132),
 /// both directions.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.websocket.close")]
+#[aether_data::kind(name = "aether.http.server.websocket.close")]
 pub struct WebSocketClose {
     pub stream_id: u64,
     pub code: u16,
@@ -427,8 +412,7 @@ pub struct WebSocketClose {
 /// described above. Mixing the two on one key, or joining with a
 /// different `kind`, is a conflict `Err` — spreading is something
 /// instances opt into together, never an accident.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.register_route")]
+#[aether_data::kind(name = "aether.http.server.register_route")]
 pub struct RegisterRoute {
     pub prefix: String,
     pub method: Option<HttpMethod>,
@@ -451,8 +435,7 @@ pub struct RegisterRoute {
 /// [`RegisterRoute`]: instanced handlers that all register `shared:
 /// true` jointly serve the route round-robin; `false` is the exclusive
 /// claim.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.register_route_self")]
+#[aether_data::kind(name = "aether.http.server.register_route_self")]
 pub struct RegisterRouteSelf {
     pub prefix: String,
     pub method: Option<HttpMethod>,
@@ -463,8 +446,7 @@ pub struct RegisterRouteSelf {
 /// `aether.http.server.unregister_route` — release the `(prefix,
 /// method)` route held by `mailbox`. Idempotent: releasing a route
 /// that isn't held is still `Ok`. Reply: `RegisterRouteResult`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.unregister_route")]
+#[aether_data::kind(name = "aether.http.server.unregister_route")]
 pub struct UnregisterRoute {
     pub prefix: String,
     pub method: Option<HttpMethod>,
@@ -475,8 +457,7 @@ pub struct UnregisterRoute {
 /// of [`UnregisterRoute`]: release the *sending* actor's `(prefix,
 /// method)` route, resolved from the host-stamped `Source` like
 /// [`RegisterRouteSelf`]. Idempotent. Reply: `RegisterRouteResult`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.unregister_route_self")]
+#[aether_data::kind(name = "aether.http.server.unregister_route_self")]
 pub struct UnregisterRouteSelf {
     pub prefix: String,
     pub method: Option<HttpMethod>,
@@ -487,8 +468,7 @@ pub struct UnregisterRouteSelf {
 /// or dropped registrant mailbox, a `(prefix, method)` key already
 /// claimed by another mailbox, or a `_self` op from a sender with no
 /// local mailbox.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.http.server.register_route_result")]
+#[aether_data::kind(name = "aether.http.server.register_route_result")]
 pub enum RegisterRouteResult {
     Ok,
     Err { error: String },
@@ -502,10 +482,7 @@ pub enum RegisterRouteResult {
 /// holding no routes is a no-op. Fire-and-forget; no reply.
 /// Cast-shape (Pod) — one `MailboxId`, fixed size.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema,
-)]
-#[kind(name = "aether.http.server.unregister_routes_all")]
+#[aether_data::kind(name = "aether.http.server.unregister_routes_all", pod, eq)]
 pub struct UnregisterRoutesAll {
     pub mailbox: aether_data::MailboxId,
 }
@@ -518,6 +495,5 @@ pub struct UnregisterRoutesAll {
 /// mail at the cap's own mailbox so the dispatcher handler drains the
 /// queue. A `TcpStream` isn't wire-shaped and a request body may be
 /// large, so the mail is only the wakeup signal.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.http.server.inbound_ready")]
+#[aether_data::kind(name = "aether.http.server.inbound_ready", default)]
 pub struct HttpInboundReady {}

@@ -14,8 +14,6 @@
 
 use alloc::string::String;
 
-use serde::{Deserialize, Serialize};
-
 /// Host-operator-authorized model-process instructions (ADR-0214).
 ///
 /// Every field is complete static instruction text. A renderer must consume the
@@ -28,8 +26,7 @@ use serde::{Deserialize, Serialize};
 /// the bundle, admit a prompt, or prove the text is free of injection.
 /// [`ConfigKind::address`](super::ConfigKind::address) hashes any serializable value,
 /// including one that fails validation.
-#[derive(aether_data::Kind, aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[kind(name = "aether.bloomery.model_process_instructions")]
+#[aether_data::kind(name = "aether.bloomery.model_process_instructions", eq)]
 #[serde(deny_unknown_fields)]
 pub struct ModelProcessInstructions {
     /// Curated repository conventions. Rendered as the `## Conventions` prefix.

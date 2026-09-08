@@ -7,19 +7,7 @@
 /// measurement. The schema-hashed `ID` is what the relay matches and
 /// the trace records.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
-#[kind(name = "mlat.ping")]
+#[aether_data::kind(name = "mlat.ping", pod, default, eq)]
 pub struct Ping {
     pub seq: u32,
 }
@@ -32,19 +20,7 @@ pub struct Ping {
 /// harvest flow. The body is meaningless (the kind id is the whole signal); a
 /// single field keeps it a well-formed `Pod`.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
-#[kind(name = "mlat.count_query")]
+#[aether_data::kind(name = "mlat.count_query", pod, default, eq)]
 pub struct CountQuery {
     /// Unused; present only so the query carries a non-empty `Pod` body.
     pub nonce: u32,
@@ -55,19 +31,7 @@ pub struct CountQuery {
 /// across the topology — `offered = Σ sent`, `completed = Σ received` — to
 /// report completed-vs-offered without touching the (lapping) trace ring.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
-#[kind(name = "mlat.count_report")]
+#[aether_data::kind(name = "mlat.count_report", pod, default, eq)]
 pub struct CountReport {
     /// `Ping` mails this actor dispatched downstream — the source's per-tick
     /// emissions, or a relay's per-inbound forwards.

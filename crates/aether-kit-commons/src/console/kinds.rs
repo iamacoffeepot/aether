@@ -110,8 +110,7 @@ const fn owns_input_by_default() -> bool {
     true
 }
 
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.console.config")]
+#[aether_data::kind(name = "aether.kit.console.config")]
 pub struct ConsoleConfig {
     pub panel_height: f32,
     pub activation_key_code: u32,
@@ -143,30 +142,26 @@ impl Default for ConsoleConfig {
     }
 }
 
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.kit.console.register_command")]
+#[aether_data::kind(name = "aether.kit.console.register_command", eq)]
 pub struct RegisterConsoleCommand {
     pub name: String,
     pub description: String,
     pub mailbox: MailboxId,
 }
 
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.kit.console.unregister_command")]
+#[aether_data::kind(name = "aether.kit.console.unregister_command", eq)]
 pub struct UnregisterConsoleCommand {
     pub name: String,
 }
 
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.kit.console.command_invoked")]
+#[aether_data::kind(name = "aether.kit.console.command_invoked", eq)]
 pub struct ConsoleCommandInvoked {
     pub name: String,
     pub args: Vec<String>,
     pub input: String,
 }
 
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.kit.console.command_output")]
+#[aether_data::kind(name = "aether.kit.console.command_output", eq)]
 pub struct ConsoleCommandOutput {
     pub command: String,
     pub lines: Vec<String>,

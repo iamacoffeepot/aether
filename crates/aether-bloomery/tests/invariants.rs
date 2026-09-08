@@ -4091,12 +4091,10 @@ mod sealed_config {
     };
     use aether_data::Kind;
     use aether_data::wire::to_vec;
-    use serde::{Deserialize, Serialize};
 
     use crate::common::{approved, digest, membership};
 
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-    #[kind(name = "aether.bloomery.test_seal_config")]
+    #[aether_data::kind(name = "aether.bloomery.test_seal_config", eq)]
     struct LaneConfig {
         lane: String,
     }

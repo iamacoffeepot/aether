@@ -1,7 +1,6 @@
 //! Math transform input kind vocabulary.
 
 use aether_math::{Mat4, Vec4};
-use bytemuck::{Pod, Zeroable};
 
 /// Input to the `mat4_apply` native transform (ADR-0048, issue 1464):
 /// apply a 4×4 matrix to a 4-vector, `M · v`. Both operands ride in
@@ -22,8 +21,7 @@ use bytemuck::{Pod, Zeroable};
 /// the transform decodes its input through the same shape-agnostic
 /// `Kind` path, so cast bytes agree on both sides.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.math.mat4_apply")]
+#[aether_data::kind(name = "aether.math.mat4_apply", pod, partial_eq)]
 pub struct Mat4Apply {
     pub matrix: Mat4,
     pub vector: Vec4,

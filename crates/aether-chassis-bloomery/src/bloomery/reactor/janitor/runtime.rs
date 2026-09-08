@@ -13,7 +13,6 @@ use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
-use serde::{Deserialize, Serialize};
 
 use super::archive::{ArchiveOutcome, ArchiveRequest, ArchiveTier, archive_pass};
 use super::kinds::{
@@ -30,8 +29,7 @@ use crate::bloomery::{
 use crate::store::SqliteStore;
 
 /// The self-addressed wake the poll timer fires each interval.
-#[derive(Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.bloomery.janitor.janitor_tick")]
+#[aether_data::kind(name = "aether.bloomery.janitor.janitor_tick", default)]
 pub struct JanitorTick {}
 
 /// Runtime state for [`JanitorReactorCapability`].

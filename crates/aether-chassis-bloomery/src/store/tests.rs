@@ -933,15 +933,13 @@ mod sealed_config {
     use aether_bloomery::{ConfigKind, ConfigRegistry, ConfigScopes, config_address};
     use aether_data::Kind;
     use aether_data::wire::to_vec;
-    use serde::{Deserialize, Serialize};
 
     use super::memory;
     use aether_bloomery::ConfigResolveError;
 
     use crate::store::{StoreBackend, StoreConfigError, resolve_config};
 
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-    #[kind(name = "aether.bloomery.test_lane_config")]
+    #[aether_data::kind(name = "aether.bloomery.test_lane_config", eq)]
     struct LaneConfig {
         lane: String,
     }

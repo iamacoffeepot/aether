@@ -784,16 +784,12 @@ mod tests {
     // the shared input/output kind wired through the `double` transform.
 
     use aether_data::transform;
-    use serde::{Deserialize, Serialize};
 
     /// Structured number kind — the fetch-fold fixtures' transform
     /// input + output. The extra `tag: u32` makes the `{ u64, u32 }`
     /// shape canonically distinct from the test vocabulary's other
     /// single-`u64` kinds so the resolved output `KindId` is unique.
-    #[derive(
-        Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
-    )]
-    #[kind(name = "aether.fs.test.number")]
+    #[aether_data::kind(name = "aether.fs.test.number", copy, default, eq)]
     struct TestNumber {
         value: u64,
         tag: u32,

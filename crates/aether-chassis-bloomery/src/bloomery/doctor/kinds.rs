@@ -5,8 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use aether_data::Kind;
-
 use super::{CheckResult, DoctorReport};
 
 /// One invariant row on the doctor snapshot wire. Always positional; not a Kind.
@@ -23,8 +21,7 @@ pub struct DoctorCheckRow {
 }
 
 /// Immutable last-pass snapshot the doctor reactor publishes to the REST API.
-#[derive(Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.bloomery.doctor.latest_report")]
+#[aether_data::kind(name = "aether.bloomery.doctor.latest_report", eq)]
 pub struct LatestDoctorReport {
     /// Seed invariant rows, in report order.
     pub checks: Vec<DoctorCheckRow>,

@@ -59,8 +59,7 @@ pub enum Motion {
 /// `config` bytes of the `aether.component.load` that instantiates it (or
 /// `load_component`'s `config_path`). Omitting config bytes boots
 /// [`IdleConfig::default()`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.puppet-idle.config")]
+#[aether_data::kind(name = "aether.puppet-idle.config")]
 pub struct IdleConfig {
     /// Whether the motor is engaged. `false` parks it — the motor stays
     /// loaded and sends nothing at all, so the subject holds whatever pose

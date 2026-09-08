@@ -46,8 +46,7 @@ use crate::values::{AgentProfile, Harness, ReasoningEffort, StageCatalog, is_mod
 /// that overrode the sealed profile would let a receipt attest a model that
 /// never ran. An override sealed into the scope revision is attestable — the
 /// bloom pins its digest — so choice and attestation are not in tension.
-#[derive(aether_data::Kind, aether_data::Schema, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-#[kind(name = "aether.bloomery.model_override")]
+#[aether_data::kind(name = "aether.bloomery.model_override", default, eq)]
 pub struct ModelOverride {
     /// The harness and model to run this workpiece's model lanes under,
     /// overriding the stage profile's. `None` → the profile default.

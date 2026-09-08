@@ -31,7 +31,6 @@ use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
-use serde::{Deserialize, Serialize};
 
 use super::{ProposeReactorCapability, ProposeReactorSetup};
 
@@ -43,8 +42,7 @@ use crate::control::ControlCore;
 use crate::store::{SqliteStore, StoreBackend};
 
 /// The self-addressed wake the poll timer fires each interval.
-#[derive(Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.bloomery.propose.propose_tick")]
+#[aether_data::kind(name = "aether.bloomery.propose.propose_tick", default)]
 pub struct ProposeTick {}
 
 /// Runtime state for [`ProposeReactorCapability`].

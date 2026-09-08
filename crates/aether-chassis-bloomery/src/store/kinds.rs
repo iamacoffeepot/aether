@@ -16,8 +16,7 @@ use serde::{Deserialize, Serialize};
 
 /// Append one journal event, deduplicated by its idempotency key (the inbox).
 /// A key already recorded is a no-op that reports [`AppendEventResult::Duplicate`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.append_event")]
+#[aether_data::kind(name = "aether.store.append_event")]
 pub struct AppendEvent {
     /// The event's idempotency key — the inbox dedup axis.
     pub idempotency_key: String,
@@ -36,8 +35,7 @@ pub struct AppendEvent {
 }
 
 /// Reply to [`AppendEvent`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.append_event_result")]
+#[aether_data::kind(name = "aether.store.append_event_result", eq)]
 pub enum AppendEventResult {
     /// The event was appended at this monotonic journal sequence.
     Applied {
@@ -56,8 +54,7 @@ pub enum AppendEventResult {
 /// Claim active membership for a bloom's workpieces under the
 /// at-most-one-active-bloom-per-workpiece uniqueness constraint. All-or-nothing:
 /// the whole set inserts in one transaction or none of it does.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.claim_seal")]
+#[aether_data::kind(name = "aether.store.claim_seal")]
 pub struct ClaimSeal {
     /// The sealing bloom's id (its digest's raw bytes).
     #[serde(with = "aether_data::bytes")]
@@ -67,8 +64,7 @@ pub struct ClaimSeal {
 }
 
 /// Reply to [`ClaimSeal`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.claim_seal_result")]
+#[aether_data::kind(name = "aether.store.claim_seal_result", eq)]
 pub enum ClaimSealResult {
     /// Every workpiece was claimed for the bloom — the seal is durable.
     Sealed,
@@ -90,8 +86,7 @@ pub enum ClaimSealResult {
 /// transaction. A workpiece the predecessor freed can be re-claimed by the
 /// successor; a workpiece held by a *third* active bloom conflicts and the whole
 /// supersession rolls back.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.supersede")]
+#[aether_data::kind(name = "aether.store.supersede")]
 pub struct Supersede {
     /// The predecessor bloom whose memberships are released.
     #[serde(with = "aether_data::bytes")]
@@ -104,8 +99,7 @@ pub struct Supersede {
 }
 
 /// Reply to [`Supersede`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.supersede_result")]
+#[aether_data::kind(name = "aether.store.supersede_result", eq)]
 pub enum SupersedeResult {
     /// The predecessor was released and the successor claimed — atomically.
     Sealed,
@@ -123,8 +117,7 @@ pub enum SupersedeResult {
 }
 
 /// Release every active membership a bloom holds (on land or supersession).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.release_membership")]
+#[aether_data::kind(name = "aether.store.release_membership")]
 pub struct ReleaseMembership {
     /// The bloom whose memberships are released.
     #[serde(with = "aether_data::bytes")]
@@ -132,8 +125,7 @@ pub struct ReleaseMembership {
 }
 
 /// Reply to [`ReleaseMembership`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.release_membership_result")]
+#[aether_data::kind(name = "aether.store.release_membership_result", eq)]
 pub enum ReleaseMembershipResult {
     /// The memberships were released.
     Ok {
@@ -148,8 +140,7 @@ pub enum ReleaseMembershipResult {
 }
 
 /// Enqueue one entry onto the transactional outbox for later republish.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.enqueue_outbox")]
+#[aether_data::kind(name = "aether.store.enqueue_outbox")]
 pub struct EnqueueOutbox {
     /// A caller-defined topic naming what the payload is (e.g. the outbound
     /// kind name), so a republisher can route it.
@@ -160,8 +151,7 @@ pub struct EnqueueOutbox {
 }
 
 /// Reply to [`EnqueueOutbox`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.enqueue_outbox_result")]
+#[aether_data::kind(name = "aether.store.enqueue_outbox_result", eq)]
 pub enum EnqueueOutboxResult {
     /// The entry was enqueued at this outbox sequence.
     Ok {
@@ -182,8 +172,7 @@ pub enum EnqueueOutboxResult {
 /// shared `delivered` flag (ADR-0149 §Outbox consumption): `topic: Some(t)`
 /// drains only that topic's undelivered entries; `topic: None` drains all (the
 /// legacy recovery-drill path).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.drain_outbox")]
+#[aether_data::kind(name = "aether.store.drain_outbox")]
 pub struct DrainOutbox {
     /// The topic to drain, or `None` for every topic.
     pub topic: Option<String>,
@@ -217,8 +206,7 @@ pub struct OutboxEntry {
 }
 
 /// Reply to [`DrainOutbox`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.drain_outbox_result")]
+#[aether_data::kind(name = "aether.store.drain_outbox_result", eq)]
 pub enum DrainOutboxResult {
     /// The undelivered entries, in sequence order.
     Ok {
@@ -237,8 +225,7 @@ pub enum DrainOutboxResult {
 /// another's entries delivered (ADR-0149 §Outbox consumption). `topic: Some(t)`
 /// acks only that topic's entries; `topic: None` acks across every topic (the
 /// legacy path).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.ack_outbox")]
+#[aether_data::kind(name = "aether.store.ack_outbox")]
 pub struct AckOutbox {
     /// The topic to acknowledge within, or `None` for every topic.
     pub topic: Option<String>,
@@ -247,8 +234,7 @@ pub struct AckOutbox {
 }
 
 /// Reply to [`AckOutbox`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.ack_outbox_result")]
+#[aether_data::kind(name = "aether.store.ack_outbox_result", eq)]
 pub enum AckOutboxResult {
     /// The entries were acknowledged.
     Ok {
@@ -268,8 +254,7 @@ pub enum AckOutboxResult {
 /// threads it onto the construct lane's prompt. Advisory model context that binds
 /// no evidence and never enters the content-addressed spec — a plain projection
 /// row, not a journalled event. Last-writer-wins on (`bloom`, `workpiece`).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.record_dispatch_description")]
+#[aether_data::kind(name = "aether.store.record_dispatch_description")]
 pub struct RecordDispatchDescription {
     /// The sealed bloom's id (its digest's raw bytes).
     #[serde(with = "aether_data::bytes")]
@@ -281,8 +266,7 @@ pub struct RecordDispatchDescription {
 }
 
 /// Reply to [`RecordDispatchDescription`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.record_dispatch_description_result")]
+#[aether_data::kind(name = "aether.store.record_dispatch_description_result", eq)]
 pub enum RecordDispatchDescriptionResult {
     /// The description row was written.
     Ok,
@@ -296,8 +280,7 @@ pub enum RecordDispatchDescriptionResult {
 /// Store an authored configuration's canonical bytes under its address
 /// (ADR-0174), so a sealed registry entry resolves to content at the point of
 /// use.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.record_config")]
+#[aether_data::kind(name = "aether.store.record_config", eq)]
 pub struct RecordConfig {
     /// The configuration's content address (its digest's raw bytes) — the value
     /// a registry entry names it by.
@@ -326,8 +309,7 @@ pub struct RecordConfig {
 /// caching them in the api cap (#4616) is to keep the synchronous pre-seal gate
 /// off the store: an operator who authors a policy and immediately seals a draft
 /// naming it would otherwise race a read that has no reason to have happened yet.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.record_config_result")]
+#[aether_data::kind(name = "aether.store.record_config_result", eq)]
 pub enum RecordConfigResult {
     /// The configuration is stored under its address.
     Ok {
@@ -358,8 +340,7 @@ pub enum RecordConfigResult {
 /// A REST journal page request. Echoed on [`PageJournalResult`] so the HTTP
 /// reply can bound the body without a second correlation table. The
 /// coordinator's own replay still uses [`aether_bloomery::ReplayJournal`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.page_journal")]
+#[aether_data::kind(name = "aether.store.page_journal")]
 pub struct PageJournal {
     /// Hex bloom id to filter on, or `None` for every record.
     pub bloom: Option<String>,
@@ -375,8 +356,7 @@ pub struct PageJournal {
 
 /// Reply to [`PageJournal`]. `records` is the whole journal; the HTTP edge
 /// selects the page. Echoes the request so the reply route can page.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.page_journal_result")]
+#[aether_data::kind(name = "aether.store.page_journal_result")]
 pub enum PageJournalResult {
     /// The journal, plus the page request that selected it.
     Ok {
@@ -428,8 +408,7 @@ pub struct BloomDispatchLive {
 }
 
 /// `GET /blooms/{id}/dispatches` — rollup rows plus live outstanding orders.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.list_bloom_dispatches")]
+#[aether_data::kind(name = "aether.store.list_bloom_dispatches")]
 pub struct ListBloomDispatches {
     /// The bloom's digest bytes.
     #[serde(with = "aether_data::bytes")]
@@ -437,8 +416,7 @@ pub struct ListBloomDispatches {
 }
 
 /// Reply to [`ListBloomDispatches`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.list_bloom_dispatches_result")]
+#[aether_data::kind(name = "aether.store.list_bloom_dispatches_result")]
 pub enum ListBloomDispatchesResult {
     /// Rollup cache plus outstanding orders for the bloom.
     Ok {
@@ -455,16 +433,14 @@ pub enum ListBloomDispatchesResult {
 }
 
 /// `GET /dispatches/{nonce}` — did the journal ever name this nonce?
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.lookup_dispatch")]
+#[aether_data::kind(name = "aether.store.lookup_dispatch")]
 pub struct LookupDispatch {
     /// The nonce as the caller spelled it.
     pub nonce: String,
 }
 
 /// Reply to [`LookupDispatch`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.lookup_dispatch_result")]
+#[aether_data::kind(name = "aether.store.lookup_dispatch_result")]
 pub enum LookupDispatchResult {
     /// The journal (or a still-outstanding order) names this nonce.
     Ok {

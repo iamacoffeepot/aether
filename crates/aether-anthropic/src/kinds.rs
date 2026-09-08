@@ -62,8 +62,7 @@ pub enum AnthropicError {
 /// (caller-minted, echoed on both arms). `model` selects the
 /// Messages model; `max_tokens` / `temperature` / `system` are the
 /// usual completion knobs.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.anthropic.messages.send")]
+#[aether_data::kind(name = "aether.anthropic.messages.send")]
 pub struct MessagesSend {
     pub request_id: u64,
     pub model: String,
@@ -77,8 +76,7 @@ pub struct MessagesSend {
 /// local `claude` subprocess (the user's subscription rail).
 /// Identical input schema to [`MessagesSend`]; the routing choice
 /// is the kind name. Reply lands as `CliSendResult`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.anthropic.cli.send")]
+#[aether_data::kind(name = "aether.anthropic.cli.send")]
 pub struct CliSend {
     pub request_id: u64,
     pub model: String,
@@ -92,8 +90,7 @@ pub struct CliSend {
 /// `request_id` for correlation. `Ok` carries the completion text,
 /// the model the provider actually served, and `Usage` accounting;
 /// `Err` carries an `AnthropicError`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.anthropic.messages.send_result")]
+#[aether_data::kind(name = "aether.anthropic.messages.send_result")]
 pub enum MessagesSendResult {
     Ok { request_id: u64, text: String, model_used: String, usage: Usage },
     Err { request_id: u64, error: AnthropicError },
@@ -102,8 +99,7 @@ pub enum MessagesSendResult {
 /// Reply to [`CliSend`]. Same shape as [`MessagesSendResult`]; the
 /// CLI backend populates only `Usage.wall_clock_millis` (the subprocess
 /// reports no token counts).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.anthropic.cli.send_result")]
+#[aether_data::kind(name = "aether.anthropic.cli.send_result")]
 pub enum CliSendResult {
     Ok { request_id: u64, text: String, model_used: String, usage: Usage },
     Err { request_id: u64, error: AnthropicError },

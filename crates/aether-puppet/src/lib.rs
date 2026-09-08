@@ -108,7 +108,6 @@ use aether_render::{
 };
 use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 use core::mem;
-use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 use easel::palette::Palette;
@@ -141,8 +140,7 @@ const DOLLY_PER_NOTCH: f32 = 0.08;
 const MIN_DOLLY_DISTANCE: f32 = 0.6;
 const MAX_DOLLY_DISTANCE: f32 = 40.0;
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.puppet.load_context")]
+#[aether_data::kind(name = "aether.puppet.load_context", default, partial_eq)]
 struct LoadContext {
     /// Only the mesh read carries one. The field read is a dependency of
     /// the same request, not a request of its own, so it must not answer.
@@ -157,8 +155,7 @@ struct LoadContext {
 /// `facing.bin` (little-endian f32 per pixel) — under `prefix` in
 /// `namespace`, for offline diff against the reference board's baked map
 /// and for cross-feeding the CPU wash oracle.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.puppet.dump_planes")]
+#[aether_data::kind(name = "aether.puppet.dump_planes", eq)]
 pub struct DumpPlanes {
     /// Writable `aether.fs` namespace to dump into, e.g. `save`.
     namespace: String,
@@ -172,8 +169,7 @@ pub struct DumpPlanes {
 /// exceptional overlay draws only curves that touched a non-manifold
 /// junction, in a high-contrast inspection colour; it is evidence, not a
 /// shipping style.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.puppet.gpu_silhouette_mode")]
+#[aether_data::kind(name = "aether.puppet.gpu_silhouette_mode", default, eq)]
 pub struct GpuSilhouetteMode {
     pub enabled: bool,
     pub exceptional_overlay: bool,

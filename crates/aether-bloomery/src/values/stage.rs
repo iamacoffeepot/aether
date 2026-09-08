@@ -255,8 +255,7 @@ pub struct StageBinding {
 /// Read by the *reducer*, not only at dispatch: the retry budgets decide
 /// re-dispatch versus wedge. That is why the catalog resolves through
 /// [`ResolvedConfigs`] rather than host-side only.
-#[derive(aether_data::Kind, aether_data::Schema, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-#[kind(name = "aether.bloomery.stage_catalog")]
+#[aether_data::kind(name = "aether.bloomery.stage_catalog", default, eq)]
 pub struct StageCatalog {
     /// The bindings, one per stage in the catalog.
     pub bindings: Vec<StageBinding>,

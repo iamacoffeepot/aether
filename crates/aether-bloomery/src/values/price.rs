@@ -134,8 +134,7 @@ impl fmt::Display for SealedPriceTable {
 /// Sealed as a configuration rather than compiled in, for the reason the
 /// [`StageCatalog`](super::StageCatalog) is: the operator authors it, and the
 /// bloom attests exactly the rates it was graded under.
-#[derive(aether_data::Kind, aether_data::Schema, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-#[kind(name = "aether.bloomery.price_table")]
+#[aether_data::kind(name = "aether.bloomery.price_table", default, eq)]
 pub struct PriceTable {
     /// Rate columns keyed by model id. A model with no entry is *unpriced*.
     pub rows: BTreeMap<String, PriceRates>,

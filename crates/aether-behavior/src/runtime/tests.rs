@@ -1,19 +1,16 @@
 use alloc::string::String;
 
 use aether_data::Kind;
-use serde::{Deserialize, Serialize};
 
 use super::{BehaviorCtx, MirrorStore, run_filter};
 use crate::envelope::{EffectTarget, Verdict};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "test.behavior.slider")]
+#[aether_data::kind(name = "test.behavior.slider", eq)]
 struct Slider {
     value: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "test.behavior.label")]
+#[aether_data::kind(name = "test.behavior.label", eq)]
 struct Label {
     text: String,
 }

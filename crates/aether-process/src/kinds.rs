@@ -67,8 +67,7 @@ pub enum ProcessError {
 /// - `timeout_millis` is the deadline; the child (and its process group)
 ///   is killed and reaped on overrun. `0` selects the configured default
 ///   timeout.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.process.run")]
+#[aether_data::kind(name = "aether.process.run", eq)]
 pub struct Run {
     pub binary: String,
     pub args: Vec<String>,
@@ -90,8 +89,7 @@ pub struct Run {
 ///   boolean flag.
 /// - `Err` carries the closed [`ProcessError`] taxonomy — only the
 ///   capability's own inability to run or reap the child.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.process.run_result")]
+#[aether_data::kind(name = "aether.process.run_result", eq)]
 pub enum RunResult {
     Ok {
         exit_code: Option<i32>,

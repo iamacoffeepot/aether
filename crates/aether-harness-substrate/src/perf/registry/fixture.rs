@@ -48,19 +48,7 @@ use aether_substrate::{Dispatch, NativeActor, NativeCtx, NativeInitCtx, Subname}
 /// burst that makes the owner queue deep. Every birth is submitted before the
 /// handler returns, so the queue sees them together rather than one at a time.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
-#[kind(name = "perf.registry.stage_burst")]
+#[aether_data::kind(name = "perf.registry.stage_burst", pod, default, eq)]
 pub struct StageBurst {
     pub count: u32,
 }
@@ -69,19 +57,7 @@ pub struct StageBurst {
 /// half of a churn cycle, so repeated bursts republish the route table instead
 /// of growing it without bound.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
-#[kind(name = "perf.registry.close_burst")]
+#[aether_data::kind(name = "perf.registry.close_burst", pod, default, eq)]
 pub struct CloseBurst {
     /// Unused; present only so the request carries a non-empty `Pod` body.
     pub nonce: u32,
@@ -89,19 +65,7 @@ pub struct CloseBurst {
 
 /// Read [`CommitParent`]'s birth tally.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
-#[kind(name = "perf.registry.commit_query")]
+#[aether_data::kind(name = "perf.registry.commit_query", pod, default, eq)]
 pub struct CommitQuery {
     /// Unused; present only so the query carries a non-empty `Pod` body.
     pub nonce: u32,
@@ -112,19 +76,7 @@ pub struct CommitQuery {
 /// benchmark asserts they agree, because a shortfall means a completion was
 /// dropped and its settlement hold leaked.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
-#[kind(name = "perf.registry.commit_report")]
+#[aether_data::kind(name = "perf.registry.commit_report", pod, default, eq)]
 pub struct CommitReport {
     pub staged: u64,
     pub succeeded: u64,
@@ -136,19 +88,7 @@ pub struct CommitReport {
 
 /// Tell a [`CommitChild`] to shut itself down.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
-#[kind(name = "perf.registry.close_child")]
+#[aether_data::kind(name = "perf.registry.close_child", pod, default, eq)]
 pub struct CloseChild {
     /// Unused; present only so the request carries a non-empty `Pod` body.
     pub nonce: u32,

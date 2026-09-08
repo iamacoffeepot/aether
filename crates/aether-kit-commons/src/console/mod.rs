@@ -23,7 +23,6 @@ use aether_text::{
     MEMORY_FONT_NAMESPACE, TextCapability,
 };
 use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
-use serde::{Deserialize, Serialize};
 
 use self::markdown::{MarkdownLine, MarkdownTone};
 
@@ -38,14 +37,12 @@ const BACKSPACE_REPEAT_INTERVAL_TICKS: u32 = 3;
 const EMBEDDED_FONT_NAME: &str = "SourceCodePro-Regular.ttf";
 const EMBEDDED_FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/SourceCodePro-Regular.ttf");
 
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy)]
-#[kind(name = "aether.kit.console.font_load_context")]
+#[aether_data::kind(name = "aether.kit.console.font_load_context", copy)]
 struct ConsoleFontLoadContext {
     embedded: bool,
 }
 
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy)]
-#[kind(name = "aether.kit.console.font_metrics_context")]
+#[aether_data::kind(name = "aether.kit.console.font_metrics_context", copy)]
 struct ConsoleFontMetricsContext {
     font_id: u32,
 }

@@ -44,43 +44,35 @@ pub struct WindowInfo {
 }
 
 /// List every live window in ascending [`WindowId`] order.
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, Default, PartialEq, Eq,
-)]
-#[kind(name = "aether.window.list")]
+#[aether_data::kind(name = "aether.window.list", copy, default, eq)]
 pub struct ListWindows;
 
 /// Reply to [`ListWindows`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.list_result")]
+#[aether_data::kind(name = "aether.window.list_result", eq)]
 pub enum ListWindowsResult {
     Ok { windows: Vec<WindowInfo> },
     Err { error: String },
 }
 
 /// Create a window from an explicit specification.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.create")]
+#[aether_data::kind(name = "aether.window.create", eq)]
 pub struct CreateWindow {
     pub spec: WindowSpec,
 }
 
 /// Reply to [`CreateWindow`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.create_result")]
+#[aether_data::kind(name = "aether.window.create_result", eq)]
 pub enum CreateWindowResult {
     Ok { window: WindowInfo },
     Err { error: String },
 }
 
 /// Begin closing the addressed window.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.close")]
+#[aether_data::kind(name = "aether.window.close", copy, eq)]
 pub struct CloseWindow;
 
 /// Reply to [`CloseWindow`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.close_result")]
+#[aether_data::kind(name = "aether.window.close_result", eq)]
 pub enum CloseWindowResult {
     Ok,
     Err { error: String },
@@ -89,8 +81,7 @@ pub enum CloseWindowResult {
 /// Change one window's presentation mode.
 ///
 /// `width` and `height` apply only to [`WindowMode::Windowed`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.set_mode")]
+#[aether_data::kind(name = "aether.window.set_mode", eq)]
 pub struct SetWindowMode {
     pub mode: WindowMode,
     pub width: Option<u32>,
@@ -98,23 +89,20 @@ pub struct SetWindowMode {
 }
 
 /// Reply to [`SetWindowMode`] with the resolved state.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.set_mode_result")]
+#[aether_data::kind(name = "aether.window.set_mode_result", eq)]
 pub enum SetWindowModeResult {
     Ok { mode: WindowMode, width: u32, height: u32 },
     Err { error: String },
 }
 
 /// Change one window's title.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.set_title")]
+#[aether_data::kind(name = "aether.window.set_title", eq)]
 pub struct SetWindowTitle {
     pub title: String,
 }
 
 /// Reply to [`SetWindowTitle`] with the applied title.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.set_title_result")]
+#[aether_data::kind(name = "aether.window.set_title_result", eq)]
 pub enum SetWindowTitleResult {
     Ok { title: String },
     Err { error: String },
@@ -149,15 +137,13 @@ pub struct WindowMenu {
 ///
 /// An empty `menus` list installs a bar carrying only the platform's own
 /// application menu, where the platform has one.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.set_menu")]
+#[aether_data::kind(name = "aether.window.set_menu", eq)]
 pub struct SetWindowMenu {
     pub menus: Vec<WindowMenu>,
 }
 
 /// Reply to [`SetWindowMenu`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.set_menu_result")]
+#[aether_data::kind(name = "aether.window.set_menu_result", eq)]
 pub enum SetWindowMenuResult {
     Ok,
     Err { error: String },
@@ -167,8 +153,7 @@ pub enum SetWindowMenuResult {
 /// menu owns the item and the caller's own [`WindowMenuItem::id`].
 ///
 /// Routed by the same selector-aware subscription family as [`aether_kinds::Key`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.menu_activated")]
+#[aether_data::kind(name = "aether.window.menu_activated", copy, eq)]
 pub struct WindowMenuActivated {
     pub window: WindowId,
     pub id: u32,
@@ -199,49 +184,42 @@ pub enum CursorIcon {
 }
 
 /// Set the addressed window's pointer shape.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.set_cursor")]
+#[aether_data::kind(name = "aether.window.set_cursor", copy, eq)]
 pub struct SetWindowCursor {
     pub icon: CursorIcon,
 }
 
 /// Reply to [`SetWindowCursor`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.set_cursor_result")]
+#[aether_data::kind(name = "aether.window.set_cursor_result", eq)]
 pub enum SetWindowCursorResult {
     Ok,
     Err { error: String },
 }
 
 /// Bring the addressed window to the foreground.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.focus")]
+#[aether_data::kind(name = "aether.window.focus", copy, eq)]
 pub struct FocusWindow;
 
 /// Reply to [`FocusWindow`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.focus_result")]
+#[aether_data::kind(name = "aether.window.focus_result", eq)]
 pub enum FocusWindowResult {
     Ok,
     Err { error: String },
 }
 
 /// Ask the platform to schedule the addressed window for redraw.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.request_redraw")]
+#[aether_data::kind(name = "aether.window.request_redraw", copy, eq)]
 pub struct RequestWindowRedraw;
 
 /// Reply to [`RequestWindowRedraw`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.request_redraw_result")]
+#[aether_data::kind(name = "aether.window.request_redraw_result", eq)]
 pub enum RequestWindowRedrawResult {
     Ok,
     Err { error: String },
 }
 
 /// Manager-private id-bearing command forwarded by one window child.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.internal.apply_command")]
+#[aether_data::kind(name = "aether.window.internal.apply_command", eq)]
 pub(crate) struct ApplyWindowCommand {
     pub window: WindowId,
     pub command: WindowCommand,
@@ -281,8 +259,7 @@ impl WindowCommand {
 }
 
 /// Manager-private result returned to the forwarding child.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.internal.apply_command_result")]
+#[aether_data::kind(name = "aether.window.internal.apply_command_result", eq)]
 pub(crate) enum ApplyWindowCommandResult {
     Close(CloseWindowResult),
     SetMode(SetWindowModeResult),
@@ -294,20 +271,17 @@ pub(crate) enum ApplyWindowCommandResult {
 }
 
 /// Correlation stored on the private manager request.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.internal.forward_context")]
+#[aether_data::kind(name = "aether.window.internal.forward_context", copy, eq)]
 pub(crate) struct WindowForwardContext {
     pub inbound: MailId,
 }
 
 /// Manager-private request that retires a child after platform-originated close.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.internal.retire")]
+#[aether_data::kind(name = "aether.window.internal.retire", copy, eq)]
 pub(crate) struct RetireWindow;
 
 /// Subscribe an explicit mailbox to a kind for a window selector.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.subscribe")]
+#[aether_data::kind(name = "aether.window.subscribe", copy, eq)]
 pub struct SubscribeWindow {
     pub selector: WindowSelector,
     pub kind: KindId,
@@ -315,16 +289,14 @@ pub struct SubscribeWindow {
 }
 
 /// Subscribe the sending actor to a kind for a window selector.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.subscribe_self")]
+#[aether_data::kind(name = "aether.window.subscribe_self", copy, eq)]
 pub struct SubscribeWindowSelf {
     pub selector: WindowSelector,
     pub kind: KindId,
 }
 
 /// Remove an explicit mailbox's subscription for a selector and kind.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.unsubscribe")]
+#[aether_data::kind(name = "aether.window.unsubscribe", copy, eq)]
 pub struct UnsubscribeWindow {
     pub selector: WindowSelector,
     pub kind: KindId,
@@ -332,16 +304,14 @@ pub struct UnsubscribeWindow {
 }
 
 /// Remove the sending actor's subscription for a selector and kind.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.unsubscribe_self")]
+#[aether_data::kind(name = "aether.window.unsubscribe_self", copy, eq)]
 pub struct UnsubscribeWindowSelf {
     pub selector: WindowSelector,
     pub kind: KindId,
 }
 
 /// Reply shared by the subscribe and unsubscribe request families.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.subscribe_result")]
+#[aether_data::kind(name = "aether.window.subscribe_result", eq)]
 pub enum SubscribeWindowResult {
     Ok,
     Err { error: String },
@@ -351,8 +321,7 @@ pub enum SubscribeWindowResult {
 ///
 /// This is the externally sendable bulk form. Runtime monitor cleanup uses
 /// the same operation internally when a subscriber mailbox closes.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.unsubscribe_all")]
+#[aether_data::kind(name = "aether.window.unsubscribe_all", copy, eq)]
 pub struct UnsubscribeAllWindows {
     pub mailbox: MailboxId,
 }
@@ -362,8 +331,7 @@ pub struct UnsubscribeAllWindows {
 /// The runtime deliberately has one handler for this envelope rather than a
 /// handler or cached id for every public window event kind.
 #[cfg(feature = "synthetic")]
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.inject_event")]
+#[aether_data::kind(name = "aether.window.inject_event", eq)]
 pub struct InjectWindowEvent {
     pub window: WindowId,
     pub kind: KindId,
@@ -372,15 +340,13 @@ pub struct InjectWindowEvent {
 }
 
 /// Published after a newly created window is fully attached.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.opened")]
+#[aether_data::kind(name = "aether.window.opened", eq)]
 pub struct WindowOpened {
     pub window: WindowInfo,
 }
 
 /// Published after a window and its native resources are detached.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
-#[kind(name = "aether.window.closed")]
+#[aether_data::kind(name = "aether.window.closed", copy, eq)]
 pub struct WindowClosed {
     pub window: WindowId,
 }

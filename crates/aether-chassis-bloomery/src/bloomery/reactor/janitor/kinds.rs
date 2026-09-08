@@ -2,11 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use aether_data::Kind;
-
 /// `POST /archive` — run the between-blooms archive pass.
-#[derive(Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.bloomery.janitor.archive_records")]
+#[aether_data::kind(name = "aether.bloomery.janitor.archive_records", default)]
 pub struct ArchiveRecords {}
 
 /// One archived record as the janitor reports it.
@@ -34,8 +31,7 @@ pub struct ArchiveFailureView {
 }
 
 /// Reply to [`ArchiveRecords`].
-#[derive(Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.bloomery.janitor.archive_records_result")]
+#[aether_data::kind(name = "aether.bloomery.janitor.archive_records_result", eq)]
 pub enum ArchiveRecordsResult {
     /// Eligible records moved, plus per-record failures that left their source
     /// in place.
@@ -58,13 +54,11 @@ pub enum ArchiveRecordsResult {
 }
 
 /// `GET /archive` — list the tier.
-#[derive(Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.bloomery.janitor.list_archive")]
+#[aether_data::kind(name = "aether.bloomery.janitor.list_archive", default)]
 pub struct ListArchive {}
 
 /// Reply to [`ListArchive`].
-#[derive(Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.bloomery.janitor.list_archive_result")]
+#[aether_data::kind(name = "aether.bloomery.janitor.list_archive_result", eq)]
 pub enum ListArchiveResult {
     /// The records currently on the tier.
     Ok {

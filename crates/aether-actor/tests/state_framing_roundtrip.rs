@@ -15,7 +15,6 @@
 
 use aether_actor::{Persistence, PriorState};
 use aether_data::Kind;
-use serde::{Deserialize, Serialize};
 
 /// Captures whatever the dehydrate side deposits, standing in for the
 /// substrate-owned migration buffer the real `WasmDropCtx` writes to.
@@ -31,8 +30,7 @@ impl Persistence for CaptureCtx {
 }
 
 /// The state kind a typed actor declares as `type State`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "test.state.counter")]
+#[aether_data::kind(name = "test.state.counter", eq)]
 struct CounterState {
     count: u32,
 }
@@ -40,8 +38,7 @@ struct CounterState {
 /// A reshaped version of the same logical state — an added field changes
 /// the schema and therefore `Kind::ID`, which is exactly how a
 /// `replace_component` against an evolved state kind manifests.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "test.state.counter.reshaped")]
+#[aether_data::kind(name = "test.state.counter.reshaped", eq)]
 struct CounterStateReshaped {
     count: u32,
     generation: u32,

@@ -161,8 +161,7 @@ pub enum TraceEvent {
 /// Not routed as mail post-3c — the central observer that used to reply
 /// with it retired. Kept as the walk's output struct (still a `Kind` so
 /// the MCP layer can name/decode it uniformly).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.trace.describe_tree_result")]
+#[aether_data::kind(name = "aether.trace.describe_tree_result", eq)]
 pub enum DescribeTreeResult {
     Ok { root: MailId, in_flight: u32, mails: Vec<MailNodeWire> },
     Err { not_found: MailId },
@@ -248,8 +247,7 @@ pub struct TraceRingEntry {
 /// - `root: None` returns every event in the ring; `Some(r)` returns
 ///   only the events tagged with root `r` — the targeted/guided-walk
 ///   strategy that touches only the actors in one tree.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.trace.tail")]
+#[aether_data::kind(name = "aether.trace.tail")]
 pub struct TraceTail {
     pub max: u32,
     pub since: Option<u64>,
@@ -265,8 +263,7 @@ pub struct TraceTail {
 /// hadn't seen yet (the lowest `sequence` still in the ring), so a
 /// reconstructed tree can flag itself known-incomplete rather than fail
 /// silently.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.trace.tail_result")]
+#[aether_data::kind(name = "aether.trace.tail_result")]
 pub enum TraceTailResult {
     Ok { entries: Vec<TraceRingEntry>, next_since: u64, truncated_before: Option<u64> },
     Err { error: String },
@@ -314,8 +311,7 @@ pub struct Settled {
 /// client-side — ADR-0086 Phase 3b). This sidesteps the settle/reply
 /// race that a single-call shape would inherit from
 /// `RpcServerCapability`'s settlement-driven `ReplyEnd`.
-#[derive(Clone, Debug, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.trace.dispatch_traced")]
+#[aether_data::kind(name = "aether.trace.dispatch_traced")]
 pub struct DispatchTraced {
     pub mails: Vec<NamedMail>,
 }
@@ -327,8 +323,7 @@ pub struct DispatchTraced {
 /// before any mail moved — typically a bad recipient or kind name in
 /// the batch (matches `CaptureFrameResult::Err`'s bundle-resolution
 /// failure shape).
-#[derive(Clone, Debug, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.trace.dispatch_traced_ack")]
+#[aether_data::kind(name = "aether.trace.dispatch_traced_ack")]
 pub enum DispatchTracedAck {
     Ok { root: MailId },
     Err { error: String },

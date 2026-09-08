@@ -1,7 +1,6 @@
 //! `aether.rpc` mail kinds owned by the RPC server capability (ADR-0121).
 
-use aether_data::{Kind, KindId, MailboxId, Schema};
-use serde::{Deserialize, Serialize};
+use aether_data::{KindId, MailboxId};
 
 /// `aether.rpc.inbound_ready` — sidecar accept / read thread →
 /// `RpcServerCapability` dispatcher wake. Issue 750. Mirrors the
@@ -12,8 +11,7 @@ use serde::{Deserialize, Serialize};
 /// (`TcpStream`, frame bytes, close reason) — a `TcpStream` isn't
 /// wire-shaped and a frame's payload may be megabytes, so the mail
 /// is only the wakeup signal.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.rpc.inbound_ready")]
+#[aether_data::kind(name = "aether.rpc.inbound_ready", default)]
 pub struct RpcInboundReady {}
 
 /// `aether.rpc.route` — ask the engines cap (`aether.fleet`) to
@@ -29,8 +27,7 @@ pub struct RpcInboundReady {}
 /// `ForwardEnvelope` at the right `aether.fleet.proxy:<id>`,
 /// propagating the original reply-to so the substrate's reply
 /// streams back to the originating `RpcServerCapability`.
-#[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.rpc.route")]
+#[aether_data::kind(name = "aether.rpc.route")]
 pub struct RouteEnvelope {
     pub engine_id: String,
     pub mailbox: MailboxId,
@@ -52,8 +49,7 @@ pub struct RouteEnvelope {
 /// forwarded call has no local chain to settle, so it needs this
 /// explicit terminal signal.) `Err` carries the wire `RpcError`
 /// rendered as a string, keeping this terminal signal wire-simple.
-#[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.rpc.call_settled")]
+#[aether_data::kind(name = "aether.rpc.call_settled")]
 pub enum CallSettled {
     Ok,
     Err { error: String },
