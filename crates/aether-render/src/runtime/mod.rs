@@ -63,7 +63,7 @@ use winit::window::Window;
 // The native impl seams, nested under this `runtime` directory so the one
 // `mod runtime;` gate in the parent covers them (no per-sibling `#[cfg]`):
 // `pipeline` (GPU bundle + shared record helpers), `texture` (the texture
-// registry), `geometry` (the geometry registry), `quad` (the quad-batch
+// registry), `geometry` (the geometry registry), `overlay` (the overlay-batch
 // accumulator), `material` (the material-batch accumulator), `capture` (the
 // similarity-reference resolver), and `config` (the `RenderTuningConfig`
 // knobs + `RenderParams`).
@@ -80,12 +80,14 @@ mod geometry;
 // gate covers it.
 mod headless;
 mod material;
+// The one accumulator every overlay verb pushes into (ADR-0105 / ADR-0213),
+// so painter order inside the overlay pass is receipt order across the three.
+mod overlay;
 mod pipeline;
 // The ADR-0170 authored-render-program registry + executor: register-time
 // validation and pipeline construction, dispatch-time resolution and pass
 // recording into the frame encoder ahead of the sampling passes.
 mod program;
-mod quad;
 // Shared desktop-surface GPU helpers (ADR-0161): the wireframe overlay
 // pipeline builder, swapchain acquisition, and the surface / offscreen
 // device boot, called by the pumped render runtime.
@@ -115,8 +117,8 @@ pub use self::capture::resolve_reference;
 use self::device::DeviceRecovery;
 pub use self::geometry::{GeometryRegistry, RealizedGeometry, StagedGeometry};
 pub use self::material::MaterialBatch;
+pub use self::overlay::OverlayBatch;
 use self::program::ProgramRegistry;
-pub use self::quad::QuadBatch;
 pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
 
 use super::{
@@ -142,8 +144,8 @@ pub struct RenderCapabilityState {
     last_submitted: Vec<u8>,
     triangles_rendered: u64,
     camera_state: [f32; 16],
-    quad_frame: Vec<QuadBatch>,
-    quad_last_submitted: Vec<QuadBatch>,
+    overlay_frame: Vec<OverlayBatch>,
+    overlay_last_submitted: Vec<OverlayBatch>,
     material_frame: Vec<MaterialBatch>,
     material_last_submitted: Vec<MaterialBatch>,
     textures: TextureRegistry,
@@ -562,7 +564,7 @@ impl RenderCapabilityState {
     fn commit_scene(&mut self, replay_cache_when_idle: bool) {
         commit_or_replay(&mut self.frame_vertices, &mut self.last_submitted, replay_cache_when_idle);
         commit_or_replay(&mut self.material_frame, &mut self.material_last_submitted, replay_cache_when_idle);
-        commit_or_replay(&mut self.quad_frame, &mut self.quad_last_submitted, replay_cache_when_idle);
+        commit_or_replay(&mut self.overlay_frame, &mut self.overlay_last_submitted, replay_cache_when_idle);
     }
 
     /// Drop only scene caches that may have been submitted ambiguously on
@@ -572,7 +574,7 @@ impl RenderCapabilityState {
     fn discard_device_replay_caches(&mut self) {
         discard_replay_cache(&mut self.last_submitted);
         discard_replay_cache(&mut self.material_last_submitted);
-        discard_replay_cache(&mut self.quad_last_submitted);
+        discard_replay_cache(&mut self.overlay_last_submitted);
     }
 
     /// Record the world / material / overlay passes into `encoder` from the
@@ -621,7 +623,7 @@ impl RenderCapabilityState {
                 encoder,
                 &targets,
                 &mut self.textures,
-                &self.quad_last_submitted,
+                &self.overlay_last_submitted,
                 self.camera_state,
                 Some(OverlayObservation { quads: &self.overlay_observation, shapes: &self.shape_observation }),
             );
@@ -769,8 +771,8 @@ impl NativeActor for RenderCapability {
             last_submitted: Vec::with_capacity(config.vertex_buffer_bytes),
             triangles_rendered: 0,
             camera_state: IDENTITY_VIEW_PROJ,
-            quad_frame: Vec::new(),
-            quad_last_submitted: Vec::new(),
+            overlay_frame: Vec::new(),
+            overlay_last_submitted: Vec::new(),
             material_frame: Vec::new(),
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
@@ -979,18 +981,18 @@ impl NativeActor for RenderCapability {
         state.programs.timings(&mail)
     }
 
-    /// `DrawTexturedQuads` accumulator (ADR-0105), on the owned `quad_frame`.
+    /// `DrawTexturedQuads` accumulator (ADR-0105), on the owned `overlay_frame`.
     #[handler::single]
     fn on_draw_textured_quads(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawTexturedQuads) {
         state.observe(<DrawTexturedQuads as Kind>::ID);
         if state.warn_drop_if_unusable("draw_textured_quads") {
             return;
         }
-        state.quad_frame.push(QuadBatch::textured(mail));
+        state.overlay_frame.push(OverlayBatch::textured(mail));
     }
 
     /// `DrawScreenTriangles` (iamacoffeepot/aether#5504), on the owned
-    /// `quad_frame` — arbitrary pixel-space triangles on the overlay pass,
+    /// `overlay_frame` — arbitrary pixel-space triangles on the overlay pass,
     /// so flat 2D content keeps its proportions on a non-square window
     /// without a camera publishing a projection for it.
     #[handler::single]
@@ -999,11 +1001,11 @@ impl NativeActor for RenderCapability {
         if state.warn_drop_if_unusable("draw_screen_triangles") {
             return;
         }
-        let batch = QuadBatch::screen_triangles(mail, &mut state.textures);
-        state.quad_frame.push(batch);
+        let batch = OverlayBatch::screen_triangles(mail, &mut state.textures);
+        state.overlay_frame.push(batch);
     }
 
-    /// `DrawShapes` (ADR-0213), on the owned `quad_frame` — rounded,
+    /// `DrawShapes` (ADR-0213), on the owned `overlay_frame` — rounded,
     /// stroked, shadowed boxes evaluated as a distance field on the overlay
     /// pass, at the same painter position as the quad batches.
     #[handler::single]
@@ -1012,7 +1014,7 @@ impl NativeActor for RenderCapability {
         if state.warn_drop_if_unusable("draw_shapes") {
             return;
         }
-        state.quad_frame.push(QuadBatch::shapes(mail));
+        state.overlay_frame.push(OverlayBatch::shapes(mail));
     }
 
     /// `DrawMaterialTextured` (ADR-0140), on the owned material stream.
@@ -1282,7 +1284,6 @@ impl NativeActor for RenderCapability {
 #[cfg(test)]
 mod tests {
     use super::super::{ScreenTriangle, ScreenVertex, Shape, TextureFormat, TextureSampling, TextureUsage};
-    use super::quad::OverlayGeometry;
     use super::texture::StagedTexture;
     use super::*;
     use aether_data::{KindId, MailId, MailboxId, Source, SourceAddr};
@@ -1360,8 +1361,8 @@ mod tests {
             last_submitted: Vec::new(),
             triangles_rendered: 0,
             camera_state: IDENTITY_VIEW_PROJ,
-            quad_frame: Vec::new(),
-            quad_last_submitted: Vec::new(),
+            overlay_frame: Vec::new(),
+            overlay_last_submitted: Vec::new(),
             material_frame: Vec::new(),
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
@@ -1676,7 +1677,7 @@ mod tests {
         );
     }
 
-    /// ADR-0213: `draw_shapes` accumulates into `quad_frame` as shape
+    /// ADR-0213: `draw_shapes` accumulates into `overlay_frame` as shape
     /// geometry — the one accumulator, so painter order interleaves with
     /// the batches of the other overlay verbs — and records its kind name
     /// in `observed_kinds`, which is what a harness's `count_observed`
@@ -1723,9 +1724,9 @@ mod tests {
             seen.contains(&<DrawShapes as Kind>::ID),
             "draw_shapes handler should push its kind; observed: {seen:?}"
         );
-        assert_eq!(state.quad_frame.len(), 2, "both batches share the one overlay accumulator");
-        let OverlayGeometry::Shapes { shapes, .. } = &state.quad_frame[1].geometry else {
-            panic!("a shape submission must accumulate as shape geometry, after the triangles sent before it");
+        assert_eq!(state.overlay_frame.len(), 2, "both batches share the one overlay accumulator");
+        let OverlayBatch::Shapes { shapes, .. } = &state.overlay_frame[1] else {
+            panic!("a shape submission must accumulate as a shape batch, after the triangles sent before it");
         };
         assert_eq!(shapes.as_slice(), &[shape]);
 

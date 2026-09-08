@@ -19,6 +19,8 @@
 //! wgpu a second way through `aether-text` -> `aether-render`, so hub
 //! and headless link it too. Decoupling them is future work.
 
+use std::slice;
+
 mod capture;
 mod material;
 mod pipeline;
@@ -136,6 +138,69 @@ fn fragment_state<'a>(
     }
 }
 
+/// One triangle-list render pipeline in the shape the material pass
+/// ([`material`], ADR-0140) and the overlay pass ([`quad`] / [`shape`],
+/// ADR-0105 / ADR-0213) both draw through: CCW winding, no culling, filled,
+/// multisampled at [`MSAA_SAMPLE_COUNT`], one colour target of `color_format`
+/// composited under `blend`, and `vs_main` as the vertex entry point. `depth`
+/// is the depth-stencil state the pass tests against — `None` for the overlay
+/// pipelines, which draw over an already-resolved world pass with no depth
+/// interaction at all.
+// Eight descriptor knobs, every one of them something a pipeline differs from
+// its siblings by; a struct for the six call sites across the three modules
+// would name each of them twice and clarify nothing.
+#[allow(clippy::too_many_arguments)]
+fn render_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    label: &str,
+    color_format: wgpu::TextureFormat,
+    fragment_entry: &str,
+    vertex_layout: &wgpu::VertexBufferLayout<'_>,
+    blend: wgpu::BlendState,
+    depth: Option<wgpu::DepthStencilState>,
+) -> wgpu::RenderPipeline {
+    let fragment_targets = [Some(color_target_state(color_format, blend))];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: slice::from_ref(vertex_layout),
+        },
+        fragment: Some(fragment_state(shader, fragment_entry, &fragment_targets)),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            // Overlay and material geometry is authored in a fixed winding and
+            // shouldn't be culled by face orientation.
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: depth,
+        multisample: wgpu::MultisampleState { count: MSAA_SAMPLE_COUNT, ..wgpu::MultisampleState::default() },
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// A shader module for one overlay stage: [`OVERLAY_PROJECTION_WGSL`] followed
+/// by `body`. Concatenated at build time rather than copied into each `.wgsl`,
+/// so the `Viewport` uniform and the Screen/World projection every overlay
+/// stage shares are written once (ADR-0105 / ADR-0213).
+fn overlay_shader_module(device: &wgpu::Device, label: &str, body: &str) -> wgpu::ShaderModule {
+    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(format!("{OVERLAY_PROJECTION_WGSL}\n{body}").into()),
+    })
+}
+
 /// `pos vec3 + color vec3` interleaved vertex layout the shared
 /// pipeline expects. Exposed so chassis-side helpers building extra
 /// pipelines (e.g. desktop's wireframe overlay) can match the layout
@@ -186,3 +251,11 @@ fn load_color_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassColorAttac
 /// pipelines that share the vertex layout (wireframe overlay, etc.)
 /// can reach for this directly.
 pub const MAIN_SHADER_WGSL: &str = include_str!("shader.wgsl");
+
+/// The overlay pass's shared vertex-stage projection: the `Viewport` uniform
+/// and `overlay_clip_position`, the Screen/World branch every overlay stage
+/// projects a vertex through (ADR-0105 / ADR-0213).
+/// [`overlay_shader_module`] prepends it to each stage's own source, so the
+/// projection is stated once and a change to it cannot land in one stage
+/// alone.
+const OVERLAY_PROJECTION_WGSL: &str = include_str!("overlay_projection.wgsl");

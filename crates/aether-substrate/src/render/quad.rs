@@ -19,7 +19,6 @@
 use super::shape::{SHAPE_VERTEX_BUFFER_BYTES, ShapePipeline, build_shape_pipeline};
 use super::targets::Targets;
 use std::iter;
-use std::slice;
 
 /// Bytes per expanded quad vertex: `anchor vec3<f32>` (12) +
 /// `offset_px vec2<f32>` (8) + `uv vec2<f32>` (8) + `tint vec4<f32>`
@@ -223,17 +222,13 @@ fn build_sampler(device: &wgpu::Device, label: &'static str, filter: wgpu::Filte
 // Single boot path: layouts, sampler, uniform, pipeline, vertex buffer
 // all tied together, mirroring `build_main_pipeline`. Splitting would
 // thread the same handles around without saving readability.
-#[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn build_quad_pipeline(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
     texture_bindings: &TextureBindings,
 ) -> QuadPipeline {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("aether quad shader"),
-        source: wgpu::ShaderSource::Wgsl(QUAD_SHADER_WGSL.into()),
-    });
+    let shader = super::overlay_shader_module(device, "aether quad shader", QUAD_SHADER_WGSL);
 
     let viewport_bind_group_layout =
         super::uniform_bind_group_layout(device, "quad viewport bind group layout", QUAD_UNIFORM_BYTES);
@@ -278,40 +273,21 @@ pub fn build_quad_pipeline(
 
     // One pipeline per blend. Everything else — layout, shader, vertex
     // layout, depth, multisample — is shared, so the pair costs a second
-    // pipeline object and nothing at record time but a rebind.
+    // pipeline object and nothing at record time but a rebind. Overlay quads
+    // draw on top of the world pass with no depth interaction at all (the
+    // main pass already resolved depth), so neither takes a depth state.
     let build = |label, blend| {
-        let fragment_targets = [Some(super::color_target_state(color_format, blend))];
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: slice::from_ref(&vertex_layout),
-            },
-            fragment: Some(super::fragment_state(&shader, "fs_main", &fragment_targets)),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                // Quads are authored as two triangles in a fixed winding;
-                // overlay UI shouldn't be culled by face orientation.
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            // Overlay quads draw on top of the world pass with no depth
-            // interaction at all — the main pass already resolved depth.
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: super::MSAA_SAMPLE_COUNT,
-                ..wgpu::MultisampleState::default()
-            },
-            multiview_mask: None,
-            cache: None,
-        })
+        super::render_pipeline(
+            device,
+            &shader,
+            &pipeline_layout,
+            label,
+            color_format,
+            "fs_main",
+            &vertex_layout,
+            blend,
+            None,
+        )
     };
     let straight = build("aether quad pipeline", wgpu::BlendState::ALPHA_BLENDING);
     let premultiplied = build("aether quad premultiplied pipeline", wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
