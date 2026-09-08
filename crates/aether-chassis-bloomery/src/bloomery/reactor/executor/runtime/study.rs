@@ -26,8 +26,8 @@ use aether_bloomery::{BloomId, ConfigScopes, ModelOverride, StageId, StudyPayloa
 use aether_bloomery_github::short_hex;
 use aether_data::wire::from_bytes;
 
-use crate::bloomery::ExecutorShell;
 use crate::bloomery::dispatch_model;
+use crate::bloomery::executor::ExecutorPort;
 use crate::bloomery::intake::{DispatchRecord, dispatch_and_record, dispatch_nonce};
 use crate::bloomery::outbox::TopicOutbox;
 use crate::store::{StoreBackend, StoreConfigError, resolve_config};
@@ -42,7 +42,7 @@ use super::transformation_has_subject;
 /// the drain — the same triple every other drain returns.
 pub(super) fn drain_and_dispatch_study(
     store: &mut dyn StoreBackend,
-    executor: &ExecutorShell,
+    executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
     let entries = store.drain_topic(Topic::Study)?;
