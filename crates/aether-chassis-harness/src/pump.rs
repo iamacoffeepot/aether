@@ -66,10 +66,11 @@ impl HarnessDriver {
     ) -> Self {
         // Chassis route-freezing: the loop wires itself to the pumped render
         // actor's and the lifecycle cap's own ids (their NAMESPACEs) — ctx-less
-        // driver setup, no sibling resolver in scope.
-        #[allow(clippy::disallowed_methods)]
+        // driver setup, no sibling resolver in scope. Both allows relocate
+        // verbatim from the binary this module was split out of.
+        #[allow(clippy::disallowed_methods)] // aether-suppression-request: route-freeze to the actor's own NAMESPACE
         let render_mailbox = mailbox_id_from_name(<RenderCapability as Addressable>::NAMESPACE);
-        #[allow(clippy::disallowed_methods)]
+        #[allow(clippy::disallowed_methods)] // aether-suppression-request: route-freeze to the cap's own NAMESPACE
         let lifecycle_mailbox = mailbox_id_from_name(<LifecycleCapability as Addressable>::NAMESPACE);
 
         let (pump_tx, pump_rx) = crossbeam_channel::unbounded::<PumpWake>();

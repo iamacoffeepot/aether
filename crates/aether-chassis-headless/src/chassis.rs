@@ -85,9 +85,12 @@ impl Chassis for HeadlessChassis {
             let ring_capacities = env.base.actor_ring.to_ring_capacities();
 
             // Tick rates are bounded well below `u32::MAX` Hz (typically
-            // 60-240 Hz); the `u128 → u32` narrowing is safe in practice.
-            #[allow(clippy::cast_possible_truncation)]
-            let tick_hz = (Duration::from_secs(1).as_nanos() / tick_period.as_nanos().max(1)) as u32;
+            // 60-240 Hz), so the `u128 → u32` narrowing never saturates in
+            // practice; a `try_from` that saturates rather than a cast that
+            // wraps keeps an absurd cadence honest in the log line without
+            // needing a truncation allow.
+            let tick_hz =
+                u32::try_from(Duration::from_secs(1).as_nanos() / tick_period.as_nanos().max(1)).unwrap_or(u32::MAX);
             tracing::info!(
                 target: "aether_substrate::boot",
                 workers_override = ?env.chassis_boot.to_workers(),
