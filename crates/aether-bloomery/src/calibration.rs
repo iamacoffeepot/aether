@@ -73,8 +73,8 @@ use crate::ledger::{SeatDispatch, priced_micro_usd};
 use crate::reduce::{Decision, Decisions, Event, Fact, Outcome};
 use crate::study_report::StudyReport;
 use crate::values::{
-    DispatchKey, EvidenceKind, ReasoningEffort, ResolvedConfigs, ResolvedModel, StudyRecord, VerifyFailure,
-    VerifyFailureSet,
+    DispatchKey, EvidenceKind, PipelineManifest, ReasoningEffort, ResolvedConfigs, ResolvedModel, StudyRecord,
+    VerifyFailure, VerifyFailureSet,
 };
 
 /// Which world a journal's rows were written in (ADR-0184).
@@ -157,24 +157,28 @@ pub const COST_CAVEAT: &str = concat!(
     "no count below is adjusted for it.",
 );
 
-/// The verifier-identity vocabulary's width — the per-cell failure counters are
-/// one slot per identity, so a new identity widens them with the vocabulary.
-const IDENTITIES: usize = VerifyFailure::ALL.len();
-
 /// How many failing terminal-Verify verdicts named one verifier identity, in
 /// the cell of the model lane that wrote the refused candidate (ADR-0178 /
-/// ADR-0181).
+/// ADR-0181 / ADR-0215).
 ///
 /// Counted per verdict rather than per member: a member that failed
 /// `verify.clippy` on three consecutive laps is three observations of that agent
 /// producing that failure, and the member cursor's union
 /// ([`StageProgress::seen_verify_failures`](crate::StageProgress::seen_verify_failures))
 /// would report it as one.
+///
+/// Columns key on the identity string (this identity's [`VerifyFailure::as_str`]),
+/// not on a compiled-position index: a name a bloom's sealed manifest declares
+/// past the compiled ten is a column of its own. A cell lists every identity
+/// contributing blooms declared, in first-seen declaration order, so
+/// `verdicts == 0` is *declared and never failed* and an identity absent from
+/// this vector is *not declared for those blooms' vocabulary*.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct VerifierFailures {
-    /// The verifier identity that failed.
+    /// The verifier identity this column measures.
     pub verifier: VerifyFailure,
-    /// How many failing verdicts named it.
+    /// How many failing verdicts named it. Zero is a rendered fact: this
+    /// identity was declared and never failed.
     pub verdicts: u64,
 }
 
@@ -203,8 +207,9 @@ pub struct CapabilityCell {
     /// "rolls to green".
     pub rolls_to_green: u64,
     /// Failing terminal-Verify verdicts against candidates this cell wrote, per
-    /// verifier identity, in [`VerifyFailure::ALL`] order. An identity that never
-    /// failed is omitted rather than carried as a zero.
+    /// verifier identity, in first-seen declaration order. An identity a
+    /// contributing bloom declared and that never failed is carried as zero;
+    /// an identity no contributing bloom declared is omitted.
     pub failures: Vec<VerifierFailures>,
     /// What this cell's priced attempts cost, in micro-USD, summed off their
     /// study records — already priced against the bloom's sealed
@@ -307,6 +312,10 @@ pub struct CalibrationLedger {
     studies: Vec<Study>,
     /// Members holding a resolution claim right now.
     claimed: BTreeSet<(BloomId, WorkpieceId)>,
+    /// The sealed lane vocabulary each bloom recorded. A failing position is
+    /// named from this list — the manifest that interned the bit — rather than
+    /// from the compiled ten.
+    manifests: BTreeMap<BloomId, PipelineManifest>,
 }
 
 /// One execution slot, keyed the way the dispatch ledger keys one (ADR-0180) —
@@ -319,7 +328,12 @@ struct Slot {
     agent: ResolvedModel,
     stage: StageId,
     dispatches: u64,
-    failures: [u64; IDENTITIES],
+    /// Identity names this bloom's sealed manifest declared, in declaration
+    /// order — the column set a cell renders, including identities that never
+    /// failed.
+    declared: Vec<String>,
+    /// Failing-verdict counts keyed by identity name.
+    failures: BTreeMap<String, u64>,
 }
 
 /// One admitted study evidence, unresolved: the fold holds digests, and
@@ -391,9 +405,7 @@ impl CalibrationLedger {
             if resolved > 0 {
                 cell.rolls_to_green = cell.rolls_to_green.saturating_add(slot.dispatches);
             }
-            for (column, verdicts) in slot.failures.into_iter().enumerate() {
-                cell.failures[column] = cell.failures[column].saturating_add(verdicts);
-            }
+            cell.absorb(slot);
         }
 
         for study in &self.studies {
@@ -460,6 +472,9 @@ impl CalibrationLedger {
             Decision::RevokeResolution { bloom, workpiece } => {
                 self.claimed.remove(&(*bloom, workpiece.clone()));
             }
+            Decision::RecordPipelineManifest { bloom, manifest } => {
+                self.manifests.insert(*bloom, manifest.clone());
+            }
             _ => {}
         }
     }
@@ -480,12 +495,14 @@ impl CalibrationLedger {
         let agent = dispatched.agent(configs);
         let SeatDispatch { bloom, key, stage, displayed, .. } = dispatched;
 
+        let declared = self.declared_identities(bloom);
         let id = (bloom, key);
         let slot = self.slots.entry(id.clone()).or_insert_with(|| Slot {
             agent,
             stage,
             dispatches: 0,
-            failures: [0; IDENTITIES],
+            declared,
+            failures: BTreeMap::new(),
         });
         slot.dispatches = slot.dispatches.saturating_add(1);
         self.displayed.entry((bloom, displayed)).or_insert_with(|| id.clone());
@@ -503,18 +520,33 @@ impl CalibrationLedger {
         let Some(id) = self.lanes.get(&(bloom, workpiece.clone())).cloned() else {
             return;
         };
+        let names = self.declared_identities(bloom);
         let Some(slot) = self.slots.get_mut(&id) else {
             return;
         };
-        // Keyed by the identity's position in the compiled vocabulary, which is
-        // the width of these columns. An identity a bloom's sealed manifest
-        // declares past that vocabulary has no column here and is counted
-        // nowhere rather than into a neighbour's; the ledger keys its columns on
-        // the identity string in the slice that follows this one (#5817).
-        for column in failed.iter().filter_map(VerifyFailure::compiled_position) {
-            slot.failures[column] = slot.failures[column].saturating_add(1);
+        // Named through the bloom's recorded manifest: a position is a bit the
+        // sealed vocabulary interned, and the name at that index is the column.
+        // A position past the declared width has no name here and is counted
+        // nowhere — intake already refuses that verdict on a live fold.
+        for position in failed.positions() {
+            let Some(name) = names.get(usize::from(position)) else {
+                continue;
+            };
+            let count = slot.failures.entry(name.clone()).or_insert(0);
+            *count = count.saturating_add(1);
         }
     }
+
+    /// The identity names `bloom` sealed, or the compiled vocabulary when no
+    /// manifest was recorded — the fallback a pre-ADR-0215 journal row folds
+    /// against, matching [`BloomRecord`](crate::BloomRecord) construction.
+    fn declared_identities(&self, bloom: BloomId) -> Vec<String> {
+        self.manifests.get(&bloom).map_or_else(compiled_identities, |manifest| manifest.verifiers.identities.clone())
+    }
+}
+
+fn compiled_identities() -> Vec<String> {
+    VerifyFailure::ALL.iter().map(|identity| String::from(identity.as_str())).collect()
 }
 
 /// The cell one slot aggregates into. The harness rides as its runner-facing
@@ -540,16 +572,17 @@ impl CellKey {
 }
 
 /// One cell mid-fold: the emitted columns, plus worker time still in millis so
-/// the seconds conversion happens once over the whole sum rather than per record,
-/// and the failure counters still one slot per identity so the emitted vector can
-/// drop the identities that never failed.
+/// the seconds conversion happens once over the whole sum rather than per record.
+/// Failure columns collect as a declaration-ordered name list plus a count map
+/// so a zero is *declared and never failed* and an absent name is *not declared*.
 struct Accumulator {
     agent: ResolvedModel,
     stage: StageId,
     attempts: u64,
     resolved_members: u64,
     rolls_to_green: u64,
-    failures: [u64; IDENTITIES],
+    declared: Vec<String>,
+    failures: BTreeMap<String, u64>,
     cost_micro_usd: u64,
     worker_millis: u64,
     samples: u64,
@@ -564,11 +597,24 @@ impl Accumulator {
             attempts: 0,
             resolved_members: 0,
             rolls_to_green: 0,
-            failures: [0; IDENTITIES],
+            declared: Vec::new(),
+            failures: BTreeMap::new(),
             cost_micro_usd: 0,
             worker_millis: 0,
             samples: 0,
             unpriced: 0,
+        }
+    }
+
+    fn absorb(&mut self, slot: &Slot) {
+        for name in &slot.declared {
+            if !self.declared.iter().any(|existing| existing == name) {
+                self.declared.push(name.clone());
+            }
+        }
+        for (name, verdicts) in &slot.failures {
+            let total = self.failures.entry(name.clone()).or_insert(0);
+            *total = total.saturating_add(*verdicts);
         }
     }
 
@@ -579,11 +625,16 @@ impl Accumulator {
             attempts: self.attempts,
             resolved_members: self.resolved_members,
             rolls_to_green: self.rolls_to_green,
-            failures: VerifyFailure::ALL
-                .into_iter()
-                .zip(self.failures)
-                .filter(|(_, verdicts)| *verdicts > 0)
-                .map(|(verifier, verdicts)| VerifierFailures { verifier, verdicts })
+            failures: self
+                .declared
+                .iter()
+                .enumerate()
+                .filter_map(|(position, name)| {
+                    let position = u8::try_from(position).ok()?;
+                    let verifier =
+                        VerifyFailure::from_name(name).or_else(|| VerifyFailure::declared(position, name))?;
+                    Some(VerifierFailures { verifier, verdicts: self.failures.get(name).copied().unwrap_or(0) })
+                })
                 .collect(),
             cost_micro_usd: self.cost_micro_usd,
             worker_secs: self.worker_millis / 1000,
