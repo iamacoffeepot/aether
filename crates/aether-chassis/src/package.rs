@@ -190,8 +190,9 @@ pub struct PackageEntry {
     pub name: Option<String>,
     /// Optional export selector (ADR-0096).
     pub export: Option<String>,
-    /// Optional instance count (issue 2626): fanned out at boot into
-    /// `{base}-{index}` instances by [`expand_replicas`].
+    /// Optional instance count (issue 2626): fanned out at boot by
+    /// [`expand_replicas`] into the bare base plus `{base}-{index}`
+    /// instances.
     pub replicas: Option<u32>,
 }
 
@@ -763,10 +764,13 @@ mod tests {
         let (returned_settings, components) = package_autoload(&root).expect("autoload");
         assert_eq!(returned_settings, settings, "the manifest's chassis settings surface to the depot boot path");
         assert_eq!(components.len(), 2, "replicas: 2 fans out to two components");
-        for (index, component) in components.iter().enumerate() {
+        assert_eq!(
+            components.iter().map(|component| component.name.clone()).collect::<Vec<_>>(),
+            vec![Some("handler".to_owned()), Some("handler-1".to_owned())],
+        );
+        for component in &components {
             assert_eq!(component.wasm, vec![0x00, 0x61, 0x73, 0x6d]);
             assert_eq!(component.config, vec![7, 8, 9]);
-            assert_eq!(component.name.as_deref(), Some(format!("handler-{index}").as_str()));
         }
 
         fs::remove_dir_all(&root).ok();

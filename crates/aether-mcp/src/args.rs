@@ -79,7 +79,7 @@ pub struct ComponentSpec {
     pub selector: String,
     /// Optional human-readable load name. The substrate defaults one
     /// from the wasm if omitted. It must not collide with another boot spec's
-    /// name or a replica-derived suffix: readiness does not deduplicate or
+    /// name or a replica-derived name: readiness does not deduplicate or
     /// correlate equal expected names with their selectors.
     #[serde(default)]
     pub name: Option<String>,
@@ -101,15 +101,16 @@ pub struct ComponentSpec {
     #[serde(default)]
     pub export: Option<String>,
     /// Fan this entry out into N instances at boot (issue 2626), one
-    /// shared config: each instance is named `{base}-{index}` for `index`
-    /// in `0..replicas`, where `base` follows the same precedence as an
-    /// unreplicated load (`name` > `export` > the default actor's own
-    /// namespace) — so `replicas: 1` differs from an omitted field only by
-    /// the `-0` suffix. Pairs with `#[router(shared)]` (ADR-0136) to scale
-    /// an HTTP handler to N instances in one spec. Omit (or `null`) for
-    /// one instance, today's behaviour. `replicas: 0` is a tool error, not
-    /// a silent no-op. Every derived `{base}-{index}` must remain unique across
-    /// the full boot list.
+    /// shared config: replica 0 is named for the bare `base` and each
+    /// later instance `{base}-{index}`, where `base` follows the same
+    /// precedence as an unreplicated load (`name` > `export` > the default
+    /// actor's own namespace) — so `replicas: 1` loads exactly what an
+    /// omitted field loads, and a co-hosted peer's bare-type
+    /// `ctx.peer::<R>()` reaches replica 0. Pairs with `#[router(shared)]`
+    /// (ADR-0136) to scale an HTTP handler to N instances in one spec.
+    /// Omit (or `null`) for one instance, today's behaviour.
+    /// `replicas: 0` is a tool error, not a silent no-op. Every derived
+    /// name must remain unique across the full boot list.
     #[serde(default)]
     pub replicas: Option<u32>,
 }
@@ -603,10 +604,12 @@ pub struct LoadComponentArgs {
     #[serde(default)]
     pub export: Option<String>,
     /// Load N instances of this component in one call (issue 2626), one
-    /// shared config: loops the single-load dispatch N times, naming each
-    /// instance `{base}-{index}` for `index` in `0..replicas` (`base` =
-    /// `name` > `export` > the default actor's own namespace — the same
-    /// precedence a plain load resolves against). Pairs with
+    /// shared config: loops the single-load dispatch N times, naming
+    /// replica 0 for the bare `base` and each later instance
+    /// `{base}-{index}` (`base` = `name` > `export` > the default actor's
+    /// own namespace — the same precedence a plain load resolves against),
+    /// so a co-hosted peer's bare-type `ctx.peer::<R>()` reaches replica 0.
+    /// Pairs with
     /// `#[router(shared)]` (ADR-0136) to scale an HTTP handler to N
     /// instances in one call. Returns one shared `capabilities` block plus
     /// `instances: [{mailbox_id, name}, …]` (issue 3006) instead of the
