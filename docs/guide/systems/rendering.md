@@ -56,6 +56,7 @@ the `RenderCapability` actor. It handles these payload kinds:
 | `aether.render.draw_textured_quads` | `{ texture_id, space, clip, blend, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
 | `aether.render.draw_solid_quads` | `{ space, clip, quads }` | per-tick flat-colored alpha-blended rects; accumulates into the frame |
 | `aether.render.draw_screen_triangles` | `{ clip, triangles }` | per-tick window-pixel triangles at any orientation; accumulates into the frame |
+| `aether.render.draw_shapes` | `{ space, clip, shapes }` | per-tick rounded, stroked, shadowed boxes evaluated as a distance field; accumulates into the frame |
 | `aether.render.material.textured` | `{ texture_id, blend, rects }` | per-tick depth-tested world-space textured rects |
 | `aether.render.material.coverage` | `{ texture_id, rects }` | per-tick depth-tested world-space coverage bands from an R8 texture |
 | `aether.render.capture_frame` | `{ mails, after_mails }` | atomic "set state, read back a PNG, clean up" |
@@ -151,6 +152,23 @@ everything by the window's aspect ratio. Pixel coordinates are absolute, so a
 ribbon at an angle, a gauge, or a graph edge holds its proportions on any
 window without a camera actor publishing a projection for flat content.
 
+**Shapes are the overlay's distance-field primitive**
+([ADR-0213](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0213-gpu-shapes-for-the-widget-kit.md)).
+`draw_shapes` takes axis-aligned boxes, each with a `corner_radius`, an optional
+`fill`, an optional inside `stroke { width_pixels, color }`, and an optional
+`shadow { blur_pixels, offset, color }`. The substrate expands each to one quad
+grown by its shadow extent and a fragment stage evaluates a rounded-box signed
+distance per pixel — shadow under fill under stroke, every edge anti-aliased
+over one `fwidth` — so a one-pixel edge at a fractional position is one soft
+edge rather than two half-covered rows, and the same six numbers draw a plate,
+a circle (a radius at or above half the shorter side), a ring (a stroke with no
+fill), or a soft halo (a shadow with neither) at any scale. The batch takes the
+same painter position and the same `clip` scissor as any other overlay batch,
+through its own pipeline: one more overlay draw, not a pass and not a layer.
+The vocabulary is fixed and substrate-owned — callers supply parameters, never
+WGSL — so the overlay lane stays a closed contract the widget kit's hole
+cutting can reason about.
+
 **World-space materials are textured and depth-tested** ([ADR-0140](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0140-render-material-pass.md)).
 The material pass records after the triangle pass and before the screen overlay,
 loading the main pass depth buffer with writes disabled. Components send typed
@@ -215,7 +233,7 @@ guest-visible wire change.
 **The production headless chassis absorbs draw and camera mail.** It composes
 `HeadlessRenderCapability` on the same `aether.render` mailbox:
 `DrawTriangle`, `aether.view_projection`, `update_texture`, `destroy_texture`,
-`draw_textured_quads`, `draw_solid_quads`, `draw_screen_triangles`, and
+`draw_textured_quads`, `draw_solid_quads`, `draw_screen_triangles`, `draw_shapes`, and
 `aether.render.material.*` no-op (a desktop-built
 component mailing them every frame doesn't warn-storm), and
 `aether.render.capture_frame` and `create_texture` reply `Err` so a request

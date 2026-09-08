@@ -842,6 +842,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-subscribe-ui-tests"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-kinds",
+ "aether-lifecycle",
+ "aether-window",
+ "trybuild",
+]
+
+[[package]]
 name = "aether-substrate"
 version = "0.3.0-alpha"
 dependencies = [

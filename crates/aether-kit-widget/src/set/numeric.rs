@@ -39,8 +39,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, TextEditState, TextSpan};
 use crate::theme::{SetTheme, Theme, ThemeState};
 use crate::{
-    Collect, FocusLost, HoverLost, NumericChanged, NumericConfig, SetWidgetState, WidgetControlState, WidgetDrawItem,
-    WidgetFrame,
+    Collect, FocusLost, HoverLost, NumericChanged, NumericConfig, SetValue, SetWidgetState, WidgetControlState,
+    WidgetDrawItem, WidgetFrame,
 };
 
 /// Retained edit-buffer bound; comfortably exceeds every canonical finite
@@ -214,6 +214,18 @@ impl NumericWidget {
         widget.committed_value = initial;
         widget.edit = TextEditState::new(Self::canonical(initial));
         widget
+    }
+
+    /// Pull the committed value back inside bounds that have just moved, and
+    /// rewrite the buffer only if that changed the number. A buffer left alone
+    /// is a half-typed entry the reader still owns; one rewritten is the
+    /// editor refusing to display a value it no longer holds.
+    fn reclamp(&mut self) {
+        let clamped = self.normalize(self.committed_value).or_else(|| self.normalize(0.0)).unwrap_or(0.0);
+        if clamped != self.committed_value {
+            self.committed_value = clamped;
+            self.edit = TextEditState::new(Self::canonical(clamped));
+        }
     }
 
     fn bounds(&self) -> NumericBounds {
@@ -581,6 +593,11 @@ impl WasmActor for NumericWidget {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
+    /// Re-bound and restyle in place from a re-sent config. `initial` seeds the
+    /// value only at `init`; the committed value is re-clamped into the new
+    /// range instead, and the buffer is rewritten only when that clamp actually
+    /// moved it — so re-bounding a field does not eat a half-typed number.
+    /// [`SetValue`] sets the value on purpose.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: NumericConfig) {
         self.min = config.min;
@@ -588,13 +605,7 @@ impl WasmActor for NumericWidget {
         self.step = config.step;
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
-        let initial = self.normalize(config.initial).or_else(|| self.normalize(0.0)).unwrap_or(0.0);
-        self.committed_value = initial;
-        self.edit = TextEditState::new(Self::canonical(initial));
-        self.dragging = false;
-        self.paste_pending = false;
-        self.hovered_stepper = None;
-        self.pressed_stepper = None;
+        self.reclamp();
         self.apply_control_state(ctx, config.state);
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
@@ -602,6 +613,15 @@ impl WasmActor for NumericWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
+    }
+
+    /// Push a value from the host: normalized into the current bounds, written
+    /// into the buffer, and silent — no [`NumericChanged`], since the host set
+    /// what it would be told about.
+    #[handler::single]
+    fn on_set_value(&mut self, _ctx: &mut WasmCtx<'_>, set: SetValue) {
+        self.committed_value = self.normalize(set.value).unwrap_or(self.committed_value);
+        self.edit = TextEditState::new(Self::canonical(self.committed_value));
     }
 
     #[handler::single]

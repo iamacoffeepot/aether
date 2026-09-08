@@ -13,8 +13,8 @@ use super::{AdapterRegistry, FsFoldError, FsTransformError};
 // moved `#[runtime] impl`. The identity in the parent resolves its own lifted
 // `HandlesKind<K>` markers through `pub use kinds::*`.
 use super::{
-    Copy, CopyResult, Delete, DeleteResult, FsCapability, FsError, FsFetch, FsFetchError, FsFetchResult, List,
-    ListResult, NamespaceRoots, Read, ReadResult, Write, WriteResult, build_registry,
+    Copy, CopyResult, Delete, DeleteResult, FileAdapter, FsCapability, FsError, FsFetch, FsFetchError, FsFetchResult,
+    List, ListResult, NamespaceAddr, NamespaceRoots, Read, ReadResult, Write, WriteResult, build_registry,
 };
 use aether_actor::runtime;
 
@@ -24,7 +24,7 @@ pub use std::panic::{self, AssertUnwindSafe};
 pub use std::sync::Arc;
 
 pub use super::adapter::fs_error_from_std;
-pub use aether_data::TransformError;
+pub use aether_data::{KindId, TransformError, TransformId};
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::transform::{FoldError, TransformRegistry};
@@ -123,16 +123,12 @@ impl NativeActor for FsCapability {
     /// Read bytes from a logical namespace path.
     ///
     /// # Agent
-    /// Reply: `ReadResult`. Echoes namespace + path on both arms.
+    /// Reply: `ReadResult`. Echoes the address on both arms.
     #[handler::single]
     fn on_read(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Read) -> ReadResult {
-        let Some(adapter) = state.registry.get(&mail.namespace) else {
-            return ReadResult::Err { namespace: mail.namespace, path: mail.path, error: FsError::UnknownNamespace };
-        };
-        match adapter.read(&mail.path) {
-            Ok(bytes) => ReadResult::Ok { namespace: mail.namespace, path: mail.path, bytes },
-            Err(error) => ReadResult::Err { namespace: mail.namespace, path: mail.path, error },
-        }
+        let bytes = state.adapter(&mail.addr).and_then(|adapter| adapter.read(&mail.addr.path));
+
+        ReadResult::from_op(mail.addr, bytes)
     }
 
     /// Write bytes to a logical namespace path. Atomic via tmp+rename
@@ -140,16 +136,12 @@ impl NativeActor for FsCapability {
     /// adapters (cloud, in-memory).
     ///
     /// # Agent
-    /// Reply: `WriteResult`. Echoes namespace + path (NOT bytes).
+    /// Reply: `WriteResult`. Echoes the address (NOT bytes).
     #[handler::single]
     fn on_write(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Write) -> WriteResult {
-        let Some(adapter) = state.registry.get(&mail.namespace) else {
-            return WriteResult::Err { namespace: mail.namespace, path: mail.path, error: FsError::UnknownNamespace };
-        };
-        match adapter.write(&mail.path, &mail.bytes) {
-            Ok(()) => WriteResult::Ok { namespace: mail.namespace, path: mail.path },
-            Err(error) => WriteResult::Err { namespace: mail.namespace, path: mail.path, error },
-        }
+        let written = state.adapter(&mail.addr).and_then(|adapter| adapter.write(&mail.addr.path, &mail.bytes));
+
+        WriteResult::from_op(mail.addr, written)
     }
 
     /// Copy a file from a raw host path into a writable namespace.
@@ -165,53 +157,34 @@ impl NativeActor for FsCapability {
     /// Reply: `CopyResult`. Echoes `from` + `to` (no bytes).
     #[handler::single]
     fn on_copy(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Copy) -> CopyResult {
-        let Some(adapter) = state.registry.get(&mail.to.namespace) else {
-            return CopyResult::Err { from: mail.from, to: mail.to, error: FsError::UnknownNamespace };
-        };
-        let bytes = match fs::read(&mail.from) {
-            Ok(b) => b,
-            Err(e) => {
-                return CopyResult::Err { from: mail.from, to: mail.to, error: fs_error_from_std(e) };
-            }
-        };
-        match adapter.write(&mail.to.path, &bytes) {
-            Ok(()) => CopyResult::Ok { from: mail.from, to: mail.to },
-            Err(error) => CopyResult::Err { from: mail.from, to: mail.to, error },
-        }
+        let copied = state
+            .adapter(&mail.to)
+            .and_then(|adapter| adapter.write(&mail.to.path, &fs::read(&mail.from).map_err(fs_error_from_std)?));
+
+        CopyResult::from_op(mail.from, mail.to, copied)
     }
 
     /// Delete a path under a namespace.
     ///
     /// # Agent
-    /// Reply: `DeleteResult`. Echoes namespace + path.
+    /// Reply: `DeleteResult`. Echoes the address.
     #[handler::single]
     fn on_delete(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Delete) -> DeleteResult {
-        let Some(adapter) = state.registry.get(&mail.namespace) else {
-            return DeleteResult::Err { namespace: mail.namespace, path: mail.path, error: FsError::UnknownNamespace };
-        };
-        match adapter.delete(&mail.path) {
-            Ok(()) => DeleteResult::Ok { namespace: mail.namespace, path: mail.path },
-            Err(error) => DeleteResult::Err { namespace: mail.namespace, path: mail.path, error },
-        }
+        let deleted = state.adapter(&mail.addr).and_then(|adapter| adapter.delete(&mail.addr.path));
+
+        DeleteResult::from_op(mail.addr, deleted)
     }
 
     /// List entries under a namespace prefix.
     ///
     /// # Agent
-    /// Reply: `ListResult`. Echoes namespace + prefix.
+    /// Reply: `ListResult`. Echoes the address, whose `path` is the
+    /// listed prefix.
     #[handler::single]
     fn on_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: List) -> ListResult {
-        let Some(adapter) = state.registry.get(&mail.namespace) else {
-            return ListResult::Err {
-                namespace: mail.namespace,
-                prefix: mail.prefix,
-                error: FsError::UnknownNamespace,
-            };
-        };
-        match adapter.list(&mail.prefix) {
-            Ok(entries) => ListResult::Ok { namespace: mail.namespace, prefix: mail.prefix, entries },
-            Err(error) => ListResult::Err { namespace: mail.namespace, prefix: mail.prefix, error },
-        }
+        let entries = state.adapter(&mail.addr).and_then(|adapter| adapter.list(&mail.addr.path));
+
+        ListResult::from_op(mail.addr, entries)
     }
 
     /// Read a file from a namespace and run an ordered transform
@@ -229,43 +202,43 @@ impl NativeActor for FsCapability {
     /// than unwinding through the actor dispatch.
     ///
     /// # Agent
-    /// Reply: `FsFetchResult`. Echoes namespace + path on both arms.
+    /// Reply: `FsFetchResult`. Echoes the address on both arms.
     #[handler::single]
     fn on_fetch(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: FsFetch) -> FsFetchResult {
-        let Some(adapter) = state.registry.get(&mail.namespace) else {
-            return FsFetchResult::Err {
-                namespace: mail.namespace,
-                path: mail.path,
-                error: FsFetchError::Fs(FsError::UnknownNamespace),
-            };
-        };
+        let fetched = state.fetch(&mail.addr, &mail.transforms);
 
-        let bytes = match adapter.read(&mail.path) {
-            Ok(b) => b,
-            Err(e) => {
-                return FsFetchResult::Err { namespace: mail.namespace, path: mail.path, error: FsFetchError::Fs(e) };
-            }
-        };
+        FsFetchResult::from_op(mail.addr, fetched)
+    }
+}
 
-        if mail.transforms.is_empty() {
-            return FsFetchResult::Ok { namespace: mail.namespace, path: mail.path, output_kind: None, data: bytes };
+impl FsCapabilityState {
+    /// Resolve one address to its adapter, or the `UnknownNamespace`
+    /// failure every `aether.fs` verb reports for a namespace that was
+    /// never registered.
+    fn adapter(&self, addr: &NamespaceAddr) -> Result<Arc<dyn FileAdapter>, FsError> {
+        self.registry.get(&addr.namespace).ok_or(FsError::UnknownNamespace)
+    }
+
+    /// Read a file and fold the transform chain over its bytes. An
+    /// empty chain short-circuits to the raw bytes with no output kind.
+    /// The whole fold runs under one `catch_unwind`, so a panicking
+    /// transform becomes `FsFetchError::Panicked` rather than unwinding
+    /// through actor dispatch.
+    fn fetch(&self, addr: &NamespaceAddr, ids: &[TransformId]) -> Result<(Option<KindId>, Vec<u8>), FsFetchError> {
+        let bytes = self.adapter(addr).and_then(|adapter| adapter.read(&addr.path)).map_err(FsFetchError::Fs)?;
+
+        if ids.is_empty() {
+            return Ok((None, bytes));
         }
 
-        let output_kind = match state.transforms.validate_fold(&mail.transforms) {
-            Ok(Some(k)) => k,
+        let output_kind = match self.transforms.validate_fold(ids) {
+            Ok(Some(kind)) => kind,
             Ok(None) => unreachable!("transforms is non-empty; validate_fold returns Some"),
-            Err(fold_err) => {
-                return FsFetchResult::Err {
-                    namespace: mail.namespace,
-                    path: mail.path,
-                    error: FsFetchError::Fold(map_fold_error(&fold_err)),
-                };
-            }
+            Err(fold_error) => return Err(FsFetchError::Fold(map_fold_error(&fold_error))),
         };
 
-        let transforms = &state.transforms;
-        let ids = &mail.transforms;
-        let fold_result = panic::catch_unwind(AssertUnwindSafe(|| {
+        let transforms = &self.transforms;
+        let folded = panic::catch_unwind(AssertUnwindSafe(|| {
             let mut buf = bytes;
             for &id in ids {
                 let t = transforms.lookup(id).expect("validate_fold succeeded; every id is guaranteed to resolve");
@@ -274,20 +247,10 @@ impl NativeActor for FsCapability {
             Ok::<Vec<u8>, TransformError>(buf)
         }));
 
-        match fold_result {
-            Ok(Ok(data)) => {
-                FsFetchResult::Ok { namespace: mail.namespace, path: mail.path, output_kind: Some(output_kind), data }
-            }
-            Ok(Err(transform_err)) => FsFetchResult::Err {
-                namespace: mail.namespace,
-                path: mail.path,
-                error: FsFetchError::Transform(map_transform_error(&transform_err)),
-            },
-            Err(payload) => FsFetchResult::Err {
-                namespace: mail.namespace,
-                path: mail.path,
-                error: FsFetchError::Panicked(panic_message(payload.as_ref())),
-            },
+        match folded {
+            Ok(Ok(data)) => Ok((Some(output_kind), data)),
+            Ok(Err(transform_error)) => Err(FsFetchError::Transform(map_transform_error(&transform_error))),
+            Err(payload) => Err(FsFetchError::Panicked(panic_message(payload.as_ref()))),
         }
     }
 }
@@ -559,15 +522,12 @@ mod tests {
             .expect("test setup: adapter accepts write");
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result = FsCapability::on_read(
-            &mut fix.state,
-            &mut ctx,
-            Read { namespace: "save".to_string(), path: "slot.bin".to_string() },
-        );
+        let result =
+            FsCapability::on_read(&mut fix.state, &mut ctx, Read { addr: NamespaceAddr::new("save", "slot.bin") });
         match result {
-            ReadResult::Ok { namespace, path, bytes } => {
-                assert_eq!(namespace, "save");
-                assert_eq!(path, "slot.bin");
+            ReadResult::Ok { addr, bytes } => {
+                assert_eq!(addr.namespace, "save");
+                assert_eq!(addr.path, "slot.bin");
                 assert_eq!(bytes, vec![9, 9, 9]);
             }
             ReadResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
@@ -581,15 +541,12 @@ mod tests {
         let reg = build_save_only_registry(&root, Access::ReadWrite);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result = FsCapability::on_read(
-            &mut fix.state,
-            &mut ctx,
-            Read { namespace: "nope".to_string(), path: "x.bin".to_string() },
-        );
+        let result =
+            FsCapability::on_read(&mut fix.state, &mut ctx, Read { addr: NamespaceAddr::new("nope", "x.bin") });
         match result {
-            ReadResult::Err { namespace, path, error: FsError::UnknownNamespace } => {
-                assert_eq!(namespace, "nope");
-                assert_eq!(path, "x.bin");
+            ReadResult::Err { addr, error: FsError::UnknownNamespace } => {
+                assert_eq!(addr.namespace, "nope");
+                assert_eq!(addr.path, "x.bin");
             }
             other => panic!("expected Err UnknownNamespace echoing request, got {other:?}"),
         }
@@ -602,11 +559,8 @@ mod tests {
         let reg = build_save_only_registry(&root, Access::ReadWrite);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result = FsCapability::on_read(
-            &mut fix.state,
-            &mut ctx,
-            Read { namespace: "save".to_string(), path: "ghost.bin".to_string() },
-        );
+        let result =
+            FsCapability::on_read(&mut fix.state, &mut ctx, Read { addr: NamespaceAddr::new("save", "ghost.bin") });
         assert!(matches!(result, ReadResult::Err { error: FsError::NotFound, .. }));
         cleanup(&root);
     }
@@ -621,12 +575,12 @@ mod tests {
         let result = FsCapability::on_write(
             &mut fix.state,
             &mut ctx,
-            Write { namespace: "save".to_string(), path: "slot.bin".to_string(), bytes: vec![1, 2, 3] },
+            Write { addr: NamespaceAddr::new("save", "slot.bin"), bytes: vec![1, 2, 3] },
         );
         match result {
-            WriteResult::Ok { namespace, path } => {
-                assert_eq!(namespace, "save");
-                assert_eq!(path, "slot.bin");
+            WriteResult::Ok { addr } => {
+                assert_eq!(addr.namespace, "save");
+                assert_eq!(addr.path, "slot.bin");
             }
             WriteResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
         }
@@ -650,7 +604,7 @@ mod tests {
         let result = FsCapability::on_write(
             &mut fix.state,
             &mut ctx,
-            Write { namespace: "save".to_string(), path: "slot.bin".to_string(), bytes: vec![] },
+            Write { addr: NamespaceAddr::new("save", "slot.bin"), bytes: vec![] },
         );
         assert!(matches!(result, WriteResult::Err { error: FsError::Forbidden, .. }));
         cleanup(&root);
@@ -667,15 +621,12 @@ mod tests {
             .expect("test setup: adapter accepts write");
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
-        let result = FsCapability::on_delete(
-            &mut fix.state,
-            &mut ctx,
-            Delete { namespace: "save".to_string(), path: "x.bin".to_string() },
-        );
+        let result =
+            FsCapability::on_delete(&mut fix.state, &mut ctx, Delete { addr: NamespaceAddr::new("save", "x.bin") });
         match result {
-            DeleteResult::Ok { namespace, path } => {
-                assert_eq!(namespace, "save");
-                assert_eq!(path, "x.bin");
+            DeleteResult::Ok { addr } => {
+                assert_eq!(addr.namespace, "save");
+                assert_eq!(addr.path, "x.bin");
             }
             DeleteResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
         }
@@ -905,12 +856,12 @@ mod tests {
         let result = FsCapability::on_fetch(
             &mut fix.state,
             &mut ctx,
-            FsFetch { namespace: "assets".to_string(), path: "data.bin".to_string(), transforms: vec![] },
+            FsFetch { addr: NamespaceAddr::new("assets", "data.bin"), transforms: vec![] },
         );
         match result {
-            FsFetchResult::Ok { namespace, path, output_kind, data } => {
-                assert_eq!(namespace, "assets");
-                assert_eq!(path, "data.bin");
+            FsFetchResult::Ok { addr, output_kind, data } => {
+                assert_eq!(addr.namespace, "assets");
+                assert_eq!(addr.path, "data.bin");
                 assert!(output_kind.is_none(), "empty transform list → output_kind is None");
                 assert_eq!(data, b"raw payload");
             }
@@ -930,7 +881,7 @@ mod tests {
         let result = FsCapability::on_fetch(
             &mut fix.state,
             &mut ctx,
-            FsFetch { namespace: "nope".to_string(), path: "x.bin".to_string(), transforms: vec![] },
+            FsFetch { addr: NamespaceAddr::new("nope", "x.bin"), transforms: vec![] },
         );
         assert!(
             matches!(result, FsFetchResult::Err { error: FsFetchError::Fs(FsError::UnknownNamespace), .. }),
@@ -964,7 +915,7 @@ mod tests {
         let result = FsCapability::on_fetch(
             &mut fix.state,
             &mut ctx,
-            FsFetch { namespace: "assets".to_string(), path: "number.bin".to_string(), transforms: vec![double_id] },
+            FsFetch { addr: NamespaceAddr::new("assets", "number.bin"), transforms: vec![double_id] },
         );
         match result {
             FsFetchResult::Ok { output_kind, data, .. } => {
@@ -999,11 +950,7 @@ mod tests {
         let result = FsCapability::on_fetch(
             &mut fix.state,
             &mut ctx,
-            FsFetch {
-                namespace: "assets".to_string(),
-                path: "data.bin".to_string(),
-                transforms: vec![double_id, seed_id],
-            },
+            FsFetch { addr: NamespaceAddr::new("assets", "data.bin"), transforms: vec![double_id, seed_id] },
         );
         match result {
             FsFetchResult::Err { error, .. } => {
@@ -1033,7 +980,7 @@ mod tests {
         let result = FsCapability::on_fetch(
             &mut fix.state,
             &mut ctx,
-            FsFetch { namespace: "assets".to_string(), path: "garbage.bin".to_string(), transforms: vec![double_id] },
+            FsFetch { addr: NamespaceAddr::new("assets", "garbage.bin"), transforms: vec![double_id] },
         );
         match result {
             FsFetchResult::Err { error, .. } => {
@@ -1061,7 +1008,7 @@ mod tests {
         let result = FsCapability::on_fetch(
             &mut fix.state,
             &mut ctx,
-            FsFetch { namespace: "assets".to_string(), path: "number.bin".to_string(), transforms: vec![boom_id] },
+            FsFetch { addr: NamespaceAddr::new("assets", "number.bin"), transforms: vec![boom_id] },
         );
         match result {
             FsFetchResult::Err { error, .. } => {
