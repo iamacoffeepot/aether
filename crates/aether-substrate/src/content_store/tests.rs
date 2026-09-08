@@ -6,6 +6,7 @@
 
 use super::{ContentStore, EvictionPolicy, Selector, hash_hex, now_nanos};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::{env, fs, process};
@@ -81,6 +82,33 @@ fn lru_budget_evicts_the_oldest_unnamed_unpinned_entry() {
     assert!(store.contains(&h_named), "a named entry is never evicted");
     assert!(store.contains(&h_pinned), "a pinned entry is never evicted");
     assert!(!store.contains(&h_plain), "the oldest unnamed, unpinned entry is evicted first");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// A runtime hold is the third eviction protection, and it has to be both
+/// halves: an entry nothing names and nobody pinned survives while it is
+/// held, and returns to the candidates the moment the hold is dropped. The
+/// hub derives its hold set from the engines it supervises (issue 5686),
+/// so a protection that never released would strand every binary any
+/// engine ever ran, and one that never protected would let a `default`
+/// repoint evict a running engine's bytes.
+#[test]
+fn a_held_entry_is_spared_until_the_hold_is_dropped() {
+    let root = temp_root("holds");
+    // A budget that holds two 11-byte entries but not three, so each
+    // trigger upload forces exactly one eviction.
+    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::LruBudget(30)).expect("open store");
+    let held = store.upload(b"held-aaaaaa", meta("a"), None).expect("upload lands");
+    let sibling = store.upload(b"filler-bbbb", meta("a"), None).expect("upload lands");
+    store.set_holds(HashSet::from([held.clone()]));
+
+    store.upload(b"trigger-ccc", meta("a"), None).expect("upload lands");
+    assert!(store.contains(&held), "a held entry is spared even unnamed and unpinned");
+    assert!(!store.contains(&sibling), "the younger unheld sibling is evicted in its place");
+
+    store.set_holds(HashSet::new());
+    store.upload(b"trigger-ddd", meta("a"), None).expect("upload lands");
+    assert!(!store.contains(&held), "dropping the hold returns the entry to the eviction candidates");
     let _ = fs::remove_dir_all(&root);
 }
 

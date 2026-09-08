@@ -76,7 +76,16 @@ the same hash. A name is a movable pointer; a content hash selects exact bytes
 for spawn. Durable explicit pin is a sidecar flag on that hash, set at upload
 with `pin: true` or later with `pin_artifact`. `unpin_artifact` removes only
 that flag — a name still protects, and there is no delete or unname tool.
-Runtime engine protection of stored binaries is not implemented (issue 5686).
+
+The hub also protects, for as long as it is running them, the binaries of the
+engines it supervises: an engine that is committed, still staging, or waiting
+out a restart backoff holds its resolved content hash against LRU eviction. So
+re-uploading over the name a live engine was spawned from cannot reclaim the
+bytes it is executing, and its automatic restart still finds the recipe it
+replays. That hold is not the operator's pin — it is never persisted, it
+disappears with the hub process, and neither `pin_artifact` nor
+`unpin_artifact` changes it. Loaded components are not held this way; the hub
+does not supervise them.
 Fleet and MCP must ship the same release: the `pin` field changes the typed
 upload kind schema.
 

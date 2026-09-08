@@ -45,7 +45,7 @@
 mod eviction;
 mod persistence;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -66,15 +66,16 @@ const TARGET: &str = "aether_substrate::content_store";
 /// How a [`ContentStore`] reclaims disk when an upload lands.
 ///
 /// [`LruBudget`](EvictionPolicy::LruBudget) evicts the
-/// least-recently-used entries that are neither pinned nor named until the
-/// on-disk ledger is back under the byte budget — cache semantics correct
-/// for re-uploadable artifacts. [`None`](EvictionPolicy::None) never
-/// evicts — a canonical record that must retain every entry (ADR-0149),
-/// where the eviction step is a cheap early return.
+/// least-recently-used entries that are neither pinned, named, nor held
+/// ([`set_holds`](ContentStore::set_holds)) until the on-disk ledger is
+/// back under the byte budget — cache semantics correct for re-uploadable
+/// artifacts. [`None`](EvictionPolicy::None) never evicts — a canonical
+/// record that must retain every entry (ADR-0149), where the eviction step
+/// is a cheap early return.
 #[derive(Debug, Clone, Copy)]
 pub enum EvictionPolicy {
-    /// Evict LRU unpinned, unnamed entries to hold this on-disk byte
-    /// budget.
+    /// Evict LRU unpinned, unnamed, unheld entries to hold this on-disk
+    /// byte budget.
     LruBudget(u64),
     /// Never evict — retain every entry regardless of recency or budget.
     None,
@@ -166,6 +167,10 @@ pub struct ContentStore<M> {
     /// the old hash keeps its bytes but loses its name (and so its
     /// eviction protection).
     names: HashMap<String, String>,
+    /// Content hashes a live runtime currently holds, protected from
+    /// eviction alongside the named and the pinned. In memory only — see
+    /// [`set_holds`](ContentStore::set_holds).
+    holds: HashSet<String>,
     /// Approximate on-disk byte ledger, the LRU eviction trigger.
     total_bytes: u64,
     /// Monotonic source for `Entry::last_access`.
@@ -198,7 +203,7 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
         let root = ensure_root(root)?;
         let lock = acquire_lock(&root);
         let RestoredIndex { entries, names, total_bytes, clock, next_seq } = restore(&root);
-        Ok(Self { root, policy, entries, names, total_bytes, clock, next_seq, _lock: lock })
+        Ok(Self { root, policy, entries, names, holds: HashSet::new(), total_bytes, clock, next_seq, _lock: lock })
     }
 
     /// The root this store resolved to (after any temp fallback).
@@ -379,6 +384,31 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
             entry.pinned = pinned;
         }
         Ok(true)
+    }
+
+    /// Replace the set of content hashes a live runtime holds, protecting
+    /// them from eviction for exactly as long as they stay in the set.
+    ///
+    /// A hold is the third protection beside a name and an explicit pin,
+    /// and deliberately neither of them: it says the owning process is
+    /// *running* this content right now, so reclaiming it would pull an
+    /// artifact out from under its own runtime. The hub holds the binary of
+    /// every engine it supervises (issue 5686) — there the name that
+    /// resolved a spawn can be repointed at new bytes a moment later, and
+    /// the explicit pin belongs to the operator rather than to supervision.
+    ///
+    /// Holds live in memory only: never written to a sidecar, never
+    /// restored by [`open`](Self::open). What they protect is what this
+    /// process is running, and a process that has just started is running
+    /// nothing — a persisted hold would be indistinguishable from a leaked
+    /// one, and would protect an entry forever with nothing left alive to
+    /// release it.
+    ///
+    /// The whole set is replaced rather than counted up and down, so the
+    /// caller re-derives it from its own live state and cannot leak a hold
+    /// by missing one release among many.
+    pub fn set_holds(&mut self, holds: HashSet<String>) {
+        self.holds = holds;
     }
 
     /// Index an entry that is on disk but not in this handle's index —
