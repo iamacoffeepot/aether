@@ -39,9 +39,8 @@ use aether_bloomery::{
     ConfigRegistry, Decision, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership,
     MetricsQuery, MetricsQueryResult, MetricsView, ModelOverride, ObserveMainlineResult, OperatorHold, OperatorRepair,
     OperatorRepairError, Outcome, PipelineManifest, Query, QueryResult, QuerySelector, ResolutionClaim, ResolvedBloom,
-    ResolvedConfigs, SealError, Snapshot, SpendQuery, SpendQueryResult, SpendWindow, StageCatalog, StageId, StudyCost,
-    StudyRecord, Unproducible, VerifyFailureSet, ViewDocument, WorkpieceId, decode_recorded_decisions, digest_of,
-    reduce,
+    SealError, Snapshot, SpendQuery, SpendQueryResult, SpendWindow, StageCatalog, StageId, StudyCost, StudyRecord,
+    Unproducible, VerifyFailureSet, ViewDocument, WorkpieceId, decode_recorded_decisions, digest_of, reduce,
 };
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, PutResult};
 use aether_chassis_bloomery::store::{JournalWrite, RecordConfig, RecordConfigResult, SqliteStore, StoreBackend};

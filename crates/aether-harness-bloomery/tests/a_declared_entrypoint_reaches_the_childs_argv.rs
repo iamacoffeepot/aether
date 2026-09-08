@@ -94,11 +94,7 @@ fn with_mock_entrypoint(program: &str) -> String {
     text
 }
 
-fn derived_manifest(
-    harness: &aether_harness_bloomery::ScenarioHarness,
-    base: aether_bloomery::Digest,
-    text: &str,
-) -> aether_bloomery::Digest {
+fn derived_manifest(harness: &aether_harness_bloomery::ScenarioHarness, base: Digest, text: &str) -> Digest {
     let (status, opened) = harness.post("/drafts", "null");
     assert_eq!(status, 201, "a draft opens: {opened}");
     let opened: Value = serde_json::from_str(&opened).expect("the draft view is JSON");
