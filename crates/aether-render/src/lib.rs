@@ -24,7 +24,7 @@
 //!
 //! The runtime decomposes along cohesion seams: `pipeline` (GPU bundle +
 //! shared record helpers), `texture` (the texture registry), `geometry`
-//! (the ADR-0171 geometry registry), `quad` (the quad-batch accumulator),
+//! (the ADR-0171 geometry registry), `overlay` (the overlay-batch accumulator),
 //! `material` (the material-batch accumulator), `surface` (the wgpu
 //! surface / offscreen boot), and `capture` (the similarity-reference
 //! resolver).
@@ -56,7 +56,7 @@ pub use kinds::*;
 use aether_kinds::CaptureFrame;
 
 // Auxiliary native-only types the chassis driver consumes alongside
-// `RenderCapability`. The seams (`capture`, `pipeline`, `quad`, `texture`,
+// `RenderCapability`. The seams (`capture`, `pipeline`, `overlay`, `texture`,
 // `surface`, `config`) live under the `runtime` directory, covered by the one
 // `mod runtime;` gate (`render-runtime`); their re-exports source through
 // `runtime` so wasm components that opt into the marker-only `render` feature

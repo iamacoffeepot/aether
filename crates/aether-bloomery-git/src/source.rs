@@ -916,15 +916,15 @@ impl<C: GitDataApi> GitSource<C> {
     }
 
     // Release each of `targets` the named `owner` holds by a fast-forward CAS to a
-    // tombstone child commit (the linearization point) then a name-only cleanup
+    // tombstone child commit (the linearization point) then an expected-sha cleanup
     // delete. Those steps are two `transact_refs` calls: git's `update-ref --stdin`
     // refuses two ops on the same name in one transaction, and the interruption
     // window between them is a state this walk already heals. An absent ref is
     // skipped (idempotent); a ref already at the tombstone commit is *already
     // released* — an interrupted release's CAS linearized but its cleanup delete
-    // did not run — so the cleanup delete is finished (behind the same CAS
-    // reassertion, so a fresh claim that reused the name in the read→delete window
-    // is spared rather than clobbered) and the walk continues (ADR-0150 §The
+    // did not run — so the cleanup delete is finished (against that tombstone sha,
+    // so a fresh claim that reused the name in the read→delete window loses the
+    // compare rather than being clobbered) and the walk continues (ADR-0150 §The
     // claim registry, amended PR #3556: the release path is idempotent over its own
     // tombstone). A ref a *different* bloom holds is spared and reported as `Held` —
     // the CAS read-guard that retires the check-then-delete TOCTOU.
@@ -1002,7 +1002,7 @@ impl<C: GitDataApi> GitSource<C> {
     // Release exactly one ref by name, reporting which of the three terminals it
     // reached. The single-ref body [`release_targets`] walks and
     // [`complete_release`] returns directly, so the CAS-to-tombstone guard,
-    // the tombstone-race reassertion, and the lost-CAS re-read live in one place
+    // the expected-sha cleanup delete, and the lost-CAS re-read live in one place
     // rather than being written twice with a different result type each.
     fn release_target(&self, owner: Option<&BloomId>, name: &str) -> Result<ClaimReleaseOutcome, SourceError> {
         let Some(current) = self.client.get_ref(name)? else {
@@ -1010,23 +1010,14 @@ impl<C: GitDataApi> GitSource<C> {
         };
         // An already-tombstoned ref is released regardless of `owner` — the
         // tombstone *is* the released state, so finishing the interrupted cleanup
-        // delete is pure name reclamation, safe for any instance. But guard the
-        // cleanup with the same CAS the live-holder branch uses: a blind name-only
-        // delete would race a fresh claim that reused the name in the window since
-        // the read, so re-assert the observed tombstone via a no-op fast-forward
-        // first. If the ref moved to an unrelated fresh claim commit that
-        // reassertion is a `RefConflict` (the new commit is not a fast-forward
-        // descendant of the stale tombstone), so the name has already been
-        // reclaimed by that holder — skip the delete rather than clobbering a
-        // claim we never owned. Either way the holder this call was authorized
-        // against is gone, which is `AlreadyAbsent`.
+        // delete is pure name reclamation, safe for any instance. It still goes
+        // through the expected-sha delete: a fresh claim can reuse the name in the
+        // window since this read, and only the compare keeps that claim alive.
+        // Either way the holder this call was authorized against is gone, which is
+        // `AlreadyAbsent`.
         let holder = match self.classify_holder(&current.sha)? {
             ClaimHolder::Tombstoned => {
-                match self.client.compare_and_swap_ref(name, &current.sha, &current.sha) {
-                    Ok(_) => self.client.delete_ref(name)?,
-                    Err(GitDataError::RefConflict(_)) => {}
-                    Err(error) => return Err(SourceError::Git(error)),
-                }
+                self.delete_released_claim(name, &current.sha)?;
                 return Ok(ClaimReleaseOutcome::AlreadyAbsent);
             }
             ClaimHolder::Held(holder) => holder,
@@ -1048,8 +1039,22 @@ impl<C: GitDataApi> GitSource<C> {
             }
             Err(error) => return Err(SourceError::Git(error)),
         }
-        self.client.delete_ref(name)?;
+        self.delete_released_claim(name, &tombstone.sha)?;
         Ok(ClaimReleaseOutcome::Released)
+    }
+
+    // Finish a release by deleting `name` only while it still points at the
+    // tombstone `expected`. The tombstone CAS already linearized the release, so
+    // the name is free — but the delete is a second round trip, and a replacement
+    // claimant can win the name in between. A name-only delete would erase that
+    // live claim; losing the compare instead leaves it standing, and an
+    // already-absent name means another releaser finished the same cleanup. Both
+    // are the terminal success this caller reports.
+    fn delete_released_claim(&self, name: &str, expected: &str) -> Result<(), SourceError> {
+        match self.client.transact_refs(&[RefTxnOp::Delete { name: name.to_owned(), expected: expected.to_owned() }]) {
+            Ok(()) | Err(GitDataError::RefConflict(_) | GitDataError::MissingObject(_)) => Ok(()),
+            Err(error) => Err(SourceError::Git(error)),
+        }
     }
 }
 
@@ -2707,7 +2712,7 @@ mod tests {
 
     // Point `name` at a tombstone commit (empty tree + `Bloom-Id: tombstone`)
     // directly — the ref state an interrupted `release_seal` leaves after its
-    // CAS-to-tombstone linearized but its name-only cleanup delete never ran.
+    // CAS-to-tombstone linearized but its cleanup delete never ran.
     fn seed_tombstone(fake: &FakeGithub, name: &str) {
         let commit = fake.seed_commit_with_message(&render_tombstone_message(), EMPTY_TREE);
         fake.seed_ref(name, &commit);

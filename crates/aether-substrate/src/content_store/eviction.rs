@@ -14,8 +14,9 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
     /// [`None`](EvictionPolicy::None) this is a cheap early return (a
     /// canonical record retains everything); under
     /// [`LruBudget`](EvictionPolicy::LruBudget) it evicts LRU entries that
-    /// are neither pinned nor named until the disk ledger is back under
-    /// budget (or no eligible candidate remains).
+    /// are neither pinned, named, nor held by a live runtime
+    /// ([`set_holds`](ContentStore::set_holds)) until the disk ledger is
+    /// back under budget (or no eligible candidate remains).
     pub(super) fn evict_if_needed(&mut self) {
         let EvictionPolicy::LruBudget(disk_budget_bytes) = self.policy else {
             return;
@@ -23,12 +24,16 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
         while self.total_bytes > disk_budget_bytes {
             // Snapshot the named set once (a name protects its target), then
             // pick the oldest eligible entry. Both reads borrow disjoint
-            // fields; `victim` is owned, so the removal below is clear.
+            // fields; `victim` is owned, so the removal below is clear. A
+            // runtime hold protects its target the same way a name does, and
+            // for a stronger reason: something is executing that content now.
             let named: HashSet<&str> = self.names.values().map(String::as_str).collect();
             let victim = self
                 .entries
                 .iter()
-                .filter(|(hash, entry)| !entry.pinned && !named.contains(hash.as_str()))
+                .filter(|(hash, entry)| {
+                    !entry.pinned && !named.contains(hash.as_str()) && !self.holds.contains(hash.as_str())
+                })
                 .min_by_key(|(_, entry)| entry.last_access)
                 .map(|(hash, _)| hash.clone());
             drop(named);

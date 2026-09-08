@@ -3,20 +3,10 @@
 // `offset_px` and set `is_screen != 0`; World quads set `is_screen ==
 // 0`, transform `anchor` through `view_proj`, and apply `offset_px`
 // as a clip-space pixel offset so labels stay camera-facing and never
-// skew. The fragment stage samples the bound texture and multiplies by
-// the per-vertex tint; the pipeline alpha-blends the result over the
-// world pass.
-
-struct Viewport {
-    // Column-major view-projection matrix used by the World path.
-    view_proj: mat4x4<f32>,
-    // Width and height of the render target in pixels.
-    size: vec2<f32>,
-    _pad: vec2<f32>,
-}
-
-@group(0) @binding(0)
-var<uniform> viewport: Viewport;
+// skew — both through the shared `overlay_clip_position` prepended from
+// `overlay_projection.wgsl` at pipeline build. The fragment stage samples
+// the bound texture and multiplies by the per-vertex tint; the pipeline
+// alpha-blends the result over the world pass.
 
 @group(1) @binding(0)
 var quad_texture: texture_2d<f32>;
@@ -50,42 +40,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.uv = in.uv;
     out.tint = in.tint;
-
-    if in.is_screen != 0u {
-        // Screen path: offset_px holds the absolute pixel position.
-        // Pixel (0,0) top-left => clip (-1, 1); pixel (w,h)
-        // bottom-right => clip (1, -1). y flips because pixels are
-        // top-down while clip space is bottom-up.
-        let ndc_x = in.offset_px.x / viewport.size.x * 2.0 - 1.0;
-        let ndc_y = 1.0 - in.offset_px.y / viewport.size.y * 2.0;
-        out.clip_pos = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
-    } else {
-        // World path (ADR-0105): transform the anchor through
-        // view_proj, then apply the per-vertex pixel offset in clip
-        // space so labels face the camera and never skew.
-        var clip = viewport.view_proj * vec4<f32>(in.anchor, 1.0);
-        // Anchors behind the camera (clip.w <= 0) are silently
-        // discarded by pushing the vertex outside the clip cube.
-        if clip.w <= 0.0 {
-            out.clip_pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
-            return out;
-        }
-        // Resolve the scale factor: negative k means Pixels mode
-        // (use clip.w, cancelling the perspective divide for constant
-        // on-screen size); positive k means Distance mode (constant
-        // k so the label shrinks as the anchor recedes).
-        var k = in.k;
-        if k < 0.0 {
-            k = clip.w;
-        }
-        // offset_px uses screen y-down convention; negate y so a
-        // positive offset_px.y moves downward on screen (i.e. a
-        // negative offset_px.y, as produced for above-anchor glyphs,
-        // increases clip.y and moves the label upward).
-        clip.x += in.offset_px.x / viewport.size.x * 2.0 * k;
-        clip.y -= in.offset_px.y / viewport.size.y * 2.0 * k;
-        out.clip_pos = clip;
-    }
+    out.clip_pos = overlay_clip_position(in.anchor, in.offset_px, in.k, in.is_screen);
     return out;
 }
 

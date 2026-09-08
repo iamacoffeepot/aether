@@ -110,7 +110,7 @@ pub fn plan_heals(snapshot: &Snapshot, states: &[ClaimRefState]) -> Vec<Result<H
     for state in states {
         match &state.holder {
             // A tombstoned ref is an interrupted release whose CAS-to-tombstone
-            // linearized but whose name-only cleanup delete never ran — sweep it.
+            // linearized but whose cleanup delete never ran — sweep it.
             // Holder-agnostic and safe for any instance: a tombstone *is* released.
             ClaimHolder::Tombstoned => ops.push(sweep_mail(&state.ref_kind).map(HealOp::Release)),
             // A ref still held by a superseded predecessor is a crashed transfer's

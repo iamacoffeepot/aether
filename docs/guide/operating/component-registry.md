@@ -94,8 +94,10 @@ unpinned history entry is eligible. `pin_artifact` / `unpin_artifact` (and
 `upload_component(pin: true)`) record or drop durable explicit protection on an
 exact content hash — names are never resolved. `pin: false` on upload is not
 unpin. There is still no delete or unname operation. Component runtime
-protection of stored artifacts is not provided here. Issue 5686 is binary
-supervision only and does not cover component runtime leases. Fleet and MCP
+protection of stored artifacts is not provided here: the hub holds the binary
+of every engine it supervises (issue 5686), but it does not supervise a loaded
+component, so a component's stored wasm is protected by a name or a pin alone.
+Fleet and MCP
 must ship the same release: the `pin` field changes the typed upload kind
 schema.
 
@@ -125,15 +127,18 @@ name and `describe_kinds` for its exact live schema.
 
 ### Replicas
 
-`replicas: N` performs N sequential loads with shared wasm/config and names each
-instance `{base}-{index}`. The base is selected from explicit load name, export,
-or default entry namespace in that order. The result carries one shared
-capabilities block and an `instances` list of ids/names.
+`replicas: N` performs N sequential loads with shared wasm/config. Replica 0 is
+named for the bare `base` and each later instance `{base}-{index}`. The base is
+selected from explicit load name, export, or default entry namespace in that
+order, so a fan-out over the default namespace leaves replica 0 reachable from a
+co-hosted component's bare-type `ctx.peer::<R>()`, and `replicas: 1` loads
+exactly what an omitted field loads. The result carries one shared capabilities
+block and an `instances` list of ids/names.
 
 A replica fan-out is not transactional. If replica K fails, instances before K
 remain live and the error says how many loaded. The failed call does not return
 the successful prefix's `instances` records or mailbox ids. Their lineage names
-follow the deterministic suffix rule, but the current public listing surface
+follow the deterministic naming rule, but the current public listing surface
 does not recover their ids. On a task-owned engine, terminate and start clean.
 On a shared engine, stop and report the partial prefix rather than guessing ids
 or retrying into occupied names.

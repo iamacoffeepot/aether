@@ -17,6 +17,7 @@ use super::config::NamespaceRoots;
 /// the adapter here, and either drives the call or replies
 /// `FsError::UnknownNamespace`. Registration is one-shot at boot;
 /// hot-swap is out of scope.
+#[derive(Default)]
 pub struct AdapterRegistry {
     adapters: HashMap<String, Arc<dyn FileAdapter>>,
 }
@@ -33,12 +34,6 @@ impl AdapterRegistry {
 
     pub fn get(&self, namespace: &str) -> Option<Arc<dyn FileAdapter>> {
         self.adapters.get(namespace).map(Arc::clone)
-    }
-}
-
-impl Default for AdapterRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

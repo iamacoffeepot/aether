@@ -20,22 +20,28 @@ use core::iter;
 use std::fs;
 use std::path::Path;
 
-use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate::{HarnessActor, HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::visual::decode_png;
 use aether_harness_substrate_capture::{
     RenderHarnessBuilderExt,
     test_helpers::{init_save_sandbox, require_runtime, rgba_at, test_namespace_roots, write_fixture},
 };
 use aether_kinds::{LoadComponent, LoadResult, WindowId, WindowSize};
-use aether_puppet::{Load, labels};
+use aether_puppet::{Load, Puppet, labels};
 
 const CUBE_OBJ: &[u8] = include_bytes!("fixtures/cube.obj");
 
 /// The address a loaded component registers at (ADR-0099).
-const PUPPET: &str = "aether.component/aether.embedded:aether.puppet";
 /// ADR-0138: the merged three-actor module is defaultless, so every load
 /// names the actor it wants.
 const PUPPET_EXPORT: &str = "aether.puppet";
+
+/// The loaded puppet's typed sender. A nameless load registers the actor
+/// under its own namespace, so `HarnessOp::loaded_default` renders the
+/// lineage address (ADR-0099 §4) the substrate answers on.
+fn puppet() -> HarnessActor<Puppet> {
+    HarnessOp::loaded_default::<Puppet>()
+}
 
 /// A 2x2x2 material field over the cube, hair on one side of `x = 0` and
 /// skin on the other, so both a pigmented wash and a mostly-reserved one
@@ -100,26 +106,17 @@ fn the_sheet_stands_behind_the_ink() {
 
     harness
         .execute(vec![
-            (
-                "size",
-                HarnessOp::send_and_settle(
-                    PUPPET,
-                    &WindowSize { window: WindowId(1), width: 128, height: 96, scale_factor: 1.0 },
-                ),
-            ),
+            ("size", puppet().send(&WindowSize { window: WindowId(1), width: 128, height: 96, scale_factor: 1.0 })),
             (
                 "subject",
-                HarnessOp::send_and_settle(
-                    PUPPET,
-                    &Load {
-                        namespace: "assets".to_owned(),
-                        path: subject,
-                        labels: field,
-                        material_field_padding: 0.12,
-                        rig: String::new(),
-                        palette: String::new(),
-                    },
-                ),
+                puppet().send(&Load {
+                    namespace: "assets".to_owned(),
+                    path: subject,
+                    labels: field,
+                    material_field_padding: 0.12,
+                    rig: String::new(),
+                    palette: String::new(),
+                }),
             ),
         ])
         .expect("the size and subject load settle");
