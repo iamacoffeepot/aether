@@ -16,6 +16,8 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::collections::BTreeSet;
+
 use aether_bloomery::{StageId, StoreClass};
 use aether_chassis_bloomery::store::OutstandingOrder;
 use aether_data::wire::from_bytes;
@@ -48,7 +50,7 @@ fn a_benchmark_run_seals_one_bloom_per_profile_cell() {
     let blooms = report["blooms"].as_array().unwrap();
     assert_eq!(blooms.len(), 4, "two cells at sample size two are four blooms: {body}");
     assert_eq!(
-        blooms.iter().map(|bloom| bloom["bloom"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>().len(),
+        blooms.iter().map(|bloom| bloom["bloom"].as_str().unwrap()).collect::<BTreeSet<_>>().len(),
         4,
         "each sample is its own bloom, not a duplicate admit of a sibling: {body}"
     );
