@@ -324,22 +324,30 @@ const EMPTY_SURFACE: [String; 0] = [];
 /// this, so a successor promises a runnable line exactly as a fresh seal does;
 /// supersession wraps the error as [`SupersedeError::InvalidMember`].
 ///
-/// The manifest resolves here too, beside the catalog it will be cross-checked
+/// The manifest resolves here too, beside the catalog it is cross-checked
 /// against (ADR-0215): the two are one answer to "can the tree I am about to
 /// dispatch against run what this catalog names", so the door resolves them
 /// together and hands both to the caller that records and dispatches them.
+/// `validate_against` is that cross-check, and it runs after the structural
+/// pass because a catalog that binds a stage twice has nothing coherent to
+/// cross-check yet. The override walk then asks the *declared* split rather
+/// than the compiled one, so a member cannot pin a model onto a stage whose
+/// lane this checkout implements as a compiler run.
 fn validate_line(spec: &BloomSpec, configs: &ResolvedConfigs) -> Result<AdmittedLine, SealError> {
     let catalog = sealed_config::<StageCatalog>(ConfigScopes::bloom_wide(spec.configs()), configs)?
         .unwrap_or_else(StageCatalog::line);
     catalog.validate().map_err(SealError::UnrunnableStageCatalog)?;
     let manifest = sealed_config::<PipelineManifest>(ConfigScopes::bloom_wide(spec.configs()), configs)?
         .unwrap_or_else(PipelineManifest::compiled);
+    catalog
+        .validate_against(&manifest)
+        .map_err(|error| SealError::CatalogOutsideDeclaredLanes { error, declared: manifest.declared_lanes() })?;
 
     for member in spec.members() {
         let scopes = ConfigScopes::member_of(&member.configs, spec.configs());
         sealed_config::<ModelOverride>(scopes, configs)?
             .unwrap_or_default()
-            .validate(&catalog)
+            .validate_against(&catalog, &manifest)
             .map_err(|error| SealError::UnusableModelOverride { workpiece: member.workpiece.clone(), error })?;
     }
     Ok(AdmittedLine { catalog, manifest })

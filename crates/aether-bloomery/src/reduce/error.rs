@@ -178,6 +178,27 @@ pub enum SealError {
     /// The vec names the members on the cycle. Appended so the prior
     /// variants' wire discriminants are unchanged.
     CyclicDependencies(Vec<WorkpieceId>),
+    /// The sealing spec's [`StageCatalog`](crate::StageCatalog) names a lane the
+    /// base's declared [`PipelineManifest`](crate::PipelineManifest) does not
+    /// implement (ADR-0215). Appended so the prior variants' wire discriminants
+    /// are unchanged.
+    ///
+    /// [`UnrunnableStageCatalog`](Self::UnrunnableStageCatalog)'s complement,
+    /// and the reason it is a second variant rather than a widening of that
+    /// one: that refusal is this binary saying it routes no such position,
+    /// while this one is the checkout saying it implements no such lane. Only a
+    /// door holding both sealed values can make it, and it is made there rather
+    /// than at dispatch — where the same catalog would surface as a member that
+    /// wedges with no attempt ever made, long after the operator who authored
+    /// it has moved on.
+    CatalogOutsideDeclaredLanes {
+        /// The stage and the lane command the cross-check found.
+        error: CatalogError,
+        /// The lane commands the sealed manifest does declare, so the refusal
+        /// states the alternative instead of sending its reader to a file in a
+        /// tree.
+        declared: Vec<String>,
+    },
 }
 
 /// Why a supersession was refused.

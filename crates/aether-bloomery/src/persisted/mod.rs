@@ -315,6 +315,19 @@ pub const EVENT_PRE_STUDY_DIGEST: Digest =
 pub const DECISIONS_PRE_MANIFEST_DIGEST: Digest =
     Digest::pinned("d5c94ca64bbd97709c01b194af82cabce70170f6b354999ad03839bfd52b99ca");
 
+/// The stamp on journaled decisions rows written before ADR-0215's seal-time
+/// cross-check appended `SealError::CatalogOutsideDeclaredLanes` and
+/// `CatalogError::UndeclaredLaneCommand`.
+///
+/// The shape the record slice left current, copied verbatim from the
+/// `decisions` line the ledger carried as current at `eaab93254` — the identity
+/// every row written between that slice and this one bears. Never recomputed
+/// from live code (#5500). A `SealError` is journaled through
+/// `Outcome::SealRejected`, so widening one moves this column exactly as
+/// appending a `Decision` variant does.
+pub const DECISIONS_PRE_CROSS_CHECK_DIGEST: Digest =
+    Digest::pinned("9ea3845b12c08bee7643a95397d64c4517d6beaa1bd882277a46b79d5eb86b8f");
+
 /// The stamp on sealed model-process instruction bundles written before
 /// ADR-0216 appended `retrospect` and `retrospect_finding_contract`.
 pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
@@ -326,9 +339,9 @@ pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
 /// The current identity decodes as today. A missing digest is the implicit v1
 /// identity — rows written before the column existed. v1 upcasts by filling
 /// `StageProgress::reconcile_assembles_base` as `false`; the pre-#5278,
-/// pre-ADR-0216 and pre-ADR-0215 shapes decode as today because everything
-/// since each is a tail-appended variant. Any other identity is a named
-/// refusal.
+/// pre-ADR-0216 and the two pre-ADR-0215 shapes decode as today because
+/// everything since each is a tail-appended variant. Any other identity is a
+/// named refusal.
 ///
 /// # Errors
 ///
@@ -339,7 +352,13 @@ pub fn decode_recorded_decisions(bytes: &[u8], schema: Option<&[u8]>) -> Result<
         &DECISIONS,
         schema,
         bytes,
-        &[upcast_decisions_v1, upcast_decisions_pre_propose, upcast_decisions_pre_study, upcast_decisions_pre_manifest],
+        &[
+            upcast_decisions_v1,
+            upcast_decisions_pre_propose,
+            upcast_decisions_pre_study,
+            upcast_decisions_pre_manifest,
+            upcast_decisions_pre_cross_check,
+        ],
     )
 }
 
@@ -366,6 +385,15 @@ fn upcast_decisions_pre_study(bytes: &[u8]) -> Result<Decisions, WireError> {
 /// past every discriminant a row of that era could hold, leaving no wire
 /// position moved.
 fn upcast_decisions_pre_manifest(bytes: &[u8]) -> Result<Decisions, WireError> {
+    from_bytes(bytes)
+}
+
+/// Pre-cross-check rows carry the same wire layout today's decoder reads: the
+/// seal-time cross-check appended one `SealError` variant past
+/// `CyclicDependencies` and one `CatalogError` variant past
+/// `WallClockOutOfRange`, both tails, so no discriminant a row of that era could
+/// hold has moved.
+fn upcast_decisions_pre_cross_check(bytes: &[u8]) -> Result<Decisions, WireError> {
     from_bytes(bytes)
 }
 
@@ -411,6 +439,7 @@ pub static DECISIONS: PersistedKind = PersistedKind {
         PersistedUpcast { digest: DECISIONS_PRE_PROPOSE_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_STUDY_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_MANIFEST_DIGEST, reshape: None },
+        PersistedUpcast { digest: DECISIONS_PRE_CROSS_CHECK_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };

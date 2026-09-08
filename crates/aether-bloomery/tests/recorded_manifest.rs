@@ -18,14 +18,23 @@ use aether_data::Kind;
 use aether_data::wire::to_vec;
 use common::{digest, draft, event, membership};
 
-/// A vocabulary no compiled copy could produce: one identity, one lane, one
-/// position. Any assertion that passes against this cannot have been answered
-/// by `PipelineManifest::compiled`.
+/// A vocabulary no compiled copy could produce: its own entrypoint, one
+/// identity, one position. Any assertion that passes against this cannot have
+/// been answered by `PipelineManifest::compiled`.
+///
+/// Its `[lanes]` is the compiled set exactly, and that is not an accident going
+/// unnoticed: since ADR-0215's cross-check the seal door refuses a base that
+/// does not implement every lane the catalog dispatches, so a fixture short one
+/// lane would be refused before it could record anything. The three axes above
+/// are what keep it distinguishable, and the lane a *seal* cross-checks is not
+/// one of them.
 fn declared() -> PipelineManifest {
     PipelineManifest::from_toml(
         "version = 1\n\
          [entrypoint]\nprogram = \"just\"\nargs = [\"lane\"]\n\
-         [lanes]\nmodel = [\"construct.implement\"]\nmechanical = []\n\
+         [lanes]\n\
+         model = [\"construct.implement\", \"review.critic\", \"scope.fill\", \"retrospect.read\"]\n\
+         mechanical = [\"verify.member\", \"verify.check\", \"verify.base\"]\n\
          [verifiers]\nidentities = [\"verify.fmt\"]\n\
          [verifiers.runs]\n\"verify.check\" = [\"verify.fmt\"]\n\
          [evidence]\nenvelope = 1\n",

@@ -234,6 +234,48 @@ impl PipelineManifest {
         configs.resolve::<Self>(scopes).ok().flatten().unwrap_or_else(Self::compiled)
     }
 
+    /// Whether the repository implements `command` as a lane at all — model or
+    /// mechanical.
+    ///
+    /// The declared half of the split ADR-0215 draws through the compiled
+    /// `is_known_process` match: a binding's host position names the
+    /// coordinator's own code and stays compiled, while the lane it dispatches
+    /// is the repository's and is answered here.
+    /// [`StageCatalog::validate_against`](super::StageCatalog::validate_against)
+    /// is its one production caller.
+    #[must_use]
+    pub fn declares_lane(&self, command: &str) -> bool {
+        self.lane_commands().any(|declared| declared == command)
+    }
+
+    /// Whether the repository declares `command` a **model lane** — the
+    /// declared answer to [`is_model_lane`](super::is_model_lane)'s question.
+    ///
+    /// It decides which dispatches carry a credential and a resolved model, so
+    /// it has to come from the value the bloom sealed: a mechanical lane that
+    /// could acquire model-lane treatment through host configuration is exactly
+    /// what the compiled disjunction was written to prevent, and reading the
+    /// split off a sealed manifest preserves it rather than loosening it.
+    #[must_use]
+    pub fn is_model_lane(&self, command: &str) -> bool {
+        self.lanes.model.iter().any(|declared| declared == command)
+    }
+
+    /// Every lane command the repository declares, model lanes first.
+    ///
+    /// What a refusal names back: an operator told their catalog names a lane
+    /// this base does not carry can see the alternatives without going to read
+    /// the file out of a tree.
+    #[must_use]
+    pub fn declared_lanes(&self) -> Vec<String> {
+        self.lane_commands().map(String::from).collect()
+    }
+
+    /// Both halves of the declared split, in declaration order.
+    fn lane_commands(&self) -> impl Iterator<Item = &str> {
+        self.lanes.model.iter().chain(&self.lanes.mechanical).map(String::as_str)
+    }
+
     /// Read a manifest from its TOML text.
     ///
     /// Refuses, in this order: text that does not carry a version at all, a
