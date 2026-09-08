@@ -4,7 +4,7 @@
 
 use core::marker::PhantomData;
 
-use aether_data::{Kind, MailboxId, mailbox_id_from_name};
+use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::persistence::Persistence;
@@ -144,9 +144,11 @@ impl MailSender for WasmDropCtx<'_> {
     // Runtime-name send escape hatch (the `MailSender::send_to_named` contract):
     // the recipient name is supplied at runtime, no compile-time `R` to resolve.
     #[allow(clippy::disallowed_methods)]
+    // the runtime-name routing path itself — resolves the written name by the same
+    // ADR-0099 §4 parse → fold the registry does, so a lineage address routes
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, false, self.mailbox);
+        mail::send_mail(mailbox_id_from_path(name).0, K::ID.0, &bytes, 1, false, self.mailbox);
     }
 
     fn prev_correlation(&self) -> u64 {
@@ -173,9 +175,10 @@ impl MailSender for WasmDropCtx<'_> {
     //noinspection DuplicatedCode
     // Runtime-name detached escape hatch — the `send_to_named` counterpart.
     #[allow(clippy::disallowed_methods)]
+    // the runtime-name routing path itself — same ADR-0099 §4 parse → fold as `send_to_named`
     fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, true, self.mailbox);
+        mail::send_mail(mailbox_id_from_path(name).0, K::ID.0, &bytes, 1, true, self.mailbox);
     }
 
     //noinspection DuplicatedCode

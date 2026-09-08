@@ -1585,7 +1585,7 @@ fn a_v11_store_gains_an_empty_scope_verify_ledger() {
         .query_row("SELECT count(*) FROM scope_verify_reports", [], |row| row.get(0))
         .expect("the ledger exists after migration");
     assert_eq!(reports, 0, "migration invents no reports");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 18);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 19);
 }
 
 #[test]
@@ -1617,7 +1617,7 @@ fn a_v15_store_gains_an_empty_candidate_hash_journal() {
         .query_row("SELECT count(*) FROM candidate_hash", [], |row| row.get(0))
         .expect("the journal exists after migration");
     assert_eq!(hashes, 0, "migration invents no hashes");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 18);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 19);
 }
 
 mod schema_digest_migration {
@@ -1686,7 +1686,7 @@ mod schema_digest_migration {
         drop(conn);
 
         let mut store = SqliteStore::open(&path).expect("a v16 store migrates");
-        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 18);
+        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 19);
         let journal = store.replay_journal().unwrap();
         assert_eq!(journal.len(), 2);
         let v2 = journal.iter().find(|row| row.idempotency_key == "v2").unwrap();
@@ -1834,7 +1834,7 @@ fn a_null_stamped_outbox_row_still_decodes_positionally_after_migration() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v17 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 18);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 19);
     let entries = store.drain_outbox(Some(Topic::ViewDocument.as_str())).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].payload_schema, None, "migration invents no stamp");
@@ -1855,4 +1855,312 @@ fn an_unknown_outbox_schema_refuses_by_name() {
     assert!(error.contains("no migration from schema `aether.bloomery.no-such-shape`"), "{error}");
     assert!(error.contains(&format!("to current `{}`", ViewDocument::NAME)), "{error}");
     assert!(error.contains(&format!("for kind `{}`", ViewDocument::NAME)), "{error}");
+}
+
+mod outbox_results {
+    use aether_bloomery::persisted::{DECISIONS, EVENT};
+    use aether_bloomery::{Decisions, Digest, Event, Fact, IdempotencyKey, Outcome};
+    use aether_data::wire::to_vec;
+
+    use super::{SqliteStore, StoreBackend, memory, write};
+
+    fn observe(key: &str, head: u8) -> Event {
+        Event {
+            idempotency_key: IdempotencyKey(key.to_owned()),
+            fact: Fact::ObserveMainline { head: Digest::from_bytes([head; 32]) },
+        }
+    }
+
+    fn result_count(store: &SqliteStore, sequence: i64) -> i64 {
+        store
+            .conn
+            .query_row("SELECT count(*) FROM outbox_results WHERE sequence = ?1", rusqlite::params![sequence], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn recorded_outbox_results_survive_reopen_without_journaling_or_acking() {
+        // Crash after persist-before-ack must keep the ordered Event batch and
+        // must not have journaled those keys or marked the outbox delivered.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("outbox-results.db");
+        let path = path.to_str().unwrap();
+        let events = [observe("obs-1", 1), observe("obs-2", 2)];
+        {
+            let mut store = SqliteStore::open(path).unwrap();
+            store.append_event(&write("journaled", b"alpha", b"decided")).unwrap();
+            assert_eq!(store.enqueue_outbox("landing_receipt", b"payload", None).unwrap(), 1);
+            store.record_outbox_results("landing_receipt", 1, &events).unwrap();
+            assert_eq!(store.drain_outbox(Some("landing_receipt")).unwrap().len(), 1);
+            assert!(store.delivered_outbox("landing_receipt").unwrap().is_empty());
+            assert_eq!(store.replay_journal().unwrap().len(), 1);
+            assert!(!store.journal_holds_any(&["obs-1".to_owned(), "obs-2".to_owned()]).unwrap());
+        }
+
+        let mut store = SqliteStore::open(path).unwrap();
+        assert_eq!(store.outbox_results("landing_receipt", 1).unwrap().as_deref(), Some(events.as_slice()));
+        assert_eq!(store.drain_outbox(Some("landing_receipt")).unwrap()[0].payload, b"payload");
+        assert!(store.delivered_outbox("landing_receipt").unwrap().is_empty());
+        assert_eq!(store.replay_journal().unwrap()[0].event, b"alpha");
+        assert!(!store.journal_holds_any(&["obs-1".to_owned(), "obs-2".to_owned()]).unwrap());
+
+        store.ack_outbox(Some("landing_receipt"), 1).unwrap();
+        assert!(store.drain_outbox(Some("landing_receipt")).unwrap().is_empty());
+        assert_eq!(store.delivered_outbox("landing_receipt").unwrap().len(), 1);
+        assert_eq!(store.outbox_results("landing_receipt", 1).unwrap().as_deref(), Some(events.as_slice()));
+    }
+
+    #[test]
+    fn record_outbox_results_keeps_the_first_batch_and_refuses_conflicts() {
+        let mut store = memory();
+        assert_eq!(store.enqueue_outbox("landing_receipt", b"payload", None).unwrap(), 1);
+        let first = [observe("obs-1", 1), observe("obs-2", 2)];
+        store.record_outbox_results("landing_receipt", 1, &first).unwrap();
+        store.record_outbox_results("landing_receipt", 1, &first).unwrap();
+        assert_eq!(result_count(&store, 1), 2, "an identical replay must not append");
+
+        let conflicted = [observe("obs-1", 1), observe("obs-2", 9)];
+        let error = store.record_outbox_results("landing_receipt", 1, &conflicted).unwrap_err().to_string();
+        assert!(error.contains("already records a different result batch"), "{error}");
+        assert_eq!(result_count(&store, 1), 2, "a conflict must not replace the first bytes");
+
+        let longer = [observe("obs-1", 1), observe("obs-2", 2), observe("obs-3", 3)];
+        assert!(store.record_outbox_results("landing_receipt", 1, &longer).is_err());
+        let shorter = [observe("obs-1", 1)];
+        assert!(store.record_outbox_results("landing_receipt", 1, &shorter).is_err());
+        let reversed = [observe("obs-2", 2), observe("obs-1", 1)];
+        let error = store.record_outbox_results("landing_receipt", 1, &reversed).unwrap_err().to_string();
+        assert!(error.contains("already records a different result batch"), "{error}");
+        assert_eq!(store.outbox_results("landing_receipt", 1).unwrap().as_deref(), Some(first.as_slice()));
+        assert_eq!(result_count(&store, 1), 2);
+    }
+
+    #[test]
+    fn record_outbox_results_rolls_back_when_a_later_ordinal_insert_aborts() {
+        let mut store = memory();
+        store.append_event(&write("journaled", b"alpha", b"decided")).unwrap();
+        assert_eq!(store.enqueue_outbox("landing_receipt", b"payload", None).unwrap(), 1);
+        let batch = [observe("obs-1", 1), observe("obs-2", 2)];
+
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER abort_outbox_result_ordinal_1 AFTER INSERT ON outbox_results \
+                 WHEN NEW.ordinal = 1 \
+                 BEGIN SELECT RAISE(ABORT, 'forced ordinal 1'); END;",
+            )
+            .unwrap();
+
+        assert!(store.record_outbox_results("landing_receipt", 1, &batch).is_err());
+        assert_eq!(result_count(&store, 1), 0, "the first ordinal must not survive the aborted transaction");
+        assert_eq!(store.drain_outbox(Some("landing_receipt")).unwrap().len(), 1);
+        assert!(store.delivered_outbox("landing_receipt").unwrap().is_empty());
+        assert_eq!(store.replay_journal().unwrap()[0].event, b"alpha");
+
+        store.conn.execute_batch("DROP TRIGGER abort_outbox_result_ordinal_1;").unwrap();
+        store.record_outbox_results("landing_receipt", 1, &batch).unwrap();
+        assert_eq!(store.outbox_results("landing_receipt", 1).unwrap().as_deref(), Some(batch.as_slice()));
+        assert_eq!(store.drain_outbox(Some("landing_receipt")).unwrap().len(), 1);
+        assert_eq!(store.replay_journal().unwrap()[0].event, b"alpha");
+    }
+
+    #[test]
+    fn record_outbox_results_refuses_empty_duplicate_unknown_wrong_topic_and_delivered_batches() {
+        let mut store = memory();
+        let batch = [observe("obs-1", 1), observe("obs-2", 2)];
+
+        let error = store.record_outbox_results("landing_receipt", 1, &[]).unwrap_err().to_string();
+        assert!(error.contains("empty"), "{error}");
+        let error = store
+            .record_outbox_results("landing_receipt", 1, &[observe("dup", 1), observe("dup", 2)])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("repeats an idempotency key"), "{error}");
+        let error = store.record_outbox_results("landing_receipt", 1, &batch).unwrap_err().to_string();
+        assert!(error.contains("does not exist"), "{error}");
+        assert_eq!(result_count(&store, 1), 0, "refusals must not write a partial sidecar");
+
+        assert_eq!(store.enqueue_outbox("landing_receipt", b"receipt", None).unwrap(), 1);
+        assert_eq!(store.enqueue_outbox("view_document", b"view", None).unwrap(), 2);
+        assert_eq!(store.outbox_results("landing_receipt", 1).unwrap(), None);
+
+        let error = store.outbox_results("view_document", 1).unwrap_err().to_string();
+        assert!(error.contains("is topic"), "{error}");
+        let error = store.outbox_results("landing_receipt", 99).unwrap_err().to_string();
+        assert!(error.contains("does not exist"), "{error}");
+        let error = store.record_outbox_results("view_document", 1, &batch).unwrap_err().to_string();
+        assert!(error.contains("is topic"), "{error}");
+        assert_eq!(result_count(&store, 1), 0);
+        let overflow = store.record_outbox_results("landing_receipt", u64::MAX, &batch).unwrap_err().to_string();
+        assert!(overflow.contains("does not fit the store's integer column"), "{overflow}");
+        assert_eq!(result_count(&store, 1), 0, "overflow must not alias sequence 1");
+        let overflow = store.outbox_results("landing_receipt", u64::MAX).unwrap_err().to_string();
+        assert!(overflow.contains("does not fit the store's integer column"), "{overflow}");
+
+        assert_eq!(store.ack_outbox(Some("view_document"), 2).unwrap(), 1);
+        assert_eq!(store.outbox_results("view_document", 2).unwrap(), None);
+        let error = store.record_outbox_results("view_document", 2, &batch).unwrap_err().to_string();
+        assert!(error.contains("already delivered"), "{error}");
+        assert_eq!(result_count(&store, 2), 0);
+
+        store.record_outbox_results("landing_receipt", 1, &batch).unwrap();
+        assert_eq!(store.outbox_results("landing_receipt", 1).unwrap().as_deref(), Some(batch.as_slice()));
+        let overflow = store.record_outbox_results("landing_receipt", u64::MAX, &batch).unwrap_err().to_string();
+        assert!(overflow.contains("does not fit the store's integer column"), "{overflow}");
+        let overflow = store.outbox_results("landing_receipt", u64::MAX).unwrap_err().to_string();
+        assert!(overflow.contains("does not fit the store's integer column"), "{overflow}");
+        assert_eq!(store.outbox_results("landing_receipt", 1).unwrap().as_deref(), Some(batch.as_slice()));
+    }
+
+    #[test]
+    fn a_v18_store_keeps_outbox_bytes_and_gains_an_empty_results_sidecar() {
+        // Version 19 adds outbox_results empty. A schema-18 store already has
+        // the current journal column set (unchanged by 19) and outbox
+        // payload_schema; opening it must keep those bytes/stamps intact and
+        // invent no result rows.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v18-outbox.db").to_str().unwrap().to_owned();
+        let event = observe("v18-journal", 7);
+        let event_bytes = to_vec(&event).unwrap();
+        let decision_bytes = to_vec(&Decisions { outcome: Outcome::Duplicate, effects: Vec::new() }).unwrap();
+        let event_schema = EVENT.current_digest().as_bytes().as_slice().to_vec();
+        let decisions_schema_digest = DECISIONS.current_digest().as_bytes().as_slice().to_vec();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE journal (
+                 sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 idempotency_key TEXT NOT NULL UNIQUE,
+                 event           BLOB NOT NULL,
+                 decisions       BLOB,
+                 decider         TEXT,
+                 decisions_schema TEXT,
+                 recorded_unix_millis INTEGER,
+                 event_schema    BLOB,
+                 decisions_schema_digest BLOB
+             );
+             CREATE TABLE outbox (
+                 sequence  INTEGER PRIMARY KEY AUTOINCREMENT,
+                 topic     TEXT NOT NULL,
+                 payload   BLOB NOT NULL,
+                 delivered INTEGER NOT NULL DEFAULT 0,
+                 payload_schema TEXT
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO journal (idempotency_key, event, decisions, decider, decisions_schema, recorded_unix_millis, \
+             event_schema, decisions_schema_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                "v18-journal",
+                event_bytes,
+                decision_bytes,
+                "v18-build",
+                "aether.bloomery.decisions.v2",
+                1_700_000_000_000i64,
+                event_schema.as_slice(),
+                decisions_schema_digest.as_slice(),
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO outbox (topic, payload, delivered, payload_schema) VALUES (?1, ?2, 0, NULL)",
+            rusqlite::params!["landing_receipt", b"receipt-bytes"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO outbox (topic, payload, delivered, payload_schema) VALUES (?1, ?2, 1, ?3)",
+            rusqlite::params!["view_document", b"view-bytes", "aether.bloomery.view_document"],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA user_version = 18;").unwrap();
+        drop(conn);
+
+        let mut store = SqliteStore::open(&path).expect("a v18 store migrates");
+        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 19);
+        let journal = store.replay_journal().unwrap();
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].idempotency_key, "v18-journal");
+        assert_eq!(journal[0].event, event_bytes);
+        assert_eq!(journal[0].decisions, decision_bytes);
+        assert_eq!(journal[0].decider, "v18-build");
+        assert_eq!(journal[0].decisions_schema.as_deref(), Some("aether.bloomery.decisions.v2"));
+        assert_eq!(journal[0].recorded_unix_millis, Some(1_700_000_000_000));
+        assert_eq!(journal[0].event_schema.as_deref(), Some(event_schema.as_slice()));
+        assert_eq!(journal[0].decisions_schema_digest.as_deref(), Some(decisions_schema_digest.as_slice()));
+        let payload: Vec<u8> =
+            store.conn.query_row("SELECT payload FROM outbox WHERE sequence = 1", [], |row| row.get(0)).unwrap();
+        let delivered: i64 =
+            store.conn.query_row("SELECT delivered FROM outbox WHERE sequence = 1", [], |row| row.get(0)).unwrap();
+        let payload_schema: Option<String> =
+            store.conn.query_row("SELECT payload_schema FROM outbox WHERE sequence = 1", [], |row| row.get(0)).unwrap();
+        assert_eq!(payload, b"receipt-bytes");
+        assert_eq!(delivered, 0);
+        assert_eq!(payload_schema, None);
+        let payload: Vec<u8> =
+            store.conn.query_row("SELECT payload FROM outbox WHERE sequence = 2", [], |row| row.get(0)).unwrap();
+        let delivered: i64 =
+            store.conn.query_row("SELECT delivered FROM outbox WHERE sequence = 2", [], |row| row.get(0)).unwrap();
+        let payload_schema: Option<String> =
+            store.conn.query_row("SELECT payload_schema FROM outbox WHERE sequence = 2", [], |row| row.get(0)).unwrap();
+        assert_eq!(payload, b"view-bytes");
+        assert_eq!(delivered, 1);
+        assert_eq!(payload_schema.as_deref(), Some("aether.bloomery.view_document"));
+        let tables: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'outbox_results'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 1);
+        let sidecar: i64 = store.conn.query_row("SELECT count(*) FROM outbox_results", [], |row| row.get(0)).unwrap();
+        assert_eq!(sidecar, 0, "migration invents no results");
+        assert_eq!(store.outbox_results("landing_receipt", 1).unwrap(), None);
+        assert_eq!(store.outbox_results("view_document", 2).unwrap(), None);
+    }
+
+    #[test]
+    fn outbox_results_stamp_the_current_event_schema_and_refuse_unknown_or_corrupt_rows() {
+        let mut store = memory();
+        assert_eq!(store.enqueue_outbox("landing_receipt", b"one", None).unwrap(), 1);
+        assert_eq!(store.enqueue_outbox("landing_receipt", b"two", None).unwrap(), 2);
+        let events = [observe("obs-1", 1), observe("obs-2", 2)];
+        store.record_outbox_results("landing_receipt", 1, &events).unwrap();
+        store.record_outbox_results("landing_receipt", 2, &[observe("obs-3", 3)]).unwrap();
+
+        let stored: Vec<u8> = store
+            .conn
+            .query_row("SELECT event FROM outbox_results WHERE sequence = 1 AND ordinal = 0", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, to_vec(&events[0]).unwrap(), "the sidecar stores canonical Event bytes");
+        let schemas: Vec<Vec<u8>> = {
+            let mut stmt = store
+                .conn
+                .prepare("SELECT event_schema FROM outbox_results WHERE sequence = 1 ORDER BY ordinal")
+                .unwrap();
+            stmt.query_map([], |row| row.get(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        let current = EVENT.current_digest().as_bytes().as_slice().to_vec();
+        assert_eq!(schemas, vec![current.clone(), current], "every result row stamps EVENT.current_digest");
+
+        let unknown = Digest::from_bytes([0x11; 32]);
+        store
+            .conn
+            .execute(
+                "UPDATE outbox_results SET event_schema = ?1 WHERE sequence = 1",
+                rusqlite::params![unknown.as_bytes().as_slice()],
+            )
+            .unwrap();
+        let error = store.outbox_results("landing_receipt", 1).unwrap_err().to_string();
+        assert!(error.contains(&format!("no migration from schema `{}`", unknown.to_hex())), "{error}");
+        assert!(error.contains(&EVENT.current_digest().to_hex()), "{error}");
+        assert!(error.contains("for kind `event`"), "{error}");
+
+        store.conn.execute("UPDATE outbox_results SET event = x'00' WHERE sequence = 2", []).unwrap();
+        let error = store.outbox_results("landing_receipt", 2).unwrap_err().to_string();
+        assert!(error.contains("persisted value did not decode"), "{error}");
+    }
 }

@@ -60,9 +60,9 @@ use aether_math::{Rgb, Rgba};
 use aether_render::QuadBlend;
 use aether_render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured,
-    DrawScreenTriangles, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect,
-    MaterialTexturedRect, ScreenTriangle, ScreenVertex, SolidQuad, TextureFormat, TextureSampling, TextureUsage,
-    TexturedQuad, UpdateTexture, Vertex, WHITE_TEXTURE_ID,
+    DrawScreenTriangles, DrawShapes, DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect,
+    MaterialTexturedRect, ScreenTriangle, ScreenVertex, Shape, TextureFormat, TextureSampling, TextureUsage,
+    TexturedQuad, UpdateTexture, Vertex,
 };
 use aether_substrate::render as substrate_render;
 use aether_substrate::render::{QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD};
@@ -176,6 +176,23 @@ fn require_wgpu_only() -> bool {
 /// that stages ordinary color pixels uses.
 fn sampled_linear(width: u32, height: u32, format: TextureFormat, pixels: Vec<u8>) -> CreateTexture {
     CreateTexture { width, height, format, sampling: TextureSampling::Linear, usage: TextureUsage::Sampled, pixels }
+}
+
+/// An opaque white rectangle with square corners — the flat fill these
+/// scenarios paint as known content, and what a radius-zero `Shape` with
+/// only a fill is (ADR-0213).
+fn flat_shape(x: f32, y: f32, width: f32, height: f32) -> Shape {
+    Shape {
+        x,
+        y,
+        width,
+        height,
+        corner_radius: 0.0,
+        fill: Some(Rgba::new(1.0, 1.0, 1.0, 1.0)),
+        stroke: None,
+        shadow: None,
+        texture: None,
+    }
 }
 
 /// `capture_frame` round-trip with non-empty mail bundles. The
@@ -482,41 +499,11 @@ fn create_observation_texture(harness: &mut SubstrateHarness) -> u32 {
     }
 }
 
-fn assert_committed_overlay_snapshot(
-    snapshot: &[DrawTexturedQuads],
-    texture_id: u32,
-    solid_clip: ClipRect,
-    solid_quad: &SolidQuad,
-    textured_space: &QuadSpace,
-    textured_clip: ClipRect,
-    textured_quad: TexturedQuad,
-) {
-    assert_eq!(snapshot.len(), 2);
-    assert_eq!(snapshot[0].texture_id, WHITE_TEXTURE_ID);
-    assert_eq!(snapshot[0].space, QuadSpace::Screen);
-    assert_eq!(snapshot[0].clip, Some(solid_clip));
-    assert_eq!(snapshot[0].quads.len(), 1);
-    assert_eq!(snapshot[0].quads[0].x, solid_quad.x);
-    assert_eq!(snapshot[0].quads[0].y, solid_quad.y);
-    assert_eq!(snapshot[0].quads[0].width, solid_quad.width);
-    assert_eq!(snapshot[0].quads[0].height, solid_quad.height);
-    assert_eq!(snapshot[0].quads[0].u0, 0.0);
-    assert_eq!(snapshot[0].quads[0].v0, 0.0);
-    assert_eq!(snapshot[0].quads[0].u1, 1.0);
-    assert_eq!(snapshot[0].quads[0].v1, 1.0);
-    assert_eq!(snapshot[0].quads[0].tint, solid_quad.color);
-
-    assert_eq!(snapshot[1].texture_id, texture_id);
-    assert_eq!(&snapshot[1].space, textured_space);
-    assert_eq!(snapshot[1].clip, Some(textured_clip));
-    assert_eq!(snapshot[1].quads, vec![textured_quad]);
-}
-
-/// Typed overlay observations expose the exact normalized batches the
-/// committed frame draws: a solid batch becomes a textured batch over the
-/// reserved white texture, a following textured batch keeps its own texture,
-/// and order, spaces, clips, geometry, UVs, and tints all survive. An idle
-/// capture replays that cache, while the next empty advance clears it.
+/// Typed overlay observations expose the exact batches the committed frame
+/// draws: order, spaces, clips, geometry, UVs, and tints all survive, and a
+/// `World` batch keeps its anchor and scale rather than being flattened to
+/// screen. An idle capture replays that cache, while the next empty advance
+/// clears it.
 #[test]
 fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
     if !require_wgpu_only() {
@@ -525,12 +512,22 @@ fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
     let texture_id = create_observation_texture(&mut harness);
 
-    let solid_clip = ClipRect { x: 2.0, y: 3.0, width: 20.0, height: 15.0 };
-    let solid_quad = SolidQuad { x: 4.0, y: 5.0, width: 6.0, height: 7.0, color: Rgba::new(0.9, 0.2, 0.3, 0.8) };
-    let textured_space =
+    let screen_clip = ClipRect { x: 2.0, y: 3.0, width: 20.0, height: 15.0 };
+    let screen_quad = TexturedQuad {
+        x: 4.0,
+        y: 5.0,
+        width: 6.0,
+        height: 7.0,
+        u0: 0.0,
+        v0: 0.0,
+        u1: 1.0,
+        v1: 1.0,
+        tint: Rgba::new(0.9, 0.2, 0.3, 0.8),
+    };
+    let world_space =
         QuadSpace::World { anchor: [0.25, -0.5, 0.75], scale: QuadScale::Distance { reference_distance: 4.0 } };
-    let textured_clip = ClipRect { x: 10.0, y: 11.0, width: 30.0, height: 25.0 };
-    let textured_quad = TexturedQuad {
+    let world_clip = ClipRect { x: 10.0, y: 11.0, width: 30.0, height: 25.0 };
+    let world_quad = TexturedQuad {
         x: -8.0,
         y: -9.0,
         width: 12.0,
@@ -544,20 +541,22 @@ fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
     let submissions = vec![
         envelope(
             "aether.render",
-            &DrawSolidQuads {
+            &DrawTexturedQuads {
+                texture_id,
+                blend: QuadBlend::Straight,
                 space: QuadSpace::Screen,
-                clip: Some(solid_clip.clone()),
-                quads: vec![solid_quad.clone()],
+                clip: Some(screen_clip.clone()),
+                quads: vec![screen_quad.clone()],
             },
         ),
         envelope(
             "aether.render",
             &DrawTexturedQuads {
                 texture_id,
-                blend: QuadBlend::Straight,
-                space: textured_space.clone(),
-                clip: Some(textured_clip.clone()),
-                quads: vec![textured_quad.clone()],
+                blend: QuadBlend::Premultiplied,
+                space: world_space.clone(),
+                clip: Some(world_clip.clone()),
+                quads: vec![world_quad.clone()],
             },
         ),
     ];
@@ -566,15 +565,17 @@ fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
         .execute(vec![("commit", HarnessOp::capture_with_mails(submissions, vec![]))])
         .expect("commit overlay submissions through capture");
     let snapshot = harness.committed_overlay_snapshot();
-    assert_committed_overlay_snapshot(
-        &snapshot,
-        texture_id,
-        solid_clip,
-        &solid_quad,
-        &textured_space,
-        textured_clip,
-        textured_quad,
-    );
+    assert_eq!(snapshot.len(), 2);
+    assert_eq!(snapshot[0].texture_id, texture_id);
+    assert_eq!(snapshot[0].space, QuadSpace::Screen);
+    assert_eq!(snapshot[0].blend, QuadBlend::Straight);
+    assert_eq!(snapshot[0].clip, Some(screen_clip));
+    assert_eq!(snapshot[0].quads, vec![screen_quad]);
+    assert_eq!(snapshot[1].texture_id, texture_id);
+    assert_eq!(snapshot[1].space, world_space);
+    assert_eq!(snapshot[1].blend, QuadBlend::Premultiplied);
+    assert_eq!(snapshot[1].clip, Some(world_clip));
+    assert_eq!(snapshot[1].quads, vec![world_quad]);
 
     harness.execute(vec![("replay", HarnessOp::capture())]).expect("idle capture replays committed overlays");
     assert_eq!(harness.committed_overlay_snapshot().len(), 2);
@@ -1227,16 +1228,17 @@ fn coverage_material_warn_drops_non_r8_texture() {
     assert!(drawn < 0.01, "coverage draw against RGBA8 should be warn-dropped, but lit coverage was {drawn}");
 }
 
-/// ADR-0107 §4 flat-fill primitive: a `draw_solid_quads` batch draws an
-/// opaque screen-space rect in the overlay pass without a caller-created
-/// texture. The test dispatches a single `SolidQuad` covering a known
+/// ADR-0213 flat-fill primitive: a radius-zero `draw_shapes` batch draws
+/// an opaque screen-space rect in the overlay pass without a
+/// caller-created texture — the draw the retired `draw_solid_quads` used
+/// to make. The test dispatches a single filled `Shape` covering a known
 /// pixel rect and asserts `coverage > 0` and `centroid` inside the rect.
-/// A second capture after an advance with no resent quads asserts the
+/// A second capture after an advance with no resent shapes asserts the
 /// immediate-mode clear — exactly the same contract as
 /// `textured_quad_draws_screen_space_rect`.
 #[test]
 #[allow(clippy::cast_precision_loss)]
-fn solid_quad_draws_screen_space_rect() {
+fn a_flat_shape_draws_a_screen_space_rect_and_clears_when_it_stops() {
     if !require_wgpu_only() {
         return;
     }
@@ -1247,17 +1249,7 @@ fn solid_quad_draws_screen_space_rect() {
     let (quad_x, quad_y, quad_w, quad_h) = (16.0f32, 12.0f32, 24.0f32, 18.0f32);
     let pre = vec![envelope(
         "aether.render",
-        &DrawSolidQuads {
-            space: QuadSpace::Screen,
-            clip: None,
-            quads: vec![SolidQuad {
-                x: quad_x,
-                y: quad_y,
-                width: quad_w,
-                height: quad_h,
-                color: Rgba::new(1.0, 1.0, 1.0, 1.0),
-            }],
-        },
+        &DrawShapes { space: QuadSpace::Screen, clip: None, shapes: vec![flat_shape(quad_x, quad_y, quad_w, quad_h)] },
     )];
 
     let captured =
@@ -1271,7 +1263,7 @@ fn solid_quad_draws_screen_space_rect() {
     let drawn = coverage(&img, bg, tolerance);
     assert!(
         (0.08..0.22).contains(&drawn),
-        "solid quad coverage {drawn} fell outside the expected band (0.08, 0.22); \
+        "flat shape coverage {drawn} fell outside the expected band (0.08, 0.22); \
          the captured frame is effectively empty or entirely filled",
     );
 
@@ -1280,7 +1272,7 @@ fn solid_quad_draws_screen_space_rect() {
     let pad = 4.0f32;
     assert!(
         cx >= quad_x - pad && cx <= quad_x + quad_w + pad && cy >= quad_y - pad && cy <= quad_y + quad_h + pad,
-        "solid quad centroid ({cx}, {cy}) should sit inside the screen rect \
+        "flat shape centroid ({cx}, {cy}) should sit inside the screen rect \
          ({quad_x},{quad_y})+({quad_w}x{quad_h}) of the {frame_width}x{frame_height} frame",
     );
 
@@ -1293,57 +1285,13 @@ fn solid_quad_draws_screen_space_rect() {
     let cleared_coverage = coverage(&img2, background_top_left(&img2), tolerance);
     assert!(
         cleared_coverage < 0.01,
-        "after the solid quad stopped being sent the frame should be uniform clear color, \
+        "after the flat shape stopped being sent the frame should be uniform clear color, \
          but coverage was {cleared_coverage} (immediate-mode clear did not run)",
     );
 }
 
-/// Issue #2855: a per-batch clip rect becomes a GPU scissor. A clipped
-/// solid batch can only light pixels inside the clip, and the following
-/// unclipped batch resets to the full framebuffer instead of inheriting
-/// the prior scissor.
-#[test]
-fn solid_quad_clip_bounds_pixels_and_does_not_leak() {
-    if !require_wgpu_only() {
-        return;
-    }
-    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
-    let clipped = envelope(
-        "aether.render",
-        &DrawSolidQuads {
-            space: QuadSpace::Screen,
-            clip: Some(ClipRect { x: 20.0, y: 12.0, width: 12.0, height: 10.0 }),
-            quads: vec![SolidQuad { x: 10.0, y: 8.0, width: 44.0, height: 30.0, color: Rgba::new(1.0, 0.0, 0.0, 1.0) }],
-        },
-    );
-    let unclipped = envelope(
-        "aether.render",
-        &DrawSolidQuads {
-            space: QuadSpace::Screen,
-            clip: None,
-            quads: vec![SolidQuad { x: 44.0, y: 30.0, width: 8.0, height: 8.0, color: Rgba::new(0.0, 1.0, 0.0, 1.0) }],
-        },
-    );
-
-    let captured = harness
-        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![clipped, unclipped], vec![]))])
-        .expect("capture clipped solid quads");
-    let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode clipped solid png");
-    let bg = background_top_left(&img);
-    let tolerance = 5;
-    assert!(pixel_is_lit(&img, 24, 16, bg, tolerance), "pixel inside the solid clip rect should be painted");
-    assert!(
-        !pixel_is_lit(&img, 16, 16, bg, tolerance),
-        "pixel inside the solid quad but outside the clip rect should remain clear",
-    );
-    assert!(
-        pixel_is_lit(&img, 48, 34, bg, tolerance),
-        "following unclipped batch should paint outside the previous clip rect",
-    );
-}
-
 /// Issue #2855: user-textured quad batches carry the same per-call
-/// framebuffer clip as solid batches.
+/// framebuffer clip a shape batch does.
 #[test]
 fn textured_quad_clip_bounds_pixels() {
     if !require_wgpu_only() {
@@ -1439,7 +1387,11 @@ fn capture_diamond(width: u32, height: u32, center: (f32, f32), radius: f32) -> 
     let mut harness = SubstrateHarness::builder().size(width, height).with_render().build().expect("boot");
     let draw = envelope(
         "aether.render",
-        &DrawScreenTriangles { clip: None, triangles: diamond(center, radius, Rgba::new(1.0, 1.0, 1.0, 1.0)) },
+        &DrawScreenTriangles {
+            space: QuadSpace::Screen,
+            clip: None,
+            triangles: diamond(center, radius, Rgba::new(1.0, 1.0, 1.0, 1.0)),
+        },
     );
 
     let captured =
@@ -1488,6 +1440,7 @@ fn screen_triangle_clip_bounds_pixels() {
     let draw = envelope(
         "aether.render",
         &DrawScreenTriangles {
+            space: QuadSpace::Screen,
             clip: Some(ClipRect { x: 24.0, y: 16.0, width: 16.0, height: 16.0 }),
             triangles: diamond((32.0, 24.0), 20.0, Rgba::new(1.0, 1.0, 1.0, 1.0)),
         },
@@ -1530,17 +1483,7 @@ fn capture_frame_checks_return_substrate_verdict() {
     let (quad_x, quad_y, quad_w, quad_h) = (16.0f32, 12.0f32, 24.0f32, 18.0f32);
     let draw = envelope(
         "aether.render",
-        &DrawSolidQuads {
-            space: QuadSpace::Screen,
-            clip: None,
-            quads: vec![SolidQuad {
-                x: quad_x,
-                y: quad_y,
-                width: quad_w,
-                height: quad_h,
-                color: Rgba::new(1.0, 1.0, 1.0, 1.0),
-            }],
-        },
+        &DrawShapes { space: QuadSpace::Screen, clip: None, shapes: vec![flat_shape(quad_x, quad_y, quad_w, quad_h)] },
     );
     let tolerance = 5u8;
     let mk_check = |reduction| FrameCheck {
@@ -1717,24 +1660,12 @@ fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
     let (second_x, second_y, second_w, second_h) = (40.0f32, 4.0f32, 12.0f32, 12.0f32);
     let draw = envelope(
         "aether.render",
-        &DrawSolidQuads {
+        &DrawShapes {
             space: QuadSpace::Screen,
             clip: None,
-            quads: vec![
-                SolidQuad {
-                    x: first_x,
-                    y: first_y,
-                    width: first_w,
-                    height: first_h,
-                    color: Rgba::new(1.0, 1.0, 1.0, 1.0),
-                },
-                SolidQuad {
-                    x: second_x,
-                    y: second_y,
-                    width: second_w,
-                    height: second_h,
-                    color: Rgba::new(1.0, 1.0, 1.0, 1.0),
-                },
+            shapes: vec![
+                flat_shape(first_x, first_y, first_w, first_h),
+                flat_shape(second_x, second_y, second_w, second_h),
             ],
         },
     );
@@ -1864,17 +1795,7 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
     let (quad_x, quad_y, quad_w, quad_h) = (16.0f32, 12.0f32, 24.0f32, 18.0f32);
     let draw = envelope(
         "aether.render",
-        &DrawSolidQuads {
-            space: QuadSpace::Screen,
-            clip: None,
-            quads: vec![SolidQuad {
-                x: quad_x,
-                y: quad_y,
-                width: quad_w,
-                height: quad_h,
-                color: Rgba::new(1.0, 1.0, 1.0, 1.0),
-            }],
-        },
+        &DrawShapes { space: QuadSpace::Screen, clip: None, shapes: vec![flat_shape(quad_x, quad_y, quad_w, quad_h)] },
     );
     let tolerance = 5u8;
     let mk_check = |reduction| FrameCheck { reduction, tolerance, background: None, region: None };
@@ -2106,17 +2027,7 @@ fn writable_texture_realizes_cleared_and_samples_transparent() {
         ),
         envelope(
             "aether.render",
-            &DrawSolidQuads {
-                space: QuadSpace::Screen,
-                clip: None,
-                quads: vec![SolidQuad {
-                    x: 2.0,
-                    y: 2.0,
-                    width: 5.0,
-                    height: 5.0,
-                    color: Rgba::new(1.0, 1.0, 1.0, 1.0),
-                }],
-            },
+            &DrawShapes { space: QuadSpace::Screen, clip: None, shapes: vec![flat_shape(2.0, 2.0, 5.0, 5.0)] },
         ),
     ];
     let captured =

@@ -29,6 +29,7 @@ use tracing::{Event as TracingEvent, Metadata, Subscriber};
 use super::{
     Admission, AdmitDecision, AdmitSink, DispatchError, DispatchRecord, EvidenceClaims, IntakeRefusal,
     UploadedEvidence, admit_uploaded, dispatch_and_record, dispatch_nonce, record_dispatch, run_intake_cycle,
+    run_intake_cycle_now,
 };
 use crate::bloomery::open_scope_run;
 use crate::bloomery::{
@@ -810,12 +811,18 @@ fn a_pending_handle_is_reported_and_neither_completed_nor_admitted() {
     let claims = SeededClaims(HashMap::new());
     let mut sink = Collector::default();
 
-    let report = run_intake_cycle(&mut store, &shell, &[handle], &claims, None, &mut sink).unwrap();
+    let mut now = [NOW_UNIX_MILLIS, NOW_UNIX_MILLIS + 1].into_iter();
+    let report = run_intake_cycle_now(&mut store, &shell, &[handle], &claims, None, &mut sink, || {
+        now.next().expect("one inspect reads start then end")
+    })
+    .unwrap();
+    assert!(now.next().is_none(), "one inspect reads the clock exactly twice");
     assert_eq!((report.completed, report.admitted, report.refused), (0, 0, 0));
-    assert_eq!(
-        report.pending,
-        vec![(Nonce("n-pending".to_owned()), ExecutionStatus::Running { last_progress_unix_millis: None })],
-    );
+    assert_eq!(report.pending.len(), 1);
+    assert_eq!(report.pending[0].nonce, Nonce("n-pending".to_owned()));
+    assert_eq!(report.pending[0].status, ExecutionStatus::Running { last_progress_unix_millis: None },);
+    assert_eq!(report.pending[0].observed_from_unix_millis, NOW_UNIX_MILLIS);
+    assert_eq!(report.pending[0].observed_until_unix_millis, NOW_UNIX_MILLIS + 1);
     assert!(sink.0.is_empty());
 }
 

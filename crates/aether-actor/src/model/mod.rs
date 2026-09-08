@@ -370,20 +370,17 @@ pub trait Lifecycle<S> {
 /// …), since no default-named instance exists.
 ///
 /// The rendered address itself — `LoadResult.name`, e.g.
-/// `aether.component/aether.embedded:NAME` — is a path of nodes, so it
-/// belongs only to the string surfaces that parse one
-/// (`mailbox_id_from_path`: the registry's name lookup, the MCP
-/// `recipient_name` surface). Handing it to `ctx.send_to_named(name, …)`
-/// misses, because that flat escape hatch hashes its argument as one root
-/// name (`mailbox_id_from_name`): a `/` trips that hasher's debug assertion,
-/// and a release build resolves an id nothing registered, so the mail routes
-/// cleanly and drops. `ctx.resolve_actor::<R>(key)` is different: it is a
-/// typed keyed route available only to [`Instanced`] actors, and delegates
-/// the key plus the resolver-selected current / root / parent scope to
-/// `R::resolve`. The id beside a rendered name (`LoadResult.mailbox_id`) has
-/// no such ambiguity: a caller already holding one sends to it directly,
-/// through the guest's `ctx.send_to(id, &mail)` or the native
-/// `ctx.actor_at::<R>(id)`.
+/// `aether.component/aether.embedded:NAME` — is a path of nodes, and every
+/// string surface resolves one the same way (`mailbox_id_from_path`: the
+/// registry's name lookup, the MCP `recipient_name` surface, and
+/// `ctx.send_to_named(name, …)`), so handing a rendered address to the
+/// runtime-name escape hatch routes. `ctx.resolve_actor::<R>(key)` is
+/// different: it is a typed keyed route available only to [`Instanced`]
+/// actors, and delegates the key plus the resolver-selected current / root /
+/// parent scope to `R::resolve`. The id beside a rendered name
+/// (`LoadResult.mailbox_id`) skips resolution entirely: a caller already
+/// holding one sends to it directly, through the guest's
+/// `ctx.send_to(id, &mail)` or the native `ctx.actor_at::<R>(id)`.
 ///
 /// Mutually exclusive with [`Instanced`] at the type level: an actor is
 /// either one-of-a-kind within a scope (singleton) or N-instances under
@@ -555,6 +552,40 @@ pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
 /// wants them; the default macro emission is strict so wire bytes stay
 /// obvious.
 pub trait HandlesKind<K: Kind>: Addressable {}
+
+/// Per-published-kind marker: `P: Publishes<K>` means actor `P` is a
+/// source of kind `K` — it fans `K` out to whoever subscribed to it.
+/// The send-side mirror of [`HandlesKind`]: that marker says "this
+/// actor accepts `K` as mail," this one says "this actor emits `K` to
+/// its subscribers."
+///
+/// Gates the `subscribe` / `unsubscribe` families on the publisher's own
+/// sender facade, so a subscription to a kind the cap never emits is an
+/// `E0277` at the `wire` call site rather than a stored row that never
+/// fires. Subscribing the wrong cap is otherwise silent end to end: the
+/// row is accepted, the event is dropped at its source for want of a
+/// matching subscriber, and the component simply looks dead.
+///
+/// Unlike [`HandlesKind`], which the `#[actor]` macro emits from the
+/// handler list, these impls are written by hand in the publishing cap's
+/// crate. A cap's published vocabulary belongs to the *mailbox*, not to
+/// any one runtime behind it: `aether.window` is claimed by a headless,
+/// a desktop, and a synthetic implementation, and only the neutral
+/// identity that callers address is the right place to state what the
+/// mailbox emits.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not publish `{K}`",
+    label = "subscribing here would store a row that never fires",
+    note = "an event with no matching subscriber is dropped at its source, so a subscription on the wrong \
+            capability fails silently at run time — it is refused here instead",
+    note = "frame-lifecycle stages (`Tick`, `Render`, `Present`, `InitCaps`, `InitComponents`, `Shutdown`) come \
+            from `LifecycleCapability`: `ctx.actor::<LifecycleCapability>().subscribe::<Tick>()`",
+    note = "window device events (`Key`, `KeyRelease`, `MouseMove`, `MouseButton`, `MouseButtonRelease`, \
+            `MouseWheel`, `WindowSize`, `TextInput`, `ImePreedit`, `Modifiers`) and window lifecycle \
+            (`WindowOpened`, `WindowClosed`, `WindowMenuActivated`) come from `WindowCapability`: \
+            `ctx.actor::<WindowCapability>().subscribe::<Key>(WindowSelector::All)`"
+)]
+pub trait Publishes<K: Kind>: Addressable {}
 
 /// A complete actor: an addressable identity ([`Addressable`]) that also
 /// carries a boot lifecycle ([`Lifecycle<S>`](Lifecycle)) over a runtime

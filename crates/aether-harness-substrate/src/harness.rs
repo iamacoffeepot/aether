@@ -42,21 +42,21 @@ use aether_trace::walk::TreeWalk;
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape).
 use crate::poll_config::PollConfig;
 use crate::pump_stats::PumpStats;
-use crate::settlement_config::SettlementConfig;
 use aether_actor::{Addressable, Root};
 use aether_fs::NamespaceRoots;
-use aether_substrate::config::ConfigMember;
+use aether_substrate::config::{ConfigMember, SettlementConfig};
 use aether_substrate::{
     EgressEvent, HubOutbound, Mailer, NativeActor, PassiveChassis, RecordingBackend, RingCapacities, SchedulerTuning,
     Source, SourceAddr, SubstrateBoot,
     mail::{CapabilityRegistry, CostTable, Mail, MailId, MailboxId},
 };
+use aether_substrate_harness_cap::SubstrateHarnessCapability;
 
 use super::chassis::{
     ComposeFn, FrameHook, RenderHookWiring, SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv,
     WORKERS,
 };
-use super::events::{ChassisEvent, EventReceiver, channel as event_channel};
+use aether_substrate_harness_cap::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use std::error;
 use std::thread;
 
@@ -1166,9 +1166,10 @@ impl SubstrateHarness {
         // (`SubstrateHarnessCapability`).
         self.push_to_mailbox(
             // Harness route to the harness's own `SubstrateHarnessCapability` mailbox by
-            // its well-known name — ctx-less driver-side push, no resolver here.
+            // its well-known name — ctx-less driver-side push, no resolver here. The name
+            // comes off the cap type itself, so the two cannot drift.
             #[allow(clippy::disallowed_methods)]
-            aether_data::mailbox_id_from_name("aether.substrate_harness"),
+            aether_data::mailbox_id_from_name(<SubstrateHarnessCapability as Addressable>::NAMESPACE),
             &Advance { ticks, delta_micros },
             cid,
         );

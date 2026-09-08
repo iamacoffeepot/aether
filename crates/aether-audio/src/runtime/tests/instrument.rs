@@ -324,11 +324,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
     AudioCapability::on_read_result(
         &mut cap,
         &mut read_ctx,
-        ReadResult::Ok {
-            namespace: "assets".to_owned(),
-            path: "piano/bank.sfz".to_owned(),
-            bytes: sfz.as_bytes().to_vec(),
-        },
+        ReadResult::Ok { addr: NamespaceAddr::new("assets", "piano/bank.sfz"), bytes: sfz.as_bytes().to_vec() },
     );
     assert_eq!(cap.assemblies.len(), 1, "assembly not parked");
     let c4_correlation = assert_next_send_kind::<Read>(&transport, &rx);
@@ -340,7 +336,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
     AudioCapability::on_read_result(
         &mut cap,
         &mut c4_ctx,
-        ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/c4.wav".to_owned(), bytes: wav.clone() },
+        ReadResult::Ok { addr: NamespaceAddr::new("assets", "piano/c4.wav"), bytes: wav.clone() },
     );
     // One sample still missing — no dispatch yet.
     assert_eq!(cap.assemblies.len(), 1, "assembly dispatched too early");
@@ -348,7 +344,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
     AudioCapability::on_read_result(
         &mut cap,
         &mut c5_ctx,
-        ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/c5.wav".to_owned(), bytes: wav },
+        ReadResult::Ok { addr: NamespaceAddr::new("assets", "piano/c5.wav"), bytes: wav },
     );
     // The last sample triggers the assembly dispatch off-thread.
     drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
@@ -408,7 +404,7 @@ fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut first_sfz_ctx,
-        ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/bank_a.sfz".to_owned(), bytes: sfz.to_vec() },
+        ReadResult::Ok { addr: NamespaceAddr::new("assets", "piano/bank_a.sfz"), bytes: sfz.to_vec() },
     );
     let first_sample_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
@@ -416,7 +412,7 @@ fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut second_sfz_ctx,
-        ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/bank_b.sfz".to_owned(), bytes: sfz.to_vec() },
+        ReadResult::Ok { addr: NamespaceAddr::new("assets", "piano/bank_b.sfz"), bytes: sfz.to_vec() },
     );
     let second_sample_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
@@ -425,7 +421,7 @@ fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut second_sample_ctx,
-        ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/shared.wav".to_owned(), bytes: wav.clone() },
+        ReadResult::Ok { addr: NamespaceAddr::new("assets", "piano/shared.wav"), bytes: wav.clone() },
     );
     drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
     let (session, reply) = decode_session_reply_with_session::<LoadInstrumentResult>(&rx);
@@ -439,7 +435,7 @@ fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut first_sample_ctx,
-        ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/shared.wav".to_owned(), bytes: wav },
+        ReadResult::Ok { addr: NamespaceAddr::new("assets", "piano/shared.wav"), bytes: wav },
     );
     drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
     let (session, reply) = decode_session_reply_with_session::<LoadInstrumentResult>(&rx);
@@ -495,8 +491,7 @@ fn interleaved_track_and_instrument_reads_demux_by_request_context() {
         &mut cap,
         &mut sfz_ctx,
         ReadResult::Ok {
-            namespace: "assets".to_owned(),
-            path: "piano/bank.sfz".to_owned(),
+            addr: NamespaceAddr::new("assets", "piano/bank.sfz"),
             bytes: b"<region>\nsample=shared.wav pitch_keycenter=60\n".to_vec(),
         },
     );
@@ -507,7 +502,7 @@ fn interleaved_track_and_instrument_reads_demux_by_request_context() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut sample_ctx,
-        ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/shared.wav".to_owned(), bytes: wav.clone() },
+        ReadResult::Ok { addr: NamespaceAddr::new("assets", "piano/shared.wav"), bytes: wav.clone() },
     );
     drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
     let (session, reply) = decode_session_reply_with_session::<LoadInstrumentResult>(&rx);
@@ -518,7 +513,7 @@ fn interleaved_track_and_instrument_reads_demux_by_request_context() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut track_read_ctx,
-        ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/shared.wav".to_owned(), bytes: wav },
+        ReadResult::Ok { addr: NamespaceAddr::new("assets", "piano/shared.wav"), bytes: wav },
     );
     drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
     let (session, reply) = decode_session_reply_with_session::<PlayTrackResult>(&rx);
@@ -551,11 +546,7 @@ fn load_instrument_missing_sample_replies_err() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut sfz_ctx,
-        ReadResult::Ok {
-            namespace: "assets".to_owned(),
-            path: "bank.sfz".to_owned(),
-            bytes: b"<region>\nsample=c4.wav\n".to_vec(),
-        },
+        ReadResult::Ok { addr: NamespaceAddr::new("assets", "bank.sfz"), bytes: b"<region>\nsample=c4.wav\n".to_vec() },
     );
     let sample_correlation = assert_next_send_kind::<Read>(&transport, &rx);
     // The bank's only sample fails to read — the whole load fails.
@@ -563,7 +554,7 @@ fn load_instrument_missing_sample_replies_err() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut sample_ctx,
-        ReadResult::Err { namespace: "assets".to_owned(), path: "c4.wav".to_owned(), error: FsError::NotFound },
+        ReadResult::Err { addr: NamespaceAddr::new("assets", "c4.wav"), error: FsError::NotFound },
     );
     match decode_session_reply::<LoadInstrumentResult>(&rx) {
         LoadInstrumentResult::Err { error, .. } => {
@@ -593,8 +584,7 @@ fn load_instrument_malformed_sfz_replies_err() {
         &mut cap,
         &mut sfz_ctx,
         ReadResult::Ok {
-            namespace: "assets".to_owned(),
-            path: "bank.sfz".to_owned(),
+            addr: NamespaceAddr::new("assets", "bank.sfz"),
             bytes: b"<control>\ndefault_path=x/\n".to_vec(),
         },
     );

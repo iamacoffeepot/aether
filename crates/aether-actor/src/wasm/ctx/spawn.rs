@@ -5,12 +5,12 @@
 
 use aether_data::{Kind, MailboxId, mailbox_id_from_name};
 
-use super::{NO_INBOUND_SOURCE, WasmCtx, WasmInitCtx};
+use super::{InlineChild, NO_INBOUND_SOURCE, WasmCtx, WasmInitCtx};
 use crate::model::ctx::reply_mode::{Manual, ReplyMode};
 use crate::model::{Addressable, ChildOf, Instanced, NamespaceError, Subname, validate_namespace_segment};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
-use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor};
+use crate::wasm::{ActorInitError, ErasedWasmActor, ModuleChild, WasmActor};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -150,7 +150,17 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// can exist beneath distinct parents in one component cluster. The same
     /// executing id is recorded as the child's logical parent for relative
     /// addressing and replacement reconstruction.
-    pub fn spawn_inline_child<P, C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<MailboxId, SpawnError>
+    ///
+    /// What comes back is an [`InlineChild<C>`] rather than a bare
+    /// [`MailboxId`]: the call already names `C`, so the handle keeps it and
+    /// [`InlineChild::send`] checks every subsequent send against `C`'s
+    /// handler set. [`InlineChild::id`] reads the alias out for a by-id
+    /// surface (`despawn_inline_child`, a slot table keyed on `MailboxId`).
+    pub fn spawn_inline_child<P, C>(
+        &self,
+        subname: Subname<'_>,
+        config: &C::Config,
+    ) -> Result<InlineChild<C>, SpawnError>
     where
         P: WasmActor,
         // `ErasedWasmActor` is the boxing seam every `#[actor]` type emits
@@ -163,6 +173,56 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         <C as WasmActor>::State: ErasedWasmActor,
     {
         self.validate_spawn_parent::<P>()?;
+        self.install_inline::<C>(subname, config)
+    }
+
+    /// ADR-0114: spawn an **inline child** naming only the child type — the
+    /// spelling every module-composable child wants, and the wasm analogue of
+    /// the native `ctx.spawn_child::<C>` that already reads its parent from
+    /// the ctx.
+    ///
+    /// [`Self::spawn_inline_child`] additionally takes the spawning actor's
+    /// own type as `P` and validates it against the ctx at run time, which the
+    /// ctx already knows: `P` carries no information the call needs (the kit
+    /// wrote `::<Self, Self>`), cannot be inferred — so a generic spawn helper
+    /// has to thread it through its own signature — and a wrong `P` copied
+    /// from a sibling actor compiles, then fails at run time as
+    /// [`SpawnError::ParentIdentityMismatch`] where a `.ok()` or a warn-log
+    /// leaves the child silently absent. `C: ModuleChild` — what
+    /// `#[actor(instanced, composable)]` emits — is exactly the declaration
+    /// that makes the parent type irrelevant: the child may sit beneath any
+    /// [`WasmActor`] parent its module exports.
+    ///
+    /// Keep [`Self::spawn_inline_child`] for the genuinely per-parent
+    /// `child_of(Parent)` edge, where the declared placement really does name
+    /// one parent and validating it against the ctx is the point.
+    ///
+    /// Everything else — subname resolution, alias allocation, the in-guest
+    /// `init`, registry insertion, the child's `wire` — is
+    /// [`Self::spawn_inline_child`]'s, and so is the returned
+    /// [`InlineChild<C>`]. A ctx whose mailbox identifies no actor still
+    /// returns [`SpawnError::ParentIdentityUnavailable`] before any host call:
+    /// the parent is read rather than named, not skipped.
+    pub fn spawn_inline<C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<InlineChild<C>, SpawnError>
+    where
+        // The erasure bounds are `spawn_inline_child`'s, for the same reason:
+        // the registry stores the child as `dyn ErasedWasmActor`. They stay
+        // explicit rather than folded into `ModuleChild`, which is a placement
+        // *permission* (ADR-0166) and should not also assert a boxing seam.
+        C: ModuleChild + ErasedWasmActor,
+        <C as WasmActor>::State: ErasedWasmActor,
+    {
+        self.spawn_parent()?;
+        self.install_inline::<C>(subname, config)
+    }
+
+    /// The spawn body both inline verbs share, entered once their differing
+    /// parent-identity check has passed.
+    fn install_inline<C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<InlineChild<C>, SpawnError>
+    where
+        C: Instanced + WasmActor + ErasedWasmActor,
+        <C as WasmActor>::State: ErasedWasmActor,
+    {
         let (is_counter, full_subname) = resolve_subname(subname)?;
         let alias = MailboxId(mail::spawn_inline_child_scoped(self.mailbox, is_counter, &full_subname));
         // Re-decode an owned `C::Config` for the in-guest `init` from the
@@ -181,13 +241,19 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         // The executing actor is both the scoped host fold seed and the
         // logical parent recorded for relative addressing and reconstruction.
         install_inline_child::<C>(self.inline, alias, type_tag, full_subname, is_counter, self.mailbox, bytes, owned)
+            .map(InlineChild::new)
+    }
+
+    /// The actor type this ctx is executing, per the registry — the logical
+    /// parent every spawn from here nests under.
+    fn spawn_parent(&self) -> Result<ActorTypeTag, SpawnError> {
+        self.inline
+            .actor_type_tag(MailboxId(self.mailbox))
+            .ok_or(SpawnError::ParentIdentityUnavailable(MailboxId(self.mailbox)))
     }
 
     fn validate_spawn_parent<P: WasmActor>(&self) -> Result<ActorTypeTag, SpawnError> {
-        let actual = self
-            .inline
-            .actor_type_tag(MailboxId(self.mailbox))
-            .ok_or(SpawnError::ParentIdentityUnavailable(MailboxId(self.mailbox)))?;
+        let actual = self.spawn_parent()?;
         let expected = ActorTypeTag::of::<P>();
         if actual != expected {
             return Err(SpawnError::ParentIdentityMismatch { expected, actual });
@@ -242,8 +308,8 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// ADR-0114: tear down an **inline child** spawned by
     /// [`Self::spawn_inline_child`]. Drops the child from this ctx's
     /// per-component [`Registry`] (running the child's `Drop`), so it
-    /// stops handling mail. `child` is the alias [`MailboxId`] that
-    /// `spawn_inline_child` returned (the registry key, the natural
+    /// stops handling mail. `child` is the alias [`MailboxId`] the spawn's
+    /// [`InlineChild::id`] reads out (the registry key, the natural
     /// handle). Returns `true` if a resident child was removed, `false` if
     /// the alias named no inline child — idempotent, so despawning an
     /// absent or already-gone alias is a clean `false`, not an error.

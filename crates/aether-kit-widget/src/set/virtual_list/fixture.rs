@@ -91,7 +91,9 @@ pub(super) fn row_text(widget: &VirtualListWidget) -> Vec<String> {
         .into_iter()
         .filter_map(|item| match item {
             WidgetDrawItem::Text { text, .. } => Some(text),
-            WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+            WidgetDrawItem::TexturedQuad { .. } | WidgetDrawItem::Shape { .. } | WidgetDrawItem::Triangle { .. } => {
+                None
+            }
         })
         .collect()
 }
@@ -105,7 +107,9 @@ pub(super) fn row_runs(widget: &VirtualListWidget) -> Vec<(String, Rgba)> {
         .into_iter()
         .filter_map(|item| match item {
             WidgetDrawItem::Text { text, color, .. } => Some((text, color)),
-            WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+            WidgetDrawItem::TexturedQuad { .. } | WidgetDrawItem::Shape { .. } | WidgetDrawItem::Triangle { .. } => {
+                None
+            }
         })
         .collect()
 }
@@ -118,19 +122,24 @@ pub(super) fn placed_runs(widget: &VirtualListWidget) -> Vec<(String, f32, f32, 
         .into_iter()
         .filter_map(|item| match item {
             WidgetDrawItem::Text { text, x, y, size_pixels, .. } => Some((text, x, y, size_pixels)),
-            WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+            WidgetDrawItem::TexturedQuad { .. } | WidgetDrawItem::Shape { .. } | WidgetDrawItem::Triangle { .. } => {
+                None
+            }
         })
         .collect()
 }
 
-/// Every quad one list draws: `(x, y, width, height, color)`.
+/// Every filled shape one list draws: `(x, y, width, height, color)`.
 pub(super) fn drawn_quads(widget: &VirtualListWidget) -> Vec<(f32, f32, f32, f32, Rgba)> {
     widget
         .draw_items()
         .into_iter()
         .filter_map(|item| match item {
-            WidgetDrawItem::Quad { x, y, width, height, color, .. } => Some((x, y, width, height, color)),
-            WidgetDrawItem::Text { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+            WidgetDrawItem::Shape { x, y, width, height, fill: Some(color), .. } => Some((x, y, width, height, color)),
+            WidgetDrawItem::Text { .. }
+            | WidgetDrawItem::TexturedQuad { .. }
+            | WidgetDrawItem::Shape { fill: None, .. }
+            | WidgetDrawItem::Triangle { .. } => None,
         })
         .collect()
 }
@@ -174,14 +183,16 @@ pub(super) fn drawn_runs(widget: &VirtualListWidget) -> Vec<(f32, String)> {
         .into_iter()
         .filter_map(|item| match item {
             WidgetDrawItem::Text { x, text, .. } => Some((x, text)),
-            WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+            WidgetDrawItem::TexturedQuad { .. } | WidgetDrawItem::Shape { .. } | WidgetDrawItem::Triangle { .. } => {
+                None
+            }
         })
         .collect()
 }
 
-/// A measured list whose every row carries the owner's pair of verbs —
-/// `[Change] [x]`, the second destructive — on a frame wide enough to hold
-/// a name beside them.
+/// A measured list whose every row carries a pair of verbs — `[Change] [×]`,
+/// the second destructive — on a frame wide enough to hold a name beside
+/// them.
 pub(super) fn actioned_list(item_count: usize, frame_width: f32) -> VirtualListWidget {
     let mut widget = measured_list(item_count, 5);
     widget.frame.width = frame_width;

@@ -56,7 +56,7 @@ fn create_reply(harness: &mut SubstrateHarness, label: &'static str, mail: &Crea
 fn created_id(harness: &mut SubstrateHarness, label: &'static str, mail: &CreateGeometry) -> u32 {
     match create_reply(harness, label, mail) {
         CreateGeometryResult::Ok { geometry_id } => geometry_id,
-        CreateGeometryResult::Err { reason } => panic!("create_geometry ({label}) failed: {reason}"),
+        CreateGeometryResult::Err { error } => panic!("create_geometry ({label}) failed: {error}"),
     }
 }
 
@@ -94,8 +94,8 @@ fn geometry_lifecycle_round_trips_over_mail() {
         &CreateGeometry { layout: position_layout(), vertices: vec![0u8; 35], indices: Vec::new() },
     );
     match rejected {
-        CreateGeometryResult::Err { reason } => {
-            assert!(reason.contains("stride"), "the off-stride create must name its class; got {reason}");
+        CreateGeometryResult::Err { error } => {
+            assert!(error.contains("stride"), "the off-stride create must name its class; got {error}");
         }
         CreateGeometryResult::Ok { geometry_id } => panic!("the off-stride create must reject; got id {geometry_id}"),
     }

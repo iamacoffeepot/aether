@@ -795,19 +795,23 @@ mod control_plane {
     }
 
     /// `aether.component.replace` — atomically rebind a target
-    /// mailbox id to a freshly instantiated component. ADR-0022: the
-    /// substrate freezes the target, drains in-flight mail through
-    /// the old instance, then swaps. If the drain exceeds
-    /// `drain_timeout_ms` (default 5000) the replace fails with
-    /// `ReplaceResult::Err` and the old instance stays bound. Kind
-    /// vocabulary rides in the wasm's `aether.kinds` custom section
-    /// (ADR-0028). Reply: `ReplaceResult`.
+    /// mailbox id to a freshly instantiated component. Post-ADR-0038 the
+    /// splice is structural: there is no drain phase and no drain
+    /// timeout. Kind vocabulary rides in the wasm's `aether.kinds`
+    /// custom section (ADR-0028). Reply: `ReplaceResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.component.replace")]
     pub struct ReplaceComponent {
         pub mailbox_id: aether_data::MailboxId,
         #[serde(with = "aether_data::bytes")]
         pub wasm: Vec<u8>,
+        /// Vestigial. ADR-0022 sized a drain phase this field capped;
+        /// ADR-0038 replaced that with a structural splice and no
+        /// substrate has read the field since. It survives only because
+        /// dropping it changes `aether.component.replace`'s schema, and
+        /// therefore its `KindId` — every sender pins it to `None` and
+        /// the MCP tool no longer exposes it (issue 5715). Remove it with
+        /// the next deliberate break of this kind.
         pub drain_timeout_ms: Option<u32>,
         /// ADR-0090 (issue 1257): optional init-config bytes for the
         /// replacement instance, threaded through to its typed `init`
@@ -1109,8 +1113,8 @@ mod control_plane {
 
     // ADR-0105 textured-quad render surface. The texture + quad draw
     // kinds (`CreateTexture` / `CreateTextureResult` / `UpdateTexture` /
-    // `TexturedQuad` / `DrawTexturedQuads` / `SolidQuad` /
-    // `DrawSolidQuads`) moved to `aether_render::kinds`
+    // `TexturedQuad` / `DrawTexturedQuads`) moved to
+    // `aether_render::kinds`
     // (ADR-0121). The `QuadScale` / `QuadSpace` projection types stay
     // central: the `aether.text.draw` kind below consumes `QuadSpace`,
     // and `aether-kinds` has no dependency on `aether-render`, so

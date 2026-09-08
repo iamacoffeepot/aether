@@ -104,7 +104,7 @@ fn create_geometry(harness: &mut SubstrateHarness, label: &'static str) -> u32 {
         .expect("decode create geometry reply")
     {
         CreateGeometryResult::Ok { geometry_id } => geometry_id,
-        CreateGeometryResult::Err { reason } => panic!("create geometry failed: {reason}"),
+        CreateGeometryResult::Err { error } => panic!("create geometry failed: {error}"),
     }
 }
 
@@ -140,7 +140,7 @@ fn register_program(harness: &mut SubstrateHarness, label: &'static str) -> u32 
         .expect("decode register program reply")
     {
         ProgramRegisterResult::Ok { program_id } => program_id,
-        ProgramRegisterResult::Err { reason } => panic!("register program failed: {reason}"),
+        ProgramRegisterResult::Err { error } => panic!("register program failed: {error}"),
     }
 }
 

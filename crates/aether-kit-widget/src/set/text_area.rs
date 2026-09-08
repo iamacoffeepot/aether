@@ -17,7 +17,7 @@ use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{
-    accept_clipboard_paste, apply_text_control_state, apply_text_theme, approx_text_width, edit_command,
+    accept_clipboard_paste, apply_text_control_state, apply_text_theme, approx_text_width, edit_command, plate,
     pump_text_font_metrics, push_control_outlines, quad, release_left, reply_with_draw_items, report_clipboard_copy,
     run_edit_key, single_line_hit_byte, text_baseline_y, text_control_theme_state, text_origin_y,
     update_text_modifiers,
@@ -26,8 +26,8 @@ use crate::state::InteractionState;
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState, TextSpan};
 use crate::theme::{SetTheme, Theme, ThemeState};
 use crate::{
-    Collect, FocusGained, FocusLost, SetWidgetState, TextAreaConfig, TextCommitted, WidgetControlState, WidgetDrawItem,
-    WidgetFrame,
+    Collect, FocusGained, FocusLost, SetText, SetWidgetState, TextAreaConfig, TextCommitted, WidgetControlState,
+    WidgetDrawItem, WidgetFrame,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,7 +250,15 @@ impl TextAreaWidget {
         let lines = text_lines(&displayed.text);
         let first = self.scroll_top.min(lines.len().saturating_sub(1));
         let end = first.saturating_add(self.visible_rows()).min(lines.len());
-        let mut items = vec![quad(0.0, 0.0, width, height, self.theme.fill(self.theme.surface_raised, theme_state))];
+        let mut items = vec![plate(
+            &self.theme,
+            0.0,
+            0.0,
+            width,
+            height,
+            Some(self.theme.fill(self.theme.surface_raised, theme_state)),
+            None,
+        )];
 
         for (visible_index, line) in lines[first..end].iter().copied().enumerate() {
             #[allow(clippy::cast_precision_loss)]
@@ -379,6 +387,8 @@ impl WidgetDefaults for TextAreaWidget {
 /// # Agent
 /// Not loaded directly — a panel spawns it from [`TextAreaConfig`]. Plain
 /// Enter inserts a newline; Ctrl+Enter emits [`TextCommitted`] to the parent.
+/// A re-sent config resizes and restyles it in place, holding the buffer;
+/// [`SetText`] replaces what it holds.
 #[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for TextAreaWidget {
     type Config = TextAreaConfig;
@@ -407,17 +417,16 @@ impl WasmActor for TextAreaWidget {
         self.pump_font_metrics(ctx);
     }
 
+    /// Re-cap, resize, and restyle in place from a re-sent config. `initial`
+    /// seeds the buffer only at `init`, so the text, the caret, and the
+    /// scrolled row window survive; only the window is re-reconciled, against
+    /// the new row count. [`SetText`] replaces the contents.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: TextAreaConfig) {
-        self.edit = TextEditState::new(config.initial);
         self.max_chars = config.max_chars;
         self.rows = config.rows;
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
-        self.dragging = false;
-        self.paste_pending = false;
-        self.preferred_x_pixels = None;
-        self.scroll_top = 0;
         self.apply_control_state(ctx, config.state);
         self.reconcile_scroll();
         self.pump_font_metrics(ctx);
@@ -426,6 +435,15 @@ impl WasmActor for TextAreaWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
+    }
+
+    /// Replace the buffer from the host, then pull the row window back onto
+    /// the caret. Silent — no [`TextCommitted`].
+    #[handler::single]
+    fn on_set_text(&mut self, _ctx: &mut WasmCtx<'_>, set: SetText) {
+        self.edit.replace_value(set.text, set.keep_caret);
+        self.preferred_x_pixels = None;
+        self.reconcile_scroll();
     }
 
     #[handler::single]
@@ -708,7 +726,9 @@ mod tests {
         let accent_bands: Vec<_> = items
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { x, y, width, color, .. } if *color == Theme::DEFAULT.accent && *width > 1.0 => {
+                WidgetDrawItem::Shape { x, y, width, fill: Some(color), .. }
+                    if *color == Theme::DEFAULT.accent && *width > 1.0 =>
+                {
                     Some((*x, *y, *width))
                 }
                 _ => None,

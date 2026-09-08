@@ -31,9 +31,8 @@ impl VirtualListWidget {
     /// the two: the selection carrying that same hover.
     ///
     /// Before this the widget-wide hover flag lit the *selected* row wherever
-    /// in the list the pointer was, so pointing at the fourth gem lit the
-    /// first — the owner's round-11 note 13, "the current behavior only has
-    /// the selected element being activated when hovering over ANY item".
+    /// in the list the pointer was, so pointing at the fourth row lit the
+    /// first — hover is a fact about a row, not about the widget.
     pub(super) fn row_fill(&self, selected: bool, hovered: bool) -> Rgba {
         let base = match (selected, hovered) {
             (true, _) => self.theme.selection,
@@ -268,7 +267,7 @@ mod tests {
         let theme = Theme::DEFAULT;
         let mut widget = measured_list(2, 2);
         widget.items = vec![
-            VirtualListRow::from("Astral Plate").with_trailing(vec!["21/20".into()]).with_ink(TextInk::RarityLegendary),
+            VirtualListRow::from("Astral Plate").with_trailing(vec!["21/20".into()]).with_ink(TextInk::Tier4),
             VirtualListRow::from("Iron Ring").with_trailing(vec!["1".into()]),
         ];
         widget.selected_index = Some(0);
@@ -276,7 +275,7 @@ mod tests {
 
         let runs = row_runs(&widget);
         assert_eq!(runs.len(), 4, "two rows of two columns: {runs:?}");
-        assert_eq!(runs[0].1, theme.rarity_legendary, "the chosen row's name kept its tier");
+        assert_eq!(runs[0].1, theme.tier_4, "the chosen row's name kept its tier");
         assert_eq!(runs[1].1, theme.selection_text, "its amount did not take the tier with it");
         assert_eq!(runs[2].1, theme.text_primary, "an inkless row is written exactly as it was");
         assert_eq!(runs[3].1, theme.text_primary);
@@ -291,7 +290,9 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 WidgetDrawItem::Text { text, .. } => Some(text.as_str()),
-                WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+                WidgetDrawItem::TexturedQuad { .. }
+                | WidgetDrawItem::Shape { .. }
+                | WidgetDrawItem::Triangle { .. } => None,
             })
             .collect();
         assert_eq!(text, vec!["row 2", "row 3", "row 4", "row 5", "row 6"]);
@@ -325,8 +326,10 @@ mod tests {
                 .draw_items()
                 .into_iter()
                 .filter_map(|item| match item {
-                    WidgetDrawItem::Quad { color, .. } => Some(color),
-                    WidgetDrawItem::Text { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+                    WidgetDrawItem::Shape { fill, .. } => fill,
+                    WidgetDrawItem::Text { .. }
+                    | WidgetDrawItem::TexturedQuad { .. }
+                    | WidgetDrawItem::Triangle { .. } => None,
                 })
                 .collect::<Vec<_>>()
         };
@@ -417,8 +420,8 @@ mod tests {
         let rules = widget.rule_items(window, 100.0);
         assert_eq!(rules.len(), 2, "three rows, two rules");
         for (index, rule) in rules.iter().enumerate() {
-            let WidgetDrawItem::Quad { x, y, width, height, color, .. } = rule else {
-                panic!("a rule is a quad: {rule:?}");
+            let WidgetDrawItem::Shape { x, y, width, height, fill: Some(color), .. } = rule else {
+                panic!("a rule is a flat fill: {rule:?}");
             };
             #[allow(clippy::cast_precision_loss)] // test rows are tiny exact integers
             let expected_y = (index + 1) as f32 * 24.0;
@@ -431,7 +434,7 @@ mod tests {
             "one row has nothing to divide",
         );
         assert_eq!(
-            widget.draw_items().iter().filter(|item| matches!(item, WidgetDrawItem::Quad { height, .. } if (*height - ROW_RULE_THICKNESS).abs() < f32::EPSILON)).count(),
+            widget.draw_items().iter().filter(|item| matches!(item, WidgetDrawItem::Shape { height, .. } if (*height - ROW_RULE_THICKNESS).abs() < f32::EPSILON)).count(),
             2,
             "and the rules reach the list's own draw",
         );
@@ -457,13 +460,13 @@ mod tests {
         widget.replace_control_state(control);
         widget.state.gain_focus(true);
         let items = widget.draw_items();
-        assert_eq!(items.len(), 20, "ten row items, the bar's two quads, and two four-quad outlines");
-        for item in &items[12..16] {
-            assert!(matches!(item, WidgetDrawItem::Quad { color, .. } if *color == widget.theme.warning));
-        }
-        for item in &items[16..20] {
-            assert!(matches!(item, WidgetDrawItem::Quad { color, .. } if *color == widget.theme.accent));
-        }
+        assert_eq!(items.len(), 14, "ten row items, the bar's two items, and two rings");
+        let ring_color = |item: &WidgetDrawItem| match item {
+            WidgetDrawItem::Shape { fill: None, stroke: Some(stroke), .. } => Some(stroke.color),
+            _ => None,
+        };
+        assert_eq!(ring_color(&items[12]), Some(widget.theme.warning), "the validation ring comes first");
+        assert_eq!(ring_color(&items[13]), Some(widget.theme.accent), "and the focus ring is drawn inside it");
     }
 
     #[test]

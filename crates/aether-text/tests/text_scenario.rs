@@ -44,7 +44,7 @@ use aether_harness_substrate_capture::{
 };
 use aether_kinds::{CachedFontMetrics, ClipRect, QuadScale, QuadSpace};
 use aether_math::{Mat4, Rgba, Vec3};
-use aether_render::{DrawSolidQuads, SolidQuad, ViewProjection};
+use aether_render::{DrawShapes, Shape, ViewProjection};
 use aether_text::{DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult, TextCapability};
 
 /// Namespace-relative path of the vendored font under the `assets` root.
@@ -212,7 +212,7 @@ fn text_draws_a_screen_space_string() {
 /// The reproduction is the panel's shape, minimized to a producer whose output
 /// changes every tick: two overlay batches that land in *different* pump drains
 /// but share the one `quad_frame` accumulator, so a mid-fill commit drops one
-/// of them. The first is a **direct** `DrawSolidQuads`, dispatched by
+/// of them. The first is a **direct** `DrawShapes`, dispatched by
 /// `on_capture_frame` straight to `aether.render`, so it lands on the first
 /// drain; the second is a `DrawText` through `aether.text`, whose cap lays the
 /// string out on its own thread and emits the glyph `draw_textured_quads` a hop
@@ -286,7 +286,7 @@ fn capture_pins_current_tick_content_not_stale_frame() {
 
     // A 16×16 solid quad on the bottom row, stepped across four columns so
     // each capture's content differs from the last. Positions stay in integer
-    // window pixels for the region reads; only the `SolidQuad`'s float fields
+    // window pixels for the region reads; only the `Shape`'s float fields
     // widen to `f32` (the `cast_precision_loss` these small ints incur is
     // covered by the fn-level allow, matching the sibling scenarios).
     let quad_size = 16u32;
@@ -302,15 +302,19 @@ fn capture_pins_current_tick_content_not_stale_frame() {
 
     let mut prior_x: Option<u32> = None;
     for (i, &quad_x) in columns.iter().enumerate() {
-        let solid = DrawSolidQuads {
+        let solid = DrawShapes {
             space: QuadSpace::Screen,
             clip: None,
-            quads: vec![SolidQuad {
+            shapes: vec![Shape {
                 x: quad_x as f32,
                 y: quad_y as f32,
                 width: quad_size as f32,
                 height: quad_size as f32,
-                color: Rgba::new(0.9, 0.9, 0.2, 1.0),
+                corner_radius: 0.0,
+                fill: Some(Rgba::new(0.9, 0.9, 0.2, 1.0)),
+                stroke: None,
+                shadow: None,
+                texture: None,
             }],
         };
         let glyph_draw = DrawText {

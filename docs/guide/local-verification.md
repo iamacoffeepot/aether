@@ -221,6 +221,28 @@ review seat decides. Test files are exempt — a fixture that spawns git is
 building a repository to test against. Build the same inventory by hand with
 `cargo xtask symbols build` and search it with `cargo xtask symbols find`.
 
+## The namespace pass
+
+`clippy.toml` refuses a hand-*hashed* address (`mailbox_id_from_name`), but not
+a hand-*written* one: an actor's `NAMESPACE` spelled out again as a `&str`
+somewhere else compiles, resolves, and warn-drops the day the two diverge,
+because the parameter receiving it is a `&str`.
+
+```sh
+cargo xtask namespaces
+```
+
+It reads every `const NAMESPACE` in `crates/*/src` and reports the string
+literals repeating one outside the crate that declares it. Inline `#[cfg(test)]`
+regions and the files a test module pulls in are out of scope, and so is a
+crate writing its own namespace. The dependency-direction cases — a crate that
+cannot see the const because it sits above the declaring crate in the graph —
+live in `xtask/namespace-literals-allow.toml`, one entry per (crate, namespace)
+pair with the reason stated; an entry no literal matches any more is itself
+reported, so the file does not accumulate.
+
+Local-only: the check is not a CI job, so run it when you touch addressing.
+
 ## Watching a draft PR
 
 Implementation PRs stay draft while their required facts accumulate. The

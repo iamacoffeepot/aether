@@ -58,7 +58,7 @@ pub use doctor::{
     ToolStatus, UNRESOLVED_HEAD_AGE_BOUND, evaluate,
 };
 #[cfg(feature = "github")]
-pub use doctor::{DoctorBoard, DoctorReactorCapability, DoctorReactorSetup, DoctorReactorState, DoctorTick};
+pub use doctor::{DoctorReactorCapability, DoctorReactorSetup, DoctorReactorState, DoctorTick, LatestDoctorReport};
 pub use driver::{BloomeryDriverCapability, BloomeryDriverRunning};
 #[cfg(feature = "github")]
 pub use executor::{
@@ -67,11 +67,13 @@ pub use executor::{
     ProcessTransformRunner, ReconcileLanes, ReconcileReport, RoutingExecutor, RunLifecycle, RunProcess, RunSpec,
     TransformRunner, UnconfiguredActionsBackend, admits_lane_key, mock_lane,
 };
+#[cfg(all(feature = "github", any(test, feature = "testing")))]
+pub use executor::{GroupAbsence, IDENTITY_RECORD, ProcessIdentity, strict_group_absence};
 #[cfg(feature = "github")]
 pub use intake::{
     Admission, AdmitDecision, AdmitSink, CycleError, CycleReport, DispatchError, DispatchRecord, EvidenceClaims,
-    IntakeError, IntakeRefusal, NameEvidenceClaims, UploadedEvidence, admit_uploaded, attempt_artifact_name,
-    dispatch_and_record, record_dispatch, run_intake_cycle,
+    IntakeError, IntakeRefusal, NameEvidenceClaims, PendingObservation, UploadedEvidence, admit_uploaded,
+    attempt_artifact_name, dispatch_and_record, record_dispatch, run_intake_cycle,
 };
 #[cfg(feature = "github")]
 pub use mirror::ProjectionShell;

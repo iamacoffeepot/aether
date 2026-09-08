@@ -45,7 +45,7 @@ use aether_substrate::{InboundMail, Mailer};
 use super::response::error_response;
 use crate::artifacts::{ArtifactsCapability, GetRange};
 #[cfg(feature = "github")]
-use crate::bloomery::{ArchiveRecords, CandidatePush, DoctorBoard, JanitorReactorCapability, ListArchive};
+use crate::bloomery::{ArchiveRecords, CandidatePush, DoctorReport, JanitorReactorCapability, ListArchive};
 // The control core is a native sibling cap since the wasm-boundary retirement
 // (ADR-0149 §The boundary, amended), addressed as a typed peer
 // (`ctx.defer(&request).to::<ControlCore>()`) rather than a `resolve_embedded`
@@ -166,9 +166,9 @@ pub struct ApiCapabilityState {
     /// Bearer token commission routes require. Empty refuses every commission
     /// request.
     pub(super) control_token: String,
-    /// The doctor's latest report, overlaid on `GET /view`.
+    /// The doctor's latest completed pass, overlaid on `GET /view`.
     #[cfg(feature = "github")]
-    pub(super) doctor: Option<DoctorBoard>,
+    pub(super) doctor: Option<DoctorReport>,
     /// Commission approval / cancel requests awaiting a signature verification.
     pub(super) commission_verifying: HashMap<u64, super::commissions::CommissionVerify>,
     /// Commission writes dispatched after a verified signature, awaiting store.

@@ -1,11 +1,11 @@
 //! The poll-driven doctor pass: rebuild live state, evaluate the seed
-//! invariants, publish the report to `/view`, and post new violations through
-//! the operator alert channel.
+//! invariants, mail the completed report to the REST API, and post new
+//! violations through the operator alert channel.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aether_actor::runtime;
@@ -22,7 +22,8 @@ use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
 use super::invariants::{DoctorReport, LiveState, OpenDispatch, ReplicaObservation, SurfaceParkObservation, evaluate};
-use super::{DoctorReactorCapability, DoctorReactorSetup};
+use super::{DoctorReactorCapability, DoctorReactorSetup, LatestDoctorReport};
+use crate::api::BloomeryApiCapability;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::bloomery::{ExecutorShell, SourceShell};
 use crate::store::{OutboxEntry, SqliteStore, StoreBackend};
@@ -32,56 +33,6 @@ use crate::store::{OutboxEntry, SqliteStore, StoreBackend};
 #[kind(name = "aether.bloomery.doctor.doctor_tick")]
 pub struct DoctorTick {}
 
-/// Shared latest report the REST `/view` overlay reads.
-///
-/// Cloning shares the same cell: the reactor writes, the API reads. A
-/// violation that only appears in journald is a failure of this design, so
-/// the board is the operator channel `/view` projects.
-#[derive(Clone, Default)]
-pub struct DoctorBoard {
-    inner: Arc<Mutex<BoardInner>>,
-}
-
-#[derive(Default)]
-struct BoardInner {
-    report: Option<DoctorReport>,
-    last_fingerprint: String,
-}
-
-impl DoctorBoard {
-    /// The latest completed pass, if one has run.
-    #[must_use]
-    pub fn latest(&self) -> Option<DoctorReport> {
-        self.lock().report.clone()
-    }
-
-    /// Record `report` and post newly-loud violations through the operator
-    /// alert channel. Idempotent on the same failing set: a stable violation
-    /// is not re-posted every poll.
-    pub fn publish(&self, report: DoctorReport) {
-        let fingerprint = report.fingerprint();
-        let mut inner = self.lock();
-        let changed = fingerprint != inner.last_fingerprint;
-        if changed && !report.is_clean() {
-            for check in report.violations() {
-                tracing::error!(
-                    target: "aether_chassis_bloomery::doctor::alert",
-                    invariant = check.name,
-                    statement = check.statement,
-                    divergences = %check.divergences.join("; "),
-                    "doctor invariant violated",
-                );
-            }
-        }
-        inner.last_fingerprint = fingerprint;
-        inner.report = Some(report);
-    }
-
-    fn lock(&self) -> MutexGuard<'_, BoardInner> {
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
 /// Runtime state for [`DoctorReactorCapability`].
 pub struct DoctorReactorState {
     source: Option<SourceShell>,
@@ -89,7 +40,7 @@ pub struct DoctorReactorState {
     correspondence: Option<SharedCorrespondence>,
     store: Option<SqliteStore>,
     worktree_base: PathBuf,
-    board: DoctorBoard,
+    last_fingerprint: String,
     replica_seen: BTreeMap<u64, Instant>,
     replica_passes: BTreeMap<u64, u32>,
     surface_seen: BTreeMap<(BloomId, WorkpieceId), Instant>,
@@ -97,6 +48,14 @@ pub struct DoctorReactorState {
     mailer: Arc<Mailer>,
     self_mailbox: MailboxId,
     _timer: Option<TimerHandle>,
+}
+
+/// Advance the alert fingerprint and report whether this pass is newly loud.
+fn alert_and_advance(last_fingerprint: &mut String, report: &DoctorReport) -> bool {
+    let fingerprint = report.fingerprint();
+    let alert = fingerprint != *last_fingerprint && !report.is_clean();
+    *last_fingerprint = fingerprint;
+    alert
 }
 
 #[runtime]
@@ -131,7 +90,7 @@ impl NativeActor for DoctorReactorCapability {
             correspondence: config.correspondence,
             store: Some(store),
             worktree_base: PathBuf::from(config.worktree_base),
-            board: config.board,
+            last_fingerprint: String::new(),
             replica_seen: BTreeMap::new(),
             replica_passes: BTreeMap::new(),
             surface_seen: BTreeMap::new(),
@@ -149,7 +108,7 @@ impl NativeActor for DoctorReactorCapability {
     }
 
     #[handler::single]
-    fn on_doctor_tick(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DoctorTick) {
+    fn on_doctor_tick(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: DoctorTick) {
         let executor = state.executor.clone();
         let lanes_running = executor.as_ref().is_some_and(|shell| shell.lane_occupancy().any_running());
         let started_nonces = executor.as_ref().map_or_else(Vec::new, ExecutorShell::started_nonces);
@@ -169,7 +128,22 @@ impl NativeActor for DoctorReactorCapability {
             unresolved_head_seen: &mut state.unresolved_head_seen,
             now: Instant::now(),
         }) {
-            Ok(report) => state.board.publish(report),
+            Ok(report) => {
+                if alert_and_advance(&mut state.last_fingerprint, &report) {
+                    for check in report.violations() {
+                        tracing::error!(
+                            target: "aether_chassis_bloomery::doctor::alert",
+                            invariant = check.name,
+                            statement = check.statement,
+                            divergences = %check.divergences.join("; "),
+                            "doctor invariant violated",
+                        );
+                    }
+                }
+                // Inherited so `DoctorTick` settlement includes the API store;
+                // detached would let `GET /view` overtake apply.
+                ctx.actor::<BloomeryApiCapability>().send(&LatestDoctorReport::from(report));
+            }
             Err(error) => tracing::warn!(
                 target: "aether_chassis_bloomery::doctor",
                 %error,
@@ -465,24 +439,44 @@ fn observe_surface_parks(
 #[cfg(test)]
 mod tests {
     use super::super::{CheckResult, DoctorReport};
-    use super::DoctorBoard;
+    use super::alert_and_advance;
+
+    fn dirty(name: &str, divergence: &str) -> DoctorReport {
+        DoctorReport {
+            checks: vec![CheckResult {
+                name: name.into(),
+                statement: "the property held".into(),
+                passed: false,
+                divergences: vec![divergence.into()],
+            }],
+        }
+    }
+
+    fn clean(name: &str) -> DoctorReport {
+        DoctorReport {
+            checks: vec![CheckResult {
+                name: name.into(),
+                statement: "the property held".into(),
+                passed: true,
+                divergences: Vec::new(),
+            }],
+        }
+    }
 
     #[test]
-    fn publish_keeps_the_latest_report_for_view() {
-        // The plausible bug: the board stores the report but /view cannot
-        // read it, so a violation is only a log line.
-        let board = DoctorBoard::default();
-        assert!(board.latest().is_none());
-        board.publish(DoctorReport {
-            checks: vec![CheckResult {
-                name: "observed_head_equals_daily_head".into(),
-                statement: "the observed head equals the actual daily ref head".into(),
-                passed: false,
-                divergences: vec!["observed aa != actual bb".into()],
-            }],
-        });
-        let latest = board.latest().expect("a published report is readable");
-        assert!(!latest.is_clean());
-        assert_eq!(latest.named("observed_head_equals_daily_head").map(|check| check.passed), Some(false));
+    fn alert_fingerprint_is_idempotent_on_the_same_failing_set() {
+        // The plausible bug: a stable violation re-alerts every poll, or a
+        // newly-loud set is silent because the fingerprint did not advance.
+        let mut last = String::new();
+        let first = dirty("observed_head_equals_daily_head", "observed aa != actual bb");
+        assert!(alert_and_advance(&mut last, &first), "the first dirty pass is newly loud");
+        assert!(!alert_and_advance(&mut last, &first), "the same failing set is not re-posted");
+        let louder = dirty("claim_refs_name_active_blooms", "refs/bloomery/claims/issue-5175");
+        assert!(alert_and_advance(&mut last, &louder), "a different failing set is newly loud");
+        assert!(
+            !alert_and_advance(&mut last, &clean("observed_head_equals_daily_head")),
+            "a clean pass is not an alert"
+        );
+        assert!(alert_and_advance(&mut last, &first), "a dirty set after a clean pass is newly loud again");
     }
 }

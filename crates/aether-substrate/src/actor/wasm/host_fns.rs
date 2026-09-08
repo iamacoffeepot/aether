@@ -532,10 +532,12 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // computed on the
     // guest side via the `Kind` derive's `const ID`. The host fn and
     // its `KIND_NOT_FOUND` sentinel are gone. Input-stream auto-
-    // subscribe (the side-effect that used to ride this host fn)
-    // moved to the guest SDK — ADR-0033 phase 3 has `#[actor]`
-    // prepend `ctx.subscribe_input::<K>()` for every `K::IS_INPUT`
-    // handler kind to the user's `init` body.
+    // subscribe (the side-effect that used to ride this host fn) is no
+    // longer a guest-side step either: there is no `Kind::IS_INPUT`, and
+    // issue #403 moved the derivation to the substrate, which reads the
+    // component's `aether.kinds.inputs` manifest after
+    // `try_register_component` publishes the mailbox. A component that
+    // wants a conditional stream calls `Ctx::subscribe_input` itself.
 
     // ADR-0016 §2: save_state buffers the component's migration payload
     // into a substrate-owned slot on the store ctx. The guest passes a
