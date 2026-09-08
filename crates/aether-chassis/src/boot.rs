@@ -13,7 +13,9 @@
 
 use std::env;
 use std::fs;
+use std::mem;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use aether_actor::log::DEFAULT_RING_CAP;
@@ -27,22 +29,24 @@ use aether_kinds::{Shutdown, Tick};
 use aether_lifecycle::{LifecycleGraphData, LifecycleParams};
 use aether_process::{ProcessCapability, ProcessParams};
 use aether_rpc::{FrameSizeConfig, FrameSizeOverlay, PeerKind, RpcServerCapability, RpcServerParams};
-use aether_substrate::chassis::builder::Builder;
+use aether_substrate::SubstrateBoot;
+use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{
-    BootableChassis, BuildProvenance, Chassis, ComposeBase, PreludeAction, PreludeFlags, run_chassis_prelude,
+    BootableChassis, BuildProvenance, Chassis, ComposeBase, PreludeAction, PreludeFlags, composed, run_chassis_prelude,
 };
 use aether_substrate::config::{
     ConfigError, ConfigMember, ConfigSources, DEFAULT_REGISTRY_OWNER_QUEUE_CAPACITY,
     DEFAULT_REGISTRY_RELAY_QUEUE_CAPACITY, KnobKind, KnobRecord, RegistryQueueCapacities, RingCapacities,
-    SchedulerTuning,
+    SchedulerTuning, validate_env,
 };
+use aether_substrate::runtime::log_install::apply_filter;
 
 use aether_tcp::TcpCapability;
 use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
 
-use crate::autoload::{AutoloadComponent, boot_manifest_autoload};
+use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::boot_manifest::ChassisSettings;
 use crate::cli::{ChassisCli, ChassisMeta};
 use crate::package::package_autoload;
@@ -988,6 +992,75 @@ pub fn with_full_stack_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -
         // off the source stack; the working-directory confinement root rides
         // `Params`, resolved chassis-side from the fs `save` root above.
         .with_actor::<ProcessCapability>(ProcessParams { work_root: process_work_root })
+}
+
+/// The standard [`Chassis::build`] body every full-stack chassis runs, owning
+/// the prologue and epilogue desktop and headless previously hand-copied
+/// line-for-line: stand up the substrate, re-apply the resolved log filter,
+/// resolve the chassis's own driver config, lift the base stratum and the
+/// autoload list out of the env, compose through [`composed`], sweep the
+/// process env against the composed known-key set, install the driver, and
+/// drain the autoload list onto the mailer once the pool is up.
+///
+/// The one genuinely per-chassis seam is the driver, and it straddles
+/// composition: a driver's config resolves off `env.base.sources` *before*
+/// `composed` consumes the env, while the driver value itself owns the
+/// [`SubstrateBoot`] that `composed` borrows first. `plan_driver` names both
+/// halves in one call — it runs at the first seam with `&mut CommonEnv`
+/// (resolving driver knobs, applying any package-manifest overlay, and logging
+/// the chassis's boot line), and returns the installer that runs at the second
+/// with the composed `SubstrateBoot`. A chassis therefore declares only what
+/// differs; nothing about the surrounding order is restatable per chassis.
+///
+/// # Errors
+///
+/// Returns [`BootError`] when the substrate fails to boot, when `plan_driver`
+/// fails (a driver config member that will not parse, ADR-0090 §4), when the
+/// chassis's `compose` delta fails, when an unknown `AETHER_*` key fails the
+/// sweep, or when the builder fails to boot the composed chain.
+pub fn boot_standard<C, P, D>(mut env: CommonEnv, plan_driver: P) -> Result<BuiltChassis<C>, BootError>
+where
+    C: BootableChassis<Base = ChassisBase, Env = CommonEnv>,
+    P: FnOnce(&mut CommonEnv) -> Result<D, BootError>,
+    D: FnOnce(SubstrateBoot) -> C::Driver,
+{
+    let mut boot = SubstrateBoot::build()?;
+    // #3849: `SubstrateBoot::build` installed the subscriber with an
+    // env-or-`info` filter (before the config file loaded); re-apply the
+    // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
+    // `info`) now so a filter set only in the config file takes effect.
+    apply_filter(&env.runtime.log_filter);
+    let mailer = Arc::clone(&boot.queue);
+
+    // ADR-0162 §config-at-its-seam: the driver's own knobs resolve here, off
+    // the base's source stack, at the seam that constructs the driver — never
+    // pre-resolved into a per-chassis env bag.
+    let install_driver = plan_driver(&mut env)?;
+
+    // The autoload list is drained after build; lift the base stratum out so
+    // the framework mints the builder and installs the aborter + base ahead of
+    // `compose` (the leftover default `env.base` is never re-read).
+    let autoload = mem::take(&mut env.autoload);
+    let base = mem::take(&mut env.base);
+
+    let builder = composed::<C>(&mut boot, base, env)?;
+    // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env var,
+    // sweeping against the composition-derived known-key set plus the residual
+    // hand records. Runs here (not in `resolve_env`) because the per-chassis
+    // known keys come from the composed builder's manifest.
+    validate_env(&builder.config_manifest().known_keys(&C::residual_knobs()))?;
+
+    // `boot` moves into the driver, after `compose` finished borrowing it.
+    let built = builder.driver(install_driver(boot)).build()?;
+
+    // Auto-load any bundled components, in order, before the run loop starts.
+    // Fire-and-forward: the component host dispatches each load off the worker
+    // pool (already up after `build`), so the components are live shortly after
+    // `run` begins — no hub required.
+    for component in autoload {
+        mailer.push(autoload_mail(component));
+    }
+    Ok(built)
 }
 
 /// This crate's `build.rs`-baked build provenance (ADR-0115): the source

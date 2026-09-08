@@ -8,10 +8,15 @@
 //! differs. This crate owns that shared layer:
 //!
 //! - [`boot`] — the `Builder` boot fragments, the fleet-wide config
-//!   registry behind `--print-config` / known-key sweeps, and the
-//!   chassis-wide boot knobs.
+//!   registry behind `--print-config` / known-key sweeps, the
+//!   chassis-wide boot knobs, and [`boot::boot_standard`], the shared
+//!   `Chassis::build` body a full-stack chassis parameterises by its
+//!   driver alone.
 //! - [`cli`] — the per-chassis clap roots and per-cap overlay
-//!   composition (ADR-0090 unit d).
+//!   composition (ADR-0090 unit d), plus [`chassis_cli!`] — the root's
+//!   `ChassisCli` impl and flag-parity test.
+//! - [`entry`] — the shared chassis-binary `main` ([`chassis_main!`] /
+//!   [`entry::run_chassis_main`]).
 //! - [`autoload`] — boot-time component autoload shared by the
 //!   full-stack chassis (issue #1529).
 //! - [`boot_manifest`] — the JSON boot-manifest format the hub's
@@ -33,14 +38,17 @@ pub mod autoload;
 pub mod boot;
 pub mod boot_manifest;
 pub mod cli;
+pub mod entry;
 pub mod package;
 pub mod tick;
 pub mod window;
 
 pub use aether_substrate::chassis::{BuildProvenance, PreludeAction, PreludeFlags};
 pub use boot::{
-    build_provenance, chassis_residual_knobs, hub_residual_knobs, resolve_teardown_budget, run_describe_prelude,
+    boot_standard, build_provenance, chassis_residual_knobs, hub_residual_knobs, resolve_teardown_budget,
+    run_describe_prelude,
 };
+pub use entry::{ChassisEnv, run_chassis_main};
 pub use tick::{DEFAULT_TICK_HZ, TickConfig, TickConfigLayer, TickOverlay, apply_manifest_tick_settings};
 pub use window::{
     WindowConfig, WindowConfigLayer, WindowOverlay, WindowSettings, apply_manifest_window_settings,

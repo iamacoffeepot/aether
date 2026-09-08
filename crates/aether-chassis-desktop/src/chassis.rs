@@ -20,10 +20,9 @@ use aether_component::ComponentHostParams;
 use aether_http::HttpServerCapability;
 use aether_lifecycle::{LifecycleCapability, frame_lifecycle_params};
 use aether_render::RenderTuningConfig;
+use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::chassis::{BootableChassis, composed};
-use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_substrate_harness_cap::UnsupportedSubstrateHarnessCapability;
 use winit::event_loop::EventLoop;
@@ -31,11 +30,12 @@ use winit::event_loop::EventLoop;
 use aether_chassis::{WindowConfig, apply_manifest_window_settings};
 
 use super::driver::DesktopDriverCapability;
-use aether_chassis::autoload::autoload_mail;
-use aether_chassis::boot::{ChassisBase, CommonEnv, chassis_residual_knobs, with_full_stack_caps, with_rpc_server};
+use aether_chassis::boot::{
+    ChassisBase, CommonEnv, boot_standard, chassis_residual_knobs, with_full_stack_caps, with_rpc_server,
+};
 
 use crate::cli::DesktopCli;
-use aether_substrate::config::{ConfigError, KnobRecord, validate_env};
+use aether_substrate::config::{ConfigError, KnobRecord};
 use winit::event_loop::ControlFlow;
 
 pub use aether_window::DesktopWindowUserEvent as UserEvent;
@@ -52,101 +52,82 @@ impl Chassis for DesktopChassis {
     type Driver = DesktopDriverCapability;
     type Env = CommonEnv;
 
-    /// Build the desktop chassis: construct the Start-stage runtime handle
-    /// (the winit event loop), stand up substrate-core internals, compose the
-    /// capability chain via [`BootableChassis::compose`], then wrap everything
-    /// in a [`DesktopDriverCapability`] and hand it to the builder. Returns a
+    /// Build the desktop chassis through the shared [`boot_standard`] body,
+    /// declaring only the desktop driver: construct the Start-stage runtime
+    /// handle (the winit event loop), resolve the window + render driver knobs,
+    /// and wrap the composed boot in a [`DesktopDriverCapability`]. Returns a
     /// [`BuiltChassis`] whose [`BuiltChassis::run`] blocks on the winit event
     /// loop.
-    fn build(mut env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        // ADR-0155 §4: the winit `EventLoop` is a Start-stage runtime handle,
-        // not config — construct it here on the boot path (`main()` calls this
-        // on the chassis main thread, where winit's `!Send` `EventLoop` must
-        // live). `--describe` never reaches this method, so it opens no event
-        // loop. The `EventLoop` build fault (never `Send + Sync` across winit's
-        // platform impls) is stringified into `BootError::Other`, the same
-        // shape a wasmtime boot fault takes. Capture is plain state on the
-        // pumped render actor (ADR-0161), so there is no cross-thread queue to
-        // hand over.
-        let event_loop = EventLoop::<UserEvent>::with_user_event().build().map_err(|e| {
-            BootError::Other(Box::new(io::Error::other(format!("desktop event loop build failed: {e}"))))
-        })?;
-        event_loop.set_control_flow(ControlFlow::Poll);
+    fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+        boot_standard(env, |env| {
+            // ADR-0155 §4: the winit `EventLoop` is a Start-stage runtime
+            // handle, not config — construct it here on the boot path (`main()`
+            // calls this on the chassis main thread, where winit's `!Send`
+            // `EventLoop` must live). `--describe` never reaches this method, so
+            // it opens no event loop. The `EventLoop` build fault (never
+            // `Send + Sync` across winit's platform impls) is stringified into
+            // `BootError::Other`, the same shape a wasmtime boot fault takes.
+            // Capture is plain state on the pumped render actor (ADR-0161), so
+            // there is no cross-thread queue to hand over.
+            let event_loop = EventLoop::<UserEvent>::with_user_event().build().map_err(|e| {
+                BootError::Other(Box::new(io::Error::other(format!("desktop event loop build failed: {e}"))))
+            })?;
+            event_loop.set_control_flow(ControlFlow::Poll);
 
-        let mut boot = SubstrateBoot::build()?;
-        // #3849: `SubstrateBoot::build` installed the subscriber with an
-        // env-or-`info` filter (before the config file loaded); re-apply the
-        // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
-        // `info`) now so a filter set only in the config file takes effect.
-        apply_filter(&env.runtime.log_filter);
-        let mailer = Arc::clone(&boot.queue);
+            // ADR-0162 §config-at-its-seam: the window boot knobs and the render
+            // tuning `Config` are driver config — their consumer is the desktop
+            // driver (which boots the pumped `aether.render` actor, ADR-0161
+            // R3), not a composed cap — so they resolve HERE, off the base's
+            // source stack, at the seam that constructs the driver rather than
+            // pre-resolved into a per-chassis env bag. `lower` delegates the
+            // window mode to `parse_window_mode_env`: a present-but-bad
+            // `AETHER_WINDOW_MODE` aborts boot (ADR-0090 §4), an absent value
+            // resolves to `Windowed`.
+            //
+            // Issue 4001: a depot package (`--package`) manifest's title /
+            // window mode overlay onto the stack BELOW argv/env, ABOVE the
+            // compiled defaults, before the resolve — so a shipped package comes
+            // up titled and in its window mode while an operator's
+            // `AETHER_WINDOW_*` still wins.
+            let package_settings = env.package_settings.clone();
+            apply_manifest_window_settings(&mut env.base.sources, &package_settings)?;
+            let window = env.base.sources.resolve::<WindowConfig>()?.lower()?;
+            // Before the event loop dispatches: winit builds its default menu
+            // from the process name during launch, so a later call would be
+            // naming items that are already drawn. The bar's own first title is
+            // not one of these surfaces — macOS takes that from the executed
+            // file, which the fleet names (iamacoffeepot/aether#5518).
+            aether_window::set_application_name(&window.app_name);
+            // ADR-0161 R3: the render tuning `Config` (vertex-buffer cap)
+            // resolves off the same stack the pooled
+            // `with_actor::<RenderCapability>` path resolved it before the swap,
+            // and rides to the driver alongside the window knobs.
+            let render_config = env.base.sources.resolve::<RenderTuningConfig>()?;
+            // The `assets` root threads into the pumped render actor's params
+            // for `capture_frame` similarity references.
+            let assets_dir = env.namespace_roots.assets.clone();
 
-        // ADR-0162 §config-at-its-seam: the window boot knobs and the render
-        // tuning `Config` are driver config — their consumer is the desktop
-        // driver (which boots the pumped `aether.render` actor, ADR-0161 R3), not
-        // a composed cap — so they resolve HERE, off the base's source stack, at
-        // the seam that constructs the driver rather than pre-resolved into a
-        // per-chassis env bag. `lower` delegates the window mode to
-        // `parse_window_mode_env`: a present-but-bad `AETHER_WINDOW_MODE` aborts
-        // boot (ADR-0090 §4), an absent value resolves to `Windowed`.
-        //
-        // Issue 4001: a depot package (`--package`) manifest's title / window
-        // mode overlay onto the stack BELOW argv/env, ABOVE the compiled
-        // defaults, before the resolve — so a shipped package comes up titled and
-        // in its window mode while an operator's `AETHER_WINDOW_*` still wins.
-        let package_settings = env.package_settings.clone();
-        apply_manifest_window_settings(&mut env.base.sources, &package_settings)?;
-        let window = env.base.sources.resolve::<WindowConfig>()?.lower()?;
-        // Before the event loop dispatches: winit builds its default menu from
-        // the process name during launch, so a later call would be naming
-        // items that are already drawn. The bar's own first title is not one
-        // of these surfaces — macOS takes that from the executed file, which
-        // the fleet names (iamacoffeepot/aether#5518).
-        aether_window::set_application_name(&window.app_name);
-        // ADR-0161 R3: the render tuning `Config` (vertex-buffer cap) resolves off
-        // the same stack the pooled `with_actor::<RenderCapability>` path resolved
-        // it before the swap, and rides to the driver alongside the window knobs.
-        let render_config = env.base.sources.resolve::<RenderTuningConfig>()?;
-        // The `assets` root threads into the pumped render actor's params for
-        // `capture_frame` similarity references.
-        let assets_dir = env.namespace_roots.assets.clone();
-        // #3930: the non-cap members ride as resolved structs now; lower `workers`
-        // for the boot log line (the same lowered value as before). The fused
-        // `with_chassis_config_member` install re-lowers it onto the builder seam
-        // during `compose`.
-        let workers = env.chassis_boot.to_workers();
-        // The autoload list is drained after build; lift the base stratum out so
-        // the framework mints the builder and installs the aborter + base ahead of
-        // `compose` (the leftover default `env.base` is never re-read).
-        let autoload = mem::take(&mut env.autoload);
-        let base = mem::take(&mut env.base);
+            tracing::info!(
+                target: "aether_substrate::boot",
+                // #3930: the non-cap members ride as resolved structs now; lower
+                // `workers` for the boot log line (the same lowered value the
+                // fused `with_chassis_config_member` install re-lowers onto the
+                // builder seam during `compose`).
+                workers_override = ?env.chassis_boot.to_workers(),
+                "componentless boot — close window to exit; load a component via aether.component.load",
+            );
 
-        tracing::info!(
-            target: "aether_substrate::boot",
-            workers_override = ?workers,
-            "componentless boot — close window to exit; load a component via aether.component.load",
-        );
-
-        let builder = composed::<Self>(&mut boot, base, env)?;
-        // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
-        // var, sweeping against the composition-derived known-key set plus the
-        // residual hand records. Runs here (not in `resolve_env`) because the
-        // per-chassis known keys come from the composed builder's manifest.
-        validate_env(&builder.config_manifest().known_keys(&Self::residual_knobs()))?;
-        // ADR-0161 R3: the driver boots the pumped `aether.render` actor from
-        // its Claim-stage `aether.render` reservation, so it carries the render
-        // tuning `Config` and the `assets` root here. `boot` moves into the
-        // driver, after `compose` finished borrowing it.
-        let driver = DesktopDriverCapability { event_loop, boot, window, render_config, assets_dir };
-        let built = builder.driver(driver).build()?;
-        // Auto-load any bundled components, in order, before the run loop
-        // starts. Fire-and-forward: the component host dispatches each load off
-        // the worker pool (already up after `build`), so the game is live
-        // shortly after `run` begins — no hub required.
-        for component in autoload {
-            mailer.push(autoload_mail(component));
-        }
-        Ok(built)
+            // ADR-0161 R3: the driver boots the pumped `aether.render` actor
+            // from its Claim-stage `aether.render` reservation, so it carries
+            // the render tuning `Config` and the `assets` root.
+            Ok(move |boot: SubstrateBoot| DesktopDriverCapability {
+                event_loop,
+                boot,
+                window,
+                render_config,
+                assets_dir,
+            })
+        })
     }
 }
 
