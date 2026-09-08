@@ -107,7 +107,7 @@ use aether_kinds::keycode::{
 };
 use aether_kinds::{CachedFontMetrics, Modifiers, MouseButton, MouseButtonRelease, mouse_button};
 use aether_math::Rgba;
-use aether_render::{ScreenVertex, ShapeShadow, ShapeStroke};
+use aether_render::{ScreenVertex, ShapeShadow, ShapeStroke, ShapeTexture};
 use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, TextCapability};
 
 use crate::state::{InteractionState, emit_state_changed};
@@ -625,6 +625,28 @@ fn shape(
         fill,
         stroke: stroke.map(|(width_pixels, color)| ShapeStroke { width_pixels, color }),
         shadow: None,
+        texture: None,
+        clip: None,
+    }
+}
+
+/// A rounded box at the theme's radius drawing `texture` inside its fill,
+/// tinted by `tint` (iamacoffeepot/aether#5709) — the image widget's face.
+/// The same radius the plates beside it take, so a thumbnail is not the one
+/// square corner in a rounded set, and the edge is anti-aliased on the GPU
+/// rather than cut by a clip.
+pub(crate) fn picture(theme: &Theme, frame: [f32; 4], texture: ShapeTexture, tint: Rgba) -> WidgetDrawItem {
+    let [x, y, width, height] = frame;
+    WidgetDrawItem::Shape {
+        x,
+        y,
+        width,
+        height,
+        corner_radius: theme.corner_radius_pixels,
+        fill: Some(tint),
+        stroke: None,
+        shadow: None,
+        texture: Some(texture),
         clip: None,
     }
 }

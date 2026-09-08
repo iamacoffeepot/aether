@@ -55,7 +55,7 @@ the `RenderCapability` actor. It handles these payload kinds:
 | `aether.render.destroy_texture` | `{ texture_id }` | release a registered texture; fire-and-forget |
 | `aether.render.draw_textured_quads` | `{ texture_id, space, clip, blend, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
 | `aether.render.draw_screen_triangles` | `{ space, clip, triangles }` | per-tick pixel-space triangles at any orientation; accumulates into the frame |
-| `aether.render.draw_shapes` | `{ space, clip, shapes }` | per-tick rounded, stroked, shadowed boxes evaluated as a distance field; accumulates into the frame |
+| `aether.render.draw_shapes` | `{ space, clip, shapes }` | per-tick rounded, stroked, shadowed, optionally textured boxes evaluated as a distance field; accumulates into the frame |
 | `aether.render.material.textured` | `{ texture_id, blend, rects }` | per-tick depth-tested world-space textured rects |
 | `aether.render.material.coverage` | `{ texture_id, rects }` | per-tick depth-tested world-space coverage bands from an R8 texture |
 | `aether.render.capture_frame` | `{ mails, after_mails }` | atomic "set state, read back a PNG, clean up" |
@@ -180,6 +180,18 @@ cutting can reason about. A `corner_radius` of `0.0` with a `fill` alone is a
 flat rectangle, which is why there is no separate flat-quad verb: the overlay's
 three verbs are one per fragment stage — sample a texture, evaluate a distance
 field, rasterize caller geometry.
+
+A shape's optional `texture { texture_id, u0, v0, u1, v1, blend }` draws an
+image *inside* the fill's coverage, so the corner radius, the circle, and the
+anti-aliased edge apply to the image exactly as they apply to a flat colour —
+a rounded avatar, a thumbnail at the panel's radius, a circular icon. The uv
+sub-rect stretches across the shape's box, `fill` multiplies the sampled texel
+the way `draw_textured_quads`' `tint` does (so `Rgba::WHITE` draws the image
+unmodified, and a shape with a texture but no fill draws no image at all), and
+`blend` means what it means on `draw_textured_quads`. The record path splits a
+batch into draws at each texture transition, so one batch may mix untextured
+plates with images over several textures and still keep its authored painter
+order.
 
 **World-space materials are textured and depth-tested** ([ADR-0140](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0140-render-material-pass.md)).
 The material pass records after the triangle pass and before the screen overlay,

@@ -305,6 +305,7 @@ mod tests {
             fill: Some(Rgba::new(tag, 0.0, 0.0, 1.0)),
             stroke: None,
             shadow: None,
+            texture: None,
             clip: None,
         }
     }
@@ -402,6 +403,7 @@ mod tests {
                 fill: Some(Rgba::new(0.5, 0.0, 0.0, 1.0)),
                 stroke: None,
                 shadow: None,
+                texture: None,
                 clip: Some(clip),
             }],
         );

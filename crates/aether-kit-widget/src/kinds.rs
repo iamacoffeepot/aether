@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 
 use aether_data::MailboxId;
 use aether_math::{Rgba, Vec2};
-use aether_render::{ScreenVertex, ShapeShadow, ShapeStroke};
+use aether_render::{ScreenVertex, ShapeShadow, ShapeStroke, ShapeTexture};
 use serde::{Deserialize, Serialize};
 
 use crate::theme::{TextInk, TextRole, Theme};
@@ -271,6 +271,11 @@ pub enum WidgetDrawItem {
     /// at or above half the shorter side is a circle); `fill`, `stroke`
     /// (inside the edge), and `shadow` are each optional and compose
     /// shadow under fill under stroke, every edge anti-aliased on the GPU.
+    /// `texture` draws an image inside the fill's coverage instead of a
+    /// flat colour, so a thumbnail or an avatar takes the same corner
+    /// radius and the same anti-aliased edge as the plates around it, with
+    /// `fill` acting as its tint.
+    ///
     /// One item where a plate and its four stroke quads used to be, and —
     /// at `corner_radius: 0.0` with a fill alone — the flat rectangle the
     /// retired `Quad` variant used to be.
@@ -283,6 +288,7 @@ pub enum WidgetDrawItem {
         fill: Option<Rgba>,
         stroke: Option<ShapeStroke>,
         shadow: Option<ShapeShadow>,
+        texture: Option<ShapeTexture>,
         clip: Option<WidgetClipRect>,
     },
     /// One flat triangle — three corners in the widget's local pixels,
@@ -323,7 +329,7 @@ impl WidgetDrawItem {
                 color: *color,
                 clip: clip.map(|rect| rect.offset(by)),
             },
-            Self::Shape { x, y, width, height, corner_radius, fill, stroke, shadow, clip } => Self::Shape {
+            Self::Shape { x, y, width, height, corner_radius, fill, stroke, shadow, texture, clip } => Self::Shape {
                 x: x + by.x,
                 y: y + by.y,
                 width: *width,
@@ -332,6 +338,7 @@ impl WidgetDrawItem {
                 fill: *fill,
                 stroke: stroke.clone(),
                 shadow: shadow.clone(),
+                texture: texture.clone(),
                 clip: clip.map(|rect| rect.offset(by)),
             },
             Self::Triangle { a, b, c, clip } => {
@@ -2217,6 +2224,7 @@ mod tests {
             fill: Some(Rgba::new(1.0, 0.0, 0.0, 1.0)),
             stroke: None,
             shadow: None,
+            texture: None,
             clip: Some(clip),
         };
         assert_eq!(
@@ -2345,6 +2353,7 @@ mod tests {
             fill: Some(Rgba::new(1.0, 1.0, 1.0, alpha)),
             stroke: None,
             shadow: None,
+            texture: None,
             clip,
         };
         let textured = |alpha: f32| WidgetDrawItem::TexturedQuad {

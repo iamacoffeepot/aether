@@ -348,7 +348,7 @@ fn direct_runs(items: &[WidgetDrawItem]) -> Vec<DirectRun> {
     let mut runs: Vec<DirectRun> = Vec::new();
     for item in items {
         match item {
-            WidgetDrawItem::Shape { x, y, width, height, corner_radius, fill, stroke, shadow, .. } => {
+            WidgetDrawItem::Shape { x, y, width, height, corner_radius, fill, stroke, shadow, texture, .. } => {
                 let Some(clip) = PreparedClip::for_item(item) else {
                     continue;
                 };
@@ -361,6 +361,7 @@ fn direct_runs(items: &[WidgetDrawItem]) -> Vec<DirectRun> {
                     fill: *fill,
                     stroke: stroke.clone(),
                     shadow: shadow.clone(),
+                    texture: texture.clone(),
                 };
                 if let Some(DirectRun::Shapes { clip: run_clip, shapes }) = runs.last_mut()
                     && *run_clip == clip
@@ -694,6 +695,7 @@ mod tests {
             fill: Some(color),
             stroke: None,
             shadow: None,
+            texture: None,
             clip: None,
         }
     }
@@ -1264,6 +1266,7 @@ mod tests {
             fill,
             stroke: None,
             shadow: None,
+            texture: None,
             clip,
         }
     }
@@ -1335,6 +1338,7 @@ mod tests {
             fill,
             stroke: None,
             shadow: None,
+            texture: None,
             clip: None,
         };
         let (plate, ring) = (plate(Some(Rgba::WHITE)), plate(None));

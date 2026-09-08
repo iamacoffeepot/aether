@@ -2037,7 +2037,10 @@ inside `stroke { width_pixels, color }`, and an optional `shadow { blur_pixels,
 offset, color }`, evaluated by the render capability as a signed distance
 field so every edge is anti-aliased at any fractional position. A radius at or
 above half the shorter side is a circle, a stroke with no fill is a ring, and a
-shadow with neither is a soft halo. A caret and a stepper arrow are one
+shadow with neither is a soft halo, and a `texture` draws an image inside the
+fill's coverage — so a thumbnail or an avatar takes the widget set's corner
+radius and its anti-aliased edge instead of being the one square corner in a
+rounded set. A caret and a stepper arrow are one
 `WidgetDrawItem::Triangle` — three local corners with a colour each — where a
 stack of quad rows used to approximate them. A flat fill — a row, a track, a
 selection band, a rule, a divider, a scroll bar's track — is the same `Shape`
@@ -2071,6 +2074,9 @@ not one per widget:
   side: a toggle's track, a scroll thumb, a pill.
 - `disc(x, y, size, fill, stroke)` — the stadium of a square box: a toggle's
   knob, a radio's marker, a status dot.
+- `picture(theme, frame, texture, tint)` — a plate whose fill is an image
+  rather than a colour: the image widget's face, at the same radius as the
+  plates beside it.
 
 A shape takes part in the root's hole cutting by its **fill box** alone: a
 filled plate raised after a run cuts the run exactly as a quad does, while a

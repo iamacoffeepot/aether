@@ -518,6 +518,33 @@ pub struct ShapeShadow {
     pub color: Rgba,
 }
 
+/// The image a [`Shape`] draws inside its fill: the sub-rect
+/// `(u0, v0)`–`(u1, v1)` of the registered texture `texture_id`
+/// (`0,0` top-left to `1,1` bottom-right), stretched across the shape's
+/// box and sampled only where the fill covers — so the corner radius, the
+/// circle, and the anti-aliased edge apply to the image exactly as they
+/// apply to a flat colour. A rounded avatar, a thumbnail at the panel's
+/// radius, and a circular icon are this and nothing else.
+///
+/// The shape's `fill` multiplies the sampled texel the way
+/// [`TexturedQuad`]'s `tint` does — `Rgba::WHITE` draws the image
+/// unmodified, and a `Shape` with a `texture` but no `fill` draws no image
+/// at all, because there is no fill coverage to sample into. `blend` says
+/// whether the texel's colour was already scaled by its own coverage,
+/// exactly as it does on [`DrawTexturedQuads`]. An unknown, unrealized, or
+/// non-filterable `texture_id` warn-drops the shapes that name it.
+///
+/// Not a kind on its own — only addressable inside `Shape.texture`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ShapeTexture {
+    pub texture_id: u32,
+    pub u0: f32,
+    pub v0: f32,
+    pub u1: f32,
+    pub v1: f32,
+    pub blend: QuadBlend,
+}
+
 /// One shape in a `DrawShapes` batch (ADR-0213): an axis-aligned box —
 /// `(x, y)` the top-left corner, `(width, height)` the size, in the unit
 /// the batch's `space` selects — with its corners rounded by
@@ -527,7 +554,9 @@ pub struct ShapeShadow {
 /// A radius at or above half the shorter side is a circle (or a stadium);
 /// a stroke with no fill is a ring; a shadow with neither is a soft halo;
 /// a `corner_radius` of `0.0` with a `fill` alone is the flat rect the
-/// retired `draw_solid_quads` drew.
+/// retired `draw_solid_quads` drew. A `texture` draws an image inside the
+/// fill's coverage instead of a flat colour, so the same box is also a
+/// rounded avatar or a circular icon.
 /// Not a kind on its own — only addressable inside `DrawShapes.shapes`.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Shape {
@@ -539,6 +568,7 @@ pub struct Shape {
     pub fill: Option<Rgba>,
     pub stroke: Option<ShapeStroke>,
     pub shadow: Option<ShapeShadow>,
+    pub texture: Option<ShapeTexture>,
 }
 
 /// `aether.render.draw_shapes` — draw a batch of rounded, stroked,
@@ -548,7 +578,10 @@ pub struct Shape {
 /// frame the shapes should appear, or they vanish next frame. Rides the
 /// overlay pass at the same painter position and under the same scissor
 /// as the quad batches, through its own pipeline — one more overlay
-/// draw, not a pass and not a layer. The vocabulary is fixed and
+/// draw, not a pass and not a layer. A batch may mix untextured shapes
+/// with shapes naming different textures; the record path splits it into
+/// draws at each texture transition, so painter order inside the batch is
+/// the order the shapes were listed in. The vocabulary is fixed and
 /// substrate-owned: callers supply parameters, never WGSL.
 /// Fire-and-forget; no reply.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
