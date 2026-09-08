@@ -19,7 +19,7 @@ use aether_bloomery::{
     Admit, BloomId, ClaimHolder, ClaimOutcome, ClaimRefKind, Digest, Event, Fact, OrphanClaimRelease,
     OrphanClaimReleaseCompletion, OrphanClaimReleasePayload, Topic,
 };
-use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{GitSource, MainlineRef};
 use aether_data::wire::{from_bytes, to_vec};
 

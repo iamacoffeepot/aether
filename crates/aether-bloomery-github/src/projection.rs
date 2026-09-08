@@ -551,9 +551,9 @@ mod tests {
 
     use super::{GithubProjection, addressed_object, commission_key};
     use crate::client::{CommissionProjectionApi, NewIssue};
+    use crate::fixture::FakeGithub;
     use crate::landing::commission_floor_title;
     use crate::marker::{Marker, render_marker};
-    use crate::testing::FakeGithub;
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])

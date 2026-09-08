@@ -126,7 +126,7 @@ mod tests {
     use aether_bloomery::{BloomId, Digest};
     use aether_bloomery_github::{
         GitSource, GithubLanding, LandAcceptance, LandProposal, LandingRefusal, LandingSource, MainlineRef,
-        ProposalOutcome, testing::FakeGithub,
+        ProposalOutcome, fixture::FakeGithub,
     };
 
     use super::{LOCAL_PROPOSAL, LocalLanding};

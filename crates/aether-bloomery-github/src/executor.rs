@@ -445,8 +445,8 @@ mod tests {
 
     use super::{ActionsExecutor, ExecutorError, LaneWorkflows};
     use crate::client::{Artifact, RunConclusion, RunStatus};
+    use crate::fixture::FakeGithub;
     use crate::source::to_hex;
-    use crate::testing::FakeGithub;
 
     const WORKFLOW: &str = "bloomery-transform.yml";
     // The credential-bearing sibling — distinct from WORKFLOW so a dispatch that

@@ -1,4 +1,4 @@
-//! An in-process fake GitHub (#3459 step 4).
+//! The in-process fixture GitHub (#3459 step 4).
 //!
 //! Models the projection's object store — the objects a repository already
 //! holds and the comments hanging off them — with enough fidelity to drive the
@@ -9,9 +9,12 @@
 //! does, and [`delete_comment`] models an operator deleting a projection so the
 //! rebuild property (delete → reappear) is exercisable.
 //!
-//! Compiled for this crate's own tests unconditionally and, behind the
-//! `testing` feature, exported so the host demo (#3459 step 7) drives the same
-//! double.
+//! Production code, unconditionally compiled (#4871). The fixture is the
+//! backend a coordinator mounts in trial mode — the replayable world a
+//! benchmark bloom runs against (ADR-0184) — so the calibration path and the
+//! live path are one binary rather than two builds that differ by `cfg`.
+//! Which backend a coordinator actually mounts is the runtime
+//! `AETHER_GITHUB_BACKEND` choice, defaulting to the real network.
 //!
 //! [`seed_issue`]: FakeGithub::seed_issue
 //! [`seed_pull_request`]: FakeGithub::seed_pull_request

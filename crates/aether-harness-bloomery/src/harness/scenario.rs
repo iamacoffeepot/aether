@@ -16,7 +16,7 @@ use aether_bloomery::{
     Observation, Outcome, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Snapshot, StageCatalog,
     StageId, Statement, VerifyFailureSet, ViewDocument, WorkpieceId, signed_approval,
 };
-use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex};
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, GetResult};
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, read_ledger};

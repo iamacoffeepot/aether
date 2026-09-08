@@ -8,24 +8,19 @@ use std::path::PathBuf;
 #[cfg(feature = "github")]
 use std::fs;
 #[cfg(feature = "github")]
-use std::sync::Arc;
-#[cfg(all(feature = "github", any(test, feature = "testing")))]
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
-#[cfg(all(feature = "github", any(test, feature = "testing")))]
-use aether_bloomery::Digest;
-#[cfg(all(feature = "github", any(test, feature = "testing")))]
-use aether_bloomery::SharedCorrespondence;
+#[cfg(feature = "github")]
+use aether_bloomery::{Digest, SharedCorrespondence};
 #[cfg(feature = "github")]
 use aether_bloomery_github::{
-    AppTokenSource, GithubConfig, GithubError, MainlineRef, ReqwestGithub, StaticTokenSource, TokenSource,
+    AppTokenSource, GitSource, GithubConfig, GithubError, GithubLanding, MainlineRef, ReqwestGithub, StaticTokenSource,
+    TokenSource, fixture::FakeGithub,
 };
-#[cfg(all(feature = "github", any(test, feature = "testing")))]
-use aether_bloomery_github::{GitSource, GithubLanding, testing::FakeGithub};
 use aether_substrate::config::ConfigError;
 
 const DEFAULT_LANE_PROGRAM: &str = "cargo xtask transform";
-#[cfg(all(feature = "github", any(test, feature = "testing")))]
+#[cfg(feature = "github")]
 use super::source::SourceShell;
 
 #[cfg(feature = "github")]
@@ -104,13 +99,22 @@ pub struct GithubConnectionConfig {
     #[config(default = 300)]
     pub app_token_skew_secs: u64,
     /// Which GitHub implementation to mount — `github` (the default, the real
-    /// network) or `fixture` (the in-memory double the lane-boundary harness
-    /// drives, #4732). Compiled only under `cfg(any(test, feature =
-    /// "testing"))`, so a production `config_manifest()` never advertises
-    /// `AETHER_GITHUB_BACKEND` and a production binary never links
-    /// `FakeGithub`.
-    #[cfg(all(feature = "github", any(test, feature = "testing")))]
-    #[config(env = "AETHER_GITHUB_BACKEND", default = "github")]
+    /// network) or `fixture` (the in-memory repository the lane-boundary
+    /// harness drives, #4732, and the world a benchmark bloom replays landed
+    /// history against, ADR-0184).
+    ///
+    /// A first-class runtime mode rather than a `cfg` (#4871): calibration
+    /// measures the shipped coordinator, so the trial path and the live path
+    /// must be one binary. A coordinator nobody put in trial mode resolves the
+    /// default and behaves exactly as it did when the fixture was compiled out
+    /// — the fixture is linked, and unreachable until this knob names it.
+    ///
+    /// `github`, `fixture`, and the `fake` alias are the whole vocabulary. An
+    /// unknown value is a boot fault rather than a silent fall-through to the
+    /// live network: once the fixture is only an env var away, a typo such as
+    /// `fixure` is an operator who asked for the replayable world and got the
+    /// real repository instead.
+    #[config(env = "AETHER_GITHUB_BACKEND", default = "github", parse = parse_github_backend)]
     pub github_backend: String,
     /// The commit the fixture's base digest names, as a git sha.
     ///
@@ -121,9 +125,7 @@ pub struct GithubConnectionConfig {
     /// mints its own commits in that repository — see
     /// [`shared_fixture`](Self::shared_fixture).
     ///
-    /// Cfg-gated beside [`github_backend`](Self::github_backend), for the same
-    /// reason.
-    #[cfg(all(feature = "github", any(test, feature = "testing")))]
+    /// Read only in trial mode, beside [`github_backend`](Self::github_backend).
     #[config(env = "AETHER_GITHUB_FIXTURE_BASE_SHA", default = "")]
     pub fixture_base_sha: String,
 }
@@ -468,9 +470,7 @@ impl Default for GithubConnectionConfig {
             app_private_key_path: String::new(),
             app_installation_id: 0,
             app_token_skew_secs: 300,
-            #[cfg(all(feature = "github", any(test, feature = "testing")))]
             github_backend: "github".to_owned(),
-            #[cfg(all(feature = "github", any(test, feature = "testing")))]
             fixture_base_sha: String::new(),
         }
     }
@@ -563,6 +563,20 @@ impl AuthorityBackend {
 /// name is a hard error rather than GitHub.
 fn parse_authority_backend(s: &str) -> Result<String, UnknownAuthorityBackend> {
     AuthorityBackend::parse(s).map(|backend| backend.as_str().to_owned())
+}
+
+/// Confique `parse_env` for [`GithubConnectionConfig::github_backend`]: only
+/// `github`, `fixture`, and the `fake` alias resolve; empty is unset (the
+/// default); any other name is a hard error rather than the live network.
+///
+/// The alias passes through rather than normalizing, so what an operator set
+/// is what the resolved config echoes back.
+#[cfg(feature = "github")]
+fn parse_github_backend(s: &str) -> Result<String, UnknownGithubBackend> {
+    match s.trim() {
+        name @ ("github" | "fixture" | "fake") => Ok(name.to_owned()),
+        _ => Err(UnknownGithubBackend),
+    }
 }
 
 impl CoordinatorConfig {
@@ -694,6 +708,12 @@ struct HeartbeatSilenceZero;
 #[derive(Debug)]
 struct UnknownAuthorityBackend;
 
+/// Why a GitHub-backend name outside `{github, fixture, fake}` is refused
+/// rather than treated as the live network.
+#[cfg(feature = "github")]
+#[derive(Debug)]
+struct UnknownGithubBackend;
+
 /// Why a source-replica boot without the single-writer marker is refused.
 #[derive(Debug)]
 pub struct MissingWriterMarker {
@@ -716,6 +736,16 @@ impl fmt::Display for UnknownAuthorityBackend {
 }
 
 impl Error for UnknownAuthorityBackend {}
+
+#[cfg(feature = "github")]
+impl fmt::Display for UnknownGithubBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("must be github or fixture")
+    }
+}
+
+#[cfg(feature = "github")]
+impl Error for UnknownGithubBackend {}
 
 impl fmt::Display for MissingWriterMarker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -811,19 +841,17 @@ impl GithubConnectionConfig {
         )
     }
 
-    #[cfg(all(feature = "github", any(test, feature = "testing")))]
+    /// Whether this connection is in trial mode — the in-memory fixture
+    /// repository rather than the network (ADR-0184).
+    ///
+    /// Unknown names are a resolve/boot fault at the knob's own `parse` hook;
+    /// this predicate is only meaningful after that gate, and it is the one
+    /// place the resolved backend string is read.
     #[must_use]
     pub fn uses_fixture(&self) -> bool {
         self.github_backend == "fixture" || self.github_backend == "fake"
     }
 
-    #[cfg(not(any(test, feature = "testing")))]
-    #[must_use]
-    pub fn uses_fixture(&self) -> bool {
-        false
-    }
-
-    #[cfg(all(feature = "github", any(test, feature = "testing")))]
     #[must_use]
     pub fn shared_fixture(&self) -> FakeGithub {
         static FAKE: OnceLock<FakeGithub> = OnceLock::new();
@@ -844,7 +872,6 @@ impl GithubConnectionConfig {
         .clone()
     }
 
-    #[cfg(all(feature = "github", any(test, feature = "testing")))]
     #[must_use]
     pub fn fixture_source(&self, mainline: MainlineRef, correspondence: SharedCorrespondence) -> SourceShell {
         let fake = self.shared_fixture();
@@ -859,7 +886,6 @@ impl GithubConnectionConfig {
         SourceShell::new_with_correspondence(Arc::new(source), correspondence)
     }
 
-    #[cfg(all(feature = "github", any(test, feature = "testing")))]
     #[must_use]
     pub fn fixture_landing(
         &self,
@@ -879,7 +905,9 @@ impl GithubConnectionConfig {
 mod tests {
     use clap::Parser as _;
 
-    use super::{AuthorityBackend, CoordinatorConfig, GithubConnectionConfig, parse_authority_backend};
+    use super::{
+        AuthorityBackend, CoordinatorConfig, GithubConnectionConfig, parse_authority_backend, parse_github_backend,
+    };
     use crate::bloomery::BloomeryCli;
 
     // A throwaway 2048-bit RSA keypair (never a real credential) — the fixture
@@ -1141,6 +1169,31 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         let local = CoordinatorConfig { authority_backend: "local".into(), ..CoordinatorConfig::default() };
         assert_eq!(local.authority().expect("local is a backend"), AuthorityBackend::Local);
         assert!(local.uses_local_authority());
+    }
+
+    #[test]
+    fn an_unknown_github_backend_is_refused_rather_than_reaching_the_live_network() {
+        // The plausible bug the promotion creates (#4871): with the fixture
+        // compiled out, `AETHER_GITHUB_BACKEND` could not be set wrong because
+        // it did not exist. Now that it is a production knob, a free String
+        // compared only against "fixture" means `AETHER_GITHUB_BACKEND=fixure`
+        // runs a benchmark bloom — one meant for the replayable world — against
+        // the real repository. Refusing at resolve is what keeps trial mode
+        // from failing open onto the network.
+        assert!(parse_github_backend("fixure").is_err(), "a typo must not pass through as the live network");
+        assert_eq!(parse_github_backend("github").expect("github is a backend"), "github");
+        assert_eq!(parse_github_backend("fixture").expect("fixture is a backend"), "fixture");
+        assert_eq!(parse_github_backend("fake").expect("fake aliases fixture"), "fake");
+        assert!(parse_github_backend("").is_err(), "empty is unset so the default github applies");
+
+        // Tripwire: the default must never be the fixture. A coordinator nobody
+        // put in trial mode has to reach the network it was configured for, and
+        // this is the one assertion standing between that and a silently
+        // detached live coordinator.
+        assert!(!GithubConnectionConfig::default().uses_fixture(), "the unset default is the live network");
+
+        let trial = GithubConnectionConfig { github_backend: "fixture".into(), ..GithubConnectionConfig::default() };
+        assert!(trial.uses_fixture(), "trial mode is reachable without a rebuild");
     }
 
     #[test]

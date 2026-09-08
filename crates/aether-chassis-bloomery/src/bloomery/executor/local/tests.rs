@@ -36,7 +36,7 @@ use aether_bloomery::{
 };
 use tempfile::TempDir;
 
-use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::to_hex;
 use aether_data::wire::to_vec;
 

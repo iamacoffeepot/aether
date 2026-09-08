@@ -65,13 +65,16 @@ runtime = [
     "dep:signal-hook",
     "dep:libc",
 ]
-# Lane-boundary harness (#4732): in-memory GitHub fixture so the
-# aggregate line (Integrate -> AggregateVerify -> AggregateReview -> Land)
-# runs without a live token. The `github_backend` field itself is
-# `#[cfg(any(test, feature = "testing"))]` so prod manifests never
-# advertise `AETHER_GITHUB_BACKEND` and prod binaries never link
-# `FakeGithub` unless the `testing` feature is enabled.
+# The GitHub adapter, and with it both backends `AETHER_GITHUB_BACKEND`
+# selects at runtime: the network, and the in-memory fixture repository that
+# runs the aggregate line (Integrate -> AggregateVerify -> AggregateReview ->
+# Land) without a live token (#4732) and that a benchmark bloom replays landed
+# history against (ADR-0184). The fixture is production code as of #4871 —
+# calibration has to measure the shipped coordinator, so trial mode is a
+# runtime choice rather than a second build.
 github = ["dep:aether-bloomery-github"]
+# The scripted-lane seam and the control-core domain fixtures — the parts that
+# really are test-only. This no longer gates the fixture backend.
 testing = ["github", "aether-bloomery-github/testing", "aether-bloomery/testing"]
 
 [dependencies]

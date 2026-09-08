@@ -11,7 +11,7 @@ use aether_bloomery::testing::digest;
 use aether_bloomery::{
     BloomId, Digest, Event, Fact, IdempotencyKey, IntegratePayload, MemberCandidate, SplicePayload, Topic, WorkpieceId,
 };
-use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{GitDataApi, GitSource, MainlineRef, MergeResult, short_hex};
 use aether_data::wire::{from_bytes, to_vec};
 

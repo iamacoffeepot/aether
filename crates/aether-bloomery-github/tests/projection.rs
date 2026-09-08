@@ -15,8 +15,8 @@ use aether_bloomery::{
 };
 use aether_bloomery_github::{
     CommissionProjectionApi, GithubError, GithubProjection, HttpRequest, HttpResponse, HttpTransport, Marker, NewIssue,
-    ReqwestGithub, StaticTokenSource, commission_floor_title, issue_title_is_valid, landing_branch,
-    marker::render_marker, testing::FakeGithub,
+    ReqwestGithub, StaticTokenSource, commission_floor_title, fixture::FakeGithub, issue_title_is_valid,
+    landing_branch, marker::render_marker,
 };
 
 /// The two issue numbers the view's members address — objects the repository

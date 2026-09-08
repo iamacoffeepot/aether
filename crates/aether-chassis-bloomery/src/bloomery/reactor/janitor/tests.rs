@@ -19,7 +19,7 @@ use aether_bloomery::testing::{digest, draft, event, membership, splice_bloom};
 use aether_bloomery::{
     BloomId, BloomSpec, BloomStatus, Digest, Fact, Forecast, ResolvedConfigs, Snapshot, SpendWindow, reduce,
 };
-use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{GitSource, MainlineRef, SourceError, candidate_ref_name};
 use aether_data::wire::to_vec;
 

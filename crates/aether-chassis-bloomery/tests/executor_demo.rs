@@ -25,7 +25,7 @@ use aether_bloomery::{
     Conclusion, Digest, ExecutionLimits, ExecutionStatus, Harness, NetworkProfile, Nonce, ReasoningEffort,
     ResolvedModel, Transformation, WorkHandle, WorkOrder,
 };
-use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{ActionsExecutor, Artifact, LaneWorkflows, RunConclusion, RunStatus};
 use aether_chassis_bloomery::bloomery::ExecutorShell;
 
