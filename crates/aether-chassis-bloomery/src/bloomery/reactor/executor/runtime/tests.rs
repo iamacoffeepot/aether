@@ -3922,6 +3922,9 @@ mod offloaded_adapter_calls {
         let sweep_at = NOW_UNIX_MILLIS + 7_200_000;
         let budget = Instant::now() + Duration::from_secs(30);
         while backend.cancelled().is_empty() && Instant::now() < budget {
+            // Each pass is a poll turn, so each opens its own offload round —
+            // the pacing the production tick applies.
+            offload.open_round();
             let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
             {
                 let port = offload.port(&shell);
@@ -3951,6 +3954,7 @@ mod offloaded_adapter_calls {
         backend.open();
         let budget = Instant::now() + Duration::from_secs(30);
         while backend.submitted().is_empty() && Instant::now() < budget {
+            offload.open_round();
             let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
             {
                 let port = offload.port(&shell);
@@ -3974,6 +3978,7 @@ mod offloaded_adapter_calls {
         let mut offload = AdapterOffload::new();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
+        offload.open_round();
         {
             let port = offload.port(&shell);
             for index in 0..MAX_IN_FLIGHT + 2 {

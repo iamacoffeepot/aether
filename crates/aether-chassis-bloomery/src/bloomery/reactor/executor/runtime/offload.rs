@@ -51,7 +51,7 @@
 //! workers share; the rest of the offload is plain actor state on the
 //! single-threaded dispatcher, which is its own mutual exclusion.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -172,12 +172,20 @@ impl Drop for Slot {
 }
 
 /// The state the actor and its workers share: what is running, what has
-/// answered, and what this turn asked for.
+/// answered, and what this round still wants run.
 #[derive(Default)]
 struct Ledger {
     in_flight: BTreeSet<AdapterCall>,
     answers: BTreeMap<AdapterCall, AdapterAnswer>,
-    wanted: Vec<AdapterWork>,
+    /// This round's backlog, in the order the turn asked for it. Drained a
+    /// slot at a time as workers free them, so a round wider than the ceiling
+    /// finishes across its completion turns rather than losing its tail.
+    wanted: VecDeque<AdapterWork>,
+    /// Every call this round has already started. A completion turn re-derives
+    /// the same wants from the same durable state, and without this it would
+    /// re-run each one the moment its answer landed — turning the reactor's
+    /// configured poll interval into "as fast as the network answers".
+    asked_this_round: BTreeSet<AdapterCall>,
 }
 
 /// A capture waiting to be published (ADR-0152), held across turns because the
@@ -261,20 +269,35 @@ impl AdapterOffload {
         answered
     }
 
-    /// Start every call this turn asked for that no worker holds, up to
-    /// [`MAX_IN_FLIGHT`]. Whatever does not fit is dropped rather than queued:
-    /// the next turn re-derives it from the same durable state, and a buffered
-    /// copy would replay a request the world has since moved past.
-    pub fn start_wanted(&mut self, ctx: &mut NativeCtx<'_>, shell: &ExecutorShell, pusher: &Arc<dyn CandidatePush>) {
-        let wanted = mem::take(&mut self.lock().wanted);
+    /// Open a new round: forget what the last one asked and what it never got
+    /// to. Called by the poll turn, and only by the poll turn — the round is
+    /// what holds the reactor to its configured cadence.
+    ///
+    /// A leftover want is dropped rather than carried, because the turn that
+    /// opens the round re-derives every want it still has from the store, the
+    /// outbox, and the tracked handles. Carrying one forward would replay a
+    /// request the world has since moved past.
+    pub fn open_round(&mut self) {
+        let mut ledger = self.lock();
+        ledger.asked_this_round.clear();
+        ledger.wanted.clear();
+    }
 
-        for work in wanted {
-            if self.in_flight() >= MAX_IN_FLIGHT {
+    /// Hand this round's backlog to workers, up to [`MAX_IN_FLIGHT`] at once.
+    /// What does not fit stays queued and starts as slots free, so a round
+    /// wider than the ceiling still finishes inside its own round.
+    pub fn start_wanted(&mut self, ctx: &mut NativeCtx<'_>, shell: &ExecutorShell, pusher: &Arc<dyn CandidatePush>) {
+        while self.in_flight() < MAX_IN_FLIGHT {
+            let Some(work) = self.lock().wanted.pop_front() else {
                 break;
-            }
+            };
             let call = work.call();
-            if !self.lock().in_flight.insert(call.clone()) {
-                continue;
+            {
+                let mut ledger = self.lock();
+                if !ledger.in_flight.insert(call.clone()) {
+                    continue;
+                }
+                ledger.asked_this_round.insert(call.clone());
             }
             self.spawn(ctx, shell, pusher, call, work);
         }
@@ -306,16 +329,24 @@ impl AdapterOffload {
         });
     }
 
-    /// Take a landed answer for `work`'s call, or record that this turn wants
+    /// Take a landed answer for `work`'s call, or record that this round wants
     /// it run.
+    ///
+    /// A call this round has already started is never wanted again, whether it
+    /// is still out or has already answered: one run per round is what keeps
+    /// the adapter surface on the reactor's poll cadence rather than on the
+    /// completion wakes' own.
     fn take_or_want(&self, work: AdapterWork) -> Option<AdapterAnswer> {
         let call = work.call();
         let mut ledger = self.lock();
         if let Some(answer) = ledger.answers.remove(&call) {
             return Some(answer);
         }
-        if !ledger.in_flight.contains(&call) && !ledger.wanted.iter().any(|held| held.call() == call) {
-            ledger.wanted.push(work);
+        let held = ledger.in_flight.contains(&call)
+            || ledger.asked_this_round.contains(&call)
+            || ledger.wanted.iter().any(|held| held.call() == call);
+        if !held {
+            ledger.wanted.push_back(work);
         }
         None
     }

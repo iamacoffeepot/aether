@@ -3041,15 +3041,27 @@ impl NativeActor for ExecutorReactorCapability {
 
     /// Poll wake: drain + submit the dispatch topic, then pull + admit matched
     /// results.
+    ///
+    /// The poll wake — and only the poll wake — opens a new offload round
+    /// (#5564). That is what still paces the adapter surface: every call runs
+    /// at most once per poll interval, exactly as it did when the tick made
+    /// them inline. Without it each answer's completion wake would re-ask the
+    /// call that just answered, and the reactor would probe the outside world
+    /// as fast as it replies.
     #[handler::single]
     fn on_dispatch_tick(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: DispatchTick) {
+        state.offload.open_round();
         run_dispatch_cycle(state, ctx);
     }
 
     /// A blocking adapter call answered (ADR-0093 / #5564). Run a cycle right
     /// here, so the answer is consumed at completion rather than waiting out
     /// the poll interval. The worker has already freed its own slot, so this
-    /// same cycle may start whatever it asks for next.
+    /// cycle hands it to whatever is left of the round's backlog.
+    ///
+    /// Deliberately *not* a new round: this turn acts on the answer and drains
+    /// the round the poll wake opened, and it cannot re-run a call that round
+    /// has already made.
     ///
     /// No reply: the dispatch was started from a timer wake, which is nobody's
     /// caller. `release_no_reply` is the sanctioned discharge for that (ADR-0109).
