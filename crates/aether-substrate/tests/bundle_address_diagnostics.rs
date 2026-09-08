@@ -28,12 +28,8 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::helpers::resolve_bundle;
 use aether_substrate::mail::registry::noop_handler;
 use aether_substrate::testing::boot_authority;
-use serde::{Deserialize, Serialize};
 
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
-)]
-#[kind(name = "test.bundle_diagnostics.poke")]
+#[aether_data::kind(name = "test.bundle_diagnostics.poke", copy, default, eq)]
 struct Poke {
     value: u64,
 }
