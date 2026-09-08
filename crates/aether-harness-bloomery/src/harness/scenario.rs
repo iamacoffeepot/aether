@@ -11,14 +11,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aether_actor::Addressable;
 use aether_bloomery::{
-    BackendObjectId, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CalibrationDocument, CandidateRef,
-    ConfigKind, ConfigRegistry, Correspondence, Digest, Evidence, EvidenceKind, Fact, FakeKeyProvider, KeyId,
-    MemberDependency, Membership, Observation, Outcome, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting,
-    Snapshot, StageCatalog, StageId, Statement, StoreClass, VerifyFailureSet, ViewDocument, WorkpieceId,
-    signed_approval,
+    AgentSelection, BackendObjectId, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CalibrationDocument,
+    CandidateRef, ConfigKind, ConfigRegistry, Correspondence, Digest, Evidence, EvidenceKind, Fact, FakeKeyProvider,
+    Harness, KeyId, MemberDependency, Membership, ModelOverride, Observation, Outcome, Provenance,
+    SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Snapshot, StageCatalog, StageId, Statement, StoreClass,
+    VerifyFailureSet, ViewDocument, WorkpieceId, signed_approval,
 };
 use aether_bloomery_github::fixture::FakeGithub;
-use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex};
+use aether_bloomery_github::{
+    ChecksState, GitDataApi, NewPullRequest, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex,
+};
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, GetResult};
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, read_ledger};
 use aether_chassis_bloomery::bloomery::{
@@ -1079,6 +1081,66 @@ impl ScenarioHarness {
             .expect("the coordinator's journal opens for writing")
             .record_dispatch_description(bloom.0.as_bytes(), workpiece, description)
             .expect("the work-order description persists");
+    }
+
+    /// Seed one landed pull request the benchmark door can draw a golden task
+    /// from (ADR-0184): an issue carrying the work order, a green landing on a
+    /// head of its own, and a proposal whose prose closes that issue.
+    ///
+    /// All four things a golden task is made of, placed the way an operator
+    /// stages real landed history onto a calibration host's fixture — so a
+    /// scenario about the run itself does not have to know which of them the
+    /// extraction reads from where.
+    ///
+    /// # Panics
+    /// The fixture refused to open the proposal, which only a duplicate head
+    /// can cause.
+    pub fn seed_landed_pull_request(&self, issue: u64, order: &str) -> u64 {
+        let branch = format!("landed-{issue}");
+        let head = self.fake().seed_commit(&format!("tree-{issue}"));
+        self.fake().seed_ref(&format!("heads/{branch}"), &head);
+        self.fake().seed_checks(&head, ChecksState::Passed);
+        self.fake().seed_issue(issue, order);
+
+        let proposal = self
+            .fake()
+            .create_pull_request(&NewPullRequest {
+                title: format!("feat(x): issue {issue}"),
+                body: format!("Closes #{issue}"),
+                head: branch,
+                base: "main".to_owned(),
+            })
+            .expect("the fixture opens the landing proposal");
+        self.fake().merge_pull_request(proposal.number, &format!("merge-{issue}"));
+
+        proposal.number
+    }
+
+    /// Record a member-wide [`ModelOverride`] through `POST /configs` and hand
+    /// back the address a benchmark cell names it by.
+    ///
+    /// Through the door rather than straight into the store, because the address
+    /// a cell is named by is the one the authoring route computed: a scenario
+    /// that content-addressed the value itself would still pass if the two ever
+    /// diverged, and the run would then seal a cell nothing resolves.
+    ///
+    /// # Panics
+    /// The route refused the write, or answered a body without an address.
+    pub fn record_model_override(&self, model: &str) -> Digest {
+        let value = ModelOverride {
+            agent: Some(AgentSelection { harness: Harness::Claude, model: model.to_owned() }),
+            ..ModelOverride::default()
+        };
+        let request = serde_json::json!({
+            "kind": ModelOverride::NAME,
+            "value": serde_json::to_value(&value).expect("a model override renders as JSON"),
+        });
+
+        let (status, body) = self.post("/configs", &request.to_string());
+        assert_eq!(status, 200, "the config write must land: {body}");
+        let written: serde_json::Value = serde_json::from_str(&body).expect("the config route answers JSON");
+        Digest::from_hex(written["digest"].as_str().expect("the config route answers an address"))
+            .expect("the answered address is 32 hex-encoded bytes")
     }
 
     /// Wake the land reactor until `bloom` reaches `want`.

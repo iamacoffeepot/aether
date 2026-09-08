@@ -32,8 +32,9 @@ use aether_actor::{HandlesKind, Manual};
 use aether_bloomery::EnumerateClaims;
 use aether_bloomery::{
     Admit, ApprovalPolicy, BloomDraft, BloomId, Event, MemberDependency, MetricsQuery, Query, ResolvedConfigs,
-    SpendQuery, Statement, Workpiece, WorkpieceId,
+    SpendQuery, Statement, StoreClass, Workpiece, WorkpieceId,
 };
+use aether_bloomery_git::fixture::FakeGithub;
 use aether_data::wire::to_vec;
 use aether_data::{Kind, MailId, MailboxId};
 use aether_http as http;
@@ -44,6 +45,7 @@ use aether_substrate::{InboundMail, Mailer};
 
 use super::response::error_response;
 use crate::artifacts::{ArtifactsCapability, GetRange};
+use crate::benchmark::{BenchmarkAdmission, BenchmarkPlan};
 #[cfg(feature = "github")]
 use crate::bloomery::{ArchiveRecords, CandidatePush, DoctorReport, JanitorReactorCapability, ListArchive};
 // The control core is a native sibling cap since the wasm-boundary retirement
@@ -89,6 +91,14 @@ pub(super) const MAX_SEAL_MEMBERS: usize = 256;
 /// so a second load round without a ceiling could amplify one seal into an
 /// unbounded number of store reads (issue #5305).
 pub(super) const MAX_SEAL_DEPENDENCY_LOADS: usize = 256;
+
+/// Ceiling on the outstanding benchmark-run count (ADR-0184). One held run keeps
+/// its whole plan — every sealed spec and every golden task's work-order text —
+/// plus one `benchmark_admits` entry per bloom, so the map is capped the way
+/// `seals` is. Low, because a benchmark run is a deliberate operator act that
+/// spends model lanes: several in flight at once is a mistake being made
+/// repeatedly rather than a load to accommodate.
+pub(super) const MAX_OPEN_BENCHMARKS: usize = 8;
 
 /// The control-plane REST router state: the pre-seal shaping maps plus the
 /// multi-hop join tables. A direct one-request/one-reply route holds nothing
@@ -188,6 +198,58 @@ pub struct ApiCapabilityState {
     /// only once the reducer has admitted the repair (issue #5560).
     #[cfg(feature = "github")]
     pub(super) repair_pushes: HashMap<u64, PendingRepairPush>,
+    /// Which world this coordinator's journal records (ADR-0184), resolved at
+    /// boot from the backend selector. `POST /benchmark` is refused outright
+    /// unless it is [`StoreClass::Trial`], so the class has to be readable from
+    /// inside a synchronous route rather than fetched per request.
+    pub(super) store_class: StoreClass,
+    /// The in-memory repository a benchmark run draws landed history from.
+    /// `Some` exactly when the backend selector named the fixture, which is the
+    /// same condition that makes the journal trial-classed.
+    pub(super) fixture: Option<FakeGithub>,
+    /// Benchmark runs held across their N seals, keyed by a minted handle.
+    pub(super) benchmarks: HashMap<u64, PendingBenchmark>,
+    /// The next benchmark-run handle to mint.
+    pub(super) next_benchmark: u64,
+    /// Each in-flight benchmark seal, keyed by its `Admit` dispatch
+    /// correlation, back-pointing at the held run and the bloom it answers for.
+    pub(super) benchmark_admits: HashMap<u64, BenchmarkAdmit>,
+}
+
+/// The pre-wired parts of a benchmark run, handed to [`finish`] so the handle
+/// mint and map inserts happen there — the [`PendingCommissionSealSetup`]
+/// sibling.
+pub(super) struct PendingBenchmarkSetup {
+    /// The planned run: its golden-task set and every bloom it dispatched.
+    pub(super) planned: BenchmarkPlan,
+    /// One entry per dispatched seal — the admit correlation and the bloom's
+    /// index in the plan.
+    pub(super) correlations: Vec<(u64, usize)>,
+}
+
+/// One benchmark run held across its seals.
+///
+/// Held rather than relayed for the reason a multi-member seal is: the answer is
+/// not the next reply. A run's `200` reports every cell, so it can only be
+/// written once the last of N admits has landed.
+pub(super) struct PendingBenchmark {
+    /// The held HTTP reply obligation.
+    pub(super) inbound: InboundMail,
+    /// The plan the report is rendered from.
+    pub(super) planned: BenchmarkPlan,
+    /// What the control core answered per bloom, positionally against
+    /// `planned.blooms`. `None` until that bloom's admit lands.
+    pub(super) admissions: Vec<Option<BenchmarkAdmission>>,
+    /// Seals still outstanding; the one that drops this to zero replies.
+    pub(super) remaining: usize,
+}
+
+/// One in-flight benchmark seal: which held run and which of its blooms.
+pub(super) struct BenchmarkAdmit {
+    /// The held [`PendingBenchmark`] handle.
+    pub(super) run: u64,
+    /// The index into that run's plan this admit answers for.
+    pub(super) index: usize,
 }
 
 /// The candidate-ref publication a derived repair owes once its admit lands: the
@@ -466,6 +528,9 @@ pub(super) enum Routed {
     ListOpenWorkpieces(ListCommissions),
     /// Await N commission loads, then gate and admit (#5048).
     DeferredCommissionSeal(Box<PendingCommissionSealSetup>),
+    /// Await N control-core seals for one benchmark run (ADR-0184); the last
+    /// admit renders the whole run's report.
+    DeferredBenchmark(Box<PendingBenchmarkSetup>),
     /// Await a signing-cap verify, then persist the commission write.
     DeferredCommissionVerify {
         /// The verify dispatch correlation the reply will echo.
@@ -613,6 +678,21 @@ pub(super) fn finish(
                     remaining,
                     loaded: BTreeMap::new(),
                 },
+            );
+            http::Outcome::Deferred
+        }
+        Routed::DeferredBenchmark(setup) => {
+            let PendingBenchmarkSetup { planned, correlations } = *setup;
+            let run = state.next_benchmark;
+            state.next_benchmark += 1;
+            let remaining = correlations.len();
+            for (correlation, index) in correlations {
+                state.benchmark_admits.insert(correlation, BenchmarkAdmit { run, index });
+            }
+            let inbound = ctx.take_inbound();
+            state.benchmarks.insert(
+                run,
+                PendingBenchmark { inbound, admissions: vec![None; planned.blooms.len()], planned, remaining },
             );
             http::Outcome::Deferred
         }

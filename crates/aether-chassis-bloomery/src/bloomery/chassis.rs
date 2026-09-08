@@ -759,6 +759,11 @@ impl BootableChassis for BloomeryChassis {
         // so a benchmark run cannot append to live history.
         let store_class = one_store_class(&store, github.uses_fixture())?;
         store_class.as_str().clone_into(&mut store.class);
+        // The repository a benchmark run replays landed history against
+        // (ADR-0184), captured beside the class it implies because one selector
+        // decides both. `None` off the fixture backend, which is the same
+        // condition under which `POST /benchmark` is refused outright.
+        let fixture = github.uses_fixture().then(|| github.shared_fixture());
         // Capture the tier-policy path before `github` is moved into the source
         // cap below; the api cap's pre-seal approve gate loads it at init (#3583).
         let approval_policy_file = coordinator.approval_policy_file.clone();
@@ -873,6 +878,8 @@ impl BootableChassis for BloomeryChassis {
                 archive_base: coordinator.archive_base.clone(),
                 artifacts_root,
                 control_token: coordinator.http_control_token,
+                store_class,
+                fixture,
             }))
     }
     #[cfg(not(feature = "github"))]
@@ -929,6 +936,11 @@ impl BootableChassis for BloomeryChassis {
                 archive_base: coordinator.archive_base.clone(),
                 artifacts_root,
                 control_token: coordinator.http_control_token,
+                store_class,
+                // No GitHub adapter is linked, so no fixture repository is
+                // mounted and `POST /benchmark` has nothing to replay — which
+                // the live class above already refuses first.
+                fixture: None,
             }))
     }
 }

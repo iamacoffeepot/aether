@@ -84,6 +84,7 @@ pub mod study_report;
 pub mod testing;
 pub mod values;
 
+pub use calibration::COST_CAVEAT;
 pub use calibration::CalibrationDocument;
 pub use calibration::CalibrationLedger;
 pub use calibration::CapabilityCell;
