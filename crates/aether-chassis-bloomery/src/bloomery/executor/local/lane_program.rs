@@ -37,7 +37,7 @@ use aether_bloomery::{LaneEntrypoint, PipelineManifest};
 /// axes) after [`leading_args`](Self::leading_args), so a stand-in binary sees
 /// exactly the argv the real lane does — its own leading words, then the
 /// coordinator's. Production reads those leading words from the bloom's sealed
-/// [`PipelineManifest`] entrypoint (ADR-0215); [`parse_override`] is the host
+/// [`PipelineManifest`] entrypoint (ADR-0215); [`LaneProgram::parse_override`] is the host
 /// knob that replaces them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneProgram {
@@ -79,7 +79,7 @@ impl LaneProgram {
     /// An empty value is [`Default`] (the compiled entrypoint) rather than an
     /// unspawnable program, so a caller that meant to override and passed `""`
     /// still spawns something. Production empty-vs-set lives on
-    /// [`parse_override`].
+    /// [`Self::parse_override`].
     #[must_use]
     pub fn parse(configured: &str) -> Self {
         Self::parse_override(configured).unwrap_or_default()
