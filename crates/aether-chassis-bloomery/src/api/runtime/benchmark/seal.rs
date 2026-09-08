@@ -99,8 +99,12 @@ impl ApiCapabilityState {
         ctx: &NativeCtx<'_, Manual>,
         mail: AdmitResult,
     ) -> Option<AdmitResult> {
-        let correlation = ctx.reply_target().correlation_id;
-        let held = self.benchmarks.remove(&correlation)?;
+        // `Some(mail)` and not `?`: every other admit route's reply arrives here
+        // too, and swallowing the ones this table does not hold would leave a
+        // hold, a grant, or a seal waiting out its ingress timeout.
+        let Some(held) = self.benchmarks.remove(&ctx.reply_target().correlation_id) else {
+            return Some(mail);
+        };
 
         held.inbound.reply(&json(200, &report(&held.planned, admission(&mail))));
         None
