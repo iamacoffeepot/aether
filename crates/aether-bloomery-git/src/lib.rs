@@ -4,9 +4,9 @@
 //! its ref/commit operations, [`GitSource`], [`GitObjectId`], [`MainlineRef`],
 //! the source error types, and the in-process [`fixture`] repository they run
 //! against — lives here so a fleet-local source authority does not depend on a
-//! crate named
-//! `github`. The GitHub REST/projection adapter (`aether-bloomery-github`)
-//! depends *inward* on this crate and re-exports the shared vocabulary.
+//! crate named `github`. The GitHub REST/projection adapter
+//! (`aether-bloomery-github`) depends *inward* on this crate and re-exports the
+//! shared vocabulary.
 //!
 //! The control core (`aether-bloomery`) stays adapter-neutral: it does not
 //! depend on this crate (ADR-0149 §The boundary).
