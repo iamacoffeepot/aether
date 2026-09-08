@@ -56,9 +56,11 @@ where it is read. Three of them decide whether the arrangement holds up:
 
 - **`AETHER_FLEET_STORE_ROOT`** must be set. Every spawn materializes the
   resolved substrate binary to `<root>/<engine-id>/substrate`, a full copy of a
-  chassis binary per engine, and nothing removes that directory when the engine
-  dies. The unit's `ExecStartPre` reaps this root at every start and refuses to
-  guess one, so the root belongs to exactly one hub.
+  chassis binary per engine. The hub reclaims each dir as its engine leaves
+  supervision and sweeps its own leftover engine dirs at startup; the unit's
+  `ExecStartPre` is the backstop for what neither can reach. It refuses to guess
+  a root, and the root belongs to exactly one hub — two sharing it would sweep
+  each other.
 - **`AETHER_BINARY_STORE_DIR`** should name a directory *outside* that root.
   This is the content-addressed store of uploaded binaries and components
   (ADR-0115 / ADR-0116) and is meant to outlive a restart; the reap must never
@@ -153,9 +155,10 @@ sides. Tearing down, the hub terminates and reaps each substrate it forked, so a
 clean stop never orphans one. Stopping the unit also kills the whole control
 group, which is the backstop for the case where the hub cannot do it itself: a
 forked substrate runs in its own process group, which a signal to the hub alone
-would not reach, but the cgroup holds it either way. The `ExecStartPre` reap then
-clears the materialized binaries those engines left under the store root before
-the new process starts.
+would not reach, but the cgroup holds it either way. A hub killed that way has
+no chance to reclaim the materialized binaries its engines left under the store
+root, so the next start sweeps them itself, and the `ExecStartPre` reap covers
+whatever that sweep cannot see.
 
 What does outlive a restart is the content-addressed store: uploaded binaries
 and components stay in `AETHER_BINARY_STORE_DIR`, and the startup bootstrap

@@ -29,15 +29,15 @@ use aether_text::FontMetricsResult;
 use alloc::format;
 use alloc::string::{String, ToString};
 
-use crate::set::defaults::WidgetDefaults;
+use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{
-    SingleLineEdit, accept_clipboard_paste, accept_font_metrics_result, apply_text_theme, arm_text_drag, edit_command,
+    SingleLineEdit, accept_clipboard_paste, accept_font_metrics_result, arm_text_drag, edit_command,
     measured_text_width, pump_text_font_metrics, push_triangle, quad, release_left, reply_single_line_edit,
     report_clipboard_copy, run_edit_key, single_line_box_fill, single_line_hit_byte,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, TextEditState, TextSpan};
-use crate::theme::{SetTheme, Theme, ThemeState};
+use crate::theme::{Theme, ThemeState};
 use crate::{
     Collect, FocusLost, HoverLost, NumericChanged, NumericConfig, SetValue, SetWidgetState, WidgetControlState,
     WidgetDrawItem, WidgetFrame,
@@ -531,28 +531,14 @@ impl NumericWidget {
     }
 }
 
+widget_chrome!(NumericWidget, font_metrics);
+
 impl WidgetDefaults for NumericWidget {
-    fn widget_frame(&mut self) -> &mut WidgetFrame {
-        &mut self.frame
-    }
-
-    fn widget_theme(&mut self) -> &mut Theme {
-        &mut self.theme
-    }
-
-    fn widget_state(&mut self) -> &mut InteractionState {
-        &mut self.state
-    }
-
     fn cancel_activation(&mut self) {
         self.dragging = false;
         self.paste_pending = false;
         self.pressed_stepper = None;
         self.edit.clear_composition();
-    }
-
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
     }
 
     fn on_focus_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: FocusLost) {

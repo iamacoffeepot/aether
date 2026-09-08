@@ -53,12 +53,12 @@ use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
 use crate::set::{
-    WidgetDefaults, accept_font_metrics_result, apply_text_theme, approx_text_width, measured_text_width,
-    pump_text_font_metrics, quad, raised_plate, reply_if_hidden, text_origin_y, wrap_to_width,
+    WidgetDefaults, accept_font_metrics_result, approx_text_width, measured_text_width, pump_text_font_metrics, quad,
+    raised_plate, reply_draw, text_origin_y, widget_chrome, wrap_to_width,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
-use crate::theme::{SetTheme, TextRole, Theme};
+use crate::theme::{TextRole, Theme};
 use crate::{
     Collect, SetWidgetState, ToastConfig, ToastNotice, ToastRegionChanged, ToastSeverity, WidgetDrawItem,
     WidgetDrawList, WidgetFrame,
@@ -305,26 +305,11 @@ fn report(ctx: &WasmCtx<'_>, changed: bool, region: ToastRegionChanged) {
     }
 }
 
+widget_chrome!(ToastWidget, font_metrics);
+
 impl WidgetDefaults for ToastWidget {
-    fn widget_frame(&mut self) -> &mut WidgetFrame {
-        &mut self.frame
-    }
-
-    fn widget_theme(&mut self) -> &mut Theme {
-        &mut self.theme
-    }
-
-    fn widget_state(&mut self) -> &mut InteractionState {
-        &mut self.state
-    }
-
     /// Nothing to cancel: a notice is read, never operated.
     fn cancel_activation(&mut self) {}
-
-    /// Restyle: adopt the fanned theme and request metrics for its font.
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
-    }
 }
 
 /// The toast region. Spawned inline by a panel root with a [`ToastConfig`];
@@ -418,17 +403,7 @@ impl WasmActor for ToastWidget {
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         let expired = self.age();
         report(ctx, expired, self.region_changed());
-        if reply_if_hidden(ctx, &self.state) {
-            return;
-        }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                content_height: None,
-                intrinsic: None,
-                items: Vec::new(),
-                overlay: self.overlay_items(),
-            });
-        }
+        reply_draw(ctx, &self.state, || WidgetDrawList::overlay(self.overlay_items()));
     }
 }
 

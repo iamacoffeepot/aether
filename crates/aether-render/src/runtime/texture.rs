@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use aether_substrate::render::{
     RealizedTexture, TextureBindings, realize_texture, realize_writable_texture, upload_texture_full,
 };
+use aether_substrate::session_ids::SessionIds;
 
 use crate::kinds::{CreateTexture, CreateTextureResult, DestroyTexture, UpdateTexture};
 use crate::{TextureFormat, TextureSampling, TextureUsage};
@@ -115,25 +116,27 @@ pub(super) fn wgpu_texture_format(format: TextureFormat) -> wgpu::TextureFormat 
 
 /// Reserved sentinel `texture_id` for the internal 1×1 white texture
 /// used by `on_draw_screen_triangles`, whose corners state their colour
-/// per vertex and sample nothing. `create_texture` starts at `0` and
-/// increments, so `u32::MAX` is outside the range any caller-visible id
+/// per vertex and sample nothing. `create_texture` allocates from `0` up
+/// to one below it, so it is outside the range any caller-visible id
 /// occupies. Typed `SubstrateHarness` observations expose the sentinel so
 /// such batches remain identifiable, but callers cannot allocate, update,
 /// or destroy it and it never collides with a user-created texture.
 pub const WHITE_TEXTURE_ID: u32 = u32::MAX;
 
-/// Session-scoped texture registry. `next_id` hands out the
-/// `texture_id` a `create_texture` reply carries — assigned in
-/// sequence the same way ADR-0103 assigns instrument ids, so ids are
-/// stable for the session and depend only on creation order.
+/// Session-scoped texture registry. `ids` hands out the `texture_id` a
+/// `create_texture` reply carries — assigned in sequence the same way
+/// ADR-0103 assigns instrument ids, so ids are stable for the session
+/// and depend only on creation order.
 pub struct TextureRegistry {
-    pub next_id: u32,
+    pub ids: SessionIds<u32>,
     pub entries: HashMap<u32, StagedTexture>,
 }
 
 impl TextureRegistry {
     pub fn new() -> Self {
-        Self { next_id: 0, entries: HashMap::new() }
+        // The window stops one below `WHITE_TEXTURE_ID` so the reserved
+        // sentinel is structurally unreachable rather than merely far away.
+        Self { ids: SessionIds::range(0, WHITE_TEXTURE_ID - 1), entries: HashMap::new() }
     }
 
     /// Drop every realization built against the current device while
@@ -151,7 +154,8 @@ impl TextureRegistry {
 
     /// Stage a new texture, validating the declared dimensions, format,
     /// sampling, and `pixels` before any id is consumed. A rejected create
-    /// leaves `next_id` untouched, so ids stay dense over accepted textures.
+    /// leaves the id sequence untouched, so ids stay dense over accepted
+    /// textures.
     pub fn create(&mut self, mail: CreateTexture) -> CreateTextureResult {
         let Some(expected) = expected_pixel_bytes(mail.width, mail.height, mail.format) else {
             return CreateTextureResult::Err {
@@ -194,8 +198,12 @@ impl TextureRegistry {
             }
             TextureUsage::Sampled | TextureUsage::Writable => {}
         }
-        let texture_id = self.next_id;
-        self.next_id += 1;
+        let Some(texture_id) = self.ids.allocate() else {
+            return CreateTextureResult::Err {
+                error: "this session has run out of texture ids; destroy_texture does not recycle them".to_owned(),
+            };
+        };
+
         self.entries.insert(
             texture_id,
             StagedTexture {
@@ -412,7 +420,7 @@ mod tests {
             pixels: vec![0u8; 16],
         });
         assert!(matches!(rejected, CreateTextureResult::Err { .. }), "staged pixels on a writable create must reject");
-        assert_eq!(registry.next_id, 0, "a rejected create must not consume an id");
+        assert_eq!(registry.ids.peek(), Some(0), "a rejected create must not consume an id");
 
         let accepted = registry.create(CreateTexture {
             width: 2,
@@ -519,7 +527,7 @@ mod tests {
 
         registry.invalidate_device_resources();
 
-        assert_eq!(registry.next_id, 2, "device replacement must not rewind public ids");
+        assert_eq!(registry.ids.peek(), Some(2), "device replacement must not rewind public ids");
         assert_eq!(registry.entries.len(), 3, "device replacement must preserve every registered id");
         let sampled = &registry.entries[&sampled_id];
         assert_eq!(sampled.width, 2);

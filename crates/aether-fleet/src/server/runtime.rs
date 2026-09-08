@@ -36,6 +36,7 @@ pub use aether_substrate::mail::SourceAddr;
 pub use aether_substrate::mail::mailer::Mailer;
 pub use std::collections::HashMap;
 pub use std::collections::VecDeque;
+use std::fs;
 use std::io;
 pub use std::path::{Path, PathBuf};
 pub use std::process::{Child, Command, Stdio};
@@ -50,7 +51,7 @@ pub use super::artifacts::{
     bootstrap_ingest, exec_file_name, ingest_binary, ingest_component, realize_executable, resolve_component,
     resolve_selector, set_artifact_pinned,
 };
-pub use super::fleet::{free_local_port, resolve_fleet_store_root, settle_err};
+pub use super::fleet::{engine_dir, free_local_port, resolve_fleet_store_root, settle_err, sweep_engine_dirs};
 
 /// How many recently-died engines [`FleetServer`]
 /// retains for `list_engines`' `recently_died` sidecar (issue 1906). A small
@@ -459,7 +460,48 @@ impl FleetServerState {
     pub fn retire_engine(&mut self, engine_id: EngineId) -> Option<EngineEntry> {
         let entry = self.engines.remove(&engine_id)?;
         self.refresh_binary_holds();
+        self.reap_engine_dir(engine_id);
         Some(entry)
+    }
+
+    /// Reclaim the scratch dir a fork materialized this engine's binary
+    /// into (issue 5502).
+    ///
+    /// Every spawn copies the resolved content bytes to
+    /// `<fleet store root>/<engine id>/<app name>` and forks that, so an
+    /// engine that leaves supervision without this leaks a whole binary to
+    /// disk under a bare uuid — unbounded growth proportional to spawn
+    /// count on a long-lived hub, with nothing to correlate it back to.
+    /// Called at every exit from supervision: a terminate, a reported
+    /// death, a birth that never committed, and an abandoned re-fork
+    /// attempt.
+    ///
+    /// Best-effort. The dir may not exist (a failure before the
+    /// materialize) and unlinking a running image is refused on some
+    /// hosts; either way the boot sweep is the backstop, so a failure is
+    /// logged and the death proceeds. The engine id is logged rather than
+    /// the path, which ADR-0115 keeps host-side.
+    fn reap_engine_dir(&self, engine_id: EngineId) {
+        match fs::remove_dir_all(engine_dir(&self.fleet_store_root, engine_id)) {
+            // A spawn that failed before the materialize left no dir at all.
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                target: "aether_substrate::fleet_server",
+                engine_id = %engine_id.0,
+                error = ?e.kind(),
+                "engine store: could not reclaim the engine's materialized binary; the next hub boot sweeps it",
+            ),
+        }
+    }
+
+    /// Record a `SpawnFailed` death against an engine id that never became
+    /// supervised and reclaim what its fork already materialized. The
+    /// shared terminal step for every birth that burned an id without
+    /// producing an engine (issue 2423, issue 5502).
+    fn abandon_spawn(&mut self, engine_id: EngineId, rpc_port: u16, detail: String) {
+        self.record_death(engine_id.0.to_string(), rpc_port, DeathReason::SpawnFailed { detail });
+        self.reap_engine_dir(engine_id);
     }
 
     /// Push a [`DeadRecord`] onto the recently-died ring, evicting the
@@ -477,7 +519,7 @@ impl FleetServerState {
     /// reap. For the failures after an `engine_id` has been minted but
     /// before the engine was ever registered alive.
     fn fail_spawn(&mut self, engine_id: EngineId, rpc_port: u16, error: String) -> SpawnEngineResult {
-        self.record_death(engine_id.0.to_string(), rpc_port, DeathReason::SpawnFailed { detail: error.clone() });
+        self.abandon_spawn(engine_id, rpc_port, error.clone());
         SpawnEngineResult::Err { engine_id: Some(engine_id.0.to_string()), error }
     }
 
@@ -557,7 +599,7 @@ impl FleetServerState {
         // unbundled application after the file it executed and draws that
         // name as the menu bar's first title, so the spawn's own
         // `--app-name` names the file (`exec_file_name`, ADR-0212).
-        let exec_path = self.fleet_store_root.join(engine_id.0.simple().to_string()).join(exec_file_name(&recipe.args));
+        let exec_path = engine_dir(&self.fleet_store_root, engine_id).join(exec_file_name(&recipe.args));
         realize_executable(exec_source, &exec_path)
             .map_err(|e| post(prepare_fork_io_detail("materializing", &recipe.hash, &e)))?;
 
@@ -633,7 +675,7 @@ impl FleetServerState {
                     error = %error,
                     "engine restart: the re-fork failed; the engine stays dead",
                 );
-                self.record_death(engine_id.0.to_string(), rpc_port, DeathReason::SpawnFailed { detail: error });
+                self.abandon_spawn(engine_id, rpc_port, error);
                 return;
             }
         };
@@ -677,7 +719,7 @@ impl FleetServerState {
                     error = %error,
                     "engine restart: the replacement proxy did not come up; the engine stays dead",
                 );
-                self.record_death(engine_id.0.to_string(), rpc_port, DeathReason::SpawnFailed { detail: error });
+                self.abandon_spawn(engine_id, rpc_port, error);
             }
         }
     }
@@ -700,6 +742,7 @@ impl FleetServerState {
                 if let Some(reason) = pending.early_death {
                     let error = format!("proxy died before supervision committed: {reason:?}");
                     self.record_death(engine_id.0.to_string(), rpc_port, reason);
+                    self.reap_engine_dir(engine_id);
                     SpawnEngineResult::Err { engine_id: Some(engine_id.0.to_string()), error }
                 } else {
                     self.engines.insert(
@@ -741,8 +784,11 @@ impl FleetServerState {
             self.record_death(engine_id.0.to_string(), entry.rpc_port, reason);
             // The corpse no longer runs its binary. A restart filed by the
             // caller takes the hold back the same turn, before anything can
-            // reclaim it.
+            // reclaim it — the store entry, that is; the successor forks a
+            // fresh dir of its own, so this engine's materialized copy goes
+            // with it.
             self.refresh_binary_holds();
+            self.reap_engine_dir(engine_id);
             return EngineDeathDisposition::LiveRemoved(Box::new(entry.supervision));
         }
         EngineDeathDisposition::Unknown
@@ -774,6 +820,22 @@ impl NativeActor for FleetServer {
         let mut store = ArtifactStore::open(&store_dir, config.binary_disk_budget_bytes)
             .map_err(|e| BootError::Other(Box::new(e)))?;
         bootstrap_ingest(&mut store, &config.binary_bootstrap);
+
+        // Reclaim the per-engine dirs an earlier hub process left under the
+        // fleet store root (issue 5502). A hub that has just started
+        // supervises nothing, so every engine dir there is a leftover: the
+        // backstop for the deaths that could not reap their own dir — a hub
+        // killed outright, or a host that refuses to unlink a running image.
+        let fleet_store_root = resolve_fleet_store_root(config.fleet_store_root.as_deref());
+        let reclaimed = sweep_engine_dirs(&fleet_store_root);
+        if reclaimed > 0 {
+            tracing::info!(
+                target: "aether_substrate::fleet_server",
+                reclaimed,
+                "engine store sweep: reclaimed engine dirs left by an earlier hub process",
+            );
+        }
+
         Ok(FleetServerState {
             engines: HashMap::new(),
             pending_engines: HashMap::new(),
@@ -782,7 +844,7 @@ impl NativeActor for FleetServer {
             heartbeat: config.heartbeat_params(),
             connect_budget: config.connect_budget(),
             spawn_attempts: config.spawn_attempts(),
-            fleet_store_root: resolve_fleet_store_root(config.fleet_store_root.as_deref()),
+            fleet_store_root,
             recently_died: VecDeque::new(),
             store,
             self_mailbox: ctx.self_id(),
@@ -958,6 +1020,12 @@ impl NativeActor for FleetServer {
                             attempts,
                             "engine spawn: substrate exited during startup (likely a stolen RPC port); re-forking on a fresh port",
                         );
+                        // The abandoned attempt burned an id, a port, and a
+                        // materialized copy of the binary. The next attempt
+                        // mints all three afresh, so this one's dir is
+                        // reclaimed here rather than left behind by a spawn
+                        // that ultimately succeeded (issue 5502).
+                        state.reap_engine_dir(engine_id);
                         continue;
                     }
                     owed.reply(ctx, &state.fail_spawn(engine_id, rpc_port, last_error));

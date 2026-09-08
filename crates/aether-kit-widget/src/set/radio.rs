@@ -29,9 +29,9 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease};
 
-use crate::set::defaults::WidgetDefaults;
+use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{
-    clamp_option_index, clamp_selection, disc, push_control_outlines, release_left, reply_if_hidden, text_origin_y,
+    clamp_option_index, clamp_selection, disc, push_control_outlines, release_left, reply_draw, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
@@ -156,19 +156,9 @@ impl RadioGroupWidget {
     }
 }
 
+widget_chrome!(RadioGroupWidget);
+
 impl WidgetDefaults for RadioGroupWidget {
-    fn widget_frame(&mut self) -> &mut WidgetFrame {
-        &mut self.frame
-    }
-
-    fn widget_theme(&mut self) -> &mut Theme {
-        &mut self.theme
-    }
-
-    fn widget_state(&mut self) -> &mut InteractionState {
-        &mut self.state
-    }
-
     fn cancel_activation(&mut self) {
         self.pressed = false;
     }
@@ -264,17 +254,7 @@ impl WasmActor for RadioGroupWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
-            return;
-        }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                content_height: None,
-                intrinsic: None,
-                items: self.draw_items(),
-                overlay: Vec::new(),
-            });
-        }
+        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()));
     }
 }
 

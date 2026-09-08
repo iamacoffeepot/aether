@@ -47,7 +47,7 @@ use core::mem;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{MouseButton, MouseButtonRelease, MouseMove, mouse_button};
 
-use crate::set::{WidgetDefaults, quad, reply_if_hidden};
+use crate::set::{WidgetDefaults, quad, reply_draw, widget_chrome};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
 use crate::{
@@ -225,19 +225,9 @@ impl SplitterWidget {
 /// pixels at the default grid.
 const MARK_UNIT_RATIO: f32 = 0.5;
 
+widget_chrome!(SplitterWidget);
+
 impl WidgetDefaults for SplitterWidget {
-    fn widget_frame(&mut self) -> &mut WidgetFrame {
-        &mut self.frame
-    }
-
-    fn widget_theme(&mut self) -> &mut Theme {
-        &mut self.theme
-    }
-
-    fn widget_state(&mut self) -> &mut InteractionState {
-        &mut self.state
-    }
-
     /// Drop a live drag. The split keeps wherever it had reached — a drag
     /// interrupted by losing focus is finished, not undone. A leave deferred
     /// by that drag stays owed and goes up on the next `Collect`.
@@ -376,17 +366,7 @@ impl WasmActor for SplitterWidget {
         if self.take_owed_leave() {
             Self::report_hover(ctx, false);
         }
-        if reply_if_hidden(ctx, &self.state) {
-            return;
-        }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                content_height: None,
-                intrinsic: None,
-                items: self.draw_items(),
-                overlay: Vec::new(),
-            });
-        }
+        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()));
     }
 }
 

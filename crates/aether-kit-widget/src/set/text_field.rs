@@ -18,7 +18,7 @@
 //! settle: the field drives a single-flight
 //! [`FontMetricsRequest`](aether_text::FontMetricsRequest) for its
 //! theme's font and measures against the resolved
-//! [`CachedFontMetrics`]. Until then it falls
+//! [`CachedFontMetrics`](aether_kinds::CachedFontMetrics). Until then it falls
 //! back to the proportional approximation as a bounded font-warm-up placement.
 //!
 //! Editing keys resolve through the set's shared `edit_command` vocabulary:
@@ -30,21 +30,19 @@
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_clipboard::{GetClipboardTextResult, SetClipboardTextResult};
 use aether_kinds::keycode::KEY_ENTER;
-use aether_kinds::{
-    CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput,
-};
+use aether_kinds::{ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput};
 use aether_text::FontMetricsResult;
 use alloc::string::String;
 
-use crate::set::defaults::WidgetDefaults;
+use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{
-    SingleLineEdit, accept_clipboard_paste, apply_text_control_state, apply_text_theme, arm_text_drag, edit_command,
-    pump_text_font_metrics, release_left, reply_single_line_edit, report_clipboard_copy, run_edit_key,
+    SingleLineEdit, accept_clipboard_paste, accept_font_metrics_result, apply_text_control_state, arm_text_drag,
+    edit_command, pump_text_font_metrics, release_left, reply_single_line_edit, report_clipboard_copy, run_edit_key,
     single_line_hit_byte, text_control_theme_state, update_text_modifiers,
 };
 use crate::state::InteractionState;
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, TextEditState, TextSpan};
-use crate::theme::{SetTheme, Theme, ThemeState};
+use crate::theme::{Theme, ThemeState};
 use crate::{Collect, SetText, SetWidgetState, TextCommitted, TextFieldConfig, WidgetControlState, WidgetFrame};
 
 /// A single-line editable string. Holds the reusable editing state, the
@@ -111,28 +109,13 @@ impl TextFieldWidget {
     }
 }
 
+widget_chrome!(TextFieldWidget, font_metrics);
+
 impl WidgetDefaults for TextFieldWidget {
-    fn widget_frame(&mut self) -> &mut WidgetFrame {
-        &mut self.frame
-    }
-
-    fn widget_theme(&mut self) -> &mut Theme {
-        &mut self.theme
-    }
-
-    fn widget_state(&mut self) -> &mut InteractionState {
-        &mut self.state
-    }
-
     fn cancel_activation(&mut self) {
         self.dragging = false;
         self.paste_pending = false;
         self.edit.clear_composition();
-    }
-
-    /// Restyle: adopt the fanned theme and request metrics for its font.
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
     }
 }
 
@@ -292,16 +275,7 @@ impl WasmActor for TextFieldWidget {
     /// stale reply (its font is no longer the desired one) is dropped.
     #[handler::single]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
-        let pump_deferred = match result {
-            FontMetricsResult::Ok { metrics } => self.font_metrics.accept_reply(Some(CachedFontMetrics::new(&metrics))),
-            FontMetricsResult::Err { error } => {
-                tracing::warn!(target: "aether_kit_widget", %error, "text field font metrics failed");
-                self.font_metrics.accept_reply(None)
-            }
-        };
-        if pump_deferred {
-            self.pump_font_metrics(ctx);
-        }
+        accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
 
     /// Reply the field's local draw: a box, any selection band, the text plus a

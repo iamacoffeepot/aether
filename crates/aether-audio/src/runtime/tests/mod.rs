@@ -43,8 +43,8 @@ fn live_cap() -> (AudioCapabilityState, Arc<ArrayQueue<AudioEvent>>) {
         sender: Some(event_sender),
         sample_rate: Some(TEST_RATE),
         assemblies: HashMap::new(),
-        next_assembly_id: 0,
-        next_instrument_id: builtin_id_ceiling(),
+        assembly_ids: SessionIds::new(),
+        instrument_ids: SessionIds::range(builtin_id_ceiling(), u8::MAX),
         thread: None,
         shutdown: None,
     };

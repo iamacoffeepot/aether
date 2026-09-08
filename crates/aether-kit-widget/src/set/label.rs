@@ -32,13 +32,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, Mail, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_kinds::CachedFontMetrics;
 use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
 use crate::set::{
-    RevealPlate, apply_static_control_state, elide_to_width, overflow_reveal_items, pump_text_font_metrics,
-    reply_if_hidden, text_origin_y,
+    RevealPlate, accept_font_metrics_result, apply_static_control_state, elide_to_width, overflow_reveal_items,
+    pump_text_font_metrics, reply_if_hidden, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{FontMetricsAdapter, SingleLineLayout};
@@ -257,16 +256,7 @@ impl WasmActor for LabelWidget {
     /// stale reply (its font is no longer the desired one) is dropped.
     #[handler::single]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
-        let pump_deferred = match result {
-            FontMetricsResult::Ok { metrics } => self.font_metrics.accept_reply(Some(CachedFontMetrics::new(&metrics))),
-            FontMetricsResult::Err { error } => {
-                tracing::warn!(target: "aether_kit_widget", %error, "label font metrics failed");
-                self.font_metrics.accept_reply(None)
-            }
-        };
-        if pump_deferred {
-            self.pump_font_metrics(ctx);
-        }
+        accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
 
     /// Reply the label's local draw: its text at the size its role is set at,
@@ -313,7 +303,7 @@ impl WasmActor for LabelWidget {
         let overlay = self.overflow_overlay(size, measured);
         let intrinsic = measured.map(|text_width| [text_width, self.theme.row_height]);
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { content_height: None, intrinsic, items, overlay });
+            parent.send(&WidgetDrawList::items(items).with_intrinsic(intrinsic).with_overlay(overlay));
         }
     }
 
@@ -329,7 +319,7 @@ impl WasmActor for LabelWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_kinds::{FontMetrics, GlyphAdvance};
+    use aether_kinds::{CachedFontMetrics, FontMetrics, GlyphAdvance};
     use alloc::vec;
 
     use crate::set::ELLIPSIS;

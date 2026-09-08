@@ -692,6 +692,70 @@ mod tests {
         settle_applied(state, engine_id, rpc_port, hash);
     }
 
+    /// Lay down the scratch dir a fork leaves for `engine_id`: the
+    /// per-engine copy of the resolved binary, at the shape `prepare_fork`
+    /// materializes into. Written out here rather than through the
+    /// production helper so a change to that shape fails this loudly.
+    fn materialize_engine_dir(state: &FleetServerState, engine_id: EngineId) -> PathBuf {
+        let dir = state.fleet_store_root.join(engine_id.0.simple().to_string());
+        fs::create_dir_all(&dir).expect("test setup: the per-engine scratch dir is creatable");
+        fs::write(dir.join("substrate"), b"realized-binary-bytes").expect("test setup: the materialized binary writes");
+        dir
+    }
+
+    /// Every spawn copies a whole chassis binary to disk under a bare
+    /// uuid, and nothing in production ever removed one: on a long-lived
+    /// hub that is unbounded growth proportional to spawn count, with
+    /// nothing in the dir name to correlate it back to. Both exits from
+    /// supervision must reclaim it — a reported death and a deliberate
+    /// terminate reach the table through different code (issue 5502).
+    #[test]
+    fn an_engine_leaving_supervision_reclaims_its_materialized_binary() {
+        let (mut state, root) = lifecycle_state(None);
+        let crashed = EngineId(Uuid::from_u128(0xC1));
+        let terminated = EngineId(Uuid::from_u128(0xC2));
+        commit_engine(&mut state, crashed, 7500, &test_recipe().hash);
+        commit_engine(&mut state, terminated, 7501, &test_recipe().hash);
+        let crashed_dir = materialize_engine_dir(&state, crashed);
+        let terminated_dir = materialize_engine_dir(&state, terminated);
+
+        state.observe_engine_death(crashed, DeathReason::Crashed { detail: "connection closed".to_owned() });
+        assert!(!crashed_dir.exists(), "a reported death reclaims the engine's materialized binary");
+
+        assert!(state.retire_engine(terminated).is_some(), "the second engine is supervised");
+        assert!(!terminated_dir.exists(), "a deliberate terminate reclaims it too");
+
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A birth that never commits materialized its binary all the same —
+    /// `prepare_fork` copies before the proxy dials — so the settlement
+    /// that turns it into a `SpawnFailed` is the only chance to reclaim it.
+    #[test]
+    fn a_birth_that_never_commits_reclaims_what_it_materialized() {
+        let (mut state, root) = lifecycle_state(None);
+        let engine_id = EngineId(Uuid::from_u128(0xC3));
+        state.begin_pending_spawn(engine_id, 7502, test_recipe().hash);
+        let dir = materialize_engine_dir(&state, engine_id);
+
+        state
+            .settle_pending_spawn(
+                FleetSpawnContext {
+                    engine_id,
+                    rpc_port: 7502,
+                    supervision: Supervision::new(test_recipe()),
+                    origin: SpawnOrigin::Requested,
+                },
+                ProxySpawnOutcome::Rejected("canonical route collision".to_owned()),
+            )
+            .expect("matching owner rejection settles");
+        assert!(!dir.exists(), "a rejected birth reclaims the binary its fork materialized");
+
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+    }
+
     /// An `upload_binary` repointing a name leaves the previously-named
     /// hash unnamed and unpinned — and therefore the *first* LRU candidate
     /// — while an engine forked from it is still running. Supervision has

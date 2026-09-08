@@ -482,6 +482,48 @@ pub struct WidgetDrawList {
     pub overlay: Vec<WidgetDrawItem>,
 }
 
+impl WidgetDrawList {
+    /// A widget's own draw and nothing more: ordinary items, an empty overlay
+    /// lane, no measurement and no content extent reported. What most stock
+    /// widgets reply, so the three fields they never vary are stated here
+    /// once instead of at every `Collect` handler.
+    #[must_use]
+    pub fn items(items: Vec<WidgetDrawItem>) -> Self {
+        Self { intrinsic: None, content_height: None, items, overlay: Vec::new() }
+    }
+
+    /// A widget whose whole draw stands over the cluster and files nothing in
+    /// the ordinary lane — a modal's plate, a tooltip, the toast stack.
+    #[must_use]
+    pub fn overlay(overlay: Vec<WidgetDrawItem>) -> Self {
+        Self { intrinsic: None, content_height: None, items: Vec::new(), overlay }
+    }
+
+    /// The same list, also filing `overlay` in the escaping lane — a control
+    /// that draws in its slot *and* over the cluster, like an open dropdown.
+    #[must_use]
+    pub fn with_overlay(mut self, overlay: Vec<WidgetDrawItem>) -> Self {
+        self.overlay = overlay;
+        self
+    }
+
+    /// The same list, reporting the widget's measured content size to the
+    /// parent that sizes its slot.
+    #[must_use]
+    pub fn with_intrinsic(mut self, intrinsic: Option<[f32; 2]>) -> Self {
+        self.intrinsic = intrinsic;
+        self
+    }
+
+    /// The same list, reporting how tall the whole of what the widget holds
+    /// is when that is taller than the viewport it drew in.
+    #[must_use]
+    pub fn with_content_height(mut self, content_height: Option<f32>) -> Self {
+        self.content_height = content_height;
+        self
+    }
+}
+
 /// The fixed size of a scroll viewport or its authored content, in logical
 /// window pixels. Named fields keep both axes and their units explicit at the
 /// schema boundary.
