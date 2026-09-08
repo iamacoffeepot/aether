@@ -295,7 +295,14 @@ impl ScenarioHarness {
     /// `GET path` against the coordinator's REST control ingress.
     #[must_use]
     pub fn get(&self, path: &str) -> (u16, String) {
-        self.wire.get(path)
+        self.wire.request("GET", path, "")
+    }
+
+    /// [`post`](Self::post) with the method left to the caller — the shaping
+    /// doors are `PATCH`, and a draft is handed its base through one.
+    #[must_use]
+    pub fn request(&self, method: &str, path: &str, body: &str) -> (u16, String) {
+        self.wire.request(method, path, body)
     }
 
     /// One benchmark run's rendered state (ADR-0184), read through the door an
@@ -920,6 +927,17 @@ impl ScenarioHarness {
             assert!(Instant::now() < deadline, "the coordinator's mainline never bound to a checkoutable commit");
             thread::sleep(POLL);
         }
+    }
+
+    /// Park the next dispatch the fixture GitHub receives for `delay` — a slow
+    /// `workflow_dispatch` round trip (#5564), the condition the executor's
+    /// handler must not wait on. One-shot: every later dispatch is at speed.
+    ///
+    /// # Panics
+    /// This is a fixture-cell method; a cell with no fixture GitHub has no
+    /// dispatch to stall.
+    pub fn stall_next_dispatch(&self, delay: Duration) {
+        self.fake().stall_next_dispatch(delay);
     }
 
     pub(super) fn fake(&self) -> &FakeGithub {

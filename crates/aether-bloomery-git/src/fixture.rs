@@ -29,6 +29,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread;
+use std::time::Duration;
 
 use aether_bloomery::{BackendObjectId, BloomId, Correspondence, CorrespondenceError, Digest};
 use sha2::{Digest as _, Sha256};
@@ -165,6 +167,12 @@ struct State {
     // is backed by a real one (`with_object_repo`). `None` keeps the synthetic
     // in-memory shas.
     object_repo: Option<PathBuf>,
+    // When set, the next `dispatch_workflow` parks for this long before it
+    // records anything — a slow `workflow_dispatch` round trip (#5564). Real
+    // wall-clock sleep, not a logical lag: what a scenario proves with it is
+    // that a caller does not *wait* on the call, which a bookkeeping-only lag
+    // cannot express.
+    stall_next_dispatch: Option<Duration>,
     // When set, each `create_ref` hides that name from the next `get_ref` once
     // — GitHub's read-after-create cache lag (#5072). `seed_ref` is not a create.
     lag_created_refs: bool,
@@ -449,6 +457,14 @@ impl FakeGithub {
     /// that name returns `Ok(None)` once — the GitHub read-after-create window
     /// Wave 3 sequence 432 hit. Subsequent reads see the ref. [`Self::seed_ref`]
     /// is not a create and is not lagged.
+    /// Park the next [`ActionsApi::dispatch_workflow`] for `delay` before it
+    /// records the dispatch — the slow-adapter shape the nonblocking-handler
+    /// contract exists for (#5564). One-shot: the call it delays consumes it,
+    /// so every later dispatch runs at full speed.
+    pub fn stall_next_dispatch(&self, delay: Duration) {
+        self.lock().stall_next_dispatch = Some(delay);
+    }
+
     pub fn lag_next_read_after_create(&self) {
         self.lock().lag_created_refs = true;
     }
@@ -1225,6 +1241,15 @@ impl ActionsApi for FakeGithub {
         git_ref: &str,
         inputs: &BTreeMap<String, String>,
     ) -> Result<(), GithubError> {
+        // Read the stall out and release the lock before sleeping: a parked
+        // dispatch must not also hold the fake's state against every other
+        // caller, which would make it a lock-contention test instead of a
+        // slow-adapter one.
+        let stall = self.lock().stall_next_dispatch.take();
+        if let Some(delay) = stall {
+            thread::sleep(delay);
+        }
+
         let nonce = inputs.get(INPUT_NONCE).cloned().unwrap_or_default();
         self.lock().dispatches.push(StoredDispatch {
             workflow_file: workflow_file.to_owned(),

@@ -13,7 +13,7 @@ use super::admit::{Admission, AdmitDecision, IntakeError, IntakeRefusal, Uploade
 use super::claims::EvidenceClaims;
 use super::dispatch::DispatchRecord;
 use crate::artifacts::ArtifactsCapabilityState;
-use crate::bloomery::executor::{ExecutorPortError, ExecutorShell};
+use crate::bloomery::executor::{ExecutorPort, ExecutorPortError, Settled};
 use crate::bloomery::study::{
     StudyAdmission, StudyAdmitDecision, UploadedStudyRecord, admit_study, study_evidence_event,
 };
@@ -29,11 +29,18 @@ pub trait AdmitSink {
 
 /// One handle this cycle inspected that was not yet [`ExecutionStatus::Completed`].
 ///
-/// `observed_from_unix_millis` is sampled immediately before [`ExecutorShell::inspect`]
+/// `observed_from_unix_millis` is sampled immediately before [`ExecutorPort::observe`]
 /// and `observed_until_unix_millis` immediately after it returns. Heartbeat future
 /// checks use the end; silence age uses the start. An inverted window (`until` <
 /// `from`) is not a backend fault: the status stays pending so the caller's
 /// absolute-deadline sweep still sees an observed live order.
+///
+/// Against an offloading port (#5564) the window brackets the *consumption* of
+/// an answer a worker produced slightly earlier, not the round trip itself. The
+/// skew is the wake latency — a worker's completion pushes the wake that runs
+/// the consuming turn — so it is milliseconds against a silence threshold in
+/// seconds, and it is in the safe direction: the window stays non-inverted and
+/// a lane is never charged with less silence than it actually kept.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PendingObservation {
     /// The inspected handle's nonce.
@@ -66,9 +73,9 @@ pub struct CycleReport {
     /// unchanged: a `Completed` handle is streamed here and never appears in
     /// `pending`.
     pub pending: Vec<PendingObservation>,
-    /// Handles this cycle never resolved because the backend arm holding them
-    /// faulted (#5412) — inspected-and-errored, or skipped after an earlier
-    /// handle on the same arm errored.
+    /// Handles this cycle never resolved: the backend arm holding them faulted
+    /// (#5412) — inspected-and-errored, or skipped after an earlier handle on
+    /// the same arm errored — or a worker still holds their call (#5564).
     ///
     /// Load-bearing to the caller's deadline and silence sweeps, not merely
     /// informational: "still pending" for one of these nonces means "never
@@ -133,7 +140,7 @@ pub fn now_unix_millis() -> u64 {
 /// # Backend isolation (#5412)
 ///
 /// The handles are grouped by the backend arm that will actually answer for
-/// them ([`ExecutorShell::backend_for`]), and a fault is isolated to its arm:
+/// them ([`ExecutorPort::backend_for`]), and a fault is isolated to its arm:
 /// the fault is logged, the rest of that arm's handles are skipped for this
 /// tick, and every other arm is still inspected and still admits. An arm
 /// holding none of these handles is not asked at all.
@@ -153,20 +160,20 @@ pub fn now_unix_millis() -> u64 {
 /// admission consumes.
 pub fn run_intake_cycle(
     store: &mut dyn StoreBackend,
-    shell: &ExecutorShell,
+    port: &dyn ExecutorPort,
     handles: &[WorkHandle],
     claims: &dyn EvidenceClaims,
     artifacts: Option<&mut ArtifactsCapabilityState>,
     sink: &mut dyn AdmitSink,
 ) -> Result<CycleReport, CycleError> {
-    run_intake_cycle_now(store, shell, handles, claims, artifacts, sink, now_unix_millis)
+    run_intake_cycle_now(store, port, handles, claims, artifacts, sink, now_unix_millis)
 }
 
 /// [`run_intake_cycle`] with an injected clock so a test can drive inspect
 /// observation windows without a process-global latch.
 pub fn run_intake_cycle_now<Now: FnMut() -> u64>(
     store: &mut dyn StoreBackend,
-    shell: &ExecutorShell,
+    port: &dyn ExecutorPort,
     handles: &[WorkHandle],
     claims: &dyn EvidenceClaims,
     artifacts: Option<&mut ArtifactsCapabilityState>,
@@ -177,31 +184,40 @@ pub fn run_intake_cycle_now<Now: FnMut() -> u64>(
     let mut artifacts = artifacts;
     let mut faulted: Vec<BackendId> = Vec::new();
     for handle in handles {
-        let backend = shell.backend_for(handle);
+        let backend = port.backend_for(handle);
         if faulted.contains(&backend) {
             report.unobserved.push(handle.nonce.clone());
             continue;
         }
         let observed_from_unix_millis = now();
-        let status = match shell.inspect(handle) {
-            Ok(status) => status,
-            Err(error) => {
+        let observed = match port.observe(handle) {
+            // A worker holds the observation (#5564). "Never asked", exactly
+            // like an arm this cycle skipped — and unlike a fault, it costs the
+            // arm nothing: its other handles are still asked, each on its own
+            // worker, and the answer is consumed on the turn the completion
+            // wake starts.
+            Settled::InFlight => {
+                report.unobserved.push(handle.nonce.clone());
+                continue;
+            }
+            Settled::Answered(Ok(observed)) => observed,
+            Settled::Answered(Err(error)) => {
                 skip_backend(&mut report, &mut faulted, backend, handle, &error, "inspect");
                 continue;
             }
         };
         let observed_until_unix_millis = now();
-        if !matches!(status, ExecutionStatus::Completed { .. }) {
+        let Some(streamed) = observed.evidence else {
             report.pending.push(PendingObservation {
                 nonce: handle.nonce.clone(),
-                status,
+                status: observed.status,
                 observed_from_unix_millis,
                 observed_until_unix_millis,
             });
             continue;
-        }
+        };
         report.completed += 1;
-        let references = match shell.stream_evidence(handle) {
+        let references = match streamed {
             Ok(references) => references,
             Err(error) => {
                 skip_backend(&mut report, &mut faulted, backend, handle, &error, "stream_evidence");

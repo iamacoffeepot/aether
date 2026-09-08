@@ -454,6 +454,7 @@ pub use values::PriceTable;
 pub use values::ProposeRequest;
 pub use values::Provenance;
 pub use values::Question;
+pub use values::RETROSPECT_READ_COMMAND;
 pub use values::REVIEW_CRITIC_COMMAND;
 pub use values::ReasoningEffort;
 pub use values::ReleaseAcceptedView;

@@ -59,7 +59,7 @@ pub struct TreeAdrs {
 
 impl AdrMaturity for TreeAdrs {
     fn status(&self, path: &str) -> Option<SealedAdrStatus> {
-        blob_markdown(&self.repo, self.commit.as_deref()?, path).map(|text| status_from_markdown(&text))
+        blob_text(&self.repo, self.commit.as_deref()?, path).map(|text| status_from_markdown(&text))
     }
 }
 
@@ -84,15 +84,17 @@ impl TreeAdrs {
 /// A Bloomery [`Digest`] is never a git sha. Reading `{digest-hex}:{path}`
 /// would miss the sealed blob on today's sha1 repositories and is the hex-pun
 /// ADR-0150 forbids.
-fn sealed_commit_hex(correspondence: Option<&dyn Correspondence>, base: Digest) -> Option<String> {
+pub fn sealed_commit_hex(correspondence: Option<&dyn Correspondence>, base: Digest) -> Option<String> {
     let object = correspondence?.resolve_backend_object(&base).ok()??;
     GitObjectId::try_from(object).ok().map(|id| id.to_hex())
 }
 
-/// Blob text at `commit:path`, or [`None`] when the read does not confirm a
-/// status line. A missing path, a missing object, and a spawn/decode fault
-/// all return [`None`] — uncertain, not a confirmed Proposed blob.
-fn blob_markdown(repo: &Path, commit: &str, path: &str) -> Option<String> {
+/// Blob text at `commit:path`, or [`None`] when nothing readable is there. A
+/// missing path, a missing object, and a spawn/decode fault are one answer:
+/// this read confirms a blob's text or it confirms nothing. Each caller decides
+/// what a non-answer means — an uncertain ADR status here, a base that does not
+/// yet declare its lanes in [`pipeline`](super::super::pipeline).
+pub fn blob_text(repo: &Path, commit: &str, path: &str) -> Option<String> {
     let spec = format!("{commit}:{path}");
     let output = command::run(repo, &["cat-file", "-p", &spec]).ok()?;
     output.status.success().then_some(output.stdout).and_then(|bytes| String::from_utf8(bytes).ok())

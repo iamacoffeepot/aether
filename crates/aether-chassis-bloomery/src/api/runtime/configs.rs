@@ -35,8 +35,11 @@
 //! content in hand before it can gate anything.
 
 use aether_actor::Manual;
-use aether_bloomery::{Digest, LoadConfigs, LoadConfigsResult, config_address};
+use aether_bloomery::{
+    Digest, LoadConfigs, LoadConfigsResult, PIPELINE_MANIFEST_PATH, PipelineManifest, config_address,
+};
 use aether_codec::{decode_schema, encode_schema};
+use aether_data::Kind;
 use aether_data::schema::SchemaType;
 use aether_http::HttpServerResponse;
 use aether_kinds::descriptors;
@@ -135,11 +138,33 @@ fn schema_of(kind: &str) -> Option<SchemaType> {
 
 /// `POST /configs` — encode a configuration through its kind's schema, address
 /// it, and relay the store write; [`config_response`] answers once it lands.
+///
+/// One kind is refused rather than authored. The pipeline manifest is a
+/// statement about what a *tree* can run, and only a host holding both the
+/// manifest and that tree can check the two agree — the reducer is `no_std` and
+/// cannot fetch, and this route sees no base at all. An operator-authored entry
+/// would therefore let a draft attest a vocabulary its base does not carry,
+/// which is the attested-but-untrue divergence ADR-0174 exists to remove. So
+/// the entry is derived at draft formation from the base's own
+/// [`PIPELINE_MANIFEST_PATH`]
+/// (ADR-0215, [`pipeline`](super::pipeline)) and can reach a registry no other
+/// way.
 pub(super) fn author_config(body: &[u8]) -> Routed {
     let request: ConfigRequest = match hex::from_slice(body) {
         Ok(request) => request,
         Err(error) => return Routed::Reply(error_response(400, &format!("invalid config body: {error}"))),
     };
+
+    if request.kind == PipelineManifest::NAME {
+        return Routed::Reply(error_response(
+            422,
+            &format!(
+                "`{}` is derived from the sealed base's `{PIPELINE_MANIFEST_PATH}` and is never authored; patch the \
+                 draft's base instead",
+                PipelineManifest::NAME
+            ),
+        ));
+    }
 
     let Some(schema) = schema_of(&request.kind) else {
         return Routed::Reply(error_response(400, &format!("unknown config kind `{}`", request.kind)));
@@ -180,7 +205,14 @@ pub(super) fn config_response(state: &mut ApiCapabilityState, result: RecordConf
             state.configs.insert(address, kind.clone(), bytes, None);
             json(200, &ConfigView { digest: address, kind })
         }
-        RecordConfigResult::Err { error } => error_response(500, &format!("config write failed: {error}")),
+        RecordConfigResult::Err { error } => {
+            // Authoring answers this to its caller. A host-derived write has no
+            // caller to answer — the draft patch that fired it replied from its
+            // own in-memory state — so the log is the only place a failed row
+            // surfaces before the reducer refuses the bloom that names it.
+            tracing::warn!(target: "aether_chassis_bloomery::api", %error, "configuration write failed");
+            error_response(500, &format!("config write failed: {error}"))
+        }
     }
 }
 

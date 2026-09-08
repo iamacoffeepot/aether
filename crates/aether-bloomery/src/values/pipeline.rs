@@ -249,8 +249,8 @@ mod tests {
 
     use super::{PipelineManifest, PipelineManifestError};
     use crate::values::{
-        CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND, VERIFY_BASE_COMMAND,
-        VERIFY_CHECK_COMMAND, VERIFY_MEMBER_COMMAND, VerifyFailure, VerifyGateSet, is_model_lane,
+        CONSTRUCT_IMPLEMENT_COMMAND, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND,
+        VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_MEMBER_COMMAND, VerifyFailure, VerifyGateSet, is_model_lane,
     };
 
     fn checked_in_manifest() -> PipelineManifest {
@@ -280,7 +280,10 @@ mod tests {
         // respelled, or a gate set's fan-out changed without the matching edit
         // to `pipeline.toml` fails here rather than at a seal door months later.
         assert_eq!(manifest.verifiers.identities, names(VerifyFailure::ALL.into_iter()));
-        assert_eq!(manifest.lanes.model, [CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND]);
+        assert_eq!(
+            manifest.lanes.model,
+            [CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND, RETROSPECT_READ_COMMAND]
+        );
         assert_eq!(manifest.lanes.mechanical, [VERIFY_MEMBER_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_BASE_COMMAND]);
         let runs: BTreeMap<String, Vec<String>> =
             [VerifyGateSet::member(), VerifyGateSet::fold(), VerifyGateSet::base()]
