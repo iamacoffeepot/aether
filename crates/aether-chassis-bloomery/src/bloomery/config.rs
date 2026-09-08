@@ -229,12 +229,12 @@ pub struct CoordinatorConfig {
     /// The comma-separated command-id prefixes the executor routes to the local
     /// backend (the rest go to Actions). The default routes the model-driven
     /// lanes local — `construct.` (construct/refine), `review.` (the critic),
-    /// and `scope.` (the scoper) — each forks an agent CLI under an ambient
-    /// credential the zero-secret runner deliberately lacks; adding e.g.
-    /// `verify.` is the release valve that flips a heavy mechanical lane local
-    /// (Actions outage, quota, offline work). Parsed by
-    /// [`local_lane_prefixes`](Self::local_lane_prefixes).
-    #[config(default = "construct.,review.,scope.")]
+    /// `scope.` (the scoper), and `retrospect.` (the bloom-level reader) — each
+    /// forks an agent CLI under an ambient credential the zero-secret runner
+    /// deliberately lacks; adding e.g. `verify.` is the release valve that
+    /// flips a heavy mechanical lane local (Actions outage, quota, offline
+    /// work). Parsed by [`local_lane_prefixes`](Self::local_lane_prefixes).
+    #[config(default = "construct.,review.,scope.,retrospect.")]
     pub local_lane_commands: String,
     /// The scratch-worktree base dir the local backend checks each order's subject
     /// into (keyed by nonce). Should be absolute in production so the checkout
@@ -532,7 +532,7 @@ impl Default for CoordinatorConfig {
             authorized_instruction_bundles: String::new(),
             retrospect_reader_enabled: false,
             local_lane_enabled: true,
-            local_lane_commands: "construct.,review.,scope.".to_owned(),
+            local_lane_commands: "construct.,review.,scope.,retrospect.".to_owned(),
             local_worktree_base: ".bloomery/local-worktrees".to_owned(),
             local_lane_program: DEFAULT_LANE_PROGRAM.to_owned(),
             max_concurrent_lanes: 3,
