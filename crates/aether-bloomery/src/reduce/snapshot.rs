@@ -275,15 +275,25 @@ impl Snapshot {
     ///
     /// The one place the two-step lookup happens, so every seal asks the
     /// question the same way: look the commit up in [`Self::base_trees`], then
-    /// the tree plus [`VerifyGateSet::base`] in [`Self::base_receipts`]. The
-    /// current gate set is recomputed rather than remembered, for the reason
+    /// the tree plus the compiled [`VerifyGateSet::base`] in
+    /// [`Self::base_receipts`]. Callers holding a sealed bloom use
+    /// [`Self::base_receipt_under`] with that bloom's manifest so a vocabulary
+    /// the compiled projection does not name still finds the receipt it filed.
+    /// The current gate set is recomputed rather than remembered, for the reason
     /// [`BloomRecord::verify_proof_for`] states: a proof journaled under a
     /// different verify vocabulary or lane misses instead of answering for
     /// gates that no longer exist.
     #[must_use]
     pub fn base_receipt_for(&self, base: Digest) -> Option<&BaseReceipt> {
+        self.base_receipt_under(base, VerifyGateSet::base().digest())
+    }
+
+    /// The recorded base-verify receipt for `base` under `gate_set`, or `None`
+    /// when this snapshot holds none under that identity.
+    #[must_use]
+    pub fn base_receipt_under(&self, base: Digest, gate_set: Digest) -> Option<&BaseReceipt> {
         let tree = self.base_trees.get(&base).copied()?;
-        self.base_receipts.get(&VerifiedTree { tree, gate_set: VerifyGateSet::base().digest() })
+        self.base_receipts.get(&VerifiedTree { tree, gate_set })
     }
 
     /// Stamp a green whole-workspace receipt for `base` — the test-and-fixture
@@ -1085,7 +1095,9 @@ impl Snapshot {
         // land, so the claim/inherit effects have a record to attach to.
         if let Some((spec, id)) = admitted_spec(&event.fact, &decisions.outcome) {
             let mut record = BloomRecord::sealed(spec.clone(), configs);
-            record.base_proven = next.base_receipt_for(spec.base()).is_some_and(BaseReceipt::is_green);
+            record.base_proven = next
+                .base_receipt_under(spec.base(), VerifyGateSet::base_of(&record.pipeline_manifest).digest())
+                .is_some_and(BaseReceipt::is_green);
             next.blooms.insert(id, record);
         }
         for effect in &decisions.effects {
@@ -2273,7 +2285,7 @@ impl BloomRecord {
     /// the whole failure the gate-set half of the key exists to stop.
     #[must_use]
     pub fn verify_proof_for(&self, position: StageId, tree: Digest) -> Option<&VerifyProof> {
-        let gate_set = VerifyGateSet::for_stage(position)?.digest();
+        let gate_set = VerifyGateSet::for_stage_of(position, &self.pipeline_manifest)?.digest();
         self.verify_proofs.get(&VerifiedTree { tree, gate_set })
     }
 

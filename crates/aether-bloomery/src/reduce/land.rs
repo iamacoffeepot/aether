@@ -136,7 +136,8 @@ fn landed_base_receipt(
 ) -> Option<Decision> {
     let tree = record.resolved_tree.filter(|_| record.resolved_head == Some(new_head))?;
     let proof = record.verify_proof_for(StageId::AggregateVerify, tree)?;
-    if !snapshot.base_receipt_for(base).is_some_and(BaseReceipt::is_green) {
+    let gate_set = VerifyGateSet::base_of(&record.pipeline_manifest).digest();
+    if !snapshot.base_receipt_under(base, gate_set).is_some_and(BaseReceipt::is_green) {
         return None;
     }
 
@@ -147,7 +148,7 @@ fn landed_base_receipt(
         receipt: BaseReceipt {
             base: new_head,
             tree,
-            gate_set: VerifyGateSet::base().digest(),
+            gate_set,
             verdict: BaseVerdict::Green { evidence: proof.evidence.clone() },
         },
     })

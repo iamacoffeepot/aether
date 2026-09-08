@@ -24,7 +24,7 @@
 //! position does not run `verify.docs`, so it has said nothing about the one
 //! gate the fold most needs a whole tree to ask.
 
-use super::Decision;
+use super::{BloomRecord, Decision};
 use crate::ids::{BloomId, StageId};
 use crate::values::{Evidence, EvidenceKind, VerifyGateSet, VerifyProof, VerifyReuse};
 
@@ -38,13 +38,15 @@ use crate::values::{Evidence, EvidenceKind, VerifyGateSet, VerifyProof, VerifyRe
 /// nothing, and the tree it names stays unproven rather than acquiring a proof
 /// from a verdict that never judged it.
 ///
-/// The gate set is read from the position rather than fixed, because the
-/// positions no longer run the same gates: a member `Verify` files under
-/// [`VerifyGateSet::member`] and `AggregateVerify` under
-/// [`VerifyGateSet::fold`], so a proof states the vocabulary that actually ran
-/// over the tree.
-pub(super) fn proof_of(bloom: BloomId, stage: StageId, evidence: &Evidence) -> Option<Decision> {
-    let gates = VerifyGateSet::for_stage(stage)?;
+/// The gate set is read from the bloom's sealed manifest rather than from
+/// the compiled projection: a member `Verify` files under
+/// [`VerifyGateSet::member_of`] and `AggregateVerify` under
+/// [`VerifyGateSet::fold_of`], so a proof states the vocabulary that bloom
+/// actually ran over the tree. A pre-manifest bloom's record carries
+/// [`PipelineManifest::compiled`](crate::PipelineManifest::compiled) and
+/// produces the same bytes the compiled constructors did.
+pub(super) fn proof_of(record: &BloomRecord, bloom: BloomId, stage: StageId, evidence: &Evidence) -> Option<Decision> {
+    let gates = VerifyGateSet::for_stage_of(stage, &record.pipeline_manifest)?;
     (evidence.kind == EvidenceKind::VerificationResult).then(|| Decision::RecordVerifyProof {
         bloom,
         proof: VerifyProof { gate_set: gates.digest(), stage, evidence: evidence.clone() },

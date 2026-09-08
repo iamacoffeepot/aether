@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     CONSTRUCT_IMPLEMENT_COMMAND, ConfigScopes, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, ResolvedConfigs,
     SCOPE_FILL_COMMAND, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_MEMBER_COMMAND, VerifyFailure,
-    VerifyFailureSet, VerifyGateSet,
+    VerifyFailureSet,
 };
 
 /// Where a repository states its lanes: the root of the checkout, beside
@@ -164,6 +164,38 @@ pub const MAX_VERIFIER_IDENTITIES: usize = 16;
 const COMPILED_ENTRYPOINT_PROGRAM: &str = "cargo";
 const COMPILED_ENTRYPOINT_ARGS: [&str; 2] = ["xtask", "transform"];
 
+/// The fan-out `verify.check` and `verify.base` run — documentation included.
+///
+/// Named here rather than read off a [`VerifyGateSet`](super::VerifyGateSet):
+/// those constructors project this list, so rendering `compiled` from them
+/// would be circular. `verify.containment` is a legal identity no lane runs
+/// and is therefore absent; `verify.docs` belongs at the two whole-tree
+/// positions because an intra-doc link resolves across crates.
+const COMPILED_FOLD_RUNS: [VerifyFailure; 9] = [
+    VerifyFailure::Preflight,
+    VerifyFailure::Fmt,
+    VerifyFailure::Clippy,
+    VerifyFailure::Docs,
+    VerifyFailure::Test,
+    VerifyFailure::Dup,
+    VerifyFailure::Deps,
+    VerifyFailure::Suppress,
+    VerifyFailure::Lock,
+];
+
+/// The fan-out `verify.member` runs — [`COMPILED_FOLD_RUNS`] less
+/// [`VerifyFailure::Docs`].
+const COMPILED_MEMBER_RUNS: [VerifyFailure; 8] = [
+    VerifyFailure::Preflight,
+    VerifyFailure::Fmt,
+    VerifyFailure::Clippy,
+    VerifyFailure::Test,
+    VerifyFailure::Dup,
+    VerifyFailure::Deps,
+    VerifyFailure::Suppress,
+    VerifyFailure::Lock,
+];
+
 /// The version probe: what a reader must decode before it can honestly refuse.
 ///
 /// Deliberately tolerant where [`PipelineManifest`] is strict. A manifest from a
@@ -184,10 +216,11 @@ impl PipelineManifest {
     /// Its only production reader is the fallback at record construction: a
     /// bloom sealed before ADR-0215 named no manifest, so the fold has to give
     /// its record *something*, and the honest something is the vocabulary that
-    /// bloom actually ran under. Rendered from the compiled copies rather than
-    /// written out again — [`VerifyFailure::ALL`], the three
-    /// [`VerifyGateSet`] positions, and the lane command constants — so this is
-    /// a projection of them and not a sixth copy to keep in step.
+    /// bloom actually ran under. Rendered from the compiled constants rather
+    /// than from the three [`VerifyGateSet`](super::VerifyGateSet) positions —
+    /// those constructors read `[verifiers.runs]` here, so rendering this from
+    /// them would be circular. [`VerifyFailure::ALL`], the per-position run
+    /// lists, and the lane command constants are the one source.
     ///
     /// It is deliberately *not* a fallback for a checkout that carries no
     /// `pipeline.toml`: a base that cannot state its lanes refuses the seal
@@ -212,10 +245,14 @@ impl PipelineManifest {
             },
             verifiers: DeclaredVerifiers {
                 identities: identities(VerifyFailure::ALL.into_iter()),
-                runs: [VerifyGateSet::member(), VerifyGateSet::fold(), VerifyGateSet::base()]
-                    .into_iter()
-                    .map(|gates| (gates.command, identities(gates.verifiers.iter())))
-                    .collect(),
+                runs: [
+                    (VERIFY_MEMBER_COMMAND, COMPILED_MEMBER_RUNS.as_slice()),
+                    (VERIFY_CHECK_COMMAND, COMPILED_FOLD_RUNS.as_slice()),
+                    (VERIFY_BASE_COMMAND, COMPILED_FOLD_RUNS.as_slice()),
+                ]
+                .into_iter()
+                .map(|(command, runs)| (String::from(command), identities(runs.iter().copied())))
+                .collect(),
             },
             evidence: DeclaredEvidence { envelope: EVIDENCE_ENVELOPE_VERSION },
         }
@@ -382,7 +419,7 @@ fn commands(compiled: &[&str]) -> Vec<String> {
 
 /// The declared spelling of each compiled verifier identity, in canonical
 /// order — the order both [`VerifyFailure::ALL`] and a
-/// [`VerifyGateSet`]'s set iterate in.
+/// [`crate::VerifyGateSet`]'s set iterate in.
 fn identities(compiled: impl Iterator<Item = VerifyFailure>) -> Vec<String> {
     compiled.map(|identity| String::from(identity.as_str())).collect()
 }
