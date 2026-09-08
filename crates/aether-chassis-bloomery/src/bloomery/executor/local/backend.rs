@@ -1098,23 +1098,16 @@ impl LocalExecutor {
         let Some(messages) = self.messages.as_ref() else {
             return PipelineManifest::compiled();
         };
-        let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
-        let Ok(Some(order)) = store.lookup_order(nonce) else {
-            return PipelineManifest::compiled();
+        let looked_up = {
+            let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
+            store.lookup_order(nonce).ok().flatten().and_then(|order| {
+                let registry = from_bytes::<ConfigRegistry>(&order.configs).ok()?;
+                let address = ConfigScopes::bloom_wide(&registry).address::<PipelineManifest>()?;
+                let (kind, bytes, _) = store.lookup_config(address.as_bytes()).ok().flatten()?;
+                (kind == PipelineManifest::NAME).then_some(bytes)
+            })
         };
-        let Ok(registry) = from_bytes::<ConfigRegistry>(&order.configs) else {
-            return PipelineManifest::compiled();
-        };
-        let Some(address) = ConfigScopes::bloom_wide(&registry).address::<PipelineManifest>() else {
-            return PipelineManifest::compiled();
-        };
-        let Ok(Some((kind, bytes, _))) = store.lookup_config(address.as_bytes()) else {
-            return PipelineManifest::compiled();
-        };
-        if kind != PipelineManifest::NAME {
-            return PipelineManifest::compiled();
-        }
-        from_bytes(&bytes).unwrap_or_else(|_| PipelineManifest::compiled())
+        looked_up.and_then(|bytes| from_bytes(&bytes).ok()).unwrap_or_else(PipelineManifest::compiled)
     }
 
     // The slot that last built this member, when one has (ADR-0196 as amended

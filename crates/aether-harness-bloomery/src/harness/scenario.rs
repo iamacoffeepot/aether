@@ -991,7 +991,7 @@ fn in_process_env(
     };
 
     let defaults = CoordinatorConfig::default();
-    let scripted = builder.lane == Lane::Scripted;
+    let scripted = matches!(builder.lane, Lane::Scripted | Lane::FromManifest);
     let coordinator = CoordinatorConfig {
         store_path: store_path.to_owned(),
         authorized_instruction_bundles: authorized_instructions.to_owned(),
@@ -1004,12 +1004,10 @@ fn in_process_env(
         } else {
             defaults.local_lane_commands
         },
-        local_lane_program: if builder.lane_from_manifest {
-            String::new()
-        } else if scripted {
-            crate::mock_lane_program()
-        } else {
-            defaults.local_lane_program
+        local_lane_program: match builder.lane {
+            Lane::FromManifest => String::new(),
+            Lane::Scripted => crate::mock_lane_program(),
+            Lane::Off => defaults.local_lane_program,
         },
         local_worktree_base: if scripted {
             worktree_base.to_owned()

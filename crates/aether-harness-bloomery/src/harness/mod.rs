@@ -116,13 +116,17 @@ pub enum Reader {
     On,
 }
 
-/// Lane axis: no local lane, or the mock-lane binary at the end of the argv.
+/// Lane axis: no local lane, the mock-lane binary at the end of the argv, or
+/// the sealed `[entrypoint]` with no host override.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Lane {
     /// `local_lane_enabled = false`. Verdicts arrive as scripted uploads.
     Off,
     /// `bloomery-mock-lane` is `AETHER_BLOOMERY_LANE_PROGRAM`.
     Scripted,
+    /// Local lanes run, but `local_lane_program` is empty so the dispatch
+    /// reads the sealed `[entrypoint]` (ADR-0215).
+    FromManifest,
 }
 
 /// Builder for [`ScenarioHarness`]. Start from a named cell, then override an
@@ -147,9 +151,6 @@ pub struct HarnessBuilder {
     github_fixture: bool,
     socket_read_timeout: Option<Duration>,
     step_budget: Duration,
-    /// When set, leave `local_lane_program` empty so the dispatch reads the
-    /// sealed manifest's `[entrypoint]` rather than the mock override.
-    lane_from_manifest: bool,
 }
 
 impl HarnessBuilder {
@@ -176,7 +177,6 @@ impl HarnessBuilder {
             github_fixture: true,
             socket_read_timeout: Some(SOCKET_READ_TIMEOUT),
             step_budget: Duration::from_secs(20),
-            lane_from_manifest: false,
         }
     }
 
@@ -203,7 +203,6 @@ impl HarnessBuilder {
             github_fixture: true,
             socket_read_timeout: None,
             step_budget: Duration::from_mins(2),
-            lane_from_manifest: false,
         }
     }
 
@@ -232,7 +231,6 @@ impl HarnessBuilder {
             github_fixture: false,
             socket_read_timeout: Some(SOCKET_READ_TIMEOUT),
             step_budget: Duration::from_secs(30),
-            lane_from_manifest: false,
         }
     }
 
@@ -242,7 +240,7 @@ impl HarnessBuilder {
     /// names the mock as that entrypoint's program so nothing real runs.
     #[must_use]
     pub const fn lane_from_manifest(mut self) -> Self {
-        self.lane_from_manifest = true;
+        self.lane = Lane::FromManifest;
         self
     }
 
