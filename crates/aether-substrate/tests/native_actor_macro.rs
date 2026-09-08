@@ -42,8 +42,7 @@ use std::thread;
 
 /// Structured-shape kind via the derive — exercises the
 /// `decode_from_bytes` structured path the macro's dispatch arm uses.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
-#[kind(name = "test.macro_native_actor.greet")]
+#[aether_data::kind(name = "test.macro_native_actor.greet", partial_eq)]
 struct Greet {
     tag: u32,
 }
@@ -51,10 +50,7 @@ struct Greet {
 /// Cast-shape kind so both arms (structured + cast) get exercised
 /// through one cap.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ::aether_data::Kind, ::aether_data::Schema,
-)]
-#[kind(name = "test.macro_native_actor.ping")]
+#[aether_data::kind(name = "test.macro_native_actor.ping", pod, partial_eq)]
 struct Ping {
     seq: u32,
 }
@@ -391,10 +387,7 @@ fn macro_emits_handles_kind_per_handler() {
 /// `dispatch_returns_none_for_unhandled_kind` test that retired
 /// alongside the legacy facade.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ::aether_data::Kind, ::aether_data::Schema,
-)]
-#[kind(name = "test.macro_native_actor.unknown")]
+#[aether_data::kind(name = "test.macro_native_actor.unknown", pod, partial_eq)]
 struct Unknown {
     payload: u32,
 }
@@ -434,36 +427,28 @@ fn macro_emitted_cap_drops_unknown_kind_via_dispatch() {
 
 /// First completion output type. Distinct from `ResultB` so the macro's
 /// output-type routing has two arms to discriminate.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
-#[kind(name = "test.macro_native_actor.result_a")]
+#[aether_data::kind(name = "test.macro_native_actor.result_a", partial_eq)]
 struct ResultA {
     value: u64,
 }
 
 /// Second completion output type — a structurally different shape so a
 /// mis-route to the `ResultA` handler couldn't accidentally type-check.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
-#[kind(name = "test.macro_native_actor.result_b")]
+#[aether_data::kind(name = "test.macro_native_actor.result_b", partial_eq)]
 struct ResultB {
     tag: u32,
 }
 
 /// Trigger that makes the cap dispatch a `ResultA`-producing worker.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ::aether_data::Kind, ::aether_data::Schema,
-)]
-#[kind(name = "test.macro_native_actor.kick_a")]
+#[aether_data::kind(name = "test.macro_native_actor.kick_a", pod, partial_eq)]
 struct KickA {
     seed: u64,
 }
 
 /// Trigger that makes the cap dispatch a `ResultB`-producing worker.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ::aether_data::Kind, ::aether_data::Schema,
-)]
-#[kind(name = "test.macro_native_actor.kick_b")]
+#[aether_data::kind(name = "test.macro_native_actor.kick_b", pod, partial_eq)]
 struct KickB {
     seed: u32,
 }
@@ -589,22 +574,19 @@ fn a_task_handler_is_measured_but_not_advertised() {
 /// `HandlerCapability` row, and the `measured_kinds` id derived from a stripped
 /// handler each name a type and a method that do not exist in this build, so
 /// leaking any one of them fails compilation before this test can run.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
-#[kind(name = "test.macro_native_actor.cfg_kept")]
+#[aether_data::kind(name = "test.macro_native_actor.cfg_kept", partial_eq)]
 struct CfgKept {
     tag: u32,
 }
 
 #[cfg(test)]
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
-#[kind(name = "test.macro_native_actor.cfg_present")]
+#[aether_data::kind(name = "test.macro_native_actor.cfg_present", partial_eq)]
 struct CfgPresent {
     tag: u32,
 }
 
 #[cfg(not(test))]
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
-#[kind(name = "test.macro_native_actor.cfg_stripped")]
+#[aether_data::kind(name = "test.macro_native_actor.cfg_stripped", partial_eq)]
 struct CfgStripped {
     tag: u32,
 }
@@ -689,22 +671,19 @@ fn a_cfg_gated_handler_leaves_no_dispatch_artifact() {
 /// The configuration is the same one: an integration test compiles with
 /// `cfg(test)` set, so `on_set_stripped` and its `SetCfgStripped` kind are
 /// absent from this build while `on_set_present` and `on_set_kept` survive.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
-#[kind(name = "test.macro_native_actor.set_cfg_kept")]
+#[aether_data::kind(name = "test.macro_native_actor.set_cfg_kept", partial_eq)]
 struct SetCfgKept {
     tag: u32,
 }
 
 #[cfg(test)]
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
-#[kind(name = "test.macro_native_actor.set_cfg_present")]
+#[aether_data::kind(name = "test.macro_native_actor.set_cfg_present", partial_eq)]
 struct SetCfgPresent {
     tag: u32,
 }
 
 #[cfg(not(test))]
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
-#[kind(name = "test.macro_native_actor.set_cfg_stripped")]
+#[aether_data::kind(name = "test.macro_native_actor.set_cfg_stripped", partial_eq)]
 struct SetCfgStripped {
     tag: u32,
 }
@@ -832,8 +811,7 @@ fn an_actor_without_task_handlers_measures_exactly_its_advertised_kinds() {
 // query projects it onto the wire.
 
 /// Reply kind for the link-time native-handler-manifest macro test.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
-#[kind(name = "test.macro_native_actor.pong")]
+#[aether_data::kind(name = "test.macro_native_actor.pong", partial_eq)]
 struct Pong {
     echoed: u32,
 }
@@ -1046,10 +1024,7 @@ fn push_envelope_replying_to<K: Kind>(registry: &Registry, recipient: &str, payl
 /// Trigger for the reply path: makes the cap dispatch an `EchoReply`
 /// worker behind a `-> Pending<EchoReply>` request handler.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ::aether_data::Kind, ::aether_data::Schema,
-)]
-#[kind(name = "test.macro_native_actor.kick_p")]
+#[aether_data::kind(name = "test.macro_native_actor.kick_p", pod, partial_eq)]
 struct KickP {
     seed: u64,
 }
@@ -1057,10 +1032,7 @@ struct KickP {
 /// Trigger for the no-reply path: makes the cap dispatch a `Silent`
 /// worker whose completion releases the hold without replying.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ::aether_data::Kind, ::aether_data::Schema,
-)]
-#[kind(name = "test.macro_native_actor.kick_s")]
+#[aether_data::kind(name = "test.macro_native_actor.kick_s", pod, partial_eq)]
 struct KickS {
     seed: u64,
 }
@@ -1069,8 +1041,7 @@ struct KickS {
 /// returns and the macro sends via `resolve_value`. Structured-shape so the
 /// reply (wire-encoded by `Mailer::send_reply`) round-trips through
 /// `EchoReply::decode_from_bytes`.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
-#[kind(name = "test.macro_native_actor.echo_reply")]
+#[aether_data::kind(name = "test.macro_native_actor.echo_reply", partial_eq)]
 struct EchoReply {
     value: u64,
 }
@@ -1078,8 +1049,7 @@ struct EchoReply {
 /// The no-reply path's worker output — a distinct output type from
 /// `EchoReply` so the two task handlers route by output type. Never
 /// replied; the completion records it and releases.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
-#[kind(name = "test.macro_native_actor.silent")]
+#[aether_data::kind(name = "test.macro_native_actor.silent", partial_eq)]
 struct Silent {
     value: u64,
 }
@@ -1160,20 +1130,14 @@ impl NativeActor for DeferredReplyCap {
 
 /// ADR-0112 manual reply class: input kind for the manual handler.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema,
-)]
-#[kind(name = "test.macro_native_actor.manual_ping")]
+#[aether_data::kind(name = "test.macro_native_actor.manual_ping", pod, eq)]
 struct ManualPing {
     seq: u32,
 }
 
 /// ADR-0112 manual reply class: the kind the manual handler replies with.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema,
-)]
-#[kind(name = "test.macro_native_actor.manual_ack")]
+#[aether_data::kind(name = "test.macro_native_actor.manual_ack", pod, eq)]
 struct ManualAck {
     seq: u32,
 }

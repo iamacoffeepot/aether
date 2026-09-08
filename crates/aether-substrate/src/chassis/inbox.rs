@@ -584,14 +584,12 @@ mod tests {
     use crate::{BootError, NativeActor, NativeInitCtx};
     use aether_data::Schema;
 
-    #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize, Kind, Schema)]
-    #[kind(name = "test.adr0109.request")]
+    #[aether_data::kind(name = "test.adr0109.request", copy, partial_eq)]
     struct ReplyRequest {
         seq: u32,
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize, Kind, Schema)]
-    #[kind(name = "test.adr0109.ack")]
+    #[aether_data::kind(name = "test.adr0109.ack", copy, partial_eq)]
     struct ReplyAck {
         seq: u32,
     }

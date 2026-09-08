@@ -96,8 +96,7 @@ use aether_test_fixtures_kinds::{
 /// Uses the `aether.test_fixtures.inline_counter_state` shape so the macro
 /// frames it via `save_state_kind` on dehydrate and recovers it via
 /// `decode_kind` on rehydrate.
-#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]
-#[kind(name = "aether.test_fixtures.inline_counter_state")]
+#[aether_data::kind(name = "aether.test_fixtures.inline_counter_state")]
 pub struct InlineCounterState {
     pub count: u32,
 }

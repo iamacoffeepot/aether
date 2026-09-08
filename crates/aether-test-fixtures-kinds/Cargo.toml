@@ -20,5 +20,13 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 bytemuck = { workspace = true, default-features = false, features = ["derive"] }
 serde = { workspace = true, default-features = false, features = ["derive"] }
 
+# cargo-machete (the CI unused-deps gate) scans source without expanding
+# macros, so it cannot see that `bytemuck` is reached only through the
+# `#[aether_data::kind(..., pod)]` expansion, which emits `::bytemuck::Pod` /
+# `::bytemuck::Zeroable` on the cast-shaped fixture kinds. The crate names
+# bytemuck nowhere in source; the dependency is real.
+[package.metadata.cargo-machete]
+ignored = ["bytemuck"] # aether-suppression-request: bytemuck is used only through the #[aether_data::kind] expansion, invisible to a source-only scan
+
 [lints]
 workspace = true
