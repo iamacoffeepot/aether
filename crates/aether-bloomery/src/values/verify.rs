@@ -92,10 +92,6 @@ impl IdentityName {
         Some(stored)
     }
 
-    fn is_empty(self) -> bool {
-        self.len == 0
-    }
-
     fn as_str(&self) -> &str {
         // Every stored name came through `new`, which admits ASCII only, so the
         // bytes are valid UTF-8 by construction; an empty name renders empty.
@@ -255,7 +251,7 @@ impl VerifyFailure {
         if Self::from_name(name).is_some() {
             return None;
         }
-        if position < COMPILED_POSITIONS || position >= POSITION_COUNT {
+        if !(COMPILED_POSITIONS..POSITION_COUNT).contains(&position) {
             return None;
         }
         Some(Self::Declared(DeclaredIdentity { position, name: IdentityName::new(name)? }))

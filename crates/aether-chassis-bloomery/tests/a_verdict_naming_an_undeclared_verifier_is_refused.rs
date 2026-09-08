@@ -99,9 +99,10 @@ fn a_verdict_naming_an_undeclared_verifier_is_refused() {
         declared.identities().map(String::from).collect::<Vec<_>>(),
         "the bloom is judged against the vocabulary its base declared",
     );
+    let admitted = journaled_verify_failures(&roots.store_path());
     assert!(
-        !journal_names_a_verify_failure(&roots.store_path()),
-        "a verdict naming an identity the base does not declare never reaches the reducer",
+        admitted.is_empty(),
+        "a verdict naming an identity the base does not declare never reaches the reducer, got {admitted:?}",
     );
     assert!(
         harness.orders().iter().any(|order| stage_of(order) == StageId::Verify),
@@ -124,16 +125,20 @@ fn stage_of(order: &OutstandingOrder) -> StageId {
     from_bytes(&order.stage).expect("a recorded order carries a StageId")
 }
 
-/// Whether any journaled fact is a member verify failure — the fact an admitted
-/// verdict would have become.
-fn journal_names_a_verify_failure(store_path: &str) -> bool {
+/// Every verifier set a journaled member-verify failure carries — the fact an
+/// admitted verdict would have become, and what it claimed.
+fn journaled_verify_failures(store_path: &str) -> Vec<VerifyFailureSet> {
     let mut store = SqliteStore::open(store_path).expect("the journal opens for reading");
     store
         .replay_journal()
         .expect("the journal replays")
         .into_iter()
         .filter_map(|record| from_bytes::<Event>(&record.event).ok())
-        .any(|event| matches!(event.fact, Fact::VerifyFailed { .. }))
+        .filter_map(|event| match event.fact {
+            Fact::VerifyFailed { failed_verifiers, .. } => Some(failed_verifiers),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Shape a fresh draft onto `base` and answer the manifest address the host
