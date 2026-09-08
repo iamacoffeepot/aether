@@ -313,6 +313,8 @@ fn stage_cursor(record: &BloomRecord, workpiece: &WorkpieceId) -> Option<Composi
 
 #[cfg(test)]
 mod tests {
+    use crate::testing::{compiled_resolved, step as testing_step, with_compiled_manifest};
+
     use aether_data::wire::{from_bytes, to_vec};
 
     use super::view_of;
@@ -345,7 +347,7 @@ mod tests {
     // reason the operator cannot name.
     #[test]
     fn a_dependent_surfaces_its_blocking_ancestor() {
-        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+        let spec = with_compiled_manifest(BloomDraft {
             proposals: vec![membership("wp-a", 1), membership("wp-b", 2)],
             base: digest(0),
             ..BloomDraft::default()
@@ -365,8 +367,8 @@ mod tests {
         let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         let snapshot = snapshot.apply(
             &event,
-            &reduce(&snapshot, &event, &crate::testing::compiled_resolved(), &SpendWindow::default()),
-            &crate::testing::compiled_resolved(),
+            &reduce(&snapshot, &event, &compiled_resolved(), &SpendWindow::default()),
+            &compiled_resolved(),
         );
 
         let view = view_of(&snapshot, |_| None);
@@ -386,14 +388,14 @@ mod tests {
     // host condition (#5020).
     #[test]
     fn a_host_fault_surfaces_the_preflight_findings() {
-        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+        let spec = with_compiled_manifest(BloomDraft {
             proposals: vec![membership("wp", 1)],
             base: digest(0),
             ..BloomDraft::default()
         })
         .seal();
         let bloom = spec.id();
-        let configs = crate::testing::compiled_resolved();
+        let configs = compiled_resolved();
         let spend = SpendWindow::default();
         let mut snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
@@ -435,7 +437,7 @@ mod tests {
     // declared surface (#5292).
     #[test]
     fn a_parked_construct_is_distinguishable_from_a_wedged_one() {
-        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+        let spec = with_compiled_manifest(BloomDraft {
             proposals: vec![membership("wp", 1)],
             base: digest(0),
             ..BloomDraft::default()
@@ -500,14 +502,14 @@ mod tests {
     // a sick host from rejected work (ADR-0195).
     #[test]
     fn a_machinery_wedge_surfaces_its_cause_and_roll() {
-        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+        let spec = with_compiled_manifest(BloomDraft {
             proposals: vec![membership("wp", 1)],
             base: digest(0),
             ..BloomDraft::default()
         })
         .seal();
         let bloom = spec.id();
-        let configs = crate::testing::compiled_resolved();
+        let configs = compiled_resolved();
         let spend = SpendWindow::default();
         let mut snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
@@ -553,7 +555,7 @@ mod tests {
     }
 
     fn sealed(name: &str) -> Snapshot {
-        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+        let spec = with_compiled_manifest(BloomDraft {
             proposals: vec![membership(name, 1)],
             base: digest(0),
             ..BloomDraft::default()
@@ -563,8 +565,8 @@ mod tests {
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         snapshot.apply(
             &seal,
-            &reduce(&snapshot, &seal, &crate::testing::compiled_resolved(), &SpendWindow::default()),
-            &crate::testing::compiled_resolved(),
+            &reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default()),
+            &compiled_resolved(),
         )
     }
 
@@ -601,14 +603,14 @@ mod tests {
     // the bloom is not landing (ADR-0206).
     #[test]
     fn a_fold_that_refuses_surfaces_the_guard_and_the_member() {
-        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+        let spec = with_compiled_manifest(BloomDraft {
             proposals: vec![membership("wp-0", 1)],
             base: digest(0),
             ..BloomDraft::default()
         })
         .seal();
         let bloom = spec.id();
-        let configs = crate::testing::compiled_resolved();
+        let configs = compiled_resolved();
         let spend = SpendWindow::default();
         let mut snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
@@ -704,7 +706,7 @@ mod tests {
     // adjudicable through the bloom-scope door.
     #[test]
     fn a_member_question_does_not_project_as_a_review_park() {
-        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+        let spec = with_compiled_manifest(BloomDraft {
             proposals: vec![membership("wp-held", 1), membership("wp-free", 2)],
             base: digest(0),
             ..BloomDraft::default()
@@ -715,8 +717,8 @@ mod tests {
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         snapshot = snapshot.apply(
             &seal,
-            &reduce(&snapshot, &seal, &crate::testing::compiled_resolved(), &SpendWindow::default()),
-            &crate::testing::compiled_resolved(),
+            &reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default()),
+            &compiled_resolved(),
         );
 
         let question = Question {
@@ -733,8 +735,8 @@ mod tests {
             Event { idempotency_key: IdempotencyKey("park-1".into()), fact: Fact::AdmitEvidence { bloom, evidence } };
         snapshot = snapshot.apply(
             &admit,
-            &reduce(&snapshot, &admit, &crate::testing::compiled_resolved(), &SpendWindow::default()),
-            &crate::testing::compiled_resolved(),
+            &reduce(&snapshot, &admit, &compiled_resolved(), &SpendWindow::default()),
+            &compiled_resolved(),
         );
 
         let view = view_of(&snapshot, |asked| (*asked == question_digest).then(|| question.clone()));
@@ -794,7 +796,7 @@ mod tests {
     }
 
     fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Outcome) {
-        let (next, decisions) = crate::testing::step(snapshot, event);
+        let (next, decisions) = testing_step(snapshot, event);
         (next, decisions.outcome)
     }
 
@@ -817,7 +819,7 @@ mod tests {
     // park, so the operator cannot see the stop or the digest adjudicate needs.
     #[test]
     fn a_composition_wedge_surfaces_its_wedge_and_open_finding() {
-        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+        let spec = with_compiled_manifest(BloomDraft {
             proposals: vec![membership("wp", 1)],
             base: digest(0),
             ..BloomDraft::default()
@@ -908,7 +910,7 @@ mod tests {
     // scanning /journal outcomes newest-first.
     #[test]
     fn a_dispatched_member_surfaces_its_cursor_and_a_waiting_one_does_not() {
-        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+        let spec = with_compiled_manifest(BloomDraft {
             proposals: vec![membership("wp-a", 1), membership("wp-b", 2)],
             base: digest(0),
             ..BloomDraft::default()

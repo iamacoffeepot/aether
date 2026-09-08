@@ -22,6 +22,7 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aether_bloomery::testing::{compiled_resolved, with_compiled_manifest};
 use aether_bloomery::{
     AggregateVerifyError, AttemptCompletedError, BloomDraft, BloomId, ConfigRegistry, Decisions, Digest, Event,
     Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Outcome, ResolvedConfigs, Snapshot, SpendWindow,
@@ -48,7 +49,26 @@ const HANDSHAKE_BUDGET: Duration = Duration::from_mins(1);
 /// which one, so neither a sibling fixture nor this suite's own restart can be
 /// handed a port someone else already took (#5000, #5116).
 fn spawn_ready(db: &str) -> (Coordinator, TcpStream) {
-    spawn_and_connect("recovery-test", HANDSHAKE_BUDGET, || Coordinator::spawn(0, &[("AETHER_STORE_PATH", db)]))
+    let (coordinator, mut stream) =
+        spawn_and_connect("recovery-test", HANDSHAKE_BUDGET, || Coordinator::spawn(0, &[("AETHER_STORE_PATH", db)]));
+    file_compiled_manifest(&mut stream);
+    (coordinator, stream)
+}
+
+fn file_compiled_manifest(stream: &mut TcpStream) {
+    use aether_bloomery::{PipelineManifest, config_address};
+    use aether_chassis_bloomery::store::{RecordConfig, RecordConfigResult};
+    use aether_data::Kind;
+    use aether_data::mailbox_id_from_path;
+    use aether_data::wire::to_vec;
+
+    let bytes = to_vec(&PipelineManifest::compiled()).expect("the compiled manifest encodes");
+    let address = config_address(PipelineManifest::NAME, &bytes);
+    let record = RecordConfig { digest: address.as_bytes().to_vec(), kind: PipelineManifest::NAME.to_owned(), bytes };
+    match call::<_, RecordConfigResult>(stream, 9000, mailbox_id_from_path("aether.store"), &record) {
+        RecordConfigResult::Ok { .. } => {}
+        RecordConfigResult::Err { error } => panic!("compiled manifest write failed: {error}"),
+    }
 }
 
 fn store_call<Req, Reply>(stream: &mut TcpStream, cid: u64, request: &Req) -> Reply
@@ -158,14 +178,14 @@ fn sealed_bloom(key: &str, workpiece: &str) -> (Event, Decisions, BloomId) {
         },
     };
     member.approval.subject = member.subject();
-    let spec = aether_bloomery::testing::with_compiled_manifest(BloomDraft {
+    let spec = with_compiled_manifest(BloomDraft {
         proposals: vec![member],
         base: Digest::from_bytes([0; 32]),
         ..BloomDraft::default()
     })
     .seal();
     let event = Event { idempotency_key: IdempotencyKey(key.to_owned()), fact: Fact::Seal(spec) };
-    let decisions = reduce(&Snapshot::default(), &event, &ResolvedConfigs::default(), &SpendWindow::default());
+    let decisions = reduce(&Snapshot::default(), &event, &compiled_resolved(), &SpendWindow::default());
     let Outcome::Sealed(bloom) = decisions.outcome else {
         panic!("fixture control: today's reducer must seal this draft: {decisions:?}");
     };

@@ -1262,7 +1262,7 @@ fn metrics_rollups_refold_to_identical_payloads() {
     // the same dispatch payloads. The fold itself is proven in aether-bloomery;
     // this pins the persist/clear/refold path the host uses over recorded
     // dispatch history, not an empty journal.
-    use aether_bloomery::testing::{digest, draft, event, membership, workpiece};
+    use aether_bloomery::testing::{compiled_resolved, digest, draft, event, membership, workpiece};
     use aether_bloomery::{
         CandidateRef, Evidence, EvidenceKind, Fact, MetricDispatch, ResolvedConfigs, Snapshot, SpendWindow, StageId,
         reduce,
@@ -1274,7 +1274,7 @@ fn metrics_rollups_refold_to_identical_payloads() {
 
     let spec = draft(1, vec![membership(MEMBER, 10)]).seal();
     let bloom = spec.id();
-    let configs = ResolvedConfigs::default();
+    let configs = compiled_resolved();
     let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
 
     let seal = event("seal", Fact::Seal(spec));

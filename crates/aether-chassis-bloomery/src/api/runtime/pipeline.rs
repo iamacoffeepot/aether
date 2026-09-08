@@ -17,12 +17,13 @@
 //!
 //! # What a missing file means here
 //!
-//! ADR-0215 refuses a base that carries no manifest. This read still returns
-//! [`None`] for a missing file or an unresolvable base — it is the derivation,
-//! not the door — and the draft-formation door maps that `None` to a 422
-//! naming the base and [`PIPELINE_MANIFEST_PATH`]. The seal door refuses a
-//! spec whose registry names no `PipelineManifest` address, so a `Fact::Seal`
-//! admitted without going through draft formation cannot bypass the file.
+//! ADR-0215 refuses a base that carries no manifest. This read returns
+//! [`None`] for an unresolvable base (the coordinator never looked) and
+//! [`PipelineManifestError::Missing`] for a tree that is readable but carries
+//! no file. Draft formation maps the missing-file case to a 422 naming the
+//! base and [`PIPELINE_MANIFEST_PATH`]. The seal door refuses a spec whose
+//! registry names no `PipelineManifest` address, so a `Fact::Seal` admitted
+//! without going through draft formation cannot bypass the file.
 //!
 //! A file that *is* there and will not decode is refused here: it can only
 //! exist because someone edited it, the editor is holding the diff that broke
@@ -92,7 +93,7 @@ fn derive_pipeline_manifest(
         return Ok(None);
     };
     let Some(text) = blob_text(repo, &commit, PIPELINE_MANIFEST_PATH) else {
-        return Ok(None);
+        return Err(PipelineManifestError::Missing);
     };
 
     // The address is taken over these exact bytes rather than through
@@ -172,25 +173,26 @@ mod tests {
 
     #[test]
     fn a_base_that_declares_no_manifest_derives_nothing() {
-        // The derivation still answers `None` for a missing file or an
-        // unresolvable base: it is the read, not the door. Draft formation
-        // maps that `None` to a 422, and the seal door refuses a spec that
-        // names no manifest address. Splitting them is what lets a `Fact::Seal`
-        // admitted without a draft still meet the same rule.
+        // The read distinguishes the two non-answers. A missing file is a
+        // named refusal so draft formation can 422 with the path; an
+        // unresolvable base is still `None`, because the coordinator never
+        // looked. The seal door refuses a spec that names no manifest either
+        // way — splitting them is what lets a dummy-base HTTP test PATCH
+        // without pretending the tree was empty.
         let repo = repository();
         write(repo.path(), "README.md", "a base from before the manifest\n");
         let undeclared = commit(repo.path(), "no manifest yet");
 
         let base = Digest::from_bytes([7; 32]);
         let correspondence = OnePair { digest: base, object: object_at(&undeclared) };
-        assert!(
-            derive_pipeline_manifest(repo.path(), Some(&correspondence), base)
-                .expect("a missing file is a non-answer at the read, not a parse error")
-                .is_none()
+        assert_eq!(
+            derive_pipeline_manifest(repo.path(), Some(&correspondence), base),
+            Err(PipelineManifestError::Missing),
+            "a readable tree with no file is Missing, not a silent None",
         );
         assert!(
             derive_pipeline_manifest(repo.path(), None, base)
-                .expect("an unresolvable base is the same non-answer")
+                .expect("an unresolvable base is still a non-answer at the read")
                 .is_none()
         );
     }

@@ -19,7 +19,7 @@
 
 use aether_bloomery::{
     BloomDraft, BloomId, ConfigRegistry, Decision, Decisions, Digest, Fact, Outcome, PIPELINE_MANIFEST_PATH,
-    PipelineManifest,
+    PipelineManifest, SealError,
 };
 use aether_chassis_bloomery::store::{SqliteStore, StoreBackend};
 use aether_data::Kind;
@@ -64,23 +64,19 @@ fn a_sealed_bloom_records_the_vocabulary_it_ran() {
         "the seal journals the vocabulary its base declared, not the one this binary compiled",
     );
 
-    // The other door. A successor sealing no manifest records the compiled
-    // vocabulary — the shape every bloom journaled before this decision has.
+    // The other door. A successor sealing no manifest is refused: supersede
+    // goes through the same door as a fresh seal, so a successor of a
+    // pre-manifest bloom must be sealed against a base that carries the file.
     let successor =
         BloomDraft { proposals: vec![member(WORKPIECE, digest(0x51))], base, ..BloomDraft::default() }.seal();
-    let superseded = successor.id();
-    assert!(
-        matches!(
-            harness.admit("supersede-without-a-manifest", Fact::Supersede { predecessor: sealed, successor }),
-            Outcome::Superseded { .. }
-        ),
-        "a successor promising its own line is admitted",
-    );
-    assert_eq!(
-        recorded_manifest(&roots.store_path(), superseded),
-        PipelineManifest::compiled(),
-        "a bloom that seals no manifest records the vocabulary it actually ran under",
-    );
+    match harness.admit("supersede-without-a-manifest", Fact::Supersede { predecessor: sealed, successor }) {
+        Outcome::SupersedeRejected(aether_bloomery::SupersedeError::InvalidMember(
+            SealError::UnusablePipelineManifest { path, .. },
+        )) => {
+            assert_eq!(path, PIPELINE_MANIFEST_PATH, "the refusal names the path the successor's base had to carry");
+        }
+        other => panic!("a successor naming no manifest must refuse, got {other:?}"),
+    }
 }
 
 /// Shape a fresh draft onto `base` and answer the manifest address the host

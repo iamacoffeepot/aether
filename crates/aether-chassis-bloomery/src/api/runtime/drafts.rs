@@ -10,7 +10,7 @@
 //! refuses.
 
 use aether_actor::Manual;
-use aether_bloomery::{BloomDraft, ConfigRegistry, PIPELINE_MANIFEST_PATH, PipelineManifest};
+use aether_bloomery::{BloomDraft, ConfigRegistry, PIPELINE_MANIFEST_PATH, PipelineManifest, PipelineManifestError};
 use aether_data::Kind;
 use aether_http::HttpServerResponse;
 use aether_substrate::actor::native::NativeCtx;
@@ -102,24 +102,34 @@ impl ApiCapabilityState {
         let Some(base) = patch.base else {
             return Ok(None);
         };
-        let derived = self.derive_pipeline_manifest(base).map_err(|error| {
-            error_response(
-                422,
-                &format!(
-                    "base {} carries a `{PIPELINE_MANIFEST_PATH}` this coordinator cannot read: {error}; draft \
-                     formation fails closed",
-                    base.to_hex()
-                ),
-            )
-        })?;
+        let derived = match self.derive_pipeline_manifest(base) {
+            Ok(derived) => derived,
+            Err(PipelineManifestError::Missing) => {
+                return Err(error_response(
+                    422,
+                    &format!(
+                        "base {} carries no `{PIPELINE_MANIFEST_PATH}`; a base must declare its lanes (ADR-0215)",
+                        base.to_hex()
+                    ),
+                ));
+            }
+            Err(error) => {
+                return Err(error_response(
+                    422,
+                    &format!(
+                        "base {} carries a `{PIPELINE_MANIFEST_PATH}` this coordinator cannot read: {error}; draft \
+                         formation fails closed",
+                        base.to_hex()
+                    ),
+                ));
+            }
+        };
         let Some(derived) = derived else {
-            return Err(error_response(
-                422,
-                &format!(
-                    "base {} carries no `{PIPELINE_MANIFEST_PATH}`; a base must declare its lanes (ADR-0215)",
-                    base.to_hex()
-                ),
-            ));
+            // The digest does not resolve to a git object this host can read.
+            // That is not a missing file: the coordinator never looked. A
+            // `Fact::Seal` still meets the door — a spec that names no
+            // manifest is refused there.
+            return Ok(None);
         };
 
         let named = patch.configs.as_ref().map_or_else(

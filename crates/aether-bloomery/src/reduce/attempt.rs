@@ -703,6 +703,8 @@ pub(super) fn wedged(
 
 #[cfg(test)]
 mod tests {
+    use crate::testing::{compiled_resolved, step as testing_step, with_compiled_manifest};
+
     use super::*;
     use crate::ids::IdempotencyKey;
     use crate::reduce::{Event, Fact, GrantAttemptsError, Outcome, reduce};
@@ -732,11 +734,11 @@ mod tests {
     }
 
     fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
-        crate::testing::step(snapshot, event)
+        testing_step(snapshot, event)
     }
 
     fn sealed() -> (Snapshot, BloomId) {
-        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+        let spec = with_compiled_manifest(BloomDraft {
             proposals: vec![membership("wp", 10)],
             base: digest(0),
             ..BloomDraft::default()
@@ -840,7 +842,7 @@ mod tests {
     // slot and leaves the sealed base. Catches treating absence as a digest.
     #[test]
     fn a_fresh_construct_checks_out_the_sealed_base() {
-        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+        let spec = with_compiled_manifest(BloomDraft {
             proposals: vec![membership("wp", 10)],
             base: digest(0),
             ..BloomDraft::default()
@@ -1180,7 +1182,7 @@ mod tests {
     }
 
     fn two_member_spec(base: u8) -> BloomSpec {
-        crate::testing::with_compiled_manifest(BloomDraft {
+        with_compiled_manifest(BloomDraft {
             proposals: vec![membership("alpha", 10), membership("beta", 11)],
             base: digest(base),
             ..BloomDraft::default()

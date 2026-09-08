@@ -453,6 +453,12 @@ pub enum PipelineManifestError {
         /// How many identities the file declared.
         declared: usize,
     },
+    /// The base's tree was readable but carried no `pipeline.toml`.
+    ///
+    /// Distinct from a parse error: the coordinator could look, and the file
+    /// was not there. Draft formation maps this to a 422 naming the base and
+    /// [`PIPELINE_MANIFEST_PATH`]; an unresolvable base is not this case.
+    Missing,
 }
 
 impl PipelineManifestError {
@@ -480,6 +486,9 @@ impl fmt::Display for PipelineManifestError {
                 "`{PIPELINE_MANIFEST_PATH}` declares {declared} verifier identities; at most \
                  {MAX_VERIFIER_IDENTITIES} may be declared"
             ),
+            Self::Missing => {
+                write!(f, "the tree carries no `{PIPELINE_MANIFEST_PATH}`; a base must declare its lanes (ADR-0215)")
+            }
         }
     }
 }

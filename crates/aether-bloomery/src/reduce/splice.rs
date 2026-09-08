@@ -199,6 +199,8 @@ fn member_index(members: &[WorkpieceId], id: &WorkpieceId) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use crate::testing::{compiled_resolved, step as testing_step, with_compiled_manifest};
+
     use crate::persisted::DECISIONS;
     use aether_data::wire::{from_bytes, to_vec};
 
@@ -241,7 +243,7 @@ mod tests {
     }
 
     fn spec_at(members: &[(&str, u8)], forecast_tokens: u64) -> BloomSpec {
-        crate::testing::with_compiled_manifest(BloomDraft {
+        with_compiled_manifest(BloomDraft {
             proposals: members.iter().map(|(name, revision)| membership(name, *revision)).collect(),
             base: digest(0),
             forecast: Forecast { predicted_tokens: forecast_tokens, predicted_worker_secs: 0, predicted_retries: 0 },
@@ -255,7 +257,7 @@ mod tests {
     }
 
     fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
-        crate::testing::step(snapshot, event)
+        testing_step(snapshot, event)
     }
 
     fn claim(name: &str, revision: u8, candidate: u8) -> ResolutionClaim {
@@ -371,12 +373,12 @@ mod tests {
         let b_done = event("b-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-b", 2, 20) });
 
         let base = Snapshot::new(digest(0)).with_green_base(digest(0));
-        let sealed = reduce(&base, &seal, &crate::testing::compiled_resolved(), &SpendWindow::default());
-        let after_seal = base.apply(&seal, &sealed, &crate::testing::compiled_resolved());
-        let decided_a = reduce(&after_seal, &a_done, &crate::testing::compiled_resolved(), &SpendWindow::default());
-        let after_a = after_seal.apply(&a_done, &decided_a, &crate::testing::compiled_resolved());
-        let decided_b = reduce(&after_a, &b_done, &crate::testing::compiled_resolved(), &SpendWindow::default());
-        let live = after_a.apply(&b_done, &decided_b, &crate::testing::compiled_resolved());
+        let sealed = reduce(&base, &seal, &compiled_resolved(), &SpendWindow::default());
+        let after_seal = base.apply(&seal, &sealed, &compiled_resolved());
+        let decided_a = reduce(&after_seal, &a_done, &compiled_resolved(), &SpendWindow::default());
+        let after_a = after_seal.apply(&a_done, &decided_a, &compiled_resolved());
+        let decided_b = reduce(&after_a, &b_done, &compiled_resolved(), &SpendWindow::default());
+        let live = after_a.apply(&b_done, &decided_b, &compiled_resolved());
 
         let replayed = base
             .apply(
@@ -386,7 +388,7 @@ mod tests {
                     Some(DECISIONS.current_digest().as_bytes()),
                 )
                 .expect("seal decodes"),
-                &crate::testing::compiled_resolved(),
+                &compiled_resolved(),
             )
             .apply(
                 &from_bytes(&to_vec(&a_done).expect("event encodes")).expect("event decodes"),
@@ -395,7 +397,7 @@ mod tests {
                     Some(DECISIONS.current_digest().as_bytes()),
                 )
                 .expect("integrate a decodes"),
-                &crate::testing::compiled_resolved(),
+                &compiled_resolved(),
             )
             .apply(
                 &from_bytes(&to_vec(&b_done).expect("event encodes")).expect("event decodes"),
@@ -404,7 +406,7 @@ mod tests {
                     Some(DECISIONS.current_digest().as_bytes()),
                 )
                 .expect("integrate b decodes"),
-                &crate::testing::compiled_resolved(),
+                &compiled_resolved(),
             );
 
         assert_eq!(live, replayed, "apply-only replay rebuilds the live snapshot");
@@ -775,7 +777,7 @@ mod tests {
                 Some(DECISIONS.current_digest().as_bytes()),
             )
             .expect("decisions decode"),
-            &crate::testing::compiled_resolved(),
+            &compiled_resolved(),
         )
     }
 

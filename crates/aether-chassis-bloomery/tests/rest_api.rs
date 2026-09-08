@@ -25,18 +25,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_bloomery::testing::{digest, event};
+use aether_bloomery::testing::{compiled_resolved, digest, event, with_compiled_manifest};
 use aether_bloomery::{
     AgentProfile, ApprovalPolicy, ApprovalRule, AuthorityDoor, BloomDraft, BloomId, CapabilityLedger, ClaimRefKind,
     ConfigKind, ConfigRegistry, ContentAddressed, Digest, DispatchPayload, Evidence, EvidenceKind, Harness, KeyId,
     Membership, MetricsSeat, ModelOverride, NamedPath, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease,
-    PathOrigin, Provenance, ReasoningEffort, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting,
-    ScopeVerifyInput, SignatureEnvelope, StageCatalog, StageId, Statement, StoreClass, Tier, ToolPolicy, Topic,
-    WorkpieceId, authorization_message, digest_of, verify_scope,
+    PathOrigin, PipelineManifest, Provenance, ReasoningEffort, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA,
+    ScopeRevision, ScopeRouting, ScopeVerifyInput, SignatureEnvelope, StageCatalog, StageId, Statement, StoreClass,
+    Tier, ToolPolicy, Topic, WorkpieceId, authorization_message, digest_of, verify_scope,
 };
 use aether_chassis_bloomery::bloomery::TopicOutbox;
 use aether_chassis_bloomery::commission;
-use aether_chassis_bloomery::store::{CommissionBackend, SqliteStore, StoreBackend};
+use aether_chassis_bloomery::store::{CommissionBackend, RecordConfig, RecordConfigResult, SqliteStore, StoreBackend};
 use aether_data::wire::from_bytes;
 use common::{Coordinator, Ingress};
 use ed25519_dalek::{Signer, SigningKey};
@@ -235,15 +235,37 @@ fn spawn_with_store(policy_path: &str, store_path: &str) -> Coordinator {
 /// keep the shared human-ceiling owner; the sealed-policy comparison needs a
 /// lower ceiling on the same key.
 fn spawn_with_store_allowlist(policy_path: &str, store_path: &str, allowlist: &str) -> Coordinator {
-    Coordinator::spawn(
-        0,
-        &[
-            ("AETHER_STORE_PATH", store_path),
-            ("AETHER_SIGNING_ALLOWLIST", allowlist),
-            ("AETHER_APPROVAL_POLICY_FILE", policy_path),
-            ("AETHER_HTTP_CONTROL_TOKEN", CONTROL_TOKEN),
-        ],
-    )
+    let (coordinator, mut stream) = common::client::spawn_and_connect("rest-api-boot", BIND_BUDGET, || {
+        Coordinator::spawn(
+            0,
+            &[
+                ("AETHER_STORE_PATH", store_path),
+                ("AETHER_SIGNING_ALLOWLIST", allowlist),
+                ("AETHER_APPROVAL_POLICY_FILE", policy_path),
+                ("AETHER_HTTP_CONTROL_TOKEN", CONTROL_TOKEN),
+            ],
+        )
+    });
+    file_compiled_manifest(&mut stream);
+    coordinator
+}
+
+/// File the compiled pipeline vocabulary so an HTTP seal names a
+/// [`PipelineManifest`] address the store can produce (ADR-0215).
+fn file_compiled_manifest(stream: &mut TcpStream) {
+    use aether_bloomery::config_address;
+    use aether_data::Kind;
+    use aether_data::mailbox_id_from_path;
+    use aether_data::wire::to_vec;
+    use common::client::call;
+
+    let bytes = to_vec(&PipelineManifest::compiled()).expect("the compiled manifest encodes");
+    let address = config_address(PipelineManifest::NAME, &bytes);
+    let record = RecordConfig { digest: address.as_bytes().to_vec(), kind: PipelineManifest::NAME.to_owned(), bytes };
+    match call::<_, RecordConfigResult>(stream, 9000, mailbox_id_from_path("aether.store"), &record) {
+        RecordConfigResult::Ok { .. } => {}
+        RecordConfigResult::Err { error } => panic!("compiled manifest write failed: {error}"),
+    }
 }
 
 /// The port `coordinator` announced for `ingress` as it bound.
@@ -426,11 +448,11 @@ fn hex_of(digest: &Digest) -> String {
 /// evidence binds its own scope revision, and the stage catalog is the one line
 /// the reducer requires (`StageCatalog::line_digest`, not the zero default).
 fn valid_draft(workpiece: &str, scope_revision: Digest) -> BloomDraft {
-    BloomDraft {
+    with_compiled_manifest(BloomDraft {
         proposals: vec![member(workpiece, scope_revision, Digest::from_bytes([9; 32]))],
         base: Digest::from_bytes([1; 32]),
         ..BloomDraft::default()
-    }
+    })
 }
 
 /// A valid two-workpiece draft. The seal gate re-forms both approvals from the
@@ -438,11 +460,11 @@ fn valid_draft(workpiece: &str, scope_revision: Digest) -> BloomDraft {
 /// the gate replaces them.
 fn two_member_draft(wp1: Digest, wp2: Digest) -> BloomDraft {
     let detail = Digest::from_bytes([9; 32]);
-    BloomDraft {
+    with_compiled_manifest(BloomDraft {
         proposals: vec![member("wp-1", wp1, detail), member("wp-2", wp2, detail)],
         base: Digest::from_bytes([1; 32]),
         ..BloomDraft::default()
-    }
+    })
 }
 
 /// Assert the store-backed door refuses a seal that names a workpiece with
@@ -989,11 +1011,11 @@ fn registry_naming(address: Digest) -> ConfigRegistry {
 /// Open a draft shaped like [`valid_draft`] with `configs` as its bloom-wide
 /// registry, and return its handle.
 fn draft_with(http_port: u16, revision: Digest, configs: Option<ConfigRegistry>) -> String {
-    let mut patch = serde_json::to_value(valid_draft("wp-1", revision)).unwrap();
+    let mut draft = valid_draft("wp-1", revision);
     if let Some(configs) = configs {
-        patch["configs"] = serde_json::to_value(&configs).unwrap();
+        draft.configs.overlay(configs);
     }
-    patch_draft(http_port, &patch)
+    patch_draft(http_port, &serde_json::to_value(draft).unwrap())
 }
 
 /// Open a fresh draft, PATCH `patch` into it, and return its handle.
@@ -1580,15 +1602,11 @@ fn fold_unpriced_construct_seats() -> (Vec<MetricsSeat>, CapabilityLedger) {
     member.configs.insert::<ModelOverride>(override_.address());
     member.approval.subject = member.subject();
 
-    let mut configs = aether_bloomery::testing::compiled_resolved();
+    let mut configs = compiled_resolved();
     configs.insert(override_.address(), ModelOverride::NAME, to_vec(&override_).expect("override encodes"), None);
 
-    let spec = aether_bloomery::testing::with_compiled_manifest(BloomDraft {
-        proposals: vec![member],
-        base: digest(1),
-        ..BloomDraft::default()
-    })
-    .seal();
+    let spec =
+        with_compiled_manifest(BloomDraft { proposals: vec![member], base: digest(1), ..BloomDraft::default() }).seal();
     let bloom = spec.id();
 
     let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
@@ -1758,8 +1776,9 @@ fn spawn_os_ports(policy_path: &str) -> Coordinator {
 }
 
 fn spawn_author_ready(policy_path: &str) -> (u16, Coordinator) {
-    let (coordinator, _stream) =
+    let (coordinator, mut stream) =
         common::client::spawn_and_connect("rest-author", Duration::from_mins(1), || spawn_os_ports(policy_path));
+    file_compiled_manifest(&mut stream);
     (wait_author_http(&coordinator), coordinator)
 }
 

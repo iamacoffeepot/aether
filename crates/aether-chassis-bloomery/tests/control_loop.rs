@@ -33,13 +33,15 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aether_bloomery::testing::with_compiled_manifest;
 use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, BloomId, CONTROL_CORE_NAMESPACE, CalibrationDocument, CandidateRef, ConfigKind,
     ConfigRegistry, Decision, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership,
     MetricsQuery, MetricsQueryResult, MetricsView, ModelOverride, ObserveMainlineResult, OperatorHold, OperatorRepair,
-    OperatorRepairError, Outcome, Query, QueryResult, QuerySelector, ResolutionClaim, ResolvedBloom, ResolvedConfigs,
-    SealError, Snapshot, SpendQuery, SpendQueryResult, SpendWindow, StageCatalog, StageId, StudyCost, StudyRecord,
-    Unproducible, VerifyFailureSet, ViewDocument, WorkpieceId, decode_recorded_decisions, digest_of, reduce,
+    OperatorRepairError, Outcome, PipelineManifest, Query, QueryResult, QuerySelector, ResolutionClaim, ResolvedBloom,
+    ResolvedConfigs, SealError, Snapshot, SpendQuery, SpendQueryResult, SpendWindow, StageCatalog, StageId, StudyCost,
+    StudyRecord, Unproducible, VerifyFailureSet, ViewDocument, WorkpieceId, decode_recorded_decisions, digest_of,
+    reduce,
 };
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, PutResult};
 use aether_chassis_bloomery::store::{JournalWrite, RecordConfig, RecordConfigResult, SqliteStore, StoreBackend};
@@ -69,7 +71,9 @@ fn spawn(port: u16, db: &str) -> Coordinator {
 /// sibling to steal — and the handshake helper dials the port the child
 /// announced in its boot log.
 fn spawn_with_store(db: &str, client_name: &str) -> (Coordinator, TcpStream) {
-    spawn_and_connect(client_name, Duration::from_mins(1), || spawn(0, db))
+    let (coordinator, mut stream) = spawn_and_connect(client_name, Duration::from_mins(1), || spawn(0, db));
+    file_compiled_manifest(&mut stream, 9000);
+    (coordinator, stream)
 }
 
 /// How long the boot-window fixtures hold the store's replay reply, so the
@@ -83,7 +87,7 @@ const BOOT_REPLAY_HOLD: Duration = Duration::from_secs(8);
 /// [`BOOT_REPLAY_HOLD`] (issue 5765).
 fn spawn_with_store_holding_replay(db: &str, client_name: &str) -> (Coordinator, TcpStream) {
     let hold = BOOT_REPLAY_HOLD.as_millis().to_string();
-    spawn_and_connect(client_name, Duration::from_mins(1), || {
+    let (coordinator, mut stream) = spawn_and_connect(client_name, Duration::from_mins(1), || {
         Coordinator::spawn(
             0,
             &[
@@ -92,7 +96,9 @@ fn spawn_with_store_holding_replay(db: &str, client_name: &str) -> (Coordinator,
                 ("AETHER_BLOOMERY_LANE_PROGRAM", CONTROL_LOOP_LANE),
             ],
         )
-    })
+    });
+    file_compiled_manifest(&mut stream, 9000);
+    (coordinator, stream)
 }
 
 /// Pipeline two typed `Call`s to `mailbox` — write **both** frames before reading
@@ -290,7 +296,7 @@ fn seal_event_configured(key: &str, base: u8, workpiece: &str, configs: ConfigRe
     member.approval.subject = member.subject();
     // An empty registry selects the compiled stage line. A configured seal uses
     // the catalog content the caller resolved before reducing.
-    let spec = aether_bloomery::testing::with_compiled_manifest(BloomDraft {
+    let spec = with_compiled_manifest(BloomDraft {
         proposals: vec![member],
         base: Digest::from_bytes([base; 32]),
         ..BloomDraft::default()
@@ -848,7 +854,7 @@ fn the_capability_ledger_is_measured_live_and_rebuilt_on_replay() {
 /// collision used to, boot error still can) is another attempt, not a
 /// 30s wait on a closed port.
 fn spawn_with_artifacts(db: &str, artifacts: &str, client_name: &str) -> (Coordinator, TcpStream) {
-    spawn_and_connect(client_name, Duration::from_mins(1), || {
+    let (coordinator, mut stream) = spawn_and_connect(client_name, Duration::from_mins(1), || {
         Coordinator::spawn(
             0,
             &[
@@ -857,7 +863,9 @@ fn spawn_with_artifacts(db: &str, artifacts: &str, client_name: &str) -> (Coordi
                 ("AETHER_BLOOMERY_LANE_PROGRAM", CONTROL_LOOP_LANE),
             ],
         )
-    })
+    });
+    file_compiled_manifest(&mut stream, 9000);
+    (coordinator, stream)
 }
 
 // The plausible bug: a journal that names a study artifact still reports
@@ -1209,7 +1217,7 @@ fn approved_member(workpiece: &str) -> Membership {
 }
 
 fn two_member_seal_event(key: &str, base: u8, wp_a: &str, wp_b: &str) -> Event {
-    let spec = aether_bloomery::testing::with_compiled_manifest(BloomDraft {
+    let spec = with_compiled_manifest(BloomDraft {
         proposals: vec![approved_member(wp_a), approved_member(wp_b)],
         base: Digest::from_bytes([base; 32]),
         ..BloomDraft::default()
@@ -1252,6 +1260,12 @@ fn integration_dispatch_count(db: &str) -> usize {
             decisions.effects.iter().filter(|effect| matches!(effect, Decision::DispatchIntegration { .. })).count()
         })
         .sum()
+}
+
+/// File the compiled pipeline vocabulary so a `Fact::Seal` this suite admits
+/// names a [`PipelineManifest`] address the store can produce (ADR-0215).
+fn file_compiled_manifest(stream: &mut TcpStream, cid: u64) {
+    let _ = author_config(stream, cid, &PipelineManifest::compiled());
 }
 
 /// Author a configuration straight to the store, exactly as the api cap's

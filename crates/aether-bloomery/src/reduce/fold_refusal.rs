@@ -28,8 +28,8 @@ mod tests {
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey};
     use crate::reduce::{BloomStatus, Event, Fact, Outcome, RecordedRead, RecordedRefusal, Snapshot, reduce};
-    use crate::testing::{draft, membership};
-    use crate::values::{ResolvedConfigs, SpendWindow};
+    use crate::testing::{compiled_resolved, draft, membership};
+    use crate::values::SpendWindow;
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
@@ -43,8 +43,8 @@ mod tests {
         (
             snapshot.apply(
                 &seal,
-                &reduce(&snapshot, &seal, &crate::testing::compiled_resolved(), &SpendWindow::default()),
-                &crate::testing::compiled_resolved(),
+                &reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default()),
+                &compiled_resolved(),
             ),
             bloom,
         )
@@ -76,7 +76,7 @@ mod tests {
             "the fact carries the refusal; a new Decision would reshape the frozen graph"
         );
 
-        let snapshot = snapshot.apply(&event, &decided, &crate::testing::compiled_resolved());
+        let snapshot = snapshot.apply(&event, &decided, &compiled_resolved());
         let stored = snapshot.fold_refusal(&bloom).expect("the refusal is on the snapshot");
         assert_eq!(stored.guard, "candidate_ref_present");
         assert_eq!(stored.reads[0].value, "wp-0");

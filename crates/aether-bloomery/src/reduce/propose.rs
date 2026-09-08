@@ -76,6 +76,8 @@ fn stated(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::testing::{compiled_resolved, with_compiled_manifest};
+
     use super::{offer_after_land, reduce_propose};
     use crate::digest::{Digest, digest_of};
     use crate::ids::{IdempotencyKey, WorkpieceId};
@@ -113,7 +115,7 @@ mod tests {
     }
 
     fn sealed_snapshot() -> Snapshot {
-        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+        let spec = with_compiled_manifest(BloomDraft {
             proposals: vec![membership("wp")],
             base: digest(0),
             ..BloomDraft::default()
@@ -123,8 +125,8 @@ mod tests {
         let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         snapshot.apply(
             &seal,
-            &reduce(&snapshot, &seal, &crate::testing::compiled_resolved(), &SpendWindow::default()),
-            &crate::testing::compiled_resolved(),
+            &reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default()),
+            &compiled_resolved(),
         )
     }
 

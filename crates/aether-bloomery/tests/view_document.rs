@@ -13,7 +13,7 @@ use aether_bloomery::{
     Evidence, EvidenceKind, Fact, Question, ResolvedConfigs, Snapshot, SpendQuiesce, SpendWindow, StageId,
     VerifyFailure, VerifyFailureSet, WorkpieceId, reduce, view_of,
 };
-use common::{digest, draft, event, membership, observing, sealed_and_resolved};
+use common::{compiled_resolved, digest, draft, event, membership, observing, sealed_and_resolved};
 use proptest::collection::btree_set;
 use proptest::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,8 +34,8 @@ fn sealed(members: Vec<aether_bloomery::Membership>) -> Snapshot {
     let seal = event("seal", Fact::Seal(spec));
     snapshot.apply(
         &seal,
-        &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
-        &ResolvedConfigs::default(),
+        &reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default()),
+        &compiled_resolved(),
     )
 }
 
@@ -95,7 +95,7 @@ fn view_carries_a_base_alert_when_the_receipt_is_red() {
             },
         ),
         &decided,
-        &ResolvedConfigs::default(),
+        &compiled_resolved(),
     );
     let view = view_of(&snapshot, |_| None);
     let alert = view.base_alert.expect("a red receipt populates the alert");
@@ -139,8 +139,8 @@ fn a_held_member_surfaces_its_pending_decision_only_when_resolvable() {
     let seal = event("seal", Fact::Seal(spec));
     snapshot = snapshot.apply(
         &seal,
-        &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
-        &ResolvedConfigs::default(),
+        &reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default()),
+        &compiled_resolved(),
     );
 
     let question = Question {
@@ -156,8 +156,8 @@ fn a_held_member_surfaces_its_pending_decision_only_when_resolvable() {
     let admit = event("park-1", Fact::AdmitEvidence { bloom, evidence });
     snapshot = snapshot.apply(
         &admit,
-        &reduce(&snapshot, &admit, &ResolvedConfigs::default(), &SpendWindow::default()),
-        &ResolvedConfigs::default(),
+        &reduce(&snapshot, &admit, &compiled_resolved(), &SpendWindow::default()),
+        &compiled_resolved(),
     );
 
     // With a resolver that returns the question bytes, the held member carries
@@ -189,8 +189,8 @@ fn a_verify_wedge_projects_only_terminal_repeated_identities() {
     let seal = event("seal", Fact::Seal(spec));
     snapshot = snapshot.apply(
         &seal,
-        &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
-        &ResolvedConfigs::default(),
+        &reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default()),
+        &compiled_resolved(),
     );
 
     let construct = event(
@@ -206,8 +206,8 @@ fn a_verify_wedge_projects_only_terminal_repeated_identities() {
     );
     snapshot = snapshot.apply(
         &construct,
-        &reduce(&snapshot, &construct, &ResolvedConfigs::default(), &SpendWindow::default()),
-        &ResolvedConfigs::default(),
+        &reduce(&snapshot, &construct, &compiled_resolved(), &SpendWindow::default()),
+        &compiled_resolved(),
     );
 
     // First clippy is novel. Three repeats spend the compiled Verify budget;
@@ -234,8 +234,8 @@ fn a_verify_wedge_projects_only_terminal_repeated_identities() {
         );
         snapshot = snapshot.apply(
             &failed,
-            &reduce(&snapshot, &failed, &ResolvedConfigs::default(), &SpendWindow::default()),
-            &ResolvedConfigs::default(),
+            &reduce(&snapshot, &failed, &compiled_resolved(), &SpendWindow::default()),
+            &compiled_resolved(),
         );
         if index < 3 {
             let refine = event(
@@ -255,8 +255,8 @@ fn a_verify_wedge_projects_only_terminal_repeated_identities() {
             );
             snapshot = snapshot.apply(
                 &refine,
-                &reduce(&snapshot, &refine, &ResolvedConfigs::default(), &SpendWindow::default()),
-                &ResolvedConfigs::default(),
+                &reduce(&snapshot, &refine, &compiled_resolved(), &SpendWindow::default()),
+                &compiled_resolved(),
             );
         }
     }

@@ -317,8 +317,8 @@ mod tests {
     use crate::port::{TransitionWhy, WhyState};
     use crate::reduce::gate::{RecordedRead, RecordedRefusal};
     use crate::reduce::{Event, Fact, Snapshot, reduce};
-    use crate::testing::{draft, membership};
-    use crate::values::{MemberDependency, ResolvedConfigs, SpendWindow};
+    use crate::testing::{compiled_resolved, draft, membership};
+    use crate::values::{MemberDependency, SpendWindow};
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
@@ -332,8 +332,8 @@ mod tests {
             idempotency_key: IdempotencyKey("seal".into()),
             fact: Fact::GraphSeal { predecessor: None, spec, edges: edges.to_vec() },
         };
-        let decided = reduce(&snapshot, &seal, &crate::testing::compiled_resolved(), &SpendWindow::default());
-        (snapshot.apply(&seal, &decided, &crate::testing::compiled_resolved()), bloom)
+        let decided = reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default());
+        (snapshot.apply(&seal, &decided, &compiled_resolved()), bloom)
     }
 
     fn rung<'a>(chain: &'a [TransitionWhy], name: &str) -> &'a TransitionWhy {
@@ -355,8 +355,8 @@ mod tests {
             idempotency_key: IdempotencyKey("refused".into()),
             fact: Fact::FoldRefused { bloom, refusal: refusal.clone() },
         };
-        let decided = reduce(&snapshot, &refused, &crate::testing::compiled_resolved(), &SpendWindow::default());
-        let snapshot = snapshot.apply(&refused, &decided, &crate::testing::compiled_resolved());
+        let decided = reduce(&snapshot, &refused, &compiled_resolved(), &SpendWindow::default());
+        let snapshot = snapshot.apply(&refused, &decided, &compiled_resolved());
 
         let document = why_of(&snapshot, &bloom).expect("the bloom is known");
         let fold = rung(&document.chain, FOLD);

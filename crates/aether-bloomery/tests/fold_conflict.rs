@@ -9,7 +9,7 @@ use aether_bloomery::{
     EvidenceKind, Fact, Outcome, Snapshot, StageId, VerifyFailure, VerifyFailureSet, Withdrawal, WithdrawalCause,
     WorkpieceId,
 };
-use common::{claim, digest, draft, event, membership, step, workpiece};
+use common::{claim, compiled_resolved, digest, draft, event, membership, step, workpiece};
 
 fn conflict_evidence(checkpoint: u8, detail: u8) -> Evidence {
     Evidence { subject: digest(checkpoint), kind: EvidenceKind::FoldConflict, detail: digest(detail) }
@@ -305,7 +305,7 @@ fn a_replayed_journal_reproduces_the_fold_conflict_sequence() {
 
     let mut replayed = two_member_with_claims().0;
     for (event, decisions) in &recorded {
-        replayed = replayed.apply(event, decisions, &aether_bloomery::ResolvedConfigs::default());
+        replayed = replayed.apply(event, decisions, &compiled_resolved());
     }
 
     assert_eq!(live, replayed, "apply-only replay rebuilds the live snapshot");
@@ -778,7 +778,7 @@ fn a_replayed_journal_reproduces_two_composition_waiters() {
 
     let mut replayed = members_at_verify(&["alpha", "beta", "gamma", "delta"]).0;
     for (event, decisions) in &recorded {
-        replayed = replayed.apply(event, decisions, &aether_bloomery::ResolvedConfigs::default());
+        replayed = replayed.apply(event, decisions, &compiled_resolved());
     }
 
     assert_eq!(live, replayed, "apply-only replay rebuilds the live snapshot, waiters included");

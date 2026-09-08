@@ -60,6 +60,10 @@ pub fn approved(mut member: Membership) -> Membership {
 /// is refused, and a draft that names one whose bytes the reducer was not
 /// given is `UnproducibleConfig`. Reducer-level tests that used to seal an
 /// empty registry reach for this.
+///
+/// # Panics
+/// A [`PipelineManifest`] never fails to encode; a panic here is a broken kind
+/// invariant.
 pub fn file_compiled_manifest(configs: &mut ConfigRegistry, resolved: &mut ResolvedConfigs) {
     let bytes = to_vec(&PipelineManifest::compiled()).expect("compiled manifest encodes");
     let address = config_address(PipelineManifest::NAME, &bytes);

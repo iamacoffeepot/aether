@@ -166,8 +166,8 @@ mod tests {
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
     use crate::reduce::{Decision, Event, Fact, NarrowCompositionError, Outcome, Snapshot, reduce};
-    use crate::testing::{draft, membership};
-    use crate::values::{CompositionParents, Evidence, EvidenceKind, ResolvedConfigs, SpendWindow};
+    use crate::testing::{compiled_resolved, draft, membership};
+    use crate::values::{CompositionParents, Evidence, EvidenceKind, SpendWindow};
 
     const FIRST: &str = "wp-0";
     const SECOND: &str = "wp-1";
@@ -197,8 +197,8 @@ mod tests {
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         let snapshot = snapshot.apply(
             &seal,
-            &reduce(&snapshot, &seal, &crate::testing::compiled_resolved(), &SpendWindow::default()),
-            &crate::testing::compiled_resolved(),
+            &reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default()),
+            &compiled_resolved(),
         );
         (snapshot, bloom)
     }

@@ -227,7 +227,6 @@ fn schema_digests_are_stale(path: &Path) -> bool {
     for kind in PERSISTED_KINDS {
         let current = kind.current_digest();
         if last_by_kind.get(kind.name).copied() != Some(current) {
-            eprintln!("PROBE schema digest {} {current}", kind.name);
             stale = true;
         }
     }
