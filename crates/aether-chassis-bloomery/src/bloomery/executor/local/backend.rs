@@ -391,6 +391,10 @@ struct Registry {
     // until the run leaves the registry, because the slot's checkout is what the
     // dispatch is building in and the next claimant resets it.
     slots: HashSet<usize>,
+    // Nonces whose `Run` is owned by an in-flight cancel. The kill/wait must not
+    // hold the registry lock, so this stand-in keeps the nonce and slot counted
+    // until kill succeeds (release) or Drop restores the run.
+    cancelling: HashMap<String, CancellingHold>,
 }
 
 impl Registry {
@@ -400,7 +404,7 @@ impl Registry {
     // `runs` and must not count twice.
     fn occupied(&self, quarantined: &HashSet<usize>) -> usize {
         let extra = quarantined.iter().filter(|slot| !self.slots.contains(slot)).count();
-        self.runs.len() + self.starting + extra
+        self.runs.len() + self.starting + self.cancelling.len() + extra
     }
 
     // Claim a preferred predecessor slot when it is free, otherwise the lowest
@@ -447,6 +451,65 @@ impl Registry {
         if let Some(slot) = slot {
             self.slots.remove(&slot);
         }
+    }
+
+    fn tracks(&self, nonce: &str) -> bool {
+        self.runs.contains_key(nonce) || self.cancelling.contains_key(nonce)
+    }
+}
+
+/// Slot and evidence path for a nonce whose `Run` is off the map for cancel.
+struct CancellingHold {
+    slot: Option<usize>,
+    evidence_dir: PathBuf,
+}
+
+/// Exclusive owner of a `Run` during cancel. `Some(run)` restores on Drop;
+/// `None` means the cancel committed and the reaped child is dropped after
+/// the registry lock is released.
+struct CancelReservation<'a> {
+    backend: &'a LocalExecutor,
+    nonce: String,
+    run: Option<Run>,
+}
+
+impl CancelReservation<'_> {
+    fn run_mut(&mut self) -> &mut Run {
+        self.run.as_mut().expect("a cancel reservation holds the run until commit or restore")
+    }
+
+    fn slot(&self) -> Option<usize> {
+        self.run.as_ref().and_then(|run| run.slot)
+    }
+
+    fn evidence_dir(&self) -> &Path {
+        &self.run.as_ref().expect("a cancel reservation holds the run until commit or restore").evidence_dir
+    }
+
+    /// Kill returned `Ok`: drop the reaped child outside the lock after freeing
+    /// the slot. Panic before this runs restores the (possibly terminal) run.
+    fn commit_release(mut self) {
+        let Some(run) = self.run.take() else {
+            return;
+        };
+        let slot = run.slot;
+        {
+            let mut registry = self.backend.lock();
+            registry.cancelling.remove(&self.nonce);
+            registry.release_slot(slot);
+        }
+        drop(run);
+    }
+}
+
+impl Drop for CancelReservation<'_> {
+    fn drop(&mut self) {
+        let Some(run) = self.run.take() else {
+            return;
+        };
+        let mut registry = self.backend.lock();
+        registry.cancelling.remove(&self.nonce);
+        registry.runs.insert(self.nonce.clone(), run);
     }
 }
 
@@ -811,6 +874,9 @@ impl LocalExecutor {
     // it to its own tree before building (see `ProcessTransformRunner::start`).
     fn retire(&self, nonce: &str) {
         let mut registry = self.lock();
+        if registry.cancelling.contains_key(nonce) {
+            return;
+        }
         let slot = registry.runs.remove(nonce).and_then(|run| run.slot);
         registry.release_slot(slot);
     }
@@ -1485,7 +1551,11 @@ impl LocalExecutor {
             "local executor backend: a dispatch failed to start; recording a host fault so its member re-dispatches",
         );
         let FailedStart { nonce, evidence_dir, subject, gates } = failed;
-        self.lock().runs.insert(
+        let mut registry = self.lock();
+        if registry.tracks(&nonce) {
+            return;
+        }
+        registry.runs.insert(
             nonce,
             Run {
                 process: Box::new(UnlaunchedRun),
@@ -1539,7 +1609,8 @@ impl LocalExecutor {
     //
     // Never replaces a tracked entry: an owned run's `Box<dyn RunProcess>` is the
     // only handle on its child, and swapping it for an orphan would silently retire
-    // the ability to kill that child.
+    // the ability to kill that child. A nonce in `cancelling` is still that handle,
+    // just owned by the cancel, so re-adoption must refuse it too.
     //
     // A re-adoption enters the registry directly, so it occupies a lane slot like
     // any other run — and past the ceiling when a previous process left more live
@@ -1563,7 +1634,7 @@ impl LocalExecutor {
             return false;
         }
         let mut registry = self.lock();
-        if registry.runs.contains_key(&nonce.0) {
+        if registry.tracks(&nonce.0) {
             return false;
         }
         let (recorded, slug) = recorded_lane(&evidence_dir);
@@ -2537,6 +2608,16 @@ impl ExecutorBackend for LocalExecutor {
                 if registry.waiting.iter().any(|pending| pending.nonce == handle.nonce.0) {
                     return Ok(ExecutionStatus::Queued);
                 }
+                // A cancel owns the process for kill/wait. The child is not
+                // confirmed gone, so this is still Running — never a successful
+                // completion, and never Unknown (that would look like eviction).
+                if let Some(hold) = registry.cancelling.get(&handle.nonce.0) {
+                    let evidence_dir = hold.evidence_dir.clone();
+                    drop(registry);
+                    return Ok(ExecutionStatus::Running {
+                        last_progress_unix_millis: lane_progress_unix_millis(&evidence_dir),
+                    });
+                }
                 // Not tracked here is the clean Unknown, never an error — the same
                 // "dispatch async, not visible yet" state the Actions backend reports.
                 // A cancelled run has been evicted, so it also reports Unknown here
@@ -2557,11 +2638,23 @@ impl ExecutorBackend for LocalExecutor {
     }
 
     fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
-        // Kill and evict under the lock. A failed kill returns early, leaving both
-        // the entry and its slot claim in place.
-        {
+        // Take the run under the lock, then kill/wait and quarantine IO without
+        // it. The `cancelling` stand-in keeps the nonce and slot occupied so a
+        // concurrent submit cannot reuse the checkout before termination.
+        let mut reservation = {
             let mut registry = self.lock();
-            let Some(run) = registry.runs.get_mut(&handle.nonce.0) else {
+            if registry.cancelling.contains_key(&handle.nonce.0) {
+                // ADR-0177 `Ok` is cancelled, already terminal, or already absent
+                // after a *successful* cancel. Another cancel still owns this
+                // child, so reporting absence would be a false success. The
+                // existing retryable arm is `Unterminated`: the deadline tick
+                // reissues cancel until the order is admitted.
+                return Err(LocalExecutorError::Unterminated(format!(
+                    "a cancel is already in flight for nonce `{}`",
+                    handle.nonce.0
+                )));
+            }
+            let Some(run) = registry.runs.remove(&handle.nonce.0) else {
                 // A dispatch still waiting for a lane slot has no child to kill and
                 // no checkout to reclaim, so dropping it from the queue is the whole
                 // cancel — and it has to happen here, or the ceiling would go on to
@@ -2595,42 +2688,42 @@ impl ExecutorBackend for LocalExecutor {
                 );
                 return Ok(());
             };
-            match run.process.kill() {
-                Ok(()) => {}
-                Err(error @ LocalExecutorError::Unterminated(_)) => {
-                    // The child is still out there. Keep the run and its slot
-                    // claim so the next dispatch cannot reset the checkout
-                    // under it, persist a quarantine so a restart without this
-                    // order still withholds the slot by name, and tell the
-                    // caller — `Ok(())` would be a kill that never happened.
-                    if let Some(slot) = run.slot {
-                        quarantine::record(
-                            &self.base_dir,
-                            slot,
-                            &handle.nonce.0,
-                            ProcessIdentity::read(&run.evidence_dir).as_ref(),
-                        );
-                        tracing::warn!(
-                            nonce = %handle.nonce.0,
-                            slot,
-                            "local executor backend: cancel could not terminate the lane child; its slot is quarantined",
-                        );
-                    }
-                    return Err(error);
+            registry.cancelling.insert(
+                handle.nonce.0.clone(),
+                CancellingHold { slot: run.slot, evidence_dir: run.evidence_dir.clone() },
+            );
+            CancelReservation { backend: self, nonce: handle.nonce.0.clone(), run: Some(run) }
+        };
+
+        match reservation.run_mut().process.kill() {
+            Ok(()) => {
+                if let Some(slot) = reservation.slot() {
+                    quarantine::clear(&self.base_dir, slot);
                 }
-                Err(error) => return Err(error),
+                reservation.commit_release();
             }
-            // A cancel is terminal — evict the killed run so the registry tracks only
-            // in-flight orders rather than parking `cancelled` entries forever, and
-            // hand its slot back. The slot's checkout stays where it is: the next
-            // dispatch to hold the slot resets it, and removing it here would pull
-            // the tree out from under whoever holds the slot by then. A quarantine
-            // left from an earlier failed attempt is cleared: this kill succeeded.
-            let slot = registry.runs.remove(&handle.nonce.0).and_then(|run| run.slot);
-            if let Some(slot) = slot {
-                quarantine::clear(&self.base_dir, slot);
+            Err(error @ LocalExecutorError::Unterminated(_)) => {
+                // The child is still out there. Restore the run (Drop) and its
+                // slot claim so the next dispatch cannot reset the checkout
+                // under it, persist a quarantine so a restart without this
+                // order still withholds the slot by name, and tell the
+                // caller — `Ok(())` would be a kill that never happened.
+                if let Some(slot) = reservation.slot() {
+                    quarantine::record(
+                        &self.base_dir,
+                        slot,
+                        &handle.nonce.0,
+                        ProcessIdentity::read(reservation.evidence_dir()).as_ref(),
+                    );
+                    tracing::warn!(
+                        nonce = %handle.nonce.0,
+                        slot,
+                        "local executor backend: cancel could not terminate the lane child; its slot is quarantined",
+                    );
+                }
+                return Err(error);
             }
-            registry.release_slot(slot);
+            Err(error) => return Err(error),
         }
         // The eviction above freed a lane slot; hand it to whatever is waiting.
         self.pump();
@@ -2750,13 +2843,15 @@ impl ReconcileLanes for LocalExecutor {
         // A re-adopted run whose evidence recorded no usable slot is building
         // somewhere this process cannot name. That fail-safe stays: a named
         // quarantine narrows the blanket, it does not replace it.
-        let unattributed = registry.runs.values().any(|run| run.slot.is_none());
+        let unattributed = registry.runs.values().any(|run| run.slot.is_none())
+            || registry.cancelling.values().any(|hold| hold.slot.is_none());
         drop(registry);
         LaneOccupancy { slots, unattributed }
     }
 
     fn started_nonces(&self) -> Vec<String> {
-        self.lock().runs.keys().cloned().collect()
+        let registry = self.lock();
+        registry.runs.keys().cloned().chain(registry.cancelling.keys().cloned()).collect()
     }
 }
 

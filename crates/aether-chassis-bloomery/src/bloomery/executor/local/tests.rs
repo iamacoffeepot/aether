@@ -4,11 +4,14 @@
 //! round-trips through [`NameEvidenceClaims`], so an admitted local run binds
 //! exactly as a wrapper-uploaded one would.
 
+use std::collections::HashMap;
 use std::fmt::{Debug, Write as _};
 use std::fs;
 use std::io::{Error as IoError, ErrorKind};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -530,6 +533,227 @@ fn cancel_evicts_the_tracked_run() {
     // deadline enforcement reissues its cancel on every tick until the expired
     // order is admitted, so a refusal here would make one store fault permanent.
     exec.cancel(&handle).expect("a repeat cancel of an already-evicted run is a clean success");
+}
+
+const CANCEL_TEST_DEADLOCK: Duration = Duration::from_secs(5);
+
+struct UnblockOnDrop(Option<mpsc::Sender<()>>);
+
+impl Drop for UnblockOnDrop {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+enum KillScript {
+    Succeed,
+    Stall { started: mpsc::Sender<()>, block: mpsc::Receiver<()> },
+    PanicOnce { armed: bool },
+    FailThenSucceed { fails_left: u32 },
+}
+
+struct ScriptedKillRunner {
+    scripts: Mutex<HashMap<String, KillScript>>,
+}
+
+struct ScriptedKillProcess {
+    script: KillScript,
+}
+
+impl TransformRunner for ScriptedKillRunner {
+    fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
+        fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
+        fs::write(spec.evidence_dir.join("evidence.json"), "{}").map_err(LocalExecutorError::Io)?;
+        let script = self.scripts.lock().unwrap().remove(spec.nonce).unwrap_or(KillScript::Succeed);
+        Ok(Box::new(ScriptedKillProcess { script }))
+    }
+
+    fn release(&self, _worktree_dir: &Path) -> Result<(), LocalExecutorError> {
+        Ok(())
+    }
+
+    fn registered_worktrees(&self) -> Result<Vec<PathBuf>, LocalExecutorError> {
+        Ok(Vec::new())
+    }
+
+    fn capture(
+        &self,
+        _worktree_dir: &Path,
+        _message: Option<&str>,
+    ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
+        Ok(None)
+    }
+}
+
+impl RunProcess for ScriptedKillProcess {
+    fn poll(&mut self) -> RunLifecycle {
+        RunLifecycle::Running
+    }
+
+    fn kill(&mut self) -> Result<(), LocalExecutorError> {
+        match &mut self.script {
+            KillScript::Succeed => Ok(()),
+            KillScript::Stall { started, block } => {
+                let _ = started.send(());
+                block.recv_timeout(CANCEL_TEST_DEADLOCK).map_err(|error| {
+                    LocalExecutorError::Unterminated(format!("kill was not explicitly released: {error}"))
+                })
+            }
+            KillScript::PanicOnce { armed } => {
+                if *armed {
+                    *armed = false;
+                    panic!("scripted kill panic");
+                }
+                Ok(())
+            }
+            KillScript::FailThenSucceed { fails_left } => {
+                if *fails_left > 0 {
+                    *fails_left -= 1;
+                    Err(LocalExecutorError::Unterminated("still running".into()))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+fn scripted_executor(base: &TempDir, scripts: HashMap<String, KillScript>, ceiling: usize) -> LocalExecutor {
+    LocalExecutor::new(Arc::new(ScriptedKillRunner { scripts: Mutex::new(scripts) }), correspondence(), base.path())
+        .with_max_concurrent_lanes(ceiling)
+}
+
+#[test]
+fn cancel_releases_the_registry_before_kill_and_keeps_the_slot_counted() {
+    let base = TempDir::new().unwrap();
+    let stalled = test_nonce("stall-kill");
+    let peer = test_nonce("peer-run");
+    let queued = test_nonce("queued-sat");
+    let slotless = test_nonce("slotless");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let exec = scripted_executor(
+        &base,
+        HashMap::from([(stalled.clone(), KillScript::Stall { started: started_tx, block: release_rx })]),
+        2,
+    );
+    let stalled_handle = exec.submit(&construct_order(digest(5), &stalled)).unwrap();
+    let peer_handle = exec.submit(&construct_order(digest(5), &peer)).unwrap();
+    let queued_handle = exec.submit(&construct_order(digest(5), &queued)).unwrap();
+    let overflow_handle = exec.submit(&construct_order(digest(5), &test_nonce("overflow"))).unwrap();
+    assert_eq!(exec.inspect(&queued_handle).unwrap(), ExecutionStatus::Queued);
+
+    thread::scope(|scope| {
+        let cancel = scope.spawn(|| exec.cancel(&stalled_handle));
+        let unblock = UnblockOnDrop(Some(release_tx));
+        started_rx.recv_timeout(CANCEL_TEST_DEADLOCK).expect("kill started; timeout is deadlock protection");
+        let (probe_tx, probe_rx) = mpsc::channel();
+        let exec = &exec;
+        let stalled_handle = &stalled_handle;
+        let peer_handle = &peer_handle;
+        let queued_handle = &queued_handle;
+        let overflow_handle = &overflow_handle;
+        let stalled = &stalled;
+        let slotless = &slotless;
+        let base = &base;
+        let probe = scope.spawn(move || {
+            assert_eq!(
+                exec.inspect(stalled_handle).unwrap(),
+                ExecutionStatus::Running { last_progress_unix_millis: None },
+                "a cancellation reservation is still running, not completed or absent",
+            );
+            assert!(matches!(exec.cancel(stalled_handle), Err(LocalExecutorError::Unterminated(_))));
+            assert!(exec.started_nonces().contains(stalled), "cancelling nonces remain visible");
+            assert!(exec.lane_occupancy().slots.contains(&0), "the stalled slot remains occupied");
+            assert_eq!(
+                exec.inspect(peer_handle).unwrap(),
+                ExecutionStatus::Running { last_progress_unix_millis: None },
+            );
+            exec.cancel(peer_handle).expect("another live lane cancels while kill is stalled");
+            assert!(exec.lane_occupancy().slots.contains(&0), "cancelling a peer does not release the stalled slot");
+            assert_eq!(
+                exec.inspect(queued_handle).unwrap(),
+                ExecutionStatus::Running { last_progress_unix_millis: None },
+                "the queued lane starts on the peer's freed slot",
+            );
+            assert_eq!(
+                exec.inspect(overflow_handle).unwrap(),
+                ExecutionStatus::Queued,
+                "the cancellation reservation still counts against the lane ceiling",
+            );
+            assert!(
+                exec.reconcile(&[outstanding(digest(5), stalled)]).readopted.is_empty(),
+                "reconciliation must not install an orphan over an in-flight cancellation",
+            );
+
+            seed_scratch(base, slotless, None, None);
+            exec.reconcile(&[outstanding(digest(5), slotless)]);
+            assert!(exec.lane_occupancy().unattributed, "a slotless orphan keeps cleanup conservative");
+            assert!(matches!(
+                exec.cancel(&WorkHandle::new(Nonce(slotless.clone()))),
+                Err(LocalExecutorError::Unterminated(_)),
+            ));
+            assert!(exec.lane_occupancy().unattributed, "a failed slotless cancellation remains unattributed");
+            probe_tx.send(()).unwrap();
+        });
+        probe_rx.recv_timeout(CANCEL_TEST_DEADLOCK).expect("probe finished; timeout is deadlock protection");
+        probe.join().unwrap();
+        drop(unblock);
+        cancel.join().unwrap().expect("stalled kill succeeds once released");
+    });
+
+    assert_eq!(exec.inspect(&stalled_handle).unwrap(), ExecutionStatus::Unknown);
+    exec.cancel(&stalled_handle).expect("a repeat cancel of an already-evicted run is a clean success");
+}
+
+#[test]
+fn failed_kill_restores_the_run_so_a_later_cancel_can_reclaim() {
+    let base = TempDir::new().unwrap();
+    let nonce = test_nonce("fail-then-succeed");
+    let exec =
+        scripted_executor(&base, HashMap::from([(nonce.clone(), KillScript::FailThenSucceed { fails_left: 1 })]), 1);
+    let handle = exec.submit(&construct_order(digest(5), &nonce)).unwrap();
+
+    match exec.cancel(&handle) {
+        Err(LocalExecutorError::Unterminated(_)) => {}
+        other => panic!("the first kill is scripted to fail: {other:?}"),
+    }
+    assert_eq!(
+        exec.inspect(&handle).unwrap(),
+        ExecutionStatus::Running { last_progress_unix_millis: None },
+        "the restored run stays tracked"
+    );
+    assert!(exec.lane_occupancy().slots.contains(&0), "the slot is still withheld");
+    let peer = exec.submit(&construct_order(digest(5), &test_nonce("after-failed-kill"))).unwrap();
+    assert_eq!(exec.inspect(&peer).unwrap(), ExecutionStatus::Queued, "the ceiling still counts the unterminated run");
+    exec.cancel(&handle).expect("restoration must let a later cancel reclaim");
+    assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Unknown);
+    assert_eq!(
+        exec.inspect(&peer).unwrap(),
+        ExecutionStatus::Running { last_progress_unix_millis: None },
+        "pump after reclaim starts the queued peer"
+    );
+}
+
+#[test]
+fn panic_during_kill_restores_the_run_so_a_later_cancel_can_reclaim() {
+    let base = TempDir::new().unwrap();
+    let nonce = test_nonce("panic-once");
+    let exec = scripted_executor(&base, HashMap::from([(nonce.clone(), KillScript::PanicOnce { armed: true })]), 1);
+    let handle = exec.submit(&construct_order(digest(5), &nonce)).unwrap();
+
+    let panicked = catch_unwind(AssertUnwindSafe(|| exec.cancel(&handle)));
+    assert!(panicked.is_err(), "the first kill is scripted to panic");
+    assert_eq!(
+        exec.inspect(&handle).unwrap(),
+        ExecutionStatus::Running { last_progress_unix_millis: None },
+        "Drop restores the run after the panicking kill"
+    );
+    assert!(exec.lane_occupancy().slots.contains(&0), "the slot is still withheld");
+    exec.cancel(&handle).expect("restoration after panic must let a later cancel reclaim");
+    assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Unknown);
 }
 
 fn evidence_dir(base: &TempDir, nonce: &str) -> PathBuf {
