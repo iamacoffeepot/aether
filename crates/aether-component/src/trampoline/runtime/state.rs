@@ -32,8 +32,8 @@ pub struct WasmTrampolineState {
     pub registry: Arc<Registry>,
     pub mailer: Arc<Mailer>,
     pub outbound: Arc<HubOutbound>,
-    /// The trampoline's own mailbox id
-    /// (== `MailboxId::from_name(full_name)`). Cached because
+    /// The trampoline's own mailbox id — the registry's depth-1
+    /// derivation over `full_name`. Cached because
     /// `NativeCtx` only exposes `self_id()` via the
     /// `NativeInitCtx` flavour today; storing it here avoids
     /// reaching into `ctx.binding().self_mailbox()` on every

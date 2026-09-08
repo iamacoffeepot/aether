@@ -12,8 +12,8 @@ use crate::mail::outbound::{EgressEvent, HubOutbound};
 use crate::mail::registry::effect::{EffectBatch, RegistryApplied, RegistryEffect, StartingCancellation};
 use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::relay::RouteRelayLease;
-use crate::mail::registry::{MailDispatch, Registry};
-use crate::mail::{KindId, Mail, MailboxId};
+use crate::mail::registry::{MailDispatch, Registry, canonical_mailbox_id};
+use crate::mail::{KindId, Mail};
 use crate::scheduler::{BatchBudget, WakeSink};
 use crate::testing::boot_authority as auth;
 
@@ -120,7 +120,7 @@ fn cancellation_holds_settlement_until_relay_terminal_delivery() {
         RegistryQueueCapacities::default(),
     );
     let name = "starting-cancel-settlement";
-    let id = MailboxId::from_name(name);
+    let id = canonical_mailbox_id(name);
     let reserved = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
     owner.run_once();
     let token = starting_token(&reserved.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());

@@ -173,11 +173,10 @@ fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool) -> Substrat
                 params,
             )
             .map_err(|e| anyhow::anyhow!("boot pumped render slot: {e}"))?;
-        // The pumped slot registered its inbox under the actor's NAMESPACE,
-        // so its id is the name hash — the same id
-        // `send_and_await_reply("aether.render", CaptureFrame)` resolves.
-        #[allow(clippy::disallowed_methods)] // ctx-less harness setup; no sibling resolver in scope
-        let render_mailbox = aether_data::mailbox_id_from_name(RenderCapability::NAMESPACE);
+        // The pumped slot registered its inbox at the cap's root-pinned id —
+        // the same id `send_and_await_reply("aether.render", CaptureFrame)`
+        // resolves.
+        let render_mailbox = aether_actor::root_mailbox::<RenderCapability>();
         Ok(Box::new(GpuFrameHook { slot, mailer, render_mailbox }) as Box<dyn FrameHook>)
     }))
 }

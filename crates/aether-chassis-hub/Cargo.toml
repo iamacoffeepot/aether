@@ -30,9 +30,6 @@ aether-substrate = { path = "../aether-substrate" }
 # (aether-chassis), so the hub no longer depends on aether-trace directly.
 aether-fleet = { path = "../aether-fleet" }
 aether-rpc = { path = "../aether-rpc" }
-# Fully-qualified `aether_data::mailbox_id_from_name` resolves the
-# engines-cap route target.
-aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 # The bin parses `HubCli` (ADR-0090 unit d) and bridges boot faults.
 clap = { workspace = true }

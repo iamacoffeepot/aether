@@ -17,8 +17,8 @@ use crate::config::RegistryQueueCapacities;
 use crate::mail::registry::effect::{
     ActivationToken, EffectBatch, RegistryApplied, RegistryEffect, RegistryEffectError,
 };
-use crate::mail::registry::{RegistryOwnerLease, RouteRelayLease, noop_handler};
-use crate::mail::{Mail, MailId, MailboxId, Source};
+use crate::mail::registry::{RegistryOwnerLease, RouteRelayLease, canonical_mailbox_id, noop_handler};
+use crate::mail::{Mail, MailId, Source};
 use crate::runtime::effect_chain::EffectChain;
 use crate::runtime::lifecycle::FatalAbortRecord;
 use crate::scheduler::WakeSink;
@@ -67,7 +67,7 @@ fn owner_close_before_apply_rejects_native_finalizer_at_home_and_releases_parent
         RegistryQueueCapacities::default(),
     );
     let caller = thread::current().id();
-    let parent_id = MailboxId::from_name("test.activation.owner-close-parent");
+    let parent_id = canonical_mailbox_id("test.activation.owner-close-parent");
     let parent = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), parent_id));
     let key = ChildReservationKey::new(
         parent_id,
@@ -128,7 +128,7 @@ fn rejected_multi_birth_batch_marks_unvisited_native_finalizer_as_activation_rej
     let caller = thread::current().id();
     let parent = Arc::new(NativeBinding::new_for_test(
         Arc::clone(&mailer),
-        MailboxId::from_name("test.activation.rejected-batch-parent"),
+        canonical_mailbox_id("test.activation.rejected-batch-parent"),
     ));
     let (first_tx, first_rx) = crossbeam_channel::unbounded();
     let (middle_tx, middle_rx) = crossbeam_channel::unbounded();
@@ -246,7 +246,7 @@ fn closed_child_subname_restages_as_retired_not_in_use() {
     );
     let parent = Arc::new(NativeBinding::new_for_test(
         Arc::clone(&mailer),
-        MailboxId::from_name("test.activation.self-close-parent"),
+        canonical_mailbox_id("test.activation.self-close-parent"),
     ));
     let (events_tx, _events_rx) = crossbeam_channel::unbounded();
     let (commit, dispatch_id, key) = finalized_probe(&spawner, &parent, "self-close", events_tx, 1);
