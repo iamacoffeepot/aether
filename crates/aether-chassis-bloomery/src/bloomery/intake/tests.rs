@@ -1016,6 +1016,58 @@ fn a_verdict_naming_an_identity_the_bloom_did_not_seal_is_refused() {
 }
 
 #[test]
+fn a_verdict_naming_only_the_second_appended_identity_keeps_its_declared_position() {
+    // The JSON evidence path decodes `failed_verifiers` as names. The set
+    // decoder interned a name the compiled vocabulary does not carry to the
+    // next free declared position in arrival order, then dropped the name.
+    // A sealed vocabulary with `verify.a` at 10 and `verify.b` at 11, and a
+    // verdict naming only `verify.b`, therefore interned `verify.b` at 10 —
+    // the first free bit, which the manifest has already given to `verify.a`.
+    // Intake judged the position, not the name: `declares_position(10)` is
+    // true, so the verdict was admitted and the journaled mask named the
+    // wrong identity.
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let workpiece = WorkpieceId("wp-rekey".to_owned());
+    let candidate = Digest::from_bytes([5; 32]);
+
+    let mut manifest = PipelineManifest::compiled();
+    manifest.verifiers.identities.push("verify.a".to_owned());
+    manifest.verifiers.identities.push("verify.b".to_owned());
+    let bytes = to_vec(&manifest).expect("a manifest encodes");
+    let address = config_address(PipelineManifest::NAME, &bytes);
+    store.record_config(address.as_bytes(), PipelineManifest::NAME, &bytes).unwrap();
+
+    let mut configs = ConfigRegistry::default();
+    configs.insert::<PipelineManifest>(address);
+    let record = DispatchRecord {
+        configs,
+        ..dispatch_record("n-rekey", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate)
+    };
+    record_dispatch(&mut store, &record).unwrap();
+
+    let failures: VerifyFailureSet =
+        serde_json::from_str(r#"["verify.b"]"#).expect("the evidence path decodes a well-formed name");
+    let upload = UploadedEvidence {
+        nonce: Nonce("n-rekey".to_owned()),
+        subject: candidate,
+        verdict: StageVerdict::VerificationFailed,
+        detail: Digest::from_bytes([7; 32]),
+        observation: LaneObservation { failed_verifiers: failures, ..Default::default() },
+    };
+
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
+        panic!("a verdict naming a sealed identity is admitted");
+    };
+    let Fact::VerifyFailed { failed_verifiers, .. } = &admission.event.fact else {
+        panic!("a failing Verify admits VerifyFailed, got {:?}", admission.event.fact);
+    };
+    let positions: Vec<u8> = failed_verifiers.positions().collect();
+    assert!(positions.contains(&11), "verify.b is the twelfth identity, got {positions:?}");
+    assert!(!positions.contains(&10), "and is not re-keyed onto verify.a, got {positions:?}");
+}
+
+#[test]
 fn a_failing_terminal_verify_admits_typed_verify_failed_not_integrate() {
     // ADR-0178: a failing Verify upload admits through its dedicated appended
     // fact with the exact typed set — never Integrate or the stage-polymorphic
