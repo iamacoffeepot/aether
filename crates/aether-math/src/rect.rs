@@ -239,10 +239,21 @@ impl Rect2 {
             return None;
         }
 
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        // aether-suppression-request: each bound is already floored/ceiled and clamped into `0..=u32::MAX`, so the four casts are exact
-        Some([min_x as u32, min_y as u32, (max_x - min_x) as u32, (max_y - min_y) as u32])
+        Some([pixel(min_x), pixel(min_y), pixel(max_x - min_x), pixel(max_y - min_y)])
     }
+}
+
+/// One snapped bound as its pixel index.
+///
+/// [`Rect2::clamp_to_pixels`] has already floored or ceiled `value` and
+/// clamped it into `0..=target`, so the conversion is exact. `core` has
+/// no fallible float-to-integer conversion to state that with — a cast
+/// is the only spelling — hence the suppression on this one line rather
+/// than over the arithmetic that computed the bound.
+#[inline]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // aether-suppression-request: clamped integral value
+fn pixel(value: f64) -> u32 {
+    value as u32
 }
 
 #[cfg(test)]
