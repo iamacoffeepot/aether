@@ -45,7 +45,7 @@ use crate::ids::{StageId, WorkpieceId};
 /// deliberately *not* on this shape — it is the host's, read off the order that
 /// dispatched the read, because a lane that could name its own receipt could
 /// file a finding derived from a bloom it never opened.
-#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct RetrospectClaim {
     /// The work order's title — the heading a reader of the filed commission
     /// sees first.
@@ -185,7 +185,7 @@ impl RetrospectFinding {
                 if SurfacePattern::parse(glob).is_none() {
                     return Err(RetrospectRefusal::UnparsableSurface { index, glob: glob.to_owned() });
                 }
-                if !surface.iter().any(|kept: &String| kept == glob) {
+                if !surface.iter().any(|kept: &String| kept.as_str() == glob) {
                     surface.push(glob.to_owned());
                 }
             }
@@ -259,10 +259,11 @@ impl RetrospectFinding {
 /// filed. Each filing then names this statement's address as its derivation
 /// parent, so the whole read is recoverable from any one of its filings.
 ///
-/// `words` is the landing receipt's own digest bytes, the way every door shape
-/// in [`statement`](super::statement) makes its words the digest it is about.
-/// That keeps the statement recomputable: a reader holding one filing has the
-/// provenance and the inputs, and re-mints byte-identical bytes.
+/// `words` is the landing receipt's own digest bytes, the way
+/// [`signed_approval`](super::signed_approval) and every other door shape makes
+/// its words the digest it is about. That keeps the statement recomputable: a
+/// reader holding one filing has the provenance and the inputs, and re-mints
+/// byte-identical bytes.
 ///
 /// Deterministic, so re-deriving it during a replayed admission produces the
 /// same parent address rather than a second lineage over the same read.
