@@ -45,5 +45,5 @@ mod tests;
 pub use golden::{GoldenTask, GoldenTaskError, GoldenTaskSet, extract};
 pub use run::{
     BenchmarkAdmission, BenchmarkBloomView, BenchmarkPlan, BenchmarkRefusal, BenchmarkReport, CellAddress,
-    MAX_BENCHMARK_BLOOMS, PlannedBloom, benchmark_workpiece, plan, require_trial_mode,
+    MAX_BENCHMARK_BLOOMS, PlannedBloom, RunSpec, benchmark_workpiece, plan, require_trial_mode,
 };

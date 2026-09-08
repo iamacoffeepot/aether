@@ -40,6 +40,7 @@ fn a_benchmark_run_seals_one_bloom_per_profile_cell() {
         "pull_requests": [landing],
         "cells": [cells[0].to_hex(), cells[1].to_hex()],
         "samples": 2,
+        "instructions": harness.instructions().to_hex(),
         "reason": "measure the construct lane on landed history",
         "operator": "benchmark harness",
     });

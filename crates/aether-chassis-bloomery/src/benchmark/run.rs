@@ -12,7 +12,7 @@ use std::fmt;
 
 use aether_bloomery::{
     BloomDraft, BloomId, BloomSpec, ConfigRegistry, Digest, Evidence, EvidenceKind, Membership, ModelOverride,
-    Observation, Outcome, Provenance, Statement, StoreClass, WorkpieceId, digest_of,
+    ModelProcessInstructions, Observation, Outcome, Provenance, Statement, StoreClass, WorkpieceId, digest_of,
 };
 use aether_bloomery_git::short_hex;
 use aether_data::Kind;
@@ -65,17 +65,28 @@ pub enum BenchmarkRefusal {
     NoSamples,
     /// The run would seal more than [`MAX_BENCHMARK_BLOOMS`] blooms.
     TooManyBlooms(usize),
-    /// A named cell address resolves to no stored configuration, so its blooms
-    /// would fall back to the compiled line and every cell would measure the
-    /// same agent under a different name.
-    UnresolvableCell(CellAddress),
-    /// A named cell address resolves to something that is not a
-    /// [`ModelOverride`].
-    CellIsNotAnOverride {
+    /// A sealed address resolves to no stored configuration.
+    ///
+    /// One variant for both the cells and the instruction bundle, because both
+    /// fail the same way and both fail *silently*: an unresolved override leaves
+    /// its dispatch on the compiled line (ADR-0184 §The agent is recomputed), so
+    /// every cell would measure the same agent under a different name, and an
+    /// unresolved bundle leaves the bloom unable to start a model attempt at all
+    /// (ADR-0214).
+    UnresolvableConfig {
         /// The address named.
-        cell: CellAddress,
+        address: Digest,
+        /// The kind a run needs it to be.
+        expected: &'static str,
+    },
+    /// A sealed address resolves to content filed under another kind.
+    MisfiledConfig {
+        /// The address named.
+        address: Digest,
+        /// The kind a run needs it to be.
+        expected: &'static str,
         /// The kind it is actually filed under.
-        kind: String,
+        actual: String,
     },
 }
 
@@ -93,9 +104,11 @@ impl fmt::Display for BenchmarkRefusal {
             Self::TooManyBlooms(blooms) => {
                 write!(f, "this run would seal {blooms} blooms; one run is capped at {MAX_BENCHMARK_BLOOMS}")
             }
-            Self::UnresolvableCell(cell) => write!(f, "no stored configuration at cell address {}", cell.to_hex()),
-            Self::CellIsNotAnOverride { cell, kind } => {
-                write!(f, "cell address {} is filed as `{kind}`, not `{}`", cell.to_hex(), ModelOverride::NAME)
+            Self::UnresolvableConfig { address, expected } => {
+                write!(f, "no stored `{expected}` at address {}", address.to_hex())
+            }
+            Self::MisfiledConfig { address, expected, actual } => {
+                write!(f, "address {} is filed as `{actual}`, not `{expected}`", address.to_hex())
             }
         }
     }
@@ -201,64 +214,99 @@ pub struct BenchmarkReport {
     pub cost_caveat: String,
 }
 
+/// What one run compares, beside the set it replays.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RunSpec {
+    /// One recorded [`ModelOverride`] address per profile cell.
+    pub cells: Vec<CellAddress>,
+    /// How many blooms to seal per `(task, cell)`.
+    pub samples: u32,
+    /// The [`ModelProcessInstructions`] bundle every bloom pins bloom-wide.
+    ///
+    /// Named by the operator rather than supplied by the door, for the reason a
+    /// draft names its own (ADR-0214): a bloom may only start a model attempt
+    /// under a bundle the host has authorized, and a door that pinned one of its
+    /// own choosing would be deciding process policy on the operator's behalf.
+    /// It is also what keeps a benchmark honest — the cells measure agents
+    /// running the same instructions live operation runs, because they run the
+    /// same bundle.
+    pub instructions: Digest,
+}
+
 /// Plan a run over `set`, one bloom per `(task, cell, sample)`.
 ///
-/// `resolve_cell` answers what kind a cell address is filed under, `None` when
-/// the address resolves to nothing — the caller's window onto stored
-/// configuration, taken as a closure so this stays a pure function of the values
-/// it is handed.
+/// `resolve` answers what kind a sealed address is filed under, `None` when the
+/// address resolves to nothing — the caller's window onto stored configuration,
+/// taken as a closure so this stays a pure function of the values it is handed.
 ///
 /// # Errors
 /// [`BenchmarkRefusal`] for an empty cell list, a zero sample size, a run over
-/// the bloom cap, or a cell address that does not resolve to a
-/// [`ModelOverride`].
+/// the bloom cap, or an address that does not resolve to the kind it is sealed
+/// as.
 pub fn plan(
     set: GoldenTaskSet,
-    cells: &[CellAddress],
-    samples: u32,
-    resolve_cell: impl Fn(CellAddress) -> Option<String>,
+    run: &RunSpec,
+    resolve: impl Fn(Digest) -> Option<String>,
 ) -> Result<BenchmarkPlan, BenchmarkRefusal> {
     if set.tasks.is_empty() {
         return Err(BenchmarkRefusal::NoTasks);
     }
-    if cells.is_empty() {
+    if run.cells.is_empty() {
         return Err(BenchmarkRefusal::NoCells);
     }
-    if samples == 0 {
+    if run.samples == 0 {
         return Err(BenchmarkRefusal::NoSamples);
     }
-    for cell in cells {
-        match resolve_cell(*cell) {
-            None => return Err(BenchmarkRefusal::UnresolvableCell(*cell)),
-            Some(kind) if kind != ModelOverride::NAME => {
-                return Err(BenchmarkRefusal::CellIsNotAnOverride { cell: *cell, kind });
-            }
-            Some(_) => {}
-        }
+    resolves_as(run.instructions, ModelProcessInstructions::NAME, &resolve)?;
+    for cell in &run.cells {
+        resolves_as(*cell, ModelOverride::NAME, &resolve)?;
     }
 
-    let per_cell = usize::try_from(samples).unwrap_or(usize::MAX);
-    let count = set.tasks.len().saturating_mul(cells.len()).saturating_mul(per_cell);
+    let per_cell = usize::try_from(run.samples).unwrap_or(usize::MAX);
+    let count = set.tasks.len().saturating_mul(run.cells.len()).saturating_mul(per_cell);
     if count > MAX_BENCHMARK_BLOOMS {
         return Err(BenchmarkRefusal::TooManyBlooms(count));
     }
 
-    let (base, version) = (set.base, set.version());
+    let (base, version, samples) = (set.base, set.version(), run.samples);
+    let mut bloom_wide = ConfigRegistry::default();
+    bloom_wide.insert::<ModelProcessInstructions>(run.instructions);
+
     let blooms = set
         .tasks
         .iter()
         .flat_map(|task| {
-            cells
-                .iter()
-                .flat_map(move |cell| (0..samples).map(move |sample| planned_bloom(base, version, task, *cell, sample)))
+            run.cells.iter().flat_map(|cell| {
+                (0..samples).map(|sample| planned_bloom(base, version, &bloom_wide, task, *cell, sample))
+            })
         })
         .collect();
 
     Ok(BenchmarkPlan { set, blooms })
 }
 
+/// Refuse an address that does not resolve to `expected`.
+fn resolves_as(
+    address: Digest,
+    expected: &'static str,
+    resolve: &impl Fn(Digest) -> Option<String>,
+) -> Result<(), BenchmarkRefusal> {
+    match resolve(address) {
+        None => Err(BenchmarkRefusal::UnresolvableConfig { address, expected }),
+        Some(actual) if actual != expected => Err(BenchmarkRefusal::MisfiledConfig { address, expected, actual }),
+        Some(_) => Ok(()),
+    }
+}
+
 /// Freeze one `(task, cell, sample)` into its spec.
-fn planned_bloom(base: Digest, version: Digest, task: &GoldenTask, cell: CellAddress, sample: u32) -> PlannedBloom {
+fn planned_bloom(
+    base: Digest,
+    version: Digest,
+    bloom_wide: &ConfigRegistry,
+    task: &GoldenTask,
+    cell: CellAddress,
+    sample: u32,
+) -> PlannedBloom {
     let workpiece = WorkpieceId(benchmark_workpiece(task.pull_request, cell, sample));
 
     let mut configs = ConfigRegistry::default();
@@ -279,7 +327,7 @@ fn planned_bloom(base: Digest, version: Digest, task: &GoldenTask, cell: CellAdd
     member.approval = trial_approval(member.subject(), version);
 
     PlannedBloom {
-        spec: BloomDraft { proposals: vec![member], base, ..BloomDraft::default() }.seal(),
+        spec: BloomDraft { proposals: vec![member], base, configs: bloom_wide.clone(), ..BloomDraft::default() }.seal(),
         workpiece,
         order: task.order.clone(),
         pull_request: task.pull_request,

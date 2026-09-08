@@ -15,7 +15,7 @@ use super::super::state::{
 use super::BenchmarkRequest;
 use crate::benchmark::{
     BenchmarkAdmission, BenchmarkBloomView, BenchmarkPlan, BenchmarkReport, GoldenTask, GoldenTaskSet, PlannedBloom,
-    extract, plan,
+    RunSpec, extract, plan,
 };
 use crate::control::ControlCore;
 use crate::store::{RecordDispatchDescription, StoreCapability};
@@ -51,9 +51,8 @@ pub(super) fn run(state: &ApiCapabilityState, ctx: &NativeCtx<'_, Manual>, reque
     };
 
     let set = GoldenTaskSet { name: request.set, base: request.base, tasks };
-    let planned = match plan(set, &request.cells, request.samples, |address| {
-        state.configs.stored(address).map(|(kind, _)| kind.to_owned())
-    }) {
+    let run = RunSpec { cells: request.cells, samples: request.samples, instructions: request.instructions };
+    let planned = match plan(set, &run, |address| state.configs.stored(address).map(|(kind, _)| kind.to_owned())) {
         Ok(planned) => planned,
         Err(refusal) => return Routed::Reply(error_response(422, &refusal.to_string())),
     };
@@ -109,9 +108,10 @@ impl ApiCapabilityState {
         else {
             return Some(mail);
         };
-        let Some(pending) = self.benchmarks.get_mut(&run) else {
-            return None;
-        };
+        // A sibling seal may already have failed the run closed and taken its
+        // table with it; this reply then has nothing to fill, and it is still
+        // claimed rather than handed to the shared renderer.
+        let pending = self.benchmarks.get_mut(&run)?;
         pending.admissions[index] = Some(admission(&mail));
         pending.remaining -= 1;
         if pending.remaining > 0 {

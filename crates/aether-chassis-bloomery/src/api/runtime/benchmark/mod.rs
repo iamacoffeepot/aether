@@ -57,6 +57,11 @@ pub(super) struct BenchmarkRequest {
     pub(super) cells: Vec<Digest>,
     /// How many blooms to seal per `(task, cell)`.
     pub(super) samples: u32,
+    /// The recorded `aether.bloomery.model_process_instructions` bundle every
+    /// bloom pins (ADR-0214). Named here rather than chosen by the door: a model
+    /// attempt runs only under a bundle the host authorized, and a benchmark's
+    /// cells are only comparable to live operation when they run its bundle.
+    pub(super) instructions: Digest,
     /// Why this run is being made. Required, as at every operator door.
     pub(super) reason: String,
     /// Who is making it.

@@ -6,12 +6,12 @@
 
 use std::collections::BTreeSet;
 
-use aether_bloomery::{Digest, ModelOverride};
+use aether_bloomery::{Digest, ModelOverride, ModelProcessInstructions};
 use aether_bloomery_git::{ChecksState, NewPullRequest, PullRequestApi, fixture::FakeGithub};
 use aether_data::Kind;
 
 use super::golden::{GoldenTask, GoldenTaskError, GoldenTaskSet, extract};
-use super::run::{BenchmarkRefusal, MAX_BENCHMARK_BLOOMS, PlannedBloom, plan};
+use super::run::{BenchmarkRefusal, MAX_BENCHMARK_BLOOMS, PlannedBloom, RunSpec, plan};
 
 /// The tree a seeded landing's head carries — the reference answer extraction
 /// reads back.
@@ -58,8 +58,23 @@ fn task(pull_request: u64) -> GoldenTask {
     }
 }
 
-fn overrides(_: Digest) -> Option<String> {
-    Some(ModelOverride::NAME.to_owned())
+/// The instruction bundle every planned bloom pins (ADR-0214).
+const INSTRUCTIONS: Digest = Digest::from_bytes([0x1B; 32]);
+
+fn run_spec(cells: &[Digest], samples: u32) -> RunSpec {
+    RunSpec { cells: cells.to_vec(), samples, instructions: INSTRUCTIONS }
+}
+
+/// The stored-configuration window a coordinator has once the operator recorded
+/// the bundle and the cells the run is about to name.
+fn recorded() -> impl Fn(Digest) -> Option<String> {
+    |address| {
+        if address == INSTRUCTIONS {
+            Some(ModelProcessInstructions::NAME.to_owned())
+        } else {
+            Some(ModelOverride::NAME.to_owned())
+        }
+    }
 }
 
 // A landed pull request becomes a work order, a landed head, and a reference
@@ -151,8 +166,8 @@ fn extraction_refuses_a_landing_that_is_not_one() {
 fn two_cells_at_sample_size_two_are_four_distinct_blooms_attributable_to_their_cells() {
     let cells = [cell(0xC1), cell(0xC2)];
 
-    let planned =
-        plan(task_set(vec![task(5820)]), &cells, 2, overrides).expect("two resolvable cells at sample size two plan");
+    let planned = plan(task_set(vec![task(5820)]), &run_spec(&cells, 2), recorded())
+        .expect("two resolvable cells at sample size two plan");
 
     assert_eq!(planned.blooms.len(), 4);
     let ids: BTreeSet<_> = planned.blooms.iter().map(PlannedBloom::id).collect();
@@ -168,6 +183,11 @@ fn two_cells_at_sample_size_two_are_four_distinct_blooms_attributable_to_their_c
         );
         assert!(member.approval.validates(&member.subject()), "the trial approval binds its own member subject");
         assert_eq!(bloom.order, "an order", "every cell replays the same work order");
+        assert_eq!(
+            bloom.spec.configs().address::<ModelProcessInstructions>(),
+            Some(INSTRUCTIONS),
+            "every bloom pins the authorized instruction bundle, or its model lane never dispatches (ADR-0214)"
+        );
     }
 
     assert_eq!(
@@ -187,16 +207,38 @@ fn two_cells_at_sample_size_two_are_four_distinct_blooms_attributable_to_their_c
 fn a_cell_that_is_not_a_resolvable_override_is_refused() {
     let set = task_set(vec![task(1)]);
 
-    assert_eq!(plan(set.clone(), &[cell(0xC1)], 1, |_| None), Err(BenchmarkRefusal::UnresolvableCell(cell(0xC1))));
+    let one_cell = run_spec(&[cell(0xC1)], 1);
+
     assert_eq!(
-        plan(set.clone(), &[cell(0xC1)], 1, |_| Some("aether.bloomery.stage_catalog".to_owned())),
-        Err(BenchmarkRefusal::CellIsNotAnOverride {
-            cell: cell(0xC1),
-            kind: "aether.bloomery.stage_catalog".to_owned()
+        plan(set.clone(), &one_cell, |address| (address == INSTRUCTIONS)
+            .then(|| ModelProcessInstructions::NAME.to_owned())),
+        Err(BenchmarkRefusal::UnresolvableConfig { address: cell(0xC1), expected: ModelOverride::NAME })
+    );
+    assert_eq!(
+        plan(set.clone(), &one_cell, |address| Some(if address == INSTRUCTIONS {
+            ModelProcessInstructions::NAME.to_owned()
+        } else {
+            "aether.bloomery.stage_catalog".to_owned()
+        })),
+        Err(BenchmarkRefusal::MisfiledConfig {
+            address: cell(0xC1),
+            expected: ModelOverride::NAME,
+            actual: "aether.bloomery.stage_catalog".to_owned()
         })
     );
-    assert_eq!(plan(set.clone(), &[], 1, overrides), Err(BenchmarkRefusal::NoCells));
-    assert_eq!(plan(set, &[cell(0xC1)], 0, overrides), Err(BenchmarkRefusal::NoSamples));
+    // The bundle is checked the same way, and before the cells: a bloom that
+    // pins none cannot start a model attempt at all (ADR-0214), so a run whose
+    // instructions do not resolve has nothing to measure whatever its cells say.
+    assert_eq!(
+        plan(set.clone(), &one_cell, |_| Some(ModelOverride::NAME.to_owned())),
+        Err(BenchmarkRefusal::MisfiledConfig {
+            address: INSTRUCTIONS,
+            expected: ModelProcessInstructions::NAME,
+            actual: ModelOverride::NAME.to_owned()
+        })
+    );
+    assert_eq!(plan(set.clone(), &run_spec(&[], 1), recorded()), Err(BenchmarkRefusal::NoCells));
+    assert_eq!(plan(set, &run_spec(&[cell(0xC1)], 0), recorded()), Err(BenchmarkRefusal::NoSamples));
 }
 
 // The multiplicative ceiling refuses the whole run rather than sealing a prefix:
@@ -207,7 +249,7 @@ fn a_run_over_the_bloom_ceiling_seals_nothing() {
     let over = vec![task(1); MAX_BENCHMARK_BLOOMS + 1];
 
     assert_eq!(
-        plan(task_set(over), &[cell(0xC1)], 1, overrides),
+        plan(task_set(over), &run_spec(&[cell(0xC1)], 1), recorded()),
         Err(BenchmarkRefusal::TooManyBlooms(MAX_BENCHMARK_BLOOMS + 1))
     );
 }

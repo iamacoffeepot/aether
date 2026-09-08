@@ -1169,6 +1169,7 @@ impl ScenarioHarness {
     /// # Panics
     /// The fixture refused to open the proposal, which only a duplicate head
     /// can cause.
+    #[must_use]
     pub fn seed_landed_pull_request(&self, issue: u64, order: &str) -> u64 {
         let branch = format!("landed-{issue}");
         let head = self.fake().seed_commit(&format!("tree-{issue}"));
@@ -1190,6 +1191,20 @@ impl ScenarioHarness {
         proposal.number
     }
 
+    /// The instruction bundle this harness pinned at boot and authorized through
+    /// the coordinator's own configuration (ADR-0214).
+    ///
+    /// The address a sealed bloom has to name bloom-wide before any of its model
+    /// lanes will dispatch, which a scenario that seals through a door rather
+    /// than through [`seal_members`](Self::seal_members) has to supply itself.
+    ///
+    /// # Panics
+    /// The harness pinned no bundle, which its own boot rules out.
+    #[must_use]
+    pub fn instructions(&self) -> Digest {
+        self.configs.address::<ModelProcessInstructions>().expect("the harness pins an instruction bundle at boot")
+    }
+
     /// Record a member-wide [`ModelOverride`] through `POST /configs` and hand
     /// back the address a benchmark cell names it by.
     ///
@@ -1200,6 +1215,7 @@ impl ScenarioHarness {
     ///
     /// # Panics
     /// The route refused the write, or answered a body without an address.
+    #[must_use]
     pub fn record_model_override(&self, model: &str) -> Digest {
         let value = ModelOverride {
             agent: Some(AgentSelection { harness: Harness::Claude, model: model.to_owned() }),

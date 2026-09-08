@@ -13,6 +13,7 @@ fn body(reason: &str) -> Vec<u8> {
         "pull_requests": [5820],
         "cells": ["c1".repeat(32)],
         "samples": 2,
+        "instructions": "1b".repeat(32),
         "reason": reason,
         "operator": "operator",
     })
