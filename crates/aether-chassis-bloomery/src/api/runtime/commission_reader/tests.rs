@@ -75,6 +75,7 @@ fn listed(id: &str, revision: Option<Digest>) -> ListedCommission {
         current_revision: revision.map(|digest| digest.as_bytes().to_vec()),
         current_ordinal: revision.map(|_| 1),
         status: "open".to_owned(),
+        filed: None,
     }
 }
 

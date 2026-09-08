@@ -7,14 +7,15 @@ use ratatui::style::Modifier;
 use ratatui::widgets::{List, ListItem, ListState};
 
 use crate::cursor::Cursor;
-use crate::dto::{BloomView, CompositionFinding, CompositionView, DigestHex, MemberView, ViewDocument};
+use crate::dto::{BloomStatus, BloomView, CompositionFinding, CompositionView, DigestHex, MemberView, ViewDocument};
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
-use crate::store::{ResourceKey, Store};
+use crate::store::{JournalQuery, ResourceKey, Store};
 use crate::warroom::Focus;
 
 use super::board::member_status_state;
+use super::filed::{FiledRow, filings, read_receipt};
 
 const HINTS: &[KeyHint] = &[
     KeyHint { keys: "j/k", action: "select" },
@@ -37,6 +38,7 @@ pub enum RowKey {
     BlockedBy,
     Digest(DigestHex),
     Dispatch,
+    Filing(String),
     Other(u16),
 }
 
@@ -57,12 +59,18 @@ pub struct Detail {
     vanished: bool,
     cursor: Cursor<RowKey>,
     scroll: usize,
+    /// Whether the subject is a landed bloom, learned from the last rebuild.
+    ///
+    /// The filed-findings tail costs a bloom-filtered journal page and the
+    /// commission list, and only a landed bloom can have been read at all, so
+    /// the subscription follows the status rather than the focus.
+    landed: bool,
 }
 
 impl Detail {
     #[must_use]
     pub fn new(focus: Focus) -> Self {
-        Self { focus, lines: Vec::new(), vanished: false, cursor: Cursor::new(), scroll: 0 }
+        Self { focus, lines: Vec::new(), vanished: false, cursor: Cursor::new(), scroll: 0, landed: false }
     }
 
     #[must_use]
@@ -87,7 +95,14 @@ impl Detail {
 
     #[must_use]
     pub fn subscriptions(&self) -> Vec<ResourceKey> {
-        vec![ResourceKey::View]
+        let mut keys = vec![ResourceKey::View];
+        if self.landed
+            && let Focus::Bloom { id } = &self.focus
+        {
+            keys.push(ResourceKey::Journal(JournalQuery { bloom: Some(*id), from_sequence: None }));
+            keys.push(ResourceKey::Commissions);
+        }
+        keys
     }
 
     #[must_use]
@@ -138,7 +153,7 @@ impl Detail {
             return;
         };
         if focus_exists(&self.focus, view) {
-            self.rebuild(view);
+            self.rebuild(view, store);
             self.vanished = false;
             self.reseat_cursor();
             return;
@@ -147,7 +162,7 @@ impl Detail {
             && focus_exists(&parent, view)
         {
             self.focus = parent;
-            self.rebuild(view);
+            self.rebuild(view, store);
             self.vanished = false;
             self.reseat_cursor();
             return;
@@ -161,7 +176,7 @@ impl Detail {
         if self.lines.is_empty()
             && let Some(view) = store.view().value.as_ref()
         {
-            self.rebuild(view);
+            self.rebuild(view, store);
             self.reseat_cursor();
         }
         let dimmed = self.vanished || store.view().is_stale();
@@ -204,9 +219,21 @@ impl Detail {
         self.cursor.reseat(&self.lines, |line| line.key.clone(), |_, lines| lines.first().map(|line| line.key.clone()));
     }
 
-    fn rebuild(&mut self, view: &ViewDocument) {
+    fn rebuild(&mut self, view: &ViewDocument, store: &Store) {
+        self.landed = match &self.focus {
+            Focus::Bloom { id } => find_bloom(view, *id).is_some_and(|found| found.status == Some(BloomStatus::Landed)),
+            Focus::Member { .. }
+            | Focus::Dispatch { .. }
+            | Focus::Composition { .. }
+            | Focus::Seal
+            | Focus::Record { .. }
+            | Focus::Artifact { .. }
+            | Focus::Transcript { .. }
+            | Focus::Workpiece { .. } => false,
+        };
+
         self.lines = match &self.focus {
-            Focus::Bloom { id } => bloom_lines(view, *id),
+            Focus::Bloom { id } => bloom_lines(view, store, *id),
             Focus::Member { bloom, workpiece } | Focus::Dispatch { bloom, workpiece } => {
                 member_lines(view, *bloom, workpiece)
             }
@@ -245,7 +272,7 @@ fn find_member<'a>(
     bloom.members.iter().find(|member| member.workpiece == workpiece).map(|member| (bloom, member))
 }
 
-fn bloom_lines(view: &ViewDocument, id: DigestHex) -> Vec<Line> {
+fn bloom_lines(view: &ViewDocument, store: &Store, id: DigestHex) -> Vec<Line> {
     let Some(bloom) = find_bloom(view, id) else {
         return Vec::new();
     };
@@ -278,7 +305,58 @@ fn bloom_lines(view: &ViewDocument, id: DigestHex) -> Vec<Line> {
             openable: false,
         });
     }
+    push_filed_section(&mut lines, &filed_rows(store, bloom));
     lines
+}
+
+/// The findings this bloom's read filed (ADR-0216 §3).
+///
+/// Empty for every bloom the reader has not read — which today is every bloom,
+/// since the lane is authored and not yet enabled — and the section disappears
+/// entirely rather than rendering an empty heading.
+fn filed_rows(store: &Store, bloom: &BloomView) -> Vec<FiledRow> {
+    if let Some(journal) = store.journal(JournalQuery { bloom: Some(bloom.id), from_sequence: None })
+        && let Some(page) = journal.value.as_ref()
+        && let Some(receipt) = read_receipt(page, bloom.id)
+        && let Some(list) = store.commissions().value.as_ref()
+    {
+        return filings(list, receipt);
+    }
+
+    Vec::new()
+}
+
+/// The pile, with what it is not stated on its own row.
+///
+/// A filing is an unapproved proposal: it carries the read's derivation and no
+/// approval, and no seal can name it, so nothing here is work until a person
+/// scopes and approves it (ADR-0216 §3). The line says so where the pile is
+/// read, because a list of work-order-shaped rows under a bloom otherwise reads
+/// as a queue somebody already accepted.
+fn push_filed_section(lines: &mut Vec<Line>, rows: &[FiledRow]) {
+    if rows.is_empty() {
+        return;
+    }
+    lines.push(label(RowKey::Other(300), format!("filed findings  {}", rows.len())));
+    lines.push(label(
+        RowKey::Other(301),
+        "  unapproved reader proposals — work only once a person approves one".to_owned(),
+    ));
+    for row in rows {
+        lines.push(Line {
+            key: RowKey::Filing(row.id.clone()),
+            text: format!("  {}  {}  {}", row.id, row.status, row.title),
+            enter: Some(Nav::focus(Focus::workpiece(row.id.clone()))),
+            digest: None,
+            openable: false,
+        });
+        if !row.surface.is_empty() {
+            lines.push(label(
+                RowKey::Filing(format!("{}  surface", row.id)),
+                format!("    surface  {}", row.surface.join("  ")),
+            ));
+        }
+    }
 }
 
 fn push_alert_section(lines: &mut Vec<Line>, bloom: &BloomView) {

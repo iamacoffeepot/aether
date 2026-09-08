@@ -10,8 +10,9 @@ use std::fmt;
 
 use aether_bloomery::{
     AuthorityDoor, BloomId, CommissionApprovalTier, CommissionProjection, CommissionStatementRole, CommissionStatus,
-    CommissionValueError, Digest, KeyProvider, Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision,
-    ScopeVerifyReport, Statement, Topic, WorkpieceId, decode_row, digest_of, encode_row, intent_title, verify_scope,
+    CommissionValueError, Digest, FiledFinding, KeyProvider, Observation, Provenance, SCOPE_REVISION_SCHEMA,
+    ScopeRevision, ScopeVerifyReport, Statement, Topic, WorkpieceId, decode_row, digest_of, encode_row, intent_title,
+    verify_scope,
 };
 use aether_data::Kind;
 
@@ -305,6 +306,10 @@ pub struct CommissionHead {
     pub current_ordinal: Option<u64>,
     /// Lifecycle flag. Not signed.
     pub status: CommissionStatus,
+    /// The reader's read this commission was filed by, when one filed it
+    /// (ADR-0216 §3). Projected from the intent statement this row already
+    /// decodes to recompute its digest, so a head costs no extra read.
+    pub filed: Option<FiledFinding>,
 }
 
 /// A commission head plus the decoded current revision, when present.
@@ -1142,7 +1147,7 @@ fn recompute_head(
     status: &str,
 ) -> Result<CommissionHead, CommissionError> {
     let stored_intent = Digest::from_slice(intent_bytes).ok_or(CommissionError::MalformedCanonical)?;
-    let intent = recompute_intent(conn, &id, stored_intent)?;
+    let (intent, statement) = recompute_intent(conn, &id, stored_intent)?;
     let current_revision = match current {
         Some(bytes) => Some(Digest::from_slice(&bytes).ok_or(CommissionError::MalformedCanonical)?),
         None => None,
@@ -1152,10 +1157,16 @@ fn recompute_head(
         None => None,
     };
     let status = CommissionStatus::parse(status).ok_or(CommissionError::MalformedCanonical)?;
-    Ok(CommissionHead { id: WorkpieceId(id), intent, current_revision, current_ordinal, status })
+    let filed = FiledFinding::of_intent(&statement);
+
+    Ok(CommissionHead { id: WorkpieceId(id), intent, current_revision, current_ordinal, status, filed })
 }
 
-fn recompute_intent(conn: &Connection, commission: &str, stored: Digest) -> Result<Digest, CommissionError> {
+fn recompute_intent(
+    conn: &Connection,
+    commission: &str,
+    stored: Digest,
+) -> Result<(Digest, Statement), CommissionError> {
     let canonical: Vec<u8> = conn
         .query_row(
             "SELECT canonical FROM commission_statements WHERE digest = ?1 AND commission = ?2 AND role = ?3",
@@ -1168,7 +1179,7 @@ fn recompute_intent(conn: &Connection, commission: &str, stored: Digest) -> Resu
     if digest != stored {
         return Err(CommissionError::MalformedCanonical);
     }
-    Ok(digest)
+    Ok((digest, statement))
 }
 
 fn revision_exists(conn: &Transaction<'_>, digest: Digest) -> Result<bool, CommissionError> {

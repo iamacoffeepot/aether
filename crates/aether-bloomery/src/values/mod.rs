@@ -99,7 +99,8 @@ pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use proof::{VerifiedTree, VerifyGateSet, VerifyProof, VerifyReuse};
 pub use question::Question;
 pub use retrospect::{
-    RetrospectClaim, RetrospectEmission, RetrospectFinding, RetrospectRefusal, filed_intent, reader_derivation,
+    FiledFinding, RetrospectClaim, RetrospectEmission, RetrospectFinding, RetrospectRefusal, filed_intent,
+    reader_derivation,
 };
 pub use scope_verify::{
     NamedPath, NamedSymbol, PathOrigin, SCOPE_VERIFY_SCHEMA, ScopeVerifyInput, ScopeVerifyReport, verify_scope,
