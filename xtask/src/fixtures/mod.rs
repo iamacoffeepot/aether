@@ -223,14 +223,7 @@ pub fn annotate_findings(findings: &str) -> String {
 fn schema_digests_are_stale(path: &Path) -> bool {
     let on_disk = fs::read_to_string(path).unwrap_or_default();
     let last_by_kind = last_pinned_by_kind(&on_disk);
-    let mut stale = false;
-    for kind in PERSISTED_KINDS {
-        let current = kind.current_digest();
-        if last_by_kind.get(kind.name).copied() != Some(current) {
-            stale = true;
-        }
-    }
-    stale
+    PERSISTED_KINDS.iter().any(|kind| last_by_kind.get(kind.name).copied() != Some(kind.current_digest()))
 }
 
 fn last_pinned_by_kind(text: &str) -> BTreeMap<&str, aether_bloomery::Digest> {
