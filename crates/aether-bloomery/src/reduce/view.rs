@@ -324,7 +324,7 @@ mod tests {
     use crate::reduce::{BloomStatus, Event, Fact, Outcome, RecordedRead, RecordedRefusal, Snapshot, reduce};
     use crate::values::{
         BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, OperatorHold,
-        Question, ResolutionClaim, ResolvedConfigs, SpendWindow, VerifyFailureSet, Wedge,
+        Question, ResolutionClaim, SpendWindow, VerifyFailureSet, Wedge,
     };
 
     fn digest(seed: u8) -> Digest {

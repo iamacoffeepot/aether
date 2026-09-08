@@ -2071,9 +2071,8 @@ mod tests {
     use aether_bloomery::{
         Admit, BloomDraft, BloomId, BloomRecord, BloomStatus, CandidateRef, ClaimResult, ClaimSeal, Commit,
         ConfigRegistry, Decision, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, HostFaultHold,
-        IdempotencyKey, Membership, OperatorRepair, OperatorRepairError, OutboxPayload, Outcome, QueryResult,
-        ResolvedConfigs, Snapshot, SpendWindow, StudyCost, StudyRecord, Topic, ViewDocument, WorkpieceId, decode_row,
-        reduce,
+        IdempotencyKey, Membership, OperatorRepair, OperatorRepairError, OutboxPayload, Outcome, QueryResult, Snapshot,
+        SpendWindow, StudyCost, StudyRecord, Topic, ViewDocument, WorkpieceId, decode_row, reduce,
     };
     use aether_data::wire::{from_bytes, to_vec};
     use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr};

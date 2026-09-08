@@ -703,12 +703,12 @@ pub(super) fn wedged(
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::{compiled_resolved, step as testing_step, with_compiled_manifest};
+    use crate::testing::{step as testing_step, with_compiled_manifest};
 
     use super::*;
     use crate::ids::IdempotencyKey;
-    use crate::reduce::{Event, Fact, GrantAttemptsError, Outcome, reduce};
-    use crate::values::{BloomDraft, BloomSpec, EvidenceKind, Membership, OperatorHold, ResolvedConfigs, SpendWindow};
+    use crate::reduce::{Event, Fact, GrantAttemptsError, Outcome};
+    use crate::values::{BloomDraft, BloomSpec, EvidenceKind, Membership, OperatorHold};
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])

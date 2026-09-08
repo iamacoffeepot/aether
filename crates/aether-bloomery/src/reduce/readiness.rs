@@ -487,7 +487,7 @@ mod tests {
     };
     use crate::values::{
         BloomDraft, BloomSpec, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, ResolutionClaim,
-        ResolvedConfigs, SpendWindow, StageCatalog, resolve_member_dependencies,
+        SpendWindow, StageCatalog, resolve_member_dependencies,
     };
 
     fn digest(seed: u8) -> Digest {

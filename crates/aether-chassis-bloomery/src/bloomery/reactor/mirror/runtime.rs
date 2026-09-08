@@ -513,8 +513,7 @@ mod tests {
     use aether_bloomery::testing::{compiled_resolved, digest, with_compiled_manifest};
     use aether_bloomery::{
         BloomDraft, BloomId, ConfigRegistry, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, LandingReceipt,
-        Membership, ProjectedReceipt, ResolvedConfigs, Snapshot, SourceReplicaPayload, Topic, WorkpieceId, reduce,
-        view_of,
+        Membership, ProjectedReceipt, Snapshot, SourceReplicaPayload, Topic, WorkpieceId, reduce, view_of,
     };
     use aether_bloomery_github::{
         GithubProjection, ReplicaError, SourceReplica, commission_floor_title, fixture::FakeGithub, landing_branch,

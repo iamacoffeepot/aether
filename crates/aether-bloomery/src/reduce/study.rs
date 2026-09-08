@@ -88,9 +88,7 @@ mod tests {
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
     use crate::reduce::{BloomStatus, Decision, Decisions, Event, Fact, Outcome, Snapshot, reduce};
-    use crate::values::{
-        BloomDraft, ConfigRegistry, Evidence, EvidenceKind, Membership, ResolvedConfigs, SpendWindow, Transformation,
-    };
+    use crate::values::{BloomDraft, ConfigRegistry, Evidence, EvidenceKind, Membership, SpendWindow, Transformation};
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])

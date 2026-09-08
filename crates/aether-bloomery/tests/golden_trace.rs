@@ -15,8 +15,8 @@
 mod common;
 
 use aether_bloomery::{
-    BloomId, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, OrphanClaimReleaseCompletion, Outcome,
-    ResolvedConfigs, Snapshot, SpendWindow, StageId, VerifyFailure, VerifyFailureSet, WorkpieceId, reduce,
+    BloomId, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, OrphanClaimReleaseCompletion, Outcome, Snapshot,
+    SpendWindow, StageId, VerifyFailure, VerifyFailureSet, WorkpieceId, reduce,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use common::{claim, compiled_resolved, digest, draft, event, membership};

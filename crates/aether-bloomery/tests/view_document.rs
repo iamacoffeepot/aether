@@ -10,8 +10,8 @@
 mod common;
 
 use aether_bloomery::{
-    Evidence, EvidenceKind, Fact, Question, ResolvedConfigs, Snapshot, SpendQuiesce, SpendWindow, StageId,
-    VerifyFailure, VerifyFailureSet, WorkpieceId, reduce, view_of,
+    Evidence, EvidenceKind, Fact, Question, Snapshot, SpendQuiesce, SpendWindow, StageId, VerifyFailure,
+    VerifyFailureSet, WorkpieceId, reduce, view_of,
 };
 use common::{compiled_resolved, digest, draft, event, membership, observing, sealed_and_resolved};
 use proptest::collection::btree_set;

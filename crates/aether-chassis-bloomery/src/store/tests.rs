@@ -1264,8 +1264,7 @@ fn metrics_rollups_refold_to_identical_payloads() {
     // dispatch history, not an empty journal.
     use aether_bloomery::testing::{compiled_resolved, digest, draft, event, membership, workpiece};
     use aether_bloomery::{
-        CandidateRef, Evidence, EvidenceKind, Fact, MetricDispatch, ResolvedConfigs, Snapshot, SpendWindow, StageId,
-        reduce,
+        CandidateRef, Evidence, EvidenceKind, Fact, MetricDispatch, Snapshot, SpendWindow, StageId, reduce,
     };
     use aether_data::wire::{from_bytes, to_vec};
 

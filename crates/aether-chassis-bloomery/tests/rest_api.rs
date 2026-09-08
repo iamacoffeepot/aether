@@ -1584,8 +1584,8 @@ fn rest_endpoint_laws_clamp_decode_and_unify_refusals() {
 /// through both seat ledgers. The test asserts the two tables agree.
 fn fold_unpriced_construct_seats() -> (Vec<MetricsSeat>, CapabilityLedger) {
     use aether_bloomery::{
-        AgentSelection, CalibrationLedger, CandidateRef, Decision, Fact, MetricsLedger, ModelOverride, ResolvedConfigs,
-        Snapshot, SpendWindow, StudyCost, StudyRecord, reduce,
+        AgentSelection, CalibrationLedger, CandidateRef, Decision, Fact, MetricsLedger, ModelOverride, Snapshot,
+        SpendWindow, StudyCost, StudyRecord, reduce,
     };
     use aether_data::Kind;
     use aether_data::wire::to_vec;

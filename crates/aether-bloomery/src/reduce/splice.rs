@@ -212,7 +212,7 @@ mod tests {
     };
     use crate::values::{
         BloomDraft, BloomSpec, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Forecast, MemberDependency,
-        Membership, ResolutionClaim, ResolvedConfigs, SpendWindow, StageCatalog, Transformation,
+        Membership, ResolutionClaim, SpendWindow, StageCatalog, Transformation,
     };
 
     fn digest(seed: u8) -> Digest {

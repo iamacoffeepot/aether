@@ -163,8 +163,7 @@ mod tests {
     use crate::ids::{BloomId, IdempotencyKey, WorkpieceId};
     use crate::reduce::{BloomStatus, Decision, Decisions, Event, Fact, Outcome, RecordedRefusal, Snapshot, reduce};
     use crate::values::{
-        BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Membership, OperatorProposal,
-        ResolvedConfigs, SpendWindow,
+        BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Membership, OperatorProposal, SpendWindow,
     };
 
     fn digest(seed: u8) -> Digest {

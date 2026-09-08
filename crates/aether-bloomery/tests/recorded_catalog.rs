@@ -4,9 +4,7 @@
 
 mod common;
 
-use aether_bloomery::{
-    Decision, Decisions, Fact, Outcome, ResolvedConfigs, Snapshot, SpendWindow, StageCatalog, StageId, reduce,
-};
+use aether_bloomery::{Decision, Decisions, Fact, Outcome, Snapshot, SpendWindow, StageCatalog, StageId, reduce};
 use common::{compiled_resolved, draft, draft_with_catalog, event, membership};
 
 #[test]

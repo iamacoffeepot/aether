@@ -13,8 +13,8 @@ use aether_bloomery::{
     BloomDraft, BloomId, BloomRecord, CandidateRef, CompositionParents, Conclusion, ConfigRegistry, Decision, Digest,
     Event, Evidence, EvidenceKind, EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey,
     LaneObservation, Membership, NetworkProfile, Nonce, Observation, Outcome, PipelineManifest, Provenance,
-    ResolvedConfigs, RetrospectClaim, Snapshot, SpendWindow, StageCatalog, StageId, StageVerdict, Statement, StudyCall,
-    StudyCost, SuppressionRequest, SurfacePathRequest, SurfaceRequest, Transformation, VerifyFailure, VerifyFailureSet,
+    RetrospectClaim, Snapshot, SpendWindow, StageCatalog, StageId, StageVerdict, Statement, StudyCall, StudyCost,
+    SuppressionRequest, SurfacePathRequest, SurfaceRequest, Transformation, VerifyFailure, VerifyFailureSet,
     WorkHandle, WorkOrder, WorkpieceId, config_address, reduce,
 };
 use aether_bloomery_github::fixture::FakeGithub;
