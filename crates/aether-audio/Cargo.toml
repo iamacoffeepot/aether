@@ -76,6 +76,10 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # The cap unit tests boot a chassis through the `aether_substrate::testing`
 # fixture, enabled by the substrate `test-support` feature.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+# The fail-fast companion's integration test composes
+# `HeadlessAudioCapability` on the in-process harness and round-trips the two
+# manual-class requests against it.
+aether-harness-substrate = { path = "../aether-harness-substrate" }
 
 # cargo-machete (the CI unused-deps gate) scans source without resolving
 # features, so it cannot see that `clap` and `confique` are used only through

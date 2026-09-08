@@ -34,6 +34,10 @@ mod config;
 mod decode;
 mod event;
 mod handlers;
+// The `HeadlessAudioCapability` companion's runtime half (identity in the
+// crate-root `headless` module) — a nested child so the same `mod runtime;`
+// gate covers it.
+mod headless;
 mod instrument;
 mod load;
 mod pipeline;

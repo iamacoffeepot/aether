@@ -729,7 +729,7 @@ f 4 5 8
             .expect("decode geometry reply");
         match result {
             CreateGeometryResult::Ok { geometry_id } => geometry_id,
-            CreateGeometryResult::Err { reason } => panic!("create geometry failed: {reason}"),
+            CreateGeometryResult::Err { error } => panic!("create geometry failed: {error}"),
         }
     }
 
@@ -761,7 +761,7 @@ f 4 5 8
             .expect("decode register reply");
         match result {
             ProgramRegisterResult::Ok { program_id } => program_id,
-            ProgramRegisterResult::Err { reason } => panic!("register candidate failed: {reason}"),
+            ProgramRegisterResult::Err { error } => panic!("register candidate failed: {error}"),
         }
     }
 
@@ -877,7 +877,7 @@ f 4 5 8
             ProgramTimingsResult::Absent { reason } => {
                 assert!(!reason.trim().is_empty(), "an unavailable timing instrument must state why");
             }
-            ProgramTimingsResult::Err { reason } => panic!("candidate timings failed: {reason}"),
+            ProgramTimingsResult::Err { error } => panic!("candidate timings failed: {error}"),
             ProgramTimingsResult::Ok { rows, .. } => {
                 assert_eq!(rows.len(), 6, "one depth prepass, four derivations, and one resident draw");
                 assert_eq!(rows[0].stage, PassStageKind::Draw);

@@ -261,10 +261,10 @@ impl WasmActor for InlineDespawnParent {
     /// `widget` and store the returned alias so the `DespawnChild` handler
     /// can tear it down.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        if let Ok(alias) =
+        if let Ok(child) =
             ctx.spawn_inline_child::<InlineDespawnParent, InlineDespawnChild>(Subname::Named("widget"), &())
         {
-            self.child = Some(alias);
+            self.child = Some(child.id());
         }
     }
 

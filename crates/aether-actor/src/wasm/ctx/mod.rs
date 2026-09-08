@@ -12,11 +12,13 @@
 //! receive), and dispatch goes through the bridge functions directly.
 //!
 //! The submodules follow the lifecycle a component author meets in order —
-//! `init`, `wire`, `receive`, `drop` — plus the three cross-cutting surfaces
+//! `init`, `wire`, `receive`, `drop` — plus the four cross-cutting surfaces
 //! the receive ctx carries and that are large enough to name in their own
-//! right: `send` (its outbound mail surface), `relative` (cluster-relative
-//! addressing) and `spawn` (detached and inline child creation).
+//! right: `send` (its outbound mail surface), `relative` (positional
+//! cluster-relative addressing), `child` (its typed counterpart) and `spawn`
+//! (detached and inline child creation).
 
+mod child;
 mod drop;
 mod init;
 mod receive;
@@ -28,6 +30,7 @@ mod wire;
 #[cfg(test)]
 mod tests;
 
+pub use child::InlineChild;
 pub use drop::WasmDropCtx;
 pub use init::WasmInitCtx;
 pub use receive::{NO_INBOUND_SOURCE, WasmCtx};

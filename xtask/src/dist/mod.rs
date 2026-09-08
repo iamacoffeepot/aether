@@ -37,6 +37,16 @@ pub struct DistArgs {
     no_bins: bool,
 }
 
+impl DistArgs {
+    /// The shape `cargo xtask build-wasm` runs: every discovered
+    /// component cross-built, no chassis binary. It lives beside the
+    /// fields rather than in the sibling command so that command composes
+    /// this one instead of re-deriving what a wasm-only run means.
+    pub fn wasm_only(profile: Profile) -> Self {
+        Self { profile, no_bins: true }
+    }
+}
+
 pub fn run(args: &DistArgs) -> Result<()> {
     let metadata = MetadataCommand::new().no_deps().exec().context("run cargo metadata")?;
 
