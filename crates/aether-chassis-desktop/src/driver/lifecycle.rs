@@ -46,13 +46,8 @@ pub(super) fn consume_lifecycle_reply(mail: InboundMail) -> LifecycleReplyOutcom
 
 #[cfg(test)]
 mod tests {
-    // Tests derive chassis mailbox ids by name to address lifecycle mail
-    // in fixtures — reference id derivation, not sibling-cap addressing.
-    #![allow(clippy::disallowed_methods)]
-
     use super::*;
-    use aether_actor::Addressable;
-    use aether_data::mailbox_id_from_name;
+    use aether_actor::root_mailbox;
     use aether_substrate::Mailer;
     use aether_substrate::SettlingInbox;
     use aether_substrate::actor::native::envelope::Envelope;
@@ -105,7 +100,7 @@ mod tests {
             .expect("register the reply inbox");
         let inbox = SettlingInbox::new(reply_mailbox, rx, Arc::clone(&mailer));
 
-        let cap_mailbox = mailbox_id_from_name(<aether_lifecycle::LifecycleCapability as Addressable>::NAMESPACE);
+        let cap_mailbox = root_mailbox::<aether_lifecycle::LifecycleCapability>();
 
         // (1) Non-`NONE`-root reply (the degraded `on_advance` inline-reply
         // shape): the producer hook records the reply's `Sent` against

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::mail::MailboxId;
 use crate::mail::registry::authority::BootAuthority;
+use crate::mail::registry::canonical_mailbox_id;
 use crate::mail::registry::effect::{RegistryApplied, RegistryEffect, RegistryEffectError};
 use crate::mail::registry::errors::{DropError, NameConflict};
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
@@ -21,7 +22,7 @@ impl Registry {
     fn insert(&self, authority: &BootAuthority, name: String, entry: MailboxEntry) -> Result<MailboxId, NameConflict> {
         // Depth-1 / root registrations derive the id from the name
         // (ADR-0029) — the lineage fold's fixed point.
-        self.insert_with_id(authority, MailboxId::from_name(&name), name, entry)
+        self.insert_with_id(authority, canonical_mailbox_id(&name), name, entry)
     }
 
     /// ADR-0099 §3: register under an explicit, caller-computed `id`

@@ -14,9 +14,9 @@
 use std::io;
 use std::path::Path;
 
-use aether_actor::Addressable;
+use aether_actor::root_mailbox;
 use aether_component::ComponentHostCapability;
-use aether_data::{Kind as _, mailbox_id_from_name};
+use aether_data::Kind as _;
 use aether_kinds::LoadComponent;
 use aether_substrate::Mail;
 use aether_substrate::actor::wasm::kind_manifest;
@@ -150,11 +150,9 @@ pub fn autoload_mail(component: AutoloadComponent) -> Mail {
     }
     .encode_into_bytes();
     Mail::new(
-        // Boot-time wire mail to the well-known component-host mailbox — a
-        // ctx-less free fn, the same address the hub and substrate harness load
-        // through, with no sibling resolver in scope.
-        #[allow(clippy::disallowed_methods)]
-        mailbox_id_from_name(<ComponentHostCapability as Addressable>::NAMESPACE),
+        // The same component-host address the hub and substrate harness load
+        // through, resolved from a ctx-less free fn.
+        root_mailbox::<ComponentHostCapability>(),
         LoadComponent::ID,
         payload,
         1,
@@ -163,9 +161,6 @@ pub fn autoload_mail(component: AutoloadComponent) -> Mail {
 
 #[cfg(test)]
 mod tests {
-    // Asserts the autoload mail targets the component host's own id —
-    // reference id derivation, not sibling-cap addressing.
-    #![allow(clippy::disallowed_methods)]
     use super::*;
 
     #[test]
@@ -178,7 +173,7 @@ mod tests {
             name: Some("loco-motion".to_owned()),
             export: None,
         });
-        assert_eq!(mail.recipient, mailbox_id_from_name(<ComponentHostCapability as Addressable>::NAMESPACE));
+        assert_eq!(mail.recipient, root_mailbox::<ComponentHostCapability>());
         assert_eq!(mail.kind, LoadComponent::ID);
     }
 

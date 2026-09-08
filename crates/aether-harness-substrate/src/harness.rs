@@ -42,7 +42,7 @@ use aether_trace::walk::TreeWalk;
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape).
 use crate::poll_config::PollConfig;
 use crate::pump_stats::PumpStats;
-use aether_actor::{Addressable, Root};
+use aether_actor::Root;
 use aether_fs::NamespaceRoots;
 use aether_substrate::config::{ConfigMember, SettlementConfig};
 use aether_substrate::{
@@ -713,12 +713,9 @@ impl SubstrateHarness {
         let queue = Arc::clone(&boot.queue);
         let outbound = Arc::clone(&boot.outbound);
         let registry = Arc::clone(&boot.registry);
-        // Chassis route-freezing: the substrate harness wires its loopback driver to
-        // the lifecycle cap's own id (its NAMESPACE) — ctx-less harness setup,
-        // no sibling resolver in scope.
-        #[allow(clippy::disallowed_methods)]
-        let lifecycle_mailbox =
-            aether_data::mailbox_id_from_name(<aether_lifecycle::LifecycleCapability as Addressable>::NAMESPACE);
+        // The loopback driver's route to the lifecycle cap; ctx-less harness
+        // setup, so the root-pinned resolver answers directly.
+        let lifecycle_mailbox = aether_actor::root_mailbox::<aether_lifecycle::LifecycleCapability>();
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
         let _ = kind_tick; // PR 3b retired direct Tick push; kept on the
         // build result for wire-compat with binaries that haven't migrated yet.
@@ -1165,11 +1162,8 @@ impl SubstrateHarness {
         // (chassis_handler closure) onto `aether.substrate_harness`
         // (`SubstrateHarnessCapability`).
         self.push_to_mailbox(
-            // Harness route to the harness's own `SubstrateHarnessCapability` mailbox by
-            // its well-known name — ctx-less driver-side push, no resolver here. The name
-            // comes off the cap type itself, so the two cannot drift.
-            #[allow(clippy::disallowed_methods)]
-            aether_data::mailbox_id_from_name(<SubstrateHarnessCapability as Addressable>::NAMESPACE),
+            // Ctx-less driver-side push to the harness's own cap mailbox.
+            aether_actor::root_mailbox::<SubstrateHarnessCapability>(),
             &Advance { ticks, delta_micros },
             cid,
         );

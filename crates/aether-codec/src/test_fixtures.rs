@@ -10,6 +10,14 @@
 
 use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
 
+/// A tag-correct [`MailboxId`](aether_data::MailboxId) for the typed-id
+/// arms. The codec keys on the `mbx-` tag bits and the 8-byte little-endian
+/// body, never on which mailbox an id names, so the arms take an id with the
+/// right tag rather than hashing a namespace they do not route to.
+pub fn sample_mailbox_id() -> aether_data::MailboxId {
+    aether_data::MailboxId(aether_data::with_tag(aether_data::Tag::Mailbox, 0x0c0d_ec00_1d))
+}
+
 /// A `NamedField` holding a single `Scalar(ty)` shape under `name`.
 pub fn scalar(name: &str, ty: Primitive) -> NamedField {
     named(name, SchemaType::Scalar(ty))

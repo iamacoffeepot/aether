@@ -383,8 +383,12 @@ mod tests {
         }
     }
 
+    /// A tag-correct mailbox id in the `mbx-…` spelling the CLI parses and
+    /// the fake caller echoes back. The tests thread it as an opaque token —
+    /// nothing recomputes it from a name — so it carries the tag bits and
+    /// nothing else.
     fn mailbox_id() -> String {
-        aether_data::MailboxId::from_name("example.echo").to_string()
+        aether_data::MailboxId(aether_data::with_tag(aether_data::Tag::Mailbox, 0x0eca_de00_1d)).to_string()
     }
 
     #[derive(Debug, Parser)]

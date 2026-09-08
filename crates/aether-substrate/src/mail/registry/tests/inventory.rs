@@ -7,7 +7,7 @@ use std::time::Duration;
 use aether_data::{Kind, MailboxCategory};
 
 use crate::mail::MailboxId;
-use crate::mail::registry::{Registry, noop_handler};
+use crate::mail::registry::{Registry, canonical_mailbox_id, noop_handler};
 use crate::testing::boot_authority as auth;
 
 use super::support::{InventorySubscriber, inventory_subscription_fixture};
@@ -64,7 +64,7 @@ fn list_mailbox_descriptors_ids_match_name_hashes() {
     let id = r.register_inbox(&auth(), "aether.audio", noop_handler());
     let entry = r.list_mailbox_descriptors().into_iter().find(|d| d.name == "aether.audio").expect("audio entry");
     assert_eq!(entry.id, id);
-    assert_eq!(entry.id, MailboxId::from_name("aether.audio"));
+    assert_eq!(entry.id, canonical_mailbox_id("aether.audio"));
 }
 
 #[test]

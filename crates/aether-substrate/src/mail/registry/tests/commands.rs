@@ -22,8 +22,10 @@ use crate::mail::registry::effect::{
 };
 use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::relay::RouteRelayLease;
-use crate::mail::registry::{InlineHandler, MailDispatch, MailboxEntry, OwnedDispatch, Registry, noop_handler};
-use crate::mail::{KindId, Mail, MailId, MailboxId, Source};
+use crate::mail::registry::{
+    InlineHandler, MailDispatch, MailboxEntry, OwnedDispatch, Registry, canonical_mailbox_id, noop_handler,
+};
+use crate::mail::{KindId, Mail, MailId, Source};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, Pool, PoolConfig, WakeSink};
 use crate::testing::boot_authority as auth;
@@ -172,7 +174,7 @@ fn owner_shutdown_discards_unapplied_prepared_state_at_home_and_joins() {
         RegistryQueueCapacities::default(),
     );
     let (dropped_tx, dropped_rx) = crossbeam_channel::bounded(1);
-    let id = MailboxId::from_name("queued-discard");
+    let id = canonical_mailbox_id("queued-discard");
     let completion = registry
         .submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(PreparedSpawnCommit::new(
             PreparedRoute::with_id(id, "queued-discard".to_owned()),
@@ -208,7 +210,7 @@ fn owner_drop_releases_apply_lock_before_joining_home_cancellation() {
     let owner =
         RegistryOwnerLease::attach(auth(), &registry, &mailer, sink.clone(), RegistryQueueCapacities::default());
     let (cancel_started_tx, cancel_started_rx) = crossbeam_channel::bounded(1);
-    let id = MailboxId::from_name("owner-drop-home-cancel");
+    let id = canonical_mailbox_id("owner-drop-home-cancel");
     let birth = RegistryEffect::PreparedSpawn(PreparedSpawnCommit::new(
         PreparedRoute::with_id(id, "owner-drop-home-cancel".to_owned()),
         Box::new(HomeCancelPrepared { sink, cancel_started: cancel_started_tx }),
@@ -249,7 +251,7 @@ fn owner_drains_fifo_batches_with_one_publication_per_dirty_view() {
         WakeSink::detached(),
         RegistryQueueCapacities::default(),
     );
-    let id = MailboxId::from_name("ordered");
+    let id = canonical_mailbox_id("ordered");
     let endpoint = || MailboxEntry::Inbox { handler: noop_handler(), seize: Arc::default() };
     let first = registry
         .submit(EffectBatch::new(vec![
@@ -332,7 +334,7 @@ fn owner_admission_catches_up_after_transitional_direct_publication() {
         RegistryQueueCapacities::default(),
     );
     registry.register_inbox(&auth(), "direct-generation-advance", noop_handler());
-    let unknown = MailboxId::from_name("unknown-after-direct-generation-advance");
+    let unknown = canonical_mailbox_id("unknown-after-direct-generation-advance");
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
     let pushing = Arc::clone(&mailer);
     #[allow(clippy::disallowed_methods, reason = "bounded-progress regression needs a joinable caller thread")]
@@ -364,7 +366,7 @@ fn owner_captures_authoritative_live_route_but_only_relay_invokes_inline() {
         received_for_handler.lock().unwrap().push(dispatch.payload.to_vec());
     });
     let name = "captured-live-then-dropped";
-    let id = MailboxId::from_name(name);
+    let id = canonical_mailbox_id(name);
     let live = registry
         .submit(EffectBatch::new(vec![RegistryEffect::publish_named(name.to_owned(), MailboxEntry::Inline(handler))]))
         .unwrap();
@@ -451,7 +453,7 @@ fn owner_sheds_route_misses_at_capacity_but_never_reserved_effects() {
     let _relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), capacities);
     let owner = RegistryOwnerLease::attach(auth(), &registry, &mailer, WakeSink::detached(), capacities);
     let name = "owner-shed-at-capacity";
-    let id = MailboxId::from_name(name);
+    let id = canonical_mailbox_id(name);
     let reserved = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
     owner.run_once();
     let _token = starting_token(&reserved.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
@@ -518,7 +520,7 @@ fn owner_admits_a_departure_notice_to_a_starting_watcher_past_capacity() {
     let owner = RegistryOwnerLease::attach(auth(), &registry, &mailer, WakeSink::detached(), capacities);
     let deliveries = Arc::new(Mutex::new(Vec::new()));
     let watcher_name = "monitor-notice-starting-watcher";
-    let watcher_id = MailboxId::from_name(watcher_name);
+    let watcher_id = canonical_mailbox_id(watcher_name);
     let (_, _, _, birth) = prepared_test_spawn(
         &registry,
         &mailer,
@@ -539,7 +541,7 @@ fn owner_admits_a_departure_notice_to_a_starting_watcher_past_capacity() {
     assert_eq!(registry.owner_queue_metrics().unwrap().depth, 2, "ordinary parked mail reaches the bound");
 
     // The departed target's notice is admitted past it rather than refused.
-    let notice = aether_kinds::MonitorNotice { target: MailboxId::from_name("monitor-notice-departed-target") };
+    let notice = aether_kinds::MonitorNotice { target: canonical_mailbox_id("monitor-notice-departed-target") };
     let notice_payload = notice.encode_into_bytes();
     mailer.push(Mail::new(watcher_id, aether_kinds::MonitorNotice::ID, notice_payload.clone(), 1));
     let metrics = registry.owner_queue_metrics().unwrap();

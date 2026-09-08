@@ -18,8 +18,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use aether_actor::Addressable;
-use aether_data::{Kind, KindId, mailbox_id_from_name};
+use aether_actor::root_mailbox;
+use aether_data::{Kind, KindId};
 use aether_fs::NamespaceRoots;
 use aether_kinds::{AdvanceResult, LifecycleAdvance};
 use aether_lifecycle::LifecycleCapability;
@@ -192,16 +192,11 @@ fn main() -> anyhow::Result<()> {
     // `init` / `wire` dispatches.
     render_slot.drain_available();
 
-    // Chassis route-freezing: the pumped render actor's own id (its NAMESPACE),
-    // the recipient for the per-frame `Frame` request. ctx-less driver setup,
-    // no sibling resolver in scope.
-    #[allow(clippy::disallowed_methods)]
-    let render_mailbox = mailbox_id_from_name(<RenderCapability as Addressable>::NAMESPACE);
-
-    // Chassis route-freezing: the bin wires its loop to the lifecycle cap's own
-    // id (its NAMESPACE) — ctx-less driver setup, no sibling resolver in scope.
-    #[allow(clippy::disallowed_methods)]
-    let lifecycle_mailbox = mailbox_id_from_name(<LifecycleCapability as Addressable>::NAMESPACE);
+    // The recipient for the per-frame `Frame` request, and the loop's route to
+    // the lifecycle cap. ctx-less driver setup, so the root-pinned resolver
+    // answers directly.
+    let render_mailbox = root_mailbox::<RenderCapability>();
+    let lifecycle_mailbox = root_mailbox::<LifecycleCapability>();
     let kind_lifecycle_advance = <LifecycleAdvance as Kind>::ID;
     let settlement_registry = Arc::clone(passive.settlement_registry());
 

@@ -39,7 +39,8 @@ use aether_substrate::actor::monitor::MonitorHandle;
 
 pub use aether_actor::Manual;
 pub use aether_actor::OutboundReply;
-pub use aether_data::{Kind, KindId, MailboxId as DataMailboxId, mailbox_id_from_name};
+pub use aether_actor::root_mailbox;
+pub use aether_data::{Kind, KindId, MailboxId as DataMailboxId};
 pub use aether_kinds::LifecycleAdvanceComplete;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
@@ -550,11 +551,8 @@ impl NativeActor for LifecycleCapability {
         if let Some(registry) = state.mailer.settlement_registry() {
             registry.subscribe_settlement_mail(
                 root,
-                // The cap's own mailbox id (Self::NAMESPACE) for its
-                // settlement subscription — a self-address compute with no
-                // sibling ctx, not a hardcoded peer namespace.
-                #[allow(clippy::disallowed_methods)]
-                mailbox_id_from_name(<Self as aether_actor::Addressable>::NAMESPACE),
+                // The cap subscribes settlement against its own mailbox.
+                root_mailbox::<Self>(),
                 <Settled as Kind>::ID,
                 Arc::clone(&state.mailer),
             );

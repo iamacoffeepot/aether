@@ -182,7 +182,7 @@ kind's schema. For a batch that must settle as one traced unit, use
 
 **From inside a component.** Address another actor *by type* —
 `ctx.actor::<RenderCapability>().send(&kind)` — or hold a `Mailbox<K>` token.
-`Kind::ID` and `mailbox_id_from_name` are compile-time constants, so there's no
+`Kind::ID` and the typed resolver are compile-time constants, so there's no
 host round-trip to resolve an address. You receive mail with a
 `#[handler::<class>] fn on_x(&mut self, ctx, mail: K)` — the kind is inferred from the
 third parameter (see [Components & lifecycle](components.md) and the *Writing a component*
@@ -196,6 +196,14 @@ recipe).
   full address `LoadResult.name` hands back.
 - **Bare names** (`"camera"`, `"player"`) are not registered and warn-drop
   silently. If mail seems to vanish, check the address first.
+- **Never hash a name into a `MailboxId` yourself.** `mailbox_id_from_name`,
+  `MailboxId::from_name`, `mailbox_id_from_path` and `resolve_mailbox` are all
+  disallowed by `clippy.toml`, because a hand-computed address freezes the
+  target's registration shape into the caller. Boot and driver code that has no
+  ctx to resolve through still doesn't need them: `aether_actor::root_mailbox::<C>()`
+  returns a root-pinned capability's mailbox, and its `C: Root` +
+  `Resolver = One` bound is a compile error for an actor whose address is only
+  knowable under a caller's lineage.
 
 ## Naming a kind
 

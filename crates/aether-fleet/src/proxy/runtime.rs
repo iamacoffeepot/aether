@@ -13,9 +13,9 @@
 use super::{FleetProxy, FleetProxyConfig};
 pub use crate::kinds::{EngineAlive, EngineDied};
 use crate::kinds::{EngineHeartbeatTick, ForwardEnvelope};
-pub use aether_actor::Addressable;
 use aether_actor::runtime;
-pub use aether_data::{EngineId, Kind, KindId, MailboxId, mailbox_id_from_name};
+pub use aether_actor::{Addressable, root_mailbox};
+pub use aether_data::{EngineId, Kind, KindId, MailboxId};
 pub use aether_kinds::DeathReason;
 use aether_kinds::TerminateEngine;
 use aether_rpc::RpcInboundReady;
@@ -41,15 +41,11 @@ pub use super::heartbeat::spawn_heartbeat;
 
 /// Mailbox of the engines cap (`aether.fleet`) — where a proxy
 /// reports its own liveness transitions (`EngineAlive` / `EngineDied`,
-/// issue 1339). A compile-time const derived from
-/// `<FleetServer as Addressable>::NAMESPACE`, so no host round-trip; matches
-/// the `RpcServerCapability`'s own route lookup.
-// Well-known engines-cap route shared with `RpcServerCapability`'s own
-// lookup; a ctx-less free helper, so there is no sibling `ctx.actor::<_>()`
-// to resolve through.
-#[allow(clippy::disallowed_methods)]
+/// issue 1339). Resolved from the cap's own root-pinned resolver, so there is
+/// no host round-trip and no second derivation beside the
+/// `RpcServerCapability`'s own route lookup.
 fn fleet_cap_mailbox() -> MailboxId {
-    mailbox_id_from_name(<FleetServer as Addressable>::NAMESPACE)
+    root_mailbox::<FleetServer>()
 }
 
 /// `aether.fleet.proxy:<id>` runtime state (ADR-0122 split): one outbound
