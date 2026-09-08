@@ -1727,15 +1727,7 @@ fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError>
             let payload = ProposalPayload { proposal: proposal.clone(), base: *base };
             Some(to_vec(&payload)?)
         }
-        Decision::DispatchStudy { bloom, transformation, profile, configs } => {
-            let payload = StudyPayload {
-                bloom: bloom.0,
-                transformation: transformation.clone(),
-                profile: profile.clone(),
-                configs: configs.clone(),
-            };
-            Some(to_vec(&payload)?)
-        }
+        Decision::DispatchStudy { .. } => study_outbox(effect)?,
         Decision::CancelDispatch { bloom, workpiece } => {
             let payload = CancelDispatchPayload { bloom: bloom.0, workpiece: workpiece.clone() };
             Some(to_vec(&payload)?)
@@ -1826,6 +1818,19 @@ fn aggregate_review_outbox(effect: &Decision) -> Result<Option<Vec<u8>>, WireErr
         bloom: bloom.0,
         transformation: transformation.clone(),
         pass: ReviewPass::from_roll(*roll),
+        configs: configs.clone(),
+    };
+    Ok(Some(to_vec(&payload)?))
+}
+
+fn study_outbox(effect: &Decision) -> Result<Option<Vec<u8>>, WireError> {
+    let Decision::DispatchStudy { bloom, transformation, profile, configs } = effect else {
+        return Ok(None);
+    };
+    let payload = StudyPayload {
+        bloom: bloom.0,
+        transformation: transformation.clone(),
+        profile: profile.clone(),
         configs: configs.clone(),
     };
     Ok(Some(to_vec(&payload)?))
