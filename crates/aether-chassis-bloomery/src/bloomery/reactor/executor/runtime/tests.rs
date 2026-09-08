@@ -3805,7 +3805,7 @@ mod offloaded_adapter_calls {
     };
     use crate::bloomery::outbox::TopicOutbox;
     use crate::bloomery::{ExecutorPort, ExecutorPortError, ExecutorShell, Settled};
-    use crate::store::SqliteStore;
+    use crate::store::{SqliteStore, StoreBackend};
 
     /// A backend whose `submit` parks until the test opens the gate. Everything
     /// else answers at once, so the only thing a turn can be waiting on is that
