@@ -1,52 +1,22 @@
 use std::collections::BTreeMap;
 
-use aether_data::{EngineId, Kind, KindDescriptor, Uuid, tagged_id};
+use aether_data::{Kind, KindDescriptor, tagged_id};
 use aether_inventory::kinds::{HandlersResult, ListHandlers};
-use aether_kinds::{DescribeComponent, DescribeComponentResult, ListEngines, ListEnginesResult, descriptors};
+use aether_kinds::{DescribeComponent, DescribeComponentResult};
 use rmcp::ErrorData as McpError;
 
 use crate::args::{
-    DescribeComponentArgs, DescribeHandlersArgs, DescribeHandlersResponse, DescribeKindsArgs, KindFamily, KindSummary,
-    NativeCapHandlers, NativeHandlerJson, TransformListing,
+    DescribeComponentArgs, DescribeHandlersArgs, DescribeHandlersResponse, DescribeKindsArgs, DescribeKindsResponse,
+    KindDetail, KindFamily, KindSummary, NativeCapHandlers, NativeHandlerJson, TransformListing,
 };
 
-use super::envelope::{engine_envelope, local_envelope};
-use super::ids::{parse_engine_id, parse_mailbox_id, static_kind_name};
+use super::envelope::engine_envelope;
+use super::ids::{parse_mailbox_id, static_kind_name};
 use super::render::{internal, internal_msg, json, project_capabilities, render_shape};
-use super::{COMPONENT_CAP, FLEET_CAP, INVENTORY_CAP, Mcp};
+use super::{COMPONENT_CAP, INVENTORY_CAP, Mcp};
 
 pub(super) async fn describe_kinds(mcp: &Mcp, args: DescribeKindsArgs) -> Result<String, McpError> {
-    // Resolve the target engine: explicit engine_id wins; when absent,
-    // auto-resolve the sole supervised engine (the single-substrate
-    // harness used in dogfood runs) so a bare describe_kinds() covers
-    // that case without requiring the caller to know the engine_id.
-    let engine = if let Some(id) = &args.engine_id {
-        Some(parse_engine_id(id)?)
-    } else {
-        let reply = mcp.session.call_one(local_envelope(FLEET_CAP, &ListEngines {})).await.map_err(internal)?;
-        let result = ListEnginesResult::decode_from_bytes(&reply.payload)
-            .ok_or_else(|| internal_msg("undecodable ListEnginesResult"))?;
-        // Auto-resolve only when exactly one engine is supervised;
-        // zero or many is ambiguous — degrade to the static baseline.
-        if result.engines.len() == 1 {
-            result.engines.into_iter().next().map(|e| EngineId(Uuid::parse_str(&e.engine_id).unwrap_or_default()))
-        } else {
-            None
-        }
-    };
-
-    // When an engine is in play, prefill its cache from the static
-    // baseline then refresh from the live inventory.  The merged
-    // snapshot (static ∪ capability-owned ∪ component-defined) is the
-    // authoritative source.  When no engine resolves, fall back to the
-    // static baseline unchanged.
-    let descriptors: Vec<KindDescriptor> = if let Some(e) = engine {
-        mcp.prefill_engine(e);
-        mcp.refresh_engine_kinds(e).await;
-        mcp.snapshot_engine_kinds(e).into_values().collect()
-    } else {
-        descriptors::all()
-    };
+    let (engine, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
 
     if args.names.is_some() && (args.families || args.prefix.is_some()) {
         return Err(McpError::invalid_params(
@@ -54,15 +24,23 @@ pub(super) async fn describe_kinds(mcp: &Mcp, args: DescribeKindsArgs) -> Result
             None,
         ));
     }
-    if args.full && !args.families && args.names.is_none() && args.prefix.is_none() {
+    if args.detail == KindDetail::Schema && !args.families && args.names.is_none() && args.prefix.is_none() {
         return Err(McpError::invalid_params(
-            "bare full:true is not allowed; select kinds with names or prefix, or request a families digest",
+            "bare detail:\"schema\" is not allowed; select kinds with names or prefix, or request a families digest",
             None,
         ));
     }
 
+    // Prefill the engine's cache from the static baseline, then refresh
+    // from its live inventory. The merged snapshot (static ∪
+    // capability-owned ∪ component-defined) is the authoritative source;
+    // a failed refresh leaves the prefilled baseline rather than erroring.
+    mcp.prefill_engine(engine);
+    mcp.refresh_engine_kinds(engine).await;
+    let descriptors: Vec<KindDescriptor> = mcp.snapshot_engine_kinds(engine).into_values().collect();
+
     if args.families {
-        let mut families = BTreeMap::<String, usize>::new();
+        let mut counts = BTreeMap::<String, usize>::new();
         for descriptor in descriptors
             .iter()
             .filter(|descriptor| args.prefix.as_ref().is_none_or(|prefix| descriptor.name.starts_with(prefix.as_str())))
@@ -72,9 +50,10 @@ pub(super) async fn describe_kinds(mcp: &Mcp, args: DescribeKindsArgs) -> Result
                 .rsplit_once('.')
                 .map_or(descriptor.name.as_str(), |(namespace, _)| namespace)
                 .to_owned();
-            *families.entry(family).or_default() += 1;
+            *counts.entry(family).or_default() += 1;
         }
-        return json(&families.into_iter().map(|(family, count)| KindFamily { family, count }).collect::<Vec<_>>());
+        let families = counts.into_iter().map(|(family, count)| KindFamily { family, count }).collect();
+        return json(&DescribeKindsResponse { engine_id, kinds: None, families: Some(families) });
     }
 
     let filtered: Vec<_> = if let Some(names) = &args.names {
@@ -84,13 +63,18 @@ pub(super) async fn describe_kinds(mcp: &Mcp, args: DescribeKindsArgs) -> Result
     } else {
         descriptors
     };
-    if args.full {
-        json(&filtered)
-    } else {
-        let summary: Vec<KindSummary> =
-            filtered.iter().map(|d| KindSummary { name: d.name.clone(), shape: render_shape(&d.schema) }).collect();
-        json(&summary)
+    let kinds = match args.detail {
+        KindDetail::Schema => serde_json::to_value(&filtered),
+        KindDetail::Shape => serde_json::to_value(
+            filtered
+                .iter()
+                .map(|d| KindSummary { name: d.name.clone(), shape: render_shape(&d.schema) })
+                .collect::<Vec<_>>(),
+        ),
     }
+    .map_err(|error| internal_msg(&format!("describe_kinds projection: {error}")))?;
+
+    json(&DescribeKindsResponse { engine_id, kinds: Some(kinds), families: None })
 }
 
 pub(super) fn describe_transforms() -> Result<String, McpError> {
@@ -106,17 +90,17 @@ pub(super) fn describe_transforms() -> Result<String, McpError> {
 }
 
 pub(super) async fn describe_component(mcp: &Mcp, args: DescribeComponentArgs) -> Result<String, McpError> {
-    let engine = parse_engine_id(&args.engine_id)?;
+    let (engine, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
     // A tagged id remains a local cache-only fast path. Every textual
     // address is resolved by the selected engine, which returns both the
     // real mailbox id used as the cache key and its canonical path. The
     // component host still receives the operator's original spelling so its
     // own engine-atomic name handling remains the forwarding contract.
-    let (mailbox_id, forward_name) = if args.component.starts_with("mbx-") {
-        (parse_mailbox_id(&args.component)?, None)
+    let (mailbox_id, forward_name) = if args.address.starts_with("mbx-") {
+        (parse_mailbox_id(&args.address)?, None)
     } else {
-        let (mailbox_id, _) = mcp.resolve_engine_address(engine, &args.component).await.map_err(internal)?;
-        (mailbox_id, Some(args.component.clone()))
+        let (mailbox_id, _) = mcp.resolve_engine_address(engine, &args.address).await.map_err(internal)?;
+        (mailbox_id, Some(args.address.clone()))
     };
 
     // Cache fast-path: populated by load_component / replace_component or
@@ -124,7 +108,7 @@ pub(super) async fn describe_component(mcp: &Mcp, args: DescribeComponentArgs) -
     let cached =
         mcp.components.lock().expect("component cache mutex is never poisoned").get(&(engine, mailbox_id)).cloned();
     if let Some(caps) = cached {
-        return json(&project_capabilities(&caps, args.full));
+        return component_reply(&engine_id, &args.address, &caps, args.full);
     }
 
     // Cache miss. With a lineage name, ask the substrate live — this is
@@ -135,9 +119,9 @@ pub(super) async fn describe_component(mcp: &Mcp, args: DescribeComponentArgs) -
     let Some(name) = forward_name else {
         return Err(McpError::invalid_params(
             format!(
-                "no component cached at {} on engine {} — address by lineage name to resolve \
+                "no component cached at {} on engine {engine_id} — address by lineage name to resolve \
                      live, or load_component / replace_component to populate this cache",
-                args.component, args.engine_id
+                args.address
             ),
             None,
         ));
@@ -153,15 +137,31 @@ pub(super) async fn describe_component(mcp: &Mcp, args: DescribeComponentArgs) -
                 .lock()
                 .expect("component cache mutex is never poisoned")
                 .insert((engine, mailbox_id), capabilities.clone());
-            json(&project_capabilities(&capabilities, args.full))
+            component_reply(&engine_id, &args.address, &capabilities, args.full)
         }
         Some(DescribeComponentResult::Err { error }) => Err(internal_msg(&error)),
         None => Err(internal_msg("undecodable DescribeComponentResult")),
     }
 }
 
+/// Name the engine that answered alongside the capabilities. `engine_id` may
+/// have been auto-resolved rather than named by the caller, so the reply says
+/// which engine — and which address on it — the description came from.
+pub(super) fn component_reply(
+    engine_id: &str,
+    address: &str,
+    capabilities: &super::ComponentCapabilities,
+    full: bool,
+) -> Result<String, McpError> {
+    json(&serde_json::json!({
+        "engine_id": engine_id,
+        "address": address,
+        "capabilities": project_capabilities(capabilities, full),
+    }))
+}
+
 pub(super) async fn describe_handlers(mcp: &Mcp, args: DescribeHandlersArgs) -> Result<String, McpError> {
-    let engine = parse_engine_id(&args.engine_id)?;
+    let (engine, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
     let reply =
         mcp.session.call_one(engine_envelope(engine, INVENTORY_CAP, &ListHandlers {})).await.map_err(internal)?;
     let Some(HandlersResult { handlers }) = HandlersResult::decode_from_bytes(&reply.payload) else {
@@ -186,5 +186,5 @@ pub(super) async fn describe_handlers(mcp: &Mcp, args: DescribeHandlersArgs) -> 
         });
     }
     let caps = folded.into_iter().map(|(namespace, handlers)| NativeCapHandlers { namespace, handlers }).collect();
-    json(&DescribeHandlersResponse { engine_id: args.engine_id, caps })
+    json(&DescribeHandlersResponse { engine_id, caps })
 }

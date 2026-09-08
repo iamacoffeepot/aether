@@ -608,7 +608,7 @@ mod tests {
                 assert_eq!(listener_name, LISTENER_NAME);
                 local_port
             }
-            BindListenerResult::Err { reason, .. } => panic!("BindListener failed: {reason}"),
+            BindListenerResult::Err { error, .. } => panic!("BindListener failed: {error}"),
         }
     }
 
@@ -629,7 +629,7 @@ mod tests {
         };
         match UnbindListenerResult::decode_from_bytes(&reply.payload).expect("decode UnbindListenerResult") {
             UnbindListenerResult::Ok { listener_name } => assert_eq!(listener_name, LISTENER_NAME),
-            UnbindListenerResult::Err { reason, .. } => panic!("UnbindListener failed: {reason}"),
+            UnbindListenerResult::Err { error, .. } => panic!("UnbindListener failed: {error}"),
         }
     }
 

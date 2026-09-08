@@ -200,8 +200,8 @@ impl GeometryRegistry {
     /// id is consumed. A rejected create leaves `next_id` untouched, so
     /// ids stay dense over accepted geometries.
     pub fn create(&mut self, mail: CreateGeometry) -> CreateGeometryResult {
-        if let Err(reason) = validate_geometry(&mail.layout, &mail.vertices, &mail.indices) {
-            return CreateGeometryResult::Err { reason };
+        if let Err(error) = validate_geometry(&mail.layout, &mail.vertices, &mail.indices) {
+            return CreateGeometryResult::Err { error };
         }
         let geometry_id = self.next_id;
         self.next_id += 1;
@@ -320,7 +320,7 @@ mod tests {
     /// The rejection reason for a create mail that must not validate.
     fn rejection(registry: &mut GeometryRegistry, mail: CreateGeometry) -> String {
         match registry.create(mail) {
-            CreateGeometryResult::Err { reason } => reason,
+            CreateGeometryResult::Err { error } => error,
             CreateGeometryResult::Ok { geometry_id } => panic!("create must reject; got geometry {geometry_id}"),
         }
     }
