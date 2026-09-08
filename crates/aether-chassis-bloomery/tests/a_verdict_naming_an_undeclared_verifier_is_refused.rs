@@ -61,19 +61,28 @@ fn base_manifest() -> String {
         }
         if let Some(rest) = line.strip_prefix("identities = [") {
             inside_identities = !rest.contains(']');
-            text.push_str(&format!("identities = {DECLARED}\n"));
+            text.push_str("identities = ");
+            declare(&mut text);
         } else if let Some((position, _)) = line.split_once(" = [")
             && position.starts_with('"')
         {
             // A `[verifiers.runs]` entry: what that verify position's fan-out
             // runs is a subset of the vocabulary, so it truncates with it.
-            text.push_str(&format!("{position} = {DECLARED}\n"));
+            text.push_str(position);
+            text.push_str(" = ");
+            declare(&mut text);
         } else {
             text.push_str(line);
             text.push('\n');
         }
     }
     text
+}
+
+/// Write the truncated vocabulary as one TOML array, and end the line.
+fn declare(text: &mut String) {
+    text.push_str(DECLARED);
+    text.push('\n');
 }
 
 #[test]
