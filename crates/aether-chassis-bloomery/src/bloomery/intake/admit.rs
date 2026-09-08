@@ -264,9 +264,29 @@ fn sealed_manifest(store: &mut dyn StoreBackend, record: &DispatchRecord) -> Res
         return Ok(PipelineManifest::compiled());
     };
     let Some((_, bytes, _)) = store.lookup_config(address.as_bytes())? else {
-        return Ok(PipelineManifest::compiled());
+        return Ok(unreadable(address, "no stored row"));
     };
-    Ok(from_bytes::<PipelineManifest>(&bytes).unwrap_or_else(|_| PipelineManifest::compiled()))
+    Ok(from_bytes::<PipelineManifest>(&bytes).unwrap_or_else(|error| unreadable(address, &error.to_string())))
+}
+
+// The compiled vocabulary, said out loud: a bloom whose sealed manifest this
+// host cannot re-read is judged against the wrong vocabulary, and the one thing
+// that must not happen is for it to be judged silently.
+//
+// Not a refusal, deliberately. The seal door already refused a manifest the host
+// could not resolve, so reaching here means the row went missing after the seal
+// — a corrupt store rather than a bloom with a vocabulary of its own — and
+// turning a storage fault into an undeclared-identity refusal would wedge every
+// member of that bloom on it.
+fn unreadable(address: Digest, why: &str) -> PipelineManifest {
+    tracing::warn!(
+        target: "aether_chassis_bloomery::intake",
+        address = %address.to_hex(),
+        why,
+        "the order names a sealed pipeline manifest this store cannot read; judging its verdict against the compiled \
+         vocabulary",
+    );
+    PipelineManifest::compiled()
 }
 
 /// Decompose a failing aggregate verdict's findings against the bloom's
