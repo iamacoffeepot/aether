@@ -73,6 +73,18 @@ pub enum AdmissionKey {
     /// about — but the key still belongs in the closed vocabulary so a
     /// later journal-shaped accounting cannot forget the shape.
     Scope,
+    /// A bloom-level reader's result (ADR-0216). Dispatch-accounting: the order
+    /// is consumed and the verdict reached the reducer, so it belongs in
+    /// [`Self::ALL`]. Distinct from [`Self::Study`], which keys a study-record
+    /// *evidence* row riding the same nonce and deliberately accounts for
+    /// nothing — one nonce can carry both, and only this one says the dispatch
+    /// finished.
+    ///
+    /// One key for a verdict and for an executor fault alike, unlike the
+    /// aggregate review's pair: the reader has a single attempt, so there is no
+    /// later real verdict on the same order for a replayed fault to collide
+    /// with.
+    StudyCompleted,
 }
 
 impl AdmissionKey {
@@ -80,7 +92,7 @@ impl AdmissionKey {
     /// of these is the durable statement that the dispatch reached the
     /// reducer as a verdict. [`Self::Study`] is deliberately absent: it
     /// rides the same nonce but must not satisfy the strand check.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Attempt,
         Self::Integrate,
         Self::VerifyFailed,
@@ -92,6 +104,7 @@ impl AdmissionKey {
         Self::MemberExecutorFault,
         Self::SurfaceRequest,
         Self::Scope,
+        Self::StudyCompleted,
     ];
 
     /// The key's stable prefix — the half of the key that is not the nonce.
@@ -110,6 +123,7 @@ impl AdmissionKey {
             Self::SurfaceRequest => "aether.bloomery.surface_request",
             Self::Study => "aether.bloomery.study",
             Self::Scope => "aether.bloomery.scope",
+            Self::StudyCompleted => "aether.bloomery.study_completed",
         }
     }
 

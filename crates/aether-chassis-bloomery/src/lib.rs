@@ -81,6 +81,8 @@ pub use control::ControlCore;
 #[cfg(feature = "runtime")]
 pub mod api;
 #[cfg(feature = "runtime")]
+pub mod benchmark;
+#[cfg(feature = "runtime")]
 pub mod bloomery;
 #[cfg(feature = "runtime")]
 pub mod commission;

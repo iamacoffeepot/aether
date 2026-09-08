@@ -886,6 +886,34 @@ pub enum Decision {
         /// at propose time, or the head a land just advanced to.
         base: Digest,
     },
+    /// Run the bloom-level `retrospect.read` lane over what the bloom just
+    /// landed (ADR-0216) — a snapshot-inert outbox intent on the
+    /// [`Decision::DispatchAggregateReview`] model, decided at the land that
+    /// produced `bloom.receipt`.
+    ///
+    /// Emitted once per bloom, at its landing, and never re-emitted: the
+    /// binding's retry budget is one attempt, and a read that fails leaves the
+    /// bloom landed with its study missing rather than buying another lane.
+    /// Findings are a product, never a gate.
+    ///
+    /// Appended so every stored row stays decodable under the current shape.
+    DispatchStudy {
+        /// The bloom that landed.
+        bloom: BloomId,
+        /// The `retrospect.read` transformation, built by
+        /// [`Transformation::for_study_read`](crate::Transformation::for_study_read):
+        /// the receipt digest as its evidence-binding subject, the landed head
+        /// as its checkout, and the sealed base as its diff base.
+        transformation: Transformation,
+        /// The [`AgentProfile`] the bloom's sealed stage catalog calibrates
+        /// `Study` at (ADR-0174).
+        profile: AgentProfile,
+        /// The bloom-wide configuration this read runs under (ADR-0174) — the
+        /// registry the host resolves the sealed [`crate::ModelOverride`] and
+        /// the ADR-0214 instruction pin from. The reader is a model lane, so
+        /// both apply to it exactly as they apply to the critic.
+        configs: ConfigRegistry,
+    },
     /// Record the lane vocabulary this bloom runs (ADR-0215) — the manifest the
     /// host read out of the sealed base's tree, resolved once at admission so
     /// the fold reads the record rather than the vocabulary its own binary

@@ -84,6 +84,12 @@ fn landing(
     // members). Spec order, so the projection writes in the bloom's own order.
     let members: Vec<WorkpieceId> = record.spec.members().iter().map(|member| member.workpiece.clone()).collect();
     effects.push(Decision::EmitReceipt(ProjectedReceipt { receipt: receipt.clone(), members }));
+    // The reader runs on what landed, so its order is decided here — the one
+    // decision set in which `bloom.receipt` exists (ADR-0216 §1). It is emitted
+    // after the receipt and after mainline moved, because those are the facts it
+    // reads, and it gates nothing that follows it: the offer below and the land
+    // itself are unchanged whether the read ever runs.
+    effects.push(super::study::dispatch_after_land(record, &receipt));
     if let Some(offer) = super::propose::offer_after_land(snapshot, new_head) {
         effects.push(offer);
     }

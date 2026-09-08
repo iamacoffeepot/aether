@@ -55,6 +55,7 @@
 
 mod archive;
 mod bases;
+mod benchmark;
 mod blooms;
 mod calibration;
 #[cfg(feature = "github")]
@@ -83,7 +84,7 @@ use crate::store::{ListBloomDispatchesResult, LookupDispatchResult};
 use aether_actor::{Manual, runtime};
 use aether_bloomery::{
     AdmitResult, EnumerateClaimsResult, LoadConfigsResult, MetricsQueryResult, QueryResult, QuerySelector,
-    ResolvedConfigs, SpendQueryResult,
+    ResolvedConfigs, SpendQueryResult, StoreClass,
 };
 use aether_http as http;
 use aether_http::{HttpServerResponse, RegisterRouteResult};
@@ -106,6 +107,7 @@ use state::{Routed, SealVerify, VerifyPending, finish};
 use super::BloomeryApiCapability;
 
 use crate::artifacts::{ArtifactsCapabilityState, GetRange, GetRangeResult, resolve_root};
+use crate::benchmark::{ReadBenchmark, ReadBenchmarkResult, StartBenchmarkResult};
 use crate::bloomery::load_policy;
 #[cfg(feature = "github")]
 use crate::bloomery::{
@@ -204,6 +206,11 @@ pub struct ApiParams {
     /// Bearer token commission routes require. Empty refuses every commission
     /// request so an unconfigured host cannot approve work.
     pub control_token: String,
+    /// Which world this coordinator's journal records (ADR-0184). A
+    /// composer-resolved boot fact — the backend selector decides it and the
+    /// store proved it against the journal's own stamp — so it rides `Params`
+    /// rather than being a knob this cap resolves.
+    pub store_class: StoreClass,
 }
 
 #[http::router]
@@ -266,6 +273,7 @@ impl NativeActor for BloomeryApiCapability {
             next_seal: 1,
             seal_verifications: HashMap::new(),
             control_token: params.control_token,
+            store_class: params.store_class,
             #[cfg(feature = "github")]
             doctor: None,
             commission_verifying: HashMap::new(),
@@ -737,6 +745,30 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `POST /benchmark` — replay landed history across profile cells, sealing
+    /// one bloom per `(golden task, cell, sample)` in sequence (ADR-0184).
+    /// Answers `202` with a handle; refused `409` on a live-classed coordinator.
+    #[http::route(Post, "/benchmark")]
+    fn on_post_benchmark(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = benchmark::post(state, ctx.request());
+        finish(state, ctx, routed)
+    }
+
+    /// `GET /benchmark/{run}` — read one run's progress (ADR-0184).
+    #[http::route(Get, "/benchmark/{run}")]
+    fn on_get_benchmark(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        run: http::Path<String>,
+    ) -> http::Outcome {
+        let run = run.0;
+        let routed = match run.parse() {
+            Ok(run) => Routed::ReadBenchmark(ReadBenchmark { run }),
+            Err(error) => Routed::Reply(error_response(400, &format!("benchmark run handle is not a number: {error}"))),
+        };
+        finish(state, ctx, routed)
+    }
+
     /// `GET /calibration` — read the measured capability ledger and the
     /// forecast grade beside it (ADR-0184).
     #[http::route(Get, "/calibration")]
@@ -1017,6 +1049,26 @@ impl NativeActor for BloomeryApiCapability {
                 }
             }
         }
+    }
+
+    /// The runner's answer to a benchmark start (ADR-0184).
+    #[http::reply]
+    fn on_start_benchmark_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: StartBenchmarkResult,
+    ) -> HttpServerResponse {
+        benchmark::start_response(mail)
+    }
+
+    /// The runner's answer to a benchmark read.
+    #[http::reply]
+    fn on_read_benchmark_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: ReadBenchmarkResult,
+    ) -> HttpServerResponse {
+        benchmark::read_response(mail)
     }
 
     #[http::reply]

@@ -311,15 +311,22 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // new gate-set digest; the scripted fold runs its own gates over a
 // single-member weave instead of passing on the member's proof, which is the
 // one added `DispatchAggregateVerify`).
-// Repinned for ADR-0215: seal and supersede record the lane vocabulary they
-// resolved (`Decision::RecordPipelineManifest`) beside the catalog, so every
-// seal step's decided output gained that effect — the same mechanism as
-// #4944's repin above. The scripted draft seals no manifest, so the compiled
-// vocabulary's bytes are what the stream carries. An intended, coordinated
-// break, recomputed.
+// Repinned for the ADR-0216 reader: a land now decides the bloom-level
+// `Decision::DispatchStudy` beside the receipt it mints, so the scripted land
+// step carries one more effect. The drift is that single added row in the land
+// step; every prior step is unchanged, and the stream still reaches Landed. An
+// intended, coordinated break, recomputed.
+// Repinned again for ADR-0215, which lands on top of it: seal and supersede
+// record the lane vocabulary they resolved (`Decision::RecordPipelineManifest`)
+// beside the catalog, so every seal step's decided output gains that effect
+// too — the same mechanism as #4944's repin above. The scripted draft seals no
+// manifest, so the compiled vocabulary's bytes are what the stream carries.
+// This pin is the merged stream, in which the land step carries the study
+// dispatch and every seal step the manifest record; neither branch's own pin
+// names it. An intended, coordinated break, recomputed.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0xe6, 0x3f, 0x47, 0x52, 0xcd, 0xcc, 0x97, 0x8c, 0x35, 0x8f, 0x28, 0xcf, 0xfc, 0xcf, 0xa2, 0x88, 0x93, 0xf7, 0x02,
-    0xa5, 0x2b, 0x2e, 0xea, 0x2d, 0x39, 0xe0, 0xba, 0xa8, 0xda, 0x03, 0xd2, 0xe2,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
 #[test]
@@ -346,7 +353,7 @@ fn fact_selector(fact: &Fact) -> u32 {
 fn appended_facts_leave_every_prior_selector_where_the_journal_left_it() {
     let bloom = BloomId(digest(2));
     let evidence = |kind| Evidence { subject: digest(30), kind, detail: digest(60) };
-    let pinned: [(u32, Fact); 10] = [
+    let pinned: [(u32, Fact); 11] = [
         (5, Fact::Land { bloom, new_head: digest(40) }),
         (
             8,
@@ -393,6 +400,7 @@ fn appended_facts_leave_every_prior_selector_where_the_journal_left_it() {
             27,
             Fact::SpliceAssembled { bloom, workpiece: WorkpieceId("alpha".into()), tree: digest(30), head: digest(40) },
         ),
+        (40, Fact::StudyCompleted { bloom, passed: true, evidence: evidence(EvidenceKind::StudyRecord) }),
     ];
 
     for (selector, fact) in pinned {

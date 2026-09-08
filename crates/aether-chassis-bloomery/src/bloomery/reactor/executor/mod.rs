@@ -80,7 +80,9 @@ impl ExecutorReactorCapability {
     /// that names no bloom. Last, it is both producer and drainer of the
     /// host-minted [`Topic::RefusedDispatch`] (ADR-0214): a dispatch its own
     /// instruction-provenance gate refused, parked durably on the way out and
-    /// admitted as a host fault on the way back in.
+    /// admitted as a host fault on the way back in. And [`Topic::Study`]
+    /// (ADR-0216): the bloom-level reader a landing decides, submitted through
+    /// the same shell under a bloom-level order record.
     pub const DRAINED_TOPICS: &'static [Topic] = &[
         Topic::Dispatch,
         Topic::AggregateReview,
@@ -90,6 +92,7 @@ impl ExecutorReactorCapability {
         Topic::ScopeDispatch,
         Topic::BaseVerify,
         Topic::RefusedDispatch,
+        Topic::Study,
     ];
 }
 

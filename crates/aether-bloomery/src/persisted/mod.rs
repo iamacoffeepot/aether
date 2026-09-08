@@ -280,20 +280,40 @@ pub const DECISIONS_V1_DIGEST: Digest =
 pub const DECISIONS_PRE_PROPOSE_DIGEST: Digest =
     Digest::pinned("ee7c8fcea13dc3607ffd0733d3e9f0f6a7b90b011e77b1f36b59ca3eb82d9aab");
 
-/// The stamp on journaled decisions rows written before ADR-0215 appended
-/// `Decision::RecordPipelineManifest`.
-///
-/// Copied from the last `decisions` line of
-/// `tests/golden_decisions/fixtures/schema-digests.txt` as it stood before that
-/// append, which is the identity the store actually stamped those rows with —
-/// never recomputed from live code (#5500).
-pub const DECISIONS_PRE_MANIFEST_DIGEST: Digest =
-    Digest::pinned("7ed0db5b5946fee65b566f4f36229438888552f46863d3552e0230d8037f4108");
-
 /// The stamp on journaled event rows written before the #5278 propose door
 /// appended `Fact::ProposeChange`.
 pub const EVENT_PRE_PROPOSE_DIGEST: Digest =
     Digest::pinned("0e7389945913e33b12660db11903787e58ce5f1f7f6e19fe64b72d6266d93117");
+
+/// The stamp on journaled decisions rows written before ADR-0216 appended
+/// `Decision::DispatchStudy` and the two `Outcome` variants the reader's
+/// result decides.
+///
+/// Copied from the `decisions` line the ledger already carried as current at
+/// `5e778243d` — the identity every row written under the pre-reader shape
+/// bears — never recomputed from a type here.
+pub const DECISIONS_PRE_STUDY_DIGEST: Digest =
+    Digest::pinned("7ed0db5b5946fee65b566f4f36229438888552f46863d3552e0230d8037f4108");
+
+/// The stamp on journaled event rows written before ADR-0216 appended
+/// `Fact::StudyCompleted`.
+///
+/// Copied from the `event` line the ledger already carried as current at
+/// `5e778243d`, the same way.
+pub const EVENT_PRE_STUDY_DIGEST: Digest =
+    Digest::pinned("a12b797cefd02c054cc72dca261e09b84564d21d80a4007b2384636d90f480df");
+
+/// The stamp on journaled decisions rows written before ADR-0215 appended
+/// `Decision::RecordPipelineManifest`.
+///
+/// The shape ADR-0216's reader slice left current, copied verbatim from the
+/// `decisions` line the ledger carried as current at `3ad573947` — the identity
+/// every row written between that slice and this one bears. Never recomputed
+/// from live code (#5500), and distinct from
+/// [`DECISIONS_PRE_STUDY_DIGEST`]: the two appends landed in sequence, so each
+/// names the shape it displaced rather than a shared ancestor.
+pub const DECISIONS_PRE_MANIFEST_DIGEST: Digest =
+    Digest::pinned("d5c94ca64bbd97709c01b194af82cabce70170f6b354999ad03839bfd52b99ca");
 
 /// The stamp on sealed model-process instruction bundles written before
 /// ADR-0216 appended `retrospect` and `retrospect_finding_contract`.
@@ -305,9 +325,10 @@ pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
 ///
 /// The current identity decodes as today. A missing digest is the implicit v1
 /// identity — rows written before the column existed. v1 upcasts by filling
-/// `StageProgress::reconcile_assembles_base` as `false`; the pre-#5278 and
-/// pre-ADR-0215 shapes decode as today because everything since each is a
-/// tail-appended variant. Any other identity is a named refusal.
+/// `StageProgress::reconcile_assembles_base` as `false`; the pre-#5278,
+/// pre-ADR-0216 and pre-ADR-0215 shapes decode as today because everything
+/// since each is a tail-appended variant. Any other identity is a named
+/// refusal.
 ///
 /// # Errors
 ///
@@ -318,7 +339,7 @@ pub fn decode_recorded_decisions(bytes: &[u8], schema: Option<&[u8]>) -> Result<
         &DECISIONS,
         schema,
         bytes,
-        &[upcast_decisions_v1, upcast_decisions_pre_propose, upcast_decisions_pre_manifest],
+        &[upcast_decisions_v1, upcast_decisions_pre_propose, upcast_decisions_pre_study, upcast_decisions_pre_manifest],
     )
 }
 
@@ -333,9 +354,17 @@ fn upcast_decisions_pre_propose(bytes: &[u8]) -> Result<Decisions, WireError> {
     from_bytes(bytes)
 }
 
+/// Pre-ADR-0216 rows carry the same wire layout today's decoder reads: the
+/// reader slice only appended a `Decision` variant and two `Outcome` variants,
+/// past every discriminant a row of that era could hold.
+fn upcast_decisions_pre_study(bytes: &[u8]) -> Result<Decisions, WireError> {
+    from_bytes(bytes)
+}
+
 /// Pre-ADR-0215 rows carry the same wire layout today's decoder reads:
-/// `Decision::RecordPipelineManifest` is appended past every discriminant a row
-/// of that era could hold, so no wire position moved.
+/// `Decision::RecordPipelineManifest` is appended past `DispatchStudy`, and so
+/// past every discriminant a row of that era could hold, leaving no wire
+/// position moved.
 fn upcast_decisions_pre_manifest(bytes: &[u8]) -> Result<Decisions, WireError> {
     from_bytes(bytes)
 }
@@ -344,6 +373,13 @@ fn upcast_decisions_pre_manifest(bytes: &[u8]) -> Result<Decisions, WireError> {
 /// only appended `Fact::ProposeChange`, past every discriminant a row of that
 /// era could hold.
 fn upcast_event_pre_propose(bytes: &[u8]) -> Result<Event, WireError> {
+    from_bytes(bytes)
+}
+
+/// Pre-ADR-0216 rows carry the same wire layout today's decoder reads: the
+/// reader slice only appended `Fact::StudyCompleted`, past every discriminant a
+/// row of that era could hold.
+fn upcast_event_pre_study(bytes: &[u8]) -> Result<Event, WireError> {
     from_bytes(bytes)
 }
 
@@ -362,7 +398,7 @@ fn reshape_instructions_pre_reader(bytes: &[u8]) -> Result<Vec<u8>, WireError> {
 /// [`PersistedSchemaError`] when the bytes do not decode as the named shape,
 /// or when this binary has no upcast for the recorded digest.
 pub fn decode_recorded_event(bytes: &[u8], schema: Option<&[u8]>) -> Result<Event, PersistedSchemaError> {
-    decode_persisted(&EVENT, schema, bytes, &[upcast_event_pre_propose])
+    decode_persisted(&EVENT, schema, bytes, &[upcast_event_pre_propose, upcast_event_pre_study])
 }
 
 /// The [`PersistedKind`] for journaled decisions.
@@ -373,6 +409,7 @@ pub static DECISIONS: PersistedKind = PersistedKind {
     upcasts: &[
         PersistedUpcast { digest: DECISIONS_V1_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_PROPOSE_DIGEST, reshape: None },
+        PersistedUpcast { digest: DECISIONS_PRE_STUDY_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_MANIFEST_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
@@ -383,7 +420,10 @@ pub static EVENT: PersistedKind = PersistedKind {
     name: EVENT_KIND,
     schema: &<Event as Schema>::SCHEMA,
     bootstrap: Bootstrap::Current,
-    upcasts: &[PersistedUpcast { digest: EVENT_PRE_PROPOSE_DIGEST, reshape: None }],
+    upcasts: &[
+        PersistedUpcast { digest: EVENT_PRE_PROPOSE_DIGEST, reshape: None },
+        PersistedUpcast { digest: EVENT_PRE_STUDY_DIGEST, reshape: None },
+    ],
     current: OnceLock::new(),
 };
 

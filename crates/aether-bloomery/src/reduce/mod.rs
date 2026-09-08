@@ -49,6 +49,7 @@ mod review;
 mod seal;
 mod snapshot;
 mod splice;
+mod study;
 mod suppression;
 mod surface_request;
 mod verify;
@@ -64,7 +65,7 @@ pub use error::{
     AttemptCompletedError, BaseMismatch, BaseReverifyError, FoldConflictError, GrantAttemptsError, HostFaultError,
     IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
     NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ProposalError,
-    ResolveError, SealConflict, SealError, SpliceError, SupersedeError, SuppressionDispositionError,
+    ResolveError, SealConflict, SealError, SpliceError, StudyError, SupersedeError, SuppressionDispositionError,
     SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 pub use event::{Event, Fact};
@@ -103,6 +104,7 @@ use propose::reduce_propose;
 use readiness::reduce_splice_assembled;
 use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor_fault};
 use seal::{reduce_seal, reduce_supersede, reduce_surface_overlap};
+use study::reduce_study_completed;
 use suppression::reduce_suppression_disposition;
 use surface_request::reduce_surface_requested;
 use verify::{reduce_resume_host_fault, reduce_verify_failed, reduce_verify_host_fault};
@@ -214,6 +216,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
             reduce_composition_narrowed(snapshot, bloom, verified, *tree, *head, evidence, attribution)
         }
         Fact::ProposeChange { proposal, authorization } => reduce_propose(snapshot, proposal, authorization),
+        Fact::StudyCompleted { bloom, passed, evidence } => reduce_study_completed(snapshot, bloom, *passed, evidence),
         // Retired: the journal holds grants the machinery decided before a
         // widening became an operator's decision, and those records replay
         // through their own recorded decisions (ADR-0190) rather than through

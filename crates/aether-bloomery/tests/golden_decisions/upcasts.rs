@@ -3,20 +3,25 @@
 //!
 //! `pre-propose-decisions.bin` is the complete pre-fold representative row —
 //! every effect family as of the shape stamped `ee7c8fce…` — and
-//! `pre-propose-event.bin` is a pre-fold event row stamped `0e738994…`. There
-//! is no regen command for either file: the bytes are history. The pre-#5278
-//! upcasts decode as the current shape because everything since is a
-//! tail-appended enum variant, so when one of these stops decoding, a change
-//! has moved wire positions those rows still occupy — the remedy is a real
-//! frozen decode shape for the pinned digest, never new bytes here.
+//! `pre-propose-event.bin` is a pre-fold event row stamped `0e738994…`.
+//! `pre-study-decisions.bin` is the same thing one shape later: the complete
+//! representative row as of `7ed0db5b…`, the shape every decisions row written
+//! before the ADR-0216 reader bore. There is no regen command for any of them:
+//! the bytes are history. Each pinned upcast decodes as the current shape
+//! because everything since is a tail-appended enum variant, so when one of
+//! these stops decoding, a change has moved wire positions those rows still
+//! occupy — the remedy is a real frozen decode shape for the pinned digest,
+//! never new bytes here.
 
 use aether_bloomery::persisted::{
-    DECISIONS_PRE_PROPOSE_DIGEST, EVENT_PRE_PROPOSE_DIGEST, decode_recorded_decisions, decode_recorded_event,
+    DECISIONS_PRE_PROPOSE_DIGEST, DECISIONS_PRE_STUDY_DIGEST, EVENT_PRE_PROPOSE_DIGEST, EVENT_PRE_STUDY_DIGEST,
+    decode_recorded_decisions, decode_recorded_event,
 };
 use aether_bloomery::testing::surface_overlap_event;
 
 const PRE_PROPOSE_DECISIONS: &[u8] = include_bytes!("fixtures/pre-propose-decisions.bin");
 const PRE_PROPOSE_EVENT: &[u8] = include_bytes!("fixtures/pre-propose-event.bin");
+const PRE_STUDY_DECISIONS: &[u8] = include_bytes!("fixtures/pre-study-decisions.bin");
 
 #[test]
 fn a_pre_propose_decisions_row_decodes_through_its_pinned_upcast() {
@@ -29,5 +34,29 @@ fn a_pre_propose_decisions_row_decodes_through_its_pinned_upcast() {
 fn a_pre_propose_event_row_decodes_through_its_pinned_upcast() {
     let decoded = decode_recorded_event(PRE_PROPOSE_EVENT, Some(EVENT_PRE_PROPOSE_DIGEST.as_bytes()))
         .expect("a row stamped 0e738994… decodes through the pre-propose upcast");
+    assert_eq!(decoded, surface_overlap_event());
+}
+
+#[test]
+fn a_pre_study_decisions_row_decodes_through_its_pinned_upcast() {
+    // Tripwire: ADR-0216 appended `Decision::DispatchStudy` and two `Outcome`
+    // variants. These are the bytes the previous binary actually wrote for the
+    // complete representative row, so a variant *inserted* rather than appended
+    // shifts a discriminant this row still occupies and fails here — which is
+    // the boot-replay abort, moved forward to the change that causes it.
+    let decoded = decode_recorded_decisions(PRE_STUDY_DECISIONS, Some(DECISIONS_PRE_STUDY_DIGEST.as_bytes()))
+        .expect("a row stamped 7ed0db5b… decodes through the pre-study upcast");
+    assert!(!decoded.effects.is_empty(), "the pre-reader representative row carries every effect family");
+}
+
+#[test]
+fn a_pre_study_event_row_decodes_through_its_pinned_upcast() {
+    // The event column's half of the same append: `Fact::StudyCompleted` sits
+    // past every discriminant a pre-reader row could hold, so a row stamped
+    // with the pre-reader event identity still decodes as today's shape. The
+    // pre-propose bytes are a real row of that era — the shape did not move
+    // between the two stamps, only the identity did.
+    let decoded = decode_recorded_event(PRE_PROPOSE_EVENT, Some(EVENT_PRE_STUDY_DIGEST.as_bytes()))
+        .expect("a row stamped a12b797c… decodes through the pre-study upcast");
     assert_eq!(decoded, surface_overlap_event());
 }
