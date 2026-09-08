@@ -179,10 +179,10 @@ mod tests {
         // the day down at the moment the file was introduced.
         let repo = repository();
         write(repo.path(), "README.md", "a base from before the manifest\n");
-        let bare = commit(repo.path(), "no manifest yet");
+        let undeclared = commit(repo.path(), "no manifest yet");
 
         let base = Digest::from_bytes([7; 32]);
-        let correspondence = OnePair { digest: base, object: object_at(&bare) };
+        let correspondence = OnePair { digest: base, object: object_at(&undeclared) };
         assert!(
             derive_pipeline_manifest(repo.path(), Some(&correspondence), base)
                 .expect("a base with no manifest is not a refusal")

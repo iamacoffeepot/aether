@@ -116,12 +116,14 @@ impl ApiCapabilityState {
             return Ok(None);
         };
 
-        let named = match &patch.configs {
-            Some(configs) => configs.address::<PipelineManifest>(),
-            None => self.drafts.get(&handle).and_then(|draft| draft.configs.address::<PipelineManifest>()),
-        };
-        match named {
-            Some(named) if named != derived.address => Err(error_response(
+        let named = patch.configs.as_ref().map_or_else(
+            || self.drafts.get(&handle).and_then(|draft| draft.configs.address::<PipelineManifest>()),
+            |configs| configs.address::<PipelineManifest>(),
+        );
+        if let Some(named) = named
+            && named != derived.address
+        {
+            return Err(error_response(
                 422,
                 &format!(
                     "draft seals `{}` at {}, but base {} declares {}; the manifest is derived from the base, never \
@@ -131,9 +133,9 @@ impl ApiCapabilityState {
                     base.to_hex(),
                     derived.address.to_hex(),
                 ),
-            )),
-            _ => Ok(Some(derived)),
+            ));
         }
+        Ok(Some(derived))
     }
 
     /// File the derived manifest's bytes: in this cap's resolved-configuration
