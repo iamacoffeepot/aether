@@ -1,0 +1,69 @@
+# The pipeline manifest — the lane vocabulary this repository declares for
+# itself (ADR-0215). The coordinator reads this file out of the sealed base's
+# tree, seals the decoded value into the bloom's configuration registry, and
+# cross-checks the authored stage catalog against it, so "can the tree I checked
+# out run what I am about to dispatch" becomes answerable from one sealed value
+# instead of from five independently compiled copies.
+#
+# Vocabulary is the repository's. Semantics, confinement, and the shape of the
+# line stay with the coordinator, and the omissions are deliberate: there is no
+# field here for the execution image or the network posture a lane runs under,
+# because a tree that named its own confinement would grant itself egress on the
+# coordinator's host. An unknown table or key is refused rather than ignored.
+#
+# `version` is refused by number when the coordinator does not implement it, and
+# so is `[evidence].envelope`: the envelope shape a lane writes and the intake
+# admits is the coordinator's, not a description it adapts to.
+#
+# Nothing reads this file yet. The slices that resolve it from the base, record
+# it on the bloom, and enforce it at the seal door land after this one; until
+# they do, the vocabulary below is transcribed by hand from the compiled one and
+# the two are held equal by the tripwire in
+# `crates/aether-bloomery/src/values/pipeline.rs`.
+
+version = 1
+
+# The argv a lane dispatch spawns, with the checkout as its working directory.
+# An argv word list, never a shell string; the coordinator appends the work
+# order's own arguments after these words.
+[entrypoint]
+program = "cargo"
+args = ["xtask", "transform"]
+
+# The typed lane commands a stage binding may name, split by whether the lane
+# runs a model. A model lane is dispatched with a credential and a resolved
+# model; a mechanical one runs a compiler over a checked-out tree and reaches
+# nothing.
+[lanes]
+model = ["construct.implement", "review.critic", "scope.fill"]
+mechanical = ["verify.member", "verify.check", "verify.base"]
+
+# The verifier identity vocabulary, in canonical order. A position here is an
+# identity's bit in every recorded failure set, so an identity is appended and
+# never inserted — inserting one shifts every mask already journaled. At most
+# sixteen may be declared, which is what keeps a set a `u16` and its artifact
+# token four hex digits.
+[verifiers]
+identities = [
+  "verify.preflight", "verify.fmt", "verify.clippy", "verify.docs", "verify.test",
+  "verify.dup", "verify.deps", "verify.suppress", "verify.containment", "verify.lock",
+]
+
+# What each verify position's fan-out actually runs. This differs from the
+# vocabulary above by exactly `verify.containment`, which is a legal identity no
+# lane runs: containment is judged coordinator-side, and stating that as data is
+# what keeps the omission from being an obligation somebody has to remember.
+#
+# `verify.docs` is absent from the member position alone. Documentation
+# correctness is a whole-workspace property — an intra-doc link resolves across
+# crates, so a member's closure can neither break it alone nor prove it alone —
+# while running it there was the single most expensive gate the member position
+# carried.
+[verifiers.runs]
+"verify.member" = ["verify.preflight", "verify.fmt", "verify.clippy", "verify.test", "verify.dup", "verify.deps", "verify.suppress", "verify.lock"]
+"verify.check"  = ["verify.preflight", "verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps", "verify.suppress", "verify.lock"]
+"verify.base"   = ["verify.preflight", "verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps", "verify.suppress", "verify.lock"]
+
+# The evidence-envelope shape the lane writes and the intake admits.
+[evidence]
+envelope = 1

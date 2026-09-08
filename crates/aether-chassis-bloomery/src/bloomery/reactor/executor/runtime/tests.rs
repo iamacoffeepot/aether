@@ -55,6 +55,7 @@ use crate::bloomery::{
     ExecutorPort, ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle,
     UnconfiguredActionsBackend,
 };
+use crate::bloomery::{authorize_instructions, reference_instructions};
 use crate::session::SessionConfig;
 use crate::store::{
     CANDIDATE_HASH_OCCASION_SEAL, CommissionBackend, JournalWrite, OutstandingOrder, SqliteStore, StoreBackend,
@@ -240,6 +241,20 @@ fn pull_and_admit(
     .0
 }
 
+/// The sealed registry a fixture dispatch runs under, with an authorized
+/// instruction bundle underneath whatever the caller sealed (ADR-0214).
+///
+/// Every model lane presents a validated bundle before it may reach a worker, so
+/// a fixture that means to observe a *dispatch* has to be a bloom that pinned
+/// one. The caller's entries win, so a scenario about a `ModelOverride` still
+/// seals exactly the override it authored. The gate's own refusals live in the
+/// provenance suite, not here.
+fn authorized_over(store: &mut SqliteStore, configs: ConfigRegistry) -> ConfigRegistry {
+    let mut sealed = authorize_instructions(store, &reference_instructions());
+    sealed.overlay(configs);
+    sealed
+}
+
 // Enqueue one per-member Construct dispatch on the dispatch topic (the bytes the
 // reducer's `DispatchAttempt` projection would enqueue), returning its outbox
 // sequence and the subject digest the attempt runs against.
@@ -272,6 +287,7 @@ fn enqueue_dispatch_with_configs(
     configs: ConfigRegistry,
 ) -> u64 {
     let payload = DispatchPayload {
+        configs: authorized_over(store, configs),
         // What a real dispatch carries: the profile the bloom's sealed catalog
         // calibrates *this* stage at, resolved by the reducer (ADR-0174).
         profile: StageCatalog::line().profile_for(stage).cloned().expect("the line binds every stage"),
@@ -286,7 +302,6 @@ fn enqueue_dispatch_with_configs(
         ),
         scope_revision,
         candidate: None,
-        configs,
     };
     // A queued dispatch belongs to a live bloom: seal claims the member's
     // membership before enqueuing its order, and the drain reads that claim to
@@ -303,6 +318,7 @@ fn enqueue_dispatch_with_configs(
 // has no member registry, only the bloom's.
 fn enqueue_aggregate_review(store: &mut SqliteStore, bloom: BloomId, workpiece: &str, configs: ConfigRegistry) -> u64 {
     let payload = AggregateReviewPayload {
+        configs: authorized_over(store, configs),
         profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: bloom.0,
         transformation: Transformation::for_aggregate_review(
@@ -312,7 +328,6 @@ fn enqueue_aggregate_review(store: &mut SqliteStore, bloom: BloomId, workpiece: 
             digest(50),
         ),
         pass: ReviewPass::Full,
-        configs,
     };
     store.claim_seal(payload.bloom.as_bytes(), &[workpiece.to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap()
@@ -342,7 +357,7 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
             digest(50),
         ),
         pass: ReviewPass::Full,
-        configs: ConfigRegistry::default(),
+        configs: authorized_over(&mut store, ConfigRegistry::default()),
     };
     // A queued review belongs to a live bloom; the drain reads its membership to
     // tell a live plan from a retired one (#4640).
@@ -396,7 +411,7 @@ fn the_second_aggregate_roll_frames_a_delta_confirm_against_the_frozen_findings(
             digest(50),
         ),
         pass: ReviewPass::DeltaConfirm,
-        configs: ConfigRegistry::default(),
+        configs: authorized_over(&mut store, ConfigRegistry::default()),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
@@ -441,7 +456,7 @@ fn a_fresh_roll_one_aggregate_dispatch_clears_the_stale_frozen_row() {
             digest(50),
         ),
         pass: ReviewPass::Full,
-        configs: ConfigRegistry::default(),
+        configs: authorized_over(&mut store, ConfigRegistry::default()),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
@@ -698,7 +713,7 @@ fn drain_dispatches_the_review_lane_under_its_own_calibrated_profile() {
             digest(50),
         ),
         pass: ReviewPass::Full,
-        configs: ConfigRegistry::default(),
+        configs: authorized_over(&mut store, ConfigRegistry::default()),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
@@ -1322,7 +1337,7 @@ fn dispatch_aggregate_review(
             digest(50),
         ),
         pass: ReviewPass::Full,
-        configs: ConfigRegistry::default(),
+        configs: authorized_over(store, ConfigRegistry::default()),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();

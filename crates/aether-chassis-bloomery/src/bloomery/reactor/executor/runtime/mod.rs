@@ -73,6 +73,7 @@ use crate::bloomery::intake::{
 };
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
+use crate::bloomery::provenance::drain_refusals;
 #[cfg(any(test, feature = "testing"))]
 use crate::bloomery::study::{StudyAdmitDecision, UploadedStudyRecord, admit_study, study_evidence_event};
 #[cfg(any(test, feature = "testing"))]
@@ -2859,6 +2860,23 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
             drain_dispatch_topics(&mut state.tracked, &mut state.backoff, store, &executor, clock.now_unix_millis);
         }
 
+        // Admit the dispatches the instruction-provenance gate refused on this
+        // drain or an earlier one (ADR-0214). Before the pull, so a member the
+        // gate stopped takes its machinery roll on the same turn the refusal
+        // happened rather than a poll interval later. The gate is synchronous —
+        // it reads this process's own store — so a refusal is always this
+        // turn's to admit, never a worker's to bring back.
+        match drain_refusals(store) {
+            Ok(refused) => admits.extend(refused),
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    %error,
+                    "refused-dispatch drain failed; the parked refusals re-drain next turn",
+                );
+            }
+        }
+
         // Sweep the live construct lanes' working trees and admit what they
         // have written (ADR-0204). Outside the backoff skip: the backoff paces
         // a *dispatch* surface that is refusing, and an observation dispatches
@@ -2961,6 +2979,21 @@ impl NativeActor for ExecutorReactorCapability {
         };
 
         let mut store = SqliteStore::open(&config.store_path).map_err(|e| BootError::Other(Box::new(e)))?;
+        // The host operator's process-policy answer, written where the dispatch
+        // gate reads it (ADR-0214). Replaced on every boot rather than merged,
+        // so removing a bundle from the configuration withdraws it. A write
+        // fault fails boot: mounting with a stale authorization set would run
+        // model lanes under a policy the operator has already replaced, which is
+        // the divergence this gate exists to close.
+        store
+            .set_authorized_instructions(&config.authorized_instructions.addresses())
+            .map_err(|e| BootError::Other(Box::new(e)))?;
+        if config.authorized_instructions.is_empty() {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                "no model-process instruction bundle is authorized; every model dispatch will refuse (ADR-0214)",
+            );
+        }
         // Restart recovery (#3641): a reactor that cannot read its recovery set
         // must not silently start with an empty one — that is the bug this
         // seed exists to fix, so a read error fails boot rather than mounting

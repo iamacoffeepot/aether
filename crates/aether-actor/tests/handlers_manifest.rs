@@ -29,30 +29,25 @@ use aether_data::{
     actor_lineage_child_len, actor_lineage_module_child_len, actor_lineage_root_len, wire, write_actor_lineage_child,
     write_actor_lineage_module_child, write_actor_lineage_root,
 };
-use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "test.tick")]
+#[aether_data::kind(name = "test.tick", pod)]
 struct Tick;
 
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "test.ping")]
+#[aether_data::kind(name = "test.ping", pod)]
 struct Ping {
     seq: u32,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "test.pong")]
+#[aether_data::kind(name = "test.pong", pod)]
 struct Pong {
     seq: u32,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "test.poke")]
+#[aether_data::kind(name = "test.poke", pod)]
 struct Poke {
     seq: u32,
 }

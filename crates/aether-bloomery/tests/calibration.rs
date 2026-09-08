@@ -16,8 +16,8 @@ use aether_data::wire::to_vec;
 use aether_bloomery::{
     AgentSelection, BloomId, CalibrationLedger, CandidateRef, CapabilityCell, CapabilityLedger, ConfigKind, Decision,
     Decisions, Digest, Event, Evidence, EvidenceKind, Fact, Harness, ModelOverride, Outcome, ReasoningEffort,
-    ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, StageOverride, StudyCost, StudyRecord,
-    Unproducible, VerifyFailure, VerifyFailureSet, reduce,
+    ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, StageOverride, StoreClass, StudyCost,
+    StudyRecord, Unproducible, VerifyFailure, VerifyFailureSet, reduce,
 };
 use common::{claim, digest, draft_with_member_override, event, membership, workpiece};
 
@@ -188,7 +188,7 @@ fn the_agent_is_recomputed_from_the_sealed_override_not_the_dispatchs_empty_mode
         }
     }
 
-    let ledger = journal.ledger.report(|_| None);
+    let ledger = journal.ledger.report(StoreClass::Live, |_| None);
     let construct = cell(&ledger, StageId::Construct).expect("the Construct lane is measured");
     let repair = cell(&ledger, StageId::Refine).expect("the Refine lane is measured");
 
@@ -221,7 +221,7 @@ fn a_failing_verify_charges_verdicts_to_the_lane_that_wrote_the_candidate() {
         &[VerifyFailure::Clippy],
     ])
     .ledger
-    .report(|_| None);
+    .report(StoreClass::Live, |_| None);
 
     let construct = cell(&ledger, StageId::Construct).expect("the Construct lane is measured");
     let repair = cell(&ledger, StageId::Refine).expect("the Refine lane is measured");
@@ -251,7 +251,7 @@ fn a_containment_refusal_lands_in_the_ledger() {
         },
     ));
 
-    let ledger = journal.ledger.report(|_| None);
+    let ledger = journal.ledger.report(StoreClass::Live, |_| None);
     let construct = cell(&ledger, StageId::Construct).expect("the Construct lane is measured");
     assert_eq!(verdicts(construct, VerifyFailure::Containment), 1);
 }
@@ -279,7 +279,7 @@ fn a_study_record_reaches_the_stage_that_spent_it_and_an_unreadable_one_costs_on
         (digest(80), record(bloom, REVISION, 5_000, 2_500)),
         (digest(81), record(bloom, TREE, 9_000, 4_000)),
     ]);
-    let ledger = journal.ledger.report(|detail: &Digest| records.get(detail).copied());
+    let ledger = journal.ledger.report(StoreClass::Live, |detail: &Digest| records.get(detail).copied());
 
     let construct = cell(&ledger, StageId::Construct).expect("the Construct lane is measured");
     let repair = cell(&ledger, StageId::Refine).expect("the Refine lane is measured");
@@ -311,7 +311,7 @@ fn a_refused_verify_verdict_charges_nothing() {
     let refused = journal.verify_failed("verify-failed-too-early", &[VerifyFailure::Clippy]);
     assert!(refused.effects.is_empty(), "the reducer refused it");
 
-    let ledger = journal.ledger.report(|_| None);
+    let ledger = journal.ledger.report(StoreClass::Live, |_| None);
     let construct = cell(&ledger, StageId::Construct).expect("the seal dispatched Construct");
 
     assert_eq!(construct.failures, Vec::new(), "a refused verdict is not an observation of anything");
@@ -324,7 +324,7 @@ fn a_refused_verify_verdict_charges_nothing() {
 // see" (ADR-0184).
 #[test]
 fn a_rendered_ledger_carries_its_caveat() {
-    assert_eq!(CalibrationLedger::default().report(|_| None).caveat, aether_bloomery::LEDGER_CAVEAT);
+    assert_eq!(CalibrationLedger::default().report(StoreClass::Live, |_| None).caveat, aether_bloomery::LEDGER_CAVEAT);
 }
 
 /// One history folded two ways: live (each commit observes against the config
@@ -426,8 +426,8 @@ fn boot_replay_rebuilds_the_ledger_exactly_as_live_commits_built_it_because_door
         "the second override is present, so the successor admits: {superseded:?}",
     );
 
-    let live = history.live.report(|_| None);
-    let replayed = history.replay().report(|_| None);
+    let live = history.live.report(StoreClass::Live, |_| None);
+    let replayed = history.replay().report(StoreClass::Live, |_| None);
     assert_eq!(live, replayed, "front-loading the final table rebuilds the live fold");
 
     let profile = StageCatalog::profile_of(StageId::Construct);

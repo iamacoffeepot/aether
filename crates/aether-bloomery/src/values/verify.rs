@@ -188,7 +188,7 @@ impl<'de> Deserialize<'de> for VerifyFailure {
     }
 }
 
-const VERIFY_FAILURE_NAMES: [&str; 9] = [
+const VERIFY_FAILURE_NAMES: [&str; 10] = [
     "verify.preflight",
     "verify.fmt",
     "verify.clippy",
@@ -198,6 +198,7 @@ const VERIFY_FAILURE_NAMES: [&str; 9] = [
     "verify.deps",
     "verify.suppress",
     "verify.containment",
+    "verify.lock",
 ];
 
 /// A deduplicated verifier-failure set with one canonical order and mask.
@@ -348,6 +349,9 @@ impl<'de> Deserialize<'de> for VerifyFailureSet {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+
     use super::{VerifyFailure, VerifyFailureSet};
     use serde::Deserialize;
     use serde::de::value::{Error as ValueError, SeqDeserializer, StrDeserializer};
@@ -440,6 +444,27 @@ mod tests {
         for invalid in ["0", "000", "00000", "0A", "GG", "g0", "-1"] {
             assert!(VerifyFailureSet::from_mask(invalid).is_none(), "`{invalid}` must be refused");
         }
+    }
+
+    #[test]
+    fn the_wrapper_renders_a_mask_token_width_the_decoder_accepts() {
+        let workflow =
+            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/transform.yml"))
+                .expect("the wrapper workflow is checked in");
+        let width: usize = workflow
+            .split_once("printf '%")
+            .and_then(|(_, rest)| rest.split_once("x'"))
+            .and_then(|(digits, _)| digits.parse().ok())
+            .expect("the wrapper renders the mask through one zero-padded hex printf");
+        let all: VerifyFailureSet = VerifyFailure::ALL.into_iter().collect();
+
+        // Tripwire: the wrapper's rendered token must be a width `from_mask`
+        // accepts for every set the lane can emit, and the full vocabulary is
+        // the value that drifts first. Zero-padding is a minimum, so a
+        // too-narrow format renders `0x3ff` as the three characters the
+        // decoder refuses — the artifact name then buys no upload and the
+        // failing lane's evidence is dropped silently (#5798).
+        assert_eq!(VerifyFailureSet::from_mask(&format!("{:0width$x}", all.0)), Some(all));
     }
 
     const MEMBERS_IN_CANONICAL_ORDER: [&str; 3] = ["verify.preflight", "verify.fmt", "verify.deps"];

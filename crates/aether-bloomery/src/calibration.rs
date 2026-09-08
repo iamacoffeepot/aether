@@ -77,6 +77,52 @@ use crate::values::{
     VerifyFailureSet,
 };
 
+/// Which world a journal's rows were written in (ADR-0184).
+///
+/// A benchmark run replays landed history against the fixture repository, so
+/// its rows measure the same machinery as live operation but describe work that
+/// never happened on the estate. ADR-0184 makes the *store* the unit that tells
+/// the two apart — "distinguishable by their trial store" — so this is a
+/// property of a journal, and every ledger folded from one carries it.
+///
+/// One coordinator generation writes one journal, so a ledger is never a
+/// mixture: the class belongs to the rendered [`CapabilityLedger`] rather than
+/// to each cell.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum StoreClass {
+    /// The estate's own journal: rows the coordinator wrote doing real work.
+    #[default]
+    Live,
+    /// A calibration host's journal: rows a benchmark run wrote against the
+    /// fixture repository, which never touched the live repository or its refs.
+    Trial,
+}
+
+impl StoreClass {
+    /// The knob and stamp spelling — what `AETHER_STORE_CLASS` accepts and what
+    /// the journal records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Trial => "trial",
+        }
+    }
+
+    /// Read a class back from its spelling. `None` is a name outside the
+    /// vocabulary — a caller refuses rather than guessing, because guessing
+    /// `Live` for an unreadable stamp is how benchmark rows would enter the
+    /// estate's measurement.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim() {
+            "live" => Some(Self::Live),
+            "trial" => Some(Self::Trial),
+            _ => None,
+        }
+    }
+}
+
 /// The honesty boundary every rendered ledger carries (ADR-0184).
 ///
 /// Part of the projection rather than prose around it: a cell read without it
@@ -180,11 +226,15 @@ pub struct CapabilityLedger {
     pub cells: Vec<CapabilityCell>,
     /// [`LEDGER_CAVEAT`], carried on the document so a rendering cannot drop it.
     pub caveat: String,
+    /// Which journal these cells were folded from (ADR-0184). Carried for the
+    /// same reason as the caveat: a benchmark cell rendered without it reads as
+    /// a measurement of work the estate actually did.
+    pub store: StoreClass,
 }
 
 impl Default for CapabilityLedger {
     fn default() -> Self {
-        Self { cells: Vec::new(), caveat: String::from(LEDGER_CAVEAT) }
+        Self { cells: Vec::new(), caveat: String::from(LEDGER_CAVEAT), store: StoreClass::Live }
     }
 }
 
@@ -293,8 +343,13 @@ impl CalibrationLedger {
     /// record that does not grade the attempt it was admitted against, or that
     /// names a different bloom, is skipped the same way: an unbound record is no
     /// more attributable than an unreadable one.
+    /// `store` is the class of the journal these rows came from, which the
+    /// caller holds as a boot fact and the store proved against the journal's
+    /// own stamp. Taken as an argument rather than defaulted: a trial ledger
+    /// that silently rendered as live is the one failure this class exists to
+    /// prevent, so a caller has to say which world it measured.
     #[must_use]
-    pub fn report(&self, source: impl Fn(&Digest) -> Option<StudyRecord>) -> CapabilityLedger {
+    pub fn report(&self, store: StoreClass, source: impl Fn(&Digest) -> Option<StudyRecord>) -> CapabilityLedger {
         let mut cells: BTreeMap<CellKey, Accumulator> = BTreeMap::new();
         for ((bloom, key), slot) in &self.slots {
             let resolved = self.resolved_members(*bloom, key);
@@ -331,6 +386,7 @@ impl CalibrationLedger {
         CapabilityLedger {
             cells: cells.into_values().map(Accumulator::into_cell).collect(),
             caveat: String::from(LEDGER_CAVEAT),
+            store,
         }
     }
 

@@ -846,6 +846,54 @@ pub struct WidgetEligibilityChanged {
     pub keyboard: bool,
 }
 
+/// `aether.kit.widget.open_changed` — an overlay-bearing widget opened
+/// (`open: true`) or closed (`open: false`) whatever it stands over the screen
+/// with. Reported once per edge; which widget it came from is the root's
+/// `source_mailbox` attribution.
+///
+/// The root answers `open: true` by granting the sender the modal pointer grab
+/// ([`crate::focus::Focus::begin_grab`]) so a press anywhere reaches the open
+/// thing, and `open: false` by ending it. That handshake is the one input fact
+/// a widget cannot arrange for itself, and it is identical for every widget
+/// that raises an overlay — which is why this is one kind rather than one per
+/// widget: a root that handled `dropdown.open_changed` and not
+/// `menu_bar.open_changed` left a menu open with no grab, and adding the next
+/// overlay widget meant a third byte-identical handler.
+#[aether_data::kind(name = "aether.kit.widget.open_changed", copy, eq)]
+pub struct WidgetOpenChanged {
+    pub open: bool,
+}
+
+/// `aether.kit.widget.dismiss` — close whatever this widget has open, without
+/// choosing anything. Fieldless and idempotent: a widget with nothing open
+/// does nothing and stays silent, and one that closes reports the
+/// [`WidgetOpenChanged`] edge like any other close.
+///
+/// The data-down half of the pair [`WidgetOpenChanged`] is the events-up half
+/// of. A host that opens a dialog over a screen, or takes a reader somewhere
+/// else entirely, has to be able to say "put that away" to every overlay at
+/// once — and before this the only lever was hiding the widget with
+/// [`SetWidgetState`], which also takes its row out of the layout.
+#[aether_data::kind(name = "aether.kit.widget.dismiss")]
+pub struct WidgetDismiss;
+
+/// `aether.kit.widget.placed` — where an overlay-bearing widget's plate
+/// actually stands, and the rectangle inside it its content occupies, both in
+/// the same window pixels the frame was assigned in. Reported whenever either
+/// changes, never every frame.
+///
+/// The host needs both, and always the same two. `frame` is the plate as
+/// *drawn* — which is not always the frame that was assigned, because a plate
+/// grows to the minimum its own content needs — so a host hands it to peers as
+/// the rectangle they are occluded by and hangs its resize splitters on the
+/// edges the reader sees. `content` is where it frames its own slot children,
+/// or the part of the region actually covered.
+#[aether_data::kind(name = "aether.kit.widget.placed", copy, default, partial_eq)]
+pub struct WidgetPlaced {
+    pub frame: PlacementBounds,
+    pub content: PlacementBounds,
+}
+
 /// `aether.kit.widget.set_value` — push a new number into a widget that holds
 /// one, without disturbing anything else about it. Handled by the slider and
 /// the numeric editor; the value is clamped and snapped into the widget's
@@ -1500,13 +1548,13 @@ impl From<&str> for DropdownOption {
 /// overlay (see [`WidgetDrawList::overlay`]) below the closed row. A press on
 /// a row selects it and closes; Escape or a press elsewhere closes without a
 /// change. While open the widget holds the root's pointer grab, reported
-/// through [`DropdownOpenChanged`]. Use it for a choice whose current value is
+/// through [`WidgetOpenChanged`]. Use it for a choice whose current value is
 /// what matters and whose alternatives are secondary; three or more options.
 ///
 /// A re-sent config replaces the options and holds the current choice,
 /// re-clamped into the new vector; [`SetSelection`] moves it. An open list
 /// closes on a reconfigure — its rows are the vector that just changed — so the
-/// root is handed back the pointer grab through [`DropdownOpenChanged`].
+/// root is handed back the pointer grab through [`WidgetOpenChanged`].
 #[aether_data::kind(name = "aether.kit.widget.dropdown.config", default)]
 pub struct DropdownConfig {
     pub options: Vec<DropdownOption>,
@@ -1615,7 +1663,7 @@ pub struct Menu {
 /// top of a screen, the place an application's commands live (File, Edit,
 /// View, Help). A press on a title opens that menu's items below it in the
 /// widget's overlay ([`WidgetDrawList::overlay`]) under the root's pointer
-/// grab, reported through [`MenuBarOpenChanged`]; while a menu is open, moving
+/// grab, reported through [`WidgetOpenChanged`]; while a menu is open, moving
 /// the pointer over another title opens that one instead. A press on an
 /// enabled item activates it ([`MenuBarActivated`]) and closes; Escape or a
 /// press elsewhere closes without activating. The bar is one row high; each
@@ -1901,10 +1949,11 @@ pub struct VirtualListActivated {
 /// pointer move, a wheel, a thumb drag, or the items being replaced under a
 /// still pointer.
 ///
-/// `x` / `y` / `width` / `height` are that row's **plate rectangle** in the
+/// `frame` is that row's **plate rectangle** in the
 /// same window-pixel space the panel gives a widget its frame in, so a host can
-/// stand a tooltip on the row without measuring anything. It is all zeroes when
-/// `index` is `None`, which is the event that says to take the tooltip down.
+/// stand a tooltip on the row without measuring anything. It is the zero
+/// rectangle when `index` is `None`, which is the event that says to take the
+/// tooltip down.
 /// This is the rule for the whole set, not a courtesy of this one widget: **a
 /// widget that owns sub-rectangles the root cannot hit-test reports the
 /// hovered one's geometry along with its index.** [`DropdownHover`] is the
@@ -1916,10 +1965,7 @@ pub struct VirtualListActivated {
 #[aether_data::kind(name = "aether.kit.widget.virtual_list.hover", copy, partial_eq)]
 pub struct VirtualListHover {
     pub index: Option<u32>,
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
+    pub frame: PlacementBounds,
 }
 
 /// `aether.kit.widget.button.activated` — a button's value-up event, fired once
@@ -1957,15 +2003,6 @@ pub struct DropdownSelected {
     pub index: u32,
 }
 
-/// `aether.kit.widget.dropdown.open_changed` — the dropdown opened or closed
-/// its list. The root answers `open: true` by granting the sender the pointer
-/// grab ([`crate::focus::Focus::begin_grab`]) so a press anywhere reaches it,
-/// and `open: false` by ending the grab.
-#[aether_data::kind(name = "aether.kit.widget.dropdown.open_changed", copy, eq)]
-pub struct DropdownOpenChanged {
-    pub open: bool,
-}
-
 /// `aether.kit.widget.dropdown.hover` — the option under the pointer in the
 /// **open** list changed: `index` is into the config's `options`, or `None`
 /// once the pointer has left the list or the list has closed. Which
@@ -1980,19 +2017,17 @@ pub struct DropdownOpenChanged {
 /// become one: the reader is looking, not picking, and `DropdownSelected` still
 /// reports what they take.
 ///
-/// `x` / `y` / `width` / `height` are that option's **row rectangle** in the
+/// `frame` is that option's **row rectangle** in the
 /// open list, in the same window-pixel space the panel gives a widget its
 /// frame in, so a host can stand a tooltip on the row without measuring
 /// anything. The overlay is offset by its slot's origin and never clipped or
-/// moved, so the rectangle is where the row really draws. It is all zeroes when
-/// `index` is `None`, which is the event that says to take the tooltip down.
+/// moved, so the rectangle is where the row really draws. It is the zero
+/// rectangle when `index` is `None`, which is the event that says to take the
+/// tooltip down.
 #[aether_data::kind(name = "aether.kit.widget.dropdown.hover", copy, partial_eq)]
 pub struct DropdownHover {
     pub index: Option<u32>,
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
+    pub frame: PlacementBounds,
 }
 
 /// `aether.kit.widget.tab_strip.selected` — the selected tab changed to
@@ -2008,14 +2043,6 @@ pub struct TabStripSelected {
 pub struct MenuBarActivated {
     pub menu: u32,
     pub item: u32,
-}
-
-/// `aether.kit.widget.menu_bar.open_changed` — a menu opened (`open: true`,
-/// the root grants the sender the pointer grab) or every menu closed
-/// (`open: false`, the root ends it). Reported once per edge.
-#[aether_data::kind(name = "aether.kit.widget.menu_bar.open_changed", copy, eq)]
-pub struct MenuBarOpenChanged {
-    pub open: bool,
 }
 
 /// `aether.kit.widget.dialog.config` — the plate a modal stands on. The
@@ -2045,21 +2072,6 @@ pub struct DialogConfig {
     pub theme: Theme,
     #[serde(default)]
     pub state: WidgetControlState,
-}
-
-/// `aether.kit.widget.dialog.placed` — where the plate actually stands and
-/// where its body is, in the same window pixels the frame was assigned in.
-/// Reported whenever either changes, never every frame.
-///
-/// The host needs both. `body` is where it frames its own slot children, so
-/// they land under the title rather than over it. `frame` is the plate as
-/// *drawn* — which is the assigned frame grown to the minimum the title
-/// needs — so the host can hand it to its peers as the rectangle they are
-/// occluded by, and hang its resize splitters on the edges the reader sees.
-#[aether_data::kind(name = "aether.kit.widget.dialog.placed", copy, default, partial_eq)]
-pub struct DialogPlaced {
-    pub frame: PlacementBounds,
-    pub body: PlacementBounds,
 }
 
 /// Which pointer motion moves a splitter's position.
@@ -2226,19 +2238,6 @@ impl Default for ToastConfig {
             state: WidgetControlState::default(),
         }
     }
-}
-
-/// `aether.kit.widget.toast.region_changed` — the standing stack changed:
-/// one arrived, one aged out, or the cap pushed one off the end. `standing`
-/// is how many are up now and `height_pixels` how far down the region they
-/// reach, so a host that has to tell another actor what is covered (a tree
-/// view being drawn under the notices) reports that rectangle without
-/// re-deriving the stack's geometry. Emitted on the edge only, never every
-/// frame.
-#[aether_data::kind(name = "aether.kit.widget.toast.region_changed", copy, partial_eq)]
-pub struct ToastRegionChanged {
-    pub standing: u32,
-    pub height_pixels: f32,
 }
 
 /// A mark drawn inline at the head of a [`TooltipLine`], before its words.

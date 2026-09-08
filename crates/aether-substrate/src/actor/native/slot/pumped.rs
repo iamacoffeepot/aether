@@ -199,7 +199,7 @@ mod tests {
     use aether_actor::log::ActorLogRing;
     use aether_actor::trace::ActorTraceRing;
     use aether_actor::{Addressable, HandlesKind, Local as _, MailSender, Manual, One};
-    use aether_data::{Kind, KindId, MailId, MailboxId, Schema, Source, SourceAddr, mailbox_id_from_name};
+    use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr, mailbox_id_from_name};
     use aether_kinds::trace::TraceEvent;
     use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult, descriptors};
 
@@ -220,32 +220,27 @@ mod tests {
     use crate::scheduler::{Pool, PoolConfig, PoolHandle};
     use crate::{BootError, NativeInitCtx};
 
-    #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize, Kind, Schema)]
-    #[kind(name = "test.pumped.ping")]
+    #[aether_data::kind(name = "test.pumped.ping", copy, partial_eq)]
     struct Ping {
         seq: u32,
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize, Kind, Schema)]
-    #[kind(name = "test.pumped.pong")]
+    #[aether_data::kind(name = "test.pumped.pong", copy, partial_eq)]
     struct Pong {
         seq: u32,
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize, Kind, Schema)]
-    #[kind(name = "test.pumped.defer")]
+    #[aether_data::kind(name = "test.pumped.defer", copy, partial_eq)]
     struct Defer {
         seq: u32,
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize, Kind, Schema)]
-    #[kind(name = "test.pumped.emit")]
+    #[aether_data::kind(name = "test.pumped.emit", copy, partial_eq)]
     struct EmitReq {
         seq: u32,
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize, Kind, Schema)]
-    #[kind(name = "test.pumped.poke")]
+    #[aether_data::kind(name = "test.pumped.poke", copy, partial_eq)]
     struct Poke {
         note: u32,
     }

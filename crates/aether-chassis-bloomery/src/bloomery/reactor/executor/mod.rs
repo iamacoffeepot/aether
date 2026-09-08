@@ -31,6 +31,8 @@ use aether_actor::actor;
 use aether_bloomery::SharedCorrespondence;
 use aether_bloomery::Topic;
 
+use crate::bloomery::provenance::ProcessPolicy;
+
 // `pub` rather than `pub(crate)` because this module is itself private: the
 // crate-only restriction is applied once, where the chain reaches the public
 // `bloomery` module, and repeating it here is the redundancy clippy flags.
@@ -49,6 +51,10 @@ pub struct ExecutorReactorSetup {
     pub heartbeat_silence_secs: u64,
     pub repository: Option<(String, String)>,
     pub disabled_missing: Vec<&'static str>,
+    /// The instruction bundles this host operator authorizes as model-process
+    /// policy (ADR-0214), resolved from the coordinator's configuration at boot
+    /// and seeded into the store the dispatch gate reads.
+    pub authorized_instructions: ProcessPolicy,
     /// The candidate-ref push seam (ADR-0152); chosen at boot by
     /// `default_candidate_push`, which is crate-private and so is named here
     /// rather than linked.
@@ -71,7 +77,10 @@ impl ExecutorReactorCapability {
     /// running lane is killed and its order consumed. And it drains the
     /// host-minted [`Topic::ScopeDispatch`] (ADR-0208, #5304) — a pre-bloom
     /// scoping run, submitted through the same shell under an order record
-    /// that names no bloom.
+    /// that names no bloom. Last, it is both producer and drainer of the
+    /// host-minted [`Topic::RefusedDispatch`] (ADR-0214): a dispatch its own
+    /// instruction-provenance gate refused, parked durably on the way out and
+    /// admitted as a host fault on the way back in.
     pub const DRAINED_TOPICS: &'static [Topic] = &[
         Topic::Dispatch,
         Topic::AggregateReview,
@@ -80,6 +89,7 @@ impl ExecutorReactorCapability {
         Topic::CancelDispatch,
         Topic::ScopeDispatch,
         Topic::BaseVerify,
+        Topic::RefusedDispatch,
     ];
 }
 
