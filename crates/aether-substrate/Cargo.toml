@@ -52,6 +52,10 @@ aether-data = { path = "../aether-data" }
 # re-exports `aether-data-derive`'s `#[derive(Kind, Schema)]`.
 aether-derive = { path = "../aether-derive" }
 aether-kinds = { path = "../aether-kinds" }
+# The geometry vocabulary the render module's rectangles speak: `Rect2`
+# owns the overlay clip -> scissor clamp (issue 5731) and `Mat4` states
+# the identity camera uniform, so neither is re-derived here.
+aether-math = { path = "../aether-math" }
 arc-swap = { workspace = true }
 bytemuck = { workspace = true }
 # ADR-0090 unit g: `#[derive(aether_substrate::Config)]` emits a clap-shaped

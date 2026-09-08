@@ -18,6 +18,7 @@
 
 use super::shape::{SHAPE_VERTEX_BUFFER_BYTES, ShapePipeline, build_shape_pipeline};
 use super::targets::Targets;
+use aether_math::Rect2;
 use std::iter;
 
 /// Bytes per expanded quad vertex: `anchor vec3<f32>` (12) +
@@ -707,21 +708,16 @@ pub fn record_quad_overlay_pass(
     }
 }
 
-#[allow(clippy::cast_precision_loss)]
+/// The scissor rect a draw's optional clip names, or `None` when the
+/// clip covers no pixel of the target and the draw should be skipped.
+/// An absent clip is the whole target.
+///
+/// `aether-render`'s observation sink applies the same contract through
+/// the same [`Rect2::clamp_to_pixels`], so a harness-reported batch and
+/// a GPU-recorded one cannot disagree about what survives.
 fn clamped_scissor(clip: Option<[f32; 4]>, target_width: u32, target_height: u32) -> Option<[u32; 4]> {
     let Some([x, y, width, height]) = clip else {
         return Some([0, 0, target_width, target_height]);
     };
-    if !x.is_finite() || !y.is_finite() || !width.is_finite() || !height.is_finite() {
-        return None;
-    }
-    let min_x = x.max(0.0).min(target_width as f32).floor();
-    let min_y = y.max(0.0).min(target_height as f32).floor();
-    let max_x = (x + width).max(0.0).min(target_width as f32).ceil();
-    let max_y = (y + height).max(0.0).min(target_height as f32).ceil();
-    if max_x <= min_x || max_y <= min_y {
-        return None;
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    Some([min_x as u32, min_y as u32, (max_x - min_x) as u32, (max_y - min_y) as u32])
+    Rect2::from_xywh(x, y, width, height).clamp_to_pixels(target_width, target_height)
 }

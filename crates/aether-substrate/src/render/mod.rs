@@ -34,6 +34,8 @@ mod targets;
 // dependency cycle. `pub` so the capture harness re-exports it unchanged.
 pub mod visual;
 
+use aether_math::Mat4;
+
 pub use capture::{CaptureMeta, encode_png, finish_capture, map_capture_rgba, prepare_capture_copy};
 pub use material::{
     MATERIAL_VERTEX_BUFFER_BYTES, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw, MaterialPassDraw,
@@ -110,12 +112,7 @@ pub const COPY_ROW_ALIGN: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
 
 /// 4×4 identity matrix in column-major order — what the camera
 /// uniform holds before the first `aether.view_projection` mail arrives.
-pub const IDENTITY_VIEW_PROJ: [f32; 16] = [
-    1.0, 0.0, 0.0, 0.0, //
-    0.0, 1.0, 0.0, 0.0, //
-    0.0, 0.0, 1.0, 0.0, //
-    0.0, 0.0, 0.0, 1.0, //
-];
+pub const IDENTITY_VIEW_PROJ: [f32; 16] = Mat4::IDENTITY.to_cols_array();
 
 fn vertex_layout(array_stride: u64, attributes: &'static [wgpu::VertexAttribute]) -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout { array_stride, step_mode: wgpu::VertexStepMode::Vertex, attributes }

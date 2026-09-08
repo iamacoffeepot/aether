@@ -7,6 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use aether_kinds::{ClipRect, QuadScale, QuadSpace};
+use aether_math::Rect2;
 use aether_substrate::render::{
     CompositeBlend, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw, MaterialPassDraw,
     MaterialPassRecord, MaterialPipelines, OverlayDraw, OverlaySource, Pipeline, QUAD_VERTEX_BUFFER_BYTES,
@@ -141,21 +142,16 @@ fn push_overlay_draw<'a>(
 
 /// Mirror the low-level overlay pass's scissor rejection without moving that
 /// validation earlier in the production render path. This runs only when
-/// `SubstrateHarness` has installed an observation sink; keep its arithmetic aligned
-/// with `aether_substrate::render::quad::clamped_scissor`.
-#[allow(clippy::cast_precision_loss)]
+/// `SubstrateHarness` has installed an observation sink.
+///
+/// The arithmetic is [`Rect2::clamp_to_pixels`] — the same call
+/// `aether_substrate::render::quad::clamped_scissor` records the GPU scissor
+/// through, so the two cannot drift into disagreeing about which batches the
+/// frame actually drew.
 fn overlay_clip_is_visible(clip: Option<[f32; 4]>, target_width: u32, target_height: u32) -> bool {
-    let Some([x, y, width, height]) = clip else {
-        return true;
-    };
-    if !x.is_finite() || !y.is_finite() || !width.is_finite() || !height.is_finite() {
-        return false;
-    }
-    let min_x = x.max(0.0).min(target_width as f32).floor();
-    let min_y = y.max(0.0).min(target_height as f32).floor();
-    let max_x = (x + width).max(0.0).min(target_width as f32).ceil();
-    let max_y = (y + height).max(0.0).min(target_height as f32).ceil();
-    max_x > min_x && max_y > min_y
+    clip.is_none_or(|[x, y, width, height]| {
+        Rect2::from_xywh(x, y, width, height).clamp_to_pixels(target_width, target_height).is_some()
+    })
 }
 
 /// Expand and record the overlay batches (ADR-0105 / ADR-0213) into
@@ -611,15 +607,15 @@ impl RenderGpu {
 mod tests {
     use super::*;
 
-    /// Observation applies the same finite, clamped, non-empty scissor
-    /// contract as the low-level overlay pass.
+    /// Tripwire: the clamp itself is `Rect2::clamp_to_pixels` and is
+    /// pinned in `aether-math`; what this crate still owns is the
+    /// mapping onto it — an absent clip draws, and a `Some` verdict is
+    /// read the right way round. An inverted `is_some` would silently
+    /// report every clipped batch as dropped.
     #[test]
     fn overlay_observation_rejects_non_drawing_clips() {
         assert!(overlay_clip_is_visible(None, 64, 48));
-        assert!(overlay_clip_is_visible(Some([-1.0, -1.0, 2.0, 2.0]), 64, 48));
         assert!(overlay_clip_is_visible(Some([63.5, 47.5, 1.0, 1.0]), 64, 48));
         assert!(!overlay_clip_is_visible(Some([64.0, 0.0, 1.0, 1.0]), 64, 48));
-        assert!(!overlay_clip_is_visible(Some([0.0, 0.0, 0.0, 1.0]), 64, 48));
-        assert!(!overlay_clip_is_visible(Some([f32::NAN, 0.0, 1.0, 1.0]), 64, 48));
     }
 }
