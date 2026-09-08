@@ -109,3 +109,12 @@ fn schema_digest_failures_are_annotated_without_a_regen_command() {
     assert!(annotated.contains("append the new digest to `schema-digests.txt` and register an upcast"));
     assert!(!annotated.contains("fixtures regen"), "{annotated}");
 }
+
+// TEMPORARY SCAFFOLD — remove before review. The ledger line for the appended
+// `Decision` variant has to come out of a run rather than a local build, and
+// the xtask step runs before the aether-bloomery ledger test that would name
+// it, so this surfaces the digest and is deleted in the next commit.
+#[test]
+fn temporary_current_decisions_digest_probe() {
+    panic!("CURRENT DECISIONS DIGEST = {}", DECISIONS.current_digest().to_hex());
+}
