@@ -99,12 +99,12 @@ where
 /// chassis_main!(HeadlessChassis, HeadlessCli);
 /// ```
 ///
-/// The invoking crate supplies `anyhow`, which every chassis bin already did
-/// for the `main` this replaces.
+/// The error type is this crate's re-exported `anyhow`, so a chassis bin needs
+/// no dependency of its own for the `main` this replaces.
 #[macro_export]
 macro_rules! chassis_main {
     ($chassis:ty, $cli:ty $(,)?) => {
-        fn main() -> ::anyhow::Result<()> {
+        fn main() -> $crate::anyhow::Result<()> {
             $crate::entry::run_chassis_main::<$chassis, $cli>()
         }
     };

@@ -34,6 +34,11 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Re-exported for `chassis_main!`, whose emitted `fn main` names this crate's
+/// `anyhow` rather than requiring every chassis bin to carry a dependency it
+/// would otherwise never spell.
+pub use anyhow;
+
 pub mod autoload;
 pub mod boot;
 pub mod boot_manifest;
