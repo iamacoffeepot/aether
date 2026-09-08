@@ -123,8 +123,8 @@ mod tests {
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         let snapshot = snapshot.apply(
             &seal,
-            &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
-            &ResolvedConfigs::default(),
+            &reduce(&snapshot, &seal, &crate::testing::compiled_resolved(), &SpendWindow::default()),
+            &crate::testing::compiled_resolved(),
         );
         (snapshot, bloom, workpiece, scope_revision)
     }
@@ -172,7 +172,7 @@ mod tests {
                 request: request(scope_revision),
             },
         };
-        let after = snapshot.apply(&event, &decided, &ResolvedConfigs::default());
+        let after = snapshot.apply(&event, &decided, &crate::testing::compiled_resolved());
         let cursor = after.blooms[&bloom].progress[&workpiece];
 
         assert_eq!(cursor.attempts, before.attempts, "a park spends no attempt");
@@ -252,7 +252,7 @@ mod tests {
                 &evidence(scope_revision),
                 &request(scope_revision),
             ),
-            &ResolvedConfigs::default(),
+            &crate::testing::compiled_resolved(),
         );
         let second = reduce_surface_requested(
             &snapshot,
@@ -264,7 +264,7 @@ mod tests {
         );
         assert!(matches!(second.outcome, Outcome::SurfaceRequested { requests: 2, .. }));
 
-        let snapshot = snapshot.apply(&fact("surface-2"), &second, &ResolvedConfigs::default());
+        let snapshot = snapshot.apply(&fact("surface-2"), &second, &crate::testing::compiled_resolved());
         assert_eq!(snapshot.awaiting_surface(&bloom, &workpiece).unwrap().requests, 2);
     }
 
@@ -333,7 +333,7 @@ mod tests {
         // re-deciding it (ADR-0190), which is what keeps the three journal
         // records written after this one — the lane the grant re-dispatched —
         // describing a snapshot they still agree with.
-        let _ = Snapshot::new(digest(0)).apply(&event, &decisions, &ResolvedConfigs::default());
+        let _ = Snapshot::new(digest(0)).apply(&event, &decisions, &crate::testing::compiled_resolved());
     }
 
     #[test]
@@ -355,7 +355,7 @@ mod tests {
             },
         };
 
-        let decided = reduce(&snapshot, &event, &ResolvedConfigs::default(), &SpendWindow::default());
+        let decided = reduce(&snapshot, &event, &crate::testing::compiled_resolved(), &SpendWindow::default());
 
         assert!(
             matches!(decided.outcome, Outcome::SurfaceGrantRejected(SurfaceRequestedError::GrantRetired)),
@@ -364,7 +364,7 @@ mod tests {
         );
         assert!(decided.effects.is_empty(), "a retired grant decides no effects");
 
-        let after = snapshot.apply(&event, &decided, &ResolvedConfigs::default());
+        let after = snapshot.apply(&event, &decided, &crate::testing::compiled_resolved());
         assert_eq!(after.blooms[&bloom].progress[&workpiece], before, "no re-pin, no re-dispatch");
         assert!(after.seen.contains(&event.idempotency_key), "the key is still recorded");
     }

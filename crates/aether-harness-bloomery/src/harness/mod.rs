@@ -147,6 +147,9 @@ pub struct HarnessBuilder {
     github_fixture: bool,
     socket_read_timeout: Option<Duration>,
     step_budget: Duration,
+    /// When set, leave `local_lane_program` empty so the dispatch reads the
+    /// sealed manifest's `[entrypoint]` rather than the mock override.
+    lane_from_manifest: bool,
 }
 
 impl HarnessBuilder {
@@ -173,6 +176,7 @@ impl HarnessBuilder {
             github_fixture: true,
             socket_read_timeout: Some(SOCKET_READ_TIMEOUT),
             step_budget: Duration::from_secs(20),
+            lane_from_manifest: false,
         }
     }
 
@@ -199,6 +203,7 @@ impl HarnessBuilder {
             github_fixture: true,
             socket_read_timeout: None,
             step_budget: Duration::from_mins(2),
+            lane_from_manifest: false,
         }
     }
 
@@ -227,7 +232,18 @@ impl HarnessBuilder {
             github_fixture: false,
             socket_read_timeout: Some(SOCKET_READ_TIMEOUT),
             step_budget: Duration::from_secs(30),
+            lane_from_manifest: false,
         }
+    }
+
+    /// Leave `local_lane_program` empty so a dispatch spawns the sealed
+    /// `[entrypoint]` rather than the mock override (ADR-0215). The scenario
+    /// that proves the manifest reaches the child's argv reaches for this, and
+    /// names the mock as that entrypoint's program so nothing real runs.
+    #[must_use]
+    pub const fn lane_from_manifest(mut self) -> Self {
+        self.lane_from_manifest = true;
+        self
     }
 
     /// Override the backend axis.

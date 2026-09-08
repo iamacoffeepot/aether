@@ -197,8 +197,8 @@ mod tests {
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         let snapshot = snapshot.apply(
             &seal,
-            &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
-            &ResolvedConfigs::default(),
+            &reduce(&snapshot, &seal, &crate::testing::compiled_resolved(), &SpendWindow::default()),
+            &crate::testing::compiled_resolved(),
         );
         (snapshot, bloom)
     }

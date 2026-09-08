@@ -732,13 +732,16 @@ mod tests {
     }
 
     fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
-        let decisions = reduce(snapshot, event, &ResolvedConfigs::default(), &SpendWindow::default());
-        (snapshot.apply(event, &decisions, &ResolvedConfigs::default()), decisions)
+        crate::testing::step(snapshot, event)
     }
 
     fn sealed() -> (Snapshot, BloomId) {
-        let spec =
-            BloomDraft { proposals: vec![membership("wp", 10)], base: digest(0), ..BloomDraft::default() }.seal();
+        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+            proposals: vec![membership("wp", 10)],
+            base: digest(0),
+            ..BloomDraft::default()
+        })
+        .seal();
         let bloom = spec.id();
         let (snapshot, _) =
             step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", Fact::Seal(spec)));
@@ -837,8 +840,12 @@ mod tests {
     // slot and leaves the sealed base. Catches treating absence as a digest.
     #[test]
     fn a_fresh_construct_checks_out_the_sealed_base() {
-        let spec =
-            BloomDraft { proposals: vec![membership("wp", 10)], base: digest(0), ..BloomDraft::default() }.seal();
+        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+            proposals: vec![membership("wp", 10)],
+            base: digest(0),
+            ..BloomDraft::default()
+        })
+        .seal();
         let bloom = spec.id();
         let (after, decided) =
             step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", Fact::Seal(spec)));
@@ -1173,11 +1180,11 @@ mod tests {
     }
 
     fn two_member_spec(base: u8) -> BloomSpec {
-        BloomDraft {
+        crate::testing::with_compiled_manifest(BloomDraft {
             proposals: vec![membership("alpha", 10), membership("beta", 11)],
             base: digest(base),
             ..BloomDraft::default()
-        }
+        })
         .seal()
     }
 

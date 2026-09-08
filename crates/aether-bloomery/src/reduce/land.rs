@@ -190,11 +190,11 @@ mod tests {
         // object, while `Outcome::Landed` must still carry the bare receipt the
         // land fact and the source port are written against.
         let base = digest(0);
-        let spec = BloomDraft {
+        let spec = crate::testing::with_compiled_manifest(BloomDraft {
             proposals: vec![membership("issue-4628", 10), membership("issue-4629", 20)],
             base,
             ..BloomDraft::default()
-        }
+        })
         .seal();
         let bloom = spec.id();
         let sealed_order: Vec<WorkpieceId> = spec.members().iter().map(|member| member.workpiece.clone()).collect();
@@ -203,8 +203,8 @@ mod tests {
         let mut snapshot = Snapshot::new(base).with_green_base(base);
         snapshot = snapshot.apply(
             &seal,
-            &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
-            &ResolvedConfigs::default(),
+            &reduce(&snapshot, &seal, &crate::testing::compiled_resolved(), &SpendWindow::default()),
+            &crate::testing::compiled_resolved(),
         );
         snapshot.blooms.get_mut(&bloom).expect("the seal recorded the bloom under its own spec id").status =
             BloomStatus::Resolved;
@@ -229,13 +229,18 @@ mod tests {
 
     /// A sealed-but-unresolved bloom, plus the id it was recorded under.
     fn sealed(base: Digest) -> (Snapshot, BloomId) {
-        let spec = BloomDraft { proposals: vec![membership("issue-4628", 10)], base, ..BloomDraft::default() }.seal();
+        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+            proposals: vec![membership("issue-4628", 10)],
+            base,
+            ..BloomDraft::default()
+        })
+        .seal();
         let bloom = spec.id();
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         let snapshot = Snapshot::new(base).with_green_base(base);
-        let decided = reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default());
+        let decided = reduce(&snapshot, &seal, &crate::testing::compiled_resolved(), &SpendWindow::default());
 
-        (snapshot.apply(&seal, &decided, &ResolvedConfigs::default()), bloom)
+        (snapshot.apply(&seal, &decided, &crate::testing::compiled_resolved()), bloom)
     }
 
     fn refusal(decisions: &Decisions) -> &RecordedRefusal {

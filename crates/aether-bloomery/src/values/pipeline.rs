@@ -29,7 +29,8 @@
 //! value into the bloom's registry; the seal door resolves it through
 //! [`PipelineManifest::sealed_in`] and journals it onto the record, so the fold
 //! reads the vocabulary the bloom sealed rather than the one its binary
-//! happens to compile. Enforcing it at the seal door is the slice that follows.
+//! happens to compile. A fresh seal that names no manifest is refused; the
+//! compiled fallback here is only for records already journaled.
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -159,8 +160,8 @@ pub const MAX_VERIFIER_IDENTITIES: usize = 16;
 /// Named here because [`PipelineManifest::compiled`] is the value a bloom
 /// sealed before this vocabulary was declared folds against, and the entrypoint
 /// is one of the five copies this record collapses: the host's own
-/// `DEFAULT_LANE_PROGRAM` is deleted by the slice that reads `[entrypoint]`
-/// from the sealed manifest.
+/// `DEFAULT_LANE_PROGRAM` is gone, and a dispatch reads `[entrypoint]` from
+/// the sealed manifest.
 const COMPILED_ENTRYPOINT_PROGRAM: &str = "cargo";
 const COMPILED_ENTRYPOINT_ARGS: [&str; 2] = ["xtask", "transform"];
 
@@ -223,9 +224,10 @@ impl PipelineManifest {
     /// lists, and the lane command constants are the one source.
     ///
     /// It is deliberately *not* a fallback for a checkout that carries no
-    /// `pipeline.toml`: a base that cannot state its lanes refuses the seal
-    /// rather than silently borrowing this one, because a fallback is silent at
-    /// exactly the moment the tree and the coordinator disagree most.
+    /// `pipeline.toml`: a fresh seal that names no manifest is refused rather
+    /// than silently borrowing this one, because a fallback is silent at
+    /// exactly the moment the tree and the coordinator disagree most. This
+    /// constructor remains the fold's answer for records already journaled.
     #[must_use]
     pub fn compiled() -> Self {
         Self {
@@ -527,6 +529,16 @@ mod tests {
         // what the manifest is about to replace.
         assert!(manifest.lanes.model.iter().all(|command| is_model_lane(command)));
         assert!(!manifest.lanes.mechanical.iter().any(|command| is_model_lane(command)));
+    }
+
+    #[test]
+    fn the_compiled_entrypoint_is_the_argv_the_deleted_default_spawned() {
+        // Tripwire: `DEFAULT_LANE_PROGRAM` used to be `"cargo xtask transform"`.
+        // Pre-manifest blooms fold against `compiled()`, so that entrypoint must
+        // stay the invocation the deleted default named. Changing it rewrites
+        // the program those records dispatched.
+        assert_eq!(super::COMPILED_ENTRYPOINT_PROGRAM, "cargo");
+        assert_eq!(super::COMPILED_ENTRYPOINT_ARGS, ["xtask", "transform"]);
     }
 
     #[test]

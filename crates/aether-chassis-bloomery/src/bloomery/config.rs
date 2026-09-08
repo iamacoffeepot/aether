@@ -19,7 +19,6 @@ use aether_bloomery_github::{
 };
 use aether_substrate::config::ConfigError;
 
-const DEFAULT_LANE_PROGRAM: &str = "cargo xtask transform";
 #[cfg(feature = "github")]
 use super::source::SourceShell;
 
@@ -241,22 +240,23 @@ pub struct CoordinatorConfig {
     /// resolves regardless of the coordinator's cwd.
     #[config(default = ".bloomery/local-worktrees")]
     pub local_worktree_base: String,
-    /// The program a local lane dispatch spawns in the scratch worktree, as a
-    /// whole invocation — the program and the arguments that precede the
-    /// transform's own argv (#4727). The default is the portable entrypoint the
-    /// wrapper workflows run.
+    /// Host override for the program a local lane dispatch spawns in the scratch
+    /// worktree, as a whole invocation — the program and the arguments that
+    /// precede the transform's own argv (#4727, ADR-0215).
     ///
-    /// Resolvable rather than hardcoded so a test can drive the *whole* dispatch
-    /// — the `git worktree add`, the environment scrub, the child, its exit
-    /// status, the `evidence.json` — against a stand-in that finishes in
-    /// milliseconds. Everything above the program is where the failures have
-    /// actually been, and a double mounted at the runner seam skips all of it.
+    /// Empty (the default) means the sealed manifest's `[entrypoint]`. A
+    /// non-empty value *replaces* that entrypoint, which is what this knob was
+    /// built for: a test driving the whole dispatch — the `git worktree add`,
+    /// the environment scrub, the child, its exit status, the `evidence.json`
+    /// — against a stand-in that finishes in milliseconds. Everything above the
+    /// program is where the failures have actually been, and a double mounted
+    /// at the runner seam skips all of it.
     ///
     /// Named `AETHER_BLOOMERY_LANE_PROGRAM` rather than under this struct's
     /// `AETHER_GITHUB` prefix, for the same reason the operator knobs are: which
     /// program a lane runs is not a property of the GitHub connection, and holds
     /// whether or not a remote is configured at all.
-    #[config(env = "AETHER_BLOOMERY_LANE_PROGRAM", default = "cargo xtask transform")]
+    #[config(env = "AETHER_BLOOMERY_LANE_PROGRAM", default = "")]
     pub local_lane_program: String,
     /// How many local lane children the executor backend may run at once.
     ///
@@ -534,7 +534,7 @@ impl Default for CoordinatorConfig {
             local_lane_enabled: true,
             local_lane_commands: "construct.,review.,scope.,retrospect.".to_owned(),
             local_worktree_base: ".bloomery/local-worktrees".to_owned(),
-            local_lane_program: DEFAULT_LANE_PROGRAM.to_owned(),
+            local_lane_program: String::new(),
             max_concurrent_lanes: 3,
             lane_target_base: String::new(),
             lane_target_budget_bytes: 68_719_476_736,

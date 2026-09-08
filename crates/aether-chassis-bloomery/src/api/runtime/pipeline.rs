@@ -15,20 +15,19 @@
 //! in meaning moves the digest — which matters, because this digest is about to
 //! appear in every receipt.
 //!
-//! # What a missing file means here, and why it is not yet a refusal
+//! # What a missing file means here
 //!
-//! ADR-0215 refuses a base that carries no manifest, and deliberately does not
-//! arm that refusal at this slice. The manifest cannot arrive by the mechanism
-//! that requires it: the file lands first as ordinary content on the day's
-//! base, and the refusal is armed only once every base the coordinator can seal
-//! against carries one. So a base whose tree has no `pipeline.toml` — and a
-//! base whose git object this host cannot resolve, which is the same
-//! non-answer — derives no entry and refuses nothing.
+//! ADR-0215 refuses a base that carries no manifest. This read still returns
+//! [`None`] for a missing file or an unresolvable base — it is the derivation,
+//! not the door — and the draft-formation door maps that `None` to a 422
+//! naming the base and [`PIPELINE_MANIFEST_PATH`]. The seal door refuses a
+//! spec whose registry names no `PipelineManifest` address, so a `Fact::Seal`
+//! admitted without going through draft formation cannot bypass the file.
 //!
-//! A file that *is* there and will not decode is the opposite case, and is
-//! refused now: it can only exist because someone edited it, the editor is
-//! holding the diff that broke it, and nothing about the bootstrap ordering
-//! asks the coordinator to tolerate a manifest whose meaning it cannot read.
+//! A file that *is* there and will not decode is refused here: it can only
+//! exist because someone edited it, the editor is holding the diff that broke
+//! it, and nothing about the bootstrap ordering asks the coordinator to
+//! tolerate a manifest whose meaning it cannot read.
 
 use std::path::Path;
 
@@ -172,11 +171,12 @@ mod tests {
     }
 
     #[test]
-    fn a_base_that_declares_no_manifest_derives_nothing_rather_than_refusing() {
-        // The bootstrap ordering, as a test: every base sealed before the file
-        // landed has to stay sealable, and an unresolvable base is the same
-        // non-answer as an absent file. Arming either refusal here would take
-        // the day down at the moment the file was introduced.
+    fn a_base_that_declares_no_manifest_derives_nothing() {
+        // The derivation still answers `None` for a missing file or an
+        // unresolvable base: it is the read, not the door. Draft formation
+        // maps that `None` to a 422, and the seal door refuses a spec that
+        // names no manifest address. Splitting them is what lets a `Fact::Seal`
+        // admitted without a draft still meet the same rule.
         let repo = repository();
         write(repo.path(), "README.md", "a base from before the manifest\n");
         let undeclared = commit(repo.path(), "no manifest yet");
@@ -185,11 +185,13 @@ mod tests {
         let correspondence = OnePair { digest: base, object: object_at(&undeclared) };
         assert!(
             derive_pipeline_manifest(repo.path(), Some(&correspondence), base)
-                .expect("a base with no manifest is not a refusal")
+                .expect("a missing file is a non-answer at the read, not a parse error")
                 .is_none()
         );
         assert!(
-            derive_pipeline_manifest(repo.path(), None, base).expect("an unresolvable base is not a refusal").is_none()
+            derive_pipeline_manifest(repo.path(), None, base)
+                .expect("an unresolvable base is the same non-answer")
+                .is_none()
         );
     }
 

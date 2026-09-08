@@ -332,8 +332,8 @@ mod tests {
             idempotency_key: IdempotencyKey("seal".into()),
             fact: Fact::GraphSeal { predecessor: None, spec, edges: edges.to_vec() },
         };
-        let decided = reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default());
-        (snapshot.apply(&seal, &decided, &ResolvedConfigs::default()), bloom)
+        let decided = reduce(&snapshot, &seal, &crate::testing::compiled_resolved(), &SpendWindow::default());
+        (snapshot.apply(&seal, &decided, &crate::testing::compiled_resolved()), bloom)
     }
 
     fn rung<'a>(chain: &'a [TransitionWhy], name: &str) -> &'a TransitionWhy {
@@ -355,8 +355,8 @@ mod tests {
             idempotency_key: IdempotencyKey("refused".into()),
             fact: Fact::FoldRefused { bloom, refusal: refusal.clone() },
         };
-        let decided = reduce(&snapshot, &refused, &ResolvedConfigs::default(), &SpendWindow::default());
-        let snapshot = snapshot.apply(&refused, &decided, &ResolvedConfigs::default());
+        let decided = reduce(&snapshot, &refused, &crate::testing::compiled_resolved(), &SpendWindow::default());
+        let snapshot = snapshot.apply(&refused, &decided, &crate::testing::compiled_resolved());
 
         let document = why_of(&snapshot, &bloom).expect("the bloom is known");
         let fold = rung(&document.chain, FOLD);

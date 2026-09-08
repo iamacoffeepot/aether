@@ -230,8 +230,8 @@ mod tests {
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         let snapshot = snapshot.apply(
             &seal,
-            &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
-            &ResolvedConfigs::default(),
+            &reduce(&snapshot, &seal, &crate::testing::compiled_resolved(), &SpendWindow::default()),
+            &crate::testing::compiled_resolved(),
         );
         (snapshot, bloom, members[0].clone(), members[1].clone())
     }
@@ -258,7 +258,7 @@ mod tests {
         let owned: Vec<String> = paths.iter().map(|path| (*path).to_string()).collect();
         let decided = reduce_lane_writes_observed(snapshot, &bloom, workpiece, stage, &owned);
         let event = Event { idempotency_key: IdempotencyKey(key.into()), fact };
-        (snapshot.apply(&event, &decided, &ResolvedConfigs::default()), decided)
+        (snapshot.apply(&event, &decided, &crate::testing::compiled_resolved()), decided)
     }
 
     #[test]
@@ -363,7 +363,7 @@ mod tests {
             fact: observation(bloom, &wp_a, stage, &["crates/shared/x.rs"]),
         };
 
-        let after = snapshot.apply(&event, &recorded, &ResolvedConfigs::default());
+        let after = snapshot.apply(&event, &recorded, &crate::testing::compiled_resolved());
 
         assert_eq!(after.lease_eviction(&bloom, &wp_b).unwrap().by, wp_a);
         assert_eq!(after.lease_eviction(&bloom, &wp_b).unwrap().path, "crates/shared/x.rs");

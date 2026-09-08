@@ -113,7 +113,13 @@ impl ApiCapabilityState {
             )
         })?;
         let Some(derived) = derived else {
-            return Ok(None);
+            return Err(error_response(
+                422,
+                &format!(
+                    "base {} carries no `{PIPELINE_MANIFEST_PATH}`; a base must declare its lanes (ADR-0215)",
+                    base.to_hex()
+                ),
+            ));
         };
 
         let named = patch.configs.as_ref().map_or_else(

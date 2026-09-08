@@ -290,8 +290,12 @@ fn seal_event_configured(key: &str, base: u8, workpiece: &str, configs: ConfigRe
     member.approval.subject = member.subject();
     // An empty registry selects the compiled stage line. A configured seal uses
     // the catalog content the caller resolved before reducing.
-    let spec =
-        BloomDraft { proposals: vec![member], base: Digest::from_bytes([base; 32]), ..BloomDraft::default() }.seal();
+    let spec = aether_bloomery::testing::with_compiled_manifest(BloomDraft {
+        proposals: vec![member],
+        base: Digest::from_bytes([base; 32]),
+        ..BloomDraft::default()
+    })
+    .seal();
     Event { idempotency_key: IdempotencyKey(key.to_owned()), fact: Fact::Seal(spec) }
 }
 
@@ -1205,11 +1209,11 @@ fn approved_member(workpiece: &str) -> Membership {
 }
 
 fn two_member_seal_event(key: &str, base: u8, wp_a: &str, wp_b: &str) -> Event {
-    let spec = BloomDraft {
+    let spec = aether_bloomery::testing::with_compiled_manifest(BloomDraft {
         proposals: vec![approved_member(wp_a), approved_member(wp_b)],
         base: Digest::from_bytes([base; 32]),
         ..BloomDraft::default()
-    }
+    })
     .seal();
     Event { idempotency_key: IdempotencyKey(key.to_owned()), fact: Fact::Seal(spec) }
 }

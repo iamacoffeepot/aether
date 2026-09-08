@@ -10,9 +10,11 @@
 //!
 //! The knob is a whole invocation rather than a bare path because the production
 //! value *is* one — `cargo xtask transform` is a program plus two leading
-//! arguments, and a path-only knob could not express its own default. Words are
-//! split on whitespace; a program whose path contains a space needs a wrapper
-//! script, which is the same bargain `PATH` itself strikes.
+//! arguments, now declared as `[entrypoint]` in the sealed manifest (ADR-0215).
+//! A path-only knob could not express that. Words are split on whitespace; a
+//! program whose path contains a space needs a wrapper script, which is the
+//! same bargain `PATH` itself strikes. Empty means "use the sealed entrypoint";
+//! a non-empty value replaces it.
 //!
 //! [`AETHER_HARNESS_FLEET_HEADLESS_BIN`] is the precedent for the *shape* — a
 //! harness pointing a real fork at a stand-in binary — but not for the
@@ -26,9 +28,7 @@
 
 use std::process::Command;
 
-/// The default lane invocation: the same portable entrypoint the wrapper
-/// workflows run.
-pub const DEFAULT_LANE_PROGRAM: &str = "cargo xtask transform";
+use aether_bloomery::{LaneEntrypoint, PipelineManifest};
 
 /// The program a lane dispatch spawns, plus the arguments that precede the
 /// transform's own argv.
@@ -36,7 +36,9 @@ pub const DEFAULT_LANE_PROGRAM: &str = "cargo xtask transform";
 /// A dispatch appends `<command> --out <dir> --nonce <n>` (and the model-lane
 /// axes) after [`leading_args`](Self::leading_args), so a stand-in binary sees
 /// exactly the argv the real lane does — its own leading words, then the
-/// coordinator's.
+/// coordinator's. Production reads those leading words from the bloom's sealed
+/// [`PipelineManifest`] entrypoint (ADR-0215); [`parse_override`] is the host
+/// knob that replaces them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneProgram {
     program: String,
@@ -45,26 +47,42 @@ pub struct LaneProgram {
 
 impl Default for LaneProgram {
     fn default() -> Self {
-        Self::parse(DEFAULT_LANE_PROGRAM)
+        Self::from_entrypoint(&PipelineManifest::compiled().entrypoint)
     }
 }
 
 impl LaneProgram {
-    /// Parse a configured invocation — whitespace-separated words, the first the
-    /// program and the rest its leading arguments.
+    /// The sealed manifest's `[entrypoint]`: the program and the arguments that
+    /// precede the work order's own argv.
+    #[must_use]
+    pub fn from_entrypoint(entrypoint: &LaneEntrypoint) -> Self {
+        Self { program: entrypoint.program.clone(), leading_args: entrypoint.args.clone() }
+    }
+
+    /// Parse a configured host override — whitespace-separated words, the first
+    /// the program and the rest its leading arguments.
     ///
-    /// An empty (or all-whitespace) value resolves to
-    /// [`DEFAULT_LANE_PROGRAM`] rather than to an unspawnable empty program: a
-    /// deployment that clears the knob means "the normal lane", and a config
-    /// layer that renders an unset string as `""` must not turn every dispatch
-    /// into a spawn failure.
+    /// Empty (or all-whitespace) is *no override*: the dispatch reads the sealed
+    /// manifest rather than a compiled string. A non-empty value replaces the
+    /// entrypoint wholesale, which is what #4727 built this knob for — a test
+    /// pointing the real spawn at a stand-in binary.
+    #[must_use]
+    pub fn parse_override(configured: &str) -> Option<Self> {
+        let mut words = configured.split_whitespace().map(str::to_owned);
+        let program = words.next()?;
+        Some(Self { program, leading_args: words.collect() })
+    }
+
+    /// Parse a configured invocation that is known to be non-empty — tests and
+    /// a host that has already decided to override.
+    ///
+    /// An empty value is [`Default`] (the compiled entrypoint) rather than an
+    /// unspawnable program, so a caller that meant to override and passed `""`
+    /// still spawns something. Production empty-vs-set lives on
+    /// [`parse_override`].
     #[must_use]
     pub fn parse(configured: &str) -> Self {
-        let mut words = configured.split_whitespace().map(str::to_owned);
-        let Some(program) = words.next() else {
-            return Self::parse(DEFAULT_LANE_PROGRAM);
-        };
-        Self { program, leading_args: words.collect() }
+        Self::parse_override(configured).unwrap_or_default()
     }
 
     /// The program the dispatch spawns.
@@ -90,7 +108,9 @@ impl LaneProgram {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_LANE_PROGRAM, LaneProgram};
+    use aether_bloomery::PipelineManifest;
+
+    use super::LaneProgram;
 
     #[test]
     fn a_configured_invocation_splits_into_a_program_and_its_leading_arguments() {
@@ -101,20 +121,25 @@ mod tests {
     }
 
     #[test]
-    fn the_production_default_is_expressible_in_the_knobs_own_vocabulary() {
-        // Tripwire: the reason the knob is a word list rather than a path. If
-        // the default ever stops round-tripping through `parse`, the knob can no
-        // longer state what it resolves to and a deployment cannot restore it.
-        assert_eq!(LaneProgram::parse(DEFAULT_LANE_PROGRAM), LaneProgram::default());
-        assert_eq!(LaneProgram::default().program(), "cargo");
-        assert_eq!(LaneProgram::default().leading_args(), ["xtask", "transform"]);
+    fn the_compiled_entrypoint_is_the_argv_the_deleted_default_spawned() {
+        // Tripwire: `DEFAULT_LANE_PROGRAM` used to be `"cargo xtask transform"`,
+        // and pre-manifest blooms fold against `PipelineManifest::compiled()`.
+        // Those two have to stay the same argv so a record sealed before the
+        // file existed still dispatches the program this binary always ran.
+        let compiled = LaneProgram::from_entrypoint(&PipelineManifest::compiled().entrypoint);
+        assert_eq!(compiled, LaneProgram::default());
+        assert_eq!(compiled.program(), "cargo");
+        assert_eq!(compiled.leading_args(), ["xtask", "transform"]);
     }
 
     #[test]
-    fn a_cleared_knob_resolves_to_the_normal_lane_rather_than_an_unspawnable_program() {
-        // Tripwire: a config layer that renders an unset string as `""` would
-        // otherwise turn every dispatch into a spawn failure — a coordinator
-        // that runs no lanes at all, from a knob nobody set.
-        assert_eq!(LaneProgram::parse("   "), LaneProgram::default());
+    fn a_cleared_knob_is_no_override_rather_than_a_compiled_string() {
+        // Tripwire: empty is the production default, and it must mean "the
+        // sealed manifest" rather than silently resurrecting the deleted
+        // compiled spawn line. A non-empty value is still the host override
+        // a test uses to point the real spawn at a stand-in.
+        assert_eq!(LaneProgram::parse_override("   "), None);
+        assert_eq!(LaneProgram::parse_override(""), None);
+        assert!(LaneProgram::parse_override("/tmp/mock-lane --script /tmp/script.json").is_some());
     }
 }

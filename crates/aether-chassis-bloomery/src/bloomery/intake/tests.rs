@@ -853,12 +853,18 @@ fn sealed_via_reducer(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snaps
     };
     // The approval binds the member's whole subject (ADR-0174).
     member.approval.subject = member.subject();
-    let spec = BloomDraft { proposals: vec![member], base: Digest::default(), ..BloomDraft::default() }.seal();
+    let spec = aether_bloomery::testing::with_compiled_manifest(BloomDraft {
+        proposals: vec![member],
+        base: Digest::default(),
+        ..BloomDraft::default()
+    })
+    .seal();
     let bloom = spec.id();
     let snapshot = Snapshot::new(Digest::default()).with_green_base(Digest::default());
     let seal = Event { idempotency_key: IdempotencyKey("seal".to_owned()), fact: Fact::Seal(spec) };
-    let decisions = reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default());
-    let snapshot = snapshot.apply(&seal, &decisions, &ResolvedConfigs::default());
+    let resolved = aether_bloomery::testing::compiled_resolved();
+    let decisions = reduce(&snapshot, &seal, &resolved, &SpendWindow::default());
+    let snapshot = snapshot.apply(&seal, &decisions, &resolved);
     (snapshot, bloom)
 }
 

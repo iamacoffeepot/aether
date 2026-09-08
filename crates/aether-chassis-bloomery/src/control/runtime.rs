@@ -2357,8 +2357,12 @@ mod tests {
     }
 
     fn seal_event(key: &str, workpiece: &str) -> Event {
-        let spec =
-            BloomDraft { proposals: vec![membership(workpiece, 1)], base: digest(0), ..BloomDraft::default() }.seal();
+        let spec = aether_bloomery::testing::with_compiled_manifest(BloomDraft {
+            proposals: vec![membership(workpiece, 1)],
+            base: digest(0),
+            ..BloomDraft::default()
+        })
+        .seal();
         Event { idempotency_key: IdempotencyKey(key.into()), fact: Fact::Seal(spec) }
     }
 
@@ -2377,7 +2381,7 @@ mod tests {
         event: &Event,
         last: Option<Digest>,
     ) -> Option<(ViewDocument, Digest, OutboxPayload)> {
-        let configs = ResolvedConfigs::default();
+        let configs = aether_bloomery::testing::compiled_resolved();
         let decisions = reduce(snapshot, event, &configs, &SpendWindow::default());
         view_document_outbox(snapshot, &configs, event, &decisions, None, last).expect("a view document encodes").map(
             |(payload, digest)| {
@@ -2501,8 +2505,8 @@ mod tests {
         let (_, digest, _) = admit_view(&snapshot, &seal, None).expect("the first admit publishes");
         let snapshot = snapshot.apply(
             &seal,
-            &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
-            &ResolvedConfigs::default(),
+            &reduce(&snapshot, &seal, &aether_bloomery::testing::compiled_resolved(), &SpendWindow::default()),
+            &aether_bloomery::testing::compiled_resolved(),
         );
 
         assert!(
@@ -2519,8 +2523,8 @@ mod tests {
         let seal = seal_event("seal", "issue-5381");
         snapshot = snapshot.apply(
             &seal,
-            &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
-            &ResolvedConfigs::default(),
+            &reduce(&snapshot, &seal, &aether_bloomery::testing::compiled_resolved(), &SpendWindow::default()),
+            &aether_bloomery::testing::compiled_resolved(),
         );
         let bloom = snapshot.blooms.keys().copied().next().expect("the sealed bloom");
         snapshot.blooms.get_mut(&bloom).expect("the sealed bloom").status = BloomStatus::Resolved;
@@ -2535,8 +2539,8 @@ mod tests {
 
         snapshot = snapshot.apply(
             &land,
-            &reduce(&snapshot, &land, &ResolvedConfigs::default(), &SpendWindow::default()),
-            &ResolvedConfigs::default(),
+            &reduce(&snapshot, &land, &aether_bloomery::testing::compiled_resolved(), &SpendWindow::default()),
+            &aether_bloomery::testing::compiled_resolved(),
         );
         let (document, _, _) = admit_view(&snapshot, &overlap_event("overlap", "issue-5381"), Some(digest))
             .expect("dropping the landed bloom is itself a document change");

@@ -174,8 +174,12 @@ mod tests {
 
     #[test]
     fn a_green_receipt_releases_withheld_construct() {
-        let spec =
-            BloomDraft { proposals: vec![membership("wp-a", 1)], base: digest(0), ..BloomDraft::default() }.seal();
+        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+            proposals: vec![membership("wp-a", 1)],
+            base: digest(0),
+            ..BloomDraft::default()
+        })
+        .seal();
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         let sealed = reduce(&Snapshot::new(digest(0)), &seal, &ResolvedConfigs::default(), &SpendWindow::default());
         let snapshot = Snapshot::new(digest(0)).apply(&seal, &sealed, &ResolvedConfigs::default());

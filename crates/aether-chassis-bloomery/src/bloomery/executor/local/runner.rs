@@ -100,6 +100,10 @@ pub struct RunSpec<'a> {
     /// The landing-receipt digest the `retrospect.read` lane binds its findings
     /// to (`--receipt`). `None` on every other command.
     pub receipt: Option<&'a str>,
+    /// The sealed manifest's `[entrypoint]` for this bloom (ADR-0215): the
+    /// program and leading arguments a dispatch spawns before the work order's
+    /// own argv. A host override on the runner replaces it.
+    pub entrypoint: super::lane_program::LaneProgram,
 }
 
 /// A running (or finished) transform child — the lifecycle the backend maps onto

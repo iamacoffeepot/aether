@@ -4108,7 +4108,7 @@ mod sealed_config {
     /// Content for every lane this module seals, so a seal under test refuses on
     /// the property it is about rather than on content nobody supplied.
     fn lane_content() -> ResolvedConfigs {
-        let mut configs = ResolvedConfigs::default();
+        let mut configs = crate::common::compiled_resolved();
         for lane in ["cheap", "expensive"] {
             let value = LaneConfig { lane: lane.to_owned() };
             configs.insert(value.address(), LaneConfig::NAME, to_vec(&value).expect("test value encodes"), None);
@@ -4126,7 +4126,12 @@ mod sealed_config {
             &Event {
                 idempotency_key: IdempotencyKey("seal".to_owned()),
                 fact: Fact::Seal(
-                    BloomDraft { proposals: vec![member], base: digest(1), ..BloomDraft::default() }.seal(),
+                    crate::common::with_compiled_manifest(BloomDraft {
+                        proposals: vec![member],
+                        base: digest(1),
+                        ..BloomDraft::default()
+                    })
+                    .seal(),
                 ),
             },
             configs,
@@ -4168,7 +4173,7 @@ mod sealed_config {
         member.configs = sealing("cheap");
         let member = approved(member);
 
-        let refused = sealed_given(member.clone(), &ResolvedConfigs::default());
+        let refused = sealed_given(member.clone(), &crate::common::compiled_resolved());
         assert!(
             matches!(
                 refused,
@@ -4187,7 +4192,12 @@ mod sealed_config {
     fn draft_with(bloom: ConfigRegistry, member: ConfigRegistry) -> BloomDraft {
         let mut proposal = membership("wp-a", 1);
         proposal.configs = member;
-        BloomDraft { proposals: vec![proposal], base: digest(1), configs: bloom, ..BloomDraft::default() }
+        crate::common::with_compiled_manifest(BloomDraft {
+            proposals: vec![proposal],
+            base: digest(1),
+            configs: bloom,
+            ..BloomDraft::default()
+        })
     }
 
     // Tripwire: the bloom id covers the configuration sealed at both scopes. A

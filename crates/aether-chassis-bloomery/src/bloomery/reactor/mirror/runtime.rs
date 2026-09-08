@@ -580,14 +580,20 @@ mod tests {
         let base = digest(0);
         // The seal-time catalog admission (ADR-0149 §The line) rejects the zero
         // default, so the draft must promise the one line the pipeline runs.
-        let spec = BloomDraft { proposals: vec![member], base, ..BloomDraft::default() }.seal();
+        let spec = aether_bloomery::testing::with_compiled_manifest(BloomDraft {
+            proposals: vec![member],
+            base,
+            ..BloomDraft::default()
+        })
+        .seal();
         let event = Event { idempotency_key: IdempotencyKey("seal-1".into()), fact: Fact::Seal(spec) };
 
         let mut snapshot = Snapshot::new(base);
+        let resolved = aether_bloomery::testing::compiled_resolved();
         snapshot = snapshot.apply(
             &event,
-            &reduce(&snapshot, &event, &ResolvedConfigs::default(), &aether_bloomery::SpendWindow::default()),
-            &ResolvedConfigs::default(),
+            &reduce(&snapshot, &event, &resolved, &aether_bloomery::SpendWindow::default()),
+            &resolved,
         );
         to_vec(&view_of(&snapshot, |_| None)).unwrap()
     }

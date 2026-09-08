@@ -15,9 +15,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aether_bloomery::{
     BackendObjectId, BloomId, CandidateRef, CompositionParents, Conclusion, ConfigRegistry, ConfigScopes, Digest,
     EvidenceRef, ExecutionStatus, ExecutorBackend, FoldContribution, LaneObservation, Nonce, ObservedLaneWrites,
-    PriceTable, ResolvedModel, RetrospectClaim, SessionSlug, SharedCorrespondence, StageId, StageVerdict, StudyCost,
-    SuppressionRequest, SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId,
-    is_model_lane, narrow_composition,
+    PipelineManifest, PriceTable, ResolvedModel, RetrospectClaim, SessionSlug, SharedCorrespondence, StageId,
+    StageVerdict, StudyCost, SuppressionRequest, SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle,
+    WorkOrder, WorkpieceId, is_model_lane, narrow_composition,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_git::source::candidate_ref_name;
@@ -346,6 +346,9 @@ struct PendingRun {
     // The landing-receipt digest this dispatch's evidence binds, hex-encoded
     // for `--receipt`. Present whenever the order named a subject input.
     receipt_hex: Option<String>,
+    // The sealed manifest's `[entrypoint]` for this bloom, used when the host
+    // has not overridden the lane program.
+    entrypoint: LaneProgram,
 }
 
 impl PendingRun {
@@ -380,6 +383,7 @@ impl PendingRun {
             stage: self.stage,
             bloom: self.bloom_hex.as_deref(),
             receipt: self.receipt_hex.as_deref(),
+            entrypoint: self.entrypoint.clone(),
         }
     }
 }
@@ -620,6 +624,11 @@ pub struct LocalExecutor {
     //
     // [`REQUIRED_KIT`]: crate::bloomery::REQUIRED_KIT
     kit_gate: bool,
+    // Host override for the lane program. `None` means each dispatch reads the
+    // sealed `[entrypoint]`. The kit inspect keys off the program that will
+    // actually spawn, so a mock named as that entrypoint does not require the
+    // operator kit.
+    lane_override: Option<LaneProgram>,
     // PATH the kit inspects when the gate is on. `None` is the process PATH
     // a dispatched lane inherits; a test names a directory of stand-in
     // binaries so a missing-tool refusal does not depend on this host.
@@ -659,6 +668,7 @@ impl LocalExecutor {
             sessions: None,
             builders,
             kit_gate: false,
+            lane_override: None,
             kit_path: None,
             #[cfg(test)]
             enqueue_parks: Mutex::new(HashMap::new()),
@@ -722,12 +732,21 @@ impl LocalExecutor {
     }
 
     /// Inspect the lane-host kit on every submit and refuse when a required
-    /// tool is missing (#5035). Off by default so seam tests and a mock-lane
-    /// program keep dispatching; [`from_config`](Self::from_config) turns it
-    /// on for the production lane program.
+    /// tool is missing (#5035). Off by default so seam tests keep dispatching;
+    /// [`from_config`](Self::from_config) turns it on, and the inspect itself
+    /// still keys off the program that will spawn — a mock named as the sealed
+    /// `[entrypoint]` does not require the operator kit.
     #[must_use]
     pub fn with_kit_gate(mut self, enabled: bool) -> Self {
         self.kit_gate = enabled;
+        self
+    }
+
+    /// Record the host lane-program override so the kit inspect can see the
+    /// program a dispatch will actually spawn.
+    #[must_use]
+    pub fn with_lane_override(mut self, lane_override: Option<LaneProgram>) -> Self {
+        self.lane_override = lane_override;
         self
     }
 
@@ -756,11 +775,12 @@ impl LocalExecutor {
         session: &SessionConfig,
     ) -> Self {
         let identity = CaptureIdentity { name: config.operator_name.clone(), email: config.operator_email.clone() };
-        let lane_program = LaneProgram::parse(&config.local_lane_program);
+        let lane_override = LaneProgram::parse_override(&config.local_lane_program);
 
         let backend = Self::new(
             Arc::new(
-                ProcessTransformRunner::new(identity, lane_program.clone(), config.lane_repository())
+                ProcessTransformRunner::new(identity, LaneProgram::default(), config.lane_repository())
+                    .with_lane_override(lane_override.clone())
                     .with_fetch_remote(config.candidate_remote()),
             ),
             correspondence,
@@ -768,7 +788,8 @@ impl LocalExecutor {
         )
         .with_max_concurrent_lanes(config.max_concurrent_lanes)
         .with_lane_build(&config.lane_target_base, config.lane_build_jobs)
-        .with_kit_gate(lane_program == LaneProgram::default());
+        .with_kit_gate(true)
+        .with_lane_override(lane_override);
         let backend = match super::SessionReuse::from_config(session) {
             Ok(sessions) => backend.with_session_reuse(sessions),
             Err(error) => {
@@ -1058,7 +1079,42 @@ impl LocalExecutor {
             priority,
             bloom_hex: identity.as_ref().map(|identity| aether_bloomery::encode_hex(&identity.bloom)),
             receipt_hex: Some(hex_digest(&subject)),
+            entrypoint: self.sealed_entrypoint(&nonce),
         })
+    }
+
+    // The sealed `[entrypoint]` this dispatch's bloom declared, or the compiled
+    // one when the order names none — a pre-manifest bloom, or a store-less
+    // backend. A host override on the runner replaces this at spawn.
+    fn sealed_entrypoint(&self, nonce: &str) -> LaneProgram {
+        LaneProgram::from_entrypoint(&self.sealed_manifest(nonce).entrypoint)
+    }
+
+    fn spawn_program(&self, nonce: &str) -> LaneProgram {
+        self.lane_override.clone().unwrap_or_else(|| self.sealed_entrypoint(nonce))
+    }
+
+    fn sealed_manifest(&self, nonce: &str) -> PipelineManifest {
+        let Some(messages) = self.messages.as_ref() else {
+            return PipelineManifest::compiled();
+        };
+        let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
+        let Ok(Some(order)) = store.lookup_order(nonce) else {
+            return PipelineManifest::compiled();
+        };
+        let Ok(registry) = from_bytes::<ConfigRegistry>(&order.configs) else {
+            return PipelineManifest::compiled();
+        };
+        let Some(address) = ConfigScopes::bloom_wide(&registry).address::<PipelineManifest>() else {
+            return PipelineManifest::compiled();
+        };
+        let Ok(Some((kind, bytes, _))) = store.lookup_config(address.as_bytes()) else {
+            return PipelineManifest::compiled();
+        };
+        if kind != PipelineManifest::NAME {
+            return PipelineManifest::compiled();
+        }
+        from_bytes(&bytes).unwrap_or_else(|_| PipelineManifest::compiled())
     }
 
     // The slot that last built this member, when one has (ADR-0196 as amended
@@ -2672,7 +2728,7 @@ impl ExecutorBackend for LocalExecutor {
         let Some(_submit) = self.claim_submit(&order.nonce.0)? else {
             return Ok(WorkHandle::new(order.nonce.clone()));
         };
-        if self.kit_gate {
+        if self.kit_gate && self.spawn_program(&order.nonce.0) == LaneProgram::default() {
             let report = self
                 .kit_path
                 .as_ref()

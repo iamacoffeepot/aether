@@ -508,11 +508,11 @@ mod tests {
     }
 
     fn spec(members: &[(&str, u8)]) -> BloomSpec {
-        BloomDraft {
+        crate::testing::with_compiled_manifest(BloomDraft {
             proposals: members.iter().map(|(name, revision)| membership(name, *revision)).collect(),
             base: digest(0),
             ..BloomDraft::default()
-        }
+        })
         .seal()
     }
 
@@ -521,8 +521,7 @@ mod tests {
     }
 
     fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
-        let decisions = reduce(snapshot, event, &ResolvedConfigs::default(), &SpendWindow::default());
-        (snapshot.apply(event, &decisions, &ResolvedConfigs::default()), decisions)
+        crate::testing::step(snapshot, event)
     }
 
     fn seal_graph(members: &[(&str, u8)], edges: Vec<MemberDependency>) -> (Snapshot, BloomSpec) {
@@ -730,10 +729,10 @@ mod tests {
         let integrate = event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) });
 
         let base = Snapshot::new(digest(0)).with_green_base(digest(0));
-        let sealed = reduce(&base, &seal, &ResolvedConfigs::default(), &SpendWindow::default());
-        let after_seal = base.apply(&seal, &sealed, &ResolvedConfigs::default());
-        let integrated = reduce(&after_seal, &integrate, &ResolvedConfigs::default(), &SpendWindow::default());
-        let live = after_seal.apply(&integrate, &integrated, &ResolvedConfigs::default());
+        let sealed = reduce(&base, &seal, &crate::testing::compiled_resolved(), &SpendWindow::default());
+        let after_seal = base.apply(&seal, &sealed, &crate::testing::compiled_resolved());
+        let integrated = reduce(&after_seal, &integrate, &crate::testing::compiled_resolved(), &SpendWindow::default());
+        let live = after_seal.apply(&integrate, &integrated, &crate::testing::compiled_resolved());
 
         let replayed_seal: Decisions = decode_recorded_decisions(
             &to_vec(&sealed).expect("seal encodes"),
@@ -749,12 +748,12 @@ mod tests {
             .apply(
                 &from_bytes(&to_vec(&seal).expect("event encodes")).expect("event decodes"),
                 &replayed_seal,
-                &ResolvedConfigs::default(),
+                &crate::testing::compiled_resolved(),
             )
             .apply(
                 &from_bytes(&to_vec(&integrate).expect("event encodes")).expect("event decodes"),
                 &replayed_integrate,
-                &ResolvedConfigs::default(),
+                &crate::testing::compiled_resolved(),
             );
 
         let bloom = spec.id();

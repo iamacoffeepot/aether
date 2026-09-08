@@ -100,7 +100,12 @@ fn script_dir(out: &Path) -> &Path {
 /// # Errors
 /// The argv was mis-shaped, or the script/evidence could not be read/written.
 pub fn run<I: IntoIterator<Item = String>>(args: I, worktree: &Path) -> Result<i32, MockLaneError> {
-    let args = argv::parse(args)?;
+    let argv: Vec<String> = args.into_iter().collect();
+    run_recorded(argv.clone(), argv, worktree)
+}
+
+fn run_recorded(parse_from: Vec<String>, argv: Vec<String>, worktree: &Path) -> Result<i32, MockLaneError> {
+    let args = argv::parse(parse_from)?;
     let script_dir = script_dir(&args.out);
 
     // An absent or undecodable script is an all-passing one rather than a
@@ -128,6 +133,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I, worktree: &Path) -> Result<i
             worktree: Some(worktree.display().to_string()),
             env: inherited_env_names(),
             process_id: Some(process::id()),
+            argv,
         },
     )?;
 
@@ -164,7 +170,8 @@ fn inherited_env_names() -> Vec<String> {
 /// # Errors
 /// As [`run`], plus a working directory the process cannot read.
 pub fn run_process() -> Result<i32, MockLaneError> {
-    run(env::args().skip(1), &env::current_dir()?)
+    let argv: Vec<String> = env::args().collect();
+    run_recorded(argv.iter().skip(1).cloned().collect(), argv, &env::current_dir()?)
 }
 
 #[cfg(test)]

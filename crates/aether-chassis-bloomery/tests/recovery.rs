@@ -158,8 +158,12 @@ fn sealed_bloom(key: &str, workpiece: &str) -> (Event, Decisions, BloomId) {
         },
     };
     member.approval.subject = member.subject();
-    let spec =
-        BloomDraft { proposals: vec![member], base: Digest::from_bytes([0; 32]), ..BloomDraft::default() }.seal();
+    let spec = aether_bloomery::testing::with_compiled_manifest(BloomDraft {
+        proposals: vec![member],
+        base: Digest::from_bytes([0; 32]),
+        ..BloomDraft::default()
+    })
+    .seal();
     let event = Event { idempotency_key: IdempotencyKey(key.to_owned()), fact: Fact::Seal(spec) };
     let decisions = reduce(&Snapshot::default(), &event, &ResolvedConfigs::default(), &SpendWindow::default());
     let Outcome::Sealed(bloom) = decisions.outcome else {

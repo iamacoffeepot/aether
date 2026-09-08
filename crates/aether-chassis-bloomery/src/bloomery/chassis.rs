@@ -750,7 +750,7 @@ impl BootableChassis for BloomeryChassis {
         // process, and a loaded lane-boundary suite boots many coordinators at
         // once — a parked probe used to leave the RPC port unbound past the
         // handshake deadline (#5035).
-        if LaneProgram::parse(&env.coordinator.local_lane_program) == LaneProgram::default() {
+        if LaneProgram::parse_override(&env.coordinator.local_lane_program).is_none() {
             KitReport::inspect().log_at_boot();
         }
         let BloomeryEnv { rpc_port, http_port, mut store, artifacts, github, notify, coordinator, session, signing } =

@@ -10,7 +10,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use aether_bloomery::PIPELINE_MANIFEST_PATH;
 use tempfile::TempDir;
+
+/// This repository's own `pipeline.toml` — the file every default harness
+/// repository carries so a fresh seal can name a vocabulary (ADR-0215).
+const CHECKED_IN_MANIFEST: &str = include_str!("../../../../pipeline.toml");
 
 /// How the seed repository is presented to the coordinator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,6 +44,7 @@ pub struct RepoBuilder {
     seed_path: String,
     seed_contents: String,
     seed_files: Vec<(String, String)>,
+    omit_pipeline_manifest: bool,
     seed_message: String,
     branch: String,
     layout: Layout,
@@ -52,6 +58,7 @@ impl Default for RepoBuilder {
             seed_path: "README.md".to_owned(),
             seed_contents: "the subject a lane-boundary scenario checks out.\n".to_owned(),
             seed_files: Vec::new(),
+            omit_pipeline_manifest: false,
             seed_message: "subject".to_owned(),
             branch: "main".to_owned(),
             layout: Layout::Origin,
@@ -74,6 +81,15 @@ impl RepoBuilder {
         self.seed_path = path.into();
         self.seed_contents = contents.into();
         self.seed_files.clear();
+        self
+    }
+
+    /// Do not auto-seed [`PIPELINE_MANIFEST_PATH`]. A scenario about a
+    /// manifestless base reaches for this; every other repository carries the
+    /// checked-in file so it can still seal (ADR-0215).
+    #[must_use]
+    pub fn omit_pipeline_manifest(mut self) -> Self {
+        self.omit_pipeline_manifest = true;
         self
     }
 
@@ -283,11 +299,14 @@ fn configure_identity(dir: &Path, spec: &RepoBuilder) {
 }
 
 fn write_seed(dir: &Path, spec: &RepoBuilder) {
-    let files = if spec.seed_files.is_empty() {
+    let mut files = if spec.seed_files.is_empty() {
         vec![(spec.seed_path.clone(), spec.seed_contents.clone())]
     } else {
         spec.seed_files.clone()
     };
+    if !spec.omit_pipeline_manifest && !files.iter().any(|(path, _)| path == PIPELINE_MANIFEST_PATH) {
+        files.push((PIPELINE_MANIFEST_PATH.to_owned(), CHECKED_IN_MANIFEST.to_owned()));
+    }
     for (relative, contents) in files {
         let path = dir.join(&relative);
         if let Some(parent) = path.parent() {

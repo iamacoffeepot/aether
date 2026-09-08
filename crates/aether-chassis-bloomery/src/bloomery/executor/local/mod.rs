@@ -107,7 +107,7 @@ pub use group_absence::{GroupAbsence, strict_group_absence};
 #[cfg(any(test, feature = "testing"))]
 pub use identity::{IDENTITY_RECORD, ProcessIdentity};
 pub use lane_env::admits_lane_key;
-pub use lane_program::{DEFAULT_LANE_PROGRAM, LaneProgram};
+pub use lane_program::LaneProgram;
 pub use orphan::OrphanedRun;
 pub use process_runner::{CaptureIdentity, ProcessTransformRunner};
 pub use runner::{CapturedObjects, RunLifecycle, RunProcess, RunSpec, TransformRunner};

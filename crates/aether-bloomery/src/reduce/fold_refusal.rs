@@ -43,8 +43,8 @@ mod tests {
         (
             snapshot.apply(
                 &seal,
-                &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
-                &ResolvedConfigs::default(),
+                &reduce(&snapshot, &seal, &crate::testing::compiled_resolved(), &SpendWindow::default()),
+                &crate::testing::compiled_resolved(),
             ),
             bloom,
         )
@@ -76,7 +76,7 @@ mod tests {
             "the fact carries the refusal; a new Decision would reshape the frozen graph"
         );
 
-        let snapshot = snapshot.apply(&event, &decided, &ResolvedConfigs::default());
+        let snapshot = snapshot.apply(&event, &decided, &crate::testing::compiled_resolved());
         let stored = snapshot.fold_refusal(&bloom).expect("the refusal is on the snapshot");
         assert_eq!(stored.guard, "candidate_ref_present");
         assert_eq!(stored.reads[0].value, "wp-0");

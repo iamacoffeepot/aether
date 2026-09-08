@@ -1580,10 +1580,15 @@ fn fold_unpriced_construct_seats() -> (Vec<MetricsSeat>, CapabilityLedger) {
     member.configs.insert::<ModelOverride>(override_.address());
     member.approval.subject = member.subject();
 
-    let mut configs = ResolvedConfigs::default();
+    let mut configs = aether_bloomery::testing::compiled_resolved();
     configs.insert(override_.address(), ModelOverride::NAME, to_vec(&override_).expect("override encodes"), None);
 
-    let spec = BloomDraft { proposals: vec![member], base: digest(1), ..BloomDraft::default() }.seal();
+    let spec = aether_bloomery::testing::with_compiled_manifest(BloomDraft {
+        proposals: vec![member],
+        base: digest(1),
+        ..BloomDraft::default()
+    })
+    .seal();
     let bloom = spec.id();
 
     let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));

@@ -11,11 +11,10 @@
 //! confinement is the coordinator's, and a tree that named its own would grant
 //! itself egress on the coordinator's host.
 //!
-//! A base carrying *no* manifest is the other case and is deliberately not this
-//! one. The file cannot arrive by the mechanism that requires it, so every base
-//! sealed before it landed stays sealable and the missing-file refusal is armed
-//! only once every sealable base carries one — the last slice of ADR-0215, not
-//! this one. A file that is present and will not decode has no such excuse: it
+//! A base carrying *no* manifest is the other case, armed by the last ADR-0215
+//! slice: draft formation answers 422 and a `Fact::Seal` naming no manifest is
+//! `UnusablePipelineManifest`. This test is the present-and-unreadable half.
+//! A file that is present and will not decode has no bootstrap excuse: it
 //! exists because somebody edited it, and the refusal reaches the person
 //! holding the diff.
 

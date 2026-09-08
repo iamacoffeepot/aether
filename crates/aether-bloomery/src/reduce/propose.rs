@@ -113,13 +113,18 @@ mod tests {
     }
 
     fn sealed_snapshot() -> Snapshot {
-        let spec = BloomDraft { proposals: vec![membership("wp")], base: digest(0), ..BloomDraft::default() }.seal();
+        let spec = crate::testing::with_compiled_manifest(BloomDraft {
+            proposals: vec![membership("wp")],
+            base: digest(0),
+            ..BloomDraft::default()
+        })
+        .seal();
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         snapshot.apply(
             &seal,
-            &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
-            &ResolvedConfigs::default(),
+            &reduce(&snapshot, &seal, &crate::testing::compiled_resolved(), &SpendWindow::default()),
+            &crate::testing::compiled_resolved(),
         )
     }
 
