@@ -36,10 +36,11 @@ use aether_substrate::mail::registry::Registry;
 use super::strand::readopt_stranded_dispatches;
 use super::{
     BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState, GitCandidatePush,
-    NameEvidenceClaims, Stores, TickClock, TrackedHandle, backoff_delay, candidate_push_at, default_candidate_push,
-    dispatch_origin, drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_dispatch_scope, drain_and_redispatch,
-    fold_drain_backoff, is_silent, is_stale, next_backoff, observe_heartbeat, push_admitted_candidates,
-    seed_dispatches, seed_tracked, select_stale_handles, silence_from, timeout_verdict,
+    NameEvidenceClaims, Stores, TickClock, TrackedHandle, admitted_candidate_pushes, backoff_delay, candidate_push_at,
+    default_candidate_push, dispatch_origin, drain_and_dispatch, drain_and_dispatch_aggregate,
+    drain_and_dispatch_scope, drain_and_redispatch, fold_drain_backoff, is_silent, is_stale, journal_publications,
+    next_backoff, observe_heartbeat, seed_dispatches, seed_tracked, select_stale_handles, silence_from,
+    timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -102,14 +103,25 @@ impl ExecutorBackend for CapturingBackend {
     }
 }
 
-// The inert candidate-push stub for tests that exercise the pull/admit loop
-// without asserting on the push side.
-struct NopPush;
-
-impl CandidatePush for NopPush {
-    fn push(&self, _commit_hex: &str, _target_ref: &str) -> Result<(), String> {
-        Ok(())
-    }
+/// The inline candidate push the production tick no longer performs (#5564):
+/// it queues each capture on the offload and journals the worker's answer.
+/// These tests assert the two steps around the shell-out — which ref a capture
+/// is named for, and what the journal records — so they run them back to back
+/// with the push in between, exactly as the tick's two halves compose.
+fn push_admitted_candidates(
+    store: &mut dyn StoreBackend,
+    admissions: &[Admission],
+    correspondence: Option<&SharedCorrespondence>,
+    pusher: &dyn CandidatePush,
+) {
+    let answered = admitted_candidate_pushes(admissions, correspondence)
+        .into_iter()
+        .map(|capture| {
+            let result = pusher.push(&capture.commit_hex, &capture.target_ref);
+            (capture, result)
+        })
+        .collect();
+    journal_publications(store, answered);
 }
 
 // A recording push seam, for asserting exactly which (commit, ref) pairs the
@@ -215,7 +227,6 @@ fn pull_and_admit(
     tracked: &mut Vec<TrackedHandle>,
     clock: &TickClock,
     correspondence: Option<&SharedCorrespondence>,
-    pusher: &dyn CandidatePush,
 ) -> Vec<Admit> {
     super::pull_and_admit(
         stores,
@@ -224,8 +235,8 @@ fn pull_and_admit(
         tracked,
         Clocks { tick: clock, now: || clock.now_unix_millis },
         correspondence,
-        pusher,
     )
+    .0
 }
 
 // Enqueue one per-member Construct dispatch on the dispatch topic (the bytes the
@@ -1007,7 +1018,6 @@ fn pull_and_admit_admits_a_matching_construct_result_as_attempt_completed() {
         &mut tracked,
         &tick_clock(),
         None,
-        &NopPush,
     );
 
     assert_eq!(admits.len(), 1, "the matching result admits");
@@ -1111,15 +1121,7 @@ fn an_overdue_scope_order_terminates_once() {
 }
 
 fn tick(store: &mut SqliteStore, shell: &ExecutorShell, tracked: &mut Vec<TrackedHandle>, now: u64) -> Vec<Admit> {
-    pull_and_admit(
-        Stores { store, artifacts: None },
-        shell,
-        NameEvidenceClaims,
-        tracked,
-        &tick_clock_at(now),
-        None,
-        &NopPush,
-    )
+    pull_and_admit(Stores { store, artifacts: None }, shell, NameEvidenceClaims, tracked, &tick_clock_at(now), None)
 }
 
 #[test]
@@ -1441,7 +1443,6 @@ fn a_timeout_details_its_evidence_by_the_address_the_store_filed_the_record_unde
         &mut tracked,
         &tick_clock_at(AT_THE_DEADLINE),
         None,
-        &NopPush,
     );
 
     let evidence = match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
@@ -1626,7 +1627,6 @@ fn seed_tracked_recovers_a_dispatched_order_across_a_restart() {
         &mut tracked,
         &tick_clock(),
         None,
-        &NopPush,
     );
     assert_eq!(admits.len(), 1, "the restart-seeded handle is inspected and its result admitted, not stranded");
     assert!(tracked.is_empty(), "the order is consumed on admit and no longer tracked");
@@ -1674,7 +1674,6 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
         &mut tracked,
         &tick_clock(),
         None,
-        &NopPush,
     );
     assert_eq!(admits.len(), 1, "the completed local run's result admits to the control core");
     assert!(tracked.is_empty(), "the admitted order was consumed");
@@ -3080,7 +3079,6 @@ fn a_local_lane_order_dispatched_before_a_restart_resolves_after_reconciliation(
         &mut tracked,
         &tick_clock(),
         None,
-        &NopPush,
     );
 
     assert_eq!(admits.len(), 1, "the run that finished while the coordinator was down admits after reconciliation");
@@ -3360,7 +3358,6 @@ fn tick_silent(
         tracked,
         &tick_clock_silent(now, SILENCE_MILLIS),
         None,
-        &NopPush,
     )
 }
 
@@ -3378,8 +3375,8 @@ fn pull_silent_now(
         tracked,
         Clocks { tick: &tick_clock_silent(tick_start, SILENCE_MILLIS), now },
         None,
-        &NopPush,
     )
+    .0
 }
 
 fn heartbeat_shell(backend: &Arc<HeartbeatBackend>) -> ExecutorShell {

@@ -62,10 +62,10 @@ pub use doctor::{DoctorReactorCapability, DoctorReactorSetup, DoctorReactorState
 pub use driver::{BloomeryDriverCapability, BloomeryDriverRunning};
 #[cfg(feature = "github")]
 pub use executor::{
-    CaptureIdentity, CapturedObjects, DEFAULT_LANE_PROGRAM, ExecutorPortError, ExecutorShell, LaneOccupancy,
-    LaneProgram, LocalExecutor, LocalExecutorError, LocalLane, OrphanedRun, OutstandingDispatch,
+    CaptureIdentity, CapturedObjects, DEFAULT_LANE_PROGRAM, ExecutorPort, ExecutorPortError, ExecutorShell,
+    LaneOccupancy, LaneProgram, LocalExecutor, LocalExecutorError, LocalLane, OrphanedRun, OutstandingDispatch,
     ProcessTransformRunner, ReconcileLanes, ReconcileReport, RoutingExecutor, RunLifecycle, RunProcess, RunSpec,
-    TransformRunner, UnconfiguredActionsBackend, admits_lane_key, mock_lane,
+    Settled, TransformRunner, UnconfiguredActionsBackend, admits_lane_key, mock_lane,
 };
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 pub use executor::{GroupAbsence, IDENTITY_RECORD, ProcessIdentity, strict_group_absence};
