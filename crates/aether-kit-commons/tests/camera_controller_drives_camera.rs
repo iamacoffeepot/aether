@@ -29,12 +29,13 @@ use std::fs;
 
 use aether_actor::Addressable;
 use aether_data::Kind;
-use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate::{HarnessActor, HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
 use aether_kinds::keycode::KEY_D;
 use aether_kinds::{Key, KeyRelease, LoadComponent, LoadResult, NamedMail, Render, WindowId, WindowSize};
-use aether_kit_commons::camera::controller::ControllerConfig;
+use aether_kit_commons::camera::CameraComponent;
+use aether_kit_commons::camera::controller::{CameraController, ControllerConfig};
 use aether_math::Rgb;
 use aether_render::{DrawTriangle, Vertex};
 
@@ -44,10 +45,19 @@ const WINDOW_WIDTH: u32 = 128;
 const WINDOW_HEIGHT: u32 = 96;
 const TEST_WINDOW_ID: WindowId = WindowId(1);
 
-/// The full trampoline address a loaded component registers at (ADR-0099 §4):
-/// the component host `/`-joined to the trampoline node under `name`.
-fn component_address(name: &str) -> String {
-    format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
+/// Load-time name for the controller instance.
+const CONTROLLER_NAME: &str = "controller";
+
+/// The camera the controller steers, loaded under the camera export's default
+/// name — `HarnessOp::loaded` renders the full trampoline address a loaded
+/// component registers at (ADR-0099 §4) from the component identity.
+fn camera() -> HarnessActor<CameraComponent> {
+    HarnessOp::loaded_default::<CameraComponent>()
+}
+
+/// The keyboard driver, loaded under `"controller"`.
+fn controller() -> HarnessActor<CameraController> {
+    HarnessOp::loaded::<CameraController>(CONTROLLER_NAME)
 }
 
 /// Load one `aether_kit_commons` export under `name` with optional init-config bytes,
@@ -111,8 +121,8 @@ fn ground_stripes() -> Vec<NamedMail> {
 /// the camera's `Render` publishes its (controller-driven) `view_proj`, then
 /// the striped ground accumulates under it, both into the accumulator right
 /// before the GPU readback.
-fn capture_scene(harness: &mut SubstrateHarness, camera: &str, label: &'static str) -> Vec<u8> {
-    let mut pre = vec![envelope(camera, &Render)];
+fn capture_scene(harness: &mut SubstrateHarness, label: &'static str) -> Vec<u8> {
+    let mut pre = vec![envelope(camera().address(), &Render)];
     pre.extend(ground_stripes());
     let captured =
         harness.execute(vec![(label, HarnessOp::capture_with_mails(pre, Vec::new()))]).expect("capture-with-mails");
@@ -145,15 +155,12 @@ fn held_key_pans_the_camera_over_the_painted_world() {
 
     // The controller resolves its target camera by the camera export's default
     // load name (`aether.kit.camera`), so the camera must be loaded under it.
-    let camera = component_address("aether.kit.camera");
-    let controller = component_address("controller");
-
-    load_kit_export(&mut harness, &kit_wasm, "aether.kit.camera", "aether.kit.camera", Vec::new());
+    load_kit_export(&mut harness, &kit_wasm, "aether.kit.camera", CameraComponent::NAMESPACE, Vec::new());
     // Default config drives the camera's boot `"main"` orbit camera — the
     // documented baseline. Loaded last so the camera instance exists when the
     // controller's `wire()` seed mail arrives.
     let config = ControllerConfig::default().encode_into_bytes();
-    load_kit_export(&mut harness, &kit_wasm, "aether.kit.camera-controller", "controller", config);
+    load_kit_export(&mut harness, &kit_wasm, "aether.kit.camera-controller", CONTROLLER_NAME, config);
 
     // Feed the camera a real window aspect, then settle the seed +
     // subscriptions before the first capture.
@@ -161,47 +168,41 @@ fn held_key_pans_the_camera_over_the_painted_world() {
         .execute(vec![
             (
                 "aspect",
-                HarnessOp::send_and_settle(
-                    camera.as_str(),
-                    &WindowSize {
-                        window: TEST_WINDOW_ID,
-                        width: WINDOW_WIDTH,
-                        height: WINDOW_HEIGHT,
-                        scale_factor: 1.0,
-                    },
-                ),
+                camera().send(&WindowSize {
+                    window: TEST_WINDOW_ID,
+                    width: WINDOW_WIDTH,
+                    height: WINDOW_HEIGHT,
+                    scale_factor: 1.0,
+                }),
             ),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("aspect + settle");
 
-    let seeded = capture_scene(&mut harness, &camera, "seeded");
+    let seeded = capture_scene(&mut harness, "seeded");
 
     // Hold D (no release): each tick the controller pans the orbit target east
     // across the stripes and mails the delta to the camera. 48 ticks at the
     // default 0.15 m/tick pan walks the target ~7 m — nearly two stripe widths.
     harness
         .execute(vec![
-            ("press_d", HarnessOp::send_and_settle(controller.as_str(), &Key { window: TEST_WINDOW_ID, code: KEY_D })),
+            ("press_d", controller().send(&Key { window: TEST_WINDOW_ID, code: KEY_D })),
             ("pan", HarnessOp::advance(48)),
         ])
         .expect("hold D + pan");
 
-    let panned = capture_scene(&mut harness, &camera, "panned");
+    let panned = capture_scene(&mut harness, "panned");
 
     // Release D and advance: with no key held the controller emits no mail, so
     // the camera pose is frozen and the view stops moving.
     harness
         .execute(vec![
-            (
-                "release_d",
-                HarnessOp::send_and_settle(controller.as_str(), &KeyRelease { window: TEST_WINDOW_ID, code: KEY_D }),
-            ),
+            ("release_d", controller().send(&KeyRelease { window: TEST_WINDOW_ID, code: KEY_D })),
             ("idle", HarnessOp::advance(48)),
         ])
         .expect("release D + idle");
 
-    let idle = capture_scene(&mut harness, &camera, "idle");
+    let idle = capture_scene(&mut harness, "idle");
 
     let seeded_img = decode_png(&seeded).expect("decode seeded png");
     let panned_img = decode_png(&panned).expect("decode panned png");

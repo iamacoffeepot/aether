@@ -356,13 +356,16 @@ fn replica_base_name_follows_name_export_namespace_precedence() {
     assert_eq!(replica_base_name(None, None, None), None);
 }
 
-/// `replica_names` suffixes every instance — no bare-name special case
-/// for index 0 — so `replicas: 1` differs from an omitted field only by
-/// the `-0` suffix.
+/// `replica_names` names replica 0 for the bare base and suffixes the rest,
+/// so a fan-out registers the name a peer's `ctx.peer::<R>()` folds and
+/// `replicas: 1` loads exactly what an omitted field loads. The bug this
+/// catches is a boot-readiness prediction that drifts from the names the
+/// chassis fan-out actually registers — `spawn_substrate` would then wait
+/// out its readiness budget on a name nothing ever claims.
 #[test]
-fn replica_names_suffixes_every_instance() {
-    assert_eq!(replica_names("handler", 3), vec!["handler-0", "handler-1", "handler-2"],);
-    assert_eq!(replica_names("handler", 1), vec!["handler-0"]);
+fn replica_names_claim_the_bare_base_then_suffix() {
+    assert_eq!(replica_names("handler", 3), vec!["handler", "handler-1", "handler-2"],);
+    assert_eq!(replica_names("handler", 1), vec!["handler"]);
 }
 
 /// `reject_replicas_out_of_range` rejects 0 and values above [`MAX_REPLICAS`]

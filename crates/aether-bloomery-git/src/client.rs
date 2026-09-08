@@ -332,9 +332,10 @@ pub trait GitDataApi {
     fn update_ref(&self, name: &str, sha: &str, force: bool) -> Result<GitRef, GitDataError>;
 
     /// Delete ref `name` (`heads/…` short form). A ref that is already gone is
-    /// the clean idempotent `Ok(())`, not a fault: release's name-only cleanup
-    /// delete runs after a tombstone CAS and an acquire's rollback re-deletes
-    /// freely.
+    /// the clean idempotent `Ok(())`, not a fault: the working-ref prune re-runs
+    /// over names a previous prune already reclaimed. Claim-registry cleanup is
+    /// not a caller — it deletes through an expected-sha [`RefTxnOp::Delete`] so
+    /// a replacement claim that reacquired the name is spared.
     ///
     /// # Errors
     /// An adapter execution failure other than an already-absent ref.

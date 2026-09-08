@@ -27,8 +27,8 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_actor::{Addressable, HandlesKind, One};
-use aether_component::ComponentHostCapability;
+use aether_actor::{Addressable, Embedded, HandlesKind, One};
+use aether_component::{ComponentHostCapability, WasmTrampoline};
 use aether_data::{Kind, KindId};
 use aether_kinds::{LoadComponent, LoadComponentUnder, NamedMail};
 use aether_window::{InjectWindowEvent, SyntheticWindowCapability, WindowId};
@@ -170,17 +170,34 @@ pub struct PollObserver(ObserveFn);
 /// The erased decode-and-test closure a [`PollObserver`] wraps.
 type ObserveFn = Box<dyn FnMut(&[u8]) -> Observation>;
 
-/// Typed root-actor sender for declarative harness operations.
+/// Typed actor sender for declarative harness operations.
 ///
-/// Construct one with [`HarnessOp::actor`]. The actor identity determines the
-/// recipient, while [`Self::send`] infers the kind from the borrowed mail and
-/// compile-checks that the actor handles it.
-pub struct HarnessActor<R>(PhantomData<fn() -> R>);
+/// Construct one with [`HarnessOp::actor`] for a root capability, or with
+/// [`HarnessOp::loaded`] / [`HarnessOp::loaded_default`] for a loaded wasm
+/// component. The constructor resolves the identity to the mailbox name it
+/// registers under and this sender holds it, so the recipient string is
+/// rendered in one place rather than at each call site; [`Self::send`] and
+/// [`Self::send_and_await_reply`] infer the kind from the borrowed mail and
+/// compile-check that the actor handles it.
+pub struct HarnessActor<R> {
+    recipient: String,
+    actor: PhantomData<fn() -> R>,
+}
 
-impl<R> HarnessActor<R>
-where
-    R: Addressable<Resolver = One>,
-{
+impl<R> HarnessActor<R> {
+    /// The mailbox name this sender addresses — a root capability's
+    /// `NAMESPACE`, or a loaded component's rendered lineage address.
+    ///
+    /// The seam for the harness surfaces that take a name rather than a
+    /// [`HarnessOp`]: `SubstrateHarness::log_tail`, a
+    /// [`NamedMail`] recipient inside a
+    /// [`HarnessOp::capture_with_mails`] bundle, or an assertion against
+    /// the `LoadResult.name` a load reported.
+    #[must_use]
+    pub fn address(&self) -> &str {
+        &self.recipient
+    }
+
     /// Build a settlement-gated send for a kind handled by `R` — the
     /// [`HarnessOp::send_and_settle`] wait, addressed by actor identity.
     #[must_use]
@@ -189,7 +206,19 @@ where
         K: Kind,
         R: HandlesKind<K>,
     {
-        HarnessOp::send_and_settle(R::NAMESPACE, mail)
+        HarnessOp::send_and_settle(self.recipient.clone(), mail)
+    }
+
+    /// Build a reply-awaiting send for a kind handled by `R` — the
+    /// [`HarnessOp::send_and_await_reply`] wait, addressed by actor
+    /// identity. Decode the stored reply with [`ExecutionResult::reply`].
+    #[must_use]
+    pub fn send_and_await_reply<K>(&self, mail: &K) -> HarnessOp
+    where
+        K: Kind,
+        R: HandlesKind<K>,
+    {
+        HarnessOp::send_and_await_reply(self.recipient.clone(), mail)
     }
 }
 
@@ -242,7 +271,59 @@ impl HarnessOp {
     where
         R: Addressable<Resolver = One>,
     {
-        HarnessActor(PhantomData)
+        HarnessActor { recipient: R::NAMESPACE.to_owned(), actor: PhantomData }
+    }
+
+    /// Bind a loaded component's identity, instantiated under the load-time
+    /// `name`, for a compile-checked typed send.
+    ///
+    /// A component resolves under the reserved embed scope ([`Embedded`],
+    /// ADR-0119), so its registered mailbox is the ADR-0099 lineage
+    /// `aether.component/aether.embedded:<name>` — never the bare
+    /// `NAMESPACE`, which is only the segment inside that scope. This
+    /// renders that address from the identity, so a scenario states which
+    /// component it is talking to instead of rebuilding the rendering by
+    /// hand and getting an unknown-recipient drop when it writes the
+    /// namespace instead.
+    ///
+    /// `name` is the `LoadComponent.name` the scenario loaded under; reach
+    /// for [`HarnessOp::loaded_default`] when the load took the actor's own
+    /// namespace as its name.
+    ///
+    /// Two shapes stay on the string constructors, addressed through
+    /// [`HarnessActor::address`] or written out: an `#[actor(instanced)]`
+    /// component resolves through `EmbeddedMany` rather than [`Embedded`],
+    /// and a kind a wasm actor adopts from a `#[handler_set]` carries no
+    /// `HandlesKind` marker on that transport (ADR-0169), so
+    /// [`HarnessActor::send`] cannot compile-check it.
+    ///
+    /// A root capability is not reachable this way — it has no embed scope
+    /// to render, so the address would be a live-nowhere string:
+    ///
+    /// ```compile_fail
+    /// use aether_harness_substrate::HarnessOp;
+    /// use aether_window::SyntheticWindowCapability;
+    ///
+    /// let _ = HarnessOp::loaded::<SyntheticWindowCapability>("synthetic");
+    /// ```
+    #[must_use]
+    pub fn loaded<R>(name: &str) -> HarnessActor<R>
+    where
+        R: Addressable<Resolver = Embedded>,
+    {
+        let recipient = format!("{}/{}:{name}", ComponentHostCapability::NAMESPACE, WasmTrampoline::NAMESPACE);
+        HarnessActor { recipient, actor: PhantomData }
+    }
+
+    /// [`HarnessOp::loaded`] for a component loaded under its own
+    /// [`Addressable::NAMESPACE`] — the name the component host assigns
+    /// when `LoadComponent.name` is `None`.
+    #[must_use]
+    pub fn loaded_default<R>() -> HarnessActor<R>
+    where
+        R: Addressable<Resolver = Embedded>,
+    {
+        Self::loaded::<R>(R::NAMESPACE)
     }
 
     /// Inject any typed event as originating from `window`.
