@@ -109,9 +109,3 @@ fn schema_digest_failures_are_annotated_without_a_regen_command() {
     assert!(annotated.contains("append the new digest to `schema-digests.txt` and register an upcast"));
     assert!(!annotated.contains("fixtures regen"), "{annotated}");
 }
-
-#[test]
-fn temporary_reveal_of_the_pipeline_manifest_schema_digest() {
-    let kind = aether_bloomery::persisted::kind_named("aether.bloomery.pipeline_manifest").unwrap();
-    assert_eq!(kind.current_digest().to_hex(), "reveal");
-}
