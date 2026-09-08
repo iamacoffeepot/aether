@@ -64,6 +64,12 @@ pub trait MailSender {
     /// know the receiver type at compile site (debug tools, dynamic
     /// dispatch, components addressing user-named mailboxes the
     /// substrate registered without a corresponding Rust type).
+    ///
+    /// `name` resolves by the ADR-0099 §4 parse → fold — the same
+    /// resolution the registry applies to a written name — so a rendered
+    /// lineage address (`LoadResult.name`, e.g.
+    /// `aether.component/aether.embedded:NAME`) addresses its actor here
+    /// exactly as a depth-1 root cap name does.
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K);
 
     /// Correlation id the host minted for this actor's most recent

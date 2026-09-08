@@ -25,7 +25,7 @@ fallback or omits the runtime.
 | `aether.inventory` | live names, kinds, handlers, transforms | `aether-inventory/src` | [Inventory](../systems/inventory-and-transforms.md) |
 | `aether.trace` | causal-tree and settlement evidence | `aether-trace/src` | [Tracing](../systems/tracing-and-settlement.md) |
 | `aether.fleet` | hub fleet and artifact control | `aether-fleet/src` | [Engine fleet](../operating/engine-fleet.md) |
-| `aether.substrate_harness` | deterministic test-chassis advance/control | `aether-harness-substrate/src` | [SubstrateHarness](../testing/substrateharness-and-fleetharness.md) |
+| `aether.substrate_harness` | deterministic test-chassis advance/control | `aether-substrate-harness-cap/src` | [SubstrateHarness](../testing/substrateharness-and-fleetharness.md) |
 
 Instanced families such as `aether.tcp.listener`, `aether.tcp.session`,
 `aether.fleet.proxy`, `aether.http.server.shard`, and guest trampolines gain

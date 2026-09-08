@@ -1,7 +1,7 @@
 //! Sender-side peer-addressing facades for loaded components —
 //! the "routing" seam of the `aether.component` capability.
 
-use aether_actor::{Addressable, Embedded, ReplyMode, WasmActorMailbox, WasmCtx};
+use aether_actor::{Addressable, Embedded, ReplyMode, Sends, WasmActorMailbox, WasmCtx};
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
@@ -92,6 +92,21 @@ pub trait PeerCtxExt {
 }
 
 impl<M: ReplyMode> PeerCtxExt for WasmCtx<'_, M> {
+    fn peer<R: Addressable<Resolver = Embedded>>(&self) -> WasmActorMailbox<'_, R> {
+        self.actor::<R>()
+    }
+
+    fn peer_named<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R> {
+        self.__actor_with_namespace::<R>(name)
+    }
+}
+
+// The peer verbs travel with the ctx's reply-mode-free send view
+// (`ctx.sends()`), so a helper that addresses a co-hosted component takes
+// `&mut Sends<'_>` rather than a `M: ReplyMode` parameter. `Sends` resolves
+// through the same caller-scoped `Embedded` path as the ctx it came from, so
+// both impls name the same peer.
+impl PeerCtxExt for Sends<'_> {
     fn peer<R: Addressable<Resolver = Embedded>>(&self) -> WasmActorMailbox<'_, R> {
         self.actor::<R>()
     }
