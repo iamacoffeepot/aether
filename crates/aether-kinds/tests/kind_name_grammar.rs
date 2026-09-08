@@ -17,9 +17,9 @@
 //! in this workspace links the whole vocabulary — this crate's test binary sees
 //! its own kinds and nothing from `aether-render`, `aether-store`, or any other
 //! family. So the population is the *declaration sites* instead: every
-//! `#[kind(name = "…")]` attribute under `crates/`, read straight off the
-//! source. That covers all 57 crates at no build cost and is the same text an
-//! author types.
+//! `#[kind(name = "…")]` or `#[aether_data::kind(name = "…", …)]` attribute
+//! under `crates/`, read straight off the source. That covers all 57 crates at
+//! no build cost and is the same text an author types.
 //!
 //! Two kinds of name are outside the scan by construction: names minted inside
 //! a macro from a non-literal (`#[kind(name = $name)]` in the perf probe
@@ -118,7 +118,13 @@ fn violations(name: &str) -> Vec<Rule> {
     broken
 }
 
-/// The `#[kind(name = "…")]` literals on one source line, or nothing when the
+/// The two spellings a kind name is declared in: the derives' inert helper
+/// attribute, and the `#[aether_data::kind]` attribute macro that emits that
+/// helper along with the derive stack. Both carry the same authored literal,
+/// so both are population.
+const DECLARATION_OPENERS: [&str; 2] = ["#[kind(", "#[aether_data::kind("];
+
+/// The declared kind-name literals on one source line, or nothing when the
 /// line is a comment or the attribute's `name` is a macro binding rather than a
 /// literal.
 fn kind_names_in_line(line: &str) -> Vec<&str> {
@@ -128,8 +134,12 @@ fn kind_names_in_line(line: &str) -> Vec<&str> {
 
     let mut found = Vec::new();
     let mut rest = line;
-    while let Some(open) = rest.find("#[kind(") {
-        rest = &rest[open + "#[kind(".len()..];
+    while let Some((open, opener)) = DECLARATION_OPENERS
+        .iter()
+        .filter_map(|opener| rest.find(opener).map(|at| (at, *opener)))
+        .min_by_key(|(at, _)| *at)
+    {
+        rest = &rest[open + opener.len()..];
         let after_name = rest.trim_start();
         let Some(after_name) = after_name.strip_prefix("name") else {
             continue;
@@ -272,6 +282,8 @@ fn the_scan_reads_declarations_and_skips_prose() {
     // matching doc comments the allow-list fills with ellipses.
     assert_eq!(kind_names_in_line(r#"#[kind(name = "aether.fs.read")]"#), ["aether.fs.read"]);
     assert_eq!(kind_names_in_line(r#"#[kind(name="aether.fs.read")]"#), ["aether.fs.read"]);
+    assert_eq!(kind_names_in_line(r#"#[aether_data::kind(name = "aether.fs.read")]"#), ["aether.fs.read"]);
+    assert_eq!(kind_names_in_line(r#"#[aether_data::kind(name = "aether.fs.read", pod, eq)]"#), ["aether.fs.read"]);
     assert!(kind_names_in_line(r#"//! the `#[kind(name = "…")]` literal is the identity"#).is_empty());
     assert!(kind_names_in_line("#[kind(name = $name)]").is_empty());
 }
