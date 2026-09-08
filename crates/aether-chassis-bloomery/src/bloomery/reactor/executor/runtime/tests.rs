@@ -3907,6 +3907,7 @@ mod offloaded_adapter_calls {
             while !*gate {
                 gate = self.opened.wait(gate).unwrap();
             }
+            drop(gate);
             Ok(ExecutionStatus::Unknown)
         }
 
@@ -4012,7 +4013,7 @@ mod offloaded_adapter_calls {
             let port = offload.port(&shell);
             for index in 0..MAX_IN_FLIGHT + 2 {
                 let handle = WorkHandle::new(Nonce(format!("n-{index}")));
-                assert!(matches!(port.observe(&handle), Settled::InFlight), "a first ask is always in flight",);
+                assert!(matches!(port.observe(&handle), Settled::InFlight), "a first ask is always in flight");
             }
         }
         offload.start_wanted(&mut ctx, &shell, &pusher);
