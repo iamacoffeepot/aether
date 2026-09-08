@@ -884,8 +884,8 @@ impl NativeActor for RenderCapability {
         mail: CreateGeometry,
     ) -> CreateGeometryResult {
         state.observe(<CreateGeometry as Kind>::ID);
-        if let Err(reason) = state.service_device_for_request() {
-            return CreateGeometryResult::Err { reason };
+        if let Err(error) = state.service_device_for_request() {
+            return CreateGeometryResult::Err { error };
         }
         state.geometries.create(mail)
     }
@@ -914,7 +914,7 @@ impl NativeActor for RenderCapability {
     /// `ProgramRegister` (ADR-0170): validate the WGSL and pass graph,
     /// build every pass pipeline under a wgpu validation error scope, and
     /// reply the assigned session-scoped `program_id` — or the failing
-    /// check's distinguishable `Err` reason. Pipeline construction needs a
+    /// check's distinguishable `Err` message. Pipeline construction needs a
     /// live device, so the offscreen GPU boots here if configured; on
     /// desktop a register before the first window attaches replies `Err`
     /// rather than parking.
@@ -926,12 +926,12 @@ impl NativeActor for RenderCapability {
     ) -> ProgramRegisterResult {
         state.observe(<ProgramRegister as Kind>::ID);
         state.ensure_offscreen_gpu_booted();
-        if let Err(reason) = state.service_device_for_request() {
-            return ProgramRegisterResult::Err { reason };
+        if let Err(error) = state.service_device_for_request() {
+            return ProgramRegisterResult::Err { error };
         }
         let Some(gpu) = state.gpu.as_ref() else {
             return ProgramRegisterResult::Err {
-                reason: "the render GPU is not booted; register programs after the first window attaches".to_owned(),
+                error: "the render GPU is not booted; register programs after the first window attaches".to_owned(),
             };
         };
         state.programs.register(gpu, mail)
@@ -973,8 +973,8 @@ impl NativeActor for RenderCapability {
         mail: ProgramTimings,
     ) -> ProgramTimingsResult {
         state.observe(<ProgramTimings as Kind>::ID);
-        if let Err(reason) = state.service_device_for_request() {
-            return ProgramTimingsResult::Err { reason };
+        if let Err(error) = state.service_device_for_request() {
+            return ProgramTimingsResult::Err { error };
         }
         state.programs.timings(&mail)
     }
@@ -1543,7 +1543,7 @@ mod tests {
                 },
             );
             assert!(
-                matches!(registered, ProgramRegisterResult::Err { reason } if reason.contains("unusable")),
+                matches!(registered, ProgramRegisterResult::Err { error } if error.contains("unusable")),
                 "request/reply GPU work returns the terminal structured error",
             );
 

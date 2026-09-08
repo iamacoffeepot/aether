@@ -118,7 +118,11 @@ pub struct ComponentSpec {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TerminateSubstrateArgs {
     /// Engine UUID, as returned by `spawn_substrate` / `list_engines`.
-    pub engine_id: String,
+    /// Omit to target the sole supervised engine; with zero or several
+    /// engines an omitted id is an error naming the situation, never a
+    /// guess. The reply echoes the engine that was terminated.
+    #[serde(default)]
+    pub engine_id: Option<String>,
 }
 
 /// `upload_binary` arguments (ADR-0115, issue 1953).
@@ -240,20 +244,27 @@ pub struct FailureEvidenceFrameArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CollectFailureEvidenceArgs {
     /// Engine UUID tied to the original failure (from `list_engines`).
-    pub engine_id: String,
+    /// Omit to target the sole supervised engine; with zero or several
+    /// engines an omitted id is an error naming the situation, never a
+    /// guess. The bundle echoes the engine that answered.
+    #[serde(default)]
+    pub engine_id: Option<String>,
     /// Non-empty caller-supplied original failure. Preserved verbatim as the
     /// bundle's primary error even when every observation fails.
     pub primary_error: String,
     /// Optional short name of the failed operation, such as `send_mail`.
     #[serde(default)]
     pub operation: Option<String>,
-    /// Up to eight exact actor mailbox lineage names. Each receives a log
-    /// tail capped at 100 entries and its complete current cost table.
+    /// Up to eight live actor addresses — each a canonical ADR-0099 lineage
+    /// (or an unambiguous ADR-0166 abbreviation) or a tagged `mbx-…` id, the
+    /// same spelling every other tool's `address` accepts. Each receives a
+    /// log tail capped at 100 entries and its complete current cost table.
     #[serde(default)]
-    pub actors: Vec<String>,
-    /// Up to eight exact component lineage names to describe in full.
+    pub actor_addresses: Vec<String>,
+    /// Up to eight live component addresses to describe in full, in the same
+    /// spelling as `actor_addresses`.
     #[serde(default)]
-    pub components: Vec<String>,
+    pub component_addresses: Vec<String>,
     /// Up to sixteen exact kind names to describe with full schemas.
     #[serde(default)]
     pub kinds: Vec<String>,
@@ -308,10 +319,19 @@ pub enum ReplyProjection {
 /// through [`MailSpec`]'s flatten) `send_mail.mails`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct EngineMailSpec {
-    /// Mailbox name on the target engine (e.g. `"aether.render"`, or a
-    /// loaded component's lineage such as
-    /// `"aether.component/aether.embedded:aether.kit.camera"`).
-    pub recipient_name: String,
+    /// Address of the recipient mailbox on the target engine: a canonical
+    /// ADR-0099 lineage (e.g. `"aether.render"`, or a loaded component's
+    /// `"aether.component/aether.embedded:aether.kit.camera"`), an
+    /// unambiguous ADR-0166 abbreviation, or a tagged `mbx-…` id — the same
+    /// spelling every other tool's `address` takes.
+    ///
+    /// The pre-0.4 spelling `recipient_name` is still accepted as a
+    /// deserialize alias for one release so existing bundles keep working;
+    /// it is not advertised in the tool schema and is removed after
+    /// 0.4-alpha. The wire `NamedMail.recipient_name` field is unchanged —
+    /// the rename is a tool-boundary one.
+    #[serde(alias = "recipient_name")]
+    pub address: String,
     /// Kind name (e.g. `"aether.fs.list"`), resolved against the target
     /// engine's merged kind view (ADR-0091) — a loaded component's own
     /// kinds are addressable.
@@ -332,8 +352,12 @@ pub struct EngineMailSpec {
 /// the flat four-field record it has always been.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MailSpec {
-    /// Engine UUID the mail targets (from `list_engines`).
-    pub engine_id: String,
+    /// Engine UUID the mail targets (from `list_engines`). Omit to target
+    /// the sole supervised engine; with zero or several engines an omitted
+    /// id is an error naming the situation, never a guess. Resolution is
+    /// per item, so a batch may still span engines by naming each one.
+    #[serde(default)]
+    pub engine_id: Option<String>,
     #[serde(flatten)]
     pub mail: EngineMailSpec,
 }
@@ -433,17 +457,19 @@ pub enum FailureEvidenceObservation {
     BudgetExhausted,
 }
 
-/// One explicitly named selector and its observation.
+/// One explicitly named live address and its observation. `address`, not
+/// `selector` — the string names a live component, never a stored registry
+/// artifact.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct NamedFailureEvidence {
-    pub selector: String,
+    pub address: String,
     pub observation: FailureEvidenceObservation,
 }
 
 /// The two bounded observations collected for one actor mailbox.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ActorFailureEvidence {
-    pub mailbox_name: String,
+    pub address: String,
     pub logs: FailureEvidenceObservation,
     pub cost: FailureEvidenceObservation,
 }
@@ -537,8 +563,12 @@ pub struct ReplyEventJson {
 /// `load_component` arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LoadComponentArgs {
-    /// Engine UUID the component loads into (from `list_engines`).
-    pub engine_id: String,
+    /// Engine UUID the component loads into (from `list_engines`). Omit to
+    /// target the sole supervised engine; with zero or several engines an
+    /// omitted id is an error naming the situation, never a guess. The
+    /// reply echoes the engine that answered.
+    #[serde(default)]
+    pub engine_id: Option<String>,
     /// Registry selector for the component, resolved against the hub's
     /// content-addressed store (ADR-0116) — `upload_component` first if it
     /// isn't stored. An exact token: a content `hash`, a `name` (latest
@@ -599,21 +629,25 @@ pub struct LoadComponentArgs {
 /// `replace_component` arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReplaceComponentArgs {
-    /// Engine UUID hosting the component (from `list_engines`).
-    pub engine_id: String,
-    /// Tagged mailbox id (`mbx-…`) of the component to replace, as
-    /// returned by `load_component`.
-    pub mailbox_id: String,
+    /// Engine UUID hosting the component (from `list_engines`). Omit to
+    /// target the sole supervised engine; with zero or several engines an
+    /// omitted id is an error naming the situation, never a guess. The
+    /// reply echoes the engine that answered.
+    #[serde(default)]
+    pub engine_id: Option<String>,
+    /// Address of the live component to replace: its canonical ADR-0099
+    /// lineage (or an unambiguous ADR-0166 abbreviation) or the tagged
+    /// `mbx-…` id `load_component` returned. Textual addresses resolve
+    /// against the selected engine through the same resolver
+    /// `describe_component` / `actor_logs` / `send_mail` use, so the
+    /// component no longer has to be addressed by raw id here.
+    pub address: String,
     /// Registry selector for the replacement component, resolved against
     /// the hub's content-addressed store (ADR-0116) — hash-primary, so a
     /// `hash` pins or rolls a component to an exact build. A `name` or
     /// `module@actor` resolves too. The host wasm path is retired; the
     /// only path anywhere is the `upload_component` input.
     pub selector: String,
-    /// Accepted for wire compatibility; currently ignored by the
-    /// substrate (post-ADR-0038 the splice is structural).
-    #[serde(default)]
-    pub drain_timeout_ms: Option<u32>,
     /// ADR-0090 (issue 1257): optional inline init-config JSON for the
     /// replacement instance, threaded to its typed `init` the same way
     /// [`LoadComponentArgs::config`] is on first load.
@@ -642,15 +676,20 @@ pub struct ReplaceComponentArgs {
 /// `describe_component` arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DescribeComponentArgs {
-    /// Engine UUID hosting the component (from `list_engines`).
-    pub engine_id: String,
-    /// The component to describe: its full ADR-0099 lineage name (returned by
-    /// `load_component`, or retained/derived from an explicit boot spec) OR its
-    /// tagged mailbox id (`mbx-…`). `spawn_substrate` returns engine information
+    /// Engine UUID hosting the component (from `list_engines`). Omit to
+    /// target the sole supervised engine; with zero or several engines an
+    /// omitted id is an error naming the situation, never a guess. The
+    /// reply echoes the engine that answered.
+    #[serde(default)]
+    pub engine_id: Option<String>,
+    /// Address of the component to describe: its full ADR-0099 lineage
+    /// (returned by `load_component`, or retained/derived from an explicit
+    /// boot spec), an unambiguous ADR-0166 abbreviation, OR its tagged
+    /// mailbox id (`mbx-…`). `spawn_substrate` returns engine information
     /// only and `list_components` reports stored artifacts. A name-addressed
     /// cache miss resolves against the substrate; a cache hit and a `mbx-` id
     /// are local fast paths and do not prove current liveness.
-    pub component: String,
+    pub address: String,
     /// When `true`, each capabilities doc field carries the full rustdoc
     /// string. When `false` (default), each doc is projected to its first
     /// non-empty rustdoc line (summary convention; issue 3006).
@@ -663,12 +702,18 @@ pub struct DescribeComponentArgs {
 /// incompatible revisions of one kind name cannot coexist in one registry.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ComponentContractSubject {
-    /// Engine UUID hosting this revision (from `list_engines`).
-    pub engine_id: String,
-    /// Component lineage name, or an unambiguous ADR-0166 abbreviation. This
-    /// must be textual so the selected engine can prove its canonical lineage
-    /// and current mailbox identity before comparison.
-    pub component: String,
+    /// Engine UUID hosting this revision (from `list_engines`). Omit to
+    /// target the sole supervised engine; with zero or several engines an
+    /// omitted id is an error naming the situation, never a guess. Each
+    /// subject's identity block echoes the engine that answered it.
+    #[serde(default)]
+    pub engine_id: Option<String>,
+    /// Address of the live component revision: its canonical ADR-0099
+    /// lineage or an unambiguous ADR-0166 abbreviation. This one must be
+    /// textual — a tagged `mbx-…` id is rejected — so the selected engine
+    /// can prove its canonical lineage and current mailbox identity before
+    /// comparison.
+    pub address: String,
 }
 
 /// `compare_component_contracts` arguments.
@@ -686,14 +731,19 @@ pub struct CompareComponentContractsArgs {
 /// client-side if you want a cross-actor view.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ActorLogsArgs {
-    /// Engine UUID to pull from (from `list_engines`).
-    pub engine_id: String,
-    /// Mailbox name of the actor to query (e.g. `"aether.audio"`,
-    /// `"aether.component/aether.embedded:aether.camera"`). The substrate's
+    /// Engine UUID to pull from (from `list_engines`). Omit to target the
+    /// sole supervised engine; with zero or several engines an omitted id
+    /// is an error naming the situation, never a guess. The reply echoes
+    /// the engine that answered.
+    #[serde(default)]
+    pub engine_id: Option<String>,
+    /// Address of the actor to query (e.g. `"aether.audio"`,
+    /// `"aether.component/aether.embedded:aether.camera"`, an unambiguous
+    /// ADR-0166 abbreviation, or a tagged `mbx-…` id). The substrate's
     /// dispatch loop services `aether.log.tail` for every actor
     /// automatically; agents don't need to know which actor
     /// implements the handler.
-    pub mailbox_name: String,
+    pub address: String,
     /// Cap on returned entries. Defaults to 100; clamped to 1000.
     /// Use the response's `next_since` to walk past the cap on the
     /// next call.
@@ -723,7 +773,7 @@ pub struct ActorLogsArgs {
 pub struct ActorLogEntry {
     /// Unix epoch milliseconds the entry was stamped at on the
     /// substrate's wall clock.
-    pub timestamp_unix_ms: u64,
+    pub timestamp_unix_millis: u64,
     /// Severity: `"trace"` | `"debug"` | `"info"` | `"warn"` | `"error"`.
     pub level: String,
     /// `tracing` target — typically the module path the event was
@@ -742,8 +792,11 @@ pub struct ActorLogEntry {
 /// sequence still in the ring), `null` otherwise.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ActorLogsResponse {
+    /// The engine that answered — the id the caller passed, or the sole
+    /// supervised engine when `engine_id` was omitted.
     pub engine_id: String,
-    pub mailbox_name: String,
+    /// The address the caller asked for, echoed verbatim.
+    pub address: String,
     pub entries: Vec<ActorLogEntry>,
     pub next_since: u64,
     pub truncated_before: Option<u64>,
@@ -756,12 +809,17 @@ pub struct ActorLogsResponse {
 /// reads it back. Measure-only — no scheduling effect.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ActorCostArgs {
-    /// Engine UUID to pull from (from `list_engines`).
-    pub engine_id: String,
-    /// Mailbox name of the actor to query (e.g. `"aether.audio"`,
-    /// `"aether.component/aether.embedded:aether.camera"`). Every actor serves
+    /// Engine UUID to pull from (from `list_engines`). Omit to target the
+    /// sole supervised engine; with zero or several engines an omitted id
+    /// is an error naming the situation, never a guess. The reply echoes
+    /// the engine that answered.
+    #[serde(default)]
+    pub engine_id: Option<String>,
+    /// Address of the actor to query (e.g. `"aether.audio"`,
+    /// `"aether.component/aether.embedded:aether.camera"`, an unambiguous
+    /// ADR-0166 abbreviation, or a tagged `mbx-…` id). Every actor serves
     /// `aether.cost.tail` via the substrate's framework dispatch arm.
-    pub mailbox_name: String,
+    pub address: String,
     /// Optional kind-id filter (tagged `knd-XXXX-XXXX-XXXX` or raw
     /// decimal). Omitted dumps every handler row the actor declares.
     #[serde(default)]
@@ -791,33 +849,51 @@ pub struct ActorCostRow {
 /// unspecified order.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ActorCostResponse {
+    /// The engine that answered — the id the caller passed, or the sole
+    /// supervised engine when `engine_id` was omitted.
     pub engine_id: String,
-    pub mailbox_name: String,
+    /// The address the caller asked for, echoed verbatim.
+    pub address: String,
     pub rows: Vec<ActorCostRow>,
 }
 
+/// How much of each kind's structure `describe_kinds` renders. This is a
+/// render-detail selector, not the documentation-expansion `full` flag the
+/// component tools carry — the two used to share one name and one bool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum KindDetail {
+    /// One-line `{name, shape}` rows — enough to build `send_mail` params.
+    #[default]
+    Shape,
+    /// The full `SchemaType` per kind, schema-exact for the returned
+    /// snapshot.
+    Schema,
+}
+
 /// `describe_kinds` arguments. Selection precedence is `families` > `names` >
-/// `prefix` > bare; `full` changes schema-bearing renders but is ignored by
+/// `prefix` > bare; `detail` changes schema-bearing renders but is ignored by
 /// the family digest. Omit all fields for the compact default listing of the
-/// selected engine snapshot (or the static baseline when no engine resolves).
+/// selected engine's snapshot.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DescribeKindsArgs {
-    /// Engine UUID (from `list_engines`) whose kind snapshot to surface. When
-    /// present, `describe_kinds` prefills the static substrate baseline and
-    /// attempts to merge the engine's live capability + component kinds (via
-    /// `aether.inventory.kinds`). A failed/undecodable refresh currently leaves
-    /// the static or prior cached snapshot and still returns success. When
-    /// absent, the tool auto-resolves the sole supervised engine if exactly one
-    /// exists; with zero or many it returns the static baseline unchanged.
+    /// Engine UUID (from `list_engines`) whose kind snapshot to surface.
+    /// `describe_kinds` prefills the static substrate baseline and merges the
+    /// engine's live capability + component kinds (via
+    /// `aether.inventory.kinds`); a failed/undecodable refresh leaves the
+    /// static or prior cached snapshot and still returns success. Omit to
+    /// target the sole supervised engine; with zero or several engines an
+    /// omitted id is an error naming the situation, never a guess. The reply
+    /// echoes the engine that answered.
     #[serde(default)]
     pub engine_id: Option<String>,
     /// Return a digest of `{family, count}` rows instead of individual kinds.
     /// A family is a kind name with its final dot-separated segment removed.
-    /// Combines with `prefix` to digest a subtree and ignores `full`.
+    /// Combines with `prefix` to digest a subtree and ignores `detail`.
     #[serde(default)]
     pub families: bool,
-    /// Exact kind names to return. This selector may combine with `full`, but
-    /// is mutually exclusive with `families` and `prefix`.
+    /// Exact kind names to return. This selector may combine with `detail`,
+    /// but is mutually exclusive with `families` and `prefix`.
     #[serde(default)]
     pub names: Option<Vec<String>>,
     /// Case-sensitive prefix filter: when set, only kinds whose name starts
@@ -826,15 +902,32 @@ pub struct DescribeKindsArgs {
     /// mutually exclusive with `names`.
     #[serde(default)]
     pub prefix: Option<String>,
-    /// When `true` with `names` or `prefix`, return the full `SchemaType` for
-    /// each matching kind (schema-exact for the returned snapshot, enough for
-    /// codec work but not proof that a selected engine was reachable).
-    /// `families` ignores this modifier, and an unfiltered bare
-    /// `full: true` request is rejected. When `false` (default), schema-bearing
-    /// modes return compact `[{name, shape}]` rows where `shape` is a one-line
-    /// human-readable rendering of the kind's field structure.
+    /// How much structure each returned kind carries: `"shape"` (default)
+    /// renders compact `{name, shape}` rows, `"schema"` renders the full
+    /// `SchemaType` — enough for codec work, but not proof that the selected
+    /// engine was reachable. `families` ignores this, and an unfiltered bare
+    /// `detail: "schema"` request is rejected so full-schema output stays
+    /// bounded.
     #[serde(default)]
-    pub full: bool,
+    pub detail: KindDetail,
+}
+
+/// `describe_kinds` response. The named envelope exists so the engine that
+/// answered is on the record: `engine_id` may have been auto-resolved rather
+/// than named by the caller, and the kind snapshot means nothing without it.
+/// Exactly one of `kinds` / `families` is present, per the selector used.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DescribeKindsResponse {
+    /// The engine that answered — the id the caller passed, or the sole
+    /// supervised engine when `engine_id` was omitted.
+    pub engine_id: String,
+    /// The selected kinds: `{name, shape}` rows under `detail: "shape"`,
+    /// full descriptors under `detail: "schema"`. Absent under `families`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<serde_json::Value>,
+    /// The `{family, count}` digest. Present only under `families: true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub families: Option<Vec<KindFamily>>,
 }
 
 /// One entry in the `describe_kinds(families: true)` digest.
@@ -874,8 +967,12 @@ pub struct TransformListing {
 /// `describe_component`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DescribeHandlersArgs {
-    /// Engine UUID to query (from `list_engines`).
-    pub engine_id: String,
+    /// Engine UUID to query (from `list_engines`). Omit to target the sole
+    /// supervised engine; with zero or several engines an omitted id is an
+    /// error naming the situation, never a guess. The reply echoes the
+    /// engine that answered.
+    #[serde(default)]
+    pub engine_id: Option<String>,
 }
 
 /// One native `#[handler]`'s reply contract as `describe_handlers`
@@ -912,11 +1009,28 @@ pub struct DescribeHandlersResponse {
 /// trace root (issue iamacoffeepot/aether#749). Every spec lands on the
 /// same engine and inherits the same chassis root, so the response carries one
 /// combined trace tree covering the whole batch.
+/// Which projection of a settled `send_mail_traced` batch to return. A
+/// render-format selector, not the documentation-expansion `full` flag the
+/// component tools carry — the two used to share one name and one bool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TraceFormat {
+    /// Compact one-line-per-node `tree` in root/sibling input order.
+    #[default]
+    Tree,
+    /// The complete per-node `mails` vector.
+    Nodes,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendMailTracedArgs {
     /// Engine UUID the batch targets (from `list_engines`). All specs
-    /// share this engine — atomic dispatch is per-engine.
-    pub engine_id: String,
+    /// share this engine — atomic dispatch is per-engine. Omit to target
+    /// the sole supervised engine; with zero or several engines an omitted
+    /// id is an error naming the situation, never a guess. The reply echoes
+    /// the engine that answered.
+    #[serde(default)]
+    pub engine_id: Option<String>,
     /// One or more mail items, dispatched as children of one shared
     /// trace root. A bad spec aborts the whole batch before any mail
     /// moves (mirrors `capture_frame`'s bundle semantics).
@@ -926,7 +1040,7 @@ pub struct SendMailTracedArgs {
     /// (600s) — sized to clear a provider cap's API timeout (e.g. the
     /// gemini cap's 180s) with margin, not the old 30s ceiling.
     #[serde(default)]
-    pub settlement_timeout_ms: Option<u32>,
+    pub settlement_timeout_millis: Option<u32>,
     /// When `true`, return the synchronous ack (the shared `root`)
     /// without awaiting chain settlement: `status` is `"dispatched"`,
     /// and `mails` / `in_flight` / `replies` are `null`. Default
@@ -934,11 +1048,12 @@ pub struct SendMailTracedArgs {
     /// returns the trace tree plus the correlated replies.
     #[serde(default)]
     pub fire_and_forget: bool,
-    /// Return the complete per-node `mails` values instead of the default
-    /// compact one-line `tree`. Both settled projections include
-    /// `node_count`; timeout and fire-and-forget responses include neither.
+    /// Which settled projection to return: `"tree"` (default) renders the
+    /// compact one-line-per-node tree, `"nodes"` returns the complete
+    /// per-node `mails` values. Both include `node_count`; timeout and
+    /// fire-and-forget responses include neither.
     #[serde(default)]
-    pub full: bool,
+    pub format: TraceFormat,
 }
 
 /// `send_mail_traced` response. One combined trace tree for the whole
@@ -946,20 +1061,23 @@ pub struct SendMailTracedArgs {
 /// caller the batch never settled.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SendMailTracedResponse {
+    /// The engine that answered — the id the caller passed, or the sole
+    /// supervised engine when `engine_id` was omitted.
+    pub engine_id: String,
     /// `"settled"` once the batch's chain settled and the tree is
     /// populated, `"timeout"` when the substrate didn't reply within
-    /// the `settlement_timeout_ms` window, or `"dispatched"` when
+    /// the `settlement_timeout_millis` window, or `"dispatched"` when
     /// `fire_and_forget` was set (ack only, no settlement wait).
     pub status: String,
     /// Chassis-root `MailId` every spec inherited. Populated on
     /// `settled` and `dispatched`, `null` on `timeout`.
     pub root: Option<MailIdJson>,
-    /// Complete mail nodes in a settled `full: true` response. Order is
+    /// Complete mail nodes in a settled `format: "nodes"` response. Order is
     /// unspecified — agents reconstruct chains via `parent` edges. `null`
     /// in the default compact projection, on `dispatched`, and on `timeout`.
     pub mails: Option<Vec<MailNodeJson>>,
     /// Compact one-line-per-node tree in root/sibling input order. Present
-    /// only on a settled default (`full: false`) response.
+    /// only on a settled default (`format: "tree"`) response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tree: Option<Vec<String>>,
     /// Number of projected mail nodes. Present for both compact and full
@@ -1091,8 +1209,11 @@ pub struct CaptureSimilaritySpec {
 /// `capture_frame` arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CaptureFrameArgs {
-    /// Engine UUID to capture (from `list_engines`).
-    pub engine_id: String,
+    /// Engine UUID to capture (from `list_engines`). Omit to target the
+    /// sole supervised engine; with zero or several engines an omitted id
+    /// is an error naming the situation, never a guess.
+    #[serde(default)]
+    pub engine_id: Option<String>,
     /// Engine window id to capture, as the tagged `mbx-…` string
     /// `aether.window.list` reports. Desktop capture never guesses a
     /// primary, focused, or current window.

@@ -154,7 +154,7 @@ pub(super) async fn spawn_substrate(mcp: &Mcp, args: SpawnSubstrateArgs) -> Resu
     } else {
         let mut statuses = Vec::with_capacity(args.mails.len());
         for (index, mail) in args.mails.into_iter().enumerate() {
-            let spec = MailSpec { engine_id: info.engine_id.clone(), mail };
+            let spec = MailSpec { engine_id: Some(info.engine_id.clone()), mail };
             statuses.push(settle_mail_item(mcp, index, spec, ReplyProjection::default()).await);
         }
         Some(statuses)
@@ -164,13 +164,14 @@ pub(super) async fn spawn_substrate(mcp: &Mcp, args: SpawnSubstrateArgs) -> Resu
 }
 
 pub(super) async fn terminate_substrate(mcp: &Mcp, args: TerminateSubstrateArgs) -> Result<String, McpError> {
+    let (_, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
     let reply = mcp
         .session
-        .call_one(local_envelope(FLEET_CAP, &TerminateEngine { engine_id: args.engine_id }))
+        .call_one(local_envelope(FLEET_CAP, &TerminateEngine { engine_id: engine_id.clone() }))
         .await
         .map_err(internal)?;
     match TerminateEngineResult::decode_from_bytes(&reply.payload) {
-        Some(TerminateEngineResult::Ok) => json(&serde_json::json!({ "status": "terminated" })),
+        Some(TerminateEngineResult::Ok) => json(&serde_json::json!({ "engine_id": engine_id, "status": "terminated" })),
         Some(TerminateEngineResult::Err { error }) => Err(internal_msg(&error)),
         None => Err(internal_msg("undecodable TerminateEngineResult")),
     }
