@@ -176,7 +176,7 @@ Notes on what this *doesn't* break:
 - **`aether-substrate`**: dual-path dispatch in `Component::deliver` — `bytemuck::cast` for `repr_c: true` kinds (today's path), postcard decode for the rest. Renderer's vertex-buffer ingest stays cast-based.
 - **Smoke tests**: end-to-end MCP `send_mail` → engine → MCP `receive_mail` for at least one kind from each `SchemaType` arm (string, vec, enum, nested struct), plus a cast-eligible kind to verify the slab path is unchanged. Delete `smoke_017_load.rs` once `LoadComponent` is hub-encodable.
 - **Parked, not committed:**
-  - Author-set `#[kind(repr_c = false)]` opt-out for the auto-picked cast hint — additive if the derive's heuristic ever needs an override.
+  - Author-set `#[kind(repr_c = false)]` opt-out for the auto-picked cast hint — additive if the derive's heuristic ever needs an override. *Superseded grammar (2026-09): still parked and never built. `#[kind(...)]` accepts exactly one key — `name = "…"` — and the accepted attribute plus naming grammar lives in `docs/guide/systems/mail-and-kinds.md`.*
   - Schema-driven decode of mail returned through `receive_mail` (agent-side decode symmetry).
   - Cross-language descriptors (WIT-ish schema interchange).
   - Descriptor schema versioning beyond V0's "change the wire and migrate everyone."
