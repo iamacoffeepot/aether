@@ -47,14 +47,6 @@
 pub mod kinds;
 pub use kinds::*;
 
-// Handler-signature kinds must be importable at file root because
-// `#[actor]` emits `impl HandlesKind<K> for X {}` markers always-on
-// (outside the `render-runtime` gate), against the identity. The drawing
-// kinds come from the local `kinds` module (via the glob re-export
-// above); `CaptureFrame` stays in `aether-kinds` (consumed by
-// `aether-mcp`).
-use aether_kinds::CaptureFrame;
-
 // Auxiliary native-only types the chassis driver consumes alongside
 // `RenderCapability`. The seams (`capture`, `pipeline`, `quad`, `texture`,
 // `surface`, `config`) live under the `runtime` directory, covered by the one

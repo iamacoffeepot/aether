@@ -14,6 +14,7 @@ use crate::handler_parse::{
     rename_lifecycle_hooks, rewrite_self_state_first_param, types_token_eq, validate_addressable_consts,
     validate_native_fallback_sig,
 };
+use crate::kind_imports::{ImportDemand, KindImport, harvest_kind_imports, select_for_demands};
 use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1227,19 +1228,62 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
     // edge is redundant but harmless).
     let runtime_path_lit = syn::LitStr::new(&harvested.runtime_path, proc_macro2::Span::call_site());
 
+    // The markers spell every handler kind exactly as the runtime file spelled
+    // it, so they need that file's imports rather than this one's. They go into
+    // a private module carrying the harvested `use` leaves the markers actually
+    // name, over `use super::*` so the identity struct and its declared parents
+    // still resolve — which is what frees the identity file from restating the
+    // whole handler-and-reply kind list by hand.
+    let imports = select_for_demands(&harvested.kind_imports, &identity_import_demands(identity, opts));
+    let module_ident = quote::format_ident!("__aether_actor_identity_{}", ident.to_string().to_lowercase());
+
     Ok(quote! {
         #item
-        #markers
+        #[doc(hidden)]
+        mod #module_ident {
+            use super::*;
+            #(#imports)*
+            #markers
+        }
         #set_markers
         const _: &[u8] = include_bytes!(#runtime_path_lit);
     })
 }
 
+/// Where the identity markers spell names, so each harvested import can be
+/// gated to match the place that wants it (see [`ImportDemand`]).
+///
+/// Three shapes: the always-on frame (the `Addressable` body's `NAMESPACE`
+/// expression plus the identity and its declared parents, named by the
+/// `Root` / `ChildOf` / inventory markers alike), each handler's argument kind
+/// under that handler's own `#[cfg]`s, and each handler's reply kind under those
+/// plus `not(wasm)` — the reply is spelled only by the ADR-0109 `HandlerEntry`
+/// inventory row, which no wasm build emits.
+fn identity_import_demands(identity: &HarvestedIdentity, opts: &ActorOpts) -> Vec<ImportDemand> {
+    let namespace = &identity.namespace;
+    let parents = &opts.child_of;
+    let mut demands = vec![ImportDemand { cfgs: Vec::new(), tokens: quote! { #namespace #(#parents)* } }];
+
+    for marker in &identity.handler_kinds {
+        let cfgs: Vec<TokenStream2> = marker.cfgs.iter().map(|cfg| quote! { #cfg }).collect();
+        let kind = &marker.kind;
+        demands.push(ImportDemand { cfgs: cfgs.clone(), tokens: quote! { #kind } });
+        if let Some(reply) = &marker.reply {
+            let mut reply_cfgs = cfgs;
+            reply_cfgs.push(quote! { #[cfg(not(target_family = "wasm"))] });
+            demands.push(ImportDemand { cfgs: reply_cfgs, tokens: quote! { #reply } });
+        }
+    }
+    demands
+}
+
 /// What one struct-hosted `#[actor]` lifts out of its runtime module: the
-/// identity the markers are built from, plus the on-disk path of the file it
-/// came from (the `include_bytes!` rebuild edge).
+/// identity the markers are built from, the module's flattened `use` leaves
+/// (the imports those markers resolve through), plus the on-disk path of the
+/// file it came from (the `include_bytes!` rebuild edge).
 struct HarvestedRuntime {
     identity: HarvestedIdentity,
+    kind_imports: Vec<KindImport>,
     runtime_path: String,
 }
 
@@ -1341,7 +1385,9 @@ fn harvest_runtime_identity(
                  least one `#[handler]`, a `#[fallback]`, or an adopted `handler_set(...)`"
             ),
         )),
-        (Some(identity), None) => Ok(HarvestedRuntime { identity, runtime_path }),
+        (Some(identity), None) => {
+            Ok(HarvestedRuntime { identity, kind_imports: harvest_kind_imports(&parsed), runtime_path })
+        }
         (Some(_), Some(_)) => Err(syn::Error::new(
             module_span,
             format!(

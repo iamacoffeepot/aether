@@ -25,13 +25,7 @@
 //! `SessionClosed`; observer-less sessions preserve the previous
 //! drop-on-the-floor behavior.
 
-// Handler-signature kinds need to be importable at file root for
-// the `#[actor]`-emitted `HandlesKind` markers against the identity
-// (always-on, outside the `feature = "runtime"` gate).
-use super::{
-    TcpCapability, TcpListenerActor,
-    kinds::{SessionClose, SessionDataReady, SessionWrite},
-};
+use super::{TcpCapability, TcpListenerActor, kinds::SessionWrite};
 
 /// `aether.tcp.session` **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`), the

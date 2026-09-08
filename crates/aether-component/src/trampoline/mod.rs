@@ -62,15 +62,7 @@
 // decoded bytes so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
 
-// Handler-signature kinds must be importable at file root so the
-// `#[actor]`-emitted `impl HandlesKind<K> for WasmTrampoline {}` markers
-// (always-on) resolve. The per-handler `HandlerEntry` inventory the same
-// `#[actor]` emits (native-only, `not(wasm)`) names each handler's reply kind,
-// so `DropResult` / `ReplaceResult` are imported under the matching gate.
 use aether_actor::{EMBEDDED_SCOPE, actor};
-use aether_kinds::{DropComponent, ReplaceComponent};
-#[cfg(not(target_family = "wasm"))]
-use aether_kinds::{DropResult, ReplaceResult};
 
 use crate::component::ComponentHostCapability;
 

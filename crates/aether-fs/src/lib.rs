@@ -33,62 +33,7 @@ pub use config::NamespaceRoots;
 pub use config::{NamespaceRootsLayer, NamespaceRootsOverlay};
 pub use registry::{AdapterRegistry, build_registry};
 
-// Handler-signature kinds resolve at file root through the `pub use
-// kinds::*` re-export above — `#[actor]` emits the `impl HandlesKind<K>
-// for X {}` markers always-on against the identity, outside the
-// `feature = "runtime"` gate, so they reference these kinds from here.
-use aether_actor::{HandlesKind, Kind, WasmActorMailbox, WasmActorMailboxWithContext};
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-use aether_substrate::actor::native::{NativeActorMailbox, NativeActorMailboxWithContext};
-
-trait FsRequestForwarder {
-    fn forward<K>(&self, payload: &K)
-    where
-        FsCapability: HandlesKind<K>,
-        K: Kind;
-}
-
-impl FsRequestForwarder for WasmActorMailbox<'_, FsCapability> {
-    fn forward<K>(&self, payload: &K)
-    where
-        FsCapability: HandlesKind<K>,
-        K: Kind,
-    {
-        self.send(payload);
-    }
-}
-
-impl<C: Kind> FsRequestForwarder for WasmActorMailboxWithContext<'_, '_, FsCapability, C> {
-    fn forward<K>(&self, payload: &K)
-    where
-        FsCapability: HandlesKind<K>,
-        K: Kind,
-    {
-        let _ = self.send(payload);
-    }
-}
-
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-impl FsRequestForwarder for NativeActorMailbox<'_, FsCapability> {
-    fn forward<K>(&self, payload: &K)
-    where
-        FsCapability: HandlesKind<K>,
-        K: Kind,
-    {
-        self.send(payload);
-    }
-}
-
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-impl<C: Kind> FsRequestForwarder for NativeActorMailboxWithContext<'_, '_, FsCapability, C> {
-    fn forward<K>(&self, payload: &K)
-    where
-        FsCapability: HandlesKind<K>,
-        K: Kind,
-    {
-        let _ = self.send(payload);
-    }
-}
+use aether_actor::MailboxForward;
 
 /// Sender-side facade for actors addressed via
 /// `ctx.actor::<FsCapability>()`.
@@ -100,17 +45,10 @@ impl<C: Kind> FsRequestForwarder for NativeActorMailboxWithContext<'_, '_, FsCap
 /// ([`FsCapability`]) AND send-side ([`FsMailboxExt`]) so future
 /// kind additions land both surfaces in one place.
 ///
-/// Impl'd for both base transports `ctx.actor::<FsCapability>()` can
-/// return and their typed request-context adapters:
-///
-/// - [`WasmActorMailbox<FsCapability>`] — always-on, for wasm-component
-///   callers.
-/// - [`WasmActorMailboxWithContext<FsCapability, C>`] — a wasm mailbox
-///   with a typed request context bound by `.with_context(&context)`.
-/// - [`NativeActorMailbox<'_, FsCapability>`] — native cap-to-cap
-///   sends, gated on `#[cfg(not(target_family = "wasm"))]`.
-/// - [`NativeActorMailboxWithContext<'_, '_, FsCapability, C>`] — the
-///   native contextual counterpart, behind the same gate.
+/// Blanket-impl'd over [`MailboxForward<FsCapability>`], so it reaches every
+/// handle `ctx.actor::<FsCapability>()` can return — the wasm and native
+/// mailboxes and their typed request-context adapters alike — without this
+/// crate naming any of them.
 ///
 /// All methods are fire-and-forget. Replies arrive as
 /// `aether.fs.read_result` / `aether.fs.write_result` /
@@ -130,8 +68,7 @@ impl<C: Kind> FsRequestForwarder for NativeActorMailboxWithContext<'_, '_, FsCap
 /// The generic escape hatch is unaffected: `mailbox.send(&CustomKind { .. })`
 /// still works for any `K` the cap declares via `HandlesKind<K>`,
 /// since `send` is an inherent method on the underlying mailbox type.
-#[allow(private_bounds)]
-pub trait FsMailboxExt: FsRequestForwarder {
+pub trait FsMailboxExt: MailboxForward<FsCapability> {
     /// Mail `aether.fs.read { addr }` to the cap.
     fn read(&self, namespace: impl Into<String>, path: impl Into<String>) {
         self.forward(&Read { addr: NamespaceAddr::new(namespace, path) });
@@ -165,7 +102,7 @@ pub trait FsMailboxExt: FsRequestForwarder {
     }
 }
 
-impl<T: FsRequestForwarder> FsMailboxExt for T {}
+impl<T: MailboxForward<FsCapability>> FsMailboxExt for T {}
 
 /// `aether.fs` cap **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`),
@@ -196,6 +133,9 @@ mod runtime;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_actor::{WasmActorMailbox, WasmActorMailboxWithContext};
+    #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+    use aether_substrate::actor::native::{NativeActorMailbox, NativeActorMailboxWithContext};
 
     fn assert_fs_mailbox_ext<T: FsMailboxExt>() {}
 

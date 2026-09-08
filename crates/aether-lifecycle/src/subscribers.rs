@@ -4,7 +4,7 @@
 //! the native [`broadcast_to_subscribers`] fan-out the receive side calls
 //! once per advance.
 
-use aether_actor::{HandlesKind, Publishes, WasmActorMailbox, WasmActorMailboxWithContext};
+use aether_actor::{MailboxForward, Publishes};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
     InitCaps, InitComponents, LifecycleSubscribe, LifecycleSubscribeSelf, LifecycleUnsubscribe,
@@ -18,7 +18,7 @@ use aether_actor::ReplyMode;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_data::KindId;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-use aether_substrate::actor::native::{NativeActorMailbox, NativeActorMailboxWithContext, NativeCtx};
+use aether_substrate::actor::native::NativeCtx;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::mail::MailboxId as SubstrateMailboxId;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
@@ -50,13 +50,9 @@ impl Publishes<Shutdown> for LifecycleCapability {}
 /// call site — same shape and rationale as
 /// `InputMailboxExt` on the `aether.input` cap.
 ///
-/// Impl'd for both transports `ctx.actor::<LifecycleCapability>()` can
-/// return:
-///
-/// - [`WasmActorMailbox<LifecycleCapability>`] — always-on, for the §12
-///   wasm-component stage-subscribe site.
-/// - [`NativeActorMailbox<'_, LifecycleCapability>`] — native cap-to-cap
-///   sends, gated on `#[cfg(not(target_family = "wasm"))]`.
+/// Blanket-impl'd over [`MailboxForward<LifecycleCapability>`], so it reaches
+/// every handle `ctx.actor::<LifecycleCapability>()` can return — the §12
+/// wasm-component stage-subscribe site and native cap-to-cap sends alike.
 ///
 /// All methods are fire-and-forget. `subscribe` / `unsubscribe` reply
 /// via `aether.lifecycle.subscribe_result`; reply handling stays on the
@@ -66,15 +62,7 @@ impl Publishes<Shutdown> for LifecycleCapability {}
 /// The generic escape hatch is unaffected: `mailbox.send(&LifecycleSubscribe { .. })`
 /// still works, since `send` is an inherent method on the underlying
 /// mailbox type.
-trait LifecycleMailboxForward {
-    fn forward<K>(&self, payload: &K)
-    where
-        LifecycleCapability: HandlesKind<K>,
-        K: Kind;
-}
-
-#[allow(private_bounds)]
-pub trait LifecycleMailboxExt: LifecycleMailboxForward {
+pub trait LifecycleMailboxExt: MailboxForward<LifecycleCapability> {
     /// Mail `aether.lifecycle.subscribe_self { stage }` to the cap —
     /// subscribe the *calling* actor to the lifecycle stage `K` (a
     /// stage kind, e.g. `Tick` / `Render`). The cap resolves the
@@ -125,49 +113,7 @@ pub trait LifecycleMailboxExt: LifecycleMailboxForward {
     }
 }
 
-impl<T: LifecycleMailboxForward> LifecycleMailboxExt for T {}
-
-impl LifecycleMailboxForward for WasmActorMailbox<'_, LifecycleCapability> {
-    fn forward<K>(&self, payload: &K)
-    where
-        LifecycleCapability: HandlesKind<K>,
-        K: Kind,
-    {
-        self.send(payload);
-    }
-}
-
-impl<C: Kind> LifecycleMailboxForward for WasmActorMailboxWithContext<'_, '_, LifecycleCapability, C> {
-    fn forward<K>(&self, payload: &K)
-    where
-        LifecycleCapability: HandlesKind<K>,
-        K: Kind,
-    {
-        let _ = self.send(payload);
-    }
-}
-
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-impl LifecycleMailboxForward for NativeActorMailbox<'_, LifecycleCapability> {
-    fn forward<K>(&self, payload: &K)
-    where
-        LifecycleCapability: HandlesKind<K>,
-        K: Kind,
-    {
-        self.send(payload);
-    }
-}
-
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-impl<C: Kind> LifecycleMailboxForward for NativeActorMailboxWithContext<'_, '_, LifecycleCapability, C> {
-    fn forward<K>(&self, payload: &K)
-    where
-        LifecycleCapability: HandlesKind<K>,
-        K: Kind,
-    {
-        let _ = self.send(payload);
-    }
-}
+impl<T: MailboxForward<LifecycleCapability>> LifecycleMailboxExt for T {}
 
 /// Push the current stage payload to each subscriber as an untyped envelope.
 /// Uses the runtime-id `send_envelope_tracked` path because the broadcast
@@ -191,9 +137,10 @@ pub fn broadcast_to_subscribers<M: ReplyMode>(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        LifecycleCapability, LifecycleMailboxExt, LifecycleSubscribeSelf, WasmActorMailbox, WasmActorMailboxWithContext,
-    };
+    use super::{LifecycleCapability, LifecycleMailboxExt, LifecycleSubscribeSelf};
+    use aether_actor::{WasmActorMailbox, WasmActorMailboxWithContext};
+    #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+    use aether_substrate::actor::native::{NativeActorMailbox, NativeActorMailboxWithContext};
 
     fn assert_facade<T: LifecycleMailboxExt>() {}
 
@@ -206,9 +153,7 @@ mod tests {
     #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
     #[test]
     fn facade_is_available_to_native_senders() {
-        assert_facade::<super::NativeActorMailbox<'static, LifecycleCapability>>();
-        assert_facade::<
-            super::NativeActorMailboxWithContext<'static, 'static, LifecycleCapability, LifecycleSubscribeSelf>,
-        >();
+        assert_facade::<NativeActorMailbox<'static, LifecycleCapability>>();
+        assert_facade::<NativeActorMailboxWithContext<'static, 'static, LifecycleCapability, LifecycleSubscribeSelf>>();
     }
 }

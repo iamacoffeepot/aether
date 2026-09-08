@@ -38,16 +38,8 @@
 //! and `Drop` live behind
 //! `runtime`.
 
-// Handler-signature kinds must be importable at file root — the
-// `#[actor]` macro emits `impl HandlesKind<K>` markers always-on against
-// the identity, so they reference these kinds from here.
-use crate::kinds::{EngineHeartbeatTick, ForwardEnvelope};
-use aether_kinds::TerminateEngine;
-// `RpcInboundReady` is owned by the RPC server cap (ADR-0121); the proxy
-// shares the wake-mail kind. Imported at file root for the always-on
-// `HandlesKind<RpcInboundReady>` marker.
+use crate::kinds::ForwardEnvelope;
 use crate::server::FleetServer;
-use aether_rpc::RpcInboundReady;
 
 // The proxy's implementation, split along its seams (ADR-0121):
 // `config` (the init config + heartbeat tuning), `connect` (the

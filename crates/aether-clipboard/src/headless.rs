@@ -6,11 +6,6 @@
 
 use aether_actor::actor;
 
-// The handler-argument and reply kinds the emitted `HandlesKind` markers lift
-// verbatim from the runtime module's signatures must resolve at this file's
-// root.
-use crate::kinds::{GetClipboardText, GetClipboardTextResult, SetClipboardText, SetClipboardTextResult};
-
 /// Fail-fast `aether.clipboard` companion for chassis without a clipboard.
 #[actor(singleton, root, runtime::headless)]
 pub struct HeadlessClipboardCapability;

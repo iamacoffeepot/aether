@@ -19,6 +19,7 @@
 use alloc::vec::Vec;
 use core::slice;
 use serde::de::DeserializeOwned;
+pub mod facade;
 pub mod mailbox;
 
 use core::marker::PhantomData;

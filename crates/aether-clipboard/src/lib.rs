@@ -14,43 +14,31 @@ mod config;
 #[cfg(feature = "runtime")]
 pub use config::ClipboardParams;
 
-use aether_actor::{WasmActorMailbox, actor};
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-use aether_substrate::actor::native::NativeActorMailbox;
+use aether_actor::{MailboxForward, actor};
 
 /// Addressing identity for the system or in-memory `aether.clipboard` actor.
 #[actor(singleton, root)]
 pub struct ClipboardCapability;
 
 /// Sender-side convenience methods for the text clipboard requests.
-pub trait ClipboardMailboxExt {
+///
+/// Blanket-impl'd over [`MailboxForward<ClipboardCapability>`], so it reaches
+/// every handle `ctx.actor::<ClipboardCapability>()` can return — the wasm and
+/// native mailboxes and their typed request-context adapters alike — from one
+/// set of bodies.
+pub trait ClipboardMailboxExt: MailboxForward<ClipboardCapability> {
     /// Request the current clipboard text.
-    fn get_text(&self);
+    fn get_text(&self) {
+        self.forward(&GetClipboardText);
+    }
 
     /// Replace the current clipboard text.
-    fn set_text(&self, text: &str);
-}
-
-impl ClipboardMailboxExt for WasmActorMailbox<'_, ClipboardCapability> {
-    fn get_text(&self) {
-        self.send(&GetClipboardText);
-    }
-
     fn set_text(&self, text: &str) {
-        self.send(&SetClipboardText { text: text.to_owned() });
+        self.forward(&SetClipboardText { text: text.to_owned() });
     }
 }
 
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-impl ClipboardMailboxExt for NativeActorMailbox<'_, ClipboardCapability> {
-    fn get_text(&self) {
-        self.send(&GetClipboardText);
-    }
-
-    fn set_text(&self, text: &str) {
-        self.send(&SetClipboardText { text: text.to_owned() });
-    }
-}
+impl<T: MailboxForward<ClipboardCapability>> ClipboardMailboxExt for T {}
 
 // The headless companion's identity lives in `headless.rs` (always-on, like
 // the [`ClipboardCapability`] ZST above); its runtime half is the nested

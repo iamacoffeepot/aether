@@ -49,25 +49,6 @@
 // decoded bytes so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
 
-use aether_kinds::trace::Settled;
-// `MonitorNotice` rides the handled-kind list like the subscribe family:
-// the `#[actor]` macro emits its always-on `HandlesKind` marker for the
-// runtime half's ADR-0079 vacate/close purge handler.
-use aether_kinds::{
-    LifecycleAdvance, LifecycleSubscribe, LifecycleSubscribeSelf, LifecycleUnsubscribe, LifecycleUnsubscribeAll,
-    LifecycleUnsubscribeSelf, MonitorNotice, Quit,
-};
-// `LifecycleSubscribeResult` rides the native gate (not `runtime`): the
-// `#[actor]` macro's ADR-0109 `HandlerEntry` inventory submission —
-// emitted on every native build, runtime or not — names the subscribe
-// handlers' reply kind `::ID`, so a transport-only build must see it.
-// `LifecycleAdvanceComplete` is the reply of the two `#[handler::manual]`
-// arms, which declare no manifest reply kind, so it is named only by the
-// runtime handler bodies and lives in `mod runtime` behind the `runtime`
-// gate.
-#[cfg(not(target_family = "wasm"))]
-use aether_kinds::LifecycleSubscribeResult;
-
 use aether_actor::actor;
 
 mod graph;

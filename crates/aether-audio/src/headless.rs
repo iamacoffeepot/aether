@@ -6,14 +6,6 @@
 
 use aether_actor::actor;
 
-// The handler-argument and reply kinds the emitted `HandlesKind` markers lift
-// verbatim from the runtime module's signatures must resolve at this file's
-// root.
-use crate::kinds::{
-    LoadInstrument, NoteOff, NoteOn, PlayTrack, Schedule, ScheduleResult, SetMasterGain, SetMasterGainResult,
-    SetReverbSend, SetReverbSendResult, SetSenderGain, SetSenderGainResult, StopTrack,
-};
-
 /// `HeadlessAudioCapability` **identity** (ADR-0122 identity/runtime split).
 /// The chassis-without-audio-device companion to [`crate::AudioCapability`],
 /// claiming the same `aether.audio` mailbox so desktop-designed components

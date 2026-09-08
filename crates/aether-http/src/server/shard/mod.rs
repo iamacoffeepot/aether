@@ -14,13 +14,8 @@
 //! (reply correlation and the ADR-0133 handles both follow the dispatching
 //! mailbox).
 
-// Handler-signature kinds resolve at file root through these imports —
-// `#[actor]` emits the `HandlesKind<K>` markers always-on against the
-// identity, and the handler bodies in `runtime` name these kinds.
 use super::HttpServerCapability;
-use crate::kinds::{
-    HttpInboundReady, HttpRequestCredit, HttpResponseChunk, HttpResponseStreamEnd, WebSocketClose, WebSocketMessage,
-};
+use crate::kinds::{HttpRequestCredit, HttpResponseChunk, HttpResponseStreamEnd, WebSocketClose, WebSocketMessage};
 use aether_kinds::trace::Settled;
 
 /// `aether.http.server.shard` **identity** (ADR-0122 identity/runtime split,

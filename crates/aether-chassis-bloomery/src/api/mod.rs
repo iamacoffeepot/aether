@@ -20,25 +20,8 @@ pub(crate) use runtime::hex;
 
 use aether_actor::actor;
 
-// The handled-kind types the `#[actor(singleton)]` dispatch table references —
-// the hand-written handlers' reply kinds (one typed handler each, so the
-// accept-set stays buffered rather than tripping the streaming path a broad
-// `#[fallback]` would) and the settlement-notice safety net. The request-ingress
-// kinds are the per-route kinds `#[http::router]` mints in `runtime/mod.rs`, and
-// a deferred route's reply kind rides its own `#[http::reply]` glue (ADR-0154),
-// so neither is named here. The boot configuration read answers no route at all,
-// so its reply is hand-written and named here (#4616).
-use aether_bloomery::{AdmitResult, LoadConfigsResult};
-use aether_http::RegisterRouteResult;
-use aether_kinds::trace::Settled;
-
 #[cfg(feature = "github")]
 use crate::bloomery::LatestDoctorReport;
-use crate::signing::VerifyResult;
-use crate::store::{
-    CancelCommissionResult, ListCommissionsResult, LoadCommissionResult, RecordCommissionApprovalResult,
-    RecordDispatchDescriptionResult, ReopenCommissionResult,
-};
 
 /// Addressing identity for the `aether.bloomery.api` capability (ADR-0122).
 #[actor(singleton, root)]

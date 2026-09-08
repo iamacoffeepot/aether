@@ -62,11 +62,6 @@
 
 use aether_actor::actor;
 
-// The handler kinds the `#[actor]` macro references when it emits this cap's
-// `HandlesKind` markers must be in scope here: `NotifyTick` from the runtime
-// module, `QueryResult` from the control core it reads the document from.
-use aether_bloomery::QueryResult;
-
 mod config;
 pub use config::{NotifyConfig, NotifyOverlay};
 

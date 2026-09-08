@@ -39,17 +39,8 @@
 // decoded bytes so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
 
-// Handler-signature kinds must be importable at file root — the
-// `#[actor]` macro emits `impl HandlesKind<K>` markers always-on against
-// the identity, so they reference these kinds from here. The per-handler
-// reply kinds those markers also name arrive through the `use runtime::*`
-// glob below.
-use crate::kinds::{EngineAlive, EngineDied, EngineRestartDue};
-use aether_kinds::{
-    ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine, TerminateEngine,
-    UploadBinary, UploadComponent,
-};
-use aether_rpc::RouteEnvelope;
+use crate::kinds::{EngineAlive, EngineDied};
+use aether_kinds::{ListEngines, SpawnEngine, TerminateEngine};
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
 
@@ -96,8 +87,6 @@ pub struct FleetServer;
 // the handler/init ctx, the runtime state, the artifact/fleet helpers — lives
 // in the `runtime` module below; the `#[actor] impl` reaches all of it through
 // the single `use runtime::*` glob.
-// The handler-signature kinds (`ListEngines` / `SpawnEngine` / …) stay
-// always-on at file root — the always-on `HandlesKind<K>` markers name them.
 use aether_actor::actor;
 
 // The `runtime` module is this cap's private runtime-half namespace; the impl

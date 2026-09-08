@@ -64,28 +64,20 @@ pub use route::{ComponentHostWasmExt, PeerCtxExt, resolve_embedded};
 #[cfg(feature = "runtime")]
 pub use runtime::ComponentHostParams;
 
-// Handler-signature kinds resolve at file root always-on: `#[actor]` emits the
-// `impl HandlesKind<K>` markers AND the `aether.kinds.inputs` handler-inventory
-// (which names each handler's reply kind via `<R as Kind>::ID`) against the
-// identity, outside the `feature = "runtime"` gate — so both the input kinds
-// and the reply kinds must be in scope here, not behind the runtime gate.
+// `LoadResult` is named by the runtime half's own code, not by the emitted
+// markers, so it keeps the runtime gate the rest of that half rides.
 #[cfg(feature = "runtime")]
 use aether_kinds::LoadResult;
-use aether_kinds::{
-    DescribeComponent, DescribeComponentResult, DropComponent, ListComponents, ListComponentsResult, LoadComponent,
-    LoadComponentUnder, ReplaceComponent, ReplaceResult,
-};
 
 // The `#[actor]` attribute sits on the capability struct (the struct-hosted
 // ADR-0123 form): it reads the sibling `runtime` module off disk and emits the
-// always-on addressing markers + handler inventory against the identity here.
-// Everything that names an `aether_substrate` / `wasmtime` type — the
-// `#[runtime] impl NativeActor`, the handler/init ctx, the runtime state, the
-// `forward_to_trampoline` helper — lives in the `runtime` module below, gated
-// once by `feature = "runtime"`; the body sources those names beside itself, so
-// only the handler-argument kinds the emitted markers lift verbatim must keep
-// resolving at this file's root (the `aether_kinds` import above).
-use aether_actor::{RegistryChanged, actor};
+// always-on addressing markers + handler inventory against the identity here,
+// carrying that module's own imports so the handler and reply kinds resolve
+// without being restated at this file's root. Everything that names an
+// `aether_substrate` / `wasmtime` type — the `#[runtime] impl NativeActor`, the
+// handler/init ctx, the runtime state, the `forward_to_trampoline` helper —
+// lives in the `runtime` module below, gated once by `feature = "runtime"`.
+use aether_actor::actor;
 
 /// `aether.component` cap **identity** (ADR-0122 identity/runtime split). A
 /// ZST carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`),
