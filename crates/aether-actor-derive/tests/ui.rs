@@ -380,6 +380,7 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_generic_native_lineage_struct",
     "rejects_handler_set_duplicate_adoption",
     "rejects_handler_set_without_body",
+    "rejects_inline_child_send_unhandled_kind",
     "rejects_malformed_actor_composable",
     "rejects_malformed_actor_lineage",
     "rejects_manual_marker_mismatch_wasm",

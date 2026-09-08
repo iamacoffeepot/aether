@@ -142,7 +142,7 @@ fn tool_router_registers_two_explicit_contract_subjects() {
         ["baseline", "candidate"].iter().all(|name| required.iter().any(|value| value == name))
     }));
     assert_eq!(schema["properties"]["baseline"]["$ref"], "#/$defs/ComponentContractSubject");
-    assert_eq!(schema["$defs"]["ComponentContractSubject"]["required"], serde_json::json!(["engine_id", "component"]));
+    assert_eq!(schema["$defs"]["ComponentContractSubject"]["required"], serde_json::json!(["address"]));
 }
 
 #[tokio::test]
@@ -226,12 +226,12 @@ async fn router_dispatches_a_fresh_compatible_comparison_with_explicit_subject_i
     let output = connect_mcp(port)
         .compare_component_contracts(Parameters(CompareComponentContractsArgs {
             baseline: ComponentContractSubject {
-                engine_id: first_engine.0.to_string(),
-                component: baseline.to_owned(),
+                engine_id: Some(first_engine.0.to_string()),
+                address: baseline.to_owned(),
             },
             candidate: ComponentContractSubject {
-                engine_id: second_engine.0.to_string(),
-                component: candidate.to_owned(),
+                engine_id: Some(second_engine.0.to_string()),
+                address: candidate.to_owned(),
             },
         }))
         .await
