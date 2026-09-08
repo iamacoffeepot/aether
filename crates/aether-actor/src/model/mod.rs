@@ -556,6 +556,40 @@ pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
 /// obvious.
 pub trait HandlesKind<K: Kind>: Addressable {}
 
+/// Per-published-kind marker: `P: Publishes<K>` means actor `P` is a
+/// source of kind `K` — it fans `K` out to whoever subscribed to it.
+/// The send-side mirror of [`HandlesKind`]: that marker says "this
+/// actor accepts `K` as mail," this one says "this actor emits `K` to
+/// its subscribers."
+///
+/// Gates the `subscribe` / `unsubscribe` families on the publisher's own
+/// sender facade, so a subscription to a kind the cap never emits is an
+/// `E0277` at the `wire` call site rather than a stored row that never
+/// fires. Subscribing the wrong cap is otherwise silent end to end: the
+/// row is accepted, the event is dropped at its source for want of a
+/// matching subscriber, and the component simply looks dead.
+///
+/// Unlike [`HandlesKind`], which the `#[actor]` macro emits from the
+/// handler list, these impls are written by hand in the publishing cap's
+/// crate. A cap's published vocabulary belongs to the *mailbox*, not to
+/// any one runtime behind it: `aether.window` is claimed by a headless,
+/// a desktop, and a synthetic implementation, and only the neutral
+/// identity that callers address is the right place to state what the
+/// mailbox emits.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not publish `{K}`",
+    label = "subscribing here would store a row that never fires",
+    note = "an event with no matching subscriber is dropped at its source, so a subscription on the wrong \
+            capability fails silently at run time — it is refused here instead",
+    note = "frame-lifecycle stages (`Tick`, `Render`, `Present`, `InitCaps`, `InitComponents`, `Shutdown`) come \
+            from `LifecycleCapability`: `ctx.actor::<LifecycleCapability>().subscribe::<Tick>()`",
+    note = "window device events (`Key`, `KeyRelease`, `MouseMove`, `MouseButton`, `MouseButtonRelease`, \
+            `MouseWheel`, `WindowSize`, `TextInput`, `ImePreedit`, `Modifiers`) and window lifecycle \
+            (`WindowOpened`, `WindowClosed`, `WindowMenuActivated`) come from `WindowCapability`: \
+            `ctx.actor::<WindowCapability>().subscribe::<Key>(WindowSelector::All)`"
+)]
+pub trait Publishes<K: Kind>: Addressable {}
+
 /// A complete actor: an addressable identity ([`Addressable`]) that also
 /// carries a boot lifecycle ([`Lifecycle<S>`](Lifecycle)) over a runtime
 /// state `S`. The blanket impl supplies it for any type that is both, so

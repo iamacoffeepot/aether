@@ -63,7 +63,7 @@ fn play_track_deferred_reply_settles_caller_chain() {
         AudioCapability::on_read_result(
             &mut cap,
             &mut read_ctx,
-            ReadResult::Ok { namespace: "assets".to_owned(), path: "track.wav".to_owned(), bytes: wav },
+            ReadResult::Ok { addr: NamespaceAddr::new("assets", "track.wav"), bytes: wav },
         );
     }
 
@@ -115,11 +115,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
         AudioCapability::on_read_result(
             &mut cap,
             &mut read_ctx,
-            ReadResult::Ok {
-                namespace: "assets".to_owned(),
-                path: "piano/bank.sfz".to_owned(),
-                bytes: sfz.as_bytes().to_vec(),
-            },
+            ReadResult::Ok { addr: NamespaceAddr::new("assets", "piano/bank.sfz"), bytes: sfz.as_bytes().to_vec() },
         );
     }
     let c4_correlation = assert_next_send_kind::<Read>(&transport, &rx);
@@ -129,7 +125,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
         AudioCapability::on_read_result(
             &mut cap,
             &mut read_ctx,
-            ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/c4.wav".to_owned(), bytes: wav.clone() },
+            ReadResult::Ok { addr: NamespaceAddr::new("assets", "piano/c4.wav"), bytes: wav.clone() },
         );
     }
     {
@@ -138,7 +134,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
         AudioCapability::on_read_result(
             &mut cap,
             &mut read_ctx,
-            ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/c5.wav".to_owned(), bytes: wav },
+            ReadResult::Ok { addr: NamespaceAddr::new("assets", "piano/c5.wav"), bytes: wav },
         );
     }
 

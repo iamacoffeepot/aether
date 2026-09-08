@@ -21,7 +21,7 @@ pub use aether_substrate::chassis::error::BootError;
 use crate::MEMORY_FONT_NAMESPACE;
 use aether_fs::FsMailboxExt;
 #[allow(unused_imports)]
-pub use aether_fs::{FsCapability, Read, ReadResult};
+pub use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
 pub use aether_render::{
     CreateTexture, CreateTextureResult, RenderCapability, TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
     UpdateTexture,
@@ -460,20 +460,21 @@ impl NativeActor for TextCapability {
             return;
         };
         match mail {
-            ReadResult::Ok { namespace, path, bytes } => {
-                let name = font_name_from_path(&path);
+            ReadResult::Ok { addr, bytes } => {
+                let name = font_name_from_path(&addr.path);
                 TextCapabilityState::dispatch_font_parse(
                     ctx,
                     context.source,
-                    namespace,
-                    path,
+                    addr.namespace,
+                    addr.path,
                     name,
                     context.reply,
                     bytes,
                 );
             }
-            ReadResult::Err { namespace, path, error } => {
+            ReadResult::Err { addr, error } => {
                 let reason = format!("file read failed: {error:?}");
+                let NamespaceAddr { namespace, path } = addr;
                 match context.reply {
                     PendingReply::LoadFont => {
                         ctx.reply_to(context.source, &LoadFontResult::Err { namespace, path, error: reason });
@@ -640,7 +641,7 @@ mod tests {
     use super::layout::build_font_metrics;
     use super::{Arc, CreateTexture, NativeCtx, QuadSpace, Read, Source, TextCapabilityState, UpdateTexture};
     use aether_data::{Kind, MailId, SessionToken, SourceAddr, Uuid};
-    use aether_fs::FsError;
+    use aether_fs::{FsError, NamespaceAddr};
     use aether_math::Rgba;
     use aether_render::DrawTexturedQuads;
     use aether_substrate::actor::native::binding::NativeBinding;
@@ -735,11 +736,7 @@ mod tests {
         TextCapability::on_read_result(
             &mut state,
             &mut read_ctx,
-            ReadResult::Err {
-                namespace: "assets".to_owned(),
-                path: "missing.ttf".to_owned(),
-                error: FsError::NotFound,
-            },
+            ReadResult::Err { addr: NamespaceAddr::new("assets", "missing.ttf"), error: FsError::NotFound },
         );
         match decode_session_reply::<LoadFontResult>(&rx) {
             LoadFontResult::Err { path, .. } => assert_eq!(path, "missing.ttf"),
@@ -785,7 +782,7 @@ mod tests {
         TextCapability::on_read_result(
             &mut state,
             &mut second_reply_ctx,
-            ReadResult::Err { namespace: "assets".to_owned(), path: "same.ttf".to_owned(), error: FsError::NotFound },
+            ReadResult::Err { addr: NamespaceAddr::new("assets", "same.ttf"), error: FsError::NotFound },
         );
         let (session, reply) = decode_session_reply_with_session::<LoadFontResult>(&rx);
         assert_eq!(session, second_session);
@@ -796,7 +793,7 @@ mod tests {
         TextCapability::on_read_result(
             &mut state,
             &mut first_reply_ctx,
-            ReadResult::Err { namespace: "assets".to_owned(), path: "same.ttf".to_owned(), error: FsError::NotFound },
+            ReadResult::Err { addr: NamespaceAddr::new("assets", "same.ttf"), error: FsError::NotFound },
         );
         let (session, reply) = decode_session_reply_with_session::<LoadFontResult>(&rx);
         assert_eq!(session, first_session);
@@ -820,11 +817,7 @@ mod tests {
         TextCapability::on_read_result(
             &mut state,
             &mut read_ctx,
-            ReadResult::Ok {
-                namespace: "assets".to_owned(),
-                path: "junk.ttf".to_owned(),
-                bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
-            },
+            ReadResult::Ok { addr: NamespaceAddr::new("assets", "junk.ttf"), bytes: vec![0xDE, 0xAD, 0xBE, 0xEF] },
         );
         drive_task_completion::<TextCapability>(&mut state, &binding, &rx);
         match decode_session_reply::<LoadFontResult>(&rx) {
@@ -1218,11 +1211,7 @@ mod tests {
         TextCapability::on_read_result(
             &mut state,
             &mut read_ctx,
-            ReadResult::Ok {
-                namespace: "assets".to_owned(),
-                path: "font.ttf".to_owned(),
-                bytes: test_font_bytes().to_vec(),
-            },
+            ReadResult::Ok { addr: NamespaceAddr::new("assets", "font.ttf"), bytes: test_font_bytes().to_vec() },
         );
         drive_task_completion::<TextCapability>(&mut state, &binding, &rx);
         match decode_session_reply::<FontMetricsResult>(&rx) {
