@@ -7,8 +7,7 @@ publish = false
 
 # Compile-time contract for the `Publishes<K>` gate on the two subscribe
 # surfaces (`LifecycleCapability` stages, `WindowCapability` device events).
-# Deliberately its own package for the same reason as
-# `aether-component-ui-tests`: trybuild promotes its host package's
+# Deliberately its own package: trybuild promotes its host package's
 # dev-dependencies into each generated fixture project, and both cap crates
 # carry substrate harness dev-dependencies that would otherwise enter the
 # nested cold build.
