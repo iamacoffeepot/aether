@@ -470,7 +470,7 @@ pub fn install_frame_size(sources: &mut ConfigSources) -> Result<(), ConfigError
 /// `env_prefix = "AETHER"` with an explicit `env =` per field pins each
 /// historical key byte-for-byte. Only [`log_filter`](Self::log_filter) is
 /// re-applied after resolution (via
-/// [`apply_filter`](aether_substrate::runtime::log_install::apply_filter)): the
+/// [`apply_filter`]): the
 /// subscriber installs an env-or-`info` filter at boot, before the config file
 /// loads, so a `[runtime]` file directive needs a re-apply. The three
 /// panic-hook fields declare their keys for the aggregate; the process-level
@@ -664,7 +664,7 @@ impl<C: Chassis> BuilderChassisConfigMember<C> for Builder<C> {
 
 /// The shared pre-composition base every full-stack chassis and the hub carry.
 /// Its [`ComposeBase`] impl is what
-/// [`composed`](aether_substrate::chassis::composed) installs on the
+/// [`composed`] installs on the
 /// framework-minted builder before each chassis's own `compose` delta runs: it
 /// hands the builder the config source stack, fuses the three non-cap members
 /// onto their builder seams, declares the two process-global members whose value

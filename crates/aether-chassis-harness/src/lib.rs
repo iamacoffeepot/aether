@@ -8,7 +8,7 @@
 //! - [`chassis`] — [`HarnessChassis`], the `BootableChassis` declaration every
 //!   path composes through (boot, `--describe`, `--print-config`).
 //! - [`cli`] — [`HarnessCli`], the clap root and the overlays it flattens.
-//! - [`env`] — [`HarnessEnv`], the config the binary boots from, resolved off
+//! - [`mod@env`] — [`HarnessEnv`], the config the binary boots from, resolved off
 //!   the argv/env/file source stack, plus the harness's own render-size knob.
 //! - [`pump`] — [`HarnessDriver`], the render pump loop `main` runs. The
 //!   harness is a passive chassis: `main()` IS the driver, because the
