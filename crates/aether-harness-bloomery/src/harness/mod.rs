@@ -12,6 +12,7 @@
 //! | **backend** | `fixture` / `local repo` | In-memory GitHub (`shared_fixture`) versus a real git repository the source port can check out |
 //! | **coordinator** | `in-process` / `forked` | `BloomeryChassis::build` in the test process versus a `bloomery` child |
 //! | **lane** | `off` / `scripted` | No local lane (scripted verdicts over the wire) versus `bloomery-mock-lane` as `AETHER_BLOOMERY_LANE_PROGRAM` |
+//! | **reader** | `off` / `on` | Whether a landing dispatches the bloom-level reader (ADR-0216 §4), as `AETHER_BLOOMERY_RETROSPECT_READER_ENABLED` |
 //!
 //! # Named cells
 //!
@@ -99,6 +100,22 @@ pub enum CoordinatorKind {
     Forked,
 }
 
+/// Reader axis: whether the coordinator dispatches the bloom-level reader
+/// after a landing (ADR-0216 §4).
+///
+/// An axis rather than a fourth `bool` on the builder, like every other thing
+/// a cell chooses here: the two states have names, and a call site reading
+/// `Reader::On` says which one it wants without the reader of that line
+/// counting arguments.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Reader {
+    /// `retrospect_reader_enabled = false`, the production default. A landing
+    /// journals its study as missing and spends no order.
+    Off,
+    /// Every landing dispatches one `retrospect.read`.
+    On,
+}
+
 /// Lane axis: no local lane, or the mock-lane binary at the end of the argv.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Lane {
@@ -120,7 +137,7 @@ pub struct HarnessBuilder {
     workpiece: String,
     wall_clock_secs: Option<u64>,
     heartbeat_silence_secs: Option<u64>,
-    retrospect_reader_enabled: bool,
+    reader: Reader,
     script: Option<LaneScript>,
     repo: Option<Repo>,
     authority_path: Option<PathBuf>,
@@ -146,7 +163,7 @@ impl HarnessBuilder {
             workpiece: "wp".to_owned(),
             wall_clock_secs: None,
             heartbeat_silence_secs: None,
-            retrospect_reader_enabled: false,
+            reader: Reader::Off,
             script: None,
             repo: None,
             authority_path: None,
@@ -172,7 +189,7 @@ impl HarnessBuilder {
             workpiece: "wp".to_owned(),
             wall_clock_secs: None,
             heartbeat_silence_secs: None,
-            retrospect_reader_enabled: false,
+            reader: Reader::Off,
             script: Some(script.clone()),
             repo: None,
             authority_path: None,
@@ -200,7 +217,7 @@ impl HarnessBuilder {
             workpiece: "wp".to_owned(),
             wall_clock_secs: None,
             heartbeat_silence_secs: None,
-            retrospect_reader_enabled: false,
+            reader: Reader::Off,
             script: Some(LaneScript::all_passing()),
             repo: None,
             authority_path: Some(repo.path().to_owned()),
@@ -275,15 +292,14 @@ impl HarnessBuilder {
         self
     }
 
-    /// Whether the coordinator dispatches the bloom-level reader after a
-    /// landing (ADR-0216 §4).
+    /// Override the reader axis.
     ///
-    /// Off, like the production default: a scenario that expects a landed
-    /// bloom to be read has to say so, and one that expects a landing to end
-    /// at the landing gets that without opting out of anything.
+    /// [`Reader::Off`] by default, like production: a scenario that expects a
+    /// landed bloom to be read has to say so, and one that expects a landing to
+    /// end at the landing gets that without opting out of anything.
     #[must_use]
-    pub const fn retrospect_reader(mut self, enabled: bool) -> Self {
-        self.retrospect_reader_enabled = enabled;
+    pub const fn reader(mut self, reader: Reader) -> Self {
+        self.reader = reader;
         self
     }
 
@@ -358,7 +374,7 @@ impl FixtureHarness {
     /// As [`start`](Self::start).
     #[must_use]
     pub fn start_with_reader(client_name: &str) -> Self {
-        Self { inner: HarnessBuilder::fixture().retrospect_reader(true).start(client_name) }
+        Self { inner: HarnessBuilder::fixture().reader(Reader::On).start(client_name) }
     }
 }
 

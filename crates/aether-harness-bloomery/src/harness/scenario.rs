@@ -46,7 +46,7 @@ use aether_substrate::chassis::builder::BuiltChassis;
 use super::digest;
 use super::drive::{member, member_with, passed};
 use super::roots::FixtureRoots;
-use super::{BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, Lane, POLL};
+use super::{BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, Lane, POLL, Reader};
 use crate::oracle::{Oracle, is_answerable, liveness};
 use crate::scenario::{LaneScript, Scenario};
 use crate::script::write_lane_scripts;
@@ -182,7 +182,7 @@ impl ScenarioHarness {
                         fixture_base_sha: repo.head(),
                         heartbeat_silence_secs: builder.heartbeat_silence_secs,
                         authorized_instructions: &authorized,
-                        retrospect_reader_enabled: builder.retrospect_reader_enabled,
+                        retrospect_reader_enabled: builder.reader == Reader::On,
                     },
                 );
                 (None, Some(child), Wire::from_stream(stream), None)
@@ -993,7 +993,7 @@ fn in_process_env(
     let coordinator = CoordinatorConfig {
         store_path: store_path.to_owned(),
         authorized_instruction_bundles: authorized_instructions.to_owned(),
-        retrospect_reader_enabled: builder.retrospect_reader_enabled,
+        retrospect_reader_enabled: builder.reader == Reader::On,
         artifacts_root: Some(artifacts_root.to_owned()),
         poll_interval_secs: builder.poll_interval_secs,
         local_lane_enabled: scripted,

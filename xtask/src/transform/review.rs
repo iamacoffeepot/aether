@@ -27,8 +27,9 @@ pub(super) use aether_bloomery::REVIEW_CRITIC_COMMAND as REVIEW_CRITIC;
 /// The review lane's in-repo instruction source, embedded like the construct
 /// lane's: the critic prompt is assembled from this text plus the subject and
 /// the work order, never from skill text in the worker's checkout.
-/// `pub(crate)` so `cargo xtask bloom instructions` imports this exact text.
-pub(crate) const REVIEW_INSTRUCTIONS: &str = include_str!("review_instructions.md");
+/// Reachable outside this module so `cargo xtask bloom instructions` imports
+/// this exact text.
+pub const REVIEW_INSTRUCTIONS: &str = include_str!("review_instructions.md");
 
 /// What a critic's final message claims. `Environment` is not a judgment of the
 /// candidate at all: it is the critic reporting that the ground step naming the

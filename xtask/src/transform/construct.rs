@@ -43,9 +43,10 @@ const SURFACE_REQUEST_DELIVERABLE: &str = ".bloomery-surface-request";
 /// The lane-owned in-repo instruction source (#3572). Embedded at build time so
 /// the construct lane owns its process natively — the prompt is assembled from
 /// this text, never from `.claude/skills/implement` in the worker's checkout.
-/// `pub(crate)` so `cargo xtask bloom instructions` can import this exact
-/// text into the ADR-0214 bundle rather than a second copy of it.
-pub(crate) const CONSTRUCT_INSTRUCTIONS: &str = include_str!("construct_instructions.md");
+/// Reachable outside this module (`transform` is itself crate-private) so
+/// `cargo xtask bloom instructions` imports this exact text into the ADR-0214
+/// bundle rather than a second copy of it.
+pub const CONSTRUCT_INSTRUCTIONS: &str = include_str!("construct_instructions.md");
 
 /// Stamp the broker-matched `nonce`, the command id, and the candidate-produced
 /// signal onto the derived result `record`, producing the construct lane's
