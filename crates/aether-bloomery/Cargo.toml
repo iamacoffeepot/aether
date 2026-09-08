@@ -34,6 +34,12 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # hub binary store (ADR-0115). Default features off keeps the wasm build lean.
 sha2 = { workspace = true, default-features = false }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+# The pipeline manifest is TOML because a human edits it in a pull request
+# (ADR-0215). The parse lives with the value rather than with a host, because the
+# text is fetched out of the sealed base's tree through the source port — there
+# is no host path for a `load_from(path)` half to own — and because the version
+# refusal it gates is a property of the value.
+toml = { workspace = true }
 
 # `#[derive(aether_data::Kind)]` (the `control.rs` mail vocabulary) emits an
 # `inventory::submit!` referencing `::inventory` only on native targets, to
