@@ -182,12 +182,14 @@ non-fatal to substrate boot: the capability stays registered in nop state.
 Immediate notes then disappear, while reply-bearing handlers implemented by
 that capability return an audio-not-initialised error.
 
-The production headless chassis currently registers a small inline
-`aether.audio` sink instead. It absorbs all audio mail and emits an error reply
-only for `aether.audio.set_master_gain`; it does **not** synthesize the newer
-reply kinds. Do not await schedule, track, instrument, reverb, or sender-gain
-results there. The minimal hub and SubstrateHarness chassis do not compose the audio
-capability. These current facts are visible in
+The production headless chassis composes `HeadlessAudioCapability`, the
+crate's fail-fast companion, instead. It absorbs the fire-and-forget trigger
+kinds (`note_on`, `note_off`, `stop_track`) and answers every kind that
+promises a reply — master gain, reverb send, sender gain, schedule, track
+playback, instrument load — with that kind's `Err` arm, so a caller fails fast
+rather than reading a settled-with-no-reply chain as success. The minimal hub
+and SubstrateHarness chassis do not compose the audio capability at all. These
+current facts are visible in
 [`headless/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-headless/src/chassis.rs),
 [`hub/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-hub/src/chassis.rs),
 and
