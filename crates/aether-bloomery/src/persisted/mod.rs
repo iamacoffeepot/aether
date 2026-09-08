@@ -51,7 +51,7 @@ use serde::de::DeserializeOwned;
 use crate::digest::{Digest, encode_hex, schema_digest};
 use crate::reduce::decisions_v1::DecisionsV1;
 use crate::reduce::{Decisions, Event};
-use crate::values::{ApprovalPolicy, ModelOverride, PriceTable, SpendCeiling, StageCatalog};
+use crate::values::{ApprovalPolicy, ModelOverride, PipelineManifest, PriceTable, SpendCeiling, StageCatalog};
 
 pub use rendering::{RenderError, render_schema};
 
@@ -307,6 +307,17 @@ pub static MODEL_OVERRIDE: PersistedKind = PersistedKind {
     current: OnceLock::new(),
 };
 
+/// The [`PersistedKind`] for the sealed [`PipelineManifest`] a base declares
+/// (ADR-0215). Host-derived rather than operator-authored, and persisted like
+/// any other sealed configuration, so its shape is stamped and pinned like one.
+pub static PIPELINE_MANIFEST: PersistedKind = PersistedKind {
+    name: PipelineManifest::NAME,
+    schema: &<PipelineManifest as Schema>::SCHEMA,
+    bootstrap: Bootstrap::Current,
+    upcasts: &[],
+    current: OnceLock::new(),
+};
+
 /// The [`PersistedKind`] for sealed [`PriceTable`].
 pub static PRICE_TABLE: PersistedKind = PersistedKind {
     name: PriceTable::NAME,
@@ -335,8 +346,16 @@ pub static STAGE_CATALOG: PersistedKind = PersistedKind {
 };
 
 /// Every kind this binary persists. The fixture walks this table.
-pub static PERSISTED_KINDS: &[&PersistedKind] =
-    &[&DECISIONS, &EVENT, &APPROVAL_POLICY, &MODEL_OVERRIDE, &PRICE_TABLE, &SPEND_CEILING, &STAGE_CATALOG];
+pub static PERSISTED_KINDS: &[&PersistedKind] = &[
+    &DECISIONS,
+    &EVENT,
+    &APPROVAL_POLICY,
+    &MODEL_OVERRIDE,
+    &PIPELINE_MANIFEST,
+    &PRICE_TABLE,
+    &SPEND_CEILING,
+    &STAGE_CATALOG,
+];
 
 /// The registry entry whose [`PersistedKind::name`] is `name`, if any.
 #[must_use]

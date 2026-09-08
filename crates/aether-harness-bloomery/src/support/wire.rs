@@ -205,10 +205,22 @@ impl Wire {
     /// well-formed response.
     #[must_use]
     pub fn post(&self, path: &str, body: &str) -> (u16, String) {
+        self.request("POST", path, body)
+    }
+
+    /// [`post`](Self::post) with the method left to the caller, for the doors
+    /// that shape rather than create — `PATCH /drafts/{id}` above all, which is
+    /// where a draft is handed its base.
+    ///
+    /// # Panics
+    /// The REST port was never bound, or the ingress did not answer a
+    /// well-formed response.
+    #[must_use]
+    pub fn request(&self, method: &str, path: &str, body: &str) -> (u16, String) {
         let port = self.http_port.expect("the coordinator bound a REST control ingress");
         let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the REST ingress accepts");
         let request = format!(
-            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len(),
         );
         stream.write_all(request.as_bytes()).expect("the request writes");

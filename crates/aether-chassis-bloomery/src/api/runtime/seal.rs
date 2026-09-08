@@ -16,8 +16,8 @@ use serde::de::DeserializeOwned;
 use aether_actor::Manual;
 use aether_bloomery::{
     Admit, ApprovalPolicy, AuthorityDoor, BloomDraft, BloomId, BloomSpec, CommissionStatus, ConfigScopes,
-    Correspondence, DependencyError, Digest, Event, Fact, IdempotencyKey, MemberDependency, Membership, ScopeRevision,
-    SpendCeiling, Statement, SurfacePattern, WorkpieceId, resolve_member_dependencies, surface_intersection,
+    DependencyError, Digest, Event, Fact, IdempotencyKey, MemberDependency, Membership, ScopeRevision, SpendCeiling,
+    Statement, SurfacePattern, WorkpieceId, resolve_member_dependencies, surface_intersection,
 };
 use aether_data::wire::to_vec;
 use aether_http::HttpServerResponse;
@@ -252,17 +252,7 @@ impl ApiCapabilityState {
     /// Unresolved correspondence or a blob that cannot be read is uncertain
     /// and keeps the Human hard gate; it is never classified Proposed.
     fn sealed_adr_catalog(&self, base: Digest) -> TreeAdrs {
-        let correspondence: Option<&dyn Correspondence> = {
-            #[cfg(feature = "github")]
-            {
-                self.correspondence.as_deref().map(|correspondence| correspondence as &dyn Correspondence)
-            }
-            #[cfg(not(feature = "github"))]
-            {
-                None
-            }
-        };
-        TreeAdrs::resolve(&self.lane_repository, correspondence, base)
+        TreeAdrs::resolve(&self.lane_repository, self.sealed_correspondence(), base)
     }
 
     /// The gate-then-admit core both doors share (#4638): resolve every

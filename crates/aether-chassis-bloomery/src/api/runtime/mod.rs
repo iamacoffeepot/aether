@@ -66,6 +66,7 @@ mod drafts;
 mod evidence;
 pub mod hex;
 mod metrics;
+mod pipeline;
 mod proposals;
 mod reads;
 mod response;
@@ -473,7 +474,7 @@ impl NativeActor for BloomeryApiCapability {
         id: http::Path<String>,
     ) -> http::Outcome {
         let id = id.0;
-        let routed = state.patch_draft(&id, &ctx.request().body);
+        let routed = state.patch_draft(&ctx, &id, &ctx.request().body);
         finish(state, ctx, routed)
     }
 
