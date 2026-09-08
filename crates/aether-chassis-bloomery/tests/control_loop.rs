@@ -72,6 +72,29 @@ fn spawn_with_store(db: &str, client_name: &str) -> (Coordinator, TcpStream) {
     spawn_and_connect(client_name, Duration::from_mins(1), || spawn(0, db))
 }
 
+/// How long the boot-window fixtures hold the store's replay reply, so the
+/// window the control core refuses reads in is this wide by construction
+/// rather than as wide as one fold of the planted journal happens to take.
+/// The handshake and first read land well inside it on a loaded runner;
+/// the filler rows below still make the fold itself non-trivial.
+const BOOT_REPLAY_HOLD: Duration = Duration::from_secs(8);
+
+/// [`spawn_with_store`] with the store holding its boot replay reply for
+/// [`BOOT_REPLAY_HOLD`] (issue 5765).
+fn spawn_with_store_holding_replay(db: &str, client_name: &str) -> (Coordinator, TcpStream) {
+    let hold = BOOT_REPLAY_HOLD.as_millis().to_string();
+    spawn_and_connect(client_name, Duration::from_mins(1), || {
+        Coordinator::spawn(
+            0,
+            &[
+                ("AETHER_STORE_PATH", db),
+                ("AETHER_STORE_BOOT_REPLAY_HOLD_MILLIS", hold.as_str()),
+                ("AETHER_BLOOMERY_LANE_PROGRAM", CONTROL_LOOP_LANE),
+            ],
+        )
+    })
+}
+
 /// Pipeline two typed `Call`s to `mailbox` — write **both** frames before reading
 /// either reply — so the second request sits in the actor's mailbox while the
 /// first's store round-trip is still outstanding, forcing the in-flight
@@ -501,8 +524,9 @@ fn every_selector_reaches_its_own_reply_arm() {
 /// applies nothing and the rebuilt projection is exactly the one sealed bloom.
 const PRE_REPLAY_FILLER_ROWS: usize = 20_000;
 
-/// One sealed row plus [`PRE_REPLAY_FILLER_ROWS`] refusals, wide enough that a
-/// read from another process can land before the restarted core finishes the fold.
+/// One sealed row plus [`PRE_REPLAY_FILLER_ROWS`] refusals, so the fold the
+/// restarted core performs is a real one; [`BOOT_REPLAY_HOLD`] is what
+/// guarantees a read from another process lands before it finishes.
 fn plant_pre_replay_journal(db: &str, sealed: &Event, decided: &Decisions) {
     let refusal = Decisions { outcome: Outcome::SealRejected(SealError::EmptyMembership), effects: Vec::new() };
     let mut store = SqliteStore::open(db).unwrap();
@@ -548,7 +572,7 @@ fn the_view_is_not_served_before_the_journal_has_replayed() {
     assert!(matches!(decided.outcome, Outcome::Sealed(_)), "fixture control: the planted row seals");
     plant_pre_replay_journal(db, &sealed, &decided);
 
-    let (_coordinator, mut stream) = spawn_with_store(db, "control-loop-test");
+    let (_coordinator, mut stream) = spawn_with_store_holding_replay(db, "control-loop-test");
     let control = control_mailbox();
 
     let deadline = Instant::now() + Duration::from_mins(2);
@@ -596,7 +620,7 @@ fn metrics_and_spend_are_not_served_before_the_journal_has_replayed() {
     };
     plant_pre_replay_journal(db, &sealed, &decided);
 
-    let (_coordinator, mut stream) = spawn_with_store(db, "control-loop-test");
+    let (_coordinator, mut stream) = spawn_with_store_holding_replay(db, "control-loop-test");
     let control = control_mailbox();
     let bloom_bytes = bloom.0.as_bytes().to_vec();
     let summary =
