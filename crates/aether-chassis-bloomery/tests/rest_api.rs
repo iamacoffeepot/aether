@@ -1077,9 +1077,15 @@ fn authored_stage_catalog_reaches_the_dispatch_profile() {
     draft.configs.overlay(configs);
     let patch = serde_json::to_value(&draft).unwrap();
     // The registry goes up in canonical form and comes back with its address
-    // spelled the way the `/artifacts/{digest}` path would spell it.
-    let rendered_registry =
-        serde_json::json!({ "entries": { "aether.bloomery.stage_catalog": hex_of(&catalog_address) } });
+    // spelled the way the `/artifacts/{digest}` path would spell it. The draft
+    // already names the compiled pipeline vocabulary; overlaying the catalog
+    // keeps that entry.
+    let rendered_registry = serde_json::json!({
+        "entries": {
+            "aether.bloomery.pipeline_manifest": hex_of(&PipelineManifest::compiled().address()),
+            "aether.bloomery.stage_catalog": hex_of(&catalog_address),
+        }
+    });
     let (status, patched) = send_json(http_port, "PATCH", &format!("/drafts/{draft_id}"), &patch);
     assert_eq!(status, 200, "patch the authored catalog address into the draft registry");
     assert_eq!(patched["draft"]["configs"], rendered_registry);

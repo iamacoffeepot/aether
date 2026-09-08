@@ -70,9 +70,8 @@ fn spawn(port: u16, db: &str) -> Coordinator {
 /// sibling to steal — and the handshake helper dials the port the child
 /// announced in its boot log.
 fn spawn_with_store(db: &str, client_name: &str) -> (Coordinator, TcpStream) {
-    let (coordinator, mut stream) = spawn_and_connect(client_name, Duration::from_mins(1), || spawn(0, db));
-    file_compiled_manifest(&mut stream, 9000);
-    (coordinator, stream)
+    plant_compiled_manifest(db);
+    spawn_and_connect(client_name, Duration::from_mins(1), || spawn(0, db))
 }
 
 /// How long the boot-window fixtures hold the store's replay reply, so the
@@ -85,8 +84,9 @@ const BOOT_REPLAY_HOLD: Duration = Duration::from_secs(8);
 /// [`spawn_with_store`] with the store holding its boot replay reply for
 /// [`BOOT_REPLAY_HOLD`] (issue 5765).
 fn spawn_with_store_holding_replay(db: &str, client_name: &str) -> (Coordinator, TcpStream) {
+    plant_compiled_manifest(db);
     let hold = BOOT_REPLAY_HOLD.as_millis().to_string();
-    let (coordinator, mut stream) = spawn_and_connect(client_name, Duration::from_mins(1), || {
+    spawn_and_connect(client_name, Duration::from_mins(1), || {
         Coordinator::spawn(
             0,
             &[
@@ -95,9 +95,7 @@ fn spawn_with_store_holding_replay(db: &str, client_name: &str) -> (Coordinator,
                 ("AETHER_BLOOMERY_LANE_PROGRAM", CONTROL_LOOP_LANE),
             ],
         )
-    });
-    file_compiled_manifest(&mut stream, 9000);
-    (coordinator, stream)
+    })
 }
 
 /// Pipeline two typed `Call`s to `mailbox` — write **both** frames before reading
@@ -853,7 +851,8 @@ fn the_capability_ledger_is_measured_live_and_rebuilt_on_replay() {
 /// collision used to, boot error still can) is another attempt, not a
 /// 30s wait on a closed port.
 fn spawn_with_artifacts(db: &str, artifacts: &str, client_name: &str) -> (Coordinator, TcpStream) {
-    let (coordinator, mut stream) = spawn_and_connect(client_name, Duration::from_mins(1), || {
+    plant_compiled_manifest(db);
+    spawn_and_connect(client_name, Duration::from_mins(1), || {
         Coordinator::spawn(
             0,
             &[
@@ -862,9 +861,7 @@ fn spawn_with_artifacts(db: &str, artifacts: &str, client_name: &str) -> (Coordi
                 ("AETHER_BLOOMERY_LANE_PROGRAM", CONTROL_LOOP_LANE),
             ],
         )
-    });
-    file_compiled_manifest(&mut stream, 9000);
-    (coordinator, stream)
+    })
 }
 
 // The plausible bug: a journal that names a study artifact still reports
@@ -1261,10 +1258,17 @@ fn integration_dispatch_count(db: &str) -> usize {
         .sum()
 }
 
-/// File the compiled pipeline vocabulary so a `Fact::Seal` this suite admits
-/// names a [`PipelineManifest`] address the store can produce (ADR-0215).
-fn file_compiled_manifest(stream: &mut TcpStream, cid: u64) {
-    let _ = author_config(stream, cid, &PipelineManifest::compiled());
+/// File the compiled pipeline vocabulary into `db` before the child boots, so a
+/// `Fact::Seal` this suite admits names a [`PipelineManifest`] address the store
+/// can produce (ADR-0215) without an RPC after handshake. A post-handshake write
+/// waits out [`BOOT_REPLAY_HOLD`] and lets the first live read miss the window.
+fn plant_compiled_manifest(db: &str) {
+    let compiled = PipelineManifest::compiled();
+    let bytes = to_vec(&compiled).expect("the compiled manifest encodes");
+    SqliteStore::open(db)
+        .unwrap()
+        .record_config(compiled.address().as_bytes(), PipelineManifest::NAME, &bytes)
+        .unwrap();
 }
 
 /// Author a configuration straight to the store, exactly as the api cap's
