@@ -96,10 +96,55 @@ use syn::{
     PathArguments, ReturnType, Token, Type, parse_macro_input, token,
 };
 
+mod kind_attr;
 mod storage;
 
 /// ADR-0048 §1 cap on input parameters.
 const MAX_TRANSFORM_INPUTS: usize = 8;
+
+/// `#[aether_data::kind(name = "…")]` — declare a mail kind and get the
+/// standard derive stack with it (issue #5729).
+///
+/// The bare form implies `Debug`, `Clone`, `aether_data::Kind`,
+/// `aether_data::Schema`, `serde::Serialize` and `serde::Deserialize` —
+/// the membership 221 declaration sites already spelled out by hand, in
+/// 56 orderings of the same idea. Options name the *contract*, not a
+/// trait checklist:
+///
+/// ```ignore
+/// #[aether_data::kind(name = "aether.fs.read")]                 // the base stack
+/// #[aether_data::kind(name = "…", eq)]                          // + PartialEq, Eq
+/// #[aether_data::kind(name = "…", partial_eq)]                  // + PartialEq (float-carrying kinds)
+/// #[aether_data::kind(name = "…", copy, default)]               // + Copy, Default
+/// #[aether_data::kind(name = "…", pod)]                         // + Copy, bytemuck::Pod/Zeroable; no serde
+/// #[aether_data::kind(name = "…", no_serde)]                    // drop Serialize/Deserialize
+/// #[aether_data::kind(name = "…", derive(Hash, PartialOrd))]    // escape hatch
+/// ```
+///
+/// `pod` drops serde because a POD kind is cast-encoded (ADR-0005): the
+/// serde impls on one are inert weight. `#[repr(C)]` stays written at
+/// the declaration site — the layout is load-bearing and belongs where a
+/// reader of the struct can see it, not inside a macro.
+///
+/// A site whose derive list this vocabulary can't state exactly —
+/// missing `Debug`, missing `Clone`, or carrying traits with their own
+/// semantics — keeps the explicit `#[derive(…)]` + `#[kind(name = …)]`
+/// form. The attribute is a shorthand for the common contract, not a
+/// replacement for the derives.
+///
+/// Emits `compile_error!` for a missing or repeated `name`, an unknown
+/// option, `eq` together with the `partial_eq` it implies, a union, and
+/// for a leftover `#[derive(…)]` or `#[kind(…)]` left on the item by a
+/// half-applied migration.
+#[proc_macro_attribute]
+pub fn kind(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let attr = TokenStream2::from(attr);
+    let item = TokenStream2::from(item);
+    match kind_attr::parse_args(&attr).and_then(|args| kind_attr::expand(&args, &item)) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
 
 #[proc_macro_derive(Kind, attributes(kind))]
 pub fn derive_kind(input: TokenStream) -> TokenStream {
