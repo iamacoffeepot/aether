@@ -15,7 +15,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use aether_bloomery::{StageId, StoreClass};
+use aether_bloomery::{StageId, StoreClass, VerifyFailure};
 use aether_chassis_bloomery::store::OutstandingOrder;
 use aether_data::wire::from_bytes;
 use aether_harness_bloomery::{FixtureHarness, digest};
@@ -44,5 +44,21 @@ fn a_trial_coordinator_ledgers_its_rows_as_trial() {
         document.ledger,
     );
     assert!(!document.ledger.cells.is_empty(), "the construct dispatch must have entered a cell");
+    let construct = document
+        .ledger
+        .cells
+        .iter()
+        .find(|cell| cell.stage == StageId::Construct)
+        .expect("the construct dispatch must have entered a cell");
+    // GET /calibration now renders declared identities at zero rather than
+    // omitting them, so "never failed" is distinct from "not declared".
+    for identity in VerifyFailure::ALL {
+        assert_eq!(
+            construct.failures.iter().find(|failures| failures.verifier == identity).map(|failures| failures.verdicts),
+            Some(0),
+            "{identity} is declared by this repository and has not failed: {:?}",
+            construct.failures,
+        );
+    }
     assert_eq!(harness.journal_class(), StoreClass::Trial, "the journal on disk carries the same class");
 }
