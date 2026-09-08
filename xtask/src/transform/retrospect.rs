@@ -139,7 +139,7 @@ fn fenced_blocks(text: &str) -> Vec<&str> {
     let mut blocks = Vec::new();
     let mut rest = text;
     while let Some(start) = rest.find("```") {
-        let after = rest[start + 3..].strip_prefix("json").unwrap_or(&rest[start + 3..]);
+        let after = rest[start + 3..].strip_prefix("json").unwrap_or_else(|| &rest[start + 3..]);
         let after = after.strip_prefix('\n').or_else(|| after.strip_prefix('\r')).unwrap_or(after);
         let Some(end) = after.find("```") else {
             break;
@@ -176,10 +176,9 @@ fn claims_from_record(record: &Value) -> Option<Vec<RetrospectClaim>> {
 /// nothing to file. Pure so the binding is testable without running a harness.
 fn stamp_retrospect_evidence(nonce: Option<&str>, record: &Value, measured: Measurements) -> Value {
     let (status, findings, note) = if completed_clean(record) {
-        match claims_from_record(record) {
-            Some(findings) => (RetrospectStatus::Pass, findings, None),
-            None => (RetrospectStatus::Pass, Vec::new(), Some(UNPARSEABLE_NOTE)),
-        }
+        let (findings, note) = claims_from_record(record)
+            .map_or_else(|| (Vec::new(), Some(UNPARSEABLE_NOTE)), |findings| (findings, None));
+        (RetrospectStatus::Pass, findings, note)
     } else {
         (RetrospectStatus::Environment, Vec::new(), Some(INCOMPLETE_NOTE))
     };

@@ -103,7 +103,7 @@ fn a_landed_bloom_is_read_and_its_findings_are_filed() {
     let bloom = harness.settle("the bloom lands", |bloom| bloom.status == BloomStatus::Landed);
     wait_until_the_reader_has_answered(&mut harness, bloom.id);
 
-    assert_eq!(harness.study_verdicts(bloom.id), vec![true], "intake admits StudyCompleted {{ passed: true }}",);
+    assert_eq!(harness.study_verdicts(bloom.id), vec![true], "intake admits StudyCompleted {{ passed: true }}");
     let commands: Vec<String> = harness.ledger().into_iter().map(|run| run.command).collect();
     assert!(
         commands.contains(&RETROSPECT_READ_COMMAND.to_owned()),
