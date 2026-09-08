@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::{StageId, WorkpieceId};
-use crate::values::{AgentProfile, ConfigScopes, Harness, ReasoningEffort, ResolvedConfigs, ResolvedModel, ToolPolicy};
+use crate::values::{
+    AgentProfile, ConfigScopes, Harness, PipelineManifest, ReasoningEffort, ResolvedConfigs, ResolvedModel, ToolPolicy,
+};
 
 /// The declared output name every dispatched attempt uploads its result record
 /// under — the study/verdict envelope the intake broker binds to the displayed
@@ -98,6 +100,11 @@ pub const VERIFY_LANE_NETWORK: NetworkProfile = NetworkProfile::None;
 /// which argv the child gets, the Actions one to decide which wrapper workflow
 /// the dispatch fires, and only the model wrapper carries a credential
 /// (ADR-0149 §Execution on Actions).
+///
+/// This is the answer for a caller holding no manifest. A caller holding one
+/// asks it instead — [`PipelineManifest::is_model_lane`](crate::PipelineManifest::is_model_lane),
+/// ADR-0215 — because the split is a property of the repository whose lanes run,
+/// and the seal door, which does hold one, takes the declared answer.
 #[must_use]
 pub fn is_model_lane(command: &str) -> bool {
     command == CONSTRUCT_IMPLEMENT_COMMAND
@@ -136,6 +143,32 @@ pub(super) fn dispatched_command(stage: StageId) -> Option<&'static str> {
     }
 }
 
+/// Whether a binding's `process` names a **host position** — a pre-seal or
+/// host-native position whose string names the coordinator's own code rather
+/// than a worker lane.
+///
+/// The compiled half of the split ADR-0215 draws through
+/// [`is_known_process`]'s old single match. These strings stay compiled because
+/// they name this coordinator's code: `review` is the position the reducer runs
+/// the aggregate critic from, `source.cas_land` the landing path it owns. A
+/// repository does not get to declare them, and it could not implement them if
+/// it did.
+fn is_host_position(process: &str) -> bool {
+    matches!(
+        process,
+        "sketch"
+            | "aether.bloomery.api"
+            | "aether.bloomery.approve_gate"
+            | "transform.verify"
+            | "review"
+            | "integrate"
+            | "aggregate-verify"
+            | "aggregate-review"
+            | "source.cas_land"
+            | "retrospect"
+    )
+}
+
 /// Whether a binding's `process` names something an executor can actually route.
 ///
 /// The dispatched lanes are the typed commands the host routes on; the rest are
@@ -144,21 +177,12 @@ pub(super) fn dispatched_command(stage: StageId) -> Option<&'static str> {
 /// a stage nothing can execute, and the member would wedge with no attempt ever
 /// made — a failure that belongs at the seal door, where the operator is still
 /// holding the catalog they wrote.
+///
+/// The lane half is the compiled answer, for the same reason [`is_model_lane`]
+/// keeps one: [`StageCatalog::validate`] holds no manifest. The declared answer
+/// is [`StageCatalog::validate_against`], which the seal door runs beside this.
 fn is_known_process(process: &str) -> bool {
-    is_model_lane(process)
-        || matches!(
-            process,
-            "sketch"
-                | "aether.bloomery.api"
-                | "aether.bloomery.approve_gate"
-                | "transform.verify"
-                | "review"
-                | "integrate"
-                | "aggregate-verify"
-                | "aggregate-review"
-                | "source.cas_land"
-                | "retrospect"
-        )
+    is_host_position(process) || is_model_lane(process)
 }
 
 /// Why a caller-authored [`StageCatalog`] cannot be sealed.
@@ -190,6 +214,21 @@ pub enum CatalogError {
         stage: StageId,
         /// The out-of-range limit, in whole seconds.
         wall_clock_secs: u64,
+    },
+    /// A binding names a lane command the base's declared
+    /// [`PipelineManifest`] does not implement (ADR-0215) — the finding
+    /// [`StageCatalog::validate_against`] makes. Appended so the prior
+    /// variants' wire discriminants are unchanged.
+    ///
+    /// Distinct from [`UnknownProcess`](Self::UnknownProcess), which is this
+    /// binary saying it routes no such position. This one is the checkout
+    /// saying it implements no such lane, and only a caller holding both values
+    /// can make it.
+    UndeclaredLaneCommand {
+        /// The stage whose binding names it.
+        stage: StageId,
+        /// The lane command the manifest does not declare.
+        command: String,
     },
 }
 
@@ -428,6 +467,44 @@ impl StageCatalog {
                     stage: binding.stage,
                     wall_clock_secs: binding.wall_clock_secs,
                 });
+            }
+        }
+        Ok(())
+    }
+
+    /// Check that every lane this catalog names is one the base's checkout
+    /// declares it implements (ADR-0215).
+    ///
+    /// [`validate`](Self::validate)'s sibling and its complement. That one is
+    /// structural and answers out of this binary; this one joins the catalog an
+    /// operator authored to the `pipeline.toml` the sealed base carries, which
+    /// is the whole "can the tree I am about to dispatch against run what this
+    /// catalog names" question. Equally pure and `no_std`: the manifest arrives
+    /// decoded because the host that resolved it already held its content
+    /// (ADR-0174).
+    ///
+    /// A binding names lanes in two places, and both are checked. Its `process`
+    /// names one whenever that string is not one of the coordinator's own host
+    /// positions, and [`dispatched_command`] names the one the executor actually
+    /// routes — which is the load-bearing half, since `StageId::Review`'s
+    /// process is the host position `review` while its dispatch runs
+    /// `review.critic`. Checking only the first would admit a catalog whose
+    /// members wedge with no attempt ever made.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::UndeclaredLaneCommand`] naming the first binding whose
+    /// lane the manifest does not declare.
+    pub fn validate_against(&self, manifest: &PipelineManifest) -> Result<(), CatalogError> {
+        for binding in &self.bindings {
+            let named = (!is_host_position(&binding.process)).then_some(binding.process.as_str());
+            for command in named.into_iter().chain(dispatched_command(binding.stage)) {
+                if !manifest.declares_lane(command) {
+                    return Err(CatalogError::UndeclaredLaneCommand {
+                        stage: binding.stage,
+                        command: String::from(command),
+                    });
+                }
             }
         }
         Ok(())
@@ -1368,9 +1445,50 @@ mod tests {
     // against binding values authored by hand, which is exactly where the two
     // drift. Caught for real when `is_known_process` first omitted `Review`'s
     // `review` process.
+    //
+    // The cross-check is the same property one axis over (ADR-0215): the line
+    // and the compiled vocabulary are the pair every bloom that seals neither
+    // runs, so a lane the line dispatches and the vocabulary omits would refuse
+    // every such seal. The two halves are authored in different files, which is
+    // exactly where they drift — a lane command respelled in `dispatched_command`
+    // without the matching edit to `compiled()` fails here.
     #[test]
     fn the_compiled_line_satisfies_the_rule_authored_catalogs_are_held_to() {
         assert_eq!(StageCatalog::line().validate(), Ok(()));
+        assert_eq!(StageCatalog::line().validate_against(&PipelineManifest::compiled()), Ok(()));
+    }
+
+    // The drift this slice arms a refusal for: a checkout that does not
+    // implement a lane the catalog's line dispatches. Pre-fix there was no value
+    // to compare against, so the mismatch surfaced as a member wedged at Review
+    // with no attempt ever made — the manifest omits `review.critic` while the
+    // Review binding's `process` is the host position `review`, so a check
+    // reading `process` alone still admits it and only the dispatched command
+    // catches it.
+    #[test]
+    fn a_lane_the_manifest_omits_is_refused_by_the_stage_that_dispatches_it() {
+        let mut manifest = PipelineManifest::compiled();
+        manifest.lanes.model.retain(|command| command != REVIEW_CRITIC_COMMAND);
+
+        assert_eq!(
+            StageCatalog::line().validate_against(&manifest),
+            Err(CatalogError::UndeclaredLaneCommand {
+                stage: StageId::Review,
+                command: String::from(REVIEW_CRITIC_COMMAND),
+            })
+        );
+
+        // A mechanical lane is the same refusal: the split decides credentials,
+        // not whether a lane has to be implemented.
+        let mut manifest = PipelineManifest::compiled();
+        manifest.lanes.mechanical.retain(|command| command != VERIFY_MEMBER_COMMAND);
+        assert_eq!(
+            StageCatalog::line().validate_against(&manifest),
+            Err(CatalogError::UndeclaredLaneCommand {
+                stage: StageId::Verify,
+                command: String::from(VERIFY_MEMBER_COMMAND),
+            })
+        );
     }
 
     // Tripwire: the seal door refuses a wall-clock limit no worker could run
