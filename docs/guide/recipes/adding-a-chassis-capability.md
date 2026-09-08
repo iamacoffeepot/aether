@@ -82,7 +82,7 @@ mod runtime;
 // text/runtime/mod.rs — the runtime half, gated by the `mod runtime;`
 // line above. The substrate-typed imports enter only on a native build.
 use super::TextCapability;
-use super::kinds::{DrawText, LoadFont, LoadFontResult};
+use crate::kinds::{DrawText, LoadFont, LoadFontResult};
 use crate::fs::{FsCapability, Read, ReadResult};
 use aether_actor::runtime;
 use aether_substrate::Manual;
@@ -135,7 +135,13 @@ The pieces:
 - **`#[actor(singleton)]`** declares the cardinality — `singleton` for a
   chassis cap; `instanced` is the counterpart for per-instance actors (the
   engine proxy uses it). It reads the sibling runtime module off disk to
-  lift the identity from the `#[runtime] impl`.
+  lift the identity from the `#[runtime] impl`. It carries that module's
+  own `use` items along with the markers, which is why the identity file
+  above imports nothing but `actor` — spell the kind imports in the runtime
+  module absolutely (`crate::kinds::…`, not `super::kinds::…`) and the
+  identity never restates them. A `super`-rooted, glob, or `#[cfg]`-gated
+  `use` is left behind (it would resolve differently one module down), so a
+  kind reached that way still needs an import in the identity file.
 - **`#[runtime] impl NativeActor for TextCapability`** carries the
   behaviour. The `#[runtime]` attribute emits the runtime surface ungated
   — the `#[cfg(feature = "runtime")]` rides the `mod runtime;` line in
