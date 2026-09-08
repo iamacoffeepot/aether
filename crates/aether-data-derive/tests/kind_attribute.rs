@@ -93,11 +93,11 @@ fn every_option_emits_the_trait_it_names() {
     let moved = copyable;
     assert_eq!(copyable.count, moved.count);
 
-    let bare = Bare { body: "x".into() };
-    let bare_clone = bare.clone();
-    assert_eq!(format!("{bare:?}"), format!("{bare_clone:?}"));
+    let serdeless = Bare { body: "x".into() };
+    let serdeless_copy = serdeless.clone();
+    assert_eq!(format!("{serdeless:?}"), format!("{serdeless_copy:?}"));
 
-    let base = Base { body: "y".into() };
-    let base_clone = base.clone();
-    assert_eq!(format!("{base:?}"), format!("{base_clone:?}"));
+    let standard = Base { body: "y".into() };
+    let standard_copy = standard.clone();
+    assert_eq!(format!("{standard:?}"), format!("{standard_copy:?}"));
 }
