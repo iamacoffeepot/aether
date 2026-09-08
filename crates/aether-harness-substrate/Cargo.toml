@@ -14,10 +14,9 @@ publish = false
 # `FrameHook`/`RenderExt` seam, so a non-visual consumer's dependency
 # closure never carries aether-render or wgpu.
 
-# The `runtime` feature exists solely to drive the `#[actor]` split
-# path's hardcoded `feature = "runtime"` gate on the harness cap pair
-# (mirrors the chassis crates); the harness itself is
-# unconditionally runtime-shaped.
+# The `runtime` feature mirrors the chassis crates' convention; the harness
+# itself is unconditionally runtime-shaped. The `#[actor]` split path it used
+# to drive now lives in `aether-substrate-harness-cap`.
 [features]
 default = ["runtime"]
 runtime = []
@@ -30,6 +29,9 @@ aether-fs = { path = "../aether-fs" }
 aether-kinds = { path = "../aether-kinds" }
 aether-lifecycle = { path = "../aether-lifecycle" }
 aether-substrate = { path = "../aether-substrate" }
+# The `aether.substrate_harness` cap the chassis composes (issue #5706 gave it
+# its own crate so the shipped chassis binaries stop linking this one).
+aether-substrate-harness-cap = { path = "../aether-substrate-harness-cap" }
 aether-trace = { path = "../aether-trace" }
 aether-window = { path = "../aether-window", features = ["synthetic"] }
 anyhow = { workspace = true }
@@ -54,7 +56,7 @@ aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 
 # cargo-machete's source-only scan cannot see that `clap` and `confique`
 # are used exclusively through `#[derive(aether_substrate::Config)]`
-# codegen on `SettlementConfig` (`confique` via the emitted config layer,
+# codegen on `PollConfig` (`confique` via the emitted config layer,
 # `clap` via the emitted `Args` overlay), so both are false positives.
 [package.metadata.cargo-machete]
 ignored = ["clap", "confique"]

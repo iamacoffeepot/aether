@@ -84,30 +84,19 @@ pub fn effective_trace_ring_cap() -> usize {
         .unwrap_or(DEFAULT_TRACE_RING_CAP)
 }
 
-/// The nine `AETHER_*` keys `scheduler_tuning_from_env` reads, in
-/// [`SchedulerTuning`] field order. Named as a const so the chassis can pin
-/// this list against `SchedulerTuningConfig`'s — the two spellings of the same
-/// key set are what would otherwise drift apart.
-pub const SCHEDULER_TUNING_ENV_KEYS: [&str; 9] = [
-    "AETHER_SPIN_WINDOW_USEC",
-    "AETHER_LOCAL_STICKY_MAX",
-    "AETHER_LOCAL_TIME_BUDGET_US",
-    "AETHER_PEER_STEAL",
-    "AETHER_LOCAL_CHAIN_BACKSTOP",
-    "AETHER_HANDOFF_COST_NS",
-    "AETHER_BLOB_RECRUIT_MIN",
-    "AETHER_BLOB_RECRUIT_MAX",
-    "AETHER_WAKE_COST_NANOS",
-];
+/// The nine `AETHER_*` keys [`scheduler_tuning_from_env`] reads, re-exported
+/// from the [`SchedulerTuning`] field list they spell (issue #5706 moved the
+/// const beside the struct, so the chassis can pin its declared set against it
+/// without depending on this test crate).
+pub use aether_substrate::config::SCHEDULER_TUNING_ENV_KEYS;
 
 /// Resolve the scheduler's hot-path tuning from the perf lane's process env,
 /// falling back to [`SchedulerTuning::default`] per knob.
 ///
 /// The nine keys are chassis-boot config (`aether-chassis`'s
 /// `SchedulerTuningConfig`), and a `SubstrateHarness` neither takes that path
-/// nor could — it resolves off a hermetic source stack (ADR-0156 §5), and
-/// `aether-chassis` already depends on this crate, so the reverse edge is a
-/// cycle. Left alone, that made every key inert under the perf lane while the
+/// nor could — it resolves off a hermetic source stack (ADR-0156 §5). Left
+/// alone, that made every key inert under the perf lane while the
 /// scheduler's own docs advertised them, so an A/B across two values ran the
 /// same configuration twice and returned a clean null indistinguishable from a
 /// real "this knob does not affect this cell" result (issue 4234).
