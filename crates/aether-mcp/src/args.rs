@@ -609,9 +609,8 @@ pub struct LoadComponentArgs {
     /// `{base}-{index}` (`base` = `name` > `export` > the default actor's
     /// own namespace — the same precedence a plain load resolves against),
     /// so a co-hosted peer's bare-type `ctx.peer::<R>()` reaches replica 0.
-    /// Pairs with
-    /// `#[router(shared)]` (ADR-0136) to scale an HTTP handler to N
-    /// instances in one call. Returns one shared `capabilities` block plus
+    /// Pairs with `#[router(shared)]` (ADR-0136) to scale an HTTP handler
+    /// to N instances in one call. Returns one shared `capabilities` block plus
     /// `instances: [{mailbox_id, name}, …]` (issue 3006) instead of the
     /// single-load shape. A mid-loop failure reports which replica failed
     /// and how many loaded before it — already-loaded replicas stay live,
