@@ -40,11 +40,12 @@ use wasm_expand::expand_wasm_actor;
 //       `DISPATCH_UNKNOWN_KIND` so the substrate's scheduler logs the
 //       miss (issue #142).
 //
-//   (b) A wrapper around the user's `init` that prepends
-//       `ctx.subscribe_input::<K>()` for every `K::IS_INPUT` handler
-//       kind. Replaces the ADR-0027 `KindList::resolve_all` walker.
-//       Guarded by `if <K as Kind>::IS_INPUT` so non-input kinds
-//       compile down to no-ops.
+//   (b) A wrapper around the user's `init`. It no longer prepends
+//       `ctx.subscribe_input::<K>()` calls — there is no
+//       `Kind::IS_INPUT`, and issue #403 moved input subscription to the
+//       substrate, which derives it from the (c) manifest below once the
+//       mailbox is registered. See `wasm_expand.rs`'s note at
+//       `wrapped_init`.
 //
 //   (c) Two associated consts on `C`'s inherent impl —
 //       `__AETHER_INPUTS_MANIFEST_LEN: usize` and

@@ -6,7 +6,7 @@
 //! to fail-fast with `Err`-replies instead of letting the mail
 //! warn-drop and hang the agent's await-reply slot.
 //!
-//! Companion: [`SubstrateHarnessCapability`](super::cap::SubstrateHarnessCapability)
+//! Companion: [`SubstrateHarnessCapability`](crate::cap::SubstrateHarnessCapability)
 //! claims the same mailbox on the substrate-harness chassis and dispatches
 //! `Advance` for real. Both live here so the mailbox's two chassis
 //! profiles read together — the same shape as

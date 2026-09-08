@@ -1012,7 +1012,10 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 WidgetDrawItem::Quad { y, height, color, .. } => Some((*y, *height, *color)),
-                WidgetDrawItem::Text { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+                WidgetDrawItem::Text { .. }
+                | WidgetDrawItem::TexturedQuad { .. }
+                | WidgetDrawItem::Shape { .. }
+                | WidgetDrawItem::Triangle { .. } => None,
             })
             .partition(|(_, height, _)| *height == strip.frame.height);
         assert_eq!(tabs.len(), 3, "one full-height fill per tab");

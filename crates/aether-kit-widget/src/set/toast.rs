@@ -57,7 +57,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::set::{
     WidgetDefaults, accept_font_metrics_result, apply_text_theme, approx_text_width, measured_text_width,
-    pump_text_font_metrics, push_rect_border, quad, reply_if_hidden, text_origin_y, wrap_to_width,
+    pump_text_font_metrics, quad, raised_plate, reply_if_hidden, text_origin_y, wrap_to_width,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
@@ -196,9 +196,6 @@ const TEXT_INSET_UNITS: u8 = 2;
 
 /// How tall one wrapped line's box is, as a multiple of its own type size.
 const LINE_LEADING: f32 = 1.4;
-
-/// The hairline a plate's ring is drawn at.
-const RING_THICKNESS: f32 = 1.0;
 
 /// One notice, standing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,9 +364,16 @@ impl ToastWidget {
         let mut items = Vec::new();
         let mut top = 0.0;
         for (notice, height) in self.standing.iter().zip(self.plate_heights()) {
-            items.push(quad(0.0, top, width, height, self.theme.surface_raised));
+            items.push(raised_plate(
+                &self.theme,
+                0.0,
+                top,
+                width,
+                height,
+                self.theme.surface_raised,
+                Some(self.theme.outline),
+            ));
             items.push(quad(0.0, top, bar, height, notice.severity.bar_ink(&self.theme)));
-            push_rect_border(&mut items, 0.0, top, width, height, RING_THICKNESS, self.theme.outline);
             let mut line_top = top + pad;
             for line in self.wrapped(notice) {
                 items.push(WidgetDrawItem::Text {
@@ -724,10 +728,9 @@ mod tests {
         let tops: Vec<f32> = items
             .iter()
             .filter_map(|item| match item {
-                // The plate's own fill: full region width and taller than the
-                // hairline rows of its ring.
-                WidgetDrawItem::Quad { x, y, width, height, .. }
-                    if (*width - toasts.frame.width).abs() < f32::EPSILON && *x == 0.0 && *height > RING_THICKNESS =>
+                // The plate itself: the one full-region-width shape a notice draws.
+                WidgetDrawItem::Shape { x, y, width, .. }
+                    if (*width - toasts.frame.width).abs() < f32::EPSILON && *x == 0.0 =>
                 {
                     Some(*y)
                 }

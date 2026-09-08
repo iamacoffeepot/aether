@@ -10,7 +10,7 @@ pub use state::*;
 
 use alloc::vec::Vec;
 
-use aether_actor::{ActorInitError, Manual, ReplyMode, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Manual, Sends, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::MailboxId;
 use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use aether_kinds::{CachedFontMetrics, Key, KeyRelease, MouseWheel, QuadSpace, Quit, TextInput, Tick, WindowSize};
@@ -321,28 +321,28 @@ impl ConsoleOverlay {
 
     fn request_initial_font(&mut self, ctx: &mut WasmCtx<'_>) {
         if Self::has_font_override(&self.config) {
-            self.request_configured_font(ctx);
+            self.request_configured_font(&mut ctx.sends());
         } else {
-            self.request_embedded_font(ctx);
+            self.request_embedded_font(&mut ctx.sends());
         }
     }
 
-    fn request_configured_font<M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, M>) {
-        Self::request_font(ctx, self.config.font_namespace.as_str(), self.config.font_path.as_str(), false);
+    fn request_configured_font(&self, sends: &mut Sends<'_>) {
+        Self::request_font(sends, self.config.font_namespace.as_str(), self.config.font_path.as_str(), false);
     }
 
-    fn request_embedded_font<M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, M>) {
+    fn request_embedded_font(&mut self, sends: &mut Sends<'_>) {
         if self.embedded_font_requested {
             return;
         }
         self.embedded_font_requested = true;
         let load = LoadFontBytes { name: EMBEDDED_FONT_NAME.into(), bytes: EMBEDDED_FONT_BYTES.to_vec() };
-        let _ = ctx.actor::<TextCapability>().send_with_context(&load, &ConsoleFontLoadContext { embedded: true });
+        let _ = sends.actor::<TextCapability>().send_with_context(&load, &ConsoleFontLoadContext { embedded: true });
     }
 
-    fn request_font<M: ReplyMode>(ctx: &mut WasmCtx<'_, M>, namespace: &str, path: &str, embedded: bool) {
+    fn request_font(sends: &mut Sends<'_>, namespace: &str, path: &str, embedded: bool) {
         let load = LoadFont { namespace: namespace.into(), path: path.into() };
-        let _ = ctx.actor::<TextCapability>().send_with_context(&load, &ConsoleFontLoadContext { embedded });
+        let _ = sends.actor::<TextCapability>().send_with_context(&load, &ConsoleFontLoadContext { embedded });
     }
 
     fn request_font_metrics(ctx: &mut WasmCtx<'_, Manual>, font_id: u32) {
@@ -359,7 +359,7 @@ impl ConsoleOverlay {
             self.override_font_failed = true;
             self.state.push_error(format!("font override failed: {error}"));
         }
-        self.request_embedded_font(ctx);
+        self.request_embedded_font(&mut ctx.sends());
     }
 
     fn register_command(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: RegisterConsoleCommand) {

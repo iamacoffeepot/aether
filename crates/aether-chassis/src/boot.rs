@@ -355,66 +355,11 @@ impl SchedulerTuningConfig {
     }
 }
 
-// Issue #3765: `SettlementConfig` (the `AETHER_SETTLEMENT_CAP_SECS`
-// knob) rehomed to `aether-harness-substrate`, its primary consumer; the
-// chassis teardown resolution below reads the same knob through the
-// re-import.
-use aether_harness_substrate::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
-pub use aether_harness_substrate::{SettlementConfig, SettlementConfigLayer};
-
-/// Render-size knob for the standalone substrate-harness binary
-/// (`AETHER_SUBSTRATE_HARNESS_SIZE=WxH`). Mirrors the single-field
-/// `SettlementConfig` shape: a `#[derive(aether_substrate::Config)]`
-/// struct resolved `from_env()` and lowered to `(u32, u32)` by
-/// [`Self::to_size`]. Lives binary-side (issue #3765) — the in-process
-/// harness sizes through its builder, not process env.
-///
-/// The explicit `env =` pin is belt-and-suspenders against a future field
-/// rename, matching how `ActorRingConfig` pins its historical keys.
-#[derive(Clone, Debug, Default, aether_substrate::Config)]
-#[config(env_prefix = "AETHER_SUBSTRATE_HARNESS", cli_prefix = "substrate-harness")]
-pub struct RenderSizeConfig {
-    /// Offscreen render width and height in pixels; unset falls back to 800x600.
-    ///
-    /// Render dimensions for the offscreen wgpu surface, given as
-    /// `width x height`. Falls back to `800x600` on missing/unparseable
-    /// input with a warn log.
-    #[config(env = "AETHER_SUBSTRATE_HARNESS_SIZE")]
-    pub size: Option<String>,
-}
-
-impl RenderSizeConfig {
-    /// Lower the resolved knob to `(width, height)` pixels. Preserves the
-    /// `parse_size_env` semantics verbatim: missing env var, missing `x`
-    /// separator, non-numeric parts, or a zero dimension all fall back to
-    /// [`DEFAULT_WIDTH`] × [`DEFAULT_HEIGHT`] with a `warn` log.
-    #[must_use]
-    pub fn to_size(&self) -> (u32, u32) {
-        let Some(raw) = self.size.as_deref() else {
-            return (DEFAULT_WIDTH, DEFAULT_HEIGHT);
-        };
-        if let Some((w, h)) = raw.split_once('x') {
-            match (w.parse::<u32>(), h.parse::<u32>()) {
-                (Ok(w), Ok(h)) if w > 0 && h > 0 => (w, h),
-                _ => {
-                    tracing::warn!(
-                        target: "aether_substrate::boot",
-                        value = %raw,
-                        "AETHER_SUBSTRATE_HARNESS_SIZE unparseable — falling back to default",
-                    );
-                    (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-                }
-            }
-        } else {
-            tracing::warn!(
-                target: "aether_substrate::boot",
-                value = %raw,
-                "AETHER_SUBSTRATE_HARNESS_SIZE missing 'x' separator — falling back to default",
-            );
-            (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-        }
-    }
-}
+// Issue #5706: `SettlementConfig` (the `AETHER_SETTLEMENT_CAP_SECS` knob)
+// lives in `aether_substrate::config` beside the other resolved substrate
+// knobs; the teardown resolution below and the fleet-wide config registry
+// both read it through this re-export.
+pub use aether_substrate::config::{SettlementConfig, SettlementConfigLayer};
 
 /// Issue #2509: resolve the instanced-actor teardown close-done gate's
 /// cumulative-patience budget from the shared `AETHER_SETTLEMENT_CAP_SECS`
@@ -1255,13 +1200,13 @@ mod tests {
     fn scheduler_tuning_env_keys_match_the_perf_lane() {
         // Tripwire: the perf lane resolves the same nine knobs from its own
         // process env, because a SubstrateHarness cannot take the chassis
-        // config path (hermetic sources, and aether-chassis already depends on
-        // the harness crate, so the reverse edge is a cycle — issue 4234).
-        // Two independent spellings of one key set drift silently: a key
-        // renamed here alone would go inert in the perf lane exactly the way
-        // the whole set was before, with no signal.
-        use aether_harness_substrate::perf::harness::SCHEDULER_TUNING_ENV_KEYS;
-        use aether_substrate::config::known_keys;
+        // config path (hermetic sources — issue 4234). The key set it reads is
+        // spelled once in `aether_substrate::config`, beside the
+        // `SchedulerTuning` fields it names; the derive-`Config` layer here is
+        // the second, independent spelling. A key renamed on one side alone
+        // would go inert in the perf lane exactly the way the whole set was
+        // before, with no signal.
+        use aether_substrate::config::{SCHEDULER_TUNING_ENV_KEYS, known_keys};
         use confique::Config as _;
         use std::collections::BTreeSet;
 

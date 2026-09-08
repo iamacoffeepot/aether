@@ -17,7 +17,7 @@ use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{
-    accept_clipboard_paste, apply_text_control_state, apply_text_theme, approx_text_width, edit_command,
+    accept_clipboard_paste, apply_text_control_state, apply_text_theme, approx_text_width, edit_command, plate,
     pump_text_font_metrics, push_control_outlines, quad, release_left, reply_with_draw_items, report_clipboard_copy,
     run_edit_key, single_line_hit_byte, text_baseline_y, text_control_theme_state, text_origin_y,
     update_text_modifiers,
@@ -250,7 +250,15 @@ impl TextAreaWidget {
         let lines = text_lines(&displayed.text);
         let first = self.scroll_top.min(lines.len().saturating_sub(1));
         let end = first.saturating_add(self.visible_rows()).min(lines.len());
-        let mut items = vec![quad(0.0, 0.0, width, height, self.theme.fill(self.theme.surface_raised, theme_state))];
+        let mut items = vec![plate(
+            &self.theme,
+            0.0,
+            0.0,
+            width,
+            height,
+            Some(self.theme.fill(self.theme.surface_raised, theme_state)),
+            None,
+        )];
 
         for (visible_index, line) in lines[first..end].iter().copied().enumerate() {
             #[allow(clippy::cast_precision_loss)]
