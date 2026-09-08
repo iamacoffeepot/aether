@@ -58,7 +58,13 @@ fn a_supersede_adopted_member_that_collides_reconciles_back_to_verify() {
     }
     assert_eq!(harness.bloom(predecessor).status, BloomStatus::Superseded);
 
-    harness.integrate_tick();
+    // The predecessor's completed claim set already enqueued an Integrate row.
+    // A pending receipt holds that prefix, so one integrate tick folds the
+    // predecessor and stops. Keep the successor collision armed until later
+    // ticks ack that receipt and fold the successor.
+    harness.pump_until("the inherited fold collides and dispatches Reconcile", |harness| {
+        harness.orders().iter().any(|order| stage_of(order) == StageId::Reconcile)
+    });
     harness.clear_fold_conflict(successor, SECOND);
 
     let reconcile = harness.await_order();
