@@ -19,7 +19,8 @@
 //! exists because somebody edited it, and the refusal reaches the person
 //! holding the diff.
 
-use aether_bloomery::PIPELINE_MANIFEST_PATH;
+use aether_bloomery::{PIPELINE_MANIFEST_PATH, PipelineManifest};
+use aether_data::Kind;
 use aether_harness_bloomery::{HarnessBuilder, Repo};
 use serde_json::Value;
 
@@ -55,10 +56,14 @@ fn a_base_whose_manifest_will_not_read_refuses_the_draft() {
     assert!(refused.contains(PIPELINE_MANIFEST_PATH), "the refusal names the file: {refused}");
     assert!(refused.contains("network"), "the refusal names the failure the reader hit: {refused}");
 
-    // The refusal is total: the draft keeps the base it had, so nothing
-    // downstream can seal against a tree whose vocabulary went unread.
+    // The refusal is total: the draft seals no vocabulary at all, so nothing
+    // downstream can attest one read off a tree that would not answer.
     let (status, draft) = harness.request("GET", &format!("/drafts/{draft}"), "");
     assert_eq!(status, 200, "the draft survives a refused patch: {draft}");
     let draft: Value = serde_json::from_str(&draft).expect("the draft view is JSON");
-    assert_ne!(draft["draft"]["base"], Value::String(base.to_hex()), "a refused patch leaves the draft untouched");
+    assert_eq!(
+        draft["draft"]["configs"]["entries"][PipelineManifest::NAME],
+        Value::Null,
+        "a refused patch seals no manifest: {draft}",
+    );
 }
