@@ -115,11 +115,11 @@ leaves either the old contents or the new — never a torn file. Missing parent
 directories along the path are created. There's no cross-actor locking, so two
 writers racing the same path resolve last-write-wins.
 
-**`list` enumerates a directory, shallowly.** `prefix` is resolved as a directory
-path under the namespace root — an empty `prefix` lists the root — and the reply's
-`entries` are the bare names directly inside it, sorted, with no recursion. A
-missing directory replies `NotFound`. The names come back bare, so you rebuild a
-path by joining an entry back under the prefix you listed.
+**`list` enumerates a directory, shallowly.** `addr.path` is resolved as a
+directory path under the namespace root — an empty path lists the root — and the
+reply's `entries` are the bare names directly inside it, sorted, with no
+recursion. A missing directory replies `NotFound`. The names come back bare, so
+you rebuild a path by joining an entry back under the path you listed.
 
 **Replies carry domain echoes and mail correlation.** A handler dispatches on
 the reply *kind*, which on its own erases *which* request a given reply answers.

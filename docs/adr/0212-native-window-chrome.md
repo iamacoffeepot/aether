@@ -1,7 +1,8 @@
 # ADR-0212: Native window chrome
 
-- **Status:** Provisional
+- **Status:** Accepted
 - **Date:** 2026-09-02
+- **Amended:** 2026-09-09 — status: implemented on `main`; `set_menu` / `menu_activated` over muda, `set_cursor`, the `AETHER_APP_NAME` config knob, and `exec_file_name` on the fleet's fork all landed together (`8e9971df4`).
 
 ## Context
 

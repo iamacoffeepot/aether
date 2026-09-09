@@ -1,0 +1,79 @@
+name: CodeQL
+
+# Advisory-only scan (issue #3610): results upload to the repo's
+# code-scanning tab, but this workflow is NOT in branch protection's
+# required set and does not fail a build on findings. Promotion to a
+# required, severity-gating check is a later deliberate owner step.
+#
+# It ran until 2026-07-21 and was then deleted as collateral in the
+# pipeline retirement (#3829) — that sweep removed the hosted contributor
+# lifecycle, and this scan went with it. Nothing replaced it, so the open
+# alerts froze at that day's tree: some point at files the same sweep
+# deleted, and no later landing could ever clear them. Restoring the
+# workflow is what lets the tab reconcile itself again.
+#
+# Deliberately NOT on `pull_request`. `ci.yml` is the merge gate and this
+# scan gates nothing, while source-based extraction over a ~550k-line Rust
+# workspace is slow enough to be a real per-pull-request cost. Scanning
+# `main` on every landing plus a weekly sweep keeps the tab current at a
+# fraction of that spend; a finding introduced by a pull request surfaces
+# on the landing commit rather than before the merge.
+
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    # Weekly, Monday 03:27 UTC — off the hour so it does not pile onto the
+    # top-of-hour scheduled-run spike, and off the nightlies' :17 / :37.
+    - cron: '27 3 * * 1'
+  workflow_dispatch:
+
+# Every landing is a distinct scan whose result the tab reconciles against,
+# so main runs are never cancelled; keyed by sha, mirroring ci.yml.
+concurrency:
+  group: codeql-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      # write — uploading the SARIF result to the code-scanning tab is the
+      # whole point of the job. `actions: read` lets the analyzer read the
+      # workflow run it is attached to.
+      security-events: write
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every language real in this repo: Rust crates; GitHub Actions
+        # workflows; scripts/*.mjs; scripts/*.py.
+        language: [ rust, actions, javascript-typescript, python ]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: ${{ matrix.language }}
+          # Source-based extraction for every language — no cargo build for
+          # Rust, which is both cheaper and what lets the config's
+          # paths-ignore filter Rust source paths (compiled extraction
+          # weakens source-path filtering).
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          # Unchanged from the pre-retirement runs on purpose: the category
+          # is the reconciliation key, so keeping it lets this scan close the
+          # alerts the July analyses left open instead of opening a parallel
+          # set beside them.
+          category: "/language:${{ matrix.language }}"

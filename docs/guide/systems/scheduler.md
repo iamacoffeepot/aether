@@ -29,7 +29,8 @@ The cast of modules, all under `crates/aether-substrate/src/`:
 | `scheduler/calibrate.rs` | the measured cross-worker handoff cost the valves scale from |
 | `mail/ring.rs` | `MailRing` — the per-actor outbound byte ring blobs are written into |
 | `mail/mail_ref.rs` | `MailRef` — the `InRing` / `Owned` payload handle an inbox envelope carries |
-| `actor/native/binding.rs` | the outbound buffer + `flush_outbound` at the handler boundary |
+| `actor/native/binding/outbound.rs` | the outbound buffer and its `ACTOR_RING_BYTES` bound |
+| `actor/native/binding/flush.rs` | `flush_outbound` at the handler boundary |
 | `actor/native/blob/work.rs` | `BlobWork` / `BlobProducer` — the cursor-shared cooperative blob |
 | `actor/native/blob/lifecycle.rs` | the packed `Lifecycle` word (cursor / len / done / seal) |
 
@@ -42,7 +43,7 @@ the first `send` inside a handler to the ring bytes being reclaimed.
 **1. Sends buffer into the producer's ring.** While a handler runs, each `send`
 writes its payload bytes straight into that actor's own outbound `MailRing`
 (`mail/ring.rs`) — a fixed-size (64 KiB, `ACTOR_RING_BYTES` in
-`actor/native/binding.rs`), single-producer, multi-consumer, *reclaiming* byte
+`actor/native/binding/outbound.rs`), single-producer, multi-consumer, *reclaiming* byte
 ring. The first send of a handler invocation opens a blob in the ring
 (`open_blob`); each subsequent send appends in place (`append`) — no staging
 buffer, no per-mail allocation. The ring **never blocks its producer**: when a
@@ -53,7 +54,7 @@ are distinct from the loss-tolerant trace/log rings of ADR-0081 — a mail ring 
 no-loss, and a region stays live until every reader has released it.)
 
 **2. Flush at the handler boundary.** When the handler returns,
-`NativeBinding::flush_outbound` seals the open blob (`MailRing::seal` publishes
+`NativeBinding::flush_outbound` (`actor/native/binding/flush.rs`) seals the open blob (`MailRing::seal` publishes
 the region's reclaim lock) and mints one `MailRef` per buffered mail —
 `InRing` for ring-resident payloads, `Owned` for the copy-out fallback. The
 whole window then routes as a single unit. This boundary is the amortization

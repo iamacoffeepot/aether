@@ -391,24 +391,34 @@ and each is the general form of a specific complaint.
   when the data implies one ("Wander of Kinetic Blast Ranger" from weapon,
   skill, and class), offer it rather than an empty field.
 
-## What the kit has to provide
+## What the kit provides for this method
 
-The method assumes a few things the widget kit does not yet express. Each is a
-small, separable change and belongs in the kit rather than in any one consumer:
+The method leans on kit surfaces rather than consumer-local reimplementations.
+Almost all of them are in `aether-kit-widget` today:
 
-- **Theme**: a type scale with named roles (title, heading, body, label), a
-  spacing scale, and a `selection` colour role distinct from `accent`.
-- **Layout**: a region/dock primitive for the panel root (fixed-width pane
-  beside a primary view), and a row/column layout that sizes rows from a
-  child's reported intrinsic size instead of one row height.
-- **Controls**: a dropdown that draws its open list outside its slot, a tab
-  strip, and an expander with a chevron; a button that centres its label with
-  a minimum width; a list with an empty state and a genuine no-selection
-  state. The transient surfaces a screen composes over its own content — the
-  tooltip, the toast region, the splitter, and the popover's plate and
-  dismissal — are in the kit too, so a second screen does not hand-roll them.
-- **Text**: a proportional UI face with tabular figures, and text measurement
-  a consumer can ask for so alignment is computed, not counted.
+- **Theme**: `Theme::text_size_pixels(TextRole)` is the type scale with named
+  roles, `Theme::space(steps)` is the spacing scale, `selection` and
+  `selection_text` are colour roles distinct from `accent`, and
+  `Theme::contrast_ratio` makes the WCAG numbers in §6 a test rather than an
+  opinion.
+- **Layout**: `DockSide` / `Docked` give the panel root its region primitive
+  (a fixed-width pane beside a primary view), and `Row` / `Column` size from a
+  child's reported intrinsic size rather than one row height.
+- **Controls**: `set::dropdown` draws its open list outside its slot,
+  `set::tab_strip`, `set::button` (centred label, minimum width,
+  `ButtonConfig { emphasis, tone }` for the rank ladder), and
+  `set::virtual_list` with its empty state and a genuine no-selection state.
+  The transient surfaces a screen composes over its own content —
+  `set::tooltip`, `set::toast`, `set::splitter`, `set::dialog`, and
+  `set::popover` — are in the kit too, so a second screen does not hand-roll
+  them.
+- **Text**: `aether-text` reports real font metrics (`FontMetrics`,
+  `GlyphAdvance`), so a consumer asks for a measurement instead of counting
+  characters.
+
+Two gaps remain and are worth naming: there is no expander widget, so a
+disclosure has to be composed; and the UI face carries no tabular-figure
+selection, so a numeric column is aligned by layout rather than by the face.
 
 ## Sources
 

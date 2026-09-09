@@ -200,10 +200,12 @@ or concurrent edit.
 ## Hooks are defense in depth
 
 Codex hooks live in [`.codex/hooks.json`](https://github.com/iamacoffeepot/aether/blob/main/.codex/hooks.json) and
-`.codex/hooks/`. They can prepare a session worktree, warn when the primary
-checkout becomes dirty, and check source-level guardrails. Because hook
-definitions are trust-recorded, new or changed hooks may need review in the
-active Codex surface before they run.
+`.codex/hooks/`; the Claude Code surface has its own set under `.claude/hooks/`,
+wired through `.claude/settings.json`. They can prepare a session worktree, warn
+when the primary checkout becomes dirty, bind or release a session worktree, and
+check source-level guardrails such as the divider-comment and PR-body rules.
+Because hook definitions are trust-recorded, new or changed hooks may need
+review in the active surface before they run.
 
 Hooks are fallible local guardrails:
 

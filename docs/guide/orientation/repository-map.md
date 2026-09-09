@@ -4,17 +4,21 @@ The workspace is layered. Most changes should move down this list only as far
 as their responsibility requires.
 
 ```text
-product actors and reusable UI/gameplay pieces       aether-kit-*
-first-party development control plane                 aether-bloomery*
+wire/schema/identity/math foundations                 aether-data, aether-codec, aether-math
+mail runtime, wasm host, scheduler, chassis traits    aether-substrate
 native services and their public mail contracts      aether-<capability> crates
 guest actor and behavior authoring SDKs               aether-actor, aether-behavior
 process profiles, binaries, packaging     aether-chassis, aether-chassis-*
-mail runtime, wasm host, scheduler, chassis traits    aether-substrate
-wire/schema/identity/math foundations                 aether-data, aether-codec, aether-math
 operator bridge                                       aether-mcp
 test harnesses                                        aether-harness-*
 procedural macros                                     *-derive crates
+reusable guest actors shipped with the engine        aether-kit-*, aether-puppet
+applications built on the engine                     aether-bloomery*
 ```
+
+The list is also the order to read it in. Everything above `aether-kit-*` is the
+engine; the two rows below it are consumers that happen to live in the same
+workspace.
 
 ## Foundation crates
 
@@ -62,8 +66,9 @@ compares these with native capabilities.
 | `aether-harness-substrate` | composable in-process substrate harness with deterministic mail, lifecycle, and settlement control |
 | `aether-harness-substrate-capture` | opt-in render/GPU capture and visual comparison support layered onto the core substrate harness |
 | `aether-harness-fleet` | real-process hub/RPC/headless fleet scenarios over raw framed calls |
-| `aether-harness-perf` | performance trial / compare / plot binaries |
-| `aether-mcp` | MCP tools, JSON/schema adaptation, hub RPC session, live-name caches |
+| `aether-harness-perf` | the `aether-perf-trial` / `-compare` / `-plot` / `-registry` binaries |
+| `aether-harness-bloomery` | `BloomeryHarness`: the coordinator scenario harness and its named cells |
+| `aether-mcp` | MCP tools, JSON/schema adaptation, hub RPC session, live-name caches; also carries the `aether-tunnel` binary |
 
 The substrate is mechanism. A capability is policy and I/O represented as an
 actor. A chassis chooses which capabilities and drivers form a process. The hub
@@ -75,16 +80,17 @@ server.
 | Crate | Owns |
 |---|---|
 | `aether-bloomery` | canonical Bloomery values, immutable work/bloom identities, the pure reducer, and control/source contracts |
+| `aether-bloomery-git` | the git source adapter implementing the control core's `SourceBackend` port |
 | `aether-bloomery-github` | GitHub source and outward-projection adapter; GitHub objects shadow Bloomery identities rather than defining them |
+| `aether-bloomery-console` | the `bloomery-console` operator terminal client |
 | `aether-chassis-bloomery` | the dedicated Bloomery process, native control/store/artifacts/session/source/signing services, REST API, and reactors |
 
-Bloomery is a first-party development control-plane application hosted on
-Aether. Its dedicated binary can run standalone or be uploaded, selected, and
-forked through the hub's binary/fleet path, while `FleetServer` remains owned by
-the hub and generic hub/headless chassis do not become build servers. ADR-0149
-still has **Proposed** status despite the substantial implementation in these
-crates, so code realization must not be mistaken for an accepted architecture
-decision.
+Bloomery is a first-party application hosted on Aether, not part of the engine.
+Its dedicated binary can run standalone or be uploaded, selected, and forked
+through the hub's binary/fleet path, while `FleetServer` remains owned by the
+hub and generic hub/headless chassis do not become build servers. ADR-0149 is
+Accepted and carries several amendments; read the record's amendment chain
+before changing its projection or landing behavior.
 
 ## Product and geometry crates
 
@@ -126,6 +132,7 @@ uses the nightly fuzzing toolchain.
 | `docs/adr/` | numbered architecture decisions and their status |
 | `docs/guide/` | this mdBook source |
 | `.agents/skills/` | current Codex repository workflows |
+| `.claude/skills/`, `.claude/hooks/` | the Claude Code workflows and local guardrail hooks |
 | `.codex/` | Codex MCP configuration and local guardrail hooks |
 | `.github/workflows/` | hosted CI, review, dogfood, reconciliation, and release jobs |
 | `scripts/` | developer/operator helpers, including the MCP tunnel |
@@ -139,7 +146,7 @@ uses the nightly fuzzing toolchain.
 | Change delivery or settlement | `aether-substrate/src/mail` or `scheduler` | actor contexts, trace/lifecycle tests, ADRs |
 | Add an MCP operation | `aether-mcp/src/tools` and `args.rs` | underlying capability kinds and hub RPC behavior |
 | Change one-shot subprocess execution | `aether-process` | chassis installation, allowlist/confinement config, settlement behavior |
-| Change Bloomery control behavior or projection | `aether-bloomery` or `aether-bloomery-github` | `aether-chassis-bloomery`, Proposed ADR-0149, durable journal/artifact boundaries |
+| Change Bloomery control behavior or projection | `aether-bloomery`, `aether-bloomery-git`, or `aether-bloomery-github` | `aether-chassis-bloomery`, ADR-0149 and its amendments, durable journal/artifact boundaries |
 | Change in-process or real-process test support | `aether-harness-substrate`, `aether-harness-substrate-capture`, or `aether-harness-fleet` | the consuming scenario's chassis and artifact requirements |
 | Add a reusable guest actor | an `aether-kit-*` crate or a new component crate | `aether-actor`, export/cardinality rules |
 | Change a process profile | `aether-chassis-<chassis>` | config layers, linked capabilities, packaging |

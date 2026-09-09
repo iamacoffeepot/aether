@@ -135,10 +135,15 @@ def valid_surface_glob(pattern):
 RANK = {"auto": 0, "judge": 1, "human": 2}
 
 
+def read_text(path):
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
 def read_globs(path):
     return [
         line.strip()
-        for line in open(path, encoding="utf-8").read().splitlines()
+        for line in read_text(path).splitlines()
         if line.strip() and not line.strip().startswith("#")
     ]
 
@@ -208,7 +213,7 @@ def valid_policy_glob(pattern):
 
 
 def load_policy(path):
-    return load_policy_text(open(path, encoding="utf-8").read())
+    return load_policy_text(read_text(path))
 
 
 def tier_of(path, policy):
@@ -325,7 +330,7 @@ def tier_of_surface(surface, policy):
 
 
 def read_paths(path):
-    return [line.strip() for line in open(path, encoding="utf-8").read().splitlines() if line.strip()]
+    return [line.strip() for line in read_text(path).splitlines() if line.strip()]
 
 
 def main(argv):

@@ -85,11 +85,11 @@ the count (`0` resolves to a default of 100, and anything above 1000 clamps to
 
 ## How to use it
 
-**Over MCP — `actor_logs`.** The `actor_logs(engine_id, mailbox_name, max?, level?, since?, contains?)`
-tool sends `aether.log.tail` to the named mailbox and returns its ring slice. The
-surface:
+**Over MCP — `actor_logs`.** The `actor_logs(engine_id?, address, max?, level?, since?, contains?)`
+tool sends `aether.log.tail` to the addressed mailbox and returns its ring slice.
+Omit `engine_id` to target the sole supervised engine. The surface:
 
-- **`mailbox_name`** — any actor's mailbox is queryable, addressed by name. That
+- **`address`** — any actor's mailbox is queryable, addressed by name. That
   includes chassis mailboxes (`"aether.audio"`, `"aether.render"`) and a loaded
   component by its full lineage name (`"aether.component/aether.embedded:camera"`).
 - **`max`** — caps returned entries; defaults to 100, clamps to 1000.
@@ -103,8 +103,8 @@ surface:
 
 Paging is the move you'll reach for on a busy actor: an `actor_logs` call returns
 `next_since`, and passing it as the next call's `since` walks the ring forward in
-chunks. A query against an unregistered mailbox name comes back as an error, not
-an empty success — so a typo'd mailbox name reads as a failure you can see.
+chunks. A query against an unregistered address comes back as an error, not
+an empty success — so a typo'd address reads as a failure you can see.
 
 **From a component — emit with `tracing`.** An author writes `tracing::info!`,
 `tracing::warn!`, and the like inside handlers; those calls are exactly what

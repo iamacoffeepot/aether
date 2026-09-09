@@ -3,6 +3,25 @@
 - **Status:** Proposed
 - **Date:** 2026-08-14
 
+## Status note (2026-09-09)
+
+Two of this decision's clauses are on `main` and the rest are not. Clause 8's
+liveness signal is built: a backend reports `last_progress_unix_millis`, and
+`silence_from` in `crates/aether-chassis-bloomery/src/bloomery/reactor/executor/runtime/`
+measures silence against the configured `heartbeat_silence_secs` inside the
+handle's own observation window. Clause 10 is built: a dispatch records a
+recycle-proof `ProcessIdentity` beside its evidence, `OrphanedRun::kill`
+returns `Unterminated` rather than reporting a cancellation it did not perform,
+and a slot whose child cannot be signalled is quarantined rather than reused.
+
+The classification the ADR is named for is not built. There is no
+`MachineryFailed` / `ArtifactRejected` verdict on the completion signal, no
+separate machinery and work attempt budgets, and no wedge that records which of
+the two exhausted it. A silent or faulted lane still lands on the existing
+`VerificationFailed` / `ExecutorFault` vocabulary, so a host repair and a model
+that could not do the job still arrive at the operator as the same terminal
+state. Read clauses 1 through 7 and 9 as a proposal.
+
 ## Context
 
 A dispatched attempt reports one bit. `Fact::AttemptCompleted` carries `passed: bool` (`crates/aether-bloomery/src/reduce/event.rs:142`), the reducer reads it in `reduce_attempt_completed` (`crates/aether-bloomery/src/reduce/attempt.rs:192`), and a false value falls through to `retry_or_wedge` (`crates/aether-bloomery/src/reduce/attempt.rs:346`), which spends one of the stage's `retry_budget` rolls and re-dispatches the same stage with a model behind it. Every recovery the pipeline knows how to perform hangs off that bit.

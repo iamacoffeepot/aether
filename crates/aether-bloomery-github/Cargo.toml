@@ -31,7 +31,13 @@ reqwest = { version = "0.13", default-features = false, features = ["blocking", 
 # with. Non-optional because this whole crate is the GitHub adapter: a consumer
 # that does not want the protocol does not depend on the crate at all, so a
 # mirrored feature would gate nothing an existing gate does not.
-jsonwebtoken = "9"
+# 10.x moved the crypto backend behind a feature and requires exactly one to
+# be chosen (a build with neither panics at the first sign). `aws_lc_rs` is the
+# one already in this workspace's graph — rustls resolves aws-lc-rs as its
+# provider — so it unifies against a crate CI already compiles on every
+# platform. The `rust_crypto` alternative would pull `rsa` 0.9 in, which carries
+# its own open advisory (GHSA-c827-hfw6-qwvm), trading one for another.
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "aws_lc_rs"] }
 serde = { workspace = true, features = ["derive", "std"] }
 # Request/response bodies and the marker change-detection digest are JSON;
 # the digest is sha256 over a value's canonical JSON so a re-render with the

@@ -118,7 +118,7 @@ mod tests {
     }
 
     fn repo() -> Repo {
-        Repo::new("/mnt/dev/bloomery/fleet.git")
+        Repo::new("/srv/fleet.git")
     }
 
     #[test]

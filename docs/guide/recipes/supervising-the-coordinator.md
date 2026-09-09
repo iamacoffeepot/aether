@@ -1,9 +1,10 @@
 # Supervising the coordinator with systemd
 
 **Class:** drive-only (nothing here rebuilds aether beyond the coordinator
-binary itself). The coordinator is journal-backed and restart-safe, so its
-supervision is declarative: a checked-in systemd user unit, one uncommitted
-environment file per host, and journald. Read
+binary itself). The Bloomery coordinator is a consumer built on the engine — a
+chassis crate like any other application's — and it is journal-backed and
+restart-safe, so its supervision is declarative: a checked-in systemd user unit,
+one uncommitted environment file per host, and journald. Read
 [Driving a bloom over the REST control API](bloomery-rest-api.md) for what the
 coordinator serves once it is up.
 

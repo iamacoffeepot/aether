@@ -54,11 +54,10 @@ binary/fleet path.
 | `aether.source` | snapshot, checkpoint, enumerate, integrate, and compare-and-swap land through the configured source adapter | `aether-chassis-bloomery/src/source` |
 | `aether.signing` | verify statements against host-local authorized signer keys | `aether-chassis-bloomery/src/signing` |
 
-ADR-0149 remains **Proposed** despite substantial checked-in Bloomery
-implementation. The table routes readers to realized code; it does not promote
-the proposal to an accepted decision. As everywhere in this index, inspect the
-running profile with live inventory before assuming that a mailbox or handler
-is installed.
+ADR-0149 is Accepted and carries several amendments; the table routes readers to
+the code that realizes it, not to the record. As everywhere in this index,
+inspect the running profile with live inventory before assuming that a mailbox
+or handler is installed.
 
 ## Loadable provider components
 

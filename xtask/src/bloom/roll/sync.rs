@@ -180,7 +180,7 @@ mod tests {
     const SYNC: &str = "bloomery/sync/2026-08-14";
     const LINEARIZED: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const EXPECTED: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const REPO: &str = "/mnt/dev/bloomery/fleet.git";
+    const REPO: &str = "/srv/fleet.git";
 
     fn repo() -> Repo {
         Repo::new(REPO)

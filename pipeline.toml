@@ -15,11 +15,12 @@
 # so is `[evidence].envelope`: the envelope shape a lane writes and the intake
 # admits is the coordinator's, not a description it adapts to.
 #
-# Nothing reads this file yet. The slices that resolve it from the base, record
-# it on the bloom, and enforce it at the seal door land after this one; until
-# they do, the vocabulary below is transcribed by hand from the compiled one and
-# the two are held equal by the tripwire in
-# `crates/aether-bloomery/src/values/pipeline.rs`.
+# The coordinator reads this file from the sealed base when a draft is formed,
+# records the derived manifest on the bloom, validates the seal against it, and
+# spawns the lane entrypoint it names; a base without the file is refused
+# (ADR-0215). `PipelineManifest::compiled()` in
+# `crates/aether-bloomery/src/values/pipeline.rs` keeps the pre-manifest
+# vocabulary only for blooms journaled before the file existed.
 
 version = 1
 

@@ -23,7 +23,7 @@ read relative to the process working directory.
 ## Build the shippable package
 
 ```sh
-cargo xtask package \
+cargo xtask package --profile release \
   --spec demo/puppet-turntable.json \
   --assets crates/aether-mesh/examples
 ```
