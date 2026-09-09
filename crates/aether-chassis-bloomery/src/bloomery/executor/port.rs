@@ -95,6 +95,26 @@ pub trait ExecutorPort {
     /// the unit suites driving a fake backend.
     fn submit(&self, order: &WorkOrder) -> Settled<Result<WorkHandle, ExecutorPortError>>;
 
+    /// Attempt an idle-only submission. `None` is a busy or unsupported backend,
+    /// not an accepted order; the durable request remains available to coalesce.
+    fn try_submit_idle(&self, order: &WorkOrder) -> Settled<Result<Option<WorkHandle>, ExecutorPortError>> {
+        let _ = order;
+        Settled::Answered(Ok(None))
+    }
+
+    /// Cheap advisory capacity read; the actual idle submit still reserves.
+    fn has_idle_capacity(&self, order: &WorkOrder) -> bool {
+        let _ = order;
+        false
+    }
+
+    /// Settle a previous idle submit or recover an existing process. Must not
+    /// start an absent order, including after a restart lost the offload ledger.
+    fn settle_idle_submission(&self, order: &WorkOrder) -> Settled<Result<Option<WorkHandle>, ExecutorPortError>> {
+        let _ = order;
+        Settled::Answered(Ok(None))
+    }
+
     /// Inspect the run the handle resolves to and, when it has completed,
     /// stream its evidence in the same call.
     ///
@@ -130,6 +150,18 @@ impl ExecutorPort for ExecutorShell {
 
     fn submit(&self, order: &WorkOrder) -> Settled<Result<WorkHandle, ExecutorPortError>> {
         Settled::Answered(self.backend.submit(order))
+    }
+
+    fn try_submit_idle(&self, order: &WorkOrder) -> Settled<Result<Option<WorkHandle>, ExecutorPortError>> {
+        Settled::Answered(self.backend.try_submit_idle(order))
+    }
+
+    fn has_idle_capacity(&self, order: &WorkOrder) -> bool {
+        self.backend.has_idle_capacity(order)
+    }
+
+    fn settle_idle_submission(&self, order: &WorkOrder) -> Settled<Result<Option<WorkHandle>, ExecutorPortError>> {
+        Settled::Answered(self.backend.settle_idle_submission(order))
     }
 
     fn observe(&self, handle: &WorkHandle) -> Settled<Result<RunObservation, ExecutorPortError>> {

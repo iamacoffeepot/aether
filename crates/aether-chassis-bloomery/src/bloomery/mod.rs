@@ -27,6 +27,8 @@ mod replica;
 mod local_landing;
 pub(crate) mod poll_timer;
 #[cfg(feature = "github")]
+mod precheck;
+#[cfg(feature = "github")]
 mod provenance;
 #[cfg(feature = "github")]
 mod reactor;

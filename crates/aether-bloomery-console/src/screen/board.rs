@@ -7,7 +7,7 @@ use ratatui::style::Modifier;
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
 use crate::cursor::Cursor;
-use crate::dto::{BloomStatus, DigestHex, MemberView, MetricDispatch, ViewDocument};
+use crate::dto::{BloomStatus, DigestHex, MemberView, MetricDispatch, PrecheckView, ViewDocument};
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
@@ -39,6 +39,7 @@ pub struct BloomRow {
     pub id_prefix: String,
     pub status: String,
     pub member_count: usize,
+    pub precheck: String,
     pub age: String,
 }
 
@@ -227,13 +228,13 @@ impl Board {
             BoardLane::Live => "BLOOM / MEMBER",
             BoardLane::History => "HISTORY (landed · superseded)",
         };
-        let header =
-            Row::new([title, "STATE", "STAGE", "AGE"]).style(palette::body().add_modifier(Modifier::BOLD).patch(muted));
+        let header = Row::new([title, "STATE", "STAGE / PRECHECK", "AGE"])
+            .style(palette::body().add_modifier(Modifier::BOLD).patch(muted));
         let table_rows = rows.iter().map(|row| match row {
             BoardRow::Bloom(bloom) => Row::new([
                 Cell::from(bloom.id_prefix.clone()),
                 Cell::from(format!("{}  {} mem", bloom.status, bloom.member_count)),
-                Cell::from(""),
+                Cell::from(bloom.precheck.clone()),
                 Cell::from(bloom.age.clone()),
             ])
             .style(palette::body().add_modifier(Modifier::BOLD).patch(muted)),
@@ -304,6 +305,7 @@ fn rows_of(view: &ViewDocument, lane: BoardLane, dispatches: &[MetricDispatch]) 
             id_prefix: bloom.id.prefix(),
             status,
             member_count: bloom.members.len(),
+            precheck: bloom.precheck.as_ref().map_or_else(String::new, PrecheckView::summary),
             age: elapsed_of(dispatches, bloom.id, None),
         }));
         for member in members {

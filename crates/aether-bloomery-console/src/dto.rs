@@ -270,6 +270,92 @@ pub struct BloomView {
     /// empty from one that has observed no writes yet.
     #[serde(default)]
     pub leases: Vec<LeaseView>,
+    /// Optional aggregate pre-check state; absent on older coordinators.
+    #[serde(default)]
+    pub precheck: Option<PrecheckView>,
+}
+
+/// Only the pre-check fields the board renders. The full state remains in the
+/// view document for the detail reader, with no console-owned proof ledger.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PrecheckView {
+    #[serde(default)]
+    pub latest_plan: Option<Value>,
+    #[serde(default)]
+    pub prepared: Option<PrecheckNodeView>,
+    #[serde(default)]
+    pub issued: Option<PrecheckNodeView>,
+    #[serde(default)]
+    pub final_join: Option<PrecheckNodeView>,
+    #[serde(default)]
+    pub result: Option<Value>,
+    #[serde(default)]
+    pub diagnostic: Option<Value>,
+    #[serde(default)]
+    pub paused: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct PrecheckNodeView {
+    #[serde(default)]
+    pub plan: DigestHex,
+    #[serde(default)]
+    pub tree: DigestHex,
+    #[serde(default)]
+    pub head: DigestHex,
+    #[serde(default)]
+    pub gate_set: DigestHex,
+}
+
+impl PrecheckView {
+    /// A passing result is shown green only for the prepared node it names.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let node = self.final_join.as_ref().or(self.prepared.as_ref());
+        let status = if self.paused {
+            "paused"
+        } else if let Some(issued) = &self.issued {
+            if self.final_join.as_ref() == Some(issued) {
+                "joined"
+            } else if self.prepared.as_ref() == Some(issued) {
+                "running"
+            } else {
+                "stale"
+            }
+        } else if let Some(node) = node {
+            self.result_label(node)
+        } else if self.diagnostic.is_some() {
+            "refused"
+        } else if self.latest_plan.is_some() {
+            "preparing"
+        } else {
+            "waiting"
+        };
+        node.map_or_else(|| status.to_owned(), |node| format!("{status} {}", node.head.prefix()))
+    }
+
+    fn result_label(&self, node: &PrecheckNodeView) -> &'static str {
+        let id = aether_bloomery::PrecheckNode {
+            plan: aether_bloomery::Digest::from_bytes(*node.plan.as_bytes()),
+            tree: aether_bloomery::Digest::from_bytes(*node.tree.as_bytes()),
+            head: aether_bloomery::Digest::from_bytes(*node.head.as_bytes()),
+            gate_set: aether_bloomery::Digest::from_bytes(*node.gate_set.as_bytes()),
+        }
+        .digest();
+        for (variant, label) in
+            [("Passed", "green"), ("Failed", "red"), ("HostFault", "fault"), ("SkippedBeforeStart", "pending")]
+        {
+            if let Some(result) = self.result.as_ref().and_then(|result| result.get(variant))
+                && result
+                    .get("node")
+                    .and_then(|node| serde_json::from_value::<DigestHex>(node.clone()).ok())
+                    .is_some_and(|recorded| recorded.as_bytes() == id.as_bytes())
+            {
+                return label;
+            }
+        }
+        "pending"
+    }
 }
 
 /// One held write lease (ADR-0204 / ADR-0198): the path, who holds it, where
@@ -1071,6 +1157,38 @@ mod tests {
         let member: MemberView = serde_json::from_value(json!({})).expect("empty member");
         assert!(member.workpiece.is_empty());
         assert!(member.wedge.is_none());
+    }
+
+    #[test]
+    fn precheck_green_is_bound_to_the_current_node_and_unknown_results_stay_pending() {
+        let node = aether_bloomery::PrecheckNode {
+            plan: aether_bloomery::Digest::from_bytes([1; 32]),
+            tree: aether_bloomery::Digest::from_bytes([2; 32]),
+            head: aether_bloomery::Digest::from_bytes([3; 32]),
+            gate_set: aether_bloomery::Digest::from_bytes([4; 32]),
+        };
+        let mut state = aether_bloomery::PrecheckState::new(aether_bloomery::PrecheckPolicy { run_budget: 1 });
+        state.prepared = Some(node.clone());
+        state.result = Some(aether_bloomery::PrecheckResult::Passed { node: node.digest(), evidence: node.tree });
+        let decode = |state: &aether_bloomery::PrecheckState| {
+            serde_json::from_value::<super::PrecheckView>(serde_json::to_value(state).expect("state JSON"))
+                .expect("view")
+        };
+        assert_eq!(decode(&state).summary(), "green 03030303");
+        state.prepared.as_mut().expect("prepared").head = aether_bloomery::Digest::from_bytes([5; 32]);
+        assert_eq!(decode(&state).summary(), "pending 05050505");
+        state.issued = Some(node.clone());
+        assert_eq!(decode(&state).summary(), "stale 05050505");
+        state.final_join = Some(node);
+        assert_eq!(decode(&state).summary(), "joined 03030303");
+        state.paused = true;
+        assert_eq!(decode(&state).summary(), "paused 03030303");
+        let mut unknown = decode(&state);
+        unknown.paused = false;
+        unknown.issued = None;
+        unknown.final_join = None;
+        unknown.result = Some(json!({"FutureResult": {"node": hex(7)}}));
+        assert_eq!(unknown.summary(), "pending 05050505");
     }
 
     #[test]

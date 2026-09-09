@@ -188,6 +188,18 @@ where
         self.0.submit(order).map_err(Into::into)
     }
 
+    fn try_submit_idle(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, Self::Error> {
+        self.0.try_submit_idle(order).map_err(Into::into)
+    }
+
+    fn has_idle_capacity(&self, order: &WorkOrder) -> bool {
+        self.0.has_idle_capacity(order)
+    }
+
+    fn settle_idle_submission(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, Self::Error> {
+        self.0.settle_idle_submission(order).map_err(Into::into)
+    }
+
     fn inspect(&self, handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
         self.0.inspect(handle).map_err(Into::into)
     }
@@ -349,6 +361,28 @@ impl ExecutorShell {
     /// The dispatch surface is unreachable or refused the dispatch.
     pub fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, ExecutorPortError> {
         self.backend.submit(order)
+    }
+
+    /// Attempt speculative work without joining the backend's waiting queue.
+    ///
+    /// # Errors
+    /// The admitted order's setup or spawn failed.
+    pub fn try_submit_idle(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, ExecutorPortError> {
+        self.backend.try_submit_idle(order)
+    }
+
+    /// Observe local spare capacity without reserving it.
+    #[must_use]
+    pub fn has_idle_capacity(&self, order: &WorkOrder) -> bool {
+        self.backend.has_idle_capacity(order)
+    }
+
+    /// Recover a prior idle submission without starting absent work.
+    ///
+    /// # Errors
+    /// The backend could not observe the prior submission.
+    pub fn settle_idle_submission(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, ExecutorPortError> {
+        self.backend.settle_idle_submission(order)
     }
 
     /// Inspect the run the handle resolves to.

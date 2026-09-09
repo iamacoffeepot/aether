@@ -42,10 +42,11 @@ use aether_bloomery::control::{
     ClaimResult, ClaimSeal, Commit, CommitResult, CompleteReleaseResult, DispatchPayload, EnumerateClaims,
     EnumerateClaimsResult, HealOp, IntegratePayload, LandPayload, LoadConfigs, LoadConfigsResult,
     MemberClaimReleasePayload, MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView, ObserveMainline,
-    ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, ProposalPayload, Query, QueryResult,
-    QuerySelector, ReconcileOp, RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, SpendQuery,
-    SpendQueryResult, SplicePayload, StudyPayload, Topic, TransferSeal, held_to_seal_error, held_to_supersede_error,
-    plan_heals, reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
+    ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, PrecheckNodePayload, PrecheckPayload,
+    ProposalPayload, Query, QueryResult, QuerySelector, QueuePrecheckPlanPayload, ReconcileOp, RedispatchPayload,
+    ReplayJournal, ReplayJournalResult, ReviewPass, SpendQuery, SpendQueryResult, SplicePayload, StudyPayload, Topic,
+    TransferSeal, held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_seal_mail,
+    seal_claim_mail, transfer_seal_mail,
 };
 use aether_bloomery::{
     BloomId, BloomStatus, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, DAYS_CAP, Decision,
@@ -1413,6 +1414,9 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::AttemptCompleted { bloom, .. }
         | Fact::AggregateReviewCompleted { bloom, .. }
         | Fact::AggregateVerifyCompleted { bloom, .. }
+        | Fact::PrecheckPrepared { bloom, .. }
+        | Fact::RequestPrecheck { bloom, .. }
+        | Fact::PrecheckCompleted { bloom, .. }
         | Fact::LandingRejected { bloom, .. }
         | Fact::GrantAttempts { bloom, .. }
         | Fact::VerifyFailed { bloom, .. }
@@ -1534,7 +1538,13 @@ fn collect_decision_blooms(effect: &Decision, into: &mut BTreeSet<BloomId>) {
         | Decision::MarkBloomWithdrawn { bloom, .. }
         | Decision::RecordAggregateGatePass { bloom, .. }
         | Decision::RecordRefusal { bloom, .. }
-        | Decision::DispatchStudy { bloom, .. } => {
+        | Decision::DispatchStudy { bloom, .. }
+        | Decision::RecordPrecheckState { bloom, .. }
+        | Decision::QueuePrecheckPlan { bloom, .. }
+        | Decision::OfferPrecheck { bloom, .. }
+        | Decision::DispatchPrecheck { bloom, .. }
+        | Decision::CancelPrecheck { bloom, .. }
+        | Decision::PromotePrecheck { bloom, .. } => {
             into.insert(*bloom);
         }
         Decision::MarkSuperseded { bloom, by } => {
@@ -1696,15 +1706,7 @@ fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError>
             let payload = LandPayload { bloom: bloom.0, expected_base: *expected_base, new_head: *new_head };
             Some(to_vec(&payload)?)
         }
-        Decision::DispatchIntegration { bloom, base, members, adopt_from } => {
-            let payload = IntegratePayload {
-                bloom: bloom.0,
-                base: *base,
-                members: members.clone(),
-                adopt_from: adopt_from.map(|predecessor| predecessor.0),
-            };
-            Some(to_vec(&payload)?)
-        }
+        Decision::DispatchIntegration { .. } => integration_outbox(effect)?,
         Decision::DispatchSplice { .. } => splice_outbox(effect)?,
         Decision::DispatchAggregateReview { .. } => aggregate_review_outbox(effect)?,
         Decision::DispatchAggregateVerify { bloom, transformation, profile, roll: _ } => {
@@ -1715,6 +1717,11 @@ fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError>
             };
             Some(to_vec(&payload)?)
         }
+        Decision::QueuePrecheckPlan { .. }
+        | Decision::OfferPrecheck { .. }
+        | Decision::DispatchPrecheck { .. }
+        | Decision::CancelPrecheck { .. }
+        | Decision::PromotePrecheck { .. } => precheck_outbox(effect)?,
         Decision::DispatchOrphanClaimRelease { request, target } => {
             let payload = OrphanClaimReleasePayload { request: *request, target: target.clone() };
             Some(to_vec(&payload)?)
@@ -1779,8 +1786,43 @@ fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError>
         | Decision::MarkBloomWithdrawn { .. }
         | Decision::RecordAggregateGatePass { .. }
         | Decision::RecordRefusal { .. }
+        | Decision::RecordPrecheckState { .. }
         | Decision::QueueProposal { .. }
         | Decision::DequeueProposal { .. } => None,
+    })
+}
+
+fn integration_outbox(effect: &Decision) -> Result<Option<Vec<u8>>, WireError> {
+    let Decision::DispatchIntegration { bloom, base, members, adopt_from } = effect else {
+        return Ok(None);
+    };
+    Ok(Some(to_vec(&IntegratePayload {
+        bloom: bloom.0,
+        base: *base,
+        members: members.clone(),
+        adopt_from: adopt_from.map(|predecessor| predecessor.0),
+    })?))
+}
+
+fn precheck_outbox(effect: &Decision) -> Result<Option<Vec<u8>>, WireError> {
+    Ok(match effect {
+        Decision::QueuePrecheckPlan { bloom, plan } => {
+            Some(to_vec(&QueuePrecheckPlanPayload { bloom: bloom.0, plan: plan.clone() })?)
+        }
+        Decision::OfferPrecheck { bloom, node, transformation, profile, configs }
+        | Decision::DispatchPrecheck { bloom, node, transformation, profile, configs } => {
+            Some(to_vec(&PrecheckPayload {
+                bloom: bloom.0,
+                node: node.clone(),
+                transformation: transformation.clone(),
+                profile: profile.clone(),
+                configs: configs.clone(),
+            })?)
+        }
+        Decision::CancelPrecheck { bloom, node } | Decision::PromotePrecheck { bloom, node } => {
+            Some(to_vec(&PrecheckNodePayload { bloom: bloom.0, node: *node })?)
+        }
+        _ => None,
     })
 }
 

@@ -14,8 +14,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use aether_bloomery::{BloomId, BloomStatus, Digest, Snapshot, is_active_unlanded};
+use crate::bloomery::outbox::TopicOutbox;
+use crate::bloomery::precheck::namespace as preview_namespace;
+use aether_bloomery::{BloomId, BloomStatus, Digest, QueuePrecheckPlanPayload, Snapshot, Topic, is_active_unlanded};
 use aether_bloomery_github::SourceError;
+use aether_data::wire::from_bytes;
 
 use crate::bloomery::LaneOccupancy;
 use crate::bloomery::SourceShell;
@@ -201,7 +204,10 @@ pub fn sweep(request: &mut SweepRequest<'_>, scan: &mut TargetScan) -> rusqlite:
     } else {
         0
     };
-    let refs = request.source.map_or(0, |source| prune_terminal_refs(source, &snapshot, request.pruned));
+    let mut refs = request.source.map_or(0, |source| prune_terminal_refs(source, &snapshot, request.pruned));
+    if let Some(source) = request.source {
+        refs += prune_preview_refs(request.store, source, &snapshot, request.pruned)?;
+    }
     let interval = Duration::from_secs(request.policy.target_scan_interval_secs);
     let now = request.now;
     let (target_dirs, targets_measured) = sweep_targets(request, scan, interval, now);
@@ -289,6 +295,55 @@ fn prune_terminal_refs(source: &dyn WorkingRefPruner, snapshot: &Snapshot, alrea
         }
     }
     pruned
+}
+
+/// Private plan namespaces are reconstructible from the existing outbox. A
+/// pending preparation may still own a Git worker; an outstanding order may
+/// still need its checkout, so neither namespace is eligible yet.
+fn prune_preview_refs(
+    store: &mut dyn StoreBackend,
+    source: &dyn WorkingRefPruner,
+    snapshot: &Snapshot,
+    already: &mut HashSet<BloomId>,
+) -> rusqlite::Result<usize> {
+    let plans = store.delivered_topic(Topic::QueuePrecheckPlan)?;
+    if plans.is_empty() {
+        return Ok(0);
+    }
+    let mut busy = HashSet::new();
+    for nonce in store.list_order_nonces()? {
+        if let Some(order) = store.lookup_order(&nonce)?
+            && let Some(bloom) = Digest::from_slice(&order.bloom)
+        {
+            busy.insert(BloomId(bloom));
+        }
+    }
+    let mut pruned = 0;
+    let mut attempted = 0;
+    for entry in plans {
+        let payload = from_bytes::<QueuePrecheckPlanPayload>(&entry.payload)
+            .map_err(|error| rusqlite::Error::InvalidParameterName(format!("pre-check prune payload: {error}")))?;
+        let bloom = BloomId(payload.bloom);
+        let namespace = preview_namespace(&payload.plan);
+        if already.contains(&namespace)
+            || busy.contains(&bloom)
+            || snapshot.blooms.get(&bloom).is_none_or(|record| is_active_unlanded(record.status))
+        {
+            continue;
+        }
+        if attempted >= JANITOR_REF_PRUNES_PER_TICK {
+            break;
+        }
+        attempted += 1;
+        match source.prune_working_refs(&namespace) {
+            Ok(count) => {
+                pruned += count;
+                already.insert(namespace);
+            }
+            Err(error) => tracing::warn!(%error, "janitor: private pre-check ref prune failed; will retry"),
+        }
+    }
+    Ok(pruned)
 }
 
 /// Whether a terminal bloom's working refs are this pass's to delete.
@@ -693,3 +748,59 @@ fn hex_of(digest: &Digest) -> String {
 /// Retention window as a [`Duration`], for tests that age a directory.
 #[cfg(test)]
 pub(super) use super::records::retention_duration;
+
+#[cfg(test)]
+mod preview_tests {
+    use std::cell::RefCell;
+
+    use aether_bloomery::PrecheckPlan;
+    use aether_bloomery::testing::{digest, draft, membership, splice_bloom};
+    use aether_data::wire::to_vec;
+
+    use super::*;
+    use crate::store::{OrderLifecycle, OutstandingOrder, SqliteStore};
+
+    #[derive(Default)]
+    struct Pruner(RefCell<Vec<BloomId>>);
+
+    impl WorkingRefPruner for Pruner {
+        fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError> {
+            self.0.borrow_mut().push(*bloom);
+            Ok(1)
+        }
+    }
+
+    #[test]
+    fn preview_refs_wait_for_preparation_terminal_membership_and_settled_orders() {
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        let spec = draft(0, vec![membership("wp", 1)]).seal();
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &spec, BloomStatus::Landed);
+        let plan = PrecheckPlan { bloom: spec.id(), base: digest(0), members: Vec::new(), gate_set: digest(1) };
+        let namespace = preview_namespace(&plan);
+        let payload = QueuePrecheckPlanPayload { bloom: spec.id().0, plan };
+        store.enqueue_topic(Topic::QueuePrecheckPlan, &to_vec(&payload).expect("payload"), None).expect("enqueue");
+        let source = Pruner::default();
+        let mut already = HashSet::new();
+        assert_eq!(prune_preview_refs(&mut store, &source, &snapshot, &mut already).expect("pending"), 0);
+
+        let entry = store.drain_topic(Topic::QueuePrecheckPlan).expect("pending plan").remove(0);
+        store.ack_topic(Topic::QueuePrecheckPlan, entry.sequence).expect("finished preparation");
+        snapshot.blooms.get_mut(&spec.id()).expect("bloom").status = BloomStatus::Sealed;
+        assert_eq!(prune_preview_refs(&mut store, &source, &snapshot, &mut already).expect("active"), 0);
+
+        snapshot.blooms.get_mut(&spec.id()).expect("bloom").status = BloomStatus::Landed;
+        store
+            .record_order(&OutstandingOrder {
+                lifecycle: OrderLifecycle::Submitting,
+                ..super::super::tests::order_for("preview", &spec.id())
+            })
+            .expect("submitting order");
+        assert_eq!(prune_preview_refs(&mut store, &source, &snapshot, &mut already).expect("submitting"), 0);
+        store.consume_order("preview").expect("settled order");
+        assert_eq!(prune_preview_refs(&mut store, &source, &snapshot, &mut already).expect("terminal"), 1);
+        assert_eq!(*source.0.borrow(), vec![namespace]);
+        assert_ne!(namespace, spec.id());
+        assert_eq!(prune_preview_refs(&mut store, &source, &snapshot, &mut already).expect("repeat"), 0);
+    }
+}

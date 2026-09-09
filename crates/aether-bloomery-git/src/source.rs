@@ -59,9 +59,9 @@ use std::slice::from_ref;
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BackendObjectId, BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome,
-    ContentAddressed, CorrespondenceError, Digest, IntegrateOutcome, IntegrationPosition, LandOutcome,
-    SharedCorrespondence, Snapshot, SourceBackend, SourceSnapshot, WorkpieceId, digest_of,
+    BackendObjectId, BloomId, CandidateRef, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState,
+    ClaimReleaseOutcome, ContentAddressed, CorrespondenceError, Digest, IntegrateOutcome, IntegrationPosition,
+    LandOutcome, SharedCorrespondence, Snapshot, SourceBackend, SourceSnapshot, WorkpieceId, digest_of,
 };
 use serde::Serialize;
 
@@ -1543,6 +1543,23 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
 /// prune is not a landing outcome, but the janitor needs it on the same
 /// object the rest of the source shell holds.
 pub trait HostSource: SourceBackend<Error = SourceError> {
+    /// Merge an immutable candidate vehicle into an owned scratch namespace.
+    /// The candidate's checkout must carry its named tree. Implementations must
+    /// never resolve a moving member ref in place of that checkout.
+    ///
+    /// # Errors
+    /// Unsupported backend, unavailable objects, mismatched candidate, or a
+    /// transport fault. A clean merge conflict remains an `IntegrateOutcome`.
+    fn integrate_pinned(
+        &self,
+        bloom: &BloomId,
+        candidate: &CandidateRef,
+        expected: &Checkpoint,
+    ) -> Result<IntegrateOutcome, SourceError> {
+        let _ = (bloom, candidate, expected);
+        Err(SourceError::Malformed("source backend does not support immutable preview merges".to_owned()))
+    }
+
     /// Delete `bloom`'s candidate, integration, and checkpoint refs. Claim refs
     /// and the landing branch are spared. See [`GitSource::prune_working_refs`].
     ///
@@ -1552,6 +1569,35 @@ pub trait HostSource: SourceBackend<Error = SourceError> {
 }
 
 impl<C: GitDataApi> HostSource for GitSource<C> {
+    fn integrate_pinned(
+        &self,
+        bloom: &BloomId,
+        candidate: &CandidateRef,
+        expected: &Checkpoint,
+    ) -> Result<IntegrateOutcome, SourceError> {
+        let checkout = self.resolve_git_sha(&candidate.checkout, "pre-check candidate checkout")?;
+        let tree = self.resolve_git_sha(&candidate.tree, "pre-check candidate tree")?;
+        if self.client.get_commit(&checkout)?.tree != tree {
+            return Err(SourceError::Malformed(
+                "pre-check candidate checkout does not contain its pinned tree".to_owned(),
+            ));
+        }
+        // This ref is private to the immutable plan namespace. It also gives
+        // conflict evidence the exact attempted vehicle through the existing
+        // merge path; the ordinary member candidate ref is never read or written.
+        let pinned = candidate_ref(bloom, &candidate.checkout.to_hex());
+        match self.client.get_ref(&pinned)? {
+            Some(existing) if existing.sha != checkout => {
+                return Err(SourceError::Malformed("pre-check candidate pin was replaced".to_owned()));
+            }
+            Some(_) => {}
+            None => {
+                self.client.create_ref(&pinned, &checkout)?;
+            }
+        }
+        self.integrate_merge(bloom, &pinned, expected)
+    }
+
     fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError> {
         Self::prune_working_refs(self, bloom)
     }
@@ -1650,6 +1696,50 @@ mod tests {
             source.transfer_seal(&predecessor, successor, from_ref(&member), &[], &[]).unwrap();
             predecessor = *successor;
         }
+    }
+
+    #[test]
+    fn a_pinned_preview_checks_the_vehicle_tree_before_writing_any_ref() {
+        let (fake, bloom, base) = seeded();
+        let source = git_source(&fake, false);
+        let expected = source.integration_checkpoint(&bloom, &base).unwrap().checkpoint;
+        let checkout = fake.seed_base_commit(&digest(30));
+        fake.seed_git_object(&digest(31));
+        let candidate = aether_bloomery::CandidateRef { tree: digest(31), checkout };
+        let before = fake.list_matching_refs(&format!("heads/bloom/{}/", short_hex(&bloom.0))).unwrap();
+        assert!(matches!(
+            super::HostSource::integrate_pinned(&source, &bloom, &candidate, &expected),
+            Err(SourceError::Malformed(_))
+        ));
+        assert_eq!(fake.list_matching_refs(&format!("heads/bloom/{}/", short_hex(&bloom.0))).unwrap(), before);
+    }
+
+    #[test]
+    fn a_pinned_preview_replays_the_recorded_checkout_even_when_a_member_ref_moves() {
+        let (fake, bloom, base) = seeded();
+        let source = git_source(&fake, false);
+        let expected = source.integration_checkpoint(&bloom, &base).unwrap().checkpoint;
+        let checkout = fake.seed_base_commit(&digest(30));
+        let candidate = aether_bloomery::CandidateRef { tree: digest(30), checkout };
+        let ordinary = candidate_ref_name(&bloom_id(99), "member");
+        fake.seed_ref_at(&ordinary, &checkout);
+        let first = super::HostSource::integrate_pinned(&source, &bloom, &candidate, &expected).unwrap();
+        let IntegrateOutcome::Integrated { tree, head } = first else {
+            panic!("expected merge")
+        };
+        let moved = fake.seed_base_commit(&digest(31));
+        fake.seed_ref_at(&ordinary, &moved);
+        let replay =
+            super::HostSource::integrate_pinned(&source, &bloom, &candidate, &Checkpoint { bloom, tree }).unwrap();
+        assert_eq!(replay, IntegrateOutcome::Integrated { tree, head });
+        assert_eq!(fake.ref_digest(&ordinary), Some(moved));
+        let private = super::candidate_ref(&bloom, &checkout.to_hex());
+        assert_eq!(fake.ref_digest(&private), Some(checkout));
+        fake.seed_ref_at(&private, &moved);
+        assert!(matches!(
+            super::HostSource::integrate_pinned(&source, &bloom, &candidate, &Checkpoint { bloom, tree }),
+            Err(SourceError::Malformed(_))
+        ));
     }
 
     #[test]

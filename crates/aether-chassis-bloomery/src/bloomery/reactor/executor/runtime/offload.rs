@@ -86,6 +86,8 @@ pub const MAX_IN_FLIGHT: usize = DEFAULT_MAX_IN_FLIGHT;
 pub enum AdapterCall {
     /// `ExecutorPort::submit` for an order's nonce.
     Submit(Nonce),
+    /// Idle-only admission has a different answer and never queues the order.
+    SubmitIdle(Nonce),
     /// `ExecutorPort::observe` for a tracked handle's nonce.
     Observe(Nonce),
     /// `ExecutorPort::cancel` for a nonce — the reactor's cancellation intent.
@@ -107,6 +109,10 @@ enum AdapterWork {
     /// Boxed: `WorkOrder` is the transformation plus nonce, far larger than
     /// the other variants, and identity is the nonce on [`AdapterCall`].
     Submit(Box<WorkOrder>),
+    SubmitIdle {
+        order: Box<WorkOrder>,
+        allow_new: bool,
+    },
     Observe(WorkHandle),
     Cancel(WorkHandle),
     ObserveWrites,
@@ -120,6 +126,7 @@ impl AdapterWork {
     fn call(&self) -> AdapterCall {
         match self {
             Self::Submit(order) => AdapterCall::Submit(order.nonce.clone()),
+            Self::SubmitIdle { order, .. } => AdapterCall::SubmitIdle(order.nonce.clone()),
             Self::Observe(handle) => AdapterCall::Observe(handle.nonce.clone()),
             Self::Cancel(handle) => AdapterCall::Cancel(handle.nonce.clone()),
             Self::ObserveWrites => AdapterCall::ObserveWrites,
@@ -135,6 +142,11 @@ impl AdapterWork {
     fn run(self, shell: &ExecutorShell, pusher: &dyn CandidatePush) -> AdapterAnswer {
         match self {
             Self::Submit(order) => AdapterAnswer::Submit(shell.submit(&order)),
+            Self::SubmitIdle { order, allow_new } => AdapterAnswer::SubmitIdle(if allow_new {
+                shell.try_submit_idle(&order)
+            } else {
+                shell.settle_idle_submission(&order)
+            }),
             Self::Observe(handle) => AdapterAnswer::Observe(shell.observe_run(&handle)),
             Self::Cancel(handle) => AdapterAnswer::Cancel(shell.cancel(&handle)),
             Self::ObserveWrites => AdapterAnswer::ObserveWrites(shell.observe_writes()),
@@ -148,6 +160,7 @@ impl AdapterWork {
 #[derive(Debug)]
 enum AdapterAnswer {
     Submit(Result<WorkHandle, ExecutorPortError>),
+    SubmitIdle(Result<Option<WorkHandle>, ExecutorPortError>),
     Observe(Result<RunObservation, ExecutorPortError>),
     Cancel(Result<(), ExecutorPortError>),
     ObserveWrites(Vec<ObservedLaneWrites>),
@@ -390,6 +403,61 @@ impl ExecutorPort for OffloadedPort<'_> {
         }
     }
 
+    fn try_submit_idle(&self, order: &WorkOrder) -> Settled<Result<Option<WorkHandle>, ExecutorPortError>> {
+        {
+            let mut ledger = self.offload.lock();
+            let call = AdapterCall::SubmitIdle(order.nonce.clone());
+            let cancel = AdapterCall::Cancel(order.nonce.clone());
+            if ledger.in_flight.contains(&cancel)
+                || ledger.answers.contains_key(&cancel)
+                || ledger.asked_this_round.contains(&cancel)
+                || ledger.wanted.iter().any(|work| work.call() == cancel)
+            {
+                return Settled::InFlight;
+            }
+            let required_pending = ledger.in_flight.iter().any(|call| matches!(call, AdapterCall::Submit(_)))
+                || ledger.wanted.iter().any(|work| matches!(work, AdapterWork::Submit(_)));
+            if required_pending && !ledger.in_flight.contains(&call) && !ledger.answers.contains_key(&call) {
+                ledger.wanted.retain(|work| work.call() != call);
+                drop(ledger);
+                return Settled::Answered(Ok(None));
+            }
+        }
+        match self.offload.take_or_want(AdapterWork::SubmitIdle { order: Box::new(order.clone()), allow_new: true }) {
+            Some(AdapterAnswer::SubmitIdle(answer)) => Settled::Answered(answer),
+            _ => Settled::InFlight,
+        }
+    }
+
+    fn has_idle_capacity(&self, order: &WorkOrder) -> bool {
+        let required_pending = {
+            let ledger = self.offload.lock();
+            ledger.in_flight.iter().any(|call| matches!(call, AdapterCall::Submit(_)))
+                || ledger.wanted.iter().any(|work| matches!(work, AdapterWork::Submit(_)))
+        };
+        !required_pending && self.shell.has_idle_capacity(order)
+    }
+
+    fn settle_idle_submission(&self, order: &WorkOrder) -> Settled<Result<Option<WorkHandle>, ExecutorPortError>> {
+        // A wanted call has not started yet; turn it into a probe before the
+        // worker takes it. An in-flight call keeps its immutable input and its
+        // answer is consumed through the same key as the original submission.
+        {
+            let mut ledger = self.offload.lock();
+            for work in &mut ledger.wanted {
+                if let AdapterWork::SubmitIdle { order: wanted, allow_new } = work
+                    && wanted.nonce == order.nonce
+                {
+                    *allow_new = false;
+                }
+            }
+        }
+        match self.offload.take_or_want(AdapterWork::SubmitIdle { order: Box::new(order.clone()), allow_new: false }) {
+            Some(AdapterAnswer::SubmitIdle(answer)) => Settled::Answered(answer),
+            _ => Settled::InFlight,
+        }
+    }
+
     fn observe(&self, handle: &WorkHandle) -> Settled<Result<RunObservation, ExecutorPortError>> {
         match self.offload.take_or_want(AdapterWork::Observe(handle.clone())) {
             Some(AdapterAnswer::Observe(answer)) => Settled::Answered(answer),
@@ -398,6 +466,16 @@ impl ExecutorPort for OffloadedPort<'_> {
     }
 
     fn cancel(&self, handle: &WorkHandle) -> Settled<Result<(), ExecutorPortError>> {
+        {
+            let mut ledger = self.offload.lock();
+            let idle = AdapterCall::SubmitIdle(handle.nonce.clone());
+            ledger.wanted.retain(|work| work.call() != idle);
+            // A submit already on a worker can still create the process.
+            // Cancel only after that call settles, including expiry cancels.
+            if ledger.in_flight.contains(&idle) {
+                return Settled::InFlight;
+            }
+        }
         match self.offload.take_or_want(AdapterWork::Cancel(handle.clone())) {
             Some(AdapterAnswer::Cancel(answer)) => Settled::Answered(answer),
             _ => Settled::InFlight,
@@ -409,5 +487,109 @@ impl ExecutorPort for OffloadedPort<'_> {
             Some(AdapterAnswer::ObserveWrites(observed)) => Settled::Answered(observed),
             _ => Settled::InFlight,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::bloomery::UnconfiguredActionsBackend;
+    use aether_bloomery::testing::digest;
+    use aether_bloomery::{StageCatalog, StageId, Transformation};
+
+    fn shell() -> ExecutorShell {
+        ExecutorShell::new(Arc::new(UnconfiguredActionsBackend::new("test backend".to_owned())))
+    }
+
+    fn order(nonce: &str) -> WorkOrder {
+        WorkOrder {
+            transformation: Transformation::for_aggregate_verify(
+                &StageCatalog::binding_of(StageId::AggregateVerify),
+                digest(1),
+                digest(2),
+                digest(3),
+            ),
+            nonce: Nonce(nonce.to_owned()),
+            instruction_bundle: None,
+            prompt_manifest: None,
+        }
+    }
+
+    #[test]
+    fn cancellation_downgrades_only_an_unstarted_idle_call_and_restart_only_probes() {
+        let offload = AdapterOffload::new();
+        let shell = shell();
+        let port = offload.port(&shell);
+        let order = order("idle");
+        assert!(matches!(port.try_submit_idle(&order), Settled::InFlight));
+        assert!(matches!(port.settle_idle_submission(&order), Settled::InFlight));
+        assert!(matches!(offload.lock().wanted.front(), Some(AdapterWork::SubmitIdle { allow_new: false, .. })));
+        let restarted = AdapterOffload::new();
+        assert!(matches!(restarted.port(&shell).settle_idle_submission(&order), Settled::InFlight));
+        assert!(matches!(restarted.lock().wanted.front(), Some(AdapterWork::SubmitIdle { allow_new: false, .. })));
+    }
+
+    #[test]
+    fn a_started_idle_answer_survives_promotion_without_another_submission() {
+        let offload = AdapterOffload::new();
+        let shell = shell();
+        let order = order("started");
+        let handle = WorkHandle::new(order.nonce.clone());
+        offload
+            .lock()
+            .answers
+            .insert(AdapterCall::SubmitIdle(order.nonce.clone()), AdapterAnswer::SubmitIdle(Ok(Some(handle.clone()))));
+        assert!(
+            matches!(offload.port(&shell).settle_idle_submission(&order), Settled::Answered(Ok(Some(got))) if got == handle)
+        );
+        assert!(offload.lock().wanted.is_empty());
+    }
+
+    #[test]
+    fn expiry_cancel_removes_an_unstarted_idle_call_and_prevents_requeue() {
+        let offload = AdapterOffload::new();
+        let shell = shell();
+        let port = offload.port(&shell);
+        let order = order("expiring");
+        let handle = WorkHandle::new(order.nonce.clone());
+        assert!(matches!(port.try_submit_idle(&order), Settled::InFlight));
+        assert!(matches!(port.cancel(&handle), Settled::InFlight));
+        assert!(matches!(port.try_submit_idle(&order), Settled::InFlight));
+        let ledger = offload.lock();
+        assert_eq!(ledger.wanted.len(), 1);
+        assert!(matches!(ledger.wanted.front(), Some(AdapterWork::Cancel(_))));
+        drop(ledger);
+    }
+
+    #[test]
+    fn expiry_cancel_waits_for_a_started_idle_submission_to_settle() {
+        let offload = AdapterOffload::new();
+        let shell = shell();
+        let order = order("started-expiry");
+        let handle = WorkHandle::new(order.nonce.clone());
+        let call = AdapterCall::SubmitIdle(order.nonce);
+        offload.lock().in_flight.insert(call.clone());
+        assert!(matches!(offload.port(&shell).cancel(&handle), Settled::InFlight));
+        assert!(offload.lock().wanted.is_empty());
+        offload.lock().in_flight.remove(&call);
+        offload.lock().answers.insert(call, AdapterAnswer::SubmitIdle(Ok(Some(handle.clone()))));
+        assert!(matches!(offload.port(&shell).cancel(&handle), Settled::InFlight));
+        assert!(matches!(offload.lock().wanted.front(), Some(AdapterWork::Cancel(_))));
+    }
+
+    #[test]
+    fn required_adapter_work_overtakes_idle_work_that_has_not_started() {
+        let offload = AdapterOffload::new();
+        let shell = shell();
+        let port = offload.port(&shell);
+        let idle = order("idle");
+        assert!(matches!(port.try_submit_idle(&idle), Settled::InFlight));
+        assert!(matches!(port.submit(&order("required")), Settled::InFlight));
+        assert!(matches!(port.try_submit_idle(&idle), Settled::Answered(Ok(None))));
+        let ledger = offload.lock();
+        assert_eq!(ledger.wanted.len(), 1);
+        assert!(matches!(ledger.wanted.front(), Some(AdapterWork::Submit(_))));
+        drop(ledger);
     }
 }

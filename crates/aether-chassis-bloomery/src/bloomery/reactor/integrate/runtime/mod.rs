@@ -50,7 +50,7 @@ use aether_bloomery::{
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 
@@ -60,9 +60,13 @@ use crate::bloomery::IntegrateReactorSetup;
 use crate::bloomery::SourceShell;
 use crate::bloomery::outbox::{OutboxResultDelivery, TopicOutbox};
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
+use crate::bloomery::precheck::PrecheckProjection;
 use crate::control::ControlCore;
 use crate::store::{SqliteStore, StoreBackend};
 use aether_bloomery_github::candidate_ref_name;
+
+mod precheck;
+use precheck::{Preview, PreviewWork, drain_precheck_plans};
 
 // The autoloaded control-core component's lineage mailbox — where an admitted
 // `Fact::Resolve` is sent. Resolved from the lineage path, mirroring the land
@@ -77,6 +81,8 @@ pub struct IntegrateTick {}
 /// Runtime state for [`IntegrateReactorCapability`]. The shell + store are `Some`
 /// only when configured; a disabled reactor holds neither and spawns no timer.
 pub struct IntegrateReactorState {
+    prechecks: PrecheckProjection,
+    preview_work: PreviewWork,
     source: Option<SourceShell>,
     store: Option<SqliteStore>,
     // Where a fold-conflict overlay is filed so a wedge's evidence detail
@@ -104,6 +110,8 @@ impl IntegrateReactorState {
         self_mailbox: MailboxId,
     ) -> Self {
         Self {
+            prechecks: PrecheckProjection::default(),
+            preview_work: PreviewWork::default(),
             source,
             store,
             artifacts: None,
@@ -924,6 +932,8 @@ impl NativeActor for IntegrateReactorCapability {
                 "integrate reactor mounted disabled (unconfigured token/owner/repo); integrate outbox will accumulate",
             );
             return Ok(IntegrateReactorState {
+                prechecks: PrecheckProjection::default(),
+                preview_work: PreviewWork::default(),
                 source: None,
                 store: None,
                 artifacts: None,
@@ -951,6 +961,8 @@ impl NativeActor for IntegrateReactorCapability {
             "integrate reactor mounted; polling the store for integration decisions",
         );
         Ok(IntegrateReactorState {
+            prechecks: PrecheckProjection::default(),
+            preview_work: PreviewWork::default(),
             source: Some(source),
             store: Some(store),
             artifacts: open_artifacts(config.artifacts_root.as_deref()),
@@ -1023,6 +1035,48 @@ impl NativeActor for IntegrateReactorCapability {
                 tracing::warn!(target: "aether_chassis_bloomery::integrate", %error, "splice drain failed");
             }
         }
+        match drain_precheck_plans(
+            store,
+            &source,
+            state.artifacts.as_mut(),
+            &mut state.prechecks,
+            &mut state.preview_work,
+            ctx,
+        ) {
+            Ok((admits, ack_through)) => {
+                if let Some(sequence) = ack_through
+                    && let Err(error) = store.ack_topic(Topic::QueuePrecheckPlan, sequence)
+                {
+                    tracing::warn!(%error, "pre-check preparation ack failed");
+                }
+                for admit in admits {
+                    let _ = ctx.send_envelope_detached(control_mailbox, Admit::ID, &admit.encode_into_bytes());
+                }
+            }
+            Err(error) => tracing::warn!(%error, "pre-check preparation drain failed"),
+        }
+        if state.prechecks.catching_up() {
+            let _ = ctx.send_envelope_detached(
+                state.self_mailbox,
+                IntegrateTick::ID,
+                &IntegrateTick::default().encode_into_bytes(),
+            );
+        }
+    }
+
+    #[handler(task)]
+    fn on_preview_prepared(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<Result<Preview, String>, Digest>,
+    ) {
+        state.preview_work.complete(*done.context(), done.output().clone());
+        done.release_no_reply();
+        let _ = ctx.send_envelope_detached(
+            state.self_mailbox,
+            IntegrateTick::ID,
+            &IntegrateTick::default().encode_into_bytes(),
+        );
     }
 
     /// Control's reply to a fire-and-forget admit. Ok is a no-op; Err is the

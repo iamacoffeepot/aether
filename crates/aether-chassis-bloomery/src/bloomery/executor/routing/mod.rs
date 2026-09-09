@@ -96,6 +96,37 @@ impl ExecutorBackend for RoutingExecutor {
         Ok(handle)
     }
 
+    fn try_submit_idle(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, Self::Error> {
+        let lane = self.lane_for_command(&order.transformation.command);
+        let handle = match lane {
+            Lane::Actions => self.actions.try_submit_idle(order)?,
+            Lane::Local => self.local.try_submit_idle(order)?,
+        };
+        if handle.is_some() {
+            self.lock().insert(order.nonce.0.clone(), lane);
+        }
+        Ok(handle)
+    }
+
+    fn has_idle_capacity(&self, order: &WorkOrder) -> bool {
+        match self.lane_for_command(&order.transformation.command) {
+            Lane::Actions => self.actions.has_idle_capacity(order),
+            Lane::Local => self.local.has_idle_capacity(order),
+        }
+    }
+
+    fn settle_idle_submission(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, Self::Error> {
+        let lane = self.lane_for_command(&order.transformation.command);
+        let handle = match lane {
+            Lane::Actions => self.actions.settle_idle_submission(order)?,
+            Lane::Local => self.local.settle_idle_submission(order)?,
+        };
+        if handle.is_some() {
+            self.lock().insert(order.nonce.0.clone(), lane);
+        }
+        Ok(handle)
+    }
+
     fn inspect(&self, handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
         Ok(match self.lane_of(&handle.nonce.0) {
             Lane::Actions => self.actions.inspect(handle)?,

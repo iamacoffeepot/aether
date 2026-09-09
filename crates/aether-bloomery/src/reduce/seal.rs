@@ -13,6 +13,7 @@ use serde::de::DeserializeOwned;
 use super::aggregate_verify::aggregate_verify_dispatch;
 use super::attempt::{DispatchTargets, SealedLine, move_effects, stage_binding};
 use super::composition::composition_progress;
+use super::precheck::initialized_effects;
 use super::readiness::{ReadyLine, entry_line, ready_entries, successor_entries};
 use super::splice::{SplicedBase, checkout_from, member_construct_base, spliced_base};
 use super::{
@@ -24,8 +25,8 @@ use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
     BaseReceipt, BaseVerdict, BloomSpec, CandidateRef, ConfigKind, ConfigResolveError, ConfigScopes, DependencyError,
     EvidenceKind, MemberCandidate, MemberDependency, Membership, ModelOverride, OperatorProposal,
-    PIPELINE_MANIFEST_PATH, PipelineManifest, ResolutionClaim, ResolvedConfigs, SpendCeiling, SpendWindow,
-    StageCatalog, Transformation, Unproducible, VerifyFailureSet, VerifyGateSet, VerifyProof,
+    PIPELINE_MANIFEST_PATH, PipelineManifest, PrecheckPolicy, ResolutionClaim, ResolvedConfigs, SpendCeiling,
+    SpendWindow, StageCatalog, Transformation, Unproducible, VerifyFailureSet, VerifyGateSet, VerifyProof,
     resolve_member_dependencies,
 };
 
@@ -105,6 +106,13 @@ pub(super) fn reduce_seal(
         Ok(proposal) => proposal,
         Err(error) => return Decisions::rejected(Outcome::SealRejected(error)),
     };
+    let precheck_policy = match sealed_config::<PrecheckPolicy>(ConfigScopes::bloom_wide(spec.configs()), configs) {
+        Ok(Some(policy)) if policy.run_budget == 0 => {
+            return Decisions::rejected(Outcome::SealRejected(SealError::InvalidPrecheckPolicy));
+        }
+        Ok(policy) => policy,
+        Err(error) => return Decisions::rejected(Outcome::SealRejected(error)),
+    };
 
     let mut effects = Vec::with_capacity(spec.members().len() * 3 + 2);
     if snapshot.spend_quiesce.is_some() {
@@ -135,6 +143,8 @@ pub(super) fn reduce_seal(
         &ReadyLine { bloom_configs: spec.configs(), catalog: &catalog, base: spec.base(), base_proven: proven },
     ));
     effects.push(Decision::RecordMemberDependencies { bloom, edges: edges.to_vec() });
+    let precheck = initialized_effects(spec, &catalog, &manifest, precheck_policy, &effects);
+    effects.extend(precheck);
     Decisions { outcome: Outcome::Sealed(bloom), effects }
 }
 
@@ -524,6 +534,16 @@ pub(super) fn reduce_supersede(
         Ok(line) => line,
         Err(error) => return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error))),
     };
+    let precheck_policy = match sealed_config::<PrecheckPolicy>(ConfigScopes::bloom_wide(successor.configs()), configs)
+    {
+        Ok(Some(policy)) if policy.run_budget == 0 => {
+            return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(
+                SealError::InvalidPrecheckPolicy,
+            )));
+        }
+        Ok(policy) => policy,
+        Err(error) => return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error))),
+    };
     // Supersession is a second door into `active`, so it runs the same
     // all-or-nothing conflict scan as seal — but the predecessor's own holds are
     // released in this decision set, so only a foreign bloom's hold conflicts.
@@ -586,6 +606,8 @@ pub(super) fn reduce_supersede(
     }
     effects.push(Decision::MarkSuperseded { bloom: *predecessor, by: successor_id });
     effects.push(Decision::RecordMemberDependencies { bloom: successor_id, edges: graph });
+    let precheck = initialized_effects(successor, &catalog, &manifest, precheck_policy, &effects);
+    effects.extend(precheck);
     Decisions { outcome: Outcome::Superseded { predecessor: *predecessor, successor: successor_id }, effects }
 }
 

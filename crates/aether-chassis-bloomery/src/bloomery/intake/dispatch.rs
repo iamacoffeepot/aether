@@ -108,6 +108,14 @@ impl DispatchRecord {
         self.stage == StageId::Refine && self.workpiece.is_composition()
     }
 
+    /// The reserved composition axis distinguishes an aggregate pre-check from
+    /// the final aggregate order, whose workpiece is empty. This metadata is
+    /// written by the dispatch host, never accepted from the worker upload.
+    #[must_use]
+    pub fn is_precheck(&self) -> bool {
+        self.stage == StageId::AggregateVerify && self.workpiece.is_composition()
+    }
+
     fn to_stored(&self, deadline_unix_millis: u64) -> OutstandingOrder {
         OutstandingOrder {
             deadline_unix_millis,
@@ -324,6 +332,43 @@ pub fn dispatch_and_record(
             // Nothing reached the worker lane, so the row describes a dispatch
             // that does not exist; drop it rather than leave the deadline sweep
             // to expire an order no run was ever started for.
+            let _ = store.consume_order(&record.nonce.0);
+            Err(DispatchError::Submit(error))
+        }
+    }
+}
+
+/// Record a mechanical pre-check and attempt it only on idle capacity.
+///
+/// A busy answer removes the unsubmitted reservation so no deadline or recovery
+/// reader mistakes it for a running lane. An offloaded call retains Submitting
+/// until its answer arrives, just like the ordinary dispatch path.
+///
+/// # Errors
+/// Invalid order kind, store failure, or an admitted lane's setup/spawn failure.
+pub fn dispatch_precheck_idle(
+    port: &dyn ExecutorPort,
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    now_unix_millis: u64,
+) -> Result<Settled<Option<WorkHandle>>, DispatchError> {
+    if !record.is_precheck() || gated(&record.transformation.command) {
+        return Err(DispatchError::Store(rusqlite::Error::InvalidParameterName(
+            "idle pre-check dispatch requires a mechanical aggregate pre-check order".to_owned(),
+        )));
+    }
+    record_dispatch_at(store, record, now_unix_millis).map_err(DispatchError::Store)?;
+    match port.try_submit_idle(&record.to_order()) {
+        Settled::InFlight => Ok(Settled::InFlight),
+        Settled::Answered(Ok(Some(handle))) => {
+            store.mark_order_submitted(&record.nonce.0).map_err(DispatchError::Store)?;
+            Ok(Settled::Answered(Some(handle)))
+        }
+        Settled::Answered(Ok(None)) => {
+            store.consume_order(&record.nonce.0).map_err(DispatchError::Store)?;
+            Ok(Settled::Answered(None))
+        }
+        Settled::Answered(Err(error)) => {
             let _ = store.consume_order(&record.nonce.0);
             Err(DispatchError::Submit(error))
         }

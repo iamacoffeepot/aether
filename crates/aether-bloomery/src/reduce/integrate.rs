@@ -9,6 +9,7 @@ use super::aggregate_verify::{aggregate_gate_dispatches, aggregate_review_dispat
 use super::boundary::EventBoundary;
 use super::gate::AGGREGATE_VERIFY_GATE;
 use super::lease::resume_entries;
+use super::precheck::final_join;
 use super::readiness::newly_ready_entries;
 use super::verify_memo::{proof_of, reuse_of};
 use super::{
@@ -282,6 +283,20 @@ fn folded(
 ) -> Decisions {
     let integration = FoldedIntegration { tree, head, lineage: lineage.to_vec() };
     let hold = Decision::RecordIntegration { bloom, integration: Some(integration) };
+
+    if let Some(node) = final_join(record, bloom, tree, head) {
+        let node_digest = node.digest();
+        let mut state = record.precheck.as_ref().expect("joined node has state").clone();
+        state.final_join = Some(node);
+        state.promoted = true;
+        let mut effects = alloc::vec![
+            hold,
+            Decision::RecordPrecheckState { bloom, state: Some(state) },
+            Decision::PromotePrecheck { bloom, node: node_digest },
+        ];
+        effects.extend(aggregate_review_dispatch(record, bloom, tree, head));
+        return Decisions { outcome: Outcome::PrecheckJoined { bloom, node: node_digest }, effects };
+    }
 
     // The fold may be a tree this bloom's fold gates have already proven
     // (#4891) — a re-weave that reproduces a tree an earlier round already put

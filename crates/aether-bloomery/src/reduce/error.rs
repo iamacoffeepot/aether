@@ -213,6 +213,8 @@ pub enum SealError {
         /// The path that base was expected to carry.
         path: String,
     },
+    /// A present pre-check policy must allow at least one bounded run.
+    InvalidPrecheckPolicy,
 }
 
 /// Why a supersession was refused.
@@ -888,4 +890,21 @@ pub enum StudyError {
     /// and only there, so a result arriving against an unlanded bloom names a
     /// dispatch this reducer never decided.
     NotLanded,
+}
+
+/// Why a pre-check lifecycle fact was refused.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum PrecheckError {
+    UnknownOrInactiveBloom,
+    Disabled,
+    PlanMismatch { expected: Digest, got: Digest },
+    NodeMismatch { expected: Digest, got: Digest },
+    InvalidPreparation,
+    OnHold,
+    BudgetExhausted { issued: u32, budget: u32 },
+    NoPreparedNode,
+    NoIssuedNode,
+    SubjectMismatch { expected: Digest, got: Digest },
+    GateMismatch { expected: Digest, got: Digest },
+    InvalidEvidenceKind,
 }
