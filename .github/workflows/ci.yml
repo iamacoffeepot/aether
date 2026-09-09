@@ -203,7 +203,13 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - run: rustup toolchain install
       - name: Install ALSA dev headers (cpal Linux backend)
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        # Third-party apt sources baked into the runner image (Google Chrome and
+        # friends) are dropped before the update: nothing here installs from them,
+        # and a stale index on one of their CDNs fails the whole update with a
+        # Hash Sum mismatch (2026-09-09). Only Ubuntu's own sources are consulted.
+        run: |
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu*' -delete
+          sudo apt-get update && sudo apt-get install -y libasound2-dev
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # The arm runs clippy non-denying under `--message-format=json` and
       # applies the same fail-on-any-warning predicate `-D warnings` encodes
@@ -255,7 +261,13 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - run: rustup toolchain install
       - name: Install ALSA dev headers (cpal Linux backend)
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        # Third-party apt sources baked into the runner image (Google Chrome and
+        # friends) are dropped before the update: nothing here installs from them,
+        # and a stale index on one of their CDNs fails the whole update with a
+        # Hash Sum mismatch (2026-09-09). Only Ubuntu's own sources are consulted.
+        run: |
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu*' -delete
+          sudo apt-get update && sudo apt-get install -y libasound2-dev
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # `[workspace.lints.rustdoc]` in the root Cargo.toml tracks the
       # rustdoc lints at `warn`. RUSTDOCFLAGS escalates the tracked
@@ -378,7 +390,13 @@ jobs:
           swap-storage: 'false'
       - run: rustup toolchain install
       - name: Install Linux deps (ALSA for cpal, Mesa lavapipe for wgpu, mold linker)
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        # Third-party apt sources baked into the runner image (Google Chrome and
+        # friends) are dropped before the update: nothing here installs from them,
+        # and a stale index on one of their CDNs fails the whole update with a
+        # Hash Sum mismatch (2026-09-09). Only Ubuntu's own sources are consulted.
+        run: |
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu*' -delete
+          sudo apt-get update && sudo apt-get install -y libasound2-dev
           mesa-vulkan-drivers mold
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
