@@ -114,7 +114,7 @@ claimed as an inbox the event loop drains between frames ([Window](window.md)
 covers that mailbox's surface).
 
 A claimed mailbox is settle-safe by construction ([ADR-0106](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0106-settlement-safe-by-construction.md)). The claim hands the
-capability a `ClaimedInbox`, not a raw receiver, and its drain methods yield each
+capability a `SettlingInbox`, not a raw receiver, and its drain methods yield each
 mail as an `InboundMail` guard that records `Finished` and replies along the
 inbound's causal chain. The guard settles when it falls out of scope — on every
 arm, including a decode error, an unrecognised kind, an early return, or teardown
@@ -257,16 +257,16 @@ returns the combined trace tree, the correlated replies, and a `status`:
 - `"settled"` — the chain closed. By default `mails` is `null`, `tree` holds one
   indented line per node (`sender → recipient`, kind, and handler duration),
   `node_count` states how many nodes were rendered, and `in_flight` reads `0`.
-  Pass `full: true` to restore the complete `mails` nodes with `parent` edges and
-  all timestamps; full mode omits `tree` and carries the same `node_count`.
-- `"timeout"` — the chain didn't settle within `settlement_timeout_ms` (default
-  300s, clamped to 600s). A timeout is the bound on a hung chain, and the usual
+  Pass `format: "nodes"` to restore the complete `mails` nodes with `parent` edges
+  and all timestamps; that mode omits `tree` and carries the same `node_count`.
+- `"timeout"` — the chain didn't settle within `settlement_timeout_millis`
+  (default 300 000, clamped to 600 000). A timeout is the bound on a hung chain, and the usual
   cause is exactly the two failures above: a deferred reply that never held its
   chain open, or a drain that dropped its finish obligation upstream. The triage
   path from this status to the offending handler is the
   [Debugging a hung settlement](../recipes/debugging-a-hung-settlement.md) recipe.
 - `"dispatched"` — only with `fire_and_forget`; the shared root acked, no
-  settlement wait, and the compact/full projection fields are omitted.
+  settlement wait, and both projections' fields are omitted.
 
 Reach for `send_mail_traced` over `send_mail` when you need proof a whole cascade
 finished rather than just one reply, the timing breakdown of a slow exchange, or

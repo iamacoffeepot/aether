@@ -60,7 +60,7 @@ For the media and product-tools overview, start with
 | [Mesh authoring](systems/mesh-authoring.md) | DSL, parser, tessellation and viewer load |
 | [Audio](systems/audio.md) | realtime events, scheduling, instruments, tracks and effects |
 | [Input](systems/input.md) | key, pointer, text, IME and subscription streams |
-| [Window](systems/window.md) | mode, title, focus and unsupported replies |
+| [Window](systems/window.md) | window lifecycle, mode/title, menu and cursor chrome, unsupported replies |
 | [Widgets](systems/widgets.md) | controls, focus, scroll, panel/editor composition |
 | [Puppet controls](systems/puppet.md) | articulated character pose, gaze, expression and turntable control |
 
