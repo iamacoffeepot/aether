@@ -44,8 +44,29 @@ pub(super) struct Terminal {
     pub usage: Option<Usage>,
 }
 
-/// The token counts a harness reported for a run.
+/// The token counts a harness reported for a run: the billed totals, and the
+/// per-call breakdown they were summed from.
 pub(super) struct Usage {
+    pub input: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub output: u64,
+    /// One entry per model call, in the order the harness made them. Empty when
+    /// the harness reports only aggregates, which renders the `calls` column
+    /// null rather than as an empty run.
+    pub calls: Vec<Call>,
+}
+
+/// One model call's token counts.
+///
+/// Two host-side readers need the calls and not the totals. The session pool
+/// takes the *last* call's prompt — uncached input plus both cache classes — as
+/// the context a resume would re-read (`session_reuse::parse_context_tokens`),
+/// and refuses to deposit a lap that reports none; and the sealed price table
+/// selects its long-context band per call, because the threshold is a
+/// prompt-size cut and an aggregate sum crosses it for reasons no single call
+/// did (`aether_bloomery::PriceTable::price_dispatch`).
+pub(super) struct Call {
     pub input: u64,
     pub cache_read: u64,
     pub cache_write: u64,
@@ -85,6 +106,8 @@ pub(super) fn record(terminal: Option<Terminal>, session: Option<String>) -> ser
         "first_call_cache_read",
         "first_call_cache_write",
         "first_call_input",
+        // Overwritten below when the harness reported per-call usage; null here
+        // so the `no_result` record keeps the same key set.
         "calls",
     ] {
         record.insert(field.to_owned(), Value::Null);
@@ -102,9 +125,15 @@ pub(super) fn record(terminal: Option<Terminal>, session: Option<String>) -> ser
     record.insert("cost_usd".to_owned(), Value::Null);
     record.insert("duration_ms".to_owned(), Value::Null);
     record.insert("is_error".to_owned(), json!(terminal.is_error));
-    let (input, cache_read, cache_write, output) =
-        terminal.usage.map_or((Value::Null, Value::Null, Value::Null, Value::Null), |usage| {
-            (json!(usage.input), json!(usage.cache_read), json!(usage.cache_write), json!(usage.output))
+    let (input, cache_read, cache_write, output, calls) =
+        terminal.usage.map_or((Value::Null, Value::Null, Value::Null, Value::Null, Value::Null), |usage| {
+            (
+                json!(usage.input),
+                json!(usage.cache_read),
+                json!(usage.cache_write),
+                json!(usage.output),
+                call_column(&usage.calls),
+            )
         });
     record.insert("input".to_owned(), input);
     record.insert("cache_read".to_owned(), cache_read);
@@ -112,10 +141,45 @@ pub(super) fn record(terminal: Option<Terminal>, session: Option<String>) -> ser
     record.insert("cache_write_1h".to_owned(), Value::Null);
     record.insert("cache_write_5m".to_owned(), Value::Null);
     record.insert("output".to_owned(), output);
+    record.insert("calls".to_owned(), calls);
     // The nested terminal the review lane reads its verdict text out of, shaped
     // like the Claude arm's carried-whole `result` event.
     record.insert("result".to_owned(), json!({ "is_error": terminal.is_error, "result": terminal.text }));
     Value::Object(record)
+}
+
+/// The `calls` column for `calls`, or null when the harness reported none.
+///
+/// Null rather than `[]`, and the two are read differently: the pool's
+/// `parse_context_tokens` takes the last entry of a non-empty array and answers
+/// `None` for an absent or empty one, which is the "unmeasured lap" branch that
+/// skips the session deposit entirely. An empty array would claim a run that
+/// made no model call.
+///
+/// The key names are the ones `aether_bloomery_github::parse_study` decodes
+/// (`CallJson`), which is the same shape the Anthropic-Messages arms write. The
+/// two cache-write TTL splits are absent, not zeroed: no harness here reports
+/// them, the aggregate columns beside these are null for the same reason, and
+/// the decoder defaults an absent one to zero anyway.
+fn call_column(calls: &[Call]) -> serde_json::Value {
+    use serde_json::{Value, json};
+
+    if calls.is_empty() {
+        return Value::Null;
+    }
+    Value::Array(
+        calls
+            .iter()
+            .map(|call| {
+                json!({
+                    "input": call.input,
+                    "cache_read": call.cache_read,
+                    "cache_write": call.cache_write,
+                    "output": call.output,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Write the assembled `prompt` to `<out>/prompt.md` and return its path — both
@@ -628,7 +692,8 @@ mod tests {
     use std::ffi::{OsStr, OsString};
 
     use super::{
-        Resumed, Terminal, Usage, build_dir, capture, capture_resumed, record, resume_handle_rejected, resumed_prompt,
+        Call, Resumed, Terminal, Usage, build_dir, capture, capture_resumed, record, resume_handle_rejected,
+        resumed_prompt,
     };
 
     #[test]
@@ -736,7 +801,7 @@ mod tests {
     #[test]
     fn an_unmetered_harness_renders_null_columns_never_zero() {
         let unmetered = record(Some(Terminal { is_error: false, text: "ok".to_owned(), usage: None }), None);
-        for column in ["cost_usd", "input", "output", "cache_read", "cache_write"] {
+        for column in ["cost_usd", "input", "output", "cache_read", "cache_write", "calls"] {
             assert!(unmetered[column].is_null(), "{column} must be null, not zero, when unmeasured");
         }
 
@@ -744,7 +809,7 @@ mod tests {
             Some(Terminal {
                 is_error: false,
                 text: "ok".to_owned(),
-                usage: Some(Usage { input: 16147, cache_read: 11008, cache_write: 0, output: 5 }),
+                usage: Some(Usage { input: 16147, cache_read: 11008, cache_write: 0, output: 5, calls: Vec::new() }),
             }),
             None,
         );
@@ -752,6 +817,54 @@ mod tests {
         assert_eq!(metered["output"], 5);
         assert_eq!(metered["cache_write"], 0, "a reported zero is a zero");
         assert!(metered["cost_usd"].is_null(), "no harness here reports a price");
+        assert!(metered["calls"].is_null(), "an empty breakdown is unmeasured, never a run that made no call");
+    }
+
+    // Tripwire: the `calls` column is what the host reads, and its key names
+    // belong to a decoder in another crate — `aether_bloomery_github::parse_study`
+    // (`CallJson`). The session pool takes the last entry's prompt as the context
+    // a resume would re-read (`session_reuse::parse_context_tokens`) and skips
+    // the deposit for a record that names none; the sealed price table selects
+    // its long-context band per call. A record that kept only the totals is what
+    // left every Muse lap cold across bloom b7f0e4568d4a.
+    #[test]
+    fn the_breakdown_rides_the_envelope_under_the_keys_the_pool_decodes() {
+        let metered = record(
+            Some(Terminal {
+                is_error: false,
+                text: "ok".to_owned(),
+                usage: Some(Usage {
+                    input: 21460,
+                    cache_read: 20465,
+                    cache_write: 7,
+                    output: 1244,
+                    calls: vec![
+                        Call { input: 20475, cache_read: 0, cache_write: 0, output: 955 },
+                        Call { input: 985, cache_read: 20465, cache_write: 7, output: 289 },
+                    ],
+                }),
+            }),
+            None,
+        );
+
+        let calls = metered["calls"].as_array().expect("the breakdown is an array, so the pool can take its last");
+        assert_eq!(calls.len(), 2, "one entry per model call, not one for the run");
+        assert_eq!(calls[1]["input"], 985);
+        assert_eq!(calls[1]["cache_read"], 20465);
+        assert_eq!(calls[1]["cache_write"], 7);
+        assert_eq!(calls[1]["output"], 289);
+        // The pool's own reading over that last entry: uncached input plus both
+        // cache classes, which is smaller than the billed aggregate the record
+        // also carries. Deposit the aggregate instead and every later acquire
+        // misses on the context cap.
+        let last = &calls[1];
+        let context: u64 =
+            ["input", "cache_read", "cache_write"].iter().map(|column| last[column].as_u64().unwrap_or_default()).sum();
+        assert!(
+            context
+                < metered["input"].as_u64().unwrap_or_default() + metered["cache_read"].as_u64().unwrap_or_default(),
+            "the resumable context is one call's prompt, never the run's billed sum",
+        );
     }
 
     // A run that died before its terminal is a legible `no_result` row carrying
