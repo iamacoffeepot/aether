@@ -34,10 +34,29 @@ fn muse_effort(effort: &str) -> &str {
 
 /// The `muse exec` argv for a model-lane run.
 ///
-/// `--disable-approval` is what makes it headless; the sandbox stays **on**,
-/// because the run's scratch worktree is exactly the blast radius it should
-/// have. The blanket `--yolo` would also disable the sandbox and trust the
-/// workspace, which is more than a lane needs.
+/// `--disable-approval` is what makes it headless, and `--disable-sandbox` is
+/// what makes it able to build (bloom `b7f0e4568d4a`, 2026-09-09). Muse's shell
+/// sandbox binds `/` read-only and re-binds only the workspace, `/tmp`, and
+/// `TMPDIR` writable, and a lane's cargo build reaches out of the workspace
+/// twice: the slot's target directory is a symlink to
+/// `AETHER_BLOOMERY_LANE_TARGET_BASE/slot-<index>-target`
+/// (`link_slot_target`, the local executor's process runner), and
+/// `RUSTC_WRAPPER=sccache` makes every `rustc` invocation a client of a daemon
+/// the sandbox's `proxy-only` network mode refuses to reach. Measured, the
+/// first is `Read-only file system (os error 30)` on the build lock and the
+/// second is `sccache: error: Operation not permitted (os error 1)` on
+/// `rustc -vV`, which fails the build before a crate is compiled. Muse offers
+/// no flag that adds a writable path or exempts a localhost peer
+/// (`--disable-sandbox`, `--yolo`, and `--sandbox-network <MODE>` are the whole
+/// safety surface), so relocating the target under `TMPDIR` — tried live —
+/// clears the first obstacle and leaves the second.
+///
+/// This is parity, not a widening: the Claude arm runs under `--settings` allow
+/// rules and the Grok arm under `--permission-mode bypassPermissions`, and
+/// neither has a filesystem sandbox at all. `--yolo` is still withheld — it
+/// would also trust the workspace's own skills and rules, which is more than a
+/// lane needs and is not something the sealed subject should be able to grant
+/// itself.
 ///
 /// `--session-id` is unconditional, and that is the arm's one inversion: Muse
 /// addresses a *new* and a *continued* session through the same flag, so the
@@ -46,8 +65,13 @@ fn muse_effort(effort: &str) -> &str {
 /// handle the pool held. (`muse resume` is the TUI's entry point and cannot run
 /// headless, so it is not the path here.)
 fn muse_argv(prompt_file: &str, model: Option<&str>, effort: Option<&str>, session: &str) -> Vec<String> {
-    let mut argv =
-        vec!["exec".to_owned(), "--json".to_owned(), "--disable-approval".to_owned(), "--prompt-file".to_owned()];
+    let mut argv = vec![
+        "exec".to_owned(),
+        "--json".to_owned(),
+        "--disable-approval".to_owned(),
+        "--disable-sandbox".to_owned(),
+        "--prompt-file".to_owned(),
+    ];
     argv.push(prompt_file.to_owned());
     argv.push("--session-id".to_owned());
     argv.push(session.to_owned());
@@ -223,9 +247,6 @@ mod tests {
         assert_eq!(argv.first().map(String::as_str), Some("exec"));
         assert!(argv.iter().any(|a| a == "--disable-approval"), "headless needs the approval prompt gone");
         assert!(argv.iter().any(|a| a == "--json"), "the transcript is what the record derives from");
-        // The sandbox stays on: the run's scratch worktree is the blast radius
-        // it should have, and --yolo would drop the sandbox too.
-        assert!(!argv.iter().any(|a| a == "--yolo"), "the sandbox stays on");
         let model_at = argv.iter().position(|a| a == "--model").expect("argv pins the model");
         assert_eq!(argv[model_at + 1], "muse-spark-1.2-contributor");
         let effort_at = argv.iter().position(|a| a == "--reasoning-effort").expect("argv pins the effort");
@@ -236,6 +257,23 @@ mod tests {
         let bare = muse_argv("/out/prompt.md", None, None, "sess-uuid");
         assert!(!bare.iter().any(|a| a == "--model"));
         assert!(!bare.iter().any(|a| a == "--reasoning-effort"));
+    }
+
+    // Tripwire: the lane's child has to be able to run a cargo build, and under
+    // Muse's shell sandbox it cannot. The slot's target directory is a symlink
+    // out of the workspace, which the sandbox binds read-only, and
+    // `RUSTC_WRAPPER=sccache` needs a daemon the sandbox's network mode refuses
+    // — measured as `Read-only file system (os error 30)` and `sccache: error:
+    // Operation not permitted (os error 1)` across bloom `b7f0e4568d4a`. Muse
+    // has no add-a-writable-path flag, so dropping `--disable-sandbox` here
+    // returns the arm to writing code it cannot compile. `--yolo` stays out: it
+    // would also trust the sealed subject's own skills and rules.
+    #[test]
+    fn the_lane_runs_unsandboxed_so_its_child_can_build_without_trusting_the_workspace() {
+        let argv = muse_argv("/out/prompt.md", None, None, "sess-uuid");
+        assert!(argv.iter().any(|a| a == "--disable-sandbox"), "a sandboxed child cannot reach the slot's target");
+        assert!(!argv.iter().any(|a| a == "--yolo"), "the workspace is not trusted");
+        assert!(!argv.iter().any(|a| a == "--trust-workspace"), "the workspace is not trusted");
     }
 
     // Tripwire: the arm's inversion. Muse opens and continues a session through
