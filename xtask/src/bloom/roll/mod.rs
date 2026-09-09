@@ -104,10 +104,12 @@ fn authority_repo(named: Option<&str>, configured: Option<String>) -> Result<Str
 }
 
 /// `AETHER_BLOOMERY_AUTHORITY_REPO`, or nothing.
+///
+/// Operator tooling reading the coordinator's own repository setting, the way
+/// this crate's port and control-token resolvers read theirs — not cap config,
+/// which is what `clippy.toml` disallows the direct read to protect.
+#[allow(clippy::disallowed_methods)] // aether-suppression-request: xtask reads the coordinator's own repository setting; not cap config
 fn configured_authority_repo() -> Option<String> {
-    // Operator tooling reading the coordinator's own repository setting — not
-    // cap config.
-    #[allow(clippy::disallowed_methods)]
     env::var(AUTHORITY_REPO).ok().map(|path| path.trim().to_owned()).filter(|path| !path.is_empty())
 }
 
