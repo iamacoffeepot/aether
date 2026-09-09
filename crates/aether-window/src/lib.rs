@@ -15,10 +15,14 @@
 pub mod kinds;
 
 pub use aether_kinds::{WindowId, WindowMode};
-#[cfg(feature = "runtime")]
-pub(crate) use kinds::WindowCommand;
+// `ApplyWindowCommand` stays always-on: it is a handler input the manager
+// identity's `#[actor]` markers name whether or not the runtime half compiles.
+// Its reply is only ever produced by a runtime, so it rides the runtime gate
+// with `WindowCommand`.
+pub(crate) use kinds::ApplyWindowCommand;
 pub use kinds::*;
-pub(crate) use kinds::{ApplyWindowCommand, ApplyWindowCommandResult};
+#[cfg(feature = "runtime")]
+pub(crate) use kinds::{ApplyWindowCommandResult, WindowCommand};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 pub(crate) use kinds::{RetireWindow, WindowForwardContext};
 

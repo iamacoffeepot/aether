@@ -1,6 +1,9 @@
 //! Public wire vocabulary for the `aether.window` manager.
 
-use aether_data::{KindId, MailId, MailboxId};
+use aether_data::{KindId, MailboxId};
+// The forwarding correlation's own type, gated with it.
+#[cfg(any(feature = "desktop", feature = "synthetic"))]
+use aether_data::MailId;
 use aether_kinds::{WindowId, WindowMode};
 use serde::{Deserialize, Serialize};
 
@@ -236,6 +239,9 @@ pub(crate) enum WindowCommand {
     RequestRedraw,
 }
 
+/// Only a runtime refuses a command, so the mapping compiles with the runtime
+/// half — a marker-only build carries the command vocabulary without it.
+#[cfg(feature = "runtime")]
 impl WindowCommand {
     /// This command's own `Err` reply, carrying `error`.
     ///
@@ -259,6 +265,11 @@ impl WindowCommand {
 }
 
 /// Manager-private result returned to the forwarding child.
+///
+/// The reply half of the private forwarding protocol: a manager runtime
+/// produces it and a forwarding child consumes it, so it rides the same
+/// `runtime` gate both of those halves do.
+#[cfg(feature = "runtime")]
 #[aether_data::kind(name = "aether.window.internal.apply_command_result", eq)]
 pub(crate) enum ApplyWindowCommandResult {
     Close(CloseWindowResult),
@@ -271,12 +282,17 @@ pub(crate) enum ApplyWindowCommandResult {
 }
 
 /// Correlation stored on the private manager request.
+///
+/// Only a window-bearing runtime forwards, so this and [`RetireWindow`] carry
+/// the same gate their crate-root re-export already carries.
+#[cfg(any(feature = "desktop", feature = "synthetic"))]
 #[aether_data::kind(name = "aether.window.internal.forward_context", copy, eq)]
 pub(crate) struct WindowForwardContext {
     pub inbound: MailId,
 }
 
 /// Manager-private request that retires a child after platform-originated close.
+#[cfg(any(feature = "desktop", feature = "synthetic"))]
 #[aether_data::kind(name = "aether.window.internal.retire", copy, eq)]
 pub(crate) struct RetireWindow;
 
