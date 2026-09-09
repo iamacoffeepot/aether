@@ -35,8 +35,10 @@ the proxy; Bloomery does not become the fleet supervisor.
 ## The five chassis profiles
 
 The `aether-chassis-*` crates assemble the shared runtime into purpose-specific
-profiles. The exact capability set is code and feature dependent, so treat this
-table as intent rather than a hardcoded manifest.
+profiles. Four are the engine's own; the fifth is Bloomery's application
+profile, built by the same composition layer. The exact capability set is code
+and feature dependent, so treat this table as intent rather than a hardcoded
+manifest.
 
 | Profile | Entry binary | Primary job |
 |---|---|---|
@@ -98,10 +100,10 @@ session reuse, and the REST control API. Its GitHub adapter projects Bloomery
 state outward and can implement the source boundary; GitHub objects are not the
 canonical work identities or the state-transition authority.
 
-This checked-in implementation is substantial, but ADR-0149 remains
-**Proposed**. Realization in code and ADR acceptance are separate facts.
-Keeping the services in the dedicated profile also means the generic hub and
-headless chassis do not become build servers.
+ADR-0149 is Accepted, and the implementation above is its realization; read the
+record's amendment chain before changing the projection or landing clauses.
+Keeping the services in the dedicated profile is what keeps the generic hub and
+headless chassis from becoming build servers.
 
 ## One tool call end to end
 
@@ -162,9 +164,10 @@ autoload or packaging behavior.
 - Fleet, proxy, and stores: `crates/aether-fleet/src/`
 - Framed RPC: `crates/aether-rpc/src/`
 - MCP translation: `crates/aether-mcp/src/`
-- ADR-0034 and ADR-0073: chassis and bundle structure
-- ADR-0074: MCP/RPC control path
+- ADR-0034 and ADR-0073: the hub as a substrate, and the runtime/chassis split
+- ADR-0072 and ADR-0118: the framed RPC protocol and the workspace's own wire format
+- ADR-0074: one actor model for native capabilities and wasm guests
 - ADR-0089: stable tunnel boundary
 - ADR-0115 and ADR-0116: binary and component registries
-- ADR-0149 (Proposed): Bloomery development control plane
+- ADR-0149 (Accepted): Bloomery development control plane
 - ADR-0157 (Accepted): one-shot process execution capability

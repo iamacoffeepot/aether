@@ -146,11 +146,11 @@ fleet of child engines, and routes engine RPC.
 **Bloomery**
 
 The first-party Aether application and dedicated chassis for bounded software
-development work. Its checked-in reducer, host services, API, and adapters are
-substantial realization of Proposed ADR-0149, not evidence that the ADR is
-Accepted. The binary can run standalone or through the hub's binary/fleet launch
-path, but does not itself own `FleetServer`. GitHub is a source/projection
-adapter, not Bloomery's state authority.
+development work. It is a consumer of the engine, not part of it. Its
+checked-in reducer, host services, API, and adapters realize Accepted ADR-0149
+and its amendment chain. The binary can run standalone or through the hub's
+binary/fleet launch path, but does not itself own `FleetServer`. GitHub is a
+source/projection adapter, not Bloomery's state authority.
 
 **Engine proxy**
 
@@ -181,10 +181,19 @@ store. Upload precedes selection for new bytes.
 
 Staged component/config instructions consumed while a substrate starts.
 
-**Bundle**
+**Package depot**
 
-A standalone desktop/headless executable with ordered component/config material
-embedded at build time. It does not require the development hub.
+The shippable directory `cargo xtask package` emits: one chassis binary, the
+workspace licenses, a persisted `pack/manifest`, and content-addressed component
+and config objects under `pack/objects/`. Its chassis boots by resolving the
+manifest against those objects, so it does not require the development hub.
+
+**Asset bundle**
+
+A component that carries payload bytes in a wasm custom section, transforms them
+into an engine resident inside its `wire` load window, and afterwards holds only
+the handle (ADR-0163 §4). `aether.kit.bundle` is the reference actor. Distinct
+from the package depot above, which is a shipping layout rather than an actor.
 
 ## Frames, rendering, and I/O
 
@@ -214,6 +223,13 @@ A bounded allowance for producer chunks. Exceeding credit is a protocol error;
 not granting more applies backpressure.
 
 ## Workflow and maturity
+
+The four scoped-issue terms below — managed Plan, approval record,
+direct-review verdict, and landable draft — belong to the checked-in
+`scope` / `approve` / `implement` / `land` skills. Those skills are still in the
+tree and still define these artifacts when a session uses them; they are not the
+repository's default path today, which is an ordinary focused pull request
+landed on green CI.
 
 **ADR**
 

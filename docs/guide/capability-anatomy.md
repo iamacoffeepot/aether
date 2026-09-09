@@ -38,7 +38,7 @@ loaded on demand, not a native chassis capability — ADR-0159.)
 ## Typical directory
 
 ```text
-aether-example/src/
+aether-<cap>/src/
   lib.rs                 crate root: identity, public re-exports, feature boundary
   module/mod.rs          optional module root for a decomposed subsystem
   kinds.rs               caller-facing request/reply/value schemas
@@ -137,9 +137,9 @@ derive/runtime requirements can vary for test-only actors.
 
 ## Kind ownership
 
-Caller-facing `aether.example.*` kinds belong in `example/kinds.rs` and are
-re-exported from the crate root, `example/lib.rs`. The marker face remains wasm-safe: schema,
-serde, and lightweight data dependencies only.
+Caller-facing `aether.<cap>.*` kinds belong in the crate's own `src/kinds.rs`
+and are re-exported from its crate root, `src/lib.rs`. The marker face remains
+wasm-safe: schema, serde, and lightweight data dependencies only.
 
 Keep a kind in `aether-kinds` only when a named upstream consumer cannot depend
 on the cap's own crate, or when it is truly substrate-wide. Document that
@@ -169,9 +169,14 @@ Separate four questions:
 Common gates are:
 
 - an always-on or light marker feature for transport types;
-- `feature = "runtime"` for substrate-typed state and handlers;
-- a heavy `<cap>-runtime` feature such as `audio-runtime`, `render-runtime`, or
-  `clipboard-runtime` for platform libraries;
+- `feature = "runtime"` for substrate-typed state and handlers, including the
+  cap's own heavy backend — `aether-audio` pulls cpal there, `aether-render`
+  pulls wgpu;
+- a further platform feature above `runtime` when only some chassis need it.
+  `aether-render` and `aether-window` both carry `desktop = ["runtime",
+  "dep:winit"]`, so headless, harness, and wasm consumers never build winit. An
+  actor whose runtime impls should gate on such a feature instead of the generic
+  `runtime` names it with `#[actor(runtime_feature = "…")]`;
 - native-target gates for provider/subprocess code that has no useful wasm
   marker face.
 
@@ -226,7 +231,8 @@ its own.
 A crate may still carry a second derive-`Config` when no actor receives it.
 `aether-rpc` holds two: `RpcServerConfig` is `RpcServerCapability`'s
 `type Config`, while `FrameSizeConfig` resolves off the same source stack and is
-installed into `aether-codec`'s frame cap at boot, reaching no `init`. The
+lowered into `aether-codec`'s frame-size ceiling at boot
+(`aether_codec::frame::install_max_frame_size`), reaching no actor's `init`. The
 one-config rule binds `type Config`, not the file count in a crate.
 
 ### Where the config struct lives

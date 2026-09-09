@@ -52,6 +52,11 @@ This rule prevents a harmless reordering from changing what a selector loads.
 It is governed by accepted ADR-0138 and enforced by the export manifest and
 component loader.
 
+A `boot = Boot` slot may precede either form (`export!(boot = Boot, default =
+Main, …)` or `export!(boot = Boot, Helper, …)`). The boot type is instantiated
+once per loaded module whatever selector the caller names, and is not itself
+selectable; it is governed by accepted ADR-0147.
+
 ## Native capability surface
 
 The `aether-<capability>` crates represent filesystem, HTTP, render, lifecycle,
@@ -140,6 +145,8 @@ example.
 - Wasm host: `crates/aether-substrate/src/actor/wasm/`
 - Capability types/runtimes: `crates/aether-<capability>/src/`
 - Behavior ABI: `crates/aether-behavior/src/`
-- ADR-0096 and ADR-0099: multi-actor/component hosting
+- ADR-0096: multi-actor wasm modules
+- ADR-0099: actor identity and addressing
 - ADR-0121 and ADR-0122: kind ownership and marker/runtime split
 - ADR-0138: explicit/defaultless multi-actor default semantics
+- ADR-0147: the module boot actor and the default export slot
