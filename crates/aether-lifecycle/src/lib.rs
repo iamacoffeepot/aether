@@ -44,6 +44,7 @@
 //! are substrate protocol vocabulary many actors address rather than a
 //! cap-internal detail, so this crate only references them.
 
+#![forbid(unsafe_code)]
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the
 // decoded bytes so callers can't see references.

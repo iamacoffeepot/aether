@@ -36,6 +36,7 @@
 //!   `#[derive(Kind)]` types into the substrate's descriptor list.
 
 #![no_std]
+#![forbid(unsafe_code)]
 
 extern crate alloc;
 

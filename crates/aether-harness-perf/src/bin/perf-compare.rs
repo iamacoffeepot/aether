@@ -45,6 +45,7 @@
 //! the retired `hop` / `send_enqueue` / `residence` metric names and
 //! can't be mapped, so they remain an envelope `TrialErr::Schema` skip.
 
+#![forbid(unsafe_code)]
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::env;

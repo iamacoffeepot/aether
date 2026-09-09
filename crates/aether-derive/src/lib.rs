@@ -8,6 +8,8 @@
 //!
 //! Crate skeleton — the actual emission lives in subsequent commits.
 
+#![forbid(unsafe_code)]
+
 use proc_macro::TokenStream;
 
 mod config;

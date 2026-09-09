@@ -28,6 +28,8 @@
 //! sibling modules. Future framing variants subdivide [`frame`] under
 //! `frame::wire` / `frame::protobuf`.
 
+#![forbid(unsafe_code)]
+
 mod cast;
 #[cfg(test)]
 mod conformance;

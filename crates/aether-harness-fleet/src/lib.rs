@@ -20,6 +20,7 @@
 //! tree `cargo xtask dist` packages (see [`headless_bin_path`] and
 //! [`read_component_wasm`]).
 
+#![forbid(unsafe_code)]
 // Matching `aether_substrate::testing`: test-support harness — the returned
 // values are always consumed by the calling scenario, and the panics on wire /
 // decode failures are themselves the test assertions.

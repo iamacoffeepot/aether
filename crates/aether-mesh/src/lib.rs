@@ -11,6 +11,8 @@
 //! retired from the v1 DSL by ADR-0062. The full prior implementation
 //! lives on the `archive/csg-bsp` branch.
 
+#![forbid(unsafe_code)]
+
 pub mod ast;
 pub mod cleanup;
 pub mod debug;

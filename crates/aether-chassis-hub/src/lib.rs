@@ -15,6 +15,8 @@
 //! vocabulary that supported it — the forward-model RPC architecture
 //! never used those paths and they were unreachable in practice.
 
+#![forbid(unsafe_code)]
+
 mod chassis;
 pub mod cli;
 

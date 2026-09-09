@@ -13,6 +13,8 @@
 //! synchronously on that thread; ADR-0041 flagged a future host-fn
 //! fast path for asset-sized streaming.
 
+#![forbid(unsafe_code)]
+
 pub mod kinds;
 
 mod adapter;

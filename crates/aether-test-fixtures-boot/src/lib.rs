@@ -25,6 +25,7 @@
 //! boot slot on the bundle would spawn a boot on every one of its many
 //! unrelated scenario loads.
 
+#![forbid(unsafe_code)]
 // The `#[handler]` methods take `&mut self` to match the dispatch ABI even
 // though these actors are stateless.
 #![allow(clippy::unused_self)]

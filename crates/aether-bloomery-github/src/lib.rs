@@ -59,6 +59,8 @@
 //! [#3460]: https://github.com/iamacoffeepot/aether/issues/3460
 //! [#4663]: https://github.com/iamacoffeepot/aether/issues/4663
 
+#![forbid(unsafe_code)]
+
 mod app_auth;
 mod client;
 mod config;

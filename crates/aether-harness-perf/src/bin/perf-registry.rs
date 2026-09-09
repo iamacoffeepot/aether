@@ -42,6 +42,7 @@
 //! per-hop percentiles, so it carries no verdict and is not wired into the
 //! merge gate. Run it when the registry's performance is the question.
 
+#![forbid(unsafe_code)]
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::env;

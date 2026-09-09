@@ -34,6 +34,8 @@
 //! they name none of those types directly, so this crate depends on
 //! nothing but `syn` / `quote` / `proc-macro2`.
 
+#![forbid(unsafe_code)]
+
 use std::cmp::Reverse;
 
 use proc_macro::TokenStream;

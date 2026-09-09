@@ -36,6 +36,7 @@
 //! composes it in place of [`RenderCapability`] (issue 603 Phase 2 § Resolved
 //! Decision 5).
 
+#![forbid(unsafe_code)]
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the
 // decoded bytes so callers can't see references.

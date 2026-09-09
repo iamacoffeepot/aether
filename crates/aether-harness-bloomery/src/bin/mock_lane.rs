@@ -4,6 +4,8 @@
 //! process, so the stand-in has to be one. Named differently so the two
 //! packages do not collide on `target/{debug,release}/bloomery-mock-lane`.
 
+#![forbid(unsafe_code)]
+
 use std::io::{self, Write};
 use std::process::ExitCode;
 

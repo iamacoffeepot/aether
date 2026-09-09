@@ -53,6 +53,8 @@
 //! `NoteOn` / `NoteOff` are dropped silently and `SetMasterGain`
 //! replies `Err` so agents fail fast instead of hanging.
 
+#![forbid(unsafe_code)]
+
 // ADR-0121: the `aether.audio.*` mail vocabulary the cap owns, always-on
 // (not native-gated) so a wasm guest addressing the cap through the
 // marker-only (`default-features = false`) build sees the types. The

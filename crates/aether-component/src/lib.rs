@@ -50,6 +50,8 @@
 //! hold `Arc<Engine>` / `Arc<Linker<ComponentCtx>>`) is gated behind it,
 //! so nothing but a native chassis pulls wasmtime through this crate.
 
+#![forbid(unsafe_code)]
+
 extern crate alloc;
 
 pub mod component;

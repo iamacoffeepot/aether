@@ -54,6 +54,7 @@
 //! orchestrates. The child's output is a private transport between the two, not
 //! the `TrialReport` schema this bin publishes.
 
+#![forbid(unsafe_code)]
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::env;

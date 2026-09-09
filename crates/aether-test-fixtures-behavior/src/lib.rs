@@ -8,6 +8,8 @@
 //! between a twin and its widget original is a decode mismatch the #2688 scenario
 //! trips on loudly (the clamp assertion fails), not a compile error.
 
+#![forbid(unsafe_code)]
+
 /// Twin of `aether_kit_widget::SliderChanged` — the value-up event the
 /// scripts intercept. Same wire name and field shape as
 /// `crates/aether-kit-widget/src/kinds.rs`.

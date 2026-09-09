@@ -55,6 +55,7 @@
 //! leaf→leaf dependency, not a facade: a downstream crate that wants TCP
 //! deps here directly, and pulls in nothing else.
 
+#![forbid(unsafe_code)]
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the
 // decoded bytes so callers can't see references.

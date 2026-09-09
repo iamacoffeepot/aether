@@ -27,6 +27,8 @@
 //! The `aether_substrate`-typed half (both cap states, the listener and its
 //! dispatch shards, the deferred-reply obligation table) is gated behind it.
 
+#![forbid(unsafe_code)]
+
 // ADR-0131: self-alias so the `#[http::router]` macro's emitted
 // `::aether_http::…` paths resolve inside this crate's own route fixtures
 // (the pattern `aether-actor` / `aether-substrate` already use for their

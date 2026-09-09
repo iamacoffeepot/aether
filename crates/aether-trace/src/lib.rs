@@ -22,6 +22,8 @@
 //!   retired with the fold (Phase 3c) — there is no `BatchedTraceEvents`
 //!   stream anymore.
 
+#![forbid(unsafe_code)]
+
 // Handler-signature kind must be importable at module root because
 // `#[actor]` emits `impl HandlesKind<DispatchTraced> for X {}` always-on,
 // outside the `feature = "runtime"` gate. The reply kind

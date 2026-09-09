@@ -6,6 +6,7 @@
 //! (the saved bundle carries the old id), warns, and boots fresh — the
 //! counter resets to its `init` zero instead of restoring.
 
+#![forbid(unsafe_code)]
 // See `stateful_replace_typed.rs`: `rehydrate` takes its `State` by value
 // (the by-value persistence contract); clippy reads that as needlessly
 // owned for an all-`Copy` state, so silence the false positive.
