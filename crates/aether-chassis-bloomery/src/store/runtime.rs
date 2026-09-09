@@ -405,6 +405,10 @@ pub trait StoreBackend: Send {
     /// Submit-intent (`submitting`) rows are omitted: they have no handle yet,
     /// and the still-unacked outbox entry re-drives them (#5564).
     fn list_outstanding_nonces(&mut self) -> rusqlite::Result<Vec<String>>;
+    /// Every nonce in the order table, including submit-intent rows. A
+    /// reservation is work in flight: the liveness oracle must not read an
+    /// empty live-dispatch list as an idle coordinator (#5564).
+    fn list_order_nonces(&mut self) -> rusqlite::Result<Vec<String>>;
     /// Every outstanding order whose stored deadline is at or before
     /// `now_unix_millis` — the expiry set the executor reactor terminates
     /// (ADR-0177), in nonce order so a repeated tick handles them the same way.
@@ -1984,6 +1988,12 @@ impl StoreBackend for SqliteStore {
         let mut stmt = self.conn.prepare("SELECT nonce FROM outstanding_orders WHERE lifecycle = ?1")?;
         let rows =
             stmt.query_map(rusqlite::params![OrderLifecycle::Submitted.as_str()], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    fn list_order_nonces(&mut self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT nonce FROM outstanding_orders")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect()
     }
 
