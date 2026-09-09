@@ -3,6 +3,25 @@
 - **Status:** Proposed
 - **Date:** 2026-08-18
 
+## Status note (2026-09-09)
+
+The weave workpiece described here is on `main`, but it landed under
+[ADR-0191](0191-the-composition-of-workpieces-is-itself-a-workpiece.md), which
+states the same decision four days earlier and carries the same title. The
+composition is a synthetic workpiece with its own stage cursor, findings
+channel, refine loop, and retry budget
+(`crates/aether-bloomery/src/reduce/composition.rs`), and
+[ADR-0210](0210-a-composition-is-parameterized-by-its-parents.md) later
+generalized it to a composition over an arbitrary parent set.
+
+What is unbuilt is the clause this ADR adds over ADR-0191: **ejection**. No
+transition removes a reviewed member from a bloom when the composed tree fails
+for a reason the weave cannot own; the word appears nowhere in the bloomery
+crates. Member-owned red at weave time is still handled by superseding the
+whole bloom by hand. Read that clause as a proposal, and the rest as a restatement
+of a decision already recorded elsewhere. Which of the two records is canonical
+is an owner call this note does not make.
+
 ## Context
 
 A bloom's members walk one line: Construct produces a candidate, Verify proves it mechanically, Review judges it, and a member that passes is resolved. The bloom's integration tail is built differently. Integrate folds the member candidates; a fold collision re-enters the *member* at Reconcile with an advisory overlay; the composed tree then passes through aggregate verify and aggregate review, and an aggregate refusal can dispatch fresh `construct.implement` orders against members that already passed their own review.

@@ -1,7 +1,8 @@
 # ADR-0207: A Member Requests The Surface Its Work Requires
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-19
+- **Amended:** 2026-09-09 — status: implemented on `main`; `SurfaceRequest`, `StageVerdict::SurfaceRequested`, and the `AwaitingSurface` reducer state are live, with `cargo xtask bloom amend` as the operator's approval verb (`43c972872`).
 
 ## Context
 

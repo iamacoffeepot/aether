@@ -1,7 +1,8 @@
 # ADR-0191: The composition of workpieces is itself a workpiece
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-14
+- **Amended:** 2026-09-09 — status: implemented on `main`; the composition workpiece is `crates/aether-bloomery/src/reduce/composition.rs`, keyed by `WorkpieceId::COMPOSITION` (#4972).
 
 ## Context
 
