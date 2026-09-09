@@ -171,7 +171,7 @@ mod tests {
     use std::path::Path;
 
     use aether_chassis::boot_manifest::ChassisSettings;
-    use aether_chassis::package::{Sha256, decode_manifest};
+    use aether_chassis::package::{Sha256, decode_manifest, package_assets_root};
     use sha2::{Digest, Sha256 as Sha256Hasher};
 
     use super::{DEPOT_LICENSE_FILES, PackComponent, emit_depot, write_pack};
@@ -457,7 +457,7 @@ mod tests {
         )
         .expect("emit depot with assets");
 
-        let root = aether_chassis::package::package_assets_root(&out).expect("the chassis boot finds the asset root");
+        let root = package_assets_root(&out).expect("the chassis boot finds the asset root");
         assert_eq!(fs::read(root.join("teapot.dsl")).expect("the root asset shipped"), b"; teapot");
         assert_eq!(
             fs::read(root.join("meshes").join("box.dsl")).expect("the nested asset shipped"),
@@ -471,7 +471,7 @@ mod tests {
         let bare = dir.join("bare-depot");
         emit_depot(&bare, &dir, &chassis_src, "aether-desktop", &components, ChassisSettings::default(), None)
             .expect("emit depot without assets");
-        assert!(aether_chassis::package::package_assets_root(&bare).is_none(), "no --assets means no shipped root");
+        assert!(package_assets_root(&bare).is_none(), "no --assets means no shipped root");
 
         fs::remove_dir_all(&dir).ok();
     }
