@@ -176,7 +176,7 @@ fn separation(surveyed: &[(Vec3, f32)], axes: &[Vec3; AXES], view: (Vec3, Vec3),
 ///
 /// Held across views rather than recomputed clean, because the answer is
 /// a maximum over a small set and a maximum can change under a rounding
-/// error. See [`HYSTERESIS`].
+/// error: a challenger has to be better by a margin, not merely better.
 #[derive(Clone, Debug)]
 pub struct Choice {
     chosen: [u8; RANKS],
