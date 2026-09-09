@@ -124,7 +124,7 @@ mod tests {
         points[2].weight = 0.8;
         let curve = Curve3 {
             points,
-            class: FeatureClass::Hatch { level: 1 },
+            class: FeatureClass::Hatch { axis: 2 },
             pen: Pen::Accent,
             seed: 0x1234_5678_9abc_def0,
             authored: false,

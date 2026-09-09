@@ -5,8 +5,10 @@
 //!
 //! - **Silhouette** — the zero set of `view . normal`. Where the surface
 //!   turns away from the eye.
-//! - **Hatch** — the level sets of `position . axis`, three families at
-//!   different angles, switching on as the tone darkens.
+//! - **Hatch** — the level sets of `position . axis`, one family per
+//!   resident [`hatch`] axis, switching on as the tone darkens. Which
+//!   three of them a view draws is [`hatch::Choice`]'s answer, not this
+//!   pass'.
 //!
 //! Nothing here consults visibility. Extraction says what exists; the
 //! next pass says what survives.
@@ -17,8 +19,9 @@ use crate::anchor::{Anchor, Anchors};
 use crate::chart;
 use crate::easel::palette::{FACE_CLASSES, SKIN_CLASS};
 use crate::feature::{Curve3, FeatureClass, Pen, SurfacePoint};
+use crate::hatch;
 use crate::labels::{self, Labels};
-use crate::math3::noise;
+use crate::math3::{camera_frame, noise};
 use crate::mesh::{Crossing, Mesh};
 use crate::weld;
 
@@ -92,12 +95,15 @@ pub struct Settings {
     /// drawing is supposed to be a property of the style, not of what
     /// units the modeller happened to work in.
     pub hatch_spacing: f32,
-    /// Per-family multiplier over [`Self::hatch_spacing`].
+    /// Per-rank multiplier over [`Self::hatch_spacing`].
     ///
-    /// Each successive family is a little sparser than the last, so the
+    /// Each successive rank is a little sparser than the last, so the
     /// step from one family to two adds tone rather than doubling it.
-    pub hatch_family_spacing: [f32; 3],
-    /// Tone below which each successive hatch family switches on.
+    /// Keyed by rank rather than by axis, so a view that swaps which
+    /// axis it draws at a rank draws it at the same density
+    /// ([`hatch::rank`]).
+    pub hatch_family_spacing: [f32; hatch::RANKS],
+    /// Tone below which each successive hatch rank switches on.
     ///
     /// The ramp the drawing shades with: above the first, bare paper;
     /// below the last, all three families crossing. They want to be
@@ -105,7 +111,7 @@ pub struct Settings {
     /// [`Self::ambient`] at the terminator to `1` under the key light —
     /// because a threshold set below the ambient floor names a tone no
     /// point on the subject has and that family never draws.
-    pub hatch_thresholds: [f32; 3],
+    pub hatch_thresholds: [f32; hatch::RANKS],
     /// How far a hatch threshold is dithered, in tone.
     ///
     /// Comparing tone against a constant puts a family's edge exactly on
@@ -114,7 +120,14 @@ pub struct Settings {
     /// [`noise`] lets the family break into dashes
     /// as it fades, which is what a hand does. Zero rules the boundary.
     pub hatch_dither: f32,
-    /// Angle of the primary hatch family, in the model's XY plane.
+    /// How far the resident axis set is turned about the model's `z`.
+    ///
+    /// The whole set rather than one family's angle: the axes are spread
+    /// over the sphere and a view picks three of them, so there is no
+    /// primary family left to be the angle of. The set is even enough
+    /// that turning it does not change how well its best three cross —
+    /// this moves where the strokes sit on the subject, not whether they
+    /// cross.
     pub hatch_tilt: f32,
     /// Direction the key light arrives from, read in [`Self::light_frame`].
     pub light: Vec3,
@@ -232,15 +245,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Three plane normals: a primary diagonal, its perpendicular, and one
-    /// splitting the pair. Hatch lines run across these.
-    fn hatch_axes(&self) -> [Vec3; 3] {
-        let (sin, cos) = self.hatch_tilt.sin_cos();
-        let (primary, cross) = (Vec3::new(cos, sin, 0.0), Vec3::new(-sin, cos, 0.0));
-
-        [primary, cross, (primary + cross).normalize()]
-    }
-
     /// Lighting term at a point: `0` in shadow, `1` fully lit.
     ///
     /// Reads [`Self::light`] as a world direction, so ask
@@ -257,9 +261,7 @@ impl Settings {
         match self.light_frame {
             LightFrame::World => self.light,
             LightFrame::Camera => {
-                let back = (eye - target).normalize_or(Vec3::Z);
-                let right = Vec3::Y.cross(back).normalize_or(Vec3::X);
-                let up = back.cross(right);
+                let (right, up, back) = camera_frame(eye, target);
 
                 (right * self.light.x + up * self.light.y + back * self.light.z).normalize_or(back)
             }
@@ -295,6 +297,11 @@ impl Settings {
     }
 
     /// Whether the tone gate can be settled once, at load.
+    ///
+    /// The *tone* half of it. Which three axes a view hatches with is
+    /// never settled at load — the eye decides that, and the eye moves —
+    /// so the shader refuses an unselected axis whatever this answers
+    /// (`sight.wgsl`'s `hatched`).
     ///
     /// Only when nothing it reads can move under it afterwards. A key
     /// light on the camera rig turns with every orbit, so the verdict it
@@ -332,13 +339,19 @@ pub fn silhouettes(mesh: &Mesh, eye: Vec3) -> Vec<Curve3> {
     weld::curves(to_points(mesh.silhouette_level_set(eye)), &template)
 }
 
-/// Hatching as three crossing families of world-space plane cuts.
+/// Hatching as one family of world-space plane cuts per resident axis.
 ///
 /// Holding the planes in *world* space rather than deriving them from the
 /// camera is what keeps the hatch welded to the figure: orbit the camera
 /// and the strokes stay on the surface they belong to instead of sliding
 /// across it. Each family shares one seed per plane, so a line that
 /// crosses the whole figure wobbles as one line.
+///
+/// Every [`hatch::AXES`] family is solved here and kept, and a view draws
+/// the three of them that cross best from where it stands. The extra
+/// families are the price of that choice: solving them per view would
+/// mean re-cutting the subject on every orbit step, which is the work
+/// residency exists to avoid.
 pub fn hatching(mesh: &Mesh, settings: &Settings) -> Vec<Curve3> {
     let mut out = Vec::new();
 
@@ -352,18 +365,19 @@ pub fn hatching(mesh: &Mesh, settings: &Settings) -> Vec<Curve3> {
         return out;
     }
 
-    for (family, axis) in settings.hatch_axes().into_iter().enumerate() {
-        let spacing = settings.hatch_spacing * reach * settings.hatch_family_spacing[family];
+    for (axis, normal) in hatch::axes(settings.hatch_tilt).into_iter().enumerate() {
+        let axis = axis as u8;
+        let spacing = settings.hatch_spacing * reach * settings.hatch_family_spacing[hatch::rank(axis)];
         if !spacing.is_finite() || spacing <= 0.0 {
             continue;
         }
 
-        for (plane, segments) in mesh.level_sets(&mesh.projected(axis), spacing) {
+        for (plane, segments) in mesh.level_sets(&mesh.projected(normal), spacing) {
             let template = Curve3 {
                 points: Vec::new(),
-                class: FeatureClass::Hatch { level: family as u8 },
+                class: FeatureClass::Hatch { axis },
                 pen: Pen::Pale,
-                seed: u64::from(family as u32) << 32 | u64::from(plane.unsigned_abs()),
+                seed: u64::from(u32::from(axis)) << 32 | u64::from(plane.unsigned_abs()),
                 authored: false,
             };
 
@@ -541,7 +555,7 @@ pub fn tone_gate(curves: Vec<Curve3>, settings: &Settings) -> Vec<Curve3> {
         .into_iter()
         .flat_map(|curve| {
             let limit = match curve.class {
-                FeatureClass::Hatch { level } => settings.hatch_thresholds[usize::from(level)],
+                FeatureClass::Hatch { axis } => settings.hatch_thresholds[hatch::rank(axis)],
                 FeatureClass::Silhouette | FeatureClass::Decal => return vec![curve],
             };
 
