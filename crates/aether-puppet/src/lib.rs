@@ -62,8 +62,11 @@
 //!
 //! # Lifecycle
 //!
-//! 1. `aether.puppet.load { namespace, path }` points at an `.obj` inside
-//!    one of the substrate's I/O namespaces.
+//! 1. `aether.puppet.load { namespace, path }` points at an `.obj` or
+//!    `.dsl` inside one of the substrate's I/O namespaces —
+//!    or [`PuppetConfig::subject`] names the same load at instantiation,
+//!    which is how a shipped package comes up with a subject on screen
+//!    and no operator in the room.
 //! 2. The component fires `aether.fs.read` and waits.
 //! 3. On reply the mesh is parsed, the view-independent passes run, and
 //!    the cache is replaced atomically. A failed load leaves the previous
@@ -73,6 +76,7 @@
 
 pub mod anchor;
 pub mod chart;
+mod config;
 pub mod deform;
 pub mod easel;
 pub mod extract;
@@ -94,6 +98,7 @@ pub mod turntable;
 pub mod visibility;
 pub mod weld;
 
+pub use config::PuppetConfig;
 pub use idle::*;
 pub use kinds::*;
 pub use labels::MaterialField;
@@ -178,6 +183,9 @@ pub struct GpuSilhouetteMode {
 
 pub struct Puppet {
     subject: Option<Mesh>,
+    /// The subject [`PuppetConfig`] named, held from `init` until `wire` —
+    /// `init`'s ctx cannot mail, and the load is mail.
+    subject_at_boot: Option<Load>,
     /// The material field, and the path still owed for it. Both assets
     /// arrive as separate mail, in whichever order the reads settle, so
     /// extraction waits until nothing is outstanding rather than running
@@ -431,6 +439,46 @@ impl Puppet {
         Ok(())
     }
 
+    /// Take a `Load` apart into the reads it owes, staging the state each
+    /// one will settle against, and return those reads in dependency order.
+    ///
+    /// Separated from the handler so `wire` can perform the identical load
+    /// for [`PuppetConfig::subject`]: the two differ only in whether anyone
+    /// is owed a `LoadResult`, and a second staging body would be the place
+    /// a config load quietly stopped resetting the palette or the rig.
+    ///
+    /// The box comes first because the field is read against it: a load
+    /// that names no palette paints out of the canonical box, and one that
+    /// names a box it cannot read falls back to the same rather than
+    /// painting out of the last subject's.
+    fn stage(&mut self, mail: &Load) -> Vec<String> {
+        self.material_field_padding = mail.material_field_padding;
+        self.palette = Palette::canonical();
+
+        let mut reads = Vec::new();
+        if !mail.palette.is_empty() {
+            self.awaiting_palette = Some(mail.palette.clone());
+            reads.push(mail.palette.clone());
+        }
+        if !mail.labels.is_empty() {
+            self.awaiting_labels = Some(mail.labels.clone());
+            reads.push(mail.labels.clone());
+        }
+        if !mail.rig.is_empty() {
+            self.skin = None;
+            self.rig = Rig {
+                awaiting_weights: Some(format!("{}/weights.npy", mail.rig)),
+                awaiting_descriptor: Some(format!("{}/rig.txt", mail.rig)),
+                ..Rig::default()
+            };
+            reads.push(format!("{}/weights.npy", mail.rig));
+            reads.push(format!("{}/rig.txt", mail.rig));
+        }
+        reads.push(mail.path.clone());
+
+        reads
+    }
+
     /// The charted face, planted on `subject`. Empty without a material
     /// field, since every anchor is measured from one — a face drawn on a
     /// guess is worse than no face.
@@ -617,10 +665,12 @@ impl Puppet {
 
 #[actor]
 impl WasmActor for Puppet {
+    type Config = PuppetConfig;
     const NAMESPACE: &'static str = "aether.puppet";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+    fn init(config: PuppetConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Self {
+            subject_at_boot: config.subject,
             subject: None,
             labels: None,
             class_scores: None,
@@ -670,6 +720,17 @@ impl WasmActor for Puppet {
         window.subscribe::<MouseMove>(WindowSelector::All);
         window.subscribe::<MouseWheel>(WindowSelector::All);
         window.subscribe::<WindowSize>(WindowSelector::All);
+
+        // The configured subject, issued here rather than in `init` because
+        // `init`'s ctx cannot mail. Nobody is owed a `LoadResult` — there is
+        // no sender — so a failure reports itself the way the handler's does
+        // when the caller was fire-and-forget: in the actor log.
+        if let Some(subject) = self.subject_at_boot.take() {
+            for path in self.stage(&subject) {
+                let context = LoadContext { reply: None, namespace: subject.namespace.clone(), path };
+                ctx.actor::<FsCapability>().with_context(&context).read(&context.namespace, &context.path);
+            }
+        }
     }
 
     /// The surface changed shape, so the projection has to follow it —
@@ -752,38 +813,11 @@ impl WasmActor for Puppet {
     #[handler::manual]
     fn on_load(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: Load) {
         self.owed = ctx.reply_target();
-        self.material_field_padding = mail.material_field_padding;
 
-        let fetch = |path: String| {
+        for path in self.stage(&mail) {
             let context = LoadContext { reply: None, namespace: mail.namespace.clone(), path };
             ctx.actor::<FsCapability>().with_context(&context).read(&context.namespace, &context.path);
-        };
-
-        // The box first, because the field is read against it: a load
-        // that names no palette paints out of the canonical box, and one
-        // that names a box it cannot read falls back to the same rather
-        // than painting out of the last subject's.
-        self.palette = Palette::canonical();
-        if !mail.palette.is_empty() {
-            self.awaiting_palette = Some(mail.palette.clone());
-            fetch(mail.palette.clone());
         }
-        if !mail.labels.is_empty() {
-            self.awaiting_labels = Some(mail.labels.clone());
-            fetch(mail.labels.clone());
-        }
-        if !mail.rig.is_empty() {
-            self.skin = None;
-            self.rig = Rig {
-                awaiting_weights: Some(format!("{}/weights.npy", mail.rig)),
-                awaiting_descriptor: Some(format!("{}/rig.txt", mail.rig)),
-                ..Rig::default()
-            };
-            fetch(format!("{}/weights.npy", mail.rig));
-            fetch(format!("{}/rig.txt", mail.rig));
-        }
-
-        fetch(mail.path.clone());
     }
 
     /// Answer the load, once, with whatever actually happened.
@@ -831,11 +865,18 @@ impl WasmActor for Puppet {
             self.awaiting_labels = None;
             self.staged_labels = Some(bytes);
         } else {
-            let Some(subject) = Mesh::from_obj_bytes(&bytes, self.settings.relaxation) else {
-                tracing::warn!(target: "aether_puppet", "parse failed; keeping the previous subject");
-                return Err(format!("{path} is not a mesh this reader accepts"));
-            };
-            self.subject = Some(subject);
+            match Mesh::from_file_bytes(path, &bytes, self.settings.relaxation) {
+                Ok(subject) => self.subject = Some(subject),
+                Err(reason) => {
+                    tracing::warn!(
+                        target: "aether_puppet",
+                        path = %path,
+                        reason = %reason,
+                        "parse failed; keeping the previous subject",
+                    );
+                    return Err(format!("{path} {reason}"));
+                }
+            }
         }
 
         Ok(())

@@ -122,6 +122,22 @@ cargo xtask package --profile release --spec demo/puppet-turntable.json --assets
 ```
 
 A line-art teapot turning on a turntable in the desktop chassis; drag to orbit.
+That writes a depot to `target/package/`; run `target/package/aether-desktop`
+with no flags at all, because everything the demo needs is inside it.
+
+Without packaging, the same composition runs straight out of the checkout —
+build the component wasm, then boot the desktop chassis against the demo's
+boot manifest (from the repository root, since a boot manifest resolves its
+paths against the working directory):
+
+```sh
+cargo xtask build-wasm
+cargo run -p aether-chassis-desktop --bin aether-desktop -- \
+  --boot-manifest demo/puppet-turntable.boot.json \
+  --assets-dir crates/aether-mesh/examples
+```
+
+See [demo/README.md](demo/README.md).
 
 <!-- demo capture pending -->
 

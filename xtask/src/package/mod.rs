@@ -61,6 +61,13 @@ pub struct PackageArgs {
     /// Tick cadence in hertz (headless chassis only).
     #[arg(long)]
     tick_hz: Option<u32>,
+    /// Asset tree to ship, copied verbatim into `pack/assets`. The
+    /// packaged chassis roots the `assets` namespace there, below an
+    /// operator's `AETHER_ASSETS_DIR` / `--assets-dir` and above the
+    /// compiled default, so a depot's components find the files their
+    /// `aether.fs.read` paths name.
+    #[arg(long)]
+    assets: Option<PathBuf>,
     /// Full-fidelity depot spec (JSON) — alternative to the component
     /// and chassis-config flags. Carries chassis, `title` /
     /// `window_mode` / `tick_hz`, and per-component `package`-or-`wasm` +
@@ -84,6 +91,7 @@ pub struct PackageArgs {
 ///   LICENSE-APACHE
 ///   pack/manifest               # `encode_manifest` output
 ///   pack/objects/<sha256>       # component wasm (+ config), content-addressed
+///   pack/assets/…               # the `--assets` tree, verbatim
 /// ```
 ///
 /// Two input surfaces resolve to the same emit (issue #4002):
@@ -134,8 +142,15 @@ pub fn run(args: &PackageArgs) -> Result<()> {
     // that filename verbatim so the shipped binary is runnable as-is.
     let chassis_file = host_binary_filename(chassis_bin);
     let chassis_src = target_dir.join(args.profile.as_str()).join(&chassis_file);
-    let manifest =
-        emit_depot(&out, metadata.workspace_root.as_std_path(), &chassis_src, &chassis_file, &components, settings)?;
+    let manifest = emit_depot(
+        &out,
+        metadata.workspace_root.as_std_path(),
+        &chassis_src,
+        &chassis_file,
+        &components,
+        settings,
+        args.assets.as_deref(),
+    )?;
 
     println!(
         "package: {} component object(s) + {} chassis bin -> {}",

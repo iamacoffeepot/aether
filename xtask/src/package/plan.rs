@@ -64,8 +64,18 @@ struct SpecComponent {
     package: Option<String>,
     #[serde(default)]
     wasm: Option<PathBuf>,
+    /// A file of init-config **bytes** — the wire image of the component's
+    /// `Config` kind.
     #[serde(default)]
     config: Option<PathBuf>,
+    /// A **JSON** init-config file, encoded at build time against the
+    /// `Config` schema the component's own wasm declares
+    /// (`aether_chassis::encode_config_json`). This is the authoring form:
+    /// a checked-in spec names a file a reviewer can read, and a field the
+    /// component does not declare fails the emit instead of arriving as a
+    /// decode error inside the guest. Mutually exclusive with `config`.
+    #[serde(default)]
+    config_json: Option<PathBuf>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -101,6 +111,7 @@ pub(super) fn resolve_package_plan(
         .map(|(i, raw)| PlannedComponent {
             source: classify_component(raw),
             config: configs.get(i).cloned(),
+            config_json: None,
             name: None,
             export: None,
         })
@@ -137,9 +148,13 @@ fn resolve_package_spec(spec_path: &Path, chassis_flag: PackageChassis) -> Resul
                 bail!("package spec component {i}: exactly one of `package` or `wasm` is required")
             }
         };
+        if entry.config.is_some() && entry.config_json.is_some() {
+            bail!("package spec component {i}: set only one of `config` or `config_json`");
+        }
         components.push(PlannedComponent {
             source,
             config: entry.config.as_deref().map(anchor),
+            config_json: entry.config_json.as_deref().map(anchor),
             name: entry.name.clone(),
             export: entry.export.clone(),
         });

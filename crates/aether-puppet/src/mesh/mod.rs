@@ -17,6 +17,8 @@
 pub mod bvh;
 
 use aether_math::{Aabb, Rigid, Vec3};
+use core::str;
+use std::collections::HashMap;
 
 use crate::deform::Skin;
 use bvh::{Bvh, SilhouetteBvh};
@@ -41,6 +43,30 @@ fn facing_ranges(faces: &[[u32; 3]]) -> Vec<FacingRange> {
             FacingRange { start: start as usize, end: end as usize + 1 }
         })
         .collect()
+}
+
+/// Index a mesher triangle soup into shared positions plus corner indices,
+/// dropping any triangle whose corners collapse onto fewer than three
+/// distinct vertices — a zero-area face carries no normal and would poison
+/// the area-weighted average at every vertex it touches.
+fn index_triangles(triangles: &[aether_mesh::Triangle]) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+    let mut positions: Vec<Vec3> = Vec::new();
+    let mut seen: HashMap<[u32; 3], u32> = HashMap::new();
+    let mut faces = Vec::with_capacity(triangles.len());
+
+    for triangle in triangles {
+        let corners = triangle.vertices.map(|vertex| {
+            *seen.entry([vertex.x.to_bits(), vertex.y.to_bits(), vertex.z.to_bits()]).or_insert_with(|| {
+                positions.push(vertex);
+                (positions.len() - 1) as u32
+            })
+        });
+        if corners[0] != corners[1] && corners[1] != corners[2] && corners[2] != corners[0] {
+            faces.push(corners);
+        }
+    }
+
+    (positions, faces)
 }
 
 pub struct Mesh {
@@ -105,12 +131,67 @@ pub struct Crossing {
 }
 
 impl Mesh {
+    /// Build from a subject file's bytes, choosing the reader by `path`'s
+    /// extension — the same dispatch the kit's mesh viewer makes, so the
+    /// two agree about what a subject file is.
+    ///
+    /// A `.dsl` subject matters more here than it looks: every other
+    /// subject this renderer draws is a sculpt somebody exported, which
+    /// means a stranger cannot see the drawing at all without first being
+    /// handed a binary. A DSL subject is text, so one lives in the tree
+    /// (`crates/aether-mesh/examples/`) and the demo has something to draw
+    /// without committing an asset.
+    ///
+    /// # Errors
+    ///
+    /// A reader-specific reason when the extension is unknown or the bytes
+    /// do not parse — the caller answers its `LoadResult` with it rather
+    /// than leaving the failure in the log.
+    pub fn from_file_bytes(path: &str, bytes: &[u8], normal_relaxation: usize) -> Result<Self, String> {
+        match path.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
+            Some("dsl") => Self::from_dsl_bytes(bytes, normal_relaxation),
+            Some("obj") => Self::from_obj_bytes(bytes, normal_relaxation)
+                .ok_or_else(|| "is not a mesh this reader accepts".to_owned()),
+            _ => Err("has an unsupported extension; expected .obj or .dsl".to_owned()),
+        }
+    }
+
     /// Build from OBJ bytes. No path: a wasm guest has no filesystem, so
     /// the bytes arrive by mail from `aether.fs` and the caller owns them.
     pub fn from_obj_bytes(bytes: &[u8], normal_relaxation: usize) -> Option<Self> {
         let raw = aether_mesh::parse_obj(bytes).ok()?;
 
         (!raw.faces.is_empty()).then(|| Self::build(raw.positions, raw.faces, normal_relaxation))
+    }
+
+    /// Build from mesh-DSL text (ADR-0026 / ADR-0051): parse, mesh, and
+    /// index the triangle soup the mesher returns.
+    ///
+    /// The indexing is not a convenience. Every feature this renderer
+    /// extracts is a level set of a per-vertex scalar, and a level set only
+    /// crosses between two triangles that share the vertex it is
+    /// interpolating along — so an unindexed soup, where each triangle owns
+    /// its own three corners, has no shared vertices, no averaged normals,
+    /// and yields a drawing of isolated per-triangle fragments rather than
+    /// curves. The mesher's cleanup pass already snaps coincident corners
+    /// through a fixed-point grid, so equal positions arrive bit-identical
+    /// and welding on the exact bits is sound here in a way it would not be
+    /// for arbitrary float geometry.
+    ///
+    /// # Errors
+    ///
+    /// A reason when the bytes are not UTF-8, the DSL does not parse, the
+    /// mesher refuses it, or it meshes to nothing.
+    pub fn from_dsl_bytes(bytes: &[u8], normal_relaxation: usize) -> Result<Self, String> {
+        let text = str::from_utf8(bytes).map_err(|_| "is not valid UTF-8".to_owned())?;
+        let ast = aether_mesh::parse(text).map_err(|error| format!("does not parse: {error}"))?;
+        let triangles = aether_mesh::mesh(&ast).map_err(|error| format!("does not mesh: {error}"))?;
+
+        let (positions, faces) = index_triangles(&triangles);
+        if faces.is_empty() {
+            return Err("meshes to no triangles".to_owned());
+        }
+        Ok(Self::build(positions, faces, normal_relaxation))
     }
 
     /// A copy of this mesh for a pose to be written into, sharing its

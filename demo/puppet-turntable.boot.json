@@ -1,0 +1,15 @@
+{
+  "chassis": "desktop",
+  "components": [
+    {
+      "wasm": "dist/components/aether_puppet.wasm",
+      "export": "aether.puppet",
+      "config_json": "demo/puppet.json"
+    },
+    {
+      "wasm": "dist/components/aether_puppet.wasm",
+      "export": "aether.puppet-turntable",
+      "config_json": "demo/turntable.json"
+    }
+  ]
+}
