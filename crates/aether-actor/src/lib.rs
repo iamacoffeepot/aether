@@ -1,43 +1,27 @@
-//! aether-actor: wasm guest SDK and transport-agnostic actor primitives.
-//! Shared by wasm components and native capabilities. Issue 552 stage 0
-//! folded the prior `aether-component` crate's guest shim in here so
-//! the SDK and its wasm binding layer share one home.
+//! Wasm guest SDK and transport-agnostic actor primitives, shared by wasm
+//! components and native capabilities. Components and capabilities are one
+//! actor primitive: one mpsc inbox, one OS thread, one `MailboxId` (ADR-0074).
 //!
-//! ADR-0074 §Decision settled the actor model: components and
-//! capabilities collapse into one actor primitive — one mpsc inbox,
-//! one OS thread, one `MailboxId`. Issue 665 retired the unifying
-//! `MailTransport` trait that originally tied the wasm and native
-//! halves together — the cross-target abstraction is now the
-//! per-stage capability traits in [`model::ctx`]; the per-target
-//! dispatch surfaces are [`wasm::bridge`] (wasm: `wasm::bridge::mail`,
-//! `wasm::bridge::persist`) and the inherent methods on
-//! `aether_substrate::actor::native::binding::NativeBinding`.
+//! - [`Mail`], [`PriorState`], [`ReplyHandle`], [`KindId`]: transport-free
+//!   types that decode bytes and carry phantom typing, nothing more.
+//! - [`Mailbox`]: an addressing token (`mailbox_id`, `kind_id`). Sends go
+//!   through a ctx's send methods, never through the mailbox itself.
+//! - [`model::ctx`]: the per-stage capability traits ([`MailSender`],
+//!   [`OutboundReply`], [`Persistence`]), the one abstraction the wasm and
+//!   native targets share. [`wasm::ctx`] and the substrate's `NativeCtx`
+//!   family each implement the relevant subset.
+//! - [`Slot`]: the single-instance backing store [`export!`] emits as a
+//!   `static`.
+//! - [`wasm`]: the guest binding layer. [`wasm::bridge`] holds the dispatch
+//!   functions, [`WasmActor`] is the trait a component implements (including
+//!   the `on_dehydrate` / `on_rehydrate` hot-swap hooks, ADR-0101),
+//!   [`WasmActorMailbox`] is the actor-typed sender chain, and [`export!`]
+//!   pins the `init` / `receive` / lifecycle FFI exports plus the
+//!   `aether.kinds.inputs` and `aether.namespace` custom-section statics.
 //!
-//! Public surface:
-//!   - [`Mail`], [`PriorState`], [`ReplyHandle`], [`KindId`] —
-//!     transport-free types: pure decode / phantom typing.
-//!   - [`Mailbox`] — pure addressing token (`mailbox_id`, `kind_id`)
-//!     after issue 665 dropped the `T: MailTransport` parameter; sends
-//!     route through each ctx's send methods, not through the mailbox
-//!     itself.
-//!   - [`model::ctx`] — per-stage capability traits ([`MailSender`],
-//!     [`OutboundReply`], [`Persistence`]). Wasm ctxs in [`wasm::ctx`]
-//!     and substrate's `NativeCtx` family impl the relevant subset.
-//!   - [`Slot`] — single-instance backing store the consumer's
-//!     [`export!`] macro emits as a `static`.
-//!   - [`wasm`] — wasm guest binding layer: [`wasm::bridge`] dispatch
-//!     functions + [`WasmActor`] trait (with the `on_dehydrate` /
-//!     `on_rehydrate` hot-swap hooks, ADR-0101) +
-//!     [`WasmActorMailbox`] for the actor-typed sender chain +
-//!     the [`export!`] macro that pins `init` / `receive` /
-//!     lifecycle FFI exports plus the `aether.kinds.inputs` /
-//!     `aether.namespace` custom-section statics.
-//!
-//! No FFI imports are pulled in unconditionally — the host-fn externs
-//! in [`wasm::raw`] live behind a `#[cfg(target_family = "wasm")]`
-//! block and the native-target stubs panic if invoked, so the crate
-//! compiles for `cargo test --workspace` on the host without dragging
-//! the FFI surface into the linker.
+//! The FFI externs in [`wasm::raw`] sit behind `#[cfg(target_family = "wasm")]`
+//! and the native stubs panic if called, so a host build links no FFI surface
+//! and `cargo test --workspace` builds this crate like any other.
 
 #![no_std]
 
