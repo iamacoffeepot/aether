@@ -287,6 +287,7 @@ mod tests {
     use std::cell::Cell;
 
     use super::{Check, Judge, OwningPackages, Report, check_argv, repair_prompt, round};
+    use crate::transform::instructions::fixture_bundle;
 
     fn names(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
@@ -440,15 +441,26 @@ mod tests {
     // The repair turn resumes the construct conversation on the tree it just
     // wrote. A prompt that let it believe the tree was reset — the other
     // resume posture in this lane — would send it to redo the whole work order
-    // against findings taken from the disk it was told to distrust.
+    // against findings taken from the disk it was told to distrust. The
+    // authorized bundle carries that posture; this function's job is to attach
+    // the packages and findings without replacing it.
     #[test]
     fn the_repair_prompt_names_the_tree_the_findings_came_from() {
-        let prompt = repair_prompt("fix remaining lint", &names(&["aether-math", "xtask"]), "warning: field names");
+        let bundle = fixture_bundle();
+        let prompt =
+            repair_prompt(&bundle.construct_lint_repair, &names(&["aether-math", "xtask"]), "warning: field names");
 
-        assert!(prompt.contains("exactly as you left it"), "the turn continues on its own tree");
-        assert!(prompt.contains("Nothing was reverted and nothing was reset."));
+        assert!(
+            prompt.contains(&bundle.construct_lint_repair),
+            "the authorized repair instructions ride the prompt; this function does not replace them with a reset \
+             posture",
+        );
         assert!(prompt.contains("aether-math, xtask"), "the prompt names the packages that were checked");
         assert!(prompt.contains("warning: field names"), "the distilled findings ride the prompt");
-        assert!(prompt.contains("one turn"), "the bound is stated: it changes what the turn should spend itself on");
+        assert!(prompt.contains("## Lint packages"), "packages are a context slot, not inlined into the instructions");
+        assert!(
+            prompt.contains("## Remaining lint findings"),
+            "diagnostics are a context slot, not inlined into the instructions"
+        );
     }
 }
