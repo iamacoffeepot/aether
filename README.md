@@ -120,7 +120,8 @@ A line-art teapot turning on a turntable in the desktop chassis; drag to orbit.
 Pre-1.0. Every crate carries one workspace version (`0.3.0-alpha` on this
 commit) and none are published to crates.io yet. APIs move between minor
 versions; the ADRs record why, and `docs/adr/` is the place to check before
-depending on a subsystem.
+depending on a subsystem. What changed since 0.3.0-alpha is in
+[CHANGELOG.md](CHANGELOG.md).
 
 Working today: the desktop, headless, hub, substrate-harness, and bloomery
 chassis; the mail scheduler and settlement tracking; wasm component load, drop,
