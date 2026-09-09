@@ -2843,6 +2843,11 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
         // Skip the drain while inside a transient-failure backoff window (#3593) —
         // paces the re-drive instead of hammering GitHub at the flat poll cadence.
         let skip_drain = state.backoff.as_ref().is_some_and(|cursor| cursor.retry_after > Instant::now());
+        // Handles this drain just obtained from a submit that answered are
+        // not inspected until the next turn. A fixture run can finish in the
+        // same worker that submitted it; inspecting here would consume the
+        // order before a scenario's `upload_admitted` can land (#5564).
+        let already_tracked = state.tracked.len();
         if !skip_drain {
             drain_dispatch_topics(
                 &mut state.tracked,
@@ -2853,6 +2858,7 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
                 clock.now_unix_millis,
             );
         }
+        let newly_tracked = state.tracked.split_off(already_tracked);
 
         // Admit the dispatches the instruction-provenance gate refused on this
         // drain or an earlier one (ADR-0214). Before the pull, so a member the
@@ -2892,6 +2898,7 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
             Clocks { tick: &clock, now: now_unix_millis },
             correspondence.as_ref(),
         );
+        state.tracked.extend(newly_tracked);
         admits.extend(pulled);
         (admits, published)
     } else {
