@@ -19,7 +19,7 @@
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::{fs, io};
 
 use aether_bloomery::{BackendObjectId, RETROSPECT_READ_COMMAND, is_model_lane};
@@ -61,6 +61,15 @@ const FALLBACK_CAPTURE_SUBJECT: &str = "bloomery: candidate capture";
 /// neutralization that marks it skip-worktree, and the reset that clears the
 /// mark before the next dispatch checks the file out again.
 const SETTINGS_PATH: &str = ".claude/settings.json";
+
+/// The file in the evidence directory retaining the lane child's combined
+/// stdout and stderr.
+///
+/// The lane is `cargo xtask transform` (or the host's override stand-in); an
+/// inherited stdio would hand its console output to the coordinator's own
+/// terminal, where the bytes behind a verdict scroll away. Both streams land
+/// in the one file, beside the `evidence.json` they explain.
+pub const LANE_LOG_FILE: &str = "lane.log";
 
 /// The subject line a capture commits under: the run's own message's first line
 /// when the lane wrote one, otherwise [`FALLBACK_CAPTURE_SUBJECT`].
@@ -289,6 +298,14 @@ impl TransformRunner for ProcessTransformRunner {
         // so an over-budget task spills to the evidence dir and the argv
         // carries its head plus a pointer line.
         append_work_order_args(&mut lane, spec, &checkout, diff_base.as_deref()).map_err(LocalExecutorError::Io)?;
+        // Retain the lane's own console output beside its evidence: without
+        // this the child inherits the coordinator's stdio and the bytes behind
+        // a verdict are lost the moment the terminal scrolls. Opened here —
+        // after every refusal — so a start that never spawns leaves no empty
+        // log behind.
+        let log = fs::File::create(spec.evidence_dir.join(LANE_LOG_FILE)).map_err(LocalExecutorError::Io)?;
+        lane.stdout(Stdio::from(log.try_clone().map_err(LocalExecutorError::Io)?));
+        lane.stderr(Stdio::from(log));
         // Own process group so a re-attached kill after a coordinator restart
         // can signal the lane *and* the harness it spawned, not just the head
         // pid this process recorded (issue #4999). `process_group(0)` is the
@@ -1022,13 +1039,13 @@ mod tests {
     use std::thread;
     #[cfg(unix)]
     use std::time::Duration;
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     use std::time::Instant;
 
     use tempfile::TempDir;
 
     use super::super::lane_program::LaneProgram;
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     use super::super::runner::RunProcess;
     use super::super::runner::{RunLifecycle, RunSpec};
     #[cfg(unix)]
@@ -1503,6 +1520,46 @@ mod tests {
         let recorded =
             super::super::identity::CheckoutHead::read(&evidence).expect("the dispatch records the HEAD it started on");
         assert_eq!(recorded.head, second, "the recorded head is this dispatch's subject, not the slot's previous one");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lane_run_retains_its_stdout_and_stderr_as_lane_log() {
+        // The plausible bug: the lane child inherits the coordinator's stdio,
+        // so the bytes behind a verdict scroll away with the terminal — or
+        // only stdout is redirected and a stderr diagnostic is still lost.
+        use std::os::unix::fs::PermissionsExt;
+
+        let (repo, scratch, _first, second) = repo_with_two_commits();
+        let slot = scratch.path().join("slot-0");
+        let evidence = scratch.path().join("n-1-evidence");
+        let target = scratch.path().join("slot-0-target");
+        let script = scratch.path().join("lane.sh");
+        fs::write(&script, "#!/bin/sh\necho lane-stdout-line\necho lane-stderr-line >&2\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runner = ProcessTransformRunner::new(
+            CaptureIdentity::default(),
+            LaneProgram::parse(&script.display().to_string()),
+            repo.path(),
+        );
+        let mut child = runner
+            .start(&spec("construct.implement", &second, None, None, &evidence, &slot, &target))
+            .expect("start spawns the lane");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if child.poll().is_terminal() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the lane script exits on its own");
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let log =
+            fs::read_to_string(evidence.join(super::LANE_LOG_FILE)).expect("the lane's output is retained as lane.log");
+        assert!(log.contains("lane-stdout-line"), "stdout is retained: {log:?}");
+        assert!(log.contains("lane-stderr-line"), "stderr is retained: {log:?}");
     }
 
     #[test]
