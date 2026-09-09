@@ -17,9 +17,13 @@
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
+use std::time::{Duration, Instant};
 use std::{env, fs, io};
 
 use anyhow::{Context, Result, bail};
@@ -156,17 +160,35 @@ pub(super) fn write_prompt(out: &Path, prompt: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Recognizes a harness's own end-of-run record on one transcript line.
+///
+/// An arm that names one is saying its CLI does not necessarily exit when the
+/// turn the lane asked for is over — see [`execute_watched`]. An arm whose CLI
+/// does exit there passes `None` and waits, which is the cheaper thing to do
+/// and the historical behaviour.
+pub(super) type Terminated = fn(&str) -> bool;
+
 /// Run `command` to completion, capture its stdout to `<out>/transcript.jsonl`,
 /// and return the captured text.
 ///
 /// A non-zero exit is the CLI itself failing to run (auth, bad args, crash) — an
 /// operational failure, distinct from a task-level error, which a completed run
 /// records inside its transcript. It is surfaced rather than folded into an
-/// empty record reported as success.
-pub(super) fn capture(command: Command, out: &Path, harness: &str, peak: &PeakMemory) -> Result<String> {
-    let run = execute(command, out, harness, peak, None)?;
-    exit_check(&run, harness)?;
-    Ok(String::from_utf8_lossy(&run.stdout).into_owned())
+/// empty record reported as success. The one exception is a run the lane itself
+/// ended at the harness's own terminal record: the harness already answered, so
+/// the exit status is this process's doing and says nothing about the run.
+pub(super) fn capture(
+    command: Command,
+    out: &Path,
+    harness: &str,
+    peak: &PeakMemory,
+    terminated: Option<Terminated>,
+) -> Result<String> {
+    let run = execute_watched(command, out, harness, peak, None, terminated)?;
+    if !run.ended_at_terminal {
+        exit_check(&run.output, harness)?;
+    }
+    Ok(String::from_utf8_lossy(&run.output.stdout).into_owned())
 }
 
 /// [`capture`] for a run whose argv carried a resume handle.
@@ -189,6 +211,38 @@ pub(super) fn capture_resumed(
     Ok(Some(String::from_utf8_lossy(&run.stdout).into_owned()))
 }
 
+/// A finished harness run.
+pub(super) struct Run {
+    /// What the process produced and how it exited.
+    output: Output,
+    /// Whether the lane ended the run itself, because the harness reported its
+    /// terminal and then kept running. When it did, the exit status is this
+    /// process's own signal and says nothing about what the run produced.
+    ended_at_terminal: bool,
+}
+
+/// How often [`settle`] re-asks whether the child has exited. Small enough that
+/// ending a run is prompt, large enough that a twenty-minute lap costs nothing
+/// to watch.
+const SETTLE_POLL: Duration = Duration::from_millis(25);
+
+/// How long a harness that has reported its terminal gets to exit on its own
+/// before the lane ends the run for it.
+///
+/// A healthy CLI exits within a line or two of its terminal record — Muse emits
+/// one more `session.workspace_branch.observed` and goes — so this window is
+/// what keeps a normal run judged by its own exit status, including a CLI that
+/// answers and *then* fails.
+const TERMINAL_LINGER: Duration = Duration::from_secs(5);
+
+/// How long the harness tree gets to fold after the lane signals it, before the
+/// lane stops asking politely.
+///
+/// Long enough for a CLI to flush the session log its token counts are read back
+/// from, short enough that no second model turn can conclude inside it and land
+/// a terminal record the arm would then read as this run's answer.
+const TERMINAL_GRACE: Duration = Duration::from_secs(5);
+
 /// Spawn `command`, tee stdout into `<out>/transcript.jsonl` as it arrives,
 /// drain stderr concurrently, and wait. The same primitive every harness arm
 /// uses, including Claude's piped-stdin launch.
@@ -203,12 +257,45 @@ pub(super) fn capture_resumed(
 /// `peak` is read after the pipes drain for the same reason as before: a run
 /// that died still peaked at something (#4912).
 pub(super) fn execute(
-    mut command: Command,
+    command: Command,
     out: &Path,
     harness: &str,
     peak: &PeakMemory,
     stdin: Option<Vec<u8>>,
 ) -> Result<Output> {
+    Ok(execute_watched(command, out, harness, peak, stdin, None)?.output)
+}
+
+/// [`execute`] for a harness whose CLI may outlive the turn the lane asked for.
+///
+/// `terminated` recognizes the harness's own end-of-run record on a transcript
+/// line. When one arrives, the lane stops waiting, signals the child's process
+/// group, and reports `ended_at_terminal` — because the harness has already
+/// said what the run produced, and everything after it is a process the lane
+/// never commissioned.
+///
+/// Muse is why this exists (bloom `b7f0e4568d4a`, dispatch-4202). Its runtime
+/// carries a background-terminal client that submits a *fresh turn* to the same
+/// session when a backgrounded shell command finishes: the transcript reaches
+/// `run.terminal.completed` for the lane's turn, and two records later a
+/// `runtime.command.accepted` from `muse-runtime-background-terminal` opens
+/// another run that no lane asked for and no lane can end. `muse exec` then does
+/// not exit, and the lane waited 49 minutes on a turn that had answered in 28 —
+/// with no bound of its own short of the coordinator's construct deadline.
+///
+/// The signal goes to the child's **process group**, not the handle this holds.
+/// `PeakMemory::command` wraps the harness in `/usr/bin/time -v`, so the handle
+/// names the wrapper, and the CLI — with every shell, sandbox and build under it
+/// — sits below that. Killing the handle alone orphans the harness, still
+/// running and still billing.
+fn execute_watched(
+    mut command: Command,
+    out: &Path,
+    harness: &str,
+    peak: &PeakMemory,
+    stdin: Option<Vec<u8>>,
+    terminated: Option<Terminated>,
+) -> Result<Run> {
     fs::create_dir_all(out).with_context(|| format!("create {}", out.display()))?;
     let path = out.join("transcript.jsonl");
     let file = File::create(&path).with_context(|| format!("write {}", path.display()))?;
@@ -219,8 +306,13 @@ pub(super) fn execute(
     } else {
         command.stdin(Stdio::null());
     }
+    // One process group for the whole harness tree, so ending a run reaches the
+    // CLI and everything it forked rather than only the wrapper.
+    #[cfg(unix)]
+    command.process_group(0);
 
     let mut child = ChildReaper::new(command.spawn().map_err(|error| spawn_context(error, harness))?);
+    let group = child.child()?.id();
     let writer_work = match stdin {
         Some(bytes) => {
             let pipe = child.child()?.stdin.take().with_context(|| format!("{harness} stdin was not captured"))?;
@@ -230,19 +322,22 @@ pub(super) fn execute(
     };
     let stdout = child.child()?.stdout.take().with_context(|| format!("{harness} stdout was not captured"))?;
     let stderr = child.child()?.stderr.take().with_context(|| format!("{harness} stderr was not captured"))?;
+    let (announce, terminal_seen) = mpsc::channel();
 
     // `thread::scope`, not `thread::spawn`: raw spawn is disallowed (settlement/trace
     // umbrella); this is infra below the actor/mail layer.
-    let (status, stdout, stderr, written) = thread::scope(|scope| {
+    let (status, stdout, stderr, written, ended_at_terminal) = thread::scope(|scope| {
         let writer = writer_work.map(|(mut pipe, bytes)| scope.spawn(move || pipe.write_all(&bytes)));
-        let stdout_reader = scope.spawn(|| tee_stdout(stdout, file));
+        let stdout_reader = scope.spawn(move || tee_stdout(stdout, file, terminated, &announce));
         let stderr_reader = scope.spawn(|| drain_stderr(stderr));
 
+        let ended_at_terminal =
+            settle(&mut child, &terminal_seen, group).with_context(|| format!("watch {harness}"))?;
         let status = child.wait().with_context(|| format!("await {harness}"))?;
         let stdout = stdout_reader.join().expect("stdout reader panicked");
         let stderr = stderr_reader.join().expect("stderr reader panicked");
         let written = writer.map(|handle| handle.join().expect("prompt-writer thread panicked"));
-        Ok::<_, anyhow::Error>((status, stdout, stderr, written))
+        Ok::<_, anyhow::Error>((status, stdout, stderr, written, ended_at_terminal))
     })?;
 
     let stderr = stderr.with_context(|| format!("read {harness} stderr"))?;
@@ -250,13 +345,95 @@ pub(super) fn execute(
     let stdout = stdout.with_context(|| format!("write {}", path.display()))?;
 
     if !status.success() {
-        return Ok(Output { status, stdout, stderr });
+        return Ok(Run { output: Output { status, stdout, stderr }, ended_at_terminal });
     }
     if let Some(written) = written {
         written.with_context(|| format!("pipe the assembled prompt to {harness}"))?;
     }
-    Ok(Output { status, stdout, stderr })
+    Ok(Run { output: Output { status, stdout, stderr }, ended_at_terminal })
 }
+
+/// Wait for the child to exit, ending the run for it only if it reported its
+/// terminal and then stayed up. `true` when the lane ended it.
+///
+/// The terminal is not itself the stopping point. A CLI that answers and exits —
+/// including one that answers and then fails — must still be judged by its own
+/// status, so the terminal only starts a [`TERMINAL_LINGER`] clock, and a
+/// harness still alive when it runs out is one that is no longer working on this
+/// lane's turn.
+///
+/// Polling rather than a second wait thread: the handle is `&mut` and the reader
+/// that recognizes a terminal is a sibling thread, so the two meet on a channel
+/// and this side has to be able to look at both. A disconnected channel is the
+/// reader finishing with no terminal named — the child closed stdout, so its
+/// exit is the next thing to happen and blocking on it is right.
+fn settle(child: &mut ChildReaper, terminal_seen: &Receiver<()>, group: u32) -> io::Result<bool> {
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(false);
+        }
+        match terminal_seen.recv_timeout(SETTLE_POLL) {
+            Ok(()) => break,
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return Ok(false),
+        }
+    }
+
+    let deadline = Instant::now() + TERMINAL_LINGER;
+    while Instant::now() < deadline {
+        if child.try_wait()?.is_some() {
+            return Ok(false);
+        }
+        thread::sleep(SETTLE_POLL);
+    }
+    end_run(child, group);
+    Ok(true)
+}
+
+/// End the harness tree: ask it to fold, give it [`TERMINAL_GRACE`] to do so,
+/// then stop asking.
+///
+/// The polite signal first, because a harness flushes the session log its token
+/// counts are read back from as it goes down, and a run whose cost cannot be
+/// read is one the ledger records as unmeasured.
+fn end_run(child: &mut ChildReaper, group: u32) {
+    signal_group(group, "TERM");
+    let deadline = Instant::now() + TERMINAL_GRACE;
+    while Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        thread::sleep(SETTLE_POLL);
+    }
+    signal_group(group, "KILL");
+    if let Ok(child) = child.child() {
+        let _ = child.kill();
+    }
+}
+
+/// Signal every process in `group`.
+///
+/// Through `kill(1)` rather than a syscall crate: the lane already shells out to
+/// `git`, `/usr/bin/time` and `sccache`, and one more host binary is cheaper
+/// than a dependency for a single call. Linux wants the negative group as an
+/// operand after `--`; macOS takes it as the last argument.
+#[cfg(unix)]
+fn signal_group(group: u32, signal: &str) {
+    let Ok(group) = i32::try_from(group) else {
+        return;
+    };
+    let mut kill = Command::new("kill");
+    kill.args(["-s", signal]);
+    if cfg!(target_os = "linux") {
+        kill.arg("--");
+    }
+    let _ = kill.arg(format!("-{group}")).stdout(Stdio::null()).stderr(Stdio::null()).status();
+}
+
+/// A host with no process groups signals the handle alone — [`end_run`] does
+/// that already, so this has nothing left to do.
+#[cfg(not(unix))]
+fn signal_group(_group: u32, _signal: &str) {}
 
 /// Reap `child` on every path, including early returns before `wait`. `Child`'s
 /// `Drop` neither waits nor kills, so a leaked handle is a zombie or a still-billing
@@ -274,6 +451,10 @@ impl ChildReaper {
         self.child.as_mut().context("child already reaped")
     }
 
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.child.as_mut().map_or(Ok(None), Child::try_wait)
+    }
+
     fn wait(&mut self) -> io::Result<ExitStatus> {
         self.child.take().expect("child already reaped").wait()
     }
@@ -282,15 +463,32 @@ impl ChildReaper {
 impl Drop for ChildReaper {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
+            // The group, not the handle: an early return leaves the wrapper's
+            // whole harness tree behind otherwise.
+            signal_group(child.id(), "KILL");
             let _ = child.kill();
             let _ = child.wait();
         }
     }
 }
 
-fn tee_stdout(mut reader: impl Read, mut file: File) -> io::Result<Vec<u8>> {
+/// Copy the child's stdout into `file` and into the returned buffer as it
+/// arrives, announcing on `terminal_seen` the first time a complete line
+/// satisfies `terminated`.
+///
+/// Reading continues past the announcement. The lane's answer is the whole
+/// transcript, and whatever the harness emits while it folds belongs in the
+/// file the arm derives that answer from.
+fn tee_stdout(
+    mut reader: impl Read,
+    mut file: File,
+    terminated: Option<Terminated>,
+    terminal_seen: &Sender<()>,
+) -> io::Result<Vec<u8>> {
     let mut captured = Vec::new();
     let mut buf = [0u8; 8192];
+    let mut scanned = 0;
+    let mut announced = false;
     loop {
         let n = reader.read(&mut buf)?;
         if n == 0 {
@@ -299,6 +497,18 @@ fn tee_stdout(mut reader: impl Read, mut file: File) -> io::Result<Vec<u8>> {
         captured.extend_from_slice(&buf[..n]);
         file.write_all(&buf[..n])?;
         file.flush()?;
+        let Some(terminated) = terminated.filter(|_| !announced) else {
+            continue;
+        };
+        while let Some(end) = captured[scanned..].iter().position(|byte| *byte == b'\n') {
+            let line = String::from_utf8_lossy(&captured[scanned..scanned + end]).into_owned();
+            scanned += end + 1;
+            if terminated(&line) {
+                announced = true;
+                let _ = terminal_seen.send(());
+                break;
+            }
+        }
     }
     Ok(captured)
 }
@@ -589,7 +799,7 @@ mod tests {
         let mut command = Command::new("sh");
         command.arg("-c").arg(format!("test -f {} || exit 7", transcript.display()));
 
-        let text = capture(command, &out, "fixture", &peak_memory::detect()).expect("child saw the transcript");
+        let text = capture(command, &out, "fixture", &peak_memory::detect(), None).expect("child saw the transcript");
         assert_eq!(text, "");
         assert_eq!(fs::read(&transcript).expect("transcript remains"), b"");
     }
@@ -611,7 +821,7 @@ mod tests {
         command.arg("-c").arg(script);
 
         thread::scope(|scope| {
-            let worker = scope.spawn(|| capture(command, &out, "fixture", &peak_memory::detect()));
+            let worker = scope.spawn(|| capture(command, &out, "fixture", &peak_memory::detect(), None));
             assert_eq!(wait_for(&transcript, |bytes| bytes == b"one\n"), b"one\n");
             assert!(!worker.is_finished(), "the first chunk must land before wait returns");
             fs::write(&go, b"").expect("release the child");
@@ -639,7 +849,7 @@ done
 "#,
         );
 
-        let text = capture(command, &out, "fixture", &peak_memory::detect()).expect("drained both pipes");
+        let text = capture(command, &out, "fixture", &peak_memory::detect(), None).expect("drained both pipes");
         assert_eq!(text.len(), 256 * 1024);
         assert_eq!(fs::read(out.join("transcript.jsonl")).expect("read transcript").len(), 256 * 1024);
     }
@@ -656,7 +866,7 @@ done
         let mut command = Command::new("cat");
         command.arg(&blob);
 
-        let text = capture(command, &out, "fixture", &peak_memory::detect()).expect("capture");
+        let text = capture(command, &out, "fixture", &peak_memory::detect(), None).expect("capture");
         assert_eq!(text, String::from_utf8_lossy(raw));
         assert_eq!(fs::read(out.join("transcript.jsonl")).expect("read transcript"), raw);
     }

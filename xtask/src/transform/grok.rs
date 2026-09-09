@@ -223,7 +223,9 @@ fn launch(
     if resume.is_some() {
         return capture_resumed(command, &args.out, GROK, peak);
     }
-    capture(command, &args.out, GROK, peak).map(Some)
+    // No terminal watch: Grok's headless run exits at its own `result` record,
+    // so waiting for the process is waiting for the answer.
+    capture(command, &args.out, GROK, peak, None).map(Some)
 }
 
 #[cfg(test)]

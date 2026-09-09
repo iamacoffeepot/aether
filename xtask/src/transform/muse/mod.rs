@@ -141,17 +141,9 @@ fn uuid_from_seed(seed: &str) -> String {
 pub(super) fn derive_terminal(transcript: &str) -> Option<Terminal> {
     let mut terminal = None;
     for line in transcript.lines() {
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+        let Some(payload) = run_terminal(line) else {
             continue;
         };
-        // Match on the payload's own `kind` rather than the `payload_type`
-        // suffix: the type string carries the terminal state in its tail
-        // (`run.terminal.completed` / `.failed`), so keying on it would mean
-        // parsing the state twice and could disagree with `payload.terminal`.
-        let payload = event.get("payload")?;
-        if payload.get("kind").and_then(serde_json::Value::as_str) != Some("run_terminal") {
-            continue;
-        }
         // Last terminal wins, mirroring the Claude arm's last-`result` rule.
         terminal = Some(Terminal {
             is_error: payload.get("terminal").and_then(serde_json::Value::as_str) != Some("completed"),
@@ -160,6 +152,26 @@ pub(super) fn derive_terminal(transcript: &str) -> Option<Terminal> {
         });
     }
     terminal
+}
+
+/// One transcript `line`'s payload, when the line is a run-terminal record.
+///
+/// Match on the payload's own `kind` rather than the `payload_type` suffix: the
+/// type string carries the terminal state in its tail (`run.terminal.completed`
+/// / `.failed`), so keying on it would mean parsing the state twice and could
+/// disagree with `payload.terminal`.
+fn run_terminal(line: &str) -> Option<serde_json::Value> {
+    let payload = serde_json::from_str::<serde_json::Value>(line).ok()?.get("payload")?.clone();
+    (payload.get("kind").and_then(serde_json::Value::as_str) == Some("run_terminal")).then_some(payload)
+}
+
+/// Whether `line` is the record that ends the turn the lane asked for — what
+/// [`crate::transform::lane::capture`] watches the transcript for.
+///
+/// Reads the same rule [`derive_terminal`] derives the answer from, so the line
+/// the lane stops at is by construction the line the record comes from.
+fn is_run_terminal(line: &str) -> bool {
+    run_terminal(line).is_some()
 }
 
 /// Run a model lane under Muse and return the shared result record.
@@ -206,7 +218,7 @@ fn run_at(
     scratch.export(&mut command);
     sccache::export(cache, &mut command);
 
-    let transcript = capture(command, &args.out, MUSE, peak)?;
+    let transcript = capture(command, &args.out, MUSE, peak, Some(is_run_terminal))?;
     // The transcript's own id wins over the one that was asked for: if Muse ever
     // declined the requested session and opened its own, that is the id the log
     // is filed under and the id a later lap has to resume.
@@ -219,6 +231,8 @@ fn run_at(
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::{derive_terminal, mint_session_id, muse_argv, muse_effort, run_at, uuid_from_seed};
     use crate::transform::TransformArgs;
     use crate::transform::construct::CONSTRUCT_IMPLEMENT;
@@ -361,6 +375,33 @@ mod tests {
             "the transcript's stream id wins over the requested handle"
         );
         assert_ne!(record["session_id"], requested, "a declined request must not be what the pool deposits");
+    }
+
+    // Tripwire: `muse exec` does not necessarily exit when the turn the lane
+    // asked for is over. Its runtime carries a background-terminal client that
+    // submits a *fresh* turn to the same session once a backgrounded shell
+    // command finishes — dispatch-4202's transcript reaches
+    // `run.terminal.completed` and two records later a
+    // `runtime.command.accepted` from `muse-runtime-background-terminal` opens
+    // a run nobody asked for. A lane that waits for the process waits for that
+    // one too: measured at 49 minutes of wall clock for a turn that answered in
+    // 28, with no bound short of the coordinator's construct deadline. The arm
+    // must read its answer off the terminal record and end the run.
+    #[test]
+    fn a_harness_that_outlives_its_own_terminal_does_not_hold_the_lane() {
+        let stub = Stub::linger_after_terminal();
+        let args = harness_stub::args(CONSTRUCT_IMPLEMENT, stub.out());
+
+        let started = Instant::now();
+        let record = drive(&stub, &args, "assembled muse prompt").expect("the terminal is the answer");
+        let elapsed = started.elapsed();
+
+        assert_eq!(record["is_error"], false, "the terminal the lane asked for said the run completed");
+        assert_eq!(record["result"]["result"], "from-launch-1");
+        assert!(
+            elapsed < Duration::from_secs(harness_stub::LINGER_SECS),
+            "the lane waited {elapsed:?} on a harness that had already answered",
+        );
     }
 
     // Tripwire: Muse does not relaunch cold on a rejected handle. A stub that
