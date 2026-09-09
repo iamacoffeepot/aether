@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use aether_chassis::encode_config_json;
 use anyhow::{Context, Result, bail};
 use cargo_metadata::Metadata;
 
@@ -14,7 +15,11 @@ use crate::package::plan::PackagePlan;
 #[derive(Debug)]
 pub(super) struct PlannedComponent {
     pub(super) source: ComponentSource,
+    /// A file of init-config bytes, taken verbatim.
     pub(super) config: Option<PathBuf>,
+    /// A JSON init-config file, encoded against the component's own
+    /// declared `Config` schema. At most one of the two is set.
+    pub(super) config_json: Option<PathBuf>,
     pub(super) name: Option<String>,
     pub(super) export: Option<String>,
 }
@@ -87,9 +92,18 @@ pub(super) fn build_planned_components(
             }
         };
         let wasm = fs::read(&wasm_path).with_context(|| format!("read component wasm {}", wasm_path.display()))?;
-        let config = match &component.config {
-            Some(path) => Some(fs::read(path).with_context(|| format!("read component config {}", path.display()))?),
-            None => None,
+        let config = match (&component.config, &component.config_json) {
+            (Some(path), _) => {
+                Some(fs::read(path).with_context(|| format!("read component config {}", path.display()))?)
+            }
+            (None, Some(path)) => {
+                let json =
+                    fs::read_to_string(path).with_context(|| format!("read component config {}", path.display()))?;
+                let bytes = encode_config_json(&wasm, component.export.as_deref(), &json)
+                    .with_context(|| format!("encode component config {}", path.display()))?;
+                Some(bytes)
+            }
+            (None, None) => None,
         };
         components.push(PackComponent {
             wasm,

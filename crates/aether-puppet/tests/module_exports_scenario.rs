@@ -11,7 +11,9 @@ use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_puppet::{Expression, EyeArchetype, Gaze, Idle, IdleConfig, Puppet, Turntable, TurntableConfig, Viseme};
+use aether_puppet::{
+    Expression, EyeArchetype, Gaze, Idle, IdleConfig, Puppet, PuppetConfig, Turntable, TurntableConfig, Viseme,
+};
 
 const PUPPET_EXPORT: &str = <Puppet as Addressable>::NAMESPACE;
 const IDLE_EXPORT: &str = <Idle as Addressable>::NAMESPACE;
@@ -44,7 +46,7 @@ fn one_artifact_serves_all_three_explicit_exports() {
     }
 
     for (label, export, config) in [
-        ("puppet", PUPPET_EXPORT, None),
+        ("puppet", PUPPET_EXPORT, Some(<PuppetConfig as Kind>::NAME)),
         ("idle", IDLE_EXPORT, Some(<IdleConfig as Kind>::NAME)),
         ("turntable", TURNTABLE_EXPORT, Some(<TurntableConfig as Kind>::NAME)),
     ] {

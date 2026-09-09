@@ -70,6 +70,7 @@ into `pack/objects/`.
   aether-desktop              # the chassis binary (`aether-headless` under `--chassis headless`; .exe on Windows)
   pack/manifest               # the persisted, versioned package manifest
   pack/objects/<sha256>       # component wasm + config bytes, content-addressed
+  pack/assets/…               # the `--assets` tree, verbatim
 ```
 
 The depot writes to `target/package/` unless `--out` names another directory.
@@ -103,9 +104,43 @@ while an operator's `AETHER_WINDOW_*` still overrides it.
 
 For explicit actor export, instance name, or richer per-component control, use
 the JSON `--spec` form. A spec carries the chassis, the three chassis settings,
-and per-component `package`-or-`wasm` plus `config`, `name`, and `export`.
-Relative paths in a spec resolve against the spec file's directory, not an
-arbitrary process working directory.
+and per-component `package`-or-`wasm` plus `config` / `config_json`, `name`, and
+`export`. Relative paths in a spec resolve against the spec file's directory,
+not an arbitrary process working directory.
+
+`config` names a file of init-config **bytes** — the wire image of the
+component's `Config` kind, which is what a machine stages. `config_json` names a
+**JSON** file instead, encoded at build time against the `Config` schema the
+component's own wasm declares (ADR-0090 + ADR-0028). Prefer `config_json` for
+anything checked in: a reviewer can read it, and a field the component does not
+declare fails the emit naming the file and the field rather than arriving as a
+decode error inside the guest. The JSON boot manifest takes the same pair of
+fields, so a spec and a manifest can share one config file. Setting both on one
+entry is an error, not a precedence question.
+
+### Shipping assets
+
+`--assets <dir>` copies a directory verbatim into `pack/assets`, and the
+packaged chassis roots the `assets` namespace there. Assets are the one part of
+`pack/` that is not content-addressed, and deliberately: a component reaches a
+file by mailing `aether.fs.read` with the path an author wrote, so the shipped
+tree has to keep those paths. Objects are hash-named because the manifest names
+them; assets are path-named because the running program does.
+
+The depot's root slots in **below** argv/env/file and **above** the compiled
+default, the same precedence a manifest's title and tick cadence take, so an
+operator's `AETHER_ASSETS_DIR` / `--assets-dir` still overrides a shipped depot.
+The check is per member rather than per field: any pinned `aether.fs` root — save
+or config as much as assets — keeps the operator's whole `NamespaceRoots`.
+
+```sh
+cargo xtask package \
+  --spec demo/puppet-turntable.json \
+  --assets crates/aether-mesh/examples
+```
+
+That is the checked-in demo (`demo/README.md`): a depot that draws a turning
+line-art teapot when its binary is run with no flags at all.
 
 ## Boot-time manifests
 
@@ -114,7 +149,13 @@ the persisted package manifest above:
 
 - The JSON boot manifest (`crate::boot_manifest`) names component files by
   path. The hub's `spawn_substrate` writes it and injects it through
-  `AETHER_BOOT_MANIFEST`; the spawned chassis reads the listed wasm itself.
+  `AETHER_BOOT_MANIFEST`; the spawned chassis reads the listed wasm itself. Its
+  entries take `config` (bytes) or `config_json` (encoded at read time against
+  the component's declared `Config` schema), so a checked-in manifest is the
+  no-packaging developer path — `--boot-manifest demo/puppet-turntable.boot.json`
+  boots the same composition the depot ships. Manifest paths are resolved as-is,
+  against the process working directory rather than the manifest's own
+  directory.
 - The package manifest (`crate::package`) references bytes by content hash and
   is what a shipped depot boots from.
 
@@ -209,5 +250,6 @@ Validate a change at the boundary it touches:
 - Autoload: `crates/aether-chassis/src/autoload.rs`
 - Boot manifest schema: `crates/aether-chassis/src/boot_manifest.rs`
 - Package manifest + store-backed boot: `crates/aether-chassis/src/package.rs`
+- JSON init-config encoding: `crates/aether-chassis/src/component_config.rs`
 - Current hosted artifact job: `.github/workflows/release.yml`
 - Related decisions: ADR-0090, ADR-0115, ADR-0116, ADR-0163; ADR-0092 is Proposed

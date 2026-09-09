@@ -19,6 +19,9 @@
 //!   [`entry::run_chassis_main`]).
 //! - [`autoload`] — boot-time component autoload shared by the
 //!   full-stack chassis (issue #1529).
+//! - [`component_config`] — encoding a checked-in JSON init-config into the
+//!   `Config` bytes a component decodes, against the schema its own wasm
+//!   declares.
 //! - [`boot_manifest`] — the JSON boot-manifest format the hub's
 //!   `spawn_substrate` injection describes a component set with, plus the
 //!   [`PackedComponent`](boot_manifest::PackedComponent) /
@@ -43,6 +46,7 @@ pub mod autoload;
 pub mod boot;
 pub mod boot_manifest;
 pub mod cli;
+pub mod component_config;
 pub mod entry;
 pub mod package;
 pub mod tick;
@@ -53,6 +57,7 @@ pub use boot::{
     boot_standard, build_provenance, chassis_residual_knobs, hub_residual_knobs, resolve_teardown_budget,
     run_describe_prelude,
 };
+pub use component_config::{ConfigJsonError, encode_config_json};
 pub use entry::{ChassisEnv, run_chassis_main};
 pub use tick::{DEFAULT_TICK_HZ, TickConfig, TickConfigLayer, TickOverlay, apply_manifest_tick_settings};
 pub use window::{

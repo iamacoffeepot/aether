@@ -86,6 +86,27 @@ final effective configuration:
 cargo run -p aether-chassis-headless --bin aether-headless -- --print-config
 ```
 
+## Run the demo
+
+A line-art teapot on a slow revolve — the shortest path from a clone to
+something on screen, with no operator and no mail sent by hand:
+
+```sh
+cargo xtask build-wasm
+cargo run -p aether-chassis-desktop --bin aether-desktop -- \
+  --boot-manifest demo/puppet-turntable.boot.json \
+  --assets-dir crates/aether-mesh/examples
+```
+
+The shippable form of the same composition is one command:
+
+```sh
+cargo xtask package --spec demo/puppet-turntable.json --assets crates/aether-mesh/examples
+```
+
+That writes a depot to `target/package/`; run `target/package/aether-desktop`
+with no flags. See [demo/README.md](demo/README.md).
+
 ## Drive a live engine
 
 Start the local MCP stack only when a task needs it:

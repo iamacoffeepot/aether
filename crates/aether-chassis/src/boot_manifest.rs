@@ -25,6 +25,8 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::component_config::{ConfigJsonError, encode_config_json};
+
 /// One component embedded in a pack, in autoload order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PackedComponent {
@@ -97,9 +99,19 @@ pub struct BootManifest {
 pub struct ManifestComponent {
     /// Path to the built wasm artifact.
     pub wasm: PathBuf,
-    /// Optional path to the init-config bytes file.
+    /// Optional path to the init-config bytes file — the wire image of the
+    /// component's `Config` kind. This is the machine channel: the hub
+    /// encodes JSON once and stages the bytes here.
     #[serde(default)]
     pub config: Option<PathBuf>,
+    /// Optional path to a **JSON** init-config file, encoded at read time
+    /// against the `Config` schema this component's wasm declares
+    /// ([`crate::component_config`]). The authoring channel: a checked-in
+    /// manifest names a file a reviewer can read, and a field that does not
+    /// exist fails here rather than inside the guest. Mutually exclusive
+    /// with [`config`](Self::config).
+    #[serde(default)]
+    pub config_json: Option<PathBuf>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -126,6 +138,13 @@ pub enum ManifestError {
     ReadWasm { path: PathBuf, source: io::Error },
     /// A component's init-config file could not be read.
     ReadConfig { path: PathBuf, source: io::Error },
+    /// One entry named both `config` and `config_json`. They are two
+    /// spellings of the same bytes, so an entry carrying both is an
+    /// authoring error rather than a precedence question.
+    ConfigSourceConflict { wasm: PathBuf },
+    /// A component's JSON init-config did not encode against the `Config`
+    /// schema its wasm declares.
+    EncodeConfig { path: PathBuf, source: ConfigJsonError },
 }
 
 impl fmt::Display for ManifestError {
@@ -143,6 +162,12 @@ impl fmt::Display for ManifestError {
             Self::ReadConfig { path, source } => {
                 write!(f, "read component config from {}: {source}", path.display())
             }
+            Self::ConfigSourceConflict { wasm } => {
+                write!(f, "component {} names both `config` and `config_json`; set one", wasm.display())
+            }
+            Self::EncodeConfig { path, source } => {
+                write!(f, "encode component config from {}: {source}", path.display())
+            }
         }
     }
 }
@@ -154,6 +179,8 @@ impl Error for ManifestError {
                 Some(source)
             }
             Self::ParseManifest { source, .. } => Some(source),
+            Self::EncodeConfig { source, .. } => Some(source),
+            Self::ConfigSourceConflict { .. } => None,
         }
     }
 }
@@ -189,9 +216,18 @@ pub fn pack_from_manifest(manifest_path: &Path) -> Result<Pack, ManifestError> {
     for entry in manifest.components {
         let wasm =
             fs::read(&entry.wasm).map_err(|source| ManifestError::ReadWasm { path: entry.wasm.clone(), source })?;
-        let config = match entry.config.as_ref() {
-            Some(path) => fs::read(path).map_err(|source| ManifestError::ReadConfig { path: path.clone(), source })?,
-            None => Vec::new(),
+        let config = match (entry.config.as_ref(), entry.config_json.as_ref()) {
+            (Some(_), Some(_)) => return Err(ManifestError::ConfigSourceConflict { wasm: entry.wasm.clone() }),
+            (Some(path), None) => {
+                fs::read(path).map_err(|source| ManifestError::ReadConfig { path: path.clone(), source })?
+            }
+            (None, Some(path)) => {
+                let json = fs::read_to_string(path)
+                    .map_err(|source| ManifestError::ReadConfig { path: path.clone(), source })?;
+                encode_config_json(&wasm, entry.export.as_deref(), &json)
+                    .map_err(|source| ManifestError::EncodeConfig { path: path.clone(), source })?
+            }
+            (None, None) => Vec::new(),
         };
         components.push(PackedComponent {
             wasm,
