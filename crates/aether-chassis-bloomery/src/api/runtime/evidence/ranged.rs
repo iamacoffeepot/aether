@@ -11,14 +11,14 @@ use std::str;
 use super::super::reads::{clamp_limit, pairs, parse_u64};
 use crate::api::dto::DispatchFilePage;
 
-/// Default page size for transcript / prompt reads.
+/// Default page size for evidence file reads.
 pub const TRANSCRIPT_DEFAULT_LIMIT: u64 = 64 * 1024;
-/// Hard ceiling for one transcript / prompt page.
+/// Hard ceiling for one evidence file page.
 pub const TRANSCRIPT_MAX_LIMIT: u64 = 512 * 1024;
 /// Per-line cap so one huge tool result cannot starve the page.
 pub const TRANSCRIPT_LINE_CAP: usize = 16 * 1024;
 
-/// Parsed `GET /dispatches/{nonce}/transcript` (and `/prompt`) query.
+/// Parsed `GET /dispatches/{nonce}/files/{name}` query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileQuery {
     /// Byte cursor. `None` means tail.

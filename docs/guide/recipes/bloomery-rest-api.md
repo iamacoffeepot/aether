@@ -210,6 +210,7 @@ tree.
 | `GET /claims/releases/{digest}` | One authorized release's state — pending, or its terminal result. |
 | `GET /journal` | The whole journal, decoded, oldest first. |
 | `GET /artifacts/{digest}` | The content-addressed artifact bytes, or `404`. |
+| `GET /dispatches/{nonce}/files/{name}` | One ranged page of a retained dispatch evidence file (`transcript.jsonl`, `prompt.md`, `evidence.json`, …). `cursor` + `limit` page line-snapped bytes; a name shaped like a path is `400`, an absent file is `404`. |
 | `POST /archive` | Move eligible evidence directories and resolved session trees onto the archive tier (ADR-0211). Refuses with `409` unless the coordinator is between blooms. Nothing is ever deleted. |
 | `GET /archive` | List the records currently on the archive tier. |
 
@@ -634,9 +635,10 @@ Layout under `AETHER_BLOOMERY_ARCHIVE_BASE` (empty resolves to
 
 Each record keeps the name it was addressed by. `GET /archive` is a directory
 listing of that tree. An archived dispatch still reads through
-`GET /dispatches/{nonce}` and its transcript page: the header reports
+`GET /dispatches/{nonce}` and its per-file pages: the header reports
 `retained: true`, names the tier path in `archived`, and carries no swept
-notice.
+notice, and `GET /dispatches/{nonce}/files/{name}` serves any retained file
+from the tier.
 
 `cargo xtask bloom archive` posts the pass; `--list` enumerates the tier.
 A refusal exits non-zero so a scripted run does not read a `409` as success.

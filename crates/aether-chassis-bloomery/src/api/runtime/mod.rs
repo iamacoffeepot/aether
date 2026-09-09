@@ -875,7 +875,8 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, evidence::lookup_dispatch(&nonce))
     }
 
-    /// `GET /dispatches/{nonce}/transcript` — line-snapped ranged read.
+    /// `GET /dispatches/{nonce}/transcript` — the files route pinned to the
+    /// transcript; kept so existing readers keep working.
     #[http::route(Get, "/dispatches/{nonce}/transcript")]
     fn on_get_dispatch_transcript(
         state: &mut ApiCapabilityState,
@@ -893,7 +894,7 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, Routed::Reply(response))
     }
 
-    /// `GET /dispatches/{nonce}/prompt` — the same ranged shape as the transcript.
+    /// `GET /dispatches/{nonce}/prompt` — the files route pinned to the prompt.
     #[http::route(Get, "/dispatches/{nonce}/prompt")]
     fn on_get_dispatch_prompt(
         state: &mut ApiCapabilityState,
@@ -903,6 +904,22 @@ impl NativeActor for BloomeryApiCapability {
         let nonce = nonce.0;
         let response =
             evidence::file_page(&state.worktree_base, &state.archive_base, &nonce, "prompt.md", &ctx.request().query);
+        finish(state, ctx, Routed::Reply(response))
+    }
+
+    /// `GET /dispatches/{nonce}/files/{name}` — the same ranged shape over
+    /// every retained evidence file.
+    #[http::route(Get, "/dispatches/{nonce}/files/{name}")]
+    fn on_get_dispatch_file(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        nonce: http::Path<String>,
+        name: http::Path<String>,
+    ) -> http::Outcome {
+        let nonce = nonce.0;
+        let name = name.0;
+        let response =
+            evidence::file_page(&state.worktree_base, &state.archive_base, &nonce, &name, &ctx.request().query);
         finish(state, ctx, Routed::Reply(response))
     }
 
