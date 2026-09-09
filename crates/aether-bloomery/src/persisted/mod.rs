@@ -595,7 +595,6 @@ pub static PERSISTED_KINDS: &[&PersistedKind] = &[
     &MODEL_PROCESS_INSTRUCTIONS,
     &PIPELINE_MANIFEST,
     &PRICE_TABLE,
-    &SCOPE_RUN,
     &SPEND_CEILING,
     &STAGE_CATALOG,
 ];
