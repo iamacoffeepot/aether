@@ -31,8 +31,6 @@ mod profile;
 mod proof;
 mod question;
 mod retrospect;
-mod scope_run;
-mod scope_run_pre_pin;
 mod scope_verify;
 mod spend;
 mod stage;
@@ -104,8 +102,6 @@ pub use retrospect::{
     FiledFinding, RetrospectClaim, RetrospectEmission, RetrospectFinding, RetrospectRefusal, filed_intent,
     reader_derivation,
 };
-pub use scope_run::ScopeRun;
-pub use scope_run_pre_pin::ScopeRunPrePin;
 pub use scope_verify::{
     NamedPath, NamedSymbol, PathOrigin, SCOPE_VERIFY_SCHEMA, ScopeVerifyInput, ScopeVerifyReport, verify_scope,
 };

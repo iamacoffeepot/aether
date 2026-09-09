@@ -1123,14 +1123,11 @@ impl ForkedLaneSettings<'_> {
     }
 }
 
-/// Author the scenario suite's model-process instruction bundle into the
-/// coordinator's own store and hand back the registry pinning it (ADR-0214).
+/// Author the suite's reference bundle into the coordinator store when the
+/// cell authorizes a unique default, and overlay that pin onto `configs`.
 ///
-/// Every scenario seals this, and the booted coordinator authorizes exactly this
-/// address, because the gate is fail-closed: a bloom with no authorized pin
-/// cannot start a model attempt, so a suite that skipped this would observe
-/// refusals in every scenario about something else. A scenario that is *about*
-/// the gate seals a member registry that overrides it.
+/// Returns the authorized address hex the host config consumes, or empty when
+/// the cell authorizes nothing.
 fn overlay_authorized_instructions(
     authorize: InstructionAuthorization,
     store_path: &str,
@@ -1150,6 +1147,14 @@ fn overlay_authorized_instructions(
     }
 }
 
+/// Author the scenario suite's model-process instruction bundle into the
+/// coordinator's own store and hand back the registry pinning it (ADR-0214).
+///
+/// Every scenario seals this, and the booted coordinator authorizes exactly this
+/// address, because the gate is fail-closed: a bloom with no authorized pin
+/// cannot start a model attempt, so a suite that skipped this would observe
+/// refusals in every scenario about something else. A scenario that is *about*
+/// the gate seals a member registry that overrides it.
 fn author_instructions(store_path: &str) -> ConfigRegistry {
     pin_instructions(
         &mut SqliteStore::open(store_path).expect("the coordinator's journal opens for writing"),

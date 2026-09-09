@@ -621,7 +621,7 @@ pub struct ScopeDispatchPayload {
 
 /// Frozen pre-pin wire shape of [`ScopeDispatchPayload`].
 ///
-/// The positional codec cannot read a six-field payload as seven. A row written
+/// The positional codec cannot read an eight-field payload as nine. A row written
 /// before the pin decodes through this shape and carries `instructions: None`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 struct ScopeDispatchPayloadPrePin {

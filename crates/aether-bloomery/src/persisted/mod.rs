@@ -65,8 +65,7 @@ use crate::reduce::decisions_v1::DecisionsV1;
 use crate::reduce::{Decisions, Event};
 use crate::values::process_instructions_pre_reader::ModelProcessInstructionsPreReader;
 use crate::values::{
-    ApprovalPolicy, ModelOverride, ModelProcessInstructions, PipelineManifest, PriceTable, ScopeRun, ScopeRunPrePin,
-    SpendCeiling, StageCatalog,
+    ApprovalPolicy, ModelOverride, ModelProcessInstructions, PipelineManifest, PriceTable, SpendCeiling, StageCatalog,
 };
 
 pub use rendering::{RenderError, render_schema};
@@ -346,15 +345,6 @@ pub const DECISIONS_PRE_MANIFESTLESS_DIGEST: Digest =
 pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
     Digest::pinned("c0a9677ad8116334fe7b217401fb5f14b06965ae33af4add641f685c5768f3e6");
 
-/// The stamp on durable scoping-run records written before the instruction-bundle
-/// pin (ADR-0214).
-///
-/// This kind had no prior ledger line. The identity is the digest CI reported
-/// for the frozen pre-pin shape on the throwaway probe, then copied into this
-/// literal — never recomputed from the type here (#5500).
-pub const SCOPE_RUN_PRE_PIN_DIGEST: Digest =
-    Digest::pinned("69a3489bd2a7d4d5782fe357dcb9c33a861ae8a6f40dfcf9708b3bc2d3f44e7d");
-
 /// Decode journaled [`Decisions`] under the writing-schema digest stamped
 /// beside them (ADR-0187).
 ///
@@ -447,13 +437,6 @@ fn upcast_event_pre_study(bytes: &[u8]) -> Result<Event, WireError> {
 /// with both reader fields empty.
 fn reshape_instructions_pre_reader(bytes: &[u8]) -> Result<Vec<u8>, WireError> {
     to_vec(&ModelProcessInstructions::from(from_bytes::<ModelProcessInstructionsPreReader>(bytes)?))
-}
-
-/// Pre-pin run records carry five fields where today's decoder reads six, so
-/// the row is decoded through its frozen shape and re-encoded with the bundle
-/// pin absent.
-fn reshape_scope_run_pre_pin(bytes: &[u8]) -> Result<Vec<u8>, WireError> {
-    to_vec(&ScopeRun::from(from_bytes::<ScopeRunPrePin>(bytes)?))
 }
 
 /// Decode a journaled [`Event`] under the writing-schema digest stamped beside
@@ -564,23 +547,6 @@ pub static SPEND_CEILING: PersistedKind = PersistedKind {
     current: OnceLock::new(),
 };
 
-/// The [`PersistedKind`] for the durable pre-bloom scoping-run record
-/// (ADR-0208, ADR-0214).
-///
-/// The first run-record shape carried no instruction-bundle pin. Appending
-/// `instructions` moves the schema digest, so the pre-pin shape is registered
-/// here: a row written before the pin upcasts with the field absent rather than
-/// refusing. The kind postdates the config column's schema-digest migration and
-/// every row of it is stamped as it is written, so the bootstrap arm never
-/// fires.
-pub static SCOPE_RUN: PersistedKind = PersistedKind {
-    name: ScopeRun::NAME,
-    schema: &<ScopeRun as Schema>::SCHEMA,
-    bootstrap: Bootstrap::Current,
-    upcasts: &[PersistedUpcast { digest: SCOPE_RUN_PRE_PIN_DIGEST, reshape: Some(reshape_scope_run_pre_pin) }],
-    current: OnceLock::new(),
-};
-
 /// The [`PersistedKind`] for sealed [`StageCatalog`].
 pub static STAGE_CATALOG: PersistedKind = PersistedKind {
     name: StageCatalog::NAME,
@@ -600,7 +566,6 @@ pub static PERSISTED_KINDS: &[&PersistedKind] = &[
     &PIPELINE_MANIFEST,
     &PRICE_TABLE,
     &SPEND_CEILING,
-    &SCOPE_RUN,
     &STAGE_CATALOG,
 ];
 

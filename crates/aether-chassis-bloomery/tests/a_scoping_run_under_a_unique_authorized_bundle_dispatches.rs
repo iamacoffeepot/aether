@@ -5,12 +5,15 @@
 //! construct uses assembles it as the manifest's sole instruction slot
 //! (ADR-0214).
 //!
-//! The GitHub actions backend refuses a model lane with no resolved model, so
-//! this scenario does not wait on an outstanding order. What the mock lane
-//! would be handed is the assembled manifest: the drain copies the run's pin
-//! into the order's registry, and `admit_model_dispatch` is that assembly.
-//! The capturing-backend unit test next to the drain is what sees the order
-//! itself.
+//! This scenario does not wait on an outstanding order. The fixture cell has
+//! no local git object database for the checkout a scripted lane would
+//! materialize, and the GitHub actions arm refuses a model lane with no
+//! resolved model — so neither `lane_axis(Lane::Scripted)` nor the default
+//! actions backend can show the order the lane is handed. The drain copying
+//! the run's pin into that order is `a_scope_run_drains_with_no_bloom_in_the_store`
+//! in the executor runtime tests, over a capturing backend. This scenario
+//! proves the run record is pinned and that `admit_model_dispatch` assembles
+//! that pin as the instruction slot.
 
 use aether_bloomery::{
     BloomId, ConfigKind, ConfigRegistry, Digest, ModelProcessInstructions, Nonce, Observation, Provenance, SlotRole,
