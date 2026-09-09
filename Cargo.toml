@@ -215,15 +215,22 @@ broken_intra_doc_links = "warn"
 private_intra_doc_links = "warn"
 
 [workspace.lints.clippy]
+# Every level in this table is a merge gate. CI's `Clippy gate` job runs
+# `verify.clippy` — `cargo clippy --workspace --all-targets` under
+# `--message-format=json` — and applies the same fail-on-any-warning predicate
+# `-D warnings` encodes over the resulting diagnostic list, so a `warn` here
+# fails a pull request exactly as a `deny` does. The two differ only in whether
+# a hit stops the compile, and a stopped compile leaves every crate downstream
+# of it unlinted — which is why the gate reads the stream instead of denying.
+# Read the levels below as history, not as a severity gradient.
 # Baseline — both groups as warn, then opt out of the idiom-fight bucket below.
 pedantic = { level = "warn", priority = -1 }
 nursery  = { level = "warn", priority = -1 }
 
-# Deny picks — INITIALLY AT WARN until per-pick cleanup PRs land (iamacoffeepot/aether#854 Phase 1.b-1.c.iv).
-# Each follow-up PR fixes its hits and promotes its lint to deny in the same diff.
-dbg_macro                           = "warn"  # promote to deny in Phase 1.c.* if any hits exist
-todo                                = "warn"  # promote to deny if no hits surface
-unimplemented                       = "warn"  # promote to deny if no hits surface
+# Picks beyond the pedantic/nursery baseline (iamacoffeepot/aether#854).
+dbg_macro                           = "warn"
+todo                                = "warn"
+unimplemented                       = "warn"
 undocumented_unsafe_blocks          = "deny"
 cloned_instead_of_copied            = "deny"
 large_stack_arrays                  = "deny"
@@ -234,13 +241,13 @@ unreadable_literal                  = "deny"
 # `foo.rs` file is only for a terminal (leaf) module with no children.
 self_named_module_files             = "deny"
 
-# Warn picks — cherry-picked from restriction + style (not covered by pedantic/nursery baseline).
+# Further picks, cherry-picked from restriction + style (not covered by the
+# pedantic/nursery baseline).
 unwrap_used                         = "warn"
 print_stdout                        = "warn"
 print_stderr                        = "warn"
 # absolute_paths — catches `crate::a::b::c::Thing` written inline at call sites
-# when a `use` would shorten it. See iamacoffeepot/aether#951. Starts at `warn`;
-# promotion to `deny` is a follow-up phase once any reintroduced hits stay green.
+# when a `use` would shorten it. See iamacoffeepot/aether#951.
 # Default `absolute-paths-max-segments = 2` is sufficient — no override in clippy.toml.
 absolute_paths                      = "warn"
 
