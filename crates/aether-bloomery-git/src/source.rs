@@ -587,6 +587,31 @@ impl<C: GitDataApi> GitSource<C> {
     // the record did not (#5554), or return a sealed-base / foreign digest
     // that is not an integration head. An object another digest already names
     // is left alone — recording would retire that identity.
+    /// The commit a prior `integrate` attempt recorded for `head`, when it is
+    /// still the right one: it carries `candidate_tree` and extends
+    /// `parent_sha`, the branch as it stands. Anything else — no record, a
+    /// record naming an object that is not a commit, a commit over another
+    /// tree, or one that does not descend from the current branch — is `None`,
+    /// and the caller mints afresh.
+    fn recorded_integrate_commit(
+        &self,
+        head: &Digest,
+        candidate_tree: &str,
+        parent_sha: &str,
+    ) -> Result<Option<String>, SourceError> {
+        let Some(object) = self.correspondence.resolve_backend_object(head)? else {
+            return Ok(None);
+        };
+        let sha = GitObjectId::try_from(object)?.to_hex();
+        let Ok(commit) = self.client.get_commit(&sha) else {
+            return Ok(None);
+        };
+        if commit.tree != candidate_tree || !self.client.is_ancestor(parent_sha, &sha)? {
+            return Ok(None);
+        }
+        Ok(Some(sha))
+    }
+
     fn ensure_integrated_head(&self, bloom: &BloomId, tree: Digest, commit_sha: &str) -> Result<Digest, SourceError> {
         let head = digest_of(&IntegratedHead { bloom: *bloom, tree });
         let commit_object = GitObjectId::from_hex(commit_sha)
@@ -1156,32 +1181,48 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         // tree-object`, and carry that head back in the outcome for the core to
         // thread through `land`'s `new_head`.
         let candidate_tree_sha = self.resolve_git_sha(candidate, "candidate tree digest")?;
-        let commit = self.client.create_commit("bloomery integrate", &candidate_tree_sha, from_ref(&current.sha))?;
         let head = digest_of(&IntegratedHead { bloom: *bloom, tree: *candidate });
-        let commit_object = GitObjectId::from_hex(&commit.sha)
-            .ok_or_else(|| SourceError::Malformed(format!("integrate commit sha `{}`", commit.sha)))?;
-
-        // Record the correspondence *before* advancing the ref, never after
-        // (#3667). The two writes are not atomic, so one of them observes a
-        // fault first, and the orders are not symmetric:
-        //
-        //   record → advance:  a fault leaves a correspondence for a commit no
-        //                      ref names. Nothing resolves it, and the retry
-        //                      re-creates a byte-identical commit (same tree,
-        //                      same parent, so git hands back the same sha) and
-        //                      re-records it idempotently. Recoverable.
-        //   advance → record:  a fault leaves the head with no correspondence,
-        //                      and the retry now reads `current_tree ==
-        //                      candidate`, so the stale-checkpoint guard above
-        //                      returns before reaching the record. The head is
-        //                      never landable (`land` faults on an unresolved
-        //                      correspondence) and never re-integratable — an
-        //                      absorbing state with no recovery path.
-        //
-        // The commit exists either way by this point; only its reachability is
-        // in question, and an unreferenced commit is ordinary git garbage.
-        self.correspondence.record(&head, &BackendObjectId::from(commit_object))?;
-        match self.client.compare_and_swap_ref(&integration, &commit.sha, &current.sha) {
+        // A prior attempt may have minted and recorded this head and then
+        // faulted before its ref update. Reuse that commit rather than minting
+        // another: the mint is clock-stamped, so a second one is a different
+        // object, and recording it would leave the head naming two commits.
+        // The reuse is guarded — the recorded commit must carry the candidate
+        // tree over the branch as it stands — so a record that names something
+        // else is treated as absent and the mint below re-records it.
+        let recorded = self.recorded_integrate_commit(&head, &candidate_tree_sha, &current.sha)?;
+        let commit_sha = if let Some(sha) = recorded {
+            sha
+        } else {
+            {
+                let commit =
+                    self.client.create_commit("bloomery integrate", &candidate_tree_sha, from_ref(&current.sha))?;
+                let commit_object = GitObjectId::from_hex(&commit.sha)
+                    .ok_or_else(|| SourceError::Malformed(format!("integrate commit sha `{}`", commit.sha)))?;
+                // Record the correspondence *before* advancing the ref, never
+                // after (#3667). The two writes are not atomic, so one of them
+                // observes a fault first, and the orders are not symmetric:
+                //
+                //   record → advance:  a fault leaves a correspondence for a
+                //                      commit no ref names. The retry finds it
+                //                      through the lookup above and finishes
+                //                      the advance. Recoverable.
+                //   advance → record:  a fault leaves the head with no
+                //                      correspondence, and the retry now reads
+                //                      `current_tree == candidate`, so the
+                //                      stale-checkpoint guard above returns
+                //                      before reaching the record. The head is
+                //                      never landable (`land` faults on an
+                //                      unresolved correspondence) and never
+                //                      re-integratable — an absorbing state.
+                //
+                // The commit exists either way by this point; only its
+                // reachability is in question, and an unreferenced commit is
+                // ordinary git garbage.
+                self.correspondence.record(&head, &BackendObjectId::from(commit_object))?;
+                commit.sha
+            }
+        };
+        match self.client.compare_and_swap_ref(&integration, &commit_sha, &current.sha) {
             Ok(_) => Ok(IntegrateOutcome::Integrated { tree: *candidate, head }),
             // A `RefConflict` is the lost compare-and-swap: a concurrent writer
             // moved the branch between our read and our update. That is the
@@ -2162,6 +2203,38 @@ mod tests {
         fake.seed_git_object(&another);
         let stale = source.integrate(&bloom, &another, &expected).unwrap();
         assert_eq!(stale, IntegrateOutcome::StaleCheckpoint { actual: candidate });
+    }
+
+    #[test]
+    fn an_integrate_retry_after_a_faulted_ref_update_reuses_the_recorded_commit() {
+        // Tripwire: a mint is clock-stamped, so a retry that minted again would
+        // produce a second commit for the same head and re-record the head
+        // onto it. The recovery for a fault between the record and the ref
+        // update is the lookup: the retry finds the commit the first attempt
+        // recorded and finishes the advance with it, minting nothing.
+        let (fake, bloom, base) = seeded();
+        let source = git_source(&fake, false);
+        let base_tree = source.snapshot(&base).unwrap().tree;
+        let expected = source.checkpoint(&bloom, &base_tree).unwrap();
+        let candidate = digest(50);
+        fake.seed_git_object(&candidate);
+        let IntegrateOutcome::Integrated { head, .. } = source.integrate(&bloom, &candidate, &expected).unwrap() else {
+            panic!("the first attempt integrates");
+        };
+        let first = resolve_git(&fake, &head).expect("the head resolves to the first attempt's commit");
+
+        // The fault: the ref update never took, so the branch still stands at
+        // the base while the correspondence already names the head.
+        fake.reset_ref_to(&GitSource::<FakeGithub>::integration_ref(&bloom), &base).unwrap();
+        let minted = fake.create_commit_count();
+
+        let IntegrateOutcome::Integrated { head: again, .. } = source.integrate(&bloom, &candidate, &expected).unwrap()
+        else {
+            panic!("the retry integrates");
+        };
+        assert_eq!(again, head, "the retry names the same head");
+        assert_eq!(resolve_git(&fake, &head), Some(first), "the head still names the first attempt's commit");
+        assert_eq!(fake.create_commit_count(), minted, "the retry minted nothing");
     }
 
     /// A correspondence whose reads work but whose `record` always faults,
