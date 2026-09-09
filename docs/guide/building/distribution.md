@@ -68,6 +68,8 @@ into `pack/objects/`.
 ```text
 <out>/
   aether-desktop              # the chassis binary (`aether-headless` under `--chassis headless`; .exe on Windows)
+  LICENSE-MIT                 # the workspace licenses, shipped beside the statically linked binary
+  LICENSE-APACHE
   pack/manifest               # the persisted, versioned package manifest
   pack/objects/<sha256>       # component wasm + config bytes, content-addressed
 ```
@@ -153,7 +155,7 @@ software release.
 
 Every crate takes its version from `[workspace.package] version` in the root
 `Cargo.toml` — no crate carries a literal, and no doc, script, or workflow
-spells one either. The ten `env!("CARGO_PKG_VERSION")` sites read it at compile
+spells one either. Every `env!("CARGO_PKG_VERSION")` site reads it at compile
 time. So the bump is one edit and the lockfiles that edit invalidates:
 
 ```sh

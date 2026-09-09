@@ -1,7 +1,8 @@
 # ADR-0192: A sealed spend ceiling quiesces sealing
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-14
+- **Amended:** 2026-09-09 — status: implemented on `main`; the sealed `aether.bloomery.spend_ceiling` value is in `crates/aether-bloomery/src/values/spend.rs` and `refuse_member_spend_ceiling` quiesces the seal door (#5001).
 
 ## Context
 

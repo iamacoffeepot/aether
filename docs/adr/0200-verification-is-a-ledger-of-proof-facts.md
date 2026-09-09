@@ -1,7 +1,8 @@
 # ADR-0200: verification is a ledger of proof facts
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-17
+- **Amended:** 2026-09-09 — status: implemented on `main`; proof facts are written on one path, `crates/aether-chassis-bloomery/src/bloomery/verify/facts.rs`, keyed by `(closure_key, test, host_class)` behind flake discrimination (#5142).
 
 ## Context
 
