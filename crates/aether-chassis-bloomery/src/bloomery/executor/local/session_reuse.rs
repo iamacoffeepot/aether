@@ -1,4 +1,4 @@
-//! Thread-bound session reuse for the construct/verify/refine retry loop (#4986).
+//! Thread-bound session reuse for construct and repair loops (#4986).
 //!
 //! A session belongs to one thread — one (workpiece × role). A lap continues
 //! that thread's session when the pool's eligibility gates pass (age, context
@@ -29,12 +29,13 @@
 //! evidence stamps the sealed-table price of the observed calls beside the
 //! replayed other-arm counterfactual.
 //!
-//! Same-member Refine always resumes the construct session journaled on the
-//! dispatch record, whatever context that session carries. A refine lap is the
-//! same author fixing findings against the tree it just built, so relaunching
-//! it cold re-reads the whole member from scratch — strictly more expensive
-//! than any long-context band. That path is keyed by (bloom, workpiece), not
-//! the pool task text, so a findings overlay cannot hide the handle.
+//! Same-member Refine and Reconcile select the construct session journaled on
+//! the dispatch record when one exists, whatever context that session carries;
+//! a base-assembly Reconcile with no author yet follows the fresh fallback. A
+//! repair lap is the same author fixing the tree it built, so relaunching it
+//! cold re-reads the whole member from scratch — strictly more expensive than
+//! any long-context band. That path is keyed by (bloom, workpiece), not the
+//! pool task text, so a repair overlay cannot hide the handle.
 //!
 //! A dependent Construct at unblock offers a predecessor's journaled session
 //! the same way (#5178): projection adds a per-link increment, warmth reuses
@@ -135,9 +136,9 @@ impl MissReason {
     }
 }
 
-/// Whether a journaled construct session should be resumed.
+/// Whether a journaled session should be resumed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RefineResume {
+pub enum ResumeDecision {
     /// Resume this harness session id.
     Resumed(String),
     /// Launch fresh. `miss` names why when a journaled handle was considered.
@@ -168,20 +169,20 @@ pub struct PredecessorCandidate {
     pub continues_tree: bool,
 }
 
-/// Decide whether a journaled construct session is worth resuming.
+/// Decide whether a same-member repair should resume its journaled author session.
 ///
-/// A usable handle always resumes: the refine lap is the same author fixing
-/// findings on the tree that session just built, so the alternative is not a
-/// cheaper prompt but a cold re-read of the whole member. Only an empty or
-/// whitespace-only id — an unparseable handle — launches fresh. The pricing
-/// cliff gates dependent-construct chains only ([`decide_predecessor_resume`]),
-/// where the resumed context belongs to a *different* member.
+/// A usable handle always resumes: the repair lap is the same author fixing the
+/// tree that session just built, so the alternative is not a cheaper prompt but
+/// a cold re-read of the whole member. Only an empty or whitespace-only id — an
+/// unparseable handle — launches fresh. The pricing cliff gates
+/// dependent-construct chains only ([`decide_predecessor_resume`]), where the
+/// resumed context belongs to a *different* member.
 #[must_use]
-pub fn decide_refine_resume(session_id: &str) -> RefineResume {
+pub fn decide_repair_resume(session_id: &str) -> ResumeDecision {
     if usable_session_id(session_id) {
-        RefineResume::Resumed(session_id.to_owned())
+        ResumeDecision::Resumed(session_id.to_owned())
     } else {
-        RefineResume::Fresh { miss: None }
+        ResumeDecision::Fresh { miss: None }
     }
 }
 
@@ -199,7 +200,7 @@ pub fn decide_predecessor_resume(
     warmth_secs: u64,
     increment_tokens: u64,
     pricing_cliff_tokens: u64,
-) -> RefineResume {
+) -> ResumeDecision {
     let mut eligible: Vec<&PredecessorCandidate> = Vec::new();
     let mut saw_stale = false;
     let mut saw_cliff = false;
@@ -227,16 +228,16 @@ pub fn decide_predecessor_resume(
         eligible.push(candidate);
     }
     if let Some(best) = eligible.iter().max_by_key(|candidate| candidate.context_tokens) {
-        return RefineResume::Resumed(best.session_id.clone());
+        return ResumeDecision::Resumed(best.session_id.clone());
     }
     if saw_cliff {
-        RefineResume::Fresh { miss: Some(MissReason::PricingCliff) }
+        ResumeDecision::Fresh { miss: Some(MissReason::PricingCliff) }
     } else if saw_stale {
-        RefineResume::Fresh { miss: Some(MissReason::Age) }
+        ResumeDecision::Fresh { miss: Some(MissReason::Age) }
     } else if saw_taken {
-        RefineResume::Fresh { miss: Some(MissReason::SessionTaken) }
+        ResumeDecision::Fresh { miss: Some(MissReason::SessionTaken) }
     } else {
-        RefineResume::Fresh { miss: None }
+        ResumeDecision::Fresh { miss: None }
     }
 }
 
@@ -655,8 +656,8 @@ pub fn is_builder_command(command: &str) -> bool {
     !is_judge_command(command)
 }
 
-/// A reuse plan that does not lease from the pool — same-member refine resume
-/// from a journaled construct handle, or the fresh fallback that handle produces.
+/// A reuse plan that does not lease from the pool — same-member repair resume
+/// from a journaled author handle, or the fresh fallback that handle produces.
 #[must_use]
 pub fn plan_for(
     request: &AcquireRequest<'_>,
@@ -1077,23 +1078,23 @@ mod tests {
     }
 
     #[test]
-    fn a_journaled_construct_session_resumes_whatever_context_it_carries() {
-        // Plausible bug: reintroducing a context gate on the same-member refine
-        // path, which reads prudent and makes every findings lap re-read the
+    fn a_journaled_author_session_resumes_whatever_context_it_carries() {
+        // Plausible bug: reintroducing a context gate on the same-member repair
+        // path, which reads prudent and makes every repair lap re-read the
         // member cold; or treating an empty handle as resumable, so a missing
         // parse threads a garbage `--resume` and wedges the lap.
-        assert_eq!(super::decide_refine_resume("sess-1"), super::RefineResume::Resumed("sess-1".to_owned()));
+        assert_eq!(super::decide_repair_resume("sess-1"), super::ResumeDecision::Resumed("sess-1".to_owned()));
         assert_eq!(
-            super::decide_refine_resume("sess-huge"),
-            super::RefineResume::Resumed("sess-huge".to_owned()),
-            "a refine resumes its own construct session however large that context grew",
+            super::decide_repair_resume("sess-huge"),
+            super::ResumeDecision::Resumed("sess-huge".to_owned()),
+            "a repair resumes its own author session however large that context grew",
         );
         assert_eq!(
-            super::decide_refine_resume("   "),
-            super::RefineResume::Fresh { miss: None },
+            super::decide_repair_resume("   "),
+            super::ResumeDecision::Fresh { miss: None },
             "whitespace is an unparseable handle, not a session to resume",
         );
-        assert_eq!(super::decide_refine_resume(""), super::RefineResume::Fresh { miss: None });
+        assert_eq!(super::decide_repair_resume(""), super::ResumeDecision::Fresh { miss: None });
     }
 
     fn predecessor(session_id: &str, context_tokens: u64, deposited_unix: Option<u64>) -> super::PredecessorCandidate {
@@ -1117,7 +1118,7 @@ mod tests {
 
         assert_eq!(
             super::decide_predecessor_resume(&[taken], now, 55 * 60, 56_000, 200_000),
-            super::RefineResume::Fresh { miss: Some(MissReason::SessionTaken) },
+            super::ResumeDecision::Fresh { miss: Some(MissReason::SessionTaken) },
             "a session bound to a sibling's tree is not this member's to resume",
         );
     }
@@ -1136,32 +1137,32 @@ mod tests {
 
         assert_eq!(
             decide(&[predecessor("sess-a", 8_000, Some(now))]),
-            super::RefineResume::Resumed("sess-a".to_owned()),
+            super::ResumeDecision::Resumed("sess-a".to_owned()),
         );
         assert_eq!(
             decide(&[predecessor("sess-a", 144_000, Some(now))]),
-            super::RefineResume::Fresh { miss: Some(MissReason::PricingCliff) },
+            super::ResumeDecision::Fresh { miss: Some(MissReason::PricingCliff) },
             "144k + the 56k link increment is the cliff, not under it",
         );
         assert_eq!(
             decide(&[predecessor("sess-a", 8_000, Some(now - warmth - 1))]),
-            super::RefineResume::Fresh { miss: Some(MissReason::Age) },
+            super::ResumeDecision::Fresh { miss: Some(MissReason::Age) },
             "a deposit older than the cache TTL is stale",
         );
         assert_eq!(
             decide(&[predecessor("sess-a", 8_000, None)]),
-            super::RefineResume::Fresh { miss: Some(MissReason::Age) },
+            super::ResumeDecision::Fresh { miss: Some(MissReason::Age) },
             "a row that never stamped a deposit time is not assumed warm",
         );
         assert_eq!(
             decide(&[predecessor("   ", 8_000, Some(now))]),
-            super::RefineResume::Fresh { miss: None },
+            super::ResumeDecision::Fresh { miss: None },
             "whitespace is an unparseable handle, not a session to resume",
         );
-        assert_eq!(decide(&[]), super::RefineResume::Fresh { miss: None }, "missing sessions launch fresh");
+        assert_eq!(decide(&[]), super::ResumeDecision::Fresh { miss: None }, "missing sessions launch fresh");
         assert_eq!(
             decide(&[predecessor("sess-small", 8_000, Some(now)), predecessor("sess-large", 40_000, Some(now))]),
-            super::RefineResume::Resumed("sess-large".to_owned()),
+            super::ResumeDecision::Resumed("sess-large".to_owned()),
             "a join resumes the largest stored context",
         );
     }
