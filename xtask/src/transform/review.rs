@@ -540,6 +540,7 @@ mod tests {
         // that does not exist there; a contract missing from the composition
         // review is the 10a1228c behaviour — a full re-read of every member,
         // eight member-scope findings out of nine, and three judge rounds.
+        let bundle = crate::transform::instructions::fixture_bundle();
         let composition = composition_contract(&bundle, Some("abc123"));
 
         assert!(composition.contains("## Composition review"), "{composition}");
