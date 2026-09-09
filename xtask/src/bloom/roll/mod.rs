@@ -20,8 +20,10 @@ mod replica;
 mod shell;
 mod sync;
 
+use std::env;
+
 use aether_bloomery_git::DayCoverage;
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use clap::Args;
 
 use self::day::Day;
@@ -32,6 +34,10 @@ use crate::bloom::dto::ViewDocument;
 /// The branch the day syncs back onto. Bloomery's mainline moves day to day;
 /// what it returns to does not.
 const MAIN: &str = "main";
+
+/// The coordinator's own setting for the fleet repository, and the roll's
+/// fallback when `--repo` names none.
+const AUTHORITY_REPO: &str = "AETHER_BLOOMERY_AUTHORITY_REPO";
 
 /// Drive one ADR-0186 day roll.
 #[derive(Args, Debug)]
@@ -50,10 +56,9 @@ pub struct RollArgs {
 
     /// The fleet repository whose refs the roll reads and writes — the
     /// coordinator's `AETHER_BLOOMERY_AUTHORITY_REPO`, or any worktree of it.
-    /// Defaults to the current directory, which is right only when the roll is
-    /// driven from inside the fleet repository.
-    #[arg(long, default_value = ".")]
-    repo: String,
+    /// Defaults to that variable; there is no compiled default.
+    #[arg(long)]
+    repo: Option<String>,
 
     /// Replay the day commit by commit instead of syncing its tree as one
     /// commit. Keeps the day's authored history, and is only available to a day
@@ -75,11 +80,35 @@ pub fn run(client: &Client<'_>, args: &RollArgs) -> Result<String> {
 
 fn roll(view: &ViewDocument, shell: &impl Shell, coverage: &DayCoverage, args: &RollArgs) -> Result<String> {
     let from = sync_from(&args.from)?;
-    let repo = Repo::new(args.repo.clone());
+    let repo = Repo::new(authority_repo(args.repo.as_deref(), configured_authority_repo())?);
     preconditions::screen(view, shell, &repo, &args.date, &args.remote)?;
     let synced = sync::merge(shell, &repo, &args.remote, &from, coverage, args.replay)?;
     cut::create(shell, &repo, &args.remote, &args.date)?;
     Ok(handoff(&args.date, &synced))
+}
+
+/// The fleet repository every roll `git` runs against, from `--repo` or the
+/// coordinator's own setting.
+///
+/// There is no compiled default. Where the fleet repository sits is host
+/// layout, which this repository neither knows nor should state, and the two
+/// candidate defaults are both worse than a refusal: a baked-in path is one
+/// host's directory shipped to every reader, and the process cwd silently
+/// answers about whichever checkout the operator happened to be standing in
+/// — the failure ADR-0203 rooted every call at the repository to end.
+fn authority_repo(named: Option<&str>, configured: Option<String>) -> Result<String> {
+    let named = named.map(str::trim).filter(|path| !path.is_empty()).map(ToOwned::to_owned);
+    named.or(configured).ok_or_else(|| {
+        anyhow!("the roll needs the fleet repository: pass --repo, or set {AUTHORITY_REPO} to the path the coordinator reads")
+    })
+}
+
+/// `AETHER_BLOOMERY_AUTHORITY_REPO`, or nothing.
+fn configured_authority_repo() -> Option<String> {
+    // Operator tooling reading the coordinator's own repository setting — not
+    // cap config.
+    #[allow(clippy::disallowed_methods)]
+    env::var(AUTHORITY_REPO).ok().map(|path| path.trim().to_owned()).filter(|path| !path.is_empty())
 }
 
 /// The day branch the sync-back runs from, normalized to the bare branch name
@@ -131,7 +160,7 @@ mod tests {
     use super::shell::fake::Fake;
     use aether_bloomery_git::DayCoverage;
 
-    use super::{Day, RollArgs, roll, sync_from};
+    use super::{AUTHORITY_REPO, Day, RollArgs, authority_repo, roll, sync_from};
     use crate::bloom::dto::{ViewDocument, test_bloom, test_member, test_view};
     use aether_bloomery::Digest;
 
@@ -152,7 +181,7 @@ mod tests {
             date: Day::parse("2026-08-15").expect("a well-formed day"),
             from: from.to_owned(),
             remote: "origin".to_owned(),
-            repo: "/mnt/dev/bloomery/fleet.git".to_owned(),
+            repo: Some("/srv/fleet.git".to_owned()),
             replay: false,
         }
     }
@@ -258,5 +287,22 @@ mod tests {
             assert_eq!(sync_from(&named).expect("the flag names the day"), day);
         }
         assert!(sync_from("   ").is_err(), "a blank --from is a refusal, not a roll of `main`");
+    }
+
+    // Tripwire: with neither the flag nor the setting, the roll refuses and
+    // names what to set. A fallback here is the whole bug — the cwd or a baked
+    // path both resolve to *a* repository, and a roll that advances main in the
+    // wrong one is discovered a day later.
+    #[test]
+    fn an_unconfigured_fleet_repository_is_a_refusal_that_names_the_setting() {
+        let refusal = authority_repo(None, None).expect_err("a roll with no repository configured refuses").to_string();
+
+        assert!(refusal.contains("--repo"), "the flag is named: {refusal}");
+        assert!(refusal.contains(AUTHORITY_REPO), "the setting is named: {refusal}");
+        assert_eq!(authority_repo(Some("  /srv/fleet.git "), None).expect("the flag names it"), "/srv/fleet.git");
+        assert_eq!(
+            authority_repo(None, Some("/srv/fleet.git".to_owned())).expect("the setting names it"),
+            "/srv/fleet.git"
+        );
     }
 }
