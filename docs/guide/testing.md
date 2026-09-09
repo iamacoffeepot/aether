@@ -141,8 +141,9 @@ headless, so any rendered-output assertion has to use SubstrateHarness plus its 
 extension, and any
 externally-addressable-over-the-wire assertion has to be FleetHarness.
 
-Bloomery coordinator behavior has a third boundary: the **scenario harness**
-in `crates/aether-chassis-bloomery/tests/harness/`. Variation is three builder
+Bloomery coordinator behavior has a third boundary: `BloomeryHarness`, the
+**scenario harness** in `crates/aether-harness-bloomery/`, taken as a
+dev-dependency by the suites that use it. Variation is three builder
 axes — backend (fixture / local repo), coordinator (in-process / forked), lane
 (off / scripted) — so a new scenario picks a cell instead of writing a fourth
 copy of the boot loop. Named cells:
@@ -153,9 +154,10 @@ copy of the boot loop. Named cells:
 - **LaneHarness** — local repo + forked + scripted. The durable work loop
   below the spawn: `git worktree add`, the child, `evidence.json`, candidate
   capture. Replaces only the expensive transform program and GitHub service.
-- **local_authority** — local repo + in-process + scripted. A fleet-local
-  bare authority, real capture and publication, a restart against the same
-  journal.
+- **`HarnessBuilder::local_authority`** — local repo + in-process + scripted. A
+  fleet-local bare authority, real capture and publication, a restart against
+  the same journal. It is a builder line rather than a fourth harness, which is
+  the point of the axes.
 
 Reach for LaneHarness when the scenario must prove the coordinator makes
 progress through its durable work loop, rather than merely that a reducer or
@@ -269,7 +271,8 @@ enough out that the timer never fires inside it and drives every step by hand.
 
 For overlay rendering, split structural and raster proof deliberately. Assert exact
 rectangle geometry, clips, texture coordinates, tint, texture identity, projection
-space, and submission order through `SubstrateHarness::committed_overlay_snapshot`; then use
+space, and submission order through `committed_overlay_snapshot` (on
+`aether-harness-substrate-capture`'s `RenderHarnessExt`); then use
 `CaptureFrame` reductions for the smaller set of outcomes that need end-to-end proof
 through projection, blending, rasterization, and GPU readback. The typed snapshot
 contains only batches accepted into the recorded draw plan, so missing textures,
