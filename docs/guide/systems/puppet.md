@@ -59,7 +59,7 @@ value is exactly an `aether.puppet.load`:
 {
   "subject": {
     "namespace": "assets",
-    "path": "teapot.dsl",
+    "path": "utah_teapot.obj",
     "labels": "",
     "material_field_padding": 0.12,
     "rig": "",
