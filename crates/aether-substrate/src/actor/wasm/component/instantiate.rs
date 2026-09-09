@@ -11,7 +11,7 @@ pub struct Component {
     /// than called inside [`Self::instantiate`]) so the trampoline
     /// can fire it AFTER its mailbox is registered — issue 640
     /// Phase 2 surfaced a race where `wire`-time `subscribe_input`
-    /// mail was rejected by the input cap's
+    /// mail was rejected by the window cap's
     /// `validate_subscriber_mailbox` because the trampoline mailbox
     /// hadn't been registered yet (init runs in
     /// `spawn_actor` step 4, registration is step 5–7).
@@ -356,8 +356,8 @@ impl Component {
         // export rather than calling it here. `instantiate` runs
         // inside `spawn_actor` step 4 — BEFORE the trampoline mailbox
         // is registered (step 5–7). A wire-time send like
-        // `aether.input.subscribe { mailbox: self.mailbox_id() }`
-        // would race the input cap's `validate_subscriber_mailbox`
+        // `aether.window.subscribe { mailbox: self.mailbox_id() }`
+        // would race the window cap's `validate_subscriber_mailbox`
         // and warn-drop. `WasmTrampoline::wire` fires this hook
         // post-registration via the `NativeActor::wire` lifecycle
         // method. wire stays one-shot — the trampoline drops the

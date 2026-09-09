@@ -342,7 +342,7 @@ impl NativeActor for HttpServerCapability {
     /// Claim a route for the *sending* actor (ADR-0130), resolved from
     /// the inbound envelope's host-stamped `Source` — forgery-proof
     /// and gated to in-process actors by construction, mirroring
-    /// `aether.input.subscribe_self`.
+    /// `aether.window.subscribe_self`.
     ///
     /// # Agent
     /// `RegisterRouteSelf { prefix, method, kind }`, typically sent

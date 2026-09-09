@@ -57,10 +57,10 @@ pub struct BootTornDown {
 
 /// Broadcast payload the probe emits on each `Key` input dispatch,
 /// carrying the pressed key `code`. Lets the ADR-0021 input round-trip
-/// scenarios count `aether.input` fan-out deliveries the same way
+/// scenarios count `aether.window` fan-out deliveries the same way
 /// [`TickObserved`] counts lifecycle ticks — `Key` is a genuine input
-/// interrupt, so it exercises the `aether.input` subscribe / unsubscribe
-/// / drop-clears path that `Tick` no longer does (issue 1490).
+/// interrupt, so it exercises the `aether.window` subscribe /
+/// unsubscribe / drop-clears path that `Tick` does not.
 #[aether_data::kind(name = "aether.test_fixture.key_observed")]
 pub struct KeyObserved {
     pub code: u32,
@@ -68,7 +68,7 @@ pub struct KeyObserved {
 
 /// Broadcast payload the probe emits on each `TextInput` dispatch,
 /// echoing the committed `text`. Lets the ADR-0021 input round-trip
-/// scenario assert the `aether.input` cap fanned a `TextInput` out to a
+/// scenario assert the `aether.window` cap fanned a `TextInput` out to a
 /// subscriber — the guard for the new text-stream fan-out handler being
 /// wired up, mirroring how [`KeyObserved`] guards the `Key` fan-out.
 #[aether_data::kind(name = "aether.test_fixture.text_input_observed")]

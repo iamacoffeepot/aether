@@ -717,7 +717,7 @@ fn on_dehydrate_save_state_populates_bundle() {
 /// the trampoline mailbox is registered) into the trampoline's
 /// `NativeActor::wire` body (post-registration), so wire-time
 /// `subscribe_input` mail validates against a live closure
-/// entry rather than racing the input cap's
+/// entry rather than racing the window cap's
 /// `validate_subscriber_mailbox`. The fixture writes 0x77 to
 /// offset 100 from inside its `wire` export; reading it back
 /// after `Component::wire()` proves the call dispatched.

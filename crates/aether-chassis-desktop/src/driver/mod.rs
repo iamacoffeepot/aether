@@ -61,10 +61,9 @@ pub struct DesktopRenderIntegration {
     queue: Arc<Mailer>,
     /// `aether.lifecycle` mailbox id, cached at boot. Each redraw
     /// fires one `LifecycleAdvance` here; the cap broadcasts the `Tick`
-    /// stage directly to its stage subscribers (issue 1490 retired the
-    /// `Tick → aether.input` relay; components subscribe `Tick` on
-    /// `aether.lifecycle`), then the driver waits for settlement before
-    /// submitting the frame.
+    /// stage directly to its stage subscribers (components subscribe
+    /// `Tick` on `aether.lifecycle`), then the driver waits for
+    /// settlement before submitting the frame.
     lifecycle_mailbox: MailboxId,
     kind_lifecycle_advance: aether_data::KindId,
     /// `aether.lifecycle.advance_reply` inbox claimed at boot (issue

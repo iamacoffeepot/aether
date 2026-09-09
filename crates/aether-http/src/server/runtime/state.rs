@@ -548,7 +548,7 @@ impl HttpSupervisorState {
     /// Release `mailbox`'s membership in the `(prefix, method)` route
     /// (ADR-0136); the last member's release drops the route.
     /// Idempotent — releasing a route that isn't held (or a set the
-    /// mailbox never joined) is still `Ok`, mirroring the input cap's
+    /// mailbox never joined) is still `Ok`, mirroring the window cap's
     /// unsubscribe semantics.
     ///
     /// # Panics

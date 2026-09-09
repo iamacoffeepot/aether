@@ -52,7 +52,7 @@ pub struct MailboxDescriptor {
 /// stores no per-mailbox category state.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MailboxCategory {
-    /// A chassis cap or framework-level actor (`aether.input`,
+    /// A chassis cap or framework-level actor (`aether.window`,
     /// `aether.render`, `aether.audio`, `aether.fs`, `aether.log`,
     /// `aether.component`, `aether.diagnostics`, etc.). Renders as
     /// `actor:NAME`.
