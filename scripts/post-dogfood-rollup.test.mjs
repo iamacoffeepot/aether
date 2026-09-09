@@ -208,3 +208,29 @@ test('the evidence image is the frame the judge graded, not a re-capture', () =>
   // contradicting the verdict printed directly above it.
   assert.doesNotMatch(comment, /\/frame\.png/)
 })
+
+test('a finding ending in a backslash does not split its table row', () => {
+  const rollup = {
+    succeeded: true,
+    buildGreen: null,
+    summary: 'Walked the path helper.',
+    artifact: { verdict: 'correct', rationale: 'Rendered.' },
+    friction: {
+      blocker: [],
+      'missing-primitive': [],
+      // A judge quoting a Windows path or a trailing regex escape writes a
+      // value ending in `\`. Escaping the pipe alone leaves that backslash to
+      // consume the escape, and the `|` that follows reopens the row mid-cell.
+      papercut: [{ severity: 'low', where: 'save\\', what: 'a | b', suggested: 'normalize' }],
+      'doc-gap': [],
+    },
+    softHolds: [],
+  }
+
+  const row = renderComment(rollup, false, { attempt: 1, runRef: '3088/12345-1' })
+    .split('\n')
+    .find((line) => line.includes('normalize'))
+  const columns = row.slice(1, -1).split(/(?<!\\)\|/)
+  assert.equal(columns.length, 4, `four cells, got ${columns.length}: ${row}`)
+  assert.equal(columns[1].trim(), 'save\\\\')
+})

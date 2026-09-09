@@ -1,39 +1,27 @@
-//! aether-data: the universal data layer (ADR-0069).
+//! The universal data layer: the single home for everything that describes
+//! typed bytes. What makes a kind a kind, what its schema looks like, how its
+//! identity is computed, how the bytes are walked. Mail dispatch and
+//! `aether-codec` are its main consumers.
 //!
-//! Single home for everything that describes typed bytes — what makes
-//! a kind a kind, what its schema looks like, how its identity is
-//! computed, how the bytes are walked. Used by mail dispatch (the
-//! original consumer), by the codec (`aether-codec`), and by any
-//! future schema-described data consumer (the prompt-system save
-//! format being the next).
+//! A payload picks one of three tiers as part of its contract, never two:
 //!
-//! Three payload tiers (ADR-0005, ADR-0059):
-//!   - POD: `#[repr(C)]` types implementing `bytemuck::NoUninit` /
-//!     `AnyBitPattern`. Encoded as their native byte layout; decoded
-//!     zero-copy to `&T` or `&[T]`. Used for vertex streams, fixed-
-//!     layout structs, anything where throughput or zero-copy matters.
-//!   - Structural: types that implement `Schema` (and therefore the owned
-//!     wire codec). Encoded with the structured wire format (ADR-0118).
-//!     Used for small control messages with Option/Vec/enum shape.
-//!   - Storage: TLV records with content-hashed field tags (ADR-0059).
-//!     Used wherever bytes outlive the binary that wrote them.
+//! - POD: `#[repr(C)]` types implementing `bytemuck::NoUninit` /
+//!   `AnyBitPattern`. Encoded as their native byte layout and decoded
+//!   zero-copy to `&T` or `&[T]`, for vertex streams and anything else where
+//!   throughput matters.
+//! - Structural: types implementing `Schema`, encoded with the structured
+//!   wire format (ADR-0118), for small control messages with `Option`, `Vec`,
+//!   or enum shape.
+//! - Storage: TLV records with content-hashed field tags (ADR-0059), for
+//!   bytes that outlive the binary that wrote them.
 //!
-//! A type picks one tier — not both mail shapes, and never mail plus
-//! storage — as part of its contract.
-//!
-//! ## What lives here
-//!
-//! - **Typed-id newtypes** (ADR-0064 / ADR-0065): `MailboxId`, `KindId`,
-//!   plus `Tag`, tag-bit constants, and FNV hashing.
-//! - **Schema vocabulary** (ADR-0019 / ADR-0031 / ADR-0032): `SchemaType`,
-//!   `LabelNode`, `KindShape`, `KindLabels`, `InputsRecord`, canonical
-//!   bytes encoders.
-//! - **Kind / Schema / `CastEligible` traits** (ADR-0030): the binding
-//!   between a Rust type and its wire form.
-//! - **Encode / decode helpers**: the `encode` / `decode` family for
-//!   POD and structured kinds.
-//! - **`__inventory`** (issue #243): native-only auto-collection of
-//!   `#[derive(Kind)]` types into the substrate's descriptor list.
+//! What lives here: the typed-id newtypes (`MailboxId`, `KindId`, `Tag`, the
+//! tag bits, FNV hashing); the schema vocabulary (`SchemaType`, `LabelNode`,
+//! `KindShape`, `KindLabels`, `InputsRecord`, and the canonical-bytes
+//! encoders); the `Kind`, `Schema`, and `CastEligible` traits that bind a Rust
+//! type to its wire form; the `encode` / `decode` helpers for POD and
+//! structured kinds; and `__inventory`, the native-only auto-collection of
+//! `#[derive(Kind)]` types into the substrate's descriptor list.
 
 #![no_std]
 

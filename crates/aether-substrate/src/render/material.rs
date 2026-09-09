@@ -183,7 +183,6 @@ fn material_params_bind_group(
     })
 }
 
-//noinspection DuplicatedCode -- material UVs and the main pipeline's colors require distinct layouts.
 fn material_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     const ATTRIBUTES: &[wgpu::VertexAttribute] = &[
         wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },

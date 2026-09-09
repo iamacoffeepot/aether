@@ -116,7 +116,6 @@ impl<A> InheritCtx<A> {
 }
 
 impl<A: Addressable> MailSender for InheritCtx<A> {
-    //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
@@ -133,7 +132,6 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
         );
     }
 
-    //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
@@ -154,7 +152,6 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
         );
     }
 
-    //noinspection DuplicatedCode
     // Runtime-name send escape hatch (the `Resolver::send_to_named` contract):
     // the recipient name is supplied at runtime, no compile-time `R` to resolve.
     #[allow(clippy::disallowed_methods)]
@@ -176,7 +173,6 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
         self.binding.prev_correlation()
     }
 
-    //noinspection DuplicatedCode
     fn send_detached<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
@@ -193,7 +189,6 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
         );
     }
 
-    //noinspection DuplicatedCode
     // Runtime-name detached escape hatch — the `send_to_named` counterpart.
     #[allow(clippy::disallowed_methods)]
     // the runtime-name routing path itself — same ADR-0099 §4 parse → fold as `send_to_named`
@@ -202,7 +197,6 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
         self.binding.send_mail_with_lineage(mailbox_id_from_path(name).0, K::ID.0, &bytes, 1, None, None);
     }
 
-    //noinspection DuplicatedCode
     // By-id detached send: `None` / `None` lineage mints a fresh root
     // rather than inheriting this ctx's captured chain (ADR-0080 §7).
     fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
@@ -307,7 +301,6 @@ impl<A: Addressable> MailSender for RootCtx<A> {
         self.binding.send_mail_with_lineage(mailbox_id_from_path(name).0, K::ID.0, &bytes, 1, None, None);
     }
 
-    //noinspection DuplicatedCode
     // By-id detached send. A root ctx already mints a fresh chain per send,
     // so this matches its other sends' `None` / `None` lineage.
     fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {

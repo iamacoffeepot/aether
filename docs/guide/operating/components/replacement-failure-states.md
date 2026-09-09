@@ -62,8 +62,8 @@ After any replace error:
    Do not drop, refill, or retry by guess.
 
 A roll-forward by known-good hash is appropriate only after the owner accepts
-the current state and the mailbox is still safe to mutate. `drain_timeout_ms`
-is currently ignored and cannot repair a failed splice.
+the current state and the mailbox is still safe to mutate. There is no drain
+knob to reach for: the splice is structural, so no argument slows or retries it.
 
 ## Designing a discriminating probe
 

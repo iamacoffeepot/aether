@@ -28,7 +28,10 @@ The project is a Rust 2024 workspace and is still moving. Current code defines
 what ships; Accepted Architecture Decision Records under `docs/adr/` preserve
 the load-bearing design and its rejected alternatives. A few applications built
 on the engine live in this tree today, the bloomery coordinator and the puppet
-mascot among them; they consume the library rather than belong to it.
+mascot among them; they consume the library rather than belong to it. The
+engine is written with an AI coding agent as a deliberate bet, under recorded
+decisions and CI gates; [How this is built](#how-this-is-built) says exactly
+what that means.
 
 ## Start here
 
@@ -73,6 +76,13 @@ and [Guest/native boundaries](docs/guide/architecture/guest-native-boundary.md)
 for the detailed model.
 
 ## Build and run
+
+Prerequisites: `rust-toolchain.toml` pins the toolchain and adds the
+`wasm32-unknown-unknown` target, so rustup installs both on first use. On Linux
+the audio and GPU crates need system packages: `libasound2-dev` to build, and
+`mesa-vulkan-drivers` to run the rendering tests without a GPU (CI installs
+exactly these). Component scenarios in the test suite need the wasm built
+first: run `cargo xtask dist` once before `cargo test`, or they skip.
 
 The workspace root has no default binary.
 
@@ -122,6 +132,11 @@ commit) and none are published to crates.io yet. APIs move between minor
 versions; the ADRs record why, and `docs/adr/` is the place to check before
 depending on a subsystem. What changed since 0.3.0-alpha is in
 [CHANGELOG.md](CHANGELOG.md).
+
+Error policy: `unwrap` and `expect` are clippy-denied in production code, so
+the several thousand hits a grep finds are test assertions. Errors cross
+boundaries as typed enums. A trap inside the native runtime aborts the process
+on purpose (ADR-0063) rather than continuing on corrupted state.
 
 Working today: the desktop, headless, hub, substrate-harness, and bloomery
 chassis; the mail scheduler and settlement tracking; wasm component load, drop,
@@ -288,7 +303,7 @@ not translated by mechanical substitution. Human contributors can start at
 - `CLAUDE.md` / `.claude/skills/` — the same for Claude Code.
 - `.github/workflows/` — hosted CI; conventions in its README.
 
-Build the guide with:
+Build the guide with mdBook (`cargo install mdbook`; CI pins 0.4.40):
 
 ```sh
 mdbook build docs
@@ -305,8 +320,9 @@ sit under `docs/adr/`, each carrying the alternatives that were rejected and
 why. Every change arrives through a pull request that a required CI aggregate
 gates on formatting, clippy with warnings denied, rustdoc, the sharded test
 suite, duplicate-code detection, unused-dependency detection, and a check on
-newly added lint suppressions. `main` is squash-merged and never pushed to
-directly.
+newly added lint suppressions. Pull requests land on `main` by squash-merge;
+the in-tree pipeline lands its own work through the same gates and mirrors the
+result here.
 
 ## License
 

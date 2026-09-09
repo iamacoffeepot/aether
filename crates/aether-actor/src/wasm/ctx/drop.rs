@@ -106,7 +106,6 @@ impl<'a> WasmDropCtx<'a> {
 }
 
 impl MailSender for WasmDropCtx<'_> {
-    //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
@@ -123,7 +122,6 @@ impl MailSender for WasmDropCtx<'_> {
         );
     }
 
-    //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
@@ -140,7 +138,6 @@ impl MailSender for WasmDropCtx<'_> {
         );
     }
 
-    //noinspection DuplicatedCode
     // Runtime-name send escape hatch (the `MailSender::send_to_named` contract):
     // the recipient name is supplied at runtime, no compile-time `R` to resolve.
     #[allow(clippy::disallowed_methods)]
@@ -155,7 +152,6 @@ impl MailSender for WasmDropCtx<'_> {
         mail::prev_correlation()
     }
 
-    //noinspection DuplicatedCode
     fn send_detached<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
@@ -172,7 +168,6 @@ impl MailSender for WasmDropCtx<'_> {
         );
     }
 
-    //noinspection DuplicatedCode
     // Runtime-name detached escape hatch — the `send_to_named` counterpart.
     #[allow(clippy::disallowed_methods)]
     // the runtime-name routing path itself — same ADR-0099 §4 parse → fold as `send_to_named`
@@ -181,7 +176,6 @@ impl MailSender for WasmDropCtx<'_> {
         mail::send_mail(mailbox_id_from_path(name).0, K::ID.0, &bytes, 1, true, self.mailbox);
     }
 
-    //noinspection DuplicatedCode
     // By-id detached send — the by-name body with the caller's id.
     fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
         let bytes = payload.encode_into_bytes();

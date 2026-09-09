@@ -5,7 +5,6 @@ use syn::Type;
 use crate::handler_parse::{FallbackFn, HandlerClass, HandlerFn};
 use crate::opts::{ActorCardinality, ActorOpts};
 
-//noinspection DuplicatedCode -- proc-macro crates intentionally do not depend on one another for this leaf helper.
 fn to_screaming_snake_case(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     for (i, ch) in s.chars().enumerate() {

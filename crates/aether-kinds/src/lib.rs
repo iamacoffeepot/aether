@@ -1,13 +1,14 @@
-//! aether-kinds: the substrate's own mail vocabulary. Imported by any
-//! actor that wants to send mail to the substrate, receive mail the
-//! substrate dispatches (tick, input), or consume the substrate's sink
-//! kinds (`draw_triangle`). See ADR-0005 / ADR-0030.
+//! The substrate's own mail vocabulary: the kinds an actor sends to the
+//! substrate, receives from it (input events, lifecycle stages), or exchanges
+//! with a peer through it. Kinds owned by one capability live with that
+//! capability's crate instead; `aether.draw_triangle`, for instance, belongs
+//! to `aether-render`.
 //!
-//! Kind ids are `fnv1a_64(KIND_DOMAIN ++ canonical(name, schema))` — a compile-time
-//! const on the `Kind` trait (ADR-0030 Phase 2). Substrate boot and
-//! guest SDK arrive at the same id independently; no host-fn resolve
-//! round-trip. Consumers address kinds via the `NAME` constants and
-//! the derived `ID` constants on the impls below.
+//! A kind id is `fnv1a_64(KIND_DOMAIN ++ canonical(name, schema))`, a
+//! compile-time constant on the `Kind` trait (ADR-0030). Substrate boot and
+//! the guest SDK arrive at the same id independently, with no host-fn resolve
+//! round trip, so address a kind through the `NAME` and `ID` constants on its
+//! impl.
 
 #![no_std]
 

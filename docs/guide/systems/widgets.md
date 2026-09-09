@@ -1949,11 +1949,9 @@ interactive subscriptions: panel/console/mover lifecycle and render roles are
 unchanged, and console/mover continue subscribing to `WindowSize` directly.
 The shell itself owns no lifecycle, render, or window-size work.
 
-(The shelved `aether-kit-workbench` terrain annotation workbench was the
-concrete peer-first assembly of this model — a specialized tool panel, a
-camera-owning viewport, a non-input-owning `ConsoleOverlay`, and the one
-`EditorShell` routing their three non-overlapping regions; git history holds
-it.)
+The assembly this model is built for is peer-first: a tool panel, a
+camera-owning viewport, a non-input-owning `ConsoleOverlay`, and one
+`EditorShell` routing their non-overlapping regions.
 
 ## Layout
 
@@ -2059,7 +2057,7 @@ without resetting its label or any sibling state:
 {
   "mails": [{
     "engine_id": "<engine-id>",
-    "recipient_name": "aether.component/aether.embedded:panel/aether.embedded:button",
+    "address": "aether.component/aether.embedded:panel/aether.embedded:button",
     "kind_name": "aether.kit.widget.set_state",
     "params": {
       "state": {

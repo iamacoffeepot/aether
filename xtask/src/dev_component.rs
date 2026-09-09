@@ -53,6 +53,15 @@ struct LiveBinding {
     canonical_name: Option<String>,
 }
 
+impl LiveBinding {
+    /// What `replace_component` resolves through its address resolver: the
+    /// canonical lineage the load handed back when there is one, else the
+    /// tagged mailbox id `--mailbox-id` supplied. The tool takes either.
+    fn address(&self) -> &str {
+        self.canonical_name.as_deref().unwrap_or(&self.mailbox_id)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct UploadReply {
     hash: String,
@@ -267,7 +276,7 @@ async fn run_pass<B: ArtifactBuilder, C: ToolCaller>(
                 "replace_component",
                 json!({
                     "engine_id": engine_id,
-                    "mailbox_id": current.mailbox_id,
+                    "address": current.address(),
                     "selector": uploaded.hash,
                 }),
             )
@@ -345,8 +354,10 @@ mod tests {
     use super::*;
     use clap::{CommandFactory, Parser, error::ErrorKind};
     use notify::event::{AccessKind, CreateKind, ModifyKind, RemoveKind, RenameMode};
-    use std::collections::VecDeque;
+    use std::collections::{BTreeSet, VecDeque};
+    use std::fs;
     use std::sync::{Arc, Mutex};
+    use syn::{Attribute, Item, Meta, parse_file};
 
     struct FakeBuilder {
         results: VecDeque<Result<PathBuf, &'static str>>,
@@ -535,9 +546,72 @@ mod tests {
             ["upload_component", "load_component", "upload_component", "replace_component"]
         );
         assert_eq!(calls[1].1["export"], "example.echo");
-        assert_eq!(calls[3].1["mailbox_id"], mailbox_id);
+        assert_eq!(calls[3].1["address"], "aether.component/example:echo");
         assert_eq!(calls[3].1["selector"], "hash-2");
         assert!(calls[3].1.get("export").is_none());
+    }
+
+    /// The dev loop's replace request and the MCP tool's `ReplaceComponentArgs`
+    /// sit in different crates, and `aether-mcp` publishes no library target, so
+    /// nothing holds the two shapes together at compile time. Issue 5864 was
+    /// exactly that drift: the loop kept sending the retired `mailbox_id` field
+    /// after the tool renamed it to `address`, and every replace pass was
+    /// refused while the build and upload steps still reported success. Read the
+    /// field set out of the tool's own source and hold the request against it.
+    #[tokio::test]
+    async fn the_replace_request_carries_the_field_set_the_mcp_tool_declares() {
+        let mut builder = builder([Ok(PathBuf::from("/tmp/component.wasm"))]);
+        let mut caller = caller([Ok(json!({ "hash": "hash-1" })), Ok(json!({ "capabilities": [] }))]);
+        let calls = caller.calls.clone();
+        let mut binding = Some(LiveBinding {
+            mailbox_id: mailbox_id(),
+            canonical_name: Some("aether.component/aether.embedded:echo".to_string()),
+        });
+
+        run_pass(&mut builder, &mut caller, "engine", None, &mut binding).await.expect("replace pass");
+
+        let (tool, request) = calls.lock().expect("calls mutex")[1].clone();
+        assert_eq!(tool, "replace_component");
+        let sent: BTreeSet<String> = request.as_object().expect("a request object").keys().cloned().collect();
+        let (declared, required) = replace_component_fields();
+        assert!(required.is_subset(&sent), "replace_component requires {required:?}; the dev loop sends {sent:?}");
+        assert!(sent.is_subset(&declared), "the dev loop sends {sent:?}; replace_component declares {declared:?}");
+    }
+
+    /// The declared and required field names of `aether-mcp`'s
+    /// `ReplaceComponentArgs`, read from its source. Required is every field
+    /// serde cannot fill in, so an omitted one is a refused call rather than a
+    /// default.
+    fn replace_component_fields() -> (BTreeSet<String>, BTreeSet<String>) {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/aether-mcp/src/args.rs");
+        let source = fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let args = parse_file(&source)
+            .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Struct(item) if item.ident == "ReplaceComponentArgs" => Some(item),
+                _ => None,
+            })
+            .expect("aether-mcp declares ReplaceComponentArgs");
+
+        let mut declared = BTreeSet::new();
+        let mut required = BTreeSet::new();
+        for field in args.fields {
+            let name = field.ident.expect("a named field").to_string();
+            if !field.attrs.iter().any(fills_in_by_default) {
+                required.insert(name.clone());
+            }
+            declared.insert(name);
+        }
+        (declared, required)
+    }
+
+    fn fills_in_by_default(attr: &Attribute) -> bool {
+        let Meta::List(list) = &attr.meta else {
+            return false;
+        };
+        attr.path().is_ident("serde") && list.tokens.to_string().contains("default")
     }
 
     #[tokio::test]
@@ -550,8 +624,10 @@ mod tests {
 
         run_pass(&mut builder, &mut caller, "engine", None, &mut binding).await.expect("replace pass");
 
+        let calls = calls.lock().expect("calls mutex").clone();
+        assert_eq!(calls[1].0, "replace_component");
+        assert_eq!(calls[1].1["address"], original.mailbox_id, "a nameless binding addresses by its mailbox id");
         assert_eq!(binding, Some(original));
-        assert_eq!(calls.lock().expect("calls mutex")[1].0, "replace_component");
     }
 
     #[tokio::test]

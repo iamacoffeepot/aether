@@ -204,7 +204,6 @@ fn overlay_shader_module(device: &wgpu::Device, label: &str, body: &str) -> wgpu
 /// pipeline expects. Exposed so chassis-side helpers building extra
 /// pipelines (e.g. desktop's wireframe overlay) can match the layout
 /// without re-deriving offsets.
-//noinspection DuplicatedCode -- this color layout is distinct from the material pipeline's UV layout.
 #[must_use]
 pub fn vertex_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
     const ATTRIBUTES: &[wgpu::VertexAttribute] = &[

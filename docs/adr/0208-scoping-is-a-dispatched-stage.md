@@ -1,7 +1,8 @@
 # ADR-0208: Scoping Is A Dispatched Stage
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-20
+- **Amended:** 2026-09-09 — status: implemented on `main`; `StageId::Scope` is a dispatched stage and `cargo xtask scope set` is the transport its lane writes through, against a `ScopeRevision` the commission reader refuses when stale (`43c972872`).
 
 ## Context
 

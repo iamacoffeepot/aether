@@ -40,13 +40,15 @@ Use the narrowest introspection call that answers the question:
 
 - Start `describe_kinds` with `families: true` for a digest.
 - Use `prefix` for one namespace or `names` for exact kinds.
-- Add `full: true` only after selecting `prefix` or `names`; bare full output is
-  rejected to keep responses bounded.
+- Add `detail: "schema"` only after selecting `prefix` or `names`; a bare
+  schema-detail request is rejected to keep responses bounded. `families: true`
+  ignores `detail`.
 - Use `describe_handlers` for native mailbox request → reply contracts.
 - Use `describe_component` for a wasm component's handlers, reply contracts,
   fallback, docs, and Config kind.
 - Use `compare_component_contracts` before switching consumers to a revision.
-  Give both a baseline and candidate `{ engine_id, component }`; separate
+  Give both a `baseline` and a `candidate` subject, each `{ engine_id?,
+  address }` with a textual address; separate
   engines are expected when one revision changes a kind schema that a single
   registry correctly refuses to host twice. The comparison resolves each
   textual lineage to its canonical mailbox identity, refreshes each engine's
@@ -96,9 +98,13 @@ Use `send_mail_traced` when any of these are true:
 - handler and queue timing matter;
 - settlement itself is under investigation.
 
-The default traced projection is a compact, indented `tree`. `full: true`
-returns nodes and parent edges instead. There is no separate public MCP
-`trace_tail` tool; `send_mail_traced` performs the guided ring walk internally.
+The default traced projection is a compact, indented `tree`. `format: "nodes"`
+returns the complete per-node `mails` vector instead, omitting `tree` and
+carrying the same `node_count`. There is no separate public MCP `trace_tail`
+tool; `send_mail_traced` performs the guided ring walk internally.
+
+`format` and `detail` select a render shape; `full` on the component tools
+means "expand documentation" and never switches a reply shape.
 
 Do not use `fire_and_forget` as a health check. `dispatched` confirms the call
 was written or its immediate traced ack arrived; it does not prove downstream
@@ -127,6 +133,21 @@ distribution. A zero sample count is a seeded handler, not observed work.
 a reference image, and/or persist the original full-resolution PNG with an
 absolute `save_path`. Checks operate on full-resolution RGBA even when the
 inline image is reduced or omitted.
+
+`window_id` is required and has no default: desktop capture never guesses a
+primary, focused, or current window, so omitting the field is a deserialize
+error rather than a fallback. Pass the tagged `mbx-…` string
+`aether.window.list` reports, or the id a window-create reply returned. It is a
+string because a real window id is an ADR-0099 lineage fold near 2^60, which a
+JSON number cannot carry to a client that parses numbers as doubles; a decimal
+`u64` is still accepted for a synthetic or harness-scale id.
+
+Each `checks` entry may carry a `region` (`{min_x, min_y, max_x, max_y}`) that
+restricts the reduction to the frame-clamped intersection of that rect, so a
+widget's fill can be asserted inside its own screen rect rather than folded
+into one whole-scene number. `coverage` then divides by the clamped region's
+pixel count, while `centroid` and `bounding_box` still report absolute frame
+coordinates. Omit `region` to score the whole frame.
 
 Mail in `mails` runs atomically before readback; `after_mails` runs after it.
 That makes capture capable of engine mutation. Empty bundles make it an
@@ -192,7 +213,7 @@ Timeouts bound the observer; they do not cancel engine work.
 
 These are await bounds, not whole-tool deadlines. Plain `send_mail` starts its
 bound after schema lookup/encoding. For traced mail,
-`settlement_timeout_ms` bounds the initial ack/settlement collection; after a
+`settlement_timeout_millis` bounds the initial ack/settlement collection; after a
 successful settle, the guided per-actor trace walk uses ordinary `call_one`
 queries and is not covered by that value.
 
@@ -219,7 +240,8 @@ Before terminate, restart, replace, or retry, capture what applies:
 - [ ] narrow `describe_kinds` output for request and reply kinds;
 - [ ] `describe_handlers` or `describe_component` output;
 - [ ] `actor_logs` result with cursor and truncation fields;
-- [ ] compact or full `send_mail_traced` result, if reproduction was safe;
+- [ ] `send_mail_traced` result in either `tree` or `nodes` format, if
+      reproduction was safe;
 - [ ] `actor_cost` rows for a slow handler;
 - [ ] capture verdict and a full-resolution `save_path`, when visual;
 - [ ] host/tunnel/substrate stderr for events outside actor handlers.

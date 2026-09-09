@@ -88,7 +88,6 @@ impl WasmActor for Probe {
         Ok(Probe { tick_count: 0, render: SetRender::default(), asset: AssetProbeResult::default() })
     }
 
-    //noinspection DuplicatedCode
     /// Issue 640: explicit subscribe in `wire`; init can't mail (its ctx
     /// has no send surface, issue 703).
     ///
