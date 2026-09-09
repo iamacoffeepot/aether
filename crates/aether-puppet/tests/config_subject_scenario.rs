@@ -64,6 +64,13 @@ const TOLERANCE: u8 = 5;
 /// geometry looks like. Between them it says nothing about how much of a
 /// teapot an illustrator inks, because that is a judgement for a person
 /// looking at a window.
+///
+/// Measured, so the band is known to bracket rather than merely contain:
+/// the demo frame draws 2.7% of it, and every one of the three failures
+/// above draws exactly 0.0% and lands under the floor. The floor is the
+/// same 0.1% `draws_scenario` uses, an order of magnitude under the
+/// measurement, so it answers "did the pen reach the frame" and nothing
+/// about the drawing's density.
 const FLOOR: f32 = 0.001;
 const CEILING: f32 = 0.60;
 
@@ -148,5 +155,4 @@ fn the_demo_config_draws_the_demo_subject_with_no_mail() {
         "a config-named .dsl subject should put strokes on the frame; coverage {drawn} is either an empty frame \
          or a filled one",
     );
-    assert!(drawn > 0.9, "PROBE (remove): measured coverage {drawn}");
 }

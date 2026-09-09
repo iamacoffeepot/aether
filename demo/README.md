@@ -37,10 +37,15 @@ the thing you would upload.
 
 ## What appears
 
-A window titled `aether` holding a line-art teapot, revolving once every
-twelve seconds. Drag with the mouse to orbit it yourself and the wheel to
-dolly in and out — the turntable restates its own pose each frame, so the
-drag reads as a nudge against a moving subject rather than a handover.
+A line-art teapot, revolving once every twelve seconds. Drag with the mouse
+to orbit it yourself and the wheel to dolly in and out — the turntable
+restates its own pose each frame, so the drag reads as a nudge against a
+moving subject rather than a handover.
+
+The packaged window is titled `aether`; the developer run gets the chassis's
+own default title, because a boot manifest deliberately drops its chassis
+settings (a hub-spawned engine is runtime-managed, not a product) while a
+depot manifest carries them.
 
 ## What the four files are
 
