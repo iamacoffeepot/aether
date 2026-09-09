@@ -50,6 +50,19 @@ cache_write_1h = 0
 cache_write = 0
 output = 12000000
 
+# Muse Spark 1.3 contributor tier ($0.10 / $0.20 per M, cached input $0.002/M),
+# as the published cards had it on 2026-09-09; Meta has not itemised a 1.3
+# card, and no cache-write or long-context band is published, so those stay
+# zero. Unconfirmed against a bill: the first Muse 1.3 bloom's billed laps are
+# the check, the way the grok-4.6 row was confirmed.
+[price_tables.standard.rows."muse-spark-1.3-contributor"]
+input = 100000
+cache_read = 2000
+cache_write_5m = 0
+cache_write_1h = 0
+cache_write = 0
+output = 200000
+
 [model_overrides.opus-high]
 agent = { harness = "Claude", model = "claude-opus-5" }
 reasoning_effort = "High"
