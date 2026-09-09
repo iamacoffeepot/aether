@@ -1,4 +1,4 @@
-//! Frozen pre-pin wire shape of the durable [`ScopeRun`](super::ScopeRun)
+//! Frozen pre-pin wire shape of the durable [`ScopeRun`]
 //! record (ADR-0187 / ADR-0214).
 //!
 //! The run record gained `instructions` so a pre-bloom scoping run can pin the

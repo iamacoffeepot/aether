@@ -16,16 +16,12 @@ use aether_bloomery::{
 use aether_chassis_bloomery::bloomery::{DispatchRecord, admit_model_dispatch, open_scope_run, reference_instructions};
 use aether_chassis_bloomery::store::{CommissionBackend, OutstandingOrder, StoreBackend};
 use aether_data::wire::from_bytes;
-use aether_harness_bloomery::{HarnessBuilder, HarnessRoots, Lane, LaneScript};
+use aether_harness_bloomery::{HarnessBuilder, HarnessRoots};
 
 #[test]
 fn a_scoping_run_under_a_unique_authorized_bundle_dispatches_that_bundle() {
     let roots = HarnessRoots::create();
-    let mut harness = HarnessBuilder::fixture()
-        .lane_axis(Lane::Scripted)
-        .script(&LaneScript::all_passing())
-        .roots(&roots)
-        .start("pinned-scope-run");
+    let mut harness = HarnessBuilder::fixture().roots(&roots).start("pinned-scope-run");
 
     let expected = reference_instructions().address();
     let commission = WorkpieceId("wp-scope".to_owned());
