@@ -242,9 +242,9 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
-          # Each leg uploaded under its own archive-stem name; flatten them
-          # into one directory so the release attaches the archives, not the
-          # per-leg folders they arrived in.
+          # Each leg uploaded its archives under one per-platform artifact
+          # name; flatten them into a single directory so the release attaches
+          # the archives themselves, not the three folders they arrived in.
           merge-multiple: true
 
       # The notes come from the tree at the tag: a `CHANGELOG.md` section for
