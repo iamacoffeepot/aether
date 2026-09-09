@@ -81,7 +81,7 @@ pub enum IntakeRefusal {
         /// The upload's claimed verdict.
         verdict: StageVerdict,
         /// The set that violated the stage/verdict contract.
-        failed_verifiers: VerifyFailureSet,
+        failed_verifiers: Box<VerifyFailureSet>,
     },
     /// An executor-fault verdict arrived against a stage that has no
     /// environment-fault lifecycle. Dispatched member stages (Construct /
@@ -222,7 +222,7 @@ fn verifier_failure_refusal(stage: StageId, upload: &UploadedEvidence) -> Option
     (!valid).then_some(IntakeRefusal::InvalidVerifierFailures {
         stage,
         verdict: upload.verdict,
-        failed_verifiers: upload.observation.failed_verifiers,
+        failed_verifiers: Box::new(upload.observation.failed_verifiers),
     })
 }
 

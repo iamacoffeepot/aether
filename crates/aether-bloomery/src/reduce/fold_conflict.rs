@@ -114,7 +114,7 @@ pub(super) fn reduce_fold_conflict(
         *bloom,
         workpiece,
         member.scope_revision,
-        progress,
+        &progress,
         DispatchTargets { subject, checkout: head },
         candidate.map(|current| current.tree),
         SealedLine::of(record, member),

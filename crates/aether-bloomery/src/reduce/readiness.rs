@@ -69,7 +69,7 @@ pub(super) fn construct_entry(bloom: BloomId, member: &Membership, sealed: Seale
         bloom,
         &member.workpiece,
         member.scope_revision,
-        StageProgress {
+        &StageProgress {
             stage,
             attempts: 1,
             candidate: None,
@@ -156,7 +156,7 @@ pub(super) fn reduce_splice_assembled(
         *bloom,
         workpiece,
         member.scope_revision,
-        progress,
+        &progress,
         DispatchTargets { subject: member.scope_revision, checkout: head },
         SealedLine {
             configs: member.configs.layered_over(record.spec.configs()),
