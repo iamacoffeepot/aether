@@ -2,6 +2,7 @@
 //! (it evolves the projection) or snapshot-inert (it carries an outbox row the
 //! host drains and turns into I/O) — the reducer never does I/O itself.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
@@ -20,10 +21,6 @@ use crate::values::{
 
 /// The ordered effects a decision applies to the projection (and, in
 /// production, the outbox/store).
-// The complete pre-check replay state makes its record variant larger than the
-// dispatch variants. `aether_data::Schema` deliberately has no boxed-field
-// representation, so the persisted vocabulary must retain the inline value.
-#[allow(clippy::large_enum_variant)]
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Decision {
     /// Claim a workpiece's active membership for a bloom.
@@ -941,7 +938,7 @@ pub enum Decision {
         manifest: PipelineManifest,
     },
     /// Replace the complete journal-derived pre-check state, or clear it.
-    RecordPrecheckState { bloom: BloomId, state: Option<PrecheckState> },
+    RecordPrecheckState { bloom: BloomId, state: Option<Box<PrecheckState>> },
     /// Ask the host to scratch-fold the newest immutable candidate plan.
     QueuePrecheckPlan { bloom: BloomId, plan: PrecheckPlan },
     /// Offer a prepared node for idle-only admission.

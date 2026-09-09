@@ -1,7 +1,10 @@
 //! Immutable aggregate pre-check plans and their journal-replayable state.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use aether_data::Schema;
+use aether_data::schema::{LabelNode, SchemaType};
 use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
@@ -141,6 +144,15 @@ pub struct PrecheckState {
     pub promoted: bool,
     /// Whether an operator hold currently pauses idle admission.
     pub paused: bool,
+}
+
+// `Box` is wire-transparent under serde. Giving this one local instantiation
+// the same schema lets the journal keep its large replay state off the enum's
+// stack representation without changing the persisted shape.
+impl Schema for Box<PrecheckState> {
+    const SCHEMA: SchemaType = PrecheckState::SCHEMA;
+    const LABEL: Option<&'static str> = PrecheckState::LABEL;
+    const LABEL_NODE: LabelNode = PrecheckState::LABEL_NODE;
 }
 
 impl PrecheckState {

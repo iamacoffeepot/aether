@@ -1,4 +1,6 @@
+use crate::bloomery::executor::LocalExecutorError;
 use std::cell::Cell;
+use std::io;
 
 use aether_bloomery::testing::digest;
 use aether_bloomery::{
@@ -18,6 +20,7 @@ enum Probe {
     Pending,
     Absent,
     Running,
+    Fault,
 }
 
 struct Port {
@@ -58,6 +61,9 @@ impl ExecutorPort for Port {
             Probe::Pending => Settled::InFlight,
             Probe::Absent => Settled::Answered(Ok(None)),
             Probe::Running => Settled::Answered(Ok(Some(WorkHandle::new(order.nonce.clone())))),
+            Probe::Fault => Settled::Answered(Err(ExecutorPortError::Local(LocalExecutorError::Spawn(
+                io::Error::from(io::ErrorKind::ArgumentListTooLong),
+            )))),
         }
     }
     fn observe(&self, _: &WorkHandle) -> Settled<Result<RunObservation, ExecutorPortError>> {
@@ -113,7 +119,7 @@ fn project(store: &mut SqliteStore, state: Option<PrecheckState>, key: &str) -> 
             idempotency_key: IdempotencyKey(key.to_owned()),
             fact: Fact::RequestPrecheck { bloom: BloomId(digest(1)), node: digest(2) },
         },
-        vec![Decision::RecordPrecheckState { bloom: BloomId(digest(1)), state }],
+        vec![Decision::RecordPrecheckState { bloom: BloomId(digest(1)), state: state.map(Box::new) }],
     );
     let mut projection = PrecheckProjection::default();
     assert!(projection.refresh(store).unwrap());
@@ -207,6 +213,8 @@ fn a_final_join_settles_idle_submission_before_becoming_required() {
         let (mut store, payload, mut state) = fixture();
         let entry = enqueue(&mut store, &payload);
         record_dispatch(&mut store, &record(&entry, &payload)).unwrap();
+        let nonce = dispatch_nonce(entry.sequence);
+        let deadline = store.lookup_order(&nonce.0).unwrap().unwrap().deadline_unix_millis;
         state.final_join = Some(payload.node.clone());
         state.promoted = true;
         let projection = project(&mut store, Some(state), "joined");
@@ -218,7 +226,36 @@ fn a_final_join_settles_idle_submission_before_becoming_required() {
         assert_eq!(drain_prechecks(&mut store, None, &port, &projection, 2).unwrap().0.len(), 1);
         assert_eq!(port.required_calls.get(), expected_required);
         assert_eq!(port.idle_calls.get(), 0);
+        assert_eq!(
+            store.lookup_order(&nonce.0).unwrap().unwrap().deadline_unix_millis,
+            deadline,
+            "joining preserves the original execution limit"
+        );
     }
+}
+
+#[test]
+fn a_promoted_submission_failure_reaches_the_precheck_fault_path() {
+    let (mut store, payload, mut state) = fixture();
+    state.final_join = Some(payload.node.clone());
+    state.promoted = true;
+    let projection = project(&mut store, Some(state), "joined-fault");
+    let entry = enqueue(&mut store, &payload);
+    let order = record(&entry, &payload);
+    record_dispatch(&mut store, &order).unwrap();
+    let port = Port::new();
+    port.probe.set(Probe::Fault);
+    let dir = tempfile::tempdir().unwrap();
+    let mut artifacts = ArtifactsCapabilityState::open(dir.path()).unwrap();
+    let (handles, admits) = drain_prechecks(&mut store, Some(&mut artifacts), &port, &projection, 2).unwrap();
+    assert!(handles.is_empty());
+    assert_eq!(admits.len(), 1);
+    let event: Event = from_bytes(&admits[0].event).unwrap();
+    assert!(
+        matches!(event.fact, Fact::PrecheckCompleted { node, completion: PrecheckCompletion::HostFault(_), .. } if node == payload.node.digest())
+    );
+    assert!(store.lookup_order(&order.nonce.0).unwrap().is_none());
+    assert_eq!(port.required_calls.get(), 0, "settled failure cannot dispatch a replacement before journal admission");
 }
 
 #[test]

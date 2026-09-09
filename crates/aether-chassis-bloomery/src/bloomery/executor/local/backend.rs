@@ -2798,11 +2798,12 @@ impl ExecutorBackend for LocalExecutor {
     }
 
     fn has_idle_capacity(&self, _order: &WorkOrder) -> bool {
-        let quarantined = quarantine::slots_on_disk(&self.base_dir);
+        // Advisory only: this runs on the reactor handler. The blocking
+        // admission worker checks persisted quarantines again at reservation.
         let registry = self.lock();
         registry.waiting.is_empty()
             && registry.submitting.is_empty()
-            && registry.occupied(&quarantined) < self.max_concurrent_lanes
+            && registry.occupied(&HashSet::new()) < self.max_concurrent_lanes
     }
 
     // `run` is a `&mut` reborrow from the registry guard (poll mutates the child),

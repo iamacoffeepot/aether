@@ -1192,6 +1192,38 @@ mod tests {
     }
 
     #[test]
+    fn every_canonical_precheck_result_keeps_its_console_label() {
+        use aether_bloomery::{Digest, PrecheckNode, PrecheckPolicy, PrecheckResult, PrecheckState};
+        let node = PrecheckNode {
+            plan: Digest::from_bytes([1; 32]),
+            tree: Digest::from_bytes([2; 32]),
+            head: Digest::from_bytes([3; 32]),
+            gate_set: Digest::from_bytes([4; 32]),
+        };
+        for result in [
+            PrecheckResult::Passed { node: node.digest(), evidence: node.tree },
+            PrecheckResult::Failed { node: node.digest(), evidence: node.tree },
+            PrecheckResult::HostFault { node: node.digest(), evidence: node.tree },
+            PrecheckResult::SkippedBeforeStart { node: node.digest() },
+        ] {
+            // Exhaustive against the producer: extending its vocabulary must
+            // update this pairing even though the DTO tolerates future JSON.
+            let label = match result {
+                PrecheckResult::Passed { .. } => "green",
+                PrecheckResult::Failed { .. } => "red",
+                PrecheckResult::HostFault { .. } => "fault",
+                PrecheckResult::SkippedBeforeStart { .. } => "pending",
+            };
+            let mut state = PrecheckState::new(PrecheckPolicy { run_budget: 1 });
+            state.prepared = Some(node.clone());
+            state.result = Some(result);
+            let decoded: super::PrecheckView =
+                serde_json::from_value(serde_json::to_value(state).expect("producer result")).expect("console result");
+            assert_eq!(decoded.summary(), format!("{label} 03030303"));
+        }
+    }
+
+    #[test]
     fn a_thin_metrics_document_still_decodes() {
         // The plausible bug: the console requires spend / landed / cycle
         // columns the current coordinator's day row does not serve, so the

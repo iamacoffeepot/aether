@@ -168,7 +168,8 @@ pub struct BloomView {
     #[serde(default)]
     pub narrowed_compositions: Vec<NarrowedCompositionView>,
     /// Optional aggregate pre-check state. Absent for blooms sealed without
-    /// the policy, preserving the old projection behavior.
+    /// the policy. Persisted readers use [`ViewDocument::decode_row`] to upcast
+    /// queued rows whose positional bloom elements predate this field.
     #[serde(default)]
     pub precheck: Option<PrecheckState>,
 }

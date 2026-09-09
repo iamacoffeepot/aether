@@ -1,6 +1,7 @@
 //! Integration and resolution: recording one member's resolution claim, and
 //! folding a complete claim set into the bloom's one artifact (ADR-0152).
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -291,7 +292,7 @@ fn folded(
         state.promoted = true;
         let mut effects = alloc::vec![
             hold,
-            Decision::RecordPrecheckState { bloom, state: Some(state) },
+            Decision::RecordPrecheckState { bloom, state: Some(Box::new(state)) },
             Decision::PromotePrecheck { bloom, node: node_digest },
         ];
         effects.extend(aggregate_review_dispatch(record, bloom, tree, head));

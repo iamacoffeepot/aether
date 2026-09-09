@@ -44,7 +44,7 @@ impl PrecheckProjection {
                         self.observed = true;
                         match state {
                             Some(state) => {
-                                self.states.insert(bloom, state);
+                                self.states.insert(bloom, *state);
                             }
                             None => {
                                 self.states.remove(&bloom);

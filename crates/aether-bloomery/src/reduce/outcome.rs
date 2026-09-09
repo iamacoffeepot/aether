@@ -833,8 +833,6 @@ pub enum Outcome {
     PrecheckPrepared { bloom: BloomId, node: Digest },
     /// Scratch folding refused the current plan.
     PrecheckPreparationRefused { bloom: BloomId, plan: Digest, diagnostic: Digest },
-    /// A prepared pre-check was offered for idle admission.
-    PrecheckOffered { bloom: BloomId, node: Digest },
     /// The idle offer was admitted and its physical run journaled.
     PrecheckRequested { bloom: BloomId, node: Digest, run: u32 },
     /// An issued pre-check completed.

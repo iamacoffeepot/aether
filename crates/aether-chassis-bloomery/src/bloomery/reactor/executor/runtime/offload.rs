@@ -444,6 +444,19 @@ impl ExecutorPort for OffloadedPort<'_> {
         // answer is consumed through the same key as the original submission.
         {
             let mut ledger = self.offload.lock();
+            // A joined pre-check may already be preparing through the required
+            // submit path. Its own answer is authoritative: an inspect probe
+            // could otherwise mistake that in-progress preparation for a run.
+            let required = AdapterCall::Submit(order.nonce.clone());
+            if let Some(AdapterAnswer::Submit(answer)) = ledger.answers.remove(&required) {
+                return Settled::Answered(answer.map(Some));
+            }
+            if ledger.in_flight.contains(&required)
+                || ledger.asked_this_round.contains(&required)
+                || ledger.wanted.iter().any(|work| work.call() == required)
+            {
+                return Settled::InFlight;
+            }
             for work in &mut ledger.wanted {
                 if let AdapterWork::SubmitIdle { order: wanted, allow_new } = work
                     && wanted.nonce == order.nonce
@@ -495,8 +508,10 @@ impl ExecutorPort for OffloadedPort<'_> {
 mod tests {
     use super::*;
     use crate::bloomery::UnconfiguredActionsBackend;
+    use crate::bloomery::executor::LocalExecutorError;
     use aether_bloomery::testing::digest;
     use aether_bloomery::{StageCatalog, StageId, Transformation};
+    use std::io;
 
     fn shell() -> ExecutorShell {
         ExecutorShell::new(Arc::new(UnconfiguredActionsBackend::new("test backend".to_owned())))
@@ -544,6 +559,29 @@ mod tests {
             matches!(offload.port(&shell).settle_idle_submission(&order), Settled::Answered(Ok(Some(got))) if got == handle)
         );
         assert!(offload.lock().wanted.is_empty());
+    }
+
+    #[test]
+    fn a_promoted_required_submit_settles_before_any_idle_probe() {
+        let offload = AdapterOffload::new();
+        let shell = shell();
+        let order = order("promoted");
+        let call = AdapterCall::Submit(order.nonce.clone());
+        offload.lock().in_flight.insert(call.clone());
+        assert!(matches!(offload.port(&shell).settle_idle_submission(&order), Settled::InFlight));
+        assert!(offload.lock().wanted.is_empty(), "no probe can mistake preparing for a successful run");
+        offload.lock().in_flight.remove(&call);
+        offload.lock().answers.insert(
+            call.clone(),
+            AdapterAnswer::Submit(Err(ExecutorPortError::Local(LocalExecutorError::Spawn(io::Error::from(
+                io::ErrorKind::ArgumentListTooLong,
+            ))))),
+        );
+        assert!(matches!(offload.port(&shell).settle_idle_submission(&order), Settled::Answered(Err(_))));
+        let ledger = offload.lock();
+        assert!(!ledger.answers.contains_key(&call));
+        assert!(ledger.wanted.is_empty(), "the required failure is returned, not hidden by inspect");
+        drop(ledger);
     }
 
     #[test]

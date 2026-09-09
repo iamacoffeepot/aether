@@ -12,7 +12,7 @@ use aether_data::wire::from_bytes;
 use crate::artifacts::{ArtifactsCapabilityState, PutResult};
 use crate::bloomery::executor::{ExecutorPort, Settled};
 use crate::bloomery::intake::{
-    AdmissionKey, DispatchRecord, dispatch_and_record, dispatch_nonce, dispatch_precheck_idle,
+    AdmissionKey, DispatchError, DispatchRecord, dispatch_and_record, dispatch_nonce, dispatch_precheck_idle,
 };
 use crate::bloomery::outbox::{OutboxResultDelivery, TopicOutbox};
 use crate::bloomery::precheck::PrecheckProjection;
@@ -119,7 +119,9 @@ fn complete_unstarted(
             fact: Fact::PrecheckCompleted { bloom: record.bloom, node: record.scope_revision, completion },
         },
         admits,
-    )
+    )?;
+    store.consume_order(&record.nonce.0)?;
+    Ok(())
 }
 
 fn setup_fault(
@@ -148,19 +150,38 @@ fn settle_old_submission(
     store: &mut dyn StoreBackend,
     executor: &dyn ExecutorPort,
     record: &DispatchRecord,
-) -> rusqlite::Result<Settled<Option<WorkHandle>>> {
+) -> Result<Settled<Option<WorkHandle>>, DispatchError> {
     match executor.settle_idle_submission(&record.to_order()) {
         Settled::InFlight => Ok(Settled::InFlight),
         Settled::Answered(Ok(handle)) => {
             if handle.is_some() {
-                store.mark_order_submitted(&record.nonce.0)?;
-            } else {
-                store.consume_order(&record.nonce.0)?;
+                store.mark_order_submitted(&record.nonce.0).map_err(DispatchError::Store)?;
             }
+            // Keep an unstarted reservation until promotion or retained skip
+            // settles it, so joining never renews the original deadline.
             Ok(Settled::Answered(handle))
         }
-        Settled::Answered(Err(error)) => Err(decode_error(error)),
+        Settled::Answered(Err(error)) => {
+            store.consume_order(&record.nonce.0).map_err(DispatchError::Store)?;
+            Err(DispatchError::Submit(error))
+        }
     }
+}
+
+fn submission_failure(
+    store: &mut dyn StoreBackend,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
+    entry: &OutboxEntry,
+    record: &DispatchRecord,
+    error: DispatchError,
+    admits: &mut Vec<Admit>,
+) -> rusqlite::Result<Settled<Option<WorkHandle>>> {
+    if !error.is_permanent() {
+        return Err(decode_error(error));
+    }
+    let completion = setup_fault(artifacts, record, &error)?;
+    complete_unstarted(store, entry, record, completion, admits)?;
+    Ok(Settled::InFlight)
 }
 
 fn dispatch_one(
@@ -186,10 +207,11 @@ fn dispatch_one(
             return Ok(Settled::Answered(Some(WorkHandle::new(record.nonce))));
         }
         if joined || !current {
-            match settle_old_submission(store, executor, &record)? {
-                Settled::InFlight => return Ok(Settled::InFlight),
-                Settled::Answered(Some(handle)) => return Ok(Settled::Answered(Some(handle))),
-                Settled::Answered(None) => {}
+            match settle_old_submission(store, executor, &record) {
+                Ok(Settled::InFlight) => return Ok(Settled::InFlight),
+                Ok(Settled::Answered(Some(handle))) => return Ok(Settled::Answered(Some(handle))),
+                Ok(Settled::Answered(None)) => {}
+                Err(error) => return submission_failure(store, artifacts, entry, &record, error, admits),
             }
         }
     }
@@ -210,12 +232,7 @@ fn dispatch_one(
     match submitted {
         Ok(Settled::Answered(None)) => Ok(Settled::InFlight),
         Ok(answer) => Ok(answer),
-        Err(error) if error.is_permanent() => {
-            let completion = setup_fault(artifacts, &record, &error)?;
-            complete_unstarted(store, entry, &record, completion, admits)?;
-            Ok(Settled::InFlight)
-        }
-        Err(error) => Err(decode_error(error)),
+        Err(error) => submission_failure(store, artifacts, entry, &record, error, admits),
     }
 }
 

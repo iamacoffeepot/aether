@@ -83,12 +83,16 @@ local lane selects the gate program the node names.
 
 Offer requests and skipped completions are retained on the existing outbox
 row before admission. The row is acknowledged only after its event key is
-journaled. Offer keys include the outbox sequence, allowing an explicitly
-re-offered node to retry after a host fault or operator hold.
+journaled. Offer and preparation keys include the outbox sequence, allowing
+an explicitly re-offered node to retry after a host fault or operator hold and an earlier
+candidate set to become current again after a sibling enters repair.
 
 An idle submission first records `Submitting`. If it becomes obsolete or is
 promoted, `settle_idle_submission` must settle the original offloaded call
-before deciding what to do. A call that has not started becomes a probe;
+before deciding what to do. Once promoted, a required submission must return
+its own answer before the order is acknowledged; an inspection cannot stand
+in for unfinished preparation. Promotion preserves the original deadline.
+A call that has not started becomes a probe;
 a running call returns its actual handle. A restart probe never starts an
 absent obsolete order. Only a confirmed unstarted order can emit
 `SkippedBeforeStart` and refund its speculative attempt. Started stale runs
@@ -132,8 +136,10 @@ machinery failure and cannot spend a code-repair lap.
 
 `RecordPrecheckState` is the replay authority. Host projections read recorded
 decisions incrementally, in bounded pages, and do no speculative work from an
-incomplete replay. New facts and decisions append to the wire vocabulary;
-absent-policy histories retain their existing behavior.
+incomplete replay. New facts and decisions append to the wire vocabulary.
+Prior journal schema digests have explicit upcasts, and queued view rows retain a previous-shape
+decoder for their positional bloom elements. Absent-policy histories retain
+their existing behavior.
 
 Physical dispatch and cost belong once to the bloom. Joining a running proof
 does not dispatch or charge another physical run. Members retain their own
@@ -144,8 +150,9 @@ compute.
 
 `BloomView.precheck` projects the journaled state. The console board shows
 preparing, pending, running, green, red, stale, joined or paused, with the
-joined head, or the prepared head when there is no final join. Full plan, node, budget, result and diagnostic
-identities remain available in `/view` and `/journal`.
+joined head, or the prepared head when there is no final join. Full plan,
+node, budget, result and diagnostic identities remain available in `/view`
+and `/journal`.
 
 The existing terminal janitor derives private namespaces from retained
 preparation outbox rows. It waits for preparation acknowledgement and all

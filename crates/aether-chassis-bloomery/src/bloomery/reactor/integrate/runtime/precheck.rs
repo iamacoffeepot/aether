@@ -124,6 +124,10 @@ fn fold_preview(
     ))
 }
 
+fn preparation_key(sequence: u64) -> IdempotencyKey {
+    IdempotencyKey(format!("aether.bloomery.precheck-prepared:{sequence}"))
+}
+
 /// Coalesce undispatched plans before doing Git work. Persist each returned
 /// fact on the existing outbox row and wait for journal admission before ack.
 pub fn drain_precheck_plans(
@@ -192,10 +196,7 @@ pub fn drain_precheck_plans(
             }
         };
         let event = Event {
-            idempotency_key: IdempotencyKey(format!(
-                "aether.bloomery.precheck-prepared:{}",
-                payload.plan.digest().to_hex()
-            )),
+            idempotency_key: preparation_key(entry.sequence),
             fact: Fact::PrecheckPrepared { bloom: BloomId(payload.bloom), plan: payload.plan.digest(), preparation },
         };
         let Some(pending) = persist_pending_results(store, Topic::QueuePrecheckPlan, entry.sequence, from_ref(&event))
@@ -233,6 +234,38 @@ mod tests {
             MainlineRef::default(),
         )));
         (fake, source, PrecheckPlan { bloom: BloomId(digest(9)), base, members, gate_set: digest(20) })
+    }
+
+    #[test]
+    fn a_returning_plan_has_a_new_delivery_key_but_replay_keeps_its_request_key() {
+        use crate::store::{JournalWrite, SqliteStore};
+        use aether_bloomery::{Decisions, Outcome};
+        use aether_data::wire::to_vec;
+        let (_, _, plan) = fixture();
+        let event = |sequence| Event {
+            idempotency_key: preparation_key(sequence),
+            fact: Fact::PrecheckPrepared {
+                bloom: plan.bloom,
+                plan: plan.digest(),
+                preparation: PrecheckPreparation::Refused { detail: digest(30) },
+            },
+        };
+        let first = event(1);
+        let mut store = SqliteStore::open(":memory:").unwrap();
+        store
+            .append_event(&JournalWrite {
+                idempotency_key: &first.idempotency_key.0,
+                event: &to_vec(&first).unwrap(),
+                decisions: &to_vec(&Decisions { outcome: Outcome::Duplicate, effects: Vec::new() }).unwrap(),
+                decider: "precheck-repeated-plan",
+            })
+            .unwrap();
+        assert!(store.journal_holds_any(&[event(1).idempotency_key.0]).unwrap());
+        assert_eq!(first.fact, event(3).fact, "returning AB still prepares the immutable AB plan");
+        assert!(
+            !store.journal_holds_any(&[event(3).idempotency_key.0]).unwrap(),
+            "AB after ABC must be admissible again"
+        );
     }
 
     #[test]

@@ -19,9 +19,16 @@ use aether_data::{Schema, Storage, StorageData, StorageError, StorageLeaves};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use super::projection::{
+    BloomView, CompositionView, ExecutorFaultView, LandingBlock, LeaseView, MemberView, NarrowedCompositionView,
+    ReviewParkView,
+};
 use crate::ids::WorkpieceId;
+use crate::reduce::RecordedRefusal;
+use crate::values::OperatorHold;
 use crate::values::SpendQuiesce;
-use crate::{BaseAlertView, Digest};
+use crate::{BaseAlertView, BloomId, BloomStatus, Digest, ViewDocument};
+use serde::Deserialize;
 
 /// Pre-adoption positional identity. An absent stamp is this identity.
 pub const POSITIONAL_ROW_SCHEMA: &str = "positional";
@@ -213,6 +220,80 @@ impl StorageLeaves for BaseAlertView {
     }
 }
 
+// The view row written at d04707893456077046715e189d2739e80c97646c.
+// Bloom elements were positional even inside storage rows. Keep that exact
+// element shape for queued rows; serde defaults cannot upcast a Vec element.
+#[derive(aether_data::Storage, Clone, Serialize, Deserialize)]
+#[kind(name = "aether.bloomery.view_document")]
+struct ViewDocumentPrePrecheck {
+    mainline: Digest,
+    observed: Digest,
+    spend_quiesce: Option<SpendQuiesce>,
+    blooms: Vec<BloomViewPrePrecheck>,
+    base_alert: Option<BaseAlertView>,
+}
+
+#[derive(aether_data::Schema, Clone, Serialize, Deserialize)]
+struct BloomViewPrePrecheck {
+    id: BloomId,
+    status: BloomStatus,
+    superseded_by: Option<BloomId>,
+    members: Vec<MemberView>,
+    landing_blocked: Option<LandingBlock>,
+    executor_fault: Option<ExecutorFaultView>,
+    review_park: Option<ReviewParkView>,
+    composition: Option<CompositionView>,
+    operator_hold: Option<OperatorHold>,
+    blocker: Option<RecordedRefusal>,
+    leases: Vec<LeaseView>,
+    narrowed_compositions: Vec<NarrowedCompositionView>,
+}
+
+impl From<BloomViewPrePrecheck> for BloomView {
+    fn from(prior: BloomViewPrePrecheck) -> Self {
+        Self {
+            id: prior.id,
+            status: prior.status,
+            superseded_by: prior.superseded_by,
+            members: prior.members,
+            landing_blocked: prior.landing_blocked,
+            executor_fault: prior.executor_fault,
+            review_park: prior.review_park,
+            composition: prior.composition,
+            operator_hold: prior.operator_hold,
+            blocker: prior.blocker,
+            leases: prior.leases,
+            narrowed_compositions: prior.narrowed_compositions,
+            precheck: None,
+        }
+    }
+}
+
+impl From<ViewDocumentPrePrecheck> for ViewDocument {
+    fn from(prior: ViewDocumentPrePrecheck) -> Self {
+        Self {
+            mainline: prior.mainline,
+            observed: prior.observed,
+            spend_quiesce: prior.spend_quiesce,
+            blooms: prior.blooms.into_iter().map(BloomView::from).collect(),
+            base_alert: prior.base_alert,
+        }
+    }
+}
+
+impl ViewDocument {
+    /// Decode a current or pre-precheck view outbox row, preserving its blooms.
+    /// Both the prior storage form and its positional predecessor are supported.
+    ///
+    /// # Errors
+    /// Returns the current decoder's refusal if neither supported shape decodes.
+    pub fn decode_row(bytes: &[u8], schema: Option<&str>) -> Result<Self, RowSchemaError> {
+        decode_row(bytes, schema).or_else(|current_error| {
+            decode_row::<ViewDocumentPrePrecheck>(bytes, schema).map(Self::from).map_err(|_| current_error)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -249,6 +330,31 @@ mod tests {
                 failed: vec![String::from("lint")],
                 evidence: Digest::from_bytes([5; 32]),
             }),
+        }
+    }
+
+    #[test]
+    fn queued_precheck_predecessor_views_keep_their_members_and_default_the_new_state() {
+        let stored =
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pre-precheck-view-storage.bin"));
+        let positional =
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pre-precheck-view-positional.bin"));
+        for (bytes, schema) in [(stored.as_slice(), Some(ViewDocument::NAME)), (positional.as_slice(), None)] {
+            assert!(decode_row::<ViewDocument>(bytes, schema).is_err(), "the fixture requires its old-shape decoder");
+            let view = ViewDocument::decode_row(bytes, schema).expect("queued previous-binary view upcasts");
+            assert_eq!(view.blooms.len(), 1);
+            assert_eq!(view.blooms[0].status, crate::BloomStatus::Sealed);
+            assert_eq!(
+                view.blooms[0].members.iter().map(|member| member.workpiece.0.as_str()).collect::<Vec<_>>(),
+                ["alpha", "beta"]
+            );
+            assert!(view.blooms[0].precheck.is_none());
+            let current = encode_row(&view, Some(ViewDocument::NAME)).expect("upcast view encodes");
+            assert_eq!(
+                ViewDocument::decode_row(&current, Some(ViewDocument::NAME)).expect("current view decodes"),
+                view
+            );
+            assert!(ViewDocument::decode_row(&bytes[..8], schema).is_err(), "a corrupt row still refuses");
         }
     }
 

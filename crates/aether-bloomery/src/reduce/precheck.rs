@@ -1,5 +1,6 @@
 //! Reducer-owned scheduling and settlement for aggregate pre-checks.
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 
 use super::aggregate_verify::{aggregate_verify_dispatch, reduce_aggregate_verify_completed};
@@ -139,7 +140,7 @@ fn rejected(error: PrecheckError) -> Decisions {
 }
 
 fn record_state(bloom: BloomId, state: PrecheckState) -> Decision {
-    Decision::RecordPrecheckState { bloom, state: Some(state) }
+    Decision::RecordPrecheckState { bloom, state: Some(Box::new(state)) }
 }
 
 fn active_state<'a>(
@@ -259,6 +260,8 @@ pub(super) fn reduce_precheck_completed(
     }
 
     let current = state.is_current_node(node);
+    let refunded_exhausted_run =
+        matches!(completion, PrecheckCompletion::SkippedBeforeStart) && state.remaining_runs() == 0;
     let mut next = state.clone();
     next.issued = None;
     let mut effects = alloc::vec![];
@@ -301,11 +304,15 @@ pub(super) fn reduce_precheck_completed(
         }
     }
     effects.push(record_state(*bloom, next.clone()));
-    if let Some(prepared) = next.prepared.as_ref()
-        && next.can_request(prepared.digest())
-        && record.operator_hold.is_none()
+    if let Some(prepared) = next.prepared.as_ref() {
+        if next.can_request(prepared.digest()) && record.operator_hold.is_none() {
+            effects.push(run_decision(record, *bloom, prepared, false));
+        }
+    } else if refunded_exhausted_run
+        && next.remaining_runs() > 0
+        && let Some(plan) = next.latest_plan
     {
-        effects.push(run_decision(record, *bloom, prepared, false));
+        effects.push(Decision::QueuePrecheckPlan { bloom: *bloom, plan });
     }
     Decisions { outcome: Outcome::PrecheckCompleted { bloom: *bloom, node }, effects }
 }
@@ -396,49 +403,53 @@ pub(super) fn final_join(record: &BloomRecord, bloom: BloomId, tree: Digest, _he
 
 /// Append coalesced scheduling effects after a member candidate transition.
 pub(super) fn schedule(snapshot: &Snapshot, mut decisions: Decisions) -> Decisions {
-    let observed = decisions.effects.clone();
-    let mut affected = BTreeSet::new();
-    let mut terminal = BTreeSet::new();
-    for effect in &observed {
-        match effect {
-            Decision::AdvanceStage { bloom, .. }
-                if snapshot.blooms.get(bloom).is_some_and(|r| r.precheck.is_some()) =>
-            {
-                affected.insert(*bloom);
+    let mut scheduled = Vec::new();
+    {
+        let observed = decisions.effects.as_slice();
+        let mut affected = BTreeSet::new();
+        let mut terminal = BTreeSet::new();
+        for effect in observed {
+            match effect {
+                Decision::AdvanceStage { bloom, .. }
+                    if snapshot.blooms.get(bloom).is_some_and(|r| r.precheck.is_some()) =>
+                {
+                    affected.insert(*bloom);
+                }
+                Decision::RecordCandidateVehicle { bloom, .. }
+                | Decision::RevokeResolution { bloom, .. }
+                | Decision::RecordWithdrawal { bloom, .. }
+                | Decision::RecordOperatorHold { bloom, .. }
+                | Decision::RecordOperatorRelease { bloom, .. }
+                | Decision::RecordIntegration { bloom, .. } => {
+                    affected.insert(*bloom);
+                }
+                Decision::MarkSuperseded { bloom, .. }
+                | Decision::MarkBloomWithdrawn { bloom }
+                | Decision::SetResolved { bloom, .. } => {
+                    affected.insert(*bloom);
+                    terminal.insert(*bloom);
+                }
+                _ => {}
             }
-            Decision::RecordCandidateVehicle { bloom, .. }
-            | Decision::RevokeResolution { bloom, .. }
-            | Decision::RecordWithdrawal { bloom, .. }
-            | Decision::RecordOperatorHold { bloom, .. }
-            | Decision::RecordOperatorRelease { bloom, .. }
-            | Decision::RecordIntegration { bloom, .. } => {
-                affected.insert(*bloom);
+        }
+        for bloom in affected {
+            let Some(record) = snapshot.blooms.get(&bloom) else {
+                continue;
+            };
+            let Some(state) = record.precheck.as_ref() else {
+                continue;
+            };
+            if terminal.contains(&bloom) {
+                if let Some(issued) = state.issued.as_ref() {
+                    scheduled.push(Decision::CancelPrecheck { bloom, node: issued.digest() });
+                }
+                scheduled.push(Decision::RecordPrecheckState { bloom, state: None });
+                continue;
             }
-            Decision::MarkSuperseded { bloom, .. }
-            | Decision::MarkBloomWithdrawn { bloom }
-            | Decision::SetResolved { bloom, .. } => {
-                affected.insert(*bloom);
-                terminal.insert(*bloom);
-            }
-            _ => {}
+            schedule_bloom(record, bloom, state, observed, &mut scheduled);
         }
     }
-    for bloom in affected {
-        let Some(record) = snapshot.blooms.get(&bloom) else {
-            continue;
-        };
-        let Some(state) = record.precheck.as_ref() else {
-            continue;
-        };
-        if terminal.contains(&bloom) {
-            if let Some(issued) = state.issued.as_ref() {
-                decisions.effects.push(Decision::CancelPrecheck { bloom, node: issued.digest() });
-            }
-            decisions.effects.push(Decision::RecordPrecheckState { bloom, state: None });
-            continue;
-        }
-        schedule_bloom(record, bloom, state, &observed, &mut decisions.effects);
-    }
+    decisions.effects.extend(scheduled);
     decisions
 }
 
@@ -537,9 +548,25 @@ fn schedule_bloom(
 
 #[cfg(test)]
 mod tests {
+    use alloc::format;
+
+    use aether_data::Kind;
+    use aether_data::wire::to_vec;
+
     use super::*;
-    use crate::testing::{claim, digest, draft, event, membership, workpiece};
-    use crate::{Fact, OperatorHold, ResolvedConfigs};
+    use crate::reduce::reduce as reduce_event;
+    use crate::testing::{claim, compiled_resolved, digest, draft, event, membership, workpiece};
+    use crate::values::config_address;
+    use crate::{Fact, OperatorHold, ResolvedConfigs, SpendWindow};
+
+    fn step_with_configs(
+        snapshot: &Snapshot,
+        event: &crate::Event,
+        configs: &ResolvedConfigs,
+    ) -> (Snapshot, Decisions) {
+        let decisions = reduce_event(snapshot, event, configs, &SpendWindow::default());
+        (snapshot.apply(event, &decisions, configs), decisions)
+    }
 
     fn candidate_record(base: u8, members: &[(&str, u8, u8, u8)]) -> (BloomId, BloomRecord) {
         let spec =
@@ -572,9 +599,59 @@ mod tests {
 
     fn recorded_state(effects: &[Decision], bloom: BloomId) -> Option<&PrecheckState> {
         effects.iter().rev().find_map(|effect| match effect {
-            Decision::RecordPrecheckState { bloom: owner, state } if *owner == bloom => state.as_ref(),
+            Decision::RecordPrecheckState { bloom: owner, state } if *owner == bloom => state.as_deref(),
             _ => None,
         })
+    }
+
+    fn capture_precheck_plan(
+        mut snapshot: Snapshot,
+        bloom: BloomId,
+        configs: &ResolvedConfigs,
+        candidates: &[(&str, u8, u8, CandidateRef)],
+    ) -> (Snapshot, PrecheckPlan) {
+        let mut queued = None;
+        for (name, _, _, candidate) in candidates.iter().copied() {
+            let completed = event(
+                &format!("precheck-lifecycle-construct-{name}"),
+                Fact::AttemptCompleted {
+                    bloom,
+                    workpiece: workpiece(name),
+                    stage: StageId::Construct,
+                    passed: true,
+                    evidence: Evidence {
+                        subject: candidate.tree,
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(90),
+                    },
+                    candidate: Some(candidate),
+                },
+            );
+            let (next, decisions) = step_with_configs(&snapshot, &completed, configs);
+            queued = decisions.effects.iter().find_map(|effect| match effect {
+                Decision::QueuePrecheckPlan { plan, .. } => Some(plan.clone()),
+                _ => None,
+            });
+            snapshot = next;
+        }
+        (snapshot, queued.expect("the second immutable candidate queues a plan"))
+    }
+
+    fn seal_enabled_bloom() -> (Snapshot, BloomId, ResolvedConfigs) {
+        let policy = PrecheckPolicy { run_budget: 1 };
+        let policy_bytes = to_vec(&policy).expect("policy encodes");
+        let policy_address = config_address(PrecheckPolicy::NAME, &policy_bytes);
+        let mut authored = draft(1, vec![membership("one", 11), membership("two", 12)]);
+        authored.configs.insert::<PrecheckPolicy>(policy_address);
+        let spec = authored.seal();
+        let bloom = spec.id();
+        let mut configs = compiled_resolved();
+        configs.insert(policy_address, PrecheckPolicy::NAME, policy_bytes, None);
+        let snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
+        let seal = event("precheck-lifecycle-seal", Fact::Seal(spec));
+
+        let (snapshot, _) = step_with_configs(&snapshot, &seal, &configs);
+        (snapshot, bloom, configs)
     }
 
     #[test]
@@ -611,6 +688,141 @@ mod tests {
 
         assert!(matches!(decisions.outcome, Outcome::PrecheckRejected(PrecheckError::InvalidEvidenceKind)));
         assert!(decisions.effects.is_empty());
+    }
+
+    #[test]
+    fn obsolete_unstarted_last_run_prepares_the_latest_plan_exactly_once() {
+        let (mut snapshot, bloom, old_node) = issued_fixture();
+        let record = snapshot.blooms.get_mut(&bloom).expect("fixture record");
+        let state = record.precheck.as_mut().expect("fixture pre-check state");
+        state.policy.run_budget = 1;
+        let mut latest = state.latest_plan.clone().expect("fixture plan");
+        latest.members[1].candidate = CandidateRef { tree: digest(80), checkout: digest(81) };
+        state.latest_plan = Some(latest.clone());
+        state.prepared = None;
+
+        let decisions =
+            reduce_precheck_completed(&snapshot, &bloom, old_node.digest(), &PrecheckCompletion::SkippedBeforeStart);
+
+        assert_eq!(
+            decisions
+                .effects
+                .iter()
+                .filter(|effect| matches!(effect, Decision::QueuePrecheckPlan { bloom: owner, plan } if *owner == bloom && plan == &latest))
+                .count(),
+            1,
+        );
+        assert!(!decisions.effects.iter().any(|effect| matches!(effect, Decision::OfferPrecheck { .. })));
+        assert_eq!(recorded_state(&decisions.effects, bloom).expect("refunded state").issued_runs, 0);
+
+        let record = snapshot.blooms.get_mut(&bloom).expect("fixture record");
+        let state = record.precheck.as_mut().expect("fixture pre-check state");
+        let latest_node =
+            PrecheckNode { plan: latest.digest(), tree: digest(82), head: digest(83), gate_set: latest.gate_set };
+        state.prepared = Some(latest_node.clone());
+        let prepared =
+            reduce_precheck_completed(&snapshot, &bloom, old_node.digest(), &PrecheckCompletion::SkippedBeforeStart);
+        assert!(!prepared.effects.iter().any(|effect| matches!(effect, Decision::QueuePrecheckPlan { .. })));
+        assert!(
+            prepared
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Decision::OfferPrecheck { node, .. } if node == &latest_node))
+        );
+    }
+
+    #[test]
+    fn enabled_policy_runs_public_lifecycle_and_joins_the_exact_issued_fold() {
+        let (mut snapshot, bloom, configs) = seal_enabled_bloom();
+        let candidates = [
+            ("one", 11, 21, CandidateRef { tree: digest(21), checkout: digest(31) }),
+            ("two", 12, 22, CandidateRef { tree: digest(22), checkout: digest(32) }),
+        ];
+        let (next, plan) = capture_precheck_plan(snapshot, bloom, &configs, &candidates);
+        snapshot = next;
+        let node = PrecheckNode { plan: plan.digest(), tree: digest(40), head: digest(41), gate_set: plan.gate_set };
+
+        let prepared = event(
+            "precheck-lifecycle-prepared",
+            Fact::PrecheckPrepared {
+                bloom,
+                plan: plan.digest(),
+                preparation: PrecheckPreparation::Prepared(node.clone()),
+            },
+        );
+        let (next, offered) = step_with_configs(&snapshot, &prepared, &configs);
+        assert!(offered.effects.iter().any(|effect| matches!(effect, Decision::OfferPrecheck { .. })));
+        snapshot = next;
+
+        let request = event("precheck-lifecycle-request", Fact::RequestPrecheck { bloom, node: node.digest() });
+        let (next, dispatched) = step_with_configs(&snapshot, &request, &configs);
+        assert!(
+            dispatched
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Decision::DispatchPrecheck { node: issued, .. } if issued == &node))
+        );
+        snapshot = next;
+
+        let mut fold_dispatched = false;
+        for (name, revision, tree, _) in candidates {
+            let integrated = event(
+                &format!("precheck-lifecycle-integrate-{name}"),
+                Fact::Integrate { bloom, claim: claim(name, revision, tree) },
+            );
+            let (next, decisions) = step_with_configs(&snapshot, &integrated, &configs);
+            fold_dispatched |=
+                decisions.effects.iter().any(|effect| matches!(effect, Decision::DispatchIntegration { .. }));
+            snapshot = next;
+        }
+        assert!(fold_dispatched, "standalone member claims trigger the ordinary fold");
+        assert_eq!(snapshot.blooms[&bloom].claims.len(), 2);
+
+        let ordinary_head = digest(42);
+        let resolved = event(
+            "precheck-lifecycle-resolve",
+            Fact::Resolve { bloom, tree: node.tree, head: ordinary_head, lineage: vec![digest(43)] },
+        );
+        let (next, joined) = step_with_configs(&snapshot, &resolved, &configs);
+        assert!(matches!(joined.outcome, Outcome::PrecheckJoined { node: joined, .. } if joined == node.digest()));
+        assert!(joined.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })));
+        assert!(!joined.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })));
+        assert_eq!(next.blooms[&bloom].integration.as_ref().expect("ordinary fold retained").head, ordinary_head);
+        snapshot = next;
+
+        let critic = event(
+            "precheck-lifecycle-critic",
+            Fact::AggregateReviewCompleted {
+                bloom,
+                passed: true,
+                evidence: Evidence { subject: node.tree, kind: EvidenceKind::VerificationResult, detail: digest(44) },
+                implicated: vec![],
+            },
+        );
+        (snapshot, _) = step_with_configs(&snapshot, &critic, &configs);
+
+        let completion = event(
+            "precheck-lifecycle-completed",
+            Fact::PrecheckCompleted {
+                bloom,
+                node: node.digest(),
+                completion: PrecheckCompletion::Passed(Evidence {
+                    subject: node.tree,
+                    kind: EvidenceKind::VerificationResult,
+                    detail: digest(45),
+                }),
+            },
+        );
+        let (snapshot, completed) = step_with_configs(&snapshot, &completion, &configs);
+        assert!(completed.effects.iter().all(|effect| {
+            !matches!(effect, Decision::RecordVerifyProof { proof, .. } if proof.stage == StageId::Verify)
+        }));
+        assert!(completed.effects.iter().any(|effect| {
+            matches!(effect, Decision::RecordVerifyProof { proof, .. } if proof.stage == StageId::AggregateVerify)
+        }));
+        let record = &snapshot.blooms[&bloom];
+        assert_eq!(record.resolved_head, Some(ordinary_head));
+        assert_eq!(record.resolved_tree, Some(node.tree));
     }
 
     #[test]
