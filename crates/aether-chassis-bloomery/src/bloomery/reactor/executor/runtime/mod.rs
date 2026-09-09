@@ -1955,93 +1955,113 @@ fn drain_and_dispatch_aggregate(
             ack_through = Some(entry.sequence);
             continue;
         }
-
-        // A full-pass dispatch opens a fresh review cycle — the first ever, or an
-        // owner re-arm after a park (ADR-0153). Clear any stale frozen row so
-        // the new cycle's first failure freezes cleanly instead of appending
-        // itself under the spent cycle's delta-confirm label.
-        if matches!(payload.pass, ReviewPass::Full) {
-            store.clear_review_findings(payload.bloom.as_bytes(), "")?;
-        }
-        let task = compose_aggregate_task(store, &payload, entry.sequence)?;
-        let mut transformation = payload.transformation;
-        // The aggregate critic is a model lane too, so it takes its calibrated
-        // profile on the same overlay channel as the member lane above: the
-        // bloom's sealed ModelOverride, resolved host-side so the receipt
-        // attests the agent that actually ran (ADR-0174). A sealed address
-        // that will not resolve parks rather than falling through to the
-        // catalog default — the same divergence the member lane refuses.
-        let model_override = match resolve_config::<ModelOverride>(store, ConfigScopes::bloom_wide(&payload.configs)) {
-            Ok(override_) => override_.unwrap_or_default(),
-            Err(StoreConfigError::Store(error)) => return Err(error),
-            Err(error) => {
-                tracing::error!(
-                    target: "aether_chassis_bloomery::executor",
-                    sequence = entry.sequence,
-                    bloom = %short_hex(&payload.bloom),
-                    %error,
-                    "sealed configuration did not resolve; parking the aggregate review rather than running the default",
-                );
-                ack_through = Some(entry.sequence);
-                continue;
-            }
-        };
-        transformation.model = Some(dispatch_model(StageId::AggregateReview, &payload.profile, &model_override));
-        // The evidence-binding subject is the integrated tree the reducer
-        // pinned as inputs[0] — also the displayed digest the returning
-        // verdict must bind.
-        let displayed = transformation.inputs[0];
-        if let Some(task) = task {
-            transformation.description = Some(task);
-        }
-        let record = DispatchRecord {
-            nonce: dispatch_nonce(entry.sequence),
-            bloom: BloomId(payload.bloom),
-            // A bloom-level order has no member axis (ADR-0153): the stage
-            // discriminates at intake, and the empty workpiece never routes.
-            workpiece: WorkpieceId(String::new()),
-            profile: payload.profile,
-            scope_revision: displayed,
-            candidate: displayed,
-            displayed_digest: displayed,
-            stage: StageId::AggregateReview,
-            transformation,
-            // The bloom-wide registry (ADR-0174): the critic has no member
-            // axis, so this is the only scope the overlay walks.
-            configs: payload.configs,
-        };
-        match dispatch_and_record(executor, store, &record, now_unix_millis) {
-            Ok(Settled::Answered(handle)) => {
+        match submit_aggregate_review(store, executor, payload, entry.sequence, now_unix_millis)? {
+            DispatchSubmit::Submitted(handle) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
             }
-            Ok(Settled::InFlight) => break,
-            Err(error) if error.is_permanent() => {
-                tracing::error!(
-                    target: "aether_chassis_bloomery::executor",
-                    sequence = entry.sequence,
-                    bloom = ?record.bloom.0,
-                    pass = ?payload.pass,
-                    nonce = %record.nonce.0,
-                    %error,
-                    "aggregate-review submit refused permanently; parking the entry instead of re-driving",
-                );
+            DispatchSubmit::Parked => ack_through = Some(entry.sequence),
+            DispatchSubmit::InFlight => break,
+            DispatchSubmit::Refused => {
                 ack_through = Some(entry.sequence);
                 break;
             }
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    sequence = entry.sequence,
-                    %error,
-                    "aggregate-review submit/record failed; stopping the ack prefix to re-drive",
-                );
+            DispatchSubmit::Transient => {
                 transient_failure = Some(entry.sequence);
                 break;
             }
         }
     }
     Ok((handles, ack_through, transient_failure))
+}
+
+/// Overlay, compose, and submit one aggregate-review entry. The drain owns
+/// the ack-prefix / stop policy, matching [`submit_dispatch_entry`].
+fn submit_aggregate_review(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    payload: AggregateReviewPayload,
+    sequence: u64,
+    now_unix_millis: u64,
+) -> rusqlite::Result<DispatchSubmit> {
+    // A full-pass dispatch opens a fresh review cycle — the first ever, or an
+    // owner re-arm after a park (ADR-0153). Clear any stale frozen row so
+    // the new cycle's first failure freezes cleanly instead of appending
+    // itself under the spent cycle's delta-confirm label.
+    if matches!(payload.pass, ReviewPass::Full) {
+        store.clear_review_findings(payload.bloom.as_bytes(), "")?;
+    }
+    let task = compose_aggregate_task(store, &payload, sequence)?;
+    let mut transformation = payload.transformation;
+    // The aggregate critic is a model lane too, so it takes its calibrated
+    // profile on the same overlay channel as the member lane above: the
+    // bloom's sealed ModelOverride, resolved host-side so the receipt
+    // attests the agent that actually ran (ADR-0174). A sealed address
+    // that will not resolve parks rather than falling through to the
+    // catalog default — the same divergence the member lane refuses.
+    let model_override = match resolve_config::<ModelOverride>(store, ConfigScopes::bloom_wide(&payload.configs)) {
+        Ok(override_) => override_.unwrap_or_default(),
+        Err(StoreConfigError::Store(error)) => return Err(error),
+        Err(error) => {
+            tracing::error!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                bloom = %short_hex(&payload.bloom),
+                %error,
+                "sealed configuration did not resolve; parking the aggregate review rather than running the default",
+            );
+            return Ok(DispatchSubmit::Parked);
+        }
+    };
+    transformation.model = Some(dispatch_model(StageId::AggregateReview, &payload.profile, &model_override));
+    // The evidence-binding subject is the integrated tree the reducer
+    // pinned as inputs[0] — also the displayed digest the returning
+    // verdict must bind.
+    let displayed = transformation.inputs[0];
+    if let Some(task) = task {
+        transformation.description = Some(task);
+    }
+    let record = DispatchRecord {
+        nonce: dispatch_nonce(sequence),
+        bloom: BloomId(payload.bloom),
+        // A bloom-level order has no member axis (ADR-0153): the stage
+        // discriminates at intake, and the empty workpiece never routes.
+        workpiece: WorkpieceId(String::new()),
+        profile: payload.profile,
+        scope_revision: displayed,
+        candidate: displayed,
+        displayed_digest: displayed,
+        stage: StageId::AggregateReview,
+        transformation,
+        // The bloom-wide registry (ADR-0174): the critic has no member
+        // axis, so this is the only scope the overlay walks.
+        configs: payload.configs,
+    };
+    match dispatch_and_record(executor, store, &record, now_unix_millis) {
+        Ok(Settled::Answered(handle)) => Ok(DispatchSubmit::Submitted(handle)),
+        Ok(Settled::InFlight) => Ok(DispatchSubmit::InFlight),
+        Err(error) if error.is_permanent() => {
+            tracing::error!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                bloom = ?record.bloom.0,
+                pass = ?payload.pass,
+                nonce = %record.nonce.0,
+                %error,
+                "aggregate-review submit refused permanently; parking the entry instead of re-driving",
+            );
+            Ok(DispatchSubmit::Refused)
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                %error,
+                "aggregate-review submit/record failed; stopping the ack prefix to re-drive",
+            );
+            Ok(DispatchSubmit::Transient)
+        }
+    }
 }
 
 /// Drain the aggregate-verify topic and submit each entry through the executor
@@ -2321,6 +2341,19 @@ fn redispatch_nonce(sequence: u64) -> Nonce {
     Nonce(format!("redispatch-{sequence}"))
 }
 
+/// Consume the parked-question row once a replay is tracked. A delete fault
+/// leaves an orphan row nothing reads, never a lost redispatch.
+fn consume_replayed_hold(store: &mut dyn StoreBackend, bloom: &[u8], question: &[u8], sequence: u64) {
+    if let Err(error) = store.consume_parked_question(bloom, question) {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            %error,
+            "redispatched attempt submitted but its parked row did not clear",
+        );
+    }
+}
+
 /// Drain the redispatch topic and replay each released question's held attempt
 /// (ADR-0151, #3664). An adopted answer releases the hold and decides a
 /// re-dispatch; this is the half that performs it — it looks the parked order up
@@ -2363,21 +2396,9 @@ fn drain_and_redispatch(
             ) {
                 break;
             }
-            // The stored order is enough to re-ask submit; the parked-question
-            // row is keyed by the payload's (bloom, question) and is consumed
-            // only once the replay is tracked, as the fresh-submit arm does.
             if consume_hold {
                 if let Ok(payload) = from_bytes::<RedispatchPayload>(&entry.payload) {
-                    if let Err(error) =
-                        store.consume_parked_question(payload.bloom.as_bytes(), payload.question.as_bytes())
-                    {
-                        tracing::warn!(
-                            target: "aether_chassis_bloomery::executor",
-                            sequence = entry.sequence,
-                            %error,
-                            "redispatched attempt submitted but its parked row did not clear",
-                        );
-                    }
+                    consume_replayed_hold(store, payload.bloom.as_bytes(), payload.question.as_bytes(), entry.sequence);
                 }
             }
             continue;
@@ -2415,18 +2436,7 @@ fn drain_and_redispatch(
             Ok(Settled::Answered(handle)) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
-                // The replay is submitted and tracked, so the hold's row has done
-                // its job. A delete fault here leaves an orphan row nothing reads
-                // (the outbox entry it answered is acked), never a lost redispatch.
-                if let Err(error) = store.consume_parked_question(payload.bloom.as_bytes(), payload.question.as_bytes())
-                {
-                    tracing::warn!(
-                        target: "aether_chassis_bloomery::executor",
-                        sequence = entry.sequence,
-                        %error,
-                        "redispatched attempt submitted but its parked row did not clear",
-                    );
-                }
+                consume_replayed_hold(store, payload.bloom.as_bytes(), payload.question.as_bytes(), entry.sequence);
             }
             Ok(Settled::InFlight) => break,
             Err(error) if error.is_permanent() => {
