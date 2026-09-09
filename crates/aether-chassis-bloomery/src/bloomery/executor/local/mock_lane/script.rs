@@ -650,6 +650,8 @@ mod tests {
                 env: Vec::new(),
                 process_id: None,
                 argv: Vec::new(),
+                instruction_manifest: None,
+                instruction_manifest_digest: None,
             },
         )
         .unwrap();
