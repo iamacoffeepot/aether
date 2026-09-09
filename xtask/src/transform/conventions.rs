@@ -2,11 +2,9 @@
 //!
 //! The lanes used to *point* at `CLAUDE.md` — "read it before editing" — which
 //! only lands if the forked harness happens to read it. Headless Claude
-//! auto-loads it; Muse reads neither. So the lane
-//! inlines the conventions here, at prompt assembly. #5141 curates that
-//! inline from [`LANE_CONTEXT`] rather than the whole subject-tree
-//! `CLAUDE.md`: MCP / runtime / wasm / pipeline workflow have no lane tool
-//! surface, and a missing file is a compile error rather than a silent omit.
+//! auto-loads it; Muse reads neither. So the authorized bundle inlines the
+//! curated lane context as its `conventions` field, and the transform renders
+//! that field rather than reading a file from the checkout.
 
 /// Render the curated lane context as the prompt section the import command
 /// records on the bundle. The transform no longer reads this file; it consumes

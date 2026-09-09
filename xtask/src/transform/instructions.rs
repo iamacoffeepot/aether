@@ -27,7 +27,7 @@ pub fn load() -> Result<ModelProcessInstructions> {
              instruction bundle (ADR-0214)"
         )
     })?;
-    let expected = env::var(INSTRUCTION_MANIFEST_DIGEST_ENV).ok_or_else(|| {
+    let expected = env::var(INSTRUCTION_MANIFEST_DIGEST_ENV).map_err(|_| {
         anyhow::anyhow!(
             "model lane refused: `{INSTRUCTION_MANIFEST_DIGEST_ENV}` is unset; the host must name the \
              bundle's content address (ADR-0214)"

@@ -24,8 +24,6 @@
 
 mod bundle;
 
-pub use bundle::{RETROSPECT, RETROSPECT_FINDING_CONTRACT};
-
 use std::fs;
 use std::path::PathBuf;
 

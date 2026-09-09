@@ -199,7 +199,7 @@ composed tree builds. Do not reopen finished member work; repair at the seam.";
 /// never run, so there is no in-repo original to import. The bloom id, the
 /// receipt digest, and the landed range are context slots, never interpolated
 /// into this text.
-pub const RETROSPECT: &str = "\
+const RETROSPECT: &str = "\
 You are the reader at the end of the line. A bloom has landed: its members were built, reviewed, verified, woven, \
 and merged, and the range it landed is checked out for you. Read what it left behind and file the work it will not \
 fix.
@@ -239,7 +239,7 @@ in what you actually read, and small enough to be one member of a future bloom."
 /// `scope_emission`, and the contract
 /// [`RetrospectFinding::normalize`](aether_bloomery::RetrospectFinding::normalize)
 /// judges. Authored here for the same reason [`RETROSPECT`] is.
-pub const RETROSPECT_FINDING_CONTRACT: &str = "\
+const RETROSPECT_FINDING_CONTRACT: &str = "\
 Emit your findings as the top-level `retrospect_findings` array of this lane's evidence — a JSON array of objects, \
 each one work order:
 
