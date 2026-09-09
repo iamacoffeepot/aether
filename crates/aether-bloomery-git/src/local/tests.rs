@@ -6,6 +6,7 @@ use std::process::Command;
 use std::slice::from_ref;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::control::{ReconcileOp, reconcile_op};
 use aether_bloomery::testing::{digest, membership};
@@ -89,6 +90,16 @@ fn dated_commit(local: &LocalGitData, tree: &str, message: &str) -> String {
 /// `sha`'s committer timestamp in whole seconds since the epoch.
 fn commit_stamp(local: &LocalGitData, sha: &str) -> String {
     git(local, &["show", "--no-patch", "--format=%ct", sha, "--"], "")
+}
+
+/// `sha`'s author timestamp in whole seconds since the epoch.
+fn author_stamp(local: &LocalGitData, sha: &str) -> String {
+    git(local, &["show", "--no-patch", "--format=%at", sha, "--"], "")
+}
+
+/// The test's own clock, in the same whole seconds git records.
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).expect("after the epoch").as_secs()
 }
 
 /// `sha`'s raw `author` header line.
@@ -241,78 +252,45 @@ fn transact_refs_is_all_or_nothing_under_a_mid_batch_conflict() {
 }
 
 #[test]
-fn create_commit_is_deterministic_and_get_commit_reads_it_back() {
+fn create_commit_reads_back_and_stamps_the_mint_moment() {
+    // The plausible bug: a mint whose dates are pinned or inherited files a
+    // fold under a moment nobody made it — the epoch, or a parent's — and the
+    // day branch's history is not browsable. Both dates are the clock at the
+    // mint, and both agree.
     let (_root, local) = open_temp();
-    let first = local.create_commit("same", EMPTY_TREE, &[]).expect("first");
-    let second = local.create_commit("same", EMPTY_TREE, &[]).expect("second");
-    assert_eq!(first.sha, second.sha, "pinned identity makes a retry byte-identical");
-    let read = local.get_commit(&first.sha).expect("cat-file");
+    let before = now_secs();
+    let commit = local.create_commit("same", EMPTY_TREE, &[]).expect("mint");
+    let after = now_secs();
+    let read = local.get_commit(&commit.sha).expect("cat-file");
     assert_eq!(read.tree, EMPTY_TREE);
     assert_eq!(read.message, "same");
+    let authored: u64 = author_stamp(&local, &commit.sha).parse().expect("an author stamp");
+    let committed: u64 = commit_stamp(&local, &commit.sha).parse().expect("a committer stamp");
+    assert!((before..=after).contains(&authored), "authored at the mint: {before} <= {authored} <= {after}");
+    assert_eq!(committed, authored, "the committer date is the author date, the mint moment");
 }
 
 #[test]
-fn a_minted_commit_is_authored_by_the_bloomery_at_the_moment_it_inherits() {
+fn a_minted_commit_is_authored_by_the_bloomery_at_the_moment_it_is_minted() {
     // Tripwire: the author line is what a reader sees on the landed day — the
     // roll rewrites the committer side when it linearizes the day onto main and
     // keeps the author verbatim. An epoch-zero date under an `.invalid` domain
-    // renders there as an unattributed 1970 commit, so both the address and the
-    // moment are pinned. The moment is the parent's, not the clock's, because
-    // the sha has to stay a pure function of the inputs.
+    // renders there as an unattributed 1970 commit, so both the address and a
+    // real moment are pinned; a parent's moment is not the mint's either.
     let (_root, local) = open_temp();
     let tree = git(&local, &["mktree"], "");
     let parent = dated_commit(&local, &tree, "base");
-    let stamp = commit_stamp(&local, &parent);
-
+    let before = now_secs();
     let commit = local.create_commit("bloomery integrate", &tree, from_ref(&parent)).expect("integrate");
-
+    let line = author_line(&local, &commit.sha);
+    let stamp: u64 = author_stamp(&local, &commit.sha).parse().expect("an author stamp");
     assert_eq!(
-        author_line(&local, &commit.sha),
+        line,
         format!("author bloomery <bloomery@iamateapot.dev> {stamp} +0000"),
-        "the bloomery authors its own commits, at the moment it inherits"
+        "the bloomery authors its own commits"
     );
-    assert_ne!(stamp, "0", "the fixture parent carries a real moment to inherit");
-}
-
-#[test]
-fn re_minting_over_the_same_parent_returns_the_same_sha_and_the_same_date() {
-    // Tripwire: `GitSource::integrate` recovers from a fault between its commit
-    // and its ref update only because the retry re-creates a byte-identical
-    // commit and git hands back the same sha. Two mints a moment apart tie
-    // under a wall-clock date too, so the load-bearing half of this is the
-    // date itself: an inherited one is in the past, a clock-read one is now.
-    let (_root, local) = open_temp();
-    let tree = git(&local, &["mktree"], "");
-    let parent = dated_commit(&local, &tree, "base");
-    let stamp = commit_stamp(&local, &parent);
-
-    let first = local.create_commit("bloomery integrate", &tree, from_ref(&parent)).expect("first");
-    let second = local.create_commit("bloomery integrate", &tree, from_ref(&parent)).expect("second");
-
-    assert_eq!(first.sha, second.sha, "one input mints one commit");
-    assert!(author_line(&local, &first.sha).ends_with(&format!("{stamp} +0000")), "the date is the parent's");
-}
-
-#[test]
-fn a_two_parent_fold_inherits_the_newest_parent_whichever_side_it_is_on() {
-    // Tripwire: a fold's merge carries the branch it advances and the candidate
-    // capture it merges in, and the capture is when the work was actually
-    // produced. Taking the newest is what keeps the dates along a branch from
-    // going backwards; taking a fixed side would stamp the merge with whichever
-    // parent happened to be listed first.
-    let (_root, local) = open_temp();
-    let tree = git(&local, &["mktree"], "");
-    let dated = dated_commit(&local, &tree, "candidate");
-    let stamp = commit_stamp(&local, &dated);
-    let epoch = local.create_commit("integration", EMPTY_TREE, &[]).expect("epoch parent").sha;
-
-    for parents in [[epoch.clone(), dated.clone()], [dated, epoch]] {
-        let commit = local.create_commit("bloomery fold heads/candidate", &tree, &parents).expect("fold");
-        assert!(
-            author_line(&local, &commit.sha).ends_with(&format!("{stamp} +0000")),
-            "the newest parent supplies the moment, listed {parents:?}"
-        );
-    }
+    assert!(stamp >= before, "the moment is the mint's, not the epoch's or the parent's: {stamp} >= {before}");
+    assert_ne!(commit_stamp(&local, &commit.sha), "0", "no minted commit is filed under the epoch");
 }
 
 #[test]
