@@ -111,7 +111,7 @@ pub struct Settings {
     /// Comparing tone against a constant puts a family's edge exactly on
     /// a level curve of the lighting, which reads as a ruled line slicing
     /// across the figure. Perturbing the threshold by
-    /// [`noise`](crate::math3::noise) lets the family break into dashes
+    /// [`noise`] lets the family break into dashes
     /// as it fades, which is what a hand does. Zero rules the boundary.
     pub hatch_dither: f32,
     /// Angle of the primary hatch family, in the model's XY plane.
