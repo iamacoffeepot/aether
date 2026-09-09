@@ -1,31 +1,20 @@
-//! aether-substrate: runtime that every substrate chassis shares.
+//! The runtime every substrate chassis shares: the wasmtime engine, the mail
+//! router, the kind manifest, and the reply-handle table. Chassis-specific
+//! peripherals (window, GPU, TCP listener, event loop) live in the chassis
+//! crate that depends on this one.
 //!
-//! Hosts the wasmtime engine, the mail router, the kind manifest, and
-//! the reply-handle table. Chassis-specific peripherals (window, GPU,
-//! TCP listener, event loop) live in the chassis crate that binds this
-//! as a dependency. See ADR-0035.
+//! The [`Chassis`] trait is universal but narrow: `const PROFILE` (the stable
+//! identifier, `"desktop"` / `"headless"` / `"hub"` / `"substrate-harness"`),
+//! `type Driver` (the capability that owns the main thread), `type Env` (the
+//! resolved-config bag), and `fn build(env) -> Result<BuiltChassis<Self>,
+//! BootError>`. What you `run()` is the [`BuiltChassis<Self>`] that `build`
+//! returns, not a value of `Self` (ADR-0035, ADR-0071).
 //!
-//! Each loaded wasm component runs as an `aether_component::trampoline::WasmTrampoline`
-//! — a `NativeActor` instanced under `aether.embedded:NAME`
-//! that delegates incoming mail to the wasm guest via `#[fallback]`
-//! (issue 634 Phase 4; trampoline moved to capabilities by issue 654
-//! so its `Addressable::NAMESPACE` is the single cap-owned declaration of
-//! the prefix). The chassis-side `ComponentHostCapability`
-//! (in `aether-component`) shrinks to a `LoadComponent` handler
-//! that spawns the trampoline (and forwarders for `DropComponent` /
-//! `ReplaceComponent`). Phase 4 PR 2 retired the per-frame drain
-//! barrier and the `DrainSummary` / `DrainDeath` / `DrainOutcome`
-//! aggregate types: trampoline traps now fail-fast directly via
-//! `NativeBinding::fatal_abort` at the trap site (ADR-0063).
-//!
-//! The `Chassis` trait (ADR-0035, redefined by ADR-0071) is universal
-//! but intentionally narrow: `const PROFILE` (the chassis's stable
-//! identifier — `"desktop"`, `"headless"`, `"hub"`, `"substrate-harness"`),
-//! `type Driver: DriverCapability` (the capability that owns the main
-//! thread), `type Env` (resolved-config bag), and
-//! `fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError>`.
-//! The chassis instance you `run()` is the [`BuiltChassis<Self>`] the
-//! trait method returns, not a value of `Self` itself.
+//! Each loaded wasm component runs as an
+//! `aether_component::trampoline::WasmTrampoline`, a native actor instanced
+//! under `aether.embedded:NAME` that delegates incoming mail to the guest. A
+//! trampoline trap fails fast at the trap site through
+//! `NativeBinding::fatal_abort`; there is no per-frame drain barrier.
 
 // The `#[actor] impl NativeActor for X` macro emits
 // `impl ::aether_substrate::NativeDispatch for X` so external callers
