@@ -61,10 +61,6 @@ use aether_kinds::descriptors;
 /// `Builder::with_actor::<ComponentHostCapability>(...)`. The substrate
 /// boot doesn't construct the cap itself — it just holds the
 /// dependencies the cap will need.
-///
-/// Issue 640 collapsed the shared `InputSubscribers: Arc<RwLock<...>>`
-/// — `aether.input` is the sole owner of the subscriber table and
-/// drivers / `ComponentHostCapability` write to it via mail.
 pub struct SubstrateBoot {
     pub engine: Arc<Engine>,
     pub registry: Arc<Registry>,

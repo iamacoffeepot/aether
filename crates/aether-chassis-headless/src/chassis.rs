@@ -155,8 +155,8 @@ impl BootableChassis for HeadlessChassis {
         let common = env.into_common_boot(component_host_params);
         // ADR-0082 §1 / PR 3b: headless uses the shared Tick-only
         // lifecycle graph (Tick self-loops, Quit escapes to Shutdown);
-        // the timer pushes `LifecycleAdvance` and the driver broadcasts
-        // Tick to `aether.input` via the relay subscriber.
+        // the timer pushes `LifecycleAdvance` and the lifecycle cap
+        // broadcasts `Tick` to its stage subscribers.
         let builder = with_full_stack_caps(builder, common)
             .with_actor::<HeadlessRenderCapability>(())
             .with_actor::<HeadlessAudioCapability>(())

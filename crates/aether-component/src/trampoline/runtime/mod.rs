@@ -136,7 +136,7 @@ impl NativeActor for WasmTrampoline {
     /// `subscribe_input` mail validates against a live closure
     /// entry. Pre-issue-640 the call lived inside
     /// `Component::instantiate` (step 4, before registration) and
-    /// races the input cap's `validate_subscriber_mailbox`,
+    /// races the window cap's `validate_subscriber_mailbox`,
     /// silently dropping subscribes.
     fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
         let (aliases, retired) = state.component.as_mut().map_or_else(Default::default, |component| {

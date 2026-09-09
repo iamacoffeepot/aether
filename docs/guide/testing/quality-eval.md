@@ -104,8 +104,7 @@ contamination assert at runtime rather than by a test.
 ## Running it manually
 
 Quality evaluation is a local manual harness, not a hosted merge gate. Run it
-with `git ≥2.49`, `node`, `jq`, and a
-`CLAUDE_CODE_OAUTH_TOKEN`):
+with `git ≥2.49`, `node`, `jq`, and a `CLAUDE_CODE_OAUTH_TOKEN`:
 
 ```bash
 GITHUB_TOKEN=$(gh auth token) node scripts/quality-eval-select.mjs > samples.jsonl

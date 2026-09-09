@@ -1599,7 +1599,7 @@ resolves a `Key` press plus the cached `Modifiers` into one `EditCommand`, and
 
 **The chord modifier is `ctrl` *or* `meta`, always.** Cmd is the chord on
 macOS and Ctrl everywhere else, and a widget cannot ask the substrate which
-platform its window is on — the input cap reports the physical modifiers and
+platform its window is on — the window cap reports the physical modifiers and
 nothing more. Accepting either costs nothing here, because no control in the
 set binds the two to different meanings; a control that ever needs to should
 say so loudly rather than quietly diverging.
@@ -1631,7 +1631,7 @@ to copy leaves the control enabled and sets `read_only`.
 ## Root-owned focus and input
 
 Widgets never subscribe to input. The panel root subscribes the pointer and
-keyboard streams once (the input cap) and the frame stage once (the lifecycle
+keyboard streams once (the window cap) and the frame stage once (the lifecycle
 cap), then routes every event through a `Focus` helper it embeds — the
 input-side counterpart to `Composite`. `Focus` holds child hit rects in layout
 order, pointer/keyboard eligibility, dynamic visible/enabled availability,
@@ -1949,11 +1949,9 @@ interactive subscriptions: panel/console/mover lifecycle and render roles are
 unchanged, and console/mover continue subscribing to `WindowSize` directly.
 The shell itself owns no lifecycle, render, or window-size work.
 
-(The shelved `aether-kit-workbench` terrain annotation workbench was the
-concrete peer-first assembly of this model — a specialized tool panel, a
-camera-owning viewport, a non-input-owning `ConsoleOverlay`, and the one
-`EditorShell` routing their three non-overlapping regions; git history holds
-it.)
+The assembly this model is built for is peer-first: a tool panel, a
+camera-owning viewport, a non-input-owning `ConsoleOverlay`, and one
+`EditorShell` routing their non-overlapping regions.
 
 ## Layout
 
@@ -2059,7 +2057,7 @@ without resetting its label or any sibling state:
 {
   "mails": [{
     "engine_id": "<engine-id>",
-    "recipient_name": "aether.component/aether.embedded:panel/aether.embedded:button",
+    "address": "aether.component/aether.embedded:panel/aether.embedded:button",
     "kind_name": "aether.kit.widget.set_state",
     "params": {
       "state": {

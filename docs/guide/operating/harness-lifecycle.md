@@ -32,6 +32,18 @@ minutes with no output; that silence is the build, not a wedged script. Set
 ever spawns headless engines, and `spawn_substrate` will resolve
 `aether-headless` alone.
 
+The same run seeds the hub's binary store. It exports
+`AETHER_BINARY_BOOTSTRAP` with the release chassis binaries it found on disk;
+the tunnel reads that list once at boot and re-addresses it to the hub as an
+argv flag, because a forked child's environment is constructed from an
+allowlist rather than inherited (ADR-0162). The hub ingests each listed path
+into its content-addressed store as it starts, so a bare `spawn_substrate`
+resolves the stored `default` headless chassis without a manual
+`upload_binary`. The list is derived from what is on disk rather than from what
+that run built, so an already-built `aether-desktop` is still seeded under
+`AETHER_TUNNEL_SKIP_DESKTOP`. The fork spec is fixed at tunnel boot, so a hub
+replaced through `/admin/restart-hub` is seeded from the same list.
+
 The tunnel's admin endpoint is loopback control, not an ownership system. It
 does not authenticate a task or establish which session may restart the fleet.
 Likewise, `/admin/status` and `list_engines` expose no owner or hub epoch. A

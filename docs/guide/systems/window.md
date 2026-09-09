@@ -122,7 +122,7 @@ that window's own reply. It is a convenience for the single-window engine, not a
 current target: with no window, or with several, the manager replies the
 operation's `Err` naming the situation rather than choosing one, and the caller
 names the window itself. The headless manager and its endpoints both refuse all
-five, so an op that cannot be applied is always answered rather than dropped.
+seven, so an op that cannot be applied is always answered rather than dropped.
 
 For an MCP `send_mail` request, `mode` remains a field of the
 `aether.window.set_mode` params object and the optional windowed dimensions

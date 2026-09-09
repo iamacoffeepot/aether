@@ -1,15 +1,15 @@
-//! Shared mesh and stroke geometry: the mesh DSL parser, typed AST, mesher,
-//! minimal OBJ import/export, and renderer-neutral eye-facing stroke ribbons.
+//! Mesh and stroke geometry: the mesh DSL parser, its typed AST, the mesher, a
+//! minimal OBJ import and export, and renderer-neutral eye-facing stroke
+//! ribbons.
 //!
-//! Library-only (per ADR-0053): produces triangles, doesn't render. The
-//! `aether-kit-commons`'s `aether.kit.mesh` export consumes this crate to
-//! mesh DSL text loaded from disk; the `dsl_to_obj` example converts a `.dsl` file to
-//! Wavefront OBJ for inspection in any external viewer. The indexed OBJ
-//! importer is also shared by the engine's triangle consumers.
-//!
-//! Boolean composition (`union` / `intersection` / `difference`) was
-//! retired from the v1 DSL by ADR-0062. The full prior implementation
-//! lives on the `archive/csg-bsp` branch.
+//! Library only (ADR-0053): it produces triangles and renders nothing.
+//! `aether-kit-commons`'s `aether.kit.mesh` export uses it to mesh DSL text
+//! loaded from disk, the engine's triangle consumers share the indexed OBJ
+//! importer, and the `dsl_to_obj` example converts a `.dsl` file to Wavefront
+//! OBJ for any external viewer. The v1 DSL has no boolean composition; that
+//! implementation lives on the `archive/csg-bsp` branch.
+
+#![forbid(unsafe_code)]
 
 pub mod ast;
 pub mod cleanup;

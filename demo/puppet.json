@@ -1,0 +1,10 @@
+{
+  "subject": {
+    "namespace": "assets",
+    "path": "teapot.dsl",
+    "labels": "",
+    "material_field_padding": 0.12,
+    "rig": "",
+    "palette": ""
+  }
+}

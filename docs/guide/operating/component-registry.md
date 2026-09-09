@@ -108,9 +108,10 @@ engine's `aether.component` cap, and waits for `LoadResult`.
 
 On a single load, record all three outputs:
 
-- `mailbox_id`: the tagged id required by replace/drop lifecycle operations.
-- `name`: the full lineage address used as `send_mail.recipient_name` and by
-  live `describe_component`.
+- `mailbox_id`: the tagged id the `aether.component.drop` kind takes, and one
+  accepted spelling of `replace_component.address`.
+- `name`: the full lineage address used as `send_mail.address` and by live
+  `describe_component`.
 - `capabilities`: handled kinds, reply contracts, fallback, docs, and config
   kind for the selected actor type.
 
@@ -186,18 +187,21 @@ engine reachability matters.
 
 ## Replacing safely
 
-Use `replace_component` with the current engine id, the exact component
-`mailbox_id`, and a previously uploaded selector. Prefer a content hash so the
-replacement is unambiguous.
+Use `replace_component` with the current engine id, the component's `address`,
+and a previously uploaded selector. The address is the same spelling every other
+tool takes: a canonical ADR-0099 lineage, an unambiguous ADR-0166 abbreviation,
+or the tagged `mbx-…` id the load returned. Prefer a content hash for the
+selector so the replacement is unambiguous.
 
 On success the trampoline mailbox stays stable and the returned capabilities
 describe the replacement actor type. An omitted export reuses the actor type the
 trampoline currently hosts; it does not necessarily select the new module's
 default entry.
 
-`drain_timeout_ms` is accepted for wire compatibility but is currently ignored
-by the substrate's structural splice path. Do not present it as a functioning
-deadline. Require an explicit successful result, then re-run
+There is no drain phase and no drain timeout. ADR-0038 made the splice
+structural, so the replace kind's `drain_timeout_ms` field is vestigial wire
+shape the MCP layer always sends empty; the tool exposes no such argument.
+Require an explicit successful result, then re-run
 `describe_component` and a safe probe. Failure is phase-dependent: pre-splice
 validation preserves the old guest; an instantiation failure after the old
 guest is taken can leave the trampoline empty; a rehydrate failure installs the

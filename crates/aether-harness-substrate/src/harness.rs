@@ -233,8 +233,7 @@ pub struct SubstrateHarness {
     /// `aether.lifecycle` mailbox id, cached at boot. `advance()`
     /// fires one `LifecycleAdvance` here per requested tick; the
     /// lifecycle driver broadcasts the `Tick` stage directly to its
-    /// stage subscriber set per ADR-0082 (issue 1490 retired the
-    /// `Tick → aether.input` relay).
+    /// stage subscriber set per ADR-0082.
     lifecycle_mailbox: MailboxId,
     /// Kind id of [`aether_kinds::LifecycleAdvance`], pre-resolved so the advance
     /// loop body stays alloc-free per tick.
@@ -1504,8 +1503,7 @@ impl SubstrateHarness {
     fn run_frame(&mut self, delta_micros: u32) -> Result<(), SubstrateHarnessError> {
         // ADR-0082 PR 3b: SubstrateHarness pushes `LifecycleAdvance` to the
         // lifecycle driver, which broadcasts the `Tick` stage directly
-        // to its stage subscribers (issue 1490 retired the
-        // `Tick → aether.input` relay; components subscribe `Tick` on
+        // to its stage subscribers (components subscribe `Tick` on
         // `aether.lifecycle`). The chain rooted at this advance's
         // `MailId` covers the whole subtree — the stage fanout,
         // subscriber handlers, the tick_observed broadcasts those
@@ -1736,7 +1734,7 @@ mod tests {
     }
 
     /// Issue iamacoffeepot/aether#723: chassis-source ticks are minted
-    /// via `push_chassis_root_mail`, and the input cap fanout
+    /// via `push_chassis_root_mail`, and the lifecycle cap fanout
     /// propagates `(root, parent_mail)` from the inbound through
     /// `NativeCtx::fanout` so each subscriber-bound copy lands in the
     /// same causal chain. Verified by registering a closure-bound
@@ -1766,9 +1764,9 @@ mod tests {
         // correct variant: the handler does immediate work (push into
         // a captured Vec) rather than enqueueing onto a downstream
         // inbox, so the producer-side `Received`/`Finished` bracket
-        // belongs on the call site. `validate_subscriber_mailbox`
-        // accepts both `Inbox` and `Inline` so the input cap's
-        // subscribe path still admits this mailbox. Pre-#845 this
+        // belongs on the call site. The lifecycle cap's subscribe
+        // path admits an `Inline` mailbox as readily as an `Inbox`
+        // one, so this mailbox takes stage broadcasts. Pre-#845 this
         // used `register_inbox` and the substrate's `run_frame`
         // silently swallowed the resulting in_flight leak; strict
         // propagation surfaces the variant mismatch as a

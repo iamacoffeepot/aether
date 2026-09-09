@@ -6,8 +6,9 @@ Aether has two packaging commands with different consumers:
 - `cargo xtask package` emits a shippable package depot: one chassis binary
   plus a content-addressed pack of components.
 
-Neither command is the same as merging a PR, tagging a version, or publishing a
-GitHub Release.
+Neither command is the same as merging a PR. Tagging a version is what
+publishes a GitHub Release, and it does so by running `cargo xtask package` on
+each platform — see [Cutting a release](#cutting-a-release).
 
 ## Distribution tree
 
@@ -53,10 +54,12 @@ cargo xtask bins --json    # the same, plus the depot filename per `--chassis`
 
 `file` is the host-platform filename, so a Windows runner is told
 `aether-desktop.exe`. The `--json` form adds `package_chassis`, keyed by the
-values `cargo xtask package --chassis` accepts, which is how
-`.github/workflows/release.yml` finds the executable it renames for hand-out.
-Prefer this over hardcoding a binary name: that workflow is manually triggered,
-so nothing in CI catches a name that has gone stale.
+values `cargo xtask package --chassis` accepts. `.github/workflows/release.yml`
+reads both: `package_chassis.desktop` tells it which binary the depot already
+carries, and each remaining `chassis_bins` entry is a binary it builds and
+ships as its own archive. Prefer this over hardcoding a binary name — no pull
+request runs that workflow, so nothing in CI catches a name that has gone
+stale.
 
 ## Package depot
 
@@ -68,8 +71,11 @@ into `pack/objects/`.
 ```text
 <out>/
   aether-desktop              # the chassis binary (`aether-headless` under `--chassis headless`; .exe on Windows)
+  LICENSE-MIT                 # the workspace licenses, shipped beside the statically linked binary
+  LICENSE-APACHE
   pack/manifest               # the persisted, versioned package manifest
   pack/objects/<sha256>       # component wasm + config bytes, content-addressed
+  pack/assets/…               # the `--assets` tree, verbatim
 ```
 
 The depot writes to `target/package/` unless `--out` names another directory.
@@ -89,8 +95,8 @@ For a real product, name the chassis and the components:
 cargo xtask package \
   --profile release \
   --chassis desktop \
-  --components aether-kit-commons \
-  --title loco-motion
+  --components aether-puppet \
+  --title aether
 ```
 
 `--chassis` selects `desktop` or `headless`. Component order is autoload order.
@@ -103,9 +109,43 @@ while an operator's `AETHER_WINDOW_*` still overrides it.
 
 For explicit actor export, instance name, or richer per-component control, use
 the JSON `--spec` form. A spec carries the chassis, the three chassis settings,
-and per-component `package`-or-`wasm` plus `config`, `name`, and `export`.
-Relative paths in a spec resolve against the spec file's directory, not an
-arbitrary process working directory.
+and per-component `package`-or-`wasm` plus `config` / `config_json`, `name`, and
+`export`. Relative paths in a spec resolve against the spec file's directory,
+not an arbitrary process working directory.
+
+`config` names a file of init-config **bytes** — the wire image of the
+component's `Config` kind, which is what a machine stages. `config_json` names a
+**JSON** file instead, encoded at build time against the `Config` schema the
+component's own wasm declares (ADR-0090 + ADR-0028). Prefer `config_json` for
+anything checked in: a reviewer can read it, and a field the component does not
+declare fails the emit naming the file and the field rather than arriving as a
+decode error inside the guest. The JSON boot manifest takes the same pair of
+fields, so a spec and a manifest can share one config file. Setting both on one
+entry is an error, not a precedence question.
+
+### Shipping assets
+
+`--assets <dir>` copies a directory verbatim into `pack/assets`, and the
+packaged chassis roots the `assets` namespace there. Assets are the one part of
+`pack/` that is not content-addressed, and deliberately: a component reaches a
+file by mailing `aether.fs.read` with the path an author wrote, so the shipped
+tree has to keep those paths. Objects are hash-named because the manifest names
+them; assets are path-named because the running program does.
+
+The depot's root slots in **below** argv/env/file and **above** the compiled
+default, the same precedence a manifest's title and tick cadence take, so an
+operator's `AETHER_ASSETS_DIR` / `--assets-dir` still overrides a shipped depot.
+The check is per member rather than per field: any pinned `aether.fs` root — save
+or config as much as assets — keeps the operator's whole `NamespaceRoots`.
+
+```sh
+cargo xtask package \
+  --spec demo/puppet-turntable.json \
+  --assets crates/aether-mesh/examples
+```
+
+That is the checked-in demo (`demo/README.md`): a depot that draws a turning
+line-art teapot when its binary is run with no flags at all.
 
 ## Boot-time manifests
 
@@ -114,7 +154,13 @@ the persisted package manifest above:
 
 - The JSON boot manifest (`crate::boot_manifest`) names component files by
   path. The hub's `spawn_substrate` writes it and injects it through
-  `AETHER_BOOT_MANIFEST`; the spawned chassis reads the listed wasm itself.
+  `AETHER_BOOT_MANIFEST`; the spawned chassis reads the listed wasm itself. Its
+  entries take `config` (bytes) or `config_json` (encoded at read time against
+  the component's declared `Config` schema), so a checked-in manifest is the
+  no-packaging developer path — `--boot-manifest demo/puppet-turntable.boot.json`
+  boots the same composition the depot ships. Manifest paths are resolved as-is,
+  against the process working directory rather than the manifest's own
+  directory.
 - The package manifest (`crate::package`) references bytes by content hash and
   is what a shipped depot boots from.
 
@@ -140,20 +186,20 @@ Keep these operations distinct:
 - **land**: merge an approved PR through the repository workflow;
 - **dist**: produce the development/test artifact tree;
 - **package**: produce a shippable package depot;
-- **release workflow**: the checked-in manual workflow currently builds a
-  Windows `loco-motion` package artifact — a zip of the depot;
 - **bump**: move the workspace version and re-lock — see below;
-- **version/tag/publication policy**: only the bump is specified today.
+- **release**: push the version tag, which packages every platform and
+  publishes the archives on that tag's GitHub Release — see
+  [Cutting a release](#cutting-a-release).
 
 ADR-0092 proposes a release-branch workflow but remains Proposed; it is not
 current repository policy. Contributor lifecycle skills do not publish a
-software release.
+software release — the tag push does.
 
 ## Bumping the workspace version
 
 Every crate takes its version from `[workspace.package] version` in the root
 `Cargo.toml` — no crate carries a literal, and no doc, script, or workflow
-spells one either. The ten `env!("CARGO_PKG_VERSION")` sites read it at compile
+spells one either. Every `env!("CARGO_PKG_VERSION")` site reads it at compile
 time. So the bump is one edit and the lockfiles that edit invalidates:
 
 ```sh
@@ -183,8 +229,59 @@ The cut is four steps:
    accumulated while nothing re-locked it.
 3. **Land the bump as its own PR** (`chore(release): …`) through the ordinary
    flow. Nothing else rides that PR, so the version move is one commit.
-4. **Tag the merged commit** and run the `Release` workflow against it for the
-   hand-out artifact.
+4. **Tag the merged commit and push the tag**, which publishes the release —
+   see below.
+
+## Cutting a release
+
+`.github/workflows/release.yml` turns a version tag into a published GitHub
+Release. It triggers on a push of a bare-semver tag; the repository's tags
+carry no `v` prefix (`0.1.0-alpha`, `0.3.0-alpha`), so once the bump above and
+the version's `CHANGELOG.md` section are on `main` the cut is:
+
+```sh
+git tag -a 0.4.0-alpha -m "…"
+git push origin 0.4.0-alpha
+```
+
+Each platform builds a package depot from the checked-in
+`demo/puppet-turntable.json` spec plus one archive per remaining chassis
+binary, and every archive is attached to the release:
+
+| Platform | Depot | Chassis binaries |
+| --- | --- | --- |
+| `linux-x86_64` | `aether-<version>-linux-x86_64.tar.gz` | `aether-headless-…`, `aether-hub-…`.tar.gz |
+| `macos-arm64` | `aether-<version>-macos-arm64.tar.gz` | `aether-headless-…`, `aether-hub-…`.tar.gz |
+| `windows-x86_64` | `aether-<version>-windows-x86_64.zip` | `aether-headless-…`, `aether-hub-…`.zip |
+
+Every name carries `<version>-<platform>`, and the platform half is read from
+the toolchain's own host triple, so it follows a runner image that changes
+architecture rather than asserting a stale one. Each archive unpacks to a
+single directory of that same name.
+
+The depot archive holds what the spec says: the chassis binary it names, the
+components it selects, and both workspace license files. The spec owns that
+list, which is why the other chassis binaries are their own archives rather
+than extra files inside a depot they are not part of — each ships with the
+same two license files, since a statically linked binary is redistributed
+with its notices. The set of those binaries comes from
+`cargo xtask bins --json`, so a chassis added to the inventory ships from the
+next tag with no workflow edit.
+
+The release is marked a pre-release whenever the version carries a
+pre-release suffix, which every tag cut so far does (`-alpha`). Its body is
+[`CHANGELOG.md`](https://github.com/iamacoffeepot/aether/blob/main/CHANGELOG.md)'s
+section for that version, and the tag's own message when the changelog carries
+no such section. The heading is matched on its first word, so
+`## 0.4.0-alpha (unreleased)` resolves the same as `## 0.4.0-alpha`, and only
+a `## ` heading ends a section — the `###` subheadings inside one stay part of
+it. So the changelog section is written before the tag, not after: what it
+says at the tagged commit is what the release page shows.
+
+Running the workflow from the Actions tab (`workflow_dispatch`) is the dry
+run: the identical build, archives named from the current workspace version
+and uploaded as workflow artifacts, and no release created. Reach for it to
+exercise a change to the workflow before a tag depends on it.
 
 ## Verification and cleanup
 
@@ -209,5 +306,6 @@ Validate a change at the boundary it touches:
 - Autoload: `crates/aether-chassis/src/autoload.rs`
 - Boot manifest schema: `crates/aether-chassis/src/boot_manifest.rs`
 - Package manifest + store-backed boot: `crates/aether-chassis/src/package.rs`
+- JSON init-config encoding: `crates/aether-chassis/src/component_config.rs`
 - Current hosted artifact job: `.github/workflows/release.yml`
 - Related decisions: ADR-0090, ADR-0115, ADR-0116, ADR-0163; ADR-0092 is Proposed

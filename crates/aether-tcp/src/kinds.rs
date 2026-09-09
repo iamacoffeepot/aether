@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// mailbox every accepted session delivers inbound frames and close
 /// notices to; `None` leaves the listener observer-less and drops
 /// inbound bytes. Addressed by [`MailboxId`](aether_data::MailboxId),
-/// like `aether.input.subscribe`'s `mailbox` — a name cannot name a
+/// like `aether.window.subscribe`'s `mailbox` — a name cannot name a
 /// nested actor, so a `String` here would exclude the loaded wasm
 /// components that are the field's main audience. Reply:
 /// `BindListenerResult`.

@@ -19,6 +19,8 @@
 //! let overlays = harness.committed_overlay_snapshot();
 //! ```
 
+#![forbid(unsafe_code)]
+
 pub mod artifacts;
 mod ext;
 pub mod test_helpers;

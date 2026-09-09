@@ -26,9 +26,11 @@ Do not rewrite past reasoning until it looks current.
 ## Status and implementation are different axes
 
 The [ADR template](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/TEMPLATE.md) offers `Proposed`, `Accepted`, and
-`Superseded by ADR-XXXX`. The existing log also contains historically qualified
-states such as Rejected or Overturned. Read the literal status line and any
-forward notes; do not normalize an unfamiliar status by guesswork.
+`Superseded by ADR-XXXX`. The existing log also contains states the template
+does not offer — Rejected, Overturned, `Superseded in part by …`, and
+Provisional (a record merged for review without yet governing). Read the literal
+status line and any forward notes; do not normalize an unfamiliar status by
+guesswork.
 
 | Decision status | What it means | What it does not prove |
 |---|---|---|

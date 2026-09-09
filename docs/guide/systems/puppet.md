@@ -26,6 +26,13 @@ Send `aether.puppet.load` with paths in one of the substrate's file namespaces:
 }
 ```
 
+`path` names a `.obj` sculpt or a `.dsl` mesh-DSL source (ADR-0026 / ADR-0051),
+dispatched on the extension the way the kit's mesh viewer dispatches. The DSL
+reader indexes the mesher's triangles onto shared vertices before extraction —
+the level sets every feature is built from only cross between triangles that
+share a vertex, so an unindexed soup would draw as per-triangle fragments
+rather than curves.
+
 `labels`, `rig` and `palette` may be empty. The charted face needs the material labels to
 measure its anchors. The optional rig directory contains `weights.npy` and
 `rig.txt`. Those disk formats stay compatible with the external bake pipeline;
@@ -40,6 +47,32 @@ and remains `Load::default()`'s value. The decoded
 `aether.puppet.material_field` kind declares its dimensions, byte cells,
 world-space origin and spacing, and ordered class vocabulary in memory; the
 on-disk asset remains a NumPy 1.0 `|u1`, C-order cube.
+
+## Load a subject at instantiation
+
+The same load can be named as init-config instead of mail, which is how a
+shipped package comes up with a subject on screen and no operator in the room.
+The `aether.puppet.config` kind carries one optional field, `subject`, whose
+value is exactly an `aether.puppet.load`:
+
+```json
+{
+  "subject": {
+    "namespace": "assets",
+    "path": "teapot.dsl",
+    "labels": "",
+    "material_field_padding": 0.12,
+    "rig": "",
+    "palette": ""
+  }
+}
+```
+
+Pass it as `load_component`'s `config` / `config_path`, or as a manifest
+entry's `config_json` (`docs/guide/building/distribution.md`). The puppet
+issues the reads from `wire`, so the load stays asynchronous and the mail path
+remains the way to swap subjects at runtime. `demo/` is a worked example: that
+config plus the turntable's, in both a depot spec and a boot manifest.
 
 ## The painter's box
 

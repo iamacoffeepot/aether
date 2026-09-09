@@ -61,8 +61,9 @@ is intentional and defended: prefer a design that treats wasm and native
 uniformly over one that special-cases the target.
 
 The chassis is **composed**, not monolithic — a builder assembles the
-capabilities a given deployment needs ([ADR-0070](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0070-native-capabilities-and-chassis-as-builder.md)/[ADR-0071](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0071-driver-capabilities-and-chassis-composition.md)), which is why there are
-several chassis (desktop, headless, hub, substrate-harness) sharing one runtime.
+capabilities a given deployment needs ([ADR-0070](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0070-native-capabilities-and-chassis-as-builder.md)/[ADR-0071](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0071-driver-capabilities-and-chassis-composition.md)), which is why several chassis
+share one runtime: desktop, headless, hub, and substrate-harness in the engine
+itself, plus an application profile such as Bloomery's.
 
 ## 4. Design for machine consumers
 

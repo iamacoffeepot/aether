@@ -1,7 +1,8 @@
 # ADR-0211: An Artifact Is a Record or It Is Rebuildable
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-26
+- **Amended:** 2026-09-09 — status: implemented on `main`; the janitor's archive pass and `evidence_retention_days` are in `crates/aether-chassis-bloomery/src/bloomery/reactor/janitor/` (`1545680c5`).
 
 ## Context
 

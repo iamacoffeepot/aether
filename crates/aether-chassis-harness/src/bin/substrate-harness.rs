@@ -10,6 +10,8 @@
 //! source stack, the resolved log filter, and the unknown-`AETHER_*` sweep over
 //! the composed known-key set.
 
+#![forbid(unsafe_code)]
+
 use std::mem;
 use std::sync::Arc;
 

@@ -206,7 +206,6 @@ impl Drop for ObligationGuard {
 /// inspection, never a second obligation); release builds carry no
 /// guard field and no `Drop`, so the type is byte-identical to its
 /// pre-ADR-0094 shape.
-//noinspection DuplicatedCode
 pub struct OwnedDispatch {
     /// Kind id (`K::ID`, ADR-0030 schema hash) the producer stamped.
     pub kind: KindId,

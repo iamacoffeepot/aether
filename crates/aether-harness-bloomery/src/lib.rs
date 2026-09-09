@@ -18,6 +18,8 @@
 //!
 //! A new scenario picks a cell. It does not write a fourth `struct Harness`.
 
+#![forbid(unsafe_code)]
+
 use std::env;
 
 pub mod cells;

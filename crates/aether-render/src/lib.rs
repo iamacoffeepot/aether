@@ -1,41 +1,32 @@
-//! `aether.render` cap. [`RenderCapability`] is the pumped, driver-thread
-//! `aether.render` actor (ADR-0161): it owns the accumulators, the wgpu GPU,
-//! its window-keyed surfaces, and the pending capture as plain state,
-//! dispatched through a [`PumpedSlot`](aether_substrate::actor::native::PumpedSlot)
-//! on the chassis driver thread rather than the worker pool. Frame recording,
-//! capture readback, and present all run on the one thread that owns the
-//! surfaces, so the largest cross-thread shared-state seam in the codebase
-//! collapses to plain fields.
+//! `aether.render` capability. [`RenderCapability`] runs on the chassis driver
+//! thread through a [`PumpedSlot`](aether_substrate::actor::native::PumpedSlot)
+//! instead of the worker pool, so it holds the accumulators, the wgpu device,
+//! its window-keyed surfaces, and the pending capture as plain fields:
+//! recording, capture readback, and present all happen on the one thread that
+//! owns the surfaces (ADR-0161).
 //!
-//! The driver requests a frame by mailing [`Frame`] each redraw after the
-//! advance chain settles; capture is a mail-driven state machine inside the
-//! actor ([`Frame`] / [`PreSettled`] / [`Occluded`] complete it), so every
-//! capture transition is a handler with trace brackets and a cost row.
+//! The driver asks for a frame by mailing [`Frame`] on each redraw, once the
+//! advance chain has settled. Capture is a mail-driven state machine inside
+//! the actor ([`Frame`], [`PreSettled`], and [`Occluded`] complete it), so
+//! every capture transition is a handler with trace brackets and a cost row.
 //! Desktop surfaces attach explicitly by `WindowId`; the surfaceless harness
 //! GPU boots lazily from `offscreen_size`.
 //!
-//! The cap's drawing + texture mail kinds — and the three chassis-internal
-//! driver kinds — live in [`kinds`] (ADR-0121): they ride the always-on
-//! (marker-only `render`) region so a wasm guest sees the kind types for
-//! typed addressing without the `render-runtime` GPU stack. The
-//! capture-request and `FrameCheck` verification kinds stay in `aether-kinds`
-//! (consumed upstream by `aether-mcp` and the substrate core), as do the
-//! `QuadSpace` / `QuadScale` projection types the `aether.text` kinds share.
+//! The drawing and texture kinds, plus the three chassis-internal driver
+//! kinds, live in [`kinds`] and compile always-on, so a wasm guest gets the
+//! kind types for typed addressing without the GPU stack behind the `runtime`
+//! feature. That runtime half splits along cohesion seams: `pipeline`,
+//! `texture`, `geometry`, `overlay`, `material`, `surface`, and `capture`. The
+//! capture-request and `FrameCheck` kinds stay in `aether-kinds`, consumed
+//! upstream by `aether-mcp` and the substrate core, as do the `QuadSpace` and
+//! `QuadScale` projection types the `aether.text` kinds share.
 //!
-//! The runtime decomposes along cohesion seams: `pipeline` (GPU bundle +
-//! shared record helpers), `texture` (the texture registry), `geometry`
-//! (the ADR-0171 geometry registry), `overlay` (the overlay-batch accumulator),
-//! `material` (the material-batch accumulator), `surface` (the wgpu
-//! surface / offscreen boot), and `capture` (the similarity-reference
-//! resolver).
-//!
-//! [`HeadlessRenderCapability`] is the chassis-without-GPU companion:
-//! same `aether.render` mailbox, no-op `DrawTriangle` / `ViewProjection`
-//! handlers (so desktop-designed components don't warn-storm),
-//! `Err`-replying `CaptureFrame` / `CreateTexture` handlers. Headless chassis
-//! composes it in place of [`RenderCapability`] (issue 603 Phase 2 § Resolved
-//! Decision 5).
+//! [`HeadlessRenderCapability`] is the companion for a chassis with no GPU:
+//! the same `aether.render` mailbox, no-op `DrawTriangle` and `ViewProjection`
+//! handlers so desktop-designed components do not warn-storm, and
+//! `Err`-replying `CaptureFrame` and `CreateTexture`.
 
+#![forbid(unsafe_code)]
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the
 // decoded bytes so callers can't see references.

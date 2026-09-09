@@ -384,7 +384,7 @@ pub struct WebSocketClose {
     pub reason: String,
 }
 
-// ADR-0130 route-registration kinds. Mirrors the `aether.input`
+// ADR-0130 route-registration kinds. Mirrors the `aether.window`
 // subscribe family: `_self` variants resolve the registrant from the
 // inbound envelope's host-stamped `Source` (forgery-proof, in-process
 // by construction); the explicit-`mailbox` variants serve external

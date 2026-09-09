@@ -14,7 +14,7 @@ owned.
 | Host I/O, device access, secrets, or privileged policy | Native capability | chassis-owned resources behind mail |
 | Pure bounded value conversion | Native transform | discoverable value-to-value operation without actor state |
 | Reusable product/editor actor | `aether-kit-*` actor | shared guest layer, not substrate policy |
-| New process composition | Chassis profile or bundle | selects drivers and capabilities at boot |
+| New process composition | Chassis profile or package depot | selects drivers and capabilities at boot |
 | Agent/operator convenience | MCP tool over an existing contract | adapts JSON and evidence; should not invent engine semantics |
 | Shared portable identity/schema primitive | Foundation crate | only when multiple owning layers truly need it |
 
@@ -89,7 +89,7 @@ pretending to be an MCP client.
 ## Chassis and distribution choices
 
 A capability module makes code available; a chassis installs a runtime actor;
-a bundle chooses a deployable composition. If a feature is optional by process
+a package depot chooses a deployable composition. If a feature is optional by process
 profile, answer separately:
 
 1. Are its marker/kind types available to guest code?

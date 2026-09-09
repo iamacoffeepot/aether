@@ -31,6 +31,7 @@
 //! normally. The cost is at most one frame of missing overflow glyphs on
 //! the saturating frame; the next frame fully recovers.
 
+#![forbid(unsafe_code)]
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the decoded
 // bytes so callers can't see references.

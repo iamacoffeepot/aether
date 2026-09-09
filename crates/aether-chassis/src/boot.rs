@@ -36,7 +36,7 @@ use aether_substrate::chassis::{
     BootableChassis, BuildProvenance, Chassis, ComposeBase, PreludeAction, PreludeFlags, composed, run_chassis_prelude,
 };
 use aether_substrate::config::{
-    ConfigError, ConfigMember, ConfigSources, DEFAULT_REGISTRY_OWNER_QUEUE_CAPACITY,
+    ConfigError, ConfigMember, ConfigProvenance, ConfigSources, DEFAULT_REGISTRY_OWNER_QUEUE_CAPACITY,
     DEFAULT_REGISTRY_RELAY_QUEUE_CAPACITY, KnobKind, KnobRecord, RegistryQueueCapacities, RingCapacities,
     SchedulerTuning, validate_env,
 };
@@ -49,7 +49,7 @@ use aether_trace::TraceDispatchCapability;
 use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::boot_manifest::ChassisSettings;
 use crate::cli::{ChassisCli, ChassisMeta};
-use crate::package::package_autoload;
+use crate::package::{package_assets_root, package_autoload};
 
 /// Env fallback for the chassis config-file path. The path is
 /// meta-config: it selects the file source and does not change the file
@@ -885,7 +885,19 @@ impl CommonEnv {
         // chassis-member fuse (`with_chassis_config_member`) lowers each onto its
         // builder seam at install time, so lowering no longer happens here.
         let chassis_boot = sources.resolve::<ChassisBootConfig>()?;
-        let namespace_roots = sources.resolve::<NamespaceRoots>()?;
+        // Read before resolving, because resolution consumes the staged argv
+        // layer and programmatic override: a depot's own `pack/assets` fills
+        // the `assets` root only when no source above the compiled defaults
+        // supplied one, so an operator's `AETHER_ASSETS_DIR` / `--assets-dir`
+        // still wins over a shipped package (the issue 4001 precedence the
+        // manifest's tick cadence and window mode already take).
+        //
+        // Provenance is per member rather than per field, so any pinned fs
+        // root — save or config as much as assets — keeps the whole resolved
+        // `NamespaceRoots`. That errs toward the operator, which is the side
+        // this precedence exists to protect.
+        let roots_supplied = sources.provenance_of::<NamespaceRoots>() != ConfigProvenance::Default;
+        let mut namespace_roots = sources.resolve::<NamespaceRoots>()?;
         let actor_ring = sources.resolve::<ActorRingConfig>()?;
         let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?;
         let registry_queues = sources.resolve::<RegistryQueueConfig>()?;
@@ -913,7 +925,17 @@ impl CommonEnv {
         // window_mode on desktop, tick_hz on headless).
         let (package_settings, autoload) = match (chassis_boot.boot_manifest.clone(), chassis_boot.package.clone()) {
             (Some(path), _) => (ChassisSettings::default(), boot_manifest_autoload(Path::new(&path))?),
-            (None, Some(root)) => package_autoload(Path::new(&root))?,
+            (None, Some(root)) => {
+                // A depot ships its assets beside its objects, so the `assets`
+                // namespace roots inside the package rather than beside the
+                // binary. Without this a shipped product boots with an empty
+                // asset namespace and every `aether.fs.read` a component makes
+                // answers `NotFound`.
+                if !roots_supplied && let Some(assets) = package_assets_root(Path::new(&root)) {
+                    namespace_roots.assets = assets;
+                }
+                package_autoload(Path::new(&root))?
+            }
             (None, None) => (ChassisSettings::default(), Vec::new()),
         };
 

@@ -1,14 +1,22 @@
 # From an idea to a landed change
 
-Aether's contributor workflow is direct-drive. Issue-body artifacts define the
-approved work, an owned worktree and branch hold implementation, and a draft
-pull request accumulates current-head evidence. The checked-in skills perform
-each operation through the active agent surface; GitHub Actions supplies build
-and test checks, not lifecycle orchestration.
+Aether's contributor workflow is direct-drive. The baseline is ordinary: an
+issue for planned work, one focused branch, one focused pull request, and green
+CI as the merge gate. GitHub Actions supplies build and test checks, not
+lifecycle orchestration.
 
-This page explains the journey and its invariants. It does not copy mutation
-procedures from the skills. Read the matching skill and shared contract before
-changing repository or GitHub state.
+On top of that baseline the repository keeps a set of scoped-issue skills —
+`scope`, `approve`, `implement`, `land`, and their neighbours — that add
+issue-body Plan artifacts, a digest-bound approval, an owned worktree, and
+head-bound review and dogfood evidence. They are checked in and current, and a
+session that invokes one is bound by its contract. They are not, however, the
+only route a change may take: a change that does not enter that pipeline lands
+as a plain reviewed PR on green CI.
+
+The rest of this page describes the journey those skills define, because that is
+the part with invariants worth stating. It does not copy mutation procedures
+from the skills. Read the matching skill and shared contract before changing
+repository or GitHub state.
 
 ## Authority depends on the question
 
@@ -23,7 +31,7 @@ Use the source that owns the question:
 | Why is a load-bearing design shaped this way? | The applicable Accepted ADR and its supersession chain |
 | What arguments does a live tool accept? | The active tool schema, not a prose copy |
 | What does this running engine contain? | Live introspection such as `describe_kinds` and `describe_component` |
-| What work is approved? | The current managed issue sections plus a trusted matching hidden approval record |
+| What work is approved? | For a scoped issue: its managed sections plus a trusted matching hidden approval record. Otherwise: the user's own request |
 | Is a draft ready to land? | Its exact head, approval ancestry, actual diff, checks, hidden direct-review record, native reviews, threads, dogfood evidence, and merge state |
 | What does hosted automation do? | Checked-in workflow YAML plus current repository protection and check state |
 
@@ -67,6 +75,9 @@ carry workflow progress, approval, or model routing. Read the body and concrete
 implementation artifacts instead.
 
 ## Choosing the workflow
+
+These are the checked-in skills, when a session uses them. Each name authorizes
+its own documented workflow and nothing adjacent.
 
 | Intent | Codex workflow | Durable result |
 |---|---|---|
@@ -153,7 +164,7 @@ worktree from that exact commit:
 - Claude Code: `.claude/worktrees/issue-<N>`.
 
 The implementation follows the Plan literally, runs focused verification plus
-`cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings`, reviews
+`cargo fmt -- --check` and `cargo clippy --workspace --all-targets -- -D warnings`, reviews
 the complete diff, checks every changed path against the declared surface, then
 plain-pushes and opens a draft PR that closes the issue. Existing artifacts are
 possible live ownership claims and require a verified resume, never opportunistic

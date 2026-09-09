@@ -69,6 +69,69 @@ members = [
     "crates/aether-test-fixtures-behavior",
     "xtask",
 ]
+# What a bare `cargo build` / `cargo test` / `cargo clippy` at the root selects:
+# the engine. Without this cargo defaults to every member, so a first clone
+# compiled the Bloomery coordinator, its terminal console, the wasm test
+# fixtures, and SQLite from C before it produced a single engine artifact —
+# none of which a contributor reading `docs/guide/` is there for.
+#
+# The split is by role, not by dependency: the members left out are the build
+# pipeline (`xtask`), the Bloomery coordinator and its satellites, the
+# `aether-puppet` lane driver, and the `aether-test-fixtures-*` wasm crates
+# `cargo xtask dist` cross-builds by `-p`. Nothing below depends on any of
+# them, so leaving them out narrows the build rather than deferring it.
+#
+# Every gate that must still see the whole tree says so in its own argv —
+# `--workspace` on the clippy / rustdoc / nextest members of `cargo xtask
+# transform verify.*`, a `crates` path on the jscpd and cargo-machete scans,
+# and `-p` on every xtask build. A gate that reads this default instead would
+# go quiet on the crates it stopped selecting, so widening one is an explicit
+# flag, never an inherited default.
+default-members = [
+    "crates/aether-substrate",
+    "crates/aether-chassis",
+    "crates/aether-chassis-desktop",
+    "crates/aether-chassis-headless",
+    "crates/aether-chassis-harness",
+    "crates/aether-chassis-hub",
+    "crates/aether-harness-substrate",
+    "crates/aether-harness-substrate-capture",
+    "crates/aether-substrate-harness-cap",
+    "crates/aether-codec",
+    "crates/aether-data",
+    "crates/aether-kinds",
+    "crates/aether-math",
+    "crates/aether-actor",
+    "crates/aether-actor-derive",
+    "crates/aether-audio",
+    "crates/aether-behavior",
+    "crates/aether-behavior-derive",
+    "crates/aether-http-derive",
+    "crates/aether-data-derive",
+    "crates/aether-derive",
+    "crates/aether-fs",
+    "crates/aether-inventory",
+    "crates/aether-mesh",
+    "crates/aether-kit-commons",
+    "crates/aether-kit-widget",
+    "crates/aether-rpc",
+    "crates/aether-fleet",
+    "crates/aether-harness-fleet",
+    "crates/aether-harness-perf",
+    "crates/aether-clipboard",
+    "crates/aether-window",
+    "crates/aether-lifecycle",
+    "crates/aether-tcp",
+    "crates/aether-component",
+    "crates/aether-subscribe-ui-tests",
+    "crates/aether-http",
+    "crates/aether-trace",
+    "crates/aether-render",
+    "crates/aether-text",
+    "crates/aether-anthropic",
+    "crates/aether-process",
+    "crates/aether-mcp",
+]
 exclude = [
     # The cargo-fuzz harness (issue 1562) is its own nested crate on the
     # nightly toolchain; keeping it out of the workspace members leaves
@@ -215,15 +278,22 @@ broken_intra_doc_links = "warn"
 private_intra_doc_links = "warn"
 
 [workspace.lints.clippy]
+# Every level in this table is a merge gate. CI's `Clippy gate` job runs
+# `verify.clippy` — `cargo clippy --workspace --all-targets` under
+# `--message-format=json` — and applies the same fail-on-any-warning predicate
+# `-D warnings` encodes over the resulting diagnostic list, so a `warn` here
+# fails a pull request exactly as a `deny` does. The two differ only in whether
+# a hit stops the compile, and a stopped compile leaves every crate downstream
+# of it unlinted — which is why the gate reads the stream instead of denying.
+# Read the levels below as history, not as a severity gradient.
 # Baseline — both groups as warn, then opt out of the idiom-fight bucket below.
 pedantic = { level = "warn", priority = -1 }
 nursery  = { level = "warn", priority = -1 }
 
-# Deny picks — INITIALLY AT WARN until per-pick cleanup PRs land (iamacoffeepot/aether#854 Phase 1.b-1.c.iv).
-# Each follow-up PR fixes its hits and promotes its lint to deny in the same diff.
-dbg_macro                           = "warn"  # promote to deny in Phase 1.c.* if any hits exist
-todo                                = "warn"  # promote to deny if no hits surface
-unimplemented                       = "warn"  # promote to deny if no hits surface
+# Picks beyond the pedantic/nursery baseline (iamacoffeepot/aether#854).
+dbg_macro                           = "warn"
+todo                                = "warn"
+unimplemented                       = "warn"
 undocumented_unsafe_blocks          = "deny"
 cloned_instead_of_copied            = "deny"
 large_stack_arrays                  = "deny"
@@ -234,13 +304,13 @@ unreadable_literal                  = "deny"
 # `foo.rs` file is only for a terminal (leaf) module with no children.
 self_named_module_files             = "deny"
 
-# Warn picks — cherry-picked from restriction + style (not covered by pedantic/nursery baseline).
+# Further picks, cherry-picked from restriction + style (not covered by the
+# pedantic/nursery baseline).
 unwrap_used                         = "warn"
 print_stdout                        = "warn"
 print_stderr                        = "warn"
 # absolute_paths — catches `crate::a::b::c::Thing` written inline at call sites
-# when a `use` would shorten it. See iamacoffeepot/aether#951. Starts at `warn`;
-# promotion to `deny` is a follow-up phase once any reintroduced hits stay green.
+# when a `use` would shorten it. See iamacoffeepot/aether#951.
 # Default `absolute-paths-max-segments = 2` is sufficient — no override in clippy.toml.
 absolute_paths                      = "warn"
 

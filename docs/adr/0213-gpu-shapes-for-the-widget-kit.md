@@ -1,7 +1,8 @@
 # ADR-0213: GPU shapes for the widget kit
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-05
+- **Amended:** 2026-09-09 — status: implemented on `main`; `aether.render.draw_shapes` with `crates/aether-substrate/src/render/shape.wgsl` (#5637), and the kit's chrome draws through `WidgetDrawItem::Shape` (#5638).
 
 ## Context
 

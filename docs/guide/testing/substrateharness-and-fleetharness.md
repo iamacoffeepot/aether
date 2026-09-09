@@ -346,7 +346,7 @@ artifact and CI cost, so it should prove a boundary the current matrix cannot.
 
 ## LaneHarness topology
 
-`LaneHarness` is the Bloomery scenario tier for contracts that cross the
+`LaneHarness` is the `aether-harness-bloomery` scenario tier for contracts that cross the
 coordinator's durable, asynchronous boundary. Use it when a test must show that
 a sealed bloom is dispatched, observed, and brought to a recorded resolution or
 wedge through the same coordinator path a local operator runs. It is not a
@@ -360,13 +360,13 @@ journal, reducer, projection, all reactors, outbox drain, polling timers, and
 intake path. A dispatch uses the production `ProcessTransformRunner`: it
 materializes the sealed checkout with `git worktree add`, scrubs the child
 environment, spawns a subprocess, reads its exit status and `evidence.json`,
-and captures a candidate worktree. LaneHarness is one cell of the
-[scenario harness](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-bloomery/tests/harness/mod.rs)
+and captures a candidate worktree. LaneHarness is one cell of
+[`BloomeryHarness`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-bloomery/src/harness/mod.rs)
 — backend local, coordinator forked, lane scripted. The same builder also
-exposes the in-process fixture cell (reactor-to-reactor handoff) and the
-local-authority cell (bare repo, in-process, mock-lane). The
-[LaneHarness module](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-bloomery/tests/lane/mod.rs)
-is the thin alias that cell's scenarios import.
+exposes the in-process fixture cell (reactor-to-reactor handoff) and
+`HarnessBuilder::local_authority` (bare repo, in-process, mock-lane). The
+[cell constructors](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-bloomery/src/cells/lane.rs)
+are what that cell's scenarios import.
 
 The substitutions are deliberately narrow. Tests set the lane-program
 configuration to the repository's mock-lane binary, which accepts the real
@@ -377,7 +377,7 @@ transform program, or prove live GitHub credentials and transport. Test those
 contracts at their own boundary.
 
 `LaneHarness::settle` polls the projection and checks liveness on every poll.
-The [liveness source](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-bloomery/tests/lane/liveness.rs)
+The [liveness oracle](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-bloomery/src/oracle/liveness.rs)
 makes two failures universal: quiescence while work is still owed, and a
 dispatched order that never completes. The
 [`lane_boundary.rs` scenarios](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-bloomery/tests/lane_boundary.rs)
@@ -406,8 +406,8 @@ stop short of it.
 - FleetHarness harness: `crates/aether-harness-fleet/src/lib.rs`
 - Fleet scenarios: the per-cap `fleetharness_*.rs` suites (e.g. `crates/aether-component/tests/`, `crates/aether-fleet/tests/`)
 - Fixtures: `crates/aether-test-fixtures-*/`
-- Scenario harness (builder axes and named cells): `crates/aether-chassis-bloomery/tests/harness/mod.rs`
-- LaneHarness alias: `crates/aether-chassis-bloomery/tests/lane/mod.rs`
-- Lane liveness invariant: `crates/aether-chassis-bloomery/tests/harness/liveness.rs`
+- Scenario harness (builder axes and named cells): `crates/aether-harness-bloomery/src/harness/mod.rs`
+- Named cells: `crates/aether-harness-bloomery/src/cells/`
+- Lane liveness invariant: `crates/aether-harness-bloomery/src/oracle/liveness.rs`
 - Lane boundary scenarios: `crates/aether-chassis-bloomery/tests/lane_boundary.rs`
 - Decisions: ADR-0067 and the subsystem ADR for the behavior under test

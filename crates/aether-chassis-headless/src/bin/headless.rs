@@ -6,6 +6,8 @@
 //! ADR-0162 `--print-config` / `--describe` prelude, env resolution, boot,
 //! run — is the shared `chassis_main!` body.
 
+#![forbid(unsafe_code)]
+
 use aether_chassis::chassis_main;
 use aether_chassis_headless::{HeadlessChassis, HeadlessCli};
 

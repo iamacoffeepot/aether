@@ -10,6 +10,7 @@
 //! `Kind::ID`), so a replacement compiled against it sees `decode_kind` =
 //! `None` and boots fresh.
 
+#![forbid(unsafe_code)]
 // `rehydrate` takes its `State` by value — the macro hands the decoded
 // state over to be moved into the actor (so a real `State` with heap
 // fields needs no clone). This fixture's `CounterState` is all-`Copy`, so
@@ -67,7 +68,6 @@ impl WasmActor for Counter {
     }
 
     /// Reply with the live counter so a test can read it across a swap.
-    //noinspection DuplicatedCode -- actor macros require one query handler per hot-swap fixture type.
     #[handler::manual]
     fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {

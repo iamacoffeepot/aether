@@ -1,32 +1,24 @@
-//! Byte encoding toolkit. Two layers, both pure functions / no async:
+//! Byte encoding toolkit. Two layers, both pure functions and free of async.
 //!
-//! - **Schema-driven encode/decode** ([`encode_schema`] / [`decode_schema`]):
-//!   walks an `aether_data::SchemaType` descriptor to encode agent-
-//!   supplied JSON params into the wire bytes the substrate's decode
-//!   path is happy with (and back out). Two wire shapes, picked per
-//!   descriptor (ADR-0019, ADR-0020):
+//! [`encode_schema`] and [`decode_schema`] walk an `aether_data::SchemaType`
+//! descriptor to turn caller-supplied JSON params into the wire bytes the
+//! substrate decodes, and back out again. The descriptor picks the wire shape
+//! (ADR-0019): a cast-shaped `Struct { repr_c: true }`, and the tree under it,
+//! is written as its `#[repr(C)]` byte layout, which the substrate decodes
+//! with `bytemuck::cast`; everything else is written in the
+//! `aether_data::wire` format, byte for byte.
 //!
-//!   1. Cast-shaped (`Struct { repr_c: true }` and the recursive tree
-//!      under it): `#[repr(C)]` byte layout. Decode is `bytemuck::cast`
-//!      on the substrate side; encode walks the schema and writes the
-//!      same layout.
-//!   2. Structured (everything else): the `aether_data::wire` format,
-//!      written and read directly to match the format byte-for-byte.
+//! [`decode_schema_strict`] is the same walk under a narrower policy, for a
+//! caller that forwards decoded bytes across a protocol boundary: non-finite
+//! floats and repeated map keys become errors instead of `null` and
+//! last-writer-wins, and the caller names the ceiling on projected values.
 //!
-//!   [`decode_schema_strict`] is the same walk under a narrower policy,
-//!   for a caller forwarding decoded bytes across a protocol boundary:
-//!   non-finite floats and repeated map keys become errors instead of
-//!   `null` and last-writer-wins, and the caller names the ceiling on
-//!   projected values.
-//!
-//! - **Stream framing** ([`frame`]): length-prefixed frames for
-//!   serde-derived enum types. The hub channel (`aether_hub::wire`)
-//!   is the first consumer; ADR-0072 placed framing here because the
-//!   helpers are codec-shaped and generic over `<T: Serialize>`.
-//!
-//! Future formats (msgpack, protobuf, save-format adapters) land as
-//! sibling modules. Future framing variants subdivide [`frame`] under
-//! `frame::wire` / `frame::protobuf`.
+//! [`frame`] is the second layer, length-prefixed framing for serde-derived
+//! message types: a four-byte little-endian body length followed by an
+//! `aether_data::wire` body (ADR-0118). `aether-rpc` and the fleet harness are
+//! its consumers.
+
+#![forbid(unsafe_code)]
 
 mod cast;
 #[cfg(test)]

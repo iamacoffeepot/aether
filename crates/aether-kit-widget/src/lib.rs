@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // `#[handler]` methods take their decoded mail by value per the ADR-0033
 // dispatch ABI; the macro-generated trampoline owns the payload and hands
 // it off, so a by-value parameter is the contract, not a copy the body
@@ -1431,7 +1432,7 @@ impl WasmActor for Widget {
 
     /// The root subscribes the frame stage once (the root-subscribes-once
     /// pattern). `Tick` is a frame-lifecycle stage, so it rides
-    /// `aether.lifecycle` (ADR-0082), not the input cap. A non-root node
+    /// `aether.lifecycle` (ADR-0082), not the window cap. A non-root node
     /// is driven by its parent's `Collect`, so it subscribes nothing.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         if self.config.root {
@@ -1468,7 +1469,6 @@ impl WasmActor for Widget {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    //noinspection DuplicatedCode -- actor macros require one draw-list handler per composite owner type.
     #[handler::manual]
     fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Manual>, list: WidgetDrawList) {
         if accept_open_child_list(&self.frame_discharge, &mut self.composite, ctx, list) {

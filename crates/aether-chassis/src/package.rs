@@ -8,7 +8,16 @@
 //!   aether-desktop              # the chassis binary
 //!   pack/manifest               # the one persisted manifest (this module)
 //!   pack/objects/<sha256>       # component wasm + config bytes, immutable
+//!   pack/assets/…               # the shipped asset tree, verbatim
 //! ```
+//!
+//! `pack/assets` is the depot's read-only asset tree, and it is deliberately
+//! **not** content-addressed: a component reaches an asset by mailing
+//! `aether.fs.read { addr: { namespace: "assets", … } }` with the path an
+//! author wrote, so the shipped tree has to keep those paths. Objects are
+//! addressed by hash because the manifest names them; assets are addressed
+//! by path because the running program does. Boot roots the `assets`
+//! namespace here via [`package_assets_root`].
 //!
 //! [`PackageManifest`] is the *persisted, versioned* shipping artifact: where
 //! the JSON boot-manifest ([`crate::boot_manifest`]) names component files by
@@ -78,6 +87,27 @@ const PACK_DIR: &str = "pack";
 const MANIFEST_FILE: &str = "manifest";
 /// The immutable object directory within `pack/`.
 const OBJECTS_DIR: &str = "objects";
+/// The shipped asset tree within `pack/` — the root of the depot's `assets`
+/// namespace.
+const ASSETS_DIR: &str = "assets";
+
+/// The `assets` namespace root a depot carries, or `None` when the package
+/// ships no asset tree (`cargo xtask package` without `--assets`).
+///
+/// Returned rather than applied: precedence belongs to the boot path, which
+/// slots this below argv/env/file and above the compiled default the way a
+/// manifest's tick cadence and window mode are slotted (issue 4001), so an
+/// operator's `AETHER_ASSETS_DIR` still wins over a shipped depot.
+///
+/// A `pack/assets` that exists but is a file rather than a directory is not
+/// an asset tree, so it reads as absent — the fs cap would fail to root
+/// there and the depot is better off with the ordinary default.
+#[must_use]
+pub fn package_assets_root(package_root: &Path) -> Option<PathBuf> {
+    let assets = package_root.join(PACK_DIR).join(ASSETS_DIR);
+
+    assets.is_dir().then_some(assets)
+}
 
 /// A sha256 content address — the identity of a package object (ADR-0163
 /// §1). Encoded on the wire as its 32 raw bytes; rendered as lowercase hex

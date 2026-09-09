@@ -1,7 +1,8 @@
 # ADR-0197: Operating Procedures Ship as Refusing Tools
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-15
+- **Amended:** 2026-09-09 — status: implemented on `main`; seal, supersede, roll, upgrade, amend, and status are `cargo xtask bloom` arms under `xtask/src/bloom/` (`0b7adcec8`).
 
 ## Context
 

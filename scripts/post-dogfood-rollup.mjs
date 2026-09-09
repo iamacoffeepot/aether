@@ -234,8 +234,12 @@ function tokenTableLines(tokensPerTool) {
 }
 
 // Escape pipes and collapse newlines so a finding never breaks the table.
+// Backslash is escaped in the same pass as the pipe, not left alone: a
+// finding ending in `\` would otherwise have its own trailing backslash
+// consume the escape this adds (`\` + `\|` reads as an escaped backslash
+// followed by a bare pipe), splitting the row it was meant to protect.
 function cell(v) {
-  return String(v ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim() || '—'
+  return String(v ?? '').replace(/[\\|]/g, '\\$&').replace(/\r?\n/g, ' ').trim() || '—'
 }
 
 function softHoldLines(softHolds) {

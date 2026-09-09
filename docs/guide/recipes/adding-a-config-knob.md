@@ -131,26 +131,31 @@ maintainer prose to the operator who runs `--help`.
 
 ### 2. Keep `Default` in sync — and let the test enforce it
 
-`HttpConfig` declares `impl Default` separately from the derive's `default = ...`
-literals (the derive feeds the layer; `Default` feeds direct construction in
-tests and call sites). Add your field's default to **both**. The
-`http_from_env_defaults_match` test in the `http/client/mod.rs` test module is what
-keeps them honest:
+A config struct declares `impl Default` separately from the derive's
+`default = ...` literals (the derive feeds the layer; `Default` feeds direct
+construction in tests and call sites). Add your field's default to **both**. A
+`*_defaults_match` test is what keeps them honest — the HTTP server's
+`config_layer_defaults_match_the_named_consts`, in
+`crates/aether-http/src/server/runtime/unit_tests.rs`, is the shape to copy:
 
 ```rust
 #[test]
-fn http_from_env_defaults_match() {
-    use super::super::HttpConfigLayer;
+fn config_layer_defaults_match_the_named_consts() {
+    use super::super::{DEFAULT_BIND_ADDR, HttpServerConfig, HttpServerConfigLayer};
     use confique::Config as _;
-    let layer = HttpConfigLayer::builder().load().expect("defaults load");
-    let default = HttpConfig::default();
-    // assert each layer default equals the matching HttpConfig::default() field
+    let layer = HttpServerConfigLayer::builder().load().expect("defaults load");
+    let default = HttpServerConfig::default();
+    assert_eq!(layer.bind_addr, DEFAULT_BIND_ADDR);
+    assert_eq!(layer.bind_addr, default.bind_addr);
+    // …one pair per field
 }
 ```
 
-`HttpConfigLayer` is the derive-emitted layer type — you don't write it, but you
+`<Name>ConfigLayer` is the derive-emitted layer type — you don't write it, but you
 do reference it from the test. Add an assertion for your new field. It loads with
-no `.env()` source, so it's env-free and CI-safe (issue 464).
+no `.env()` source, so it's env-free and CI-safe (issue 464). Where the default
+is also a named `const`, assert against the const on both sides so the literal,
+the `Default`, and the const cannot drift apart in pairs.
 
 > **Gotcha — the `runtime` feature gate.** Every `#[derive(...)]` and `#[config]`
 > attribute is wrapped in `#[cfg_attr(feature = "runtime", ...)]`, including the
@@ -160,7 +165,7 @@ no `.env()` source, so it's env-free and CI-safe (issue 464).
 > cross-build in CI is what fails on it. Any `parse` helper you add is
 > `#[cfg(feature = "runtime")]` too.
 
-### 3. Wire the argv overlay and config-file section into each chassis
+### 3. Wire the argv overlay into the chassis CLI
 
 The derive emits `<Name>Overlay` (here `HttpOverlay`) with an `into_layer()`
 method. For a field on an existing struct whose overlay is already flattened into
@@ -174,22 +179,28 @@ pub http: HttpOverlay,
 ```
 
 `CommonOverlay` is in turn flattened into `DesktopCli` and `HeadlessCli`, so both
-full-stack chassis expose the flag. Each chassis loads its sectioned TOML file once,
-then resolves the overlay against the subsystem's explicit section in
-`resolve` (`crates/aether-chassis-{desktop,headless}/src/chassis.rs`):
+full-stack chassis expose the flag. `ChassisCli::into_sources` then assembles the
+whole stack once — it loads the `--config` file into a `ConfigSources` and stages
+every flattened overlay's argv layer onto it through the derived `StageArgv` impl
+— and hands that stack to the chassis builder
+(`crates/aether-chassis/src/boot.rs`):
 
 ```rust
-let config_file = load_chassis_config(config)?;
-let config_file = config_file.as_ref();
+let mut sources = cli.into_sources()?;
 
-let http = resolve_with_file::<HttpConfig>(
-    http.into_layer(),
-    config_file,
-    "http",
-)?;
+// A value the chassis itself needs before composing.
+let namespace_roots = sources.resolve::<NamespaceRoots>()?;
+
+// Everything else: the builder resolves each cap's Config off the stack.
+builder.with_config_sources(sources).with_actor::<HttpCapability>(())
 ```
 
-The section name is part of the chassis composition contract. For this config, a
+`resolve` reads the member's `[section]` out of the loaded file itself, so the
+section name is declared once on the config type (`#[config(section = "…")]`,
+defaulting to its `cli_prefix`) rather than repeated at each chassis call site.
+Reach for a chassis-side `sources.resolve::<C>()` only when the chassis needs the
+value before composition (a driver's cadence, roots it must also pass
+programmatically); an ordinary cap config is builder-resolved. For this config, a
 file override is written under `[http]`:
 
 ```toml
@@ -199,7 +210,7 @@ require_https = true
 
 `load_chassis_config` selects `--config PATH` first and falls back to
 `AETHER_CONFIG_FILE`; either explicitly selected file is a hard boot error when it
-cannot be read or parsed. `resolve_with_file` extracts the named section with
+cannot be read or parsed. Resolution extracts the named section with
 `file_section` and preserves field precedence **argv > env > config file > literal
 default**. A missing `[http]` section simply contributes no layer, while a present
 non-table or malformed section is a hard `ConfigError`. Absent flags resolve
@@ -222,18 +233,20 @@ cargo run -p aether-chassis-headless --bin aether-headless -- --print-config
 
 Your new field appears with its default. This command is the discovery surface:
 the binaries exit before loading a selected TOML file, so use it to confirm that
-the declaration is registered, not to test a `[http]` override. The dump is rendered by
-`chassis_config_dump()` in `crates/aether-chassis/src/boot.rs`,
-which walks `chassis_registry()`. That registry lists `&HttpConfigLayer::META`, so
-a field on an existing struct shows up with no extra wiring — the META walk is the
-discovery source of truth. If your knob is missing from the dump, the field isn't
-  reaching the layer (re-check the `#[config]` hint and the `runtime` gate).
+the declaration is registered, not to test a `[http]` override. The dump is
+`ConfigManifest::dump`, and the manifest is *composition-derived* (ADR-0156):
+`with_actor::<HttpCapability>(…)` accumulates that cap's `ConfigMember` record —
+its section plus its layer `META` — so a field on an existing struct shows up
+with no extra wiring, and a chassis lists exactly the knobs it composes. If your
+knob is missing from the dump, the field isn't reaching the layer (re-check the
+`#[config]` hint and the `runtime` gate); if the whole struct is missing, its cap
+isn't composed on that chassis.
 
 ### 5. Run the deterministic local tier
 
 ```sh
 cargo fmt -- --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Fix either failure locally, then push the implementation branch. CI owns the
@@ -245,25 +258,25 @@ lint pass cannot.
 If the knob doesn't belong on any existing struct, you're declaring a new
 `#[derive(aether_substrate::Config)]` struct. Three steps beyond the above:
 
-- **Register its layer META for discovery.** Add `&YourConfigLayer::META` to the
-  `METAS` slice in `chassis_registry()`
-  (`crates/aether-chassis/src/boot.rs`) so the `--print-config` dump
-  and the unknown-key sweep (`chassis_known_keys`) both see its knobs.
+- **Choose a stable TOML section.** The derive takes it from the struct's
+  `cli_prefix`; pin a different one with `#[config(section = "…")]` when the
+  historical file API and the flag prefix diverge. That string is the
+  operator-facing file API, so it is chosen once and does not move.
+- **Own it from a composed cap.** Discovery is composition-derived: the derive
+  emits the `ConfigMember` impl, and `with_actor::<YourCapability>(…)` is what
+  puts it in the chassis aggregate the `--print-config` dump and the unknown-key
+  sweep walk. A config struct nothing composes appears nowhere. A non-cap
+  chassis member is declared on the builder the same way.
 - **Flatten its overlay into a chassis CLI.** Import `YourOverlay` into
   `crates/aether-chassis/src/cli.rs` and `#[command(flatten)]` it into
   `CommonOverlay`, or into a per-chassis root in its own chassis crate
-  (`crates/aether-chassis-{desktop,headless,hub}/src/cli.rs`).
-- **Choose and wire a stable TOML section.** Pick the explicit section name that
-  belongs to the subsystem, then call
-  `resolve_with_file::<YourConfig>(overlay.into_layer(), config_file, "your-section")`
-  in every chassis that carries it. Keep that string in lockstep across chassis;
-  it is the operator-facing file API, and `file_section` validates a present
-  section instead of silently skipping malformed input.
+  (`crates/aether-chassis-{desktop,headless,hub}/src/cli.rs`). The derived
+  `StageArgv` impl on that root is what stages the overlay onto the source stack.
 
 ## Verify against current code
 
 This recipe names files, symbols, and methods that move. Before following it,
 confirm `HttpConfig`, `HttpConfigLayer`, `HttpOverlay`,
-`load_chassis_config`, `file_section`, `resolve_with_file`, `into_layer`,
-`chassis_registry`, and `chassis_config_dump` still exist where named — grep the
+`load_chassis_config`, `file_section`, `ConfigSources::resolve`, `StageArgv`,
+`ConfigMember`, and `ConfigManifest` still exist where named — grep the
 crates, and if a name has drifted, fix the recipe as part of your work.

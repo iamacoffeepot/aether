@@ -173,8 +173,8 @@ pub struct LifecycleUnsubscribeSelf {
 /// sendable bulk form; drop-time cleanup rides the ADR-0079
 /// vacate/close `MonitorNotice` instead, so the per-stage broadcast
 /// stops firing at a dropped trampoline without anyone mailing this —
-/// the lifecycle-family counterpart of `UnsubscribeAll` for
-/// `aether.input`. Idempotent: a mailbox with no stage subscriptions
+/// the lifecycle-family counterpart of `UnsubscribeAllWindows` for
+/// `aether.window`. Idempotent: a mailbox with no stage subscriptions
 /// is still a no-op. Fire-and-forget; no reply. Cast-shape (Pod), one
 /// `mailbox` field, matching the sibling lifecycle kinds' raw-`u64`
 /// shape.
@@ -187,7 +187,7 @@ pub struct LifecycleUnsubscribeAll {
 /// Reply to [`LifecycleSubscribe`] / [`LifecycleUnsubscribe`].
 /// `Err` carries the stage kind id and a human-readable reason —
 /// fail-fast subscribe per ADR-0082 §7. Same shape and rationale as
-/// `SubscribeInputResult` for input subscriptions.
+/// `SubscribeWindowResult` for window-event subscriptions.
 #[aether_data::kind(name = "aether.lifecycle.subscribe_result")]
 pub enum LifecycleSubscribeResult {
     Ok,

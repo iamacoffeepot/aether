@@ -25,7 +25,8 @@ const DEPOT_LICENSE_FILES: [&str; 2] = ["LICENSE-MIT", "LICENSE-APACHE"];
 /// Write the depot tree at `out`: copy the chassis binary to
 /// `<out>/<chassis_file>` (the host-platform filename, `.exe` on Windows),
 /// copy the workspace license files from `workspace_root` via
-/// [`copy_licenses`], then write the `pack/` tree of content-addressed
+/// [`copy_licenses`], copy `assets` (when given) into `pack/assets` via
+/// [`copy_assets`], then write the `pack/` tree of content-addressed
 /// objects and `pack/manifest` via [`write_pack`]. Regenerates `out` from
 /// scratch so a stale prior run can't leave orphaned objects. Returns the
 /// manifest it wrote.
@@ -36,6 +37,7 @@ pub(super) fn emit_depot(
     chassis_file: &str,
     components: &[PackComponent],
     settings: ChassisSettings,
+    assets: Option<&Path>,
 ) -> Result<PackageManifest> {
     if out.exists() {
         fs::remove_dir_all(out).with_context(|| format!("clear {}", out.display()))?;
@@ -43,7 +45,56 @@ pub(super) fn emit_depot(
     fs::create_dir_all(out).with_context(|| format!("create {}", out.display()))?;
     copy_artifact(chassis_src, &out.join(chassis_file))?;
     copy_licenses(out, workspace_root)?;
-    write_pack(out, components, settings)
+    let manifest = write_pack(out, components, settings)?;
+    if let Some(assets) = assets {
+        copy_assets(out, assets)?;
+    }
+    Ok(manifest)
+}
+
+/// The depot's `pack/` subdirectory holding the manifest, the objects, and
+/// the shipped asset tree.
+const PACK_DIR: &str = "pack";
+/// The content-addressed object directory within `pack/`.
+const OBJECTS_DIR: &str = "objects";
+/// The asset tree within `pack/` — the root the packaged chassis gives the
+/// `assets` namespace (`aether_chassis::package::package_assets_root`).
+const ASSETS_DIR: &str = "assets";
+
+/// Copy the tree at `src` verbatim into `<out>/pack/assets`, preserving
+/// relative paths.
+///
+/// Verbatim and path-preserving because that is what an asset *is*: a
+/// component reads one by mailing the path an author wrote, so a depot that
+/// renamed, flattened, or content-addressed the tree would break every one of
+/// those reads. This is the one part of `pack/` that is not hash-named.
+///
+/// Iterative rather than recursive: an asset tree's depth is the author's,
+/// not something this command can bound (the workspace rule on recursion over
+/// user-supplied data), so the walk carries its own directory stack.
+fn copy_assets(out: &Path, src: &Path) -> Result<()> {
+    let root = fs::canonicalize(src).with_context(|| format!("locate asset directory {}", src.display()))?;
+    let dest_root = out.join(PACK_DIR).join(ASSETS_DIR);
+    let mut pending = vec![root.clone()];
+
+    while let Some(dir) = pending.pop() {
+        let relative = dir.strip_prefix(&root).expect("every queued directory is under the asset root");
+        let dest = dest_root.join(relative);
+        fs::create_dir_all(&dest).with_context(|| format!("create {}", dest.display()))?;
+        for entry in fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
+            let entry = entry.with_context(|| format!("read an entry of {}", dir.display()))?;
+            let path = entry.path();
+            // `file_type` rather than `metadata`, so a symlink is classified
+            // as the link it is instead of silently following into a cycle or
+            // out of the tree the author named.
+            if entry.file_type().with_context(|| format!("stat {}", path.display()))?.is_dir() {
+                pending.push(path);
+            } else {
+                copy_artifact(&path, &dest.join(entry.file_name()))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Copy each of [`DEPOT_LICENSE_FILES`] from `workspace_root` into the depot
@@ -69,11 +120,11 @@ fn copy_licenses(out: &Path, workspace_root: &Path) -> Result<()> {
 /// Called by the depot [`emit_depot`], which also copies the chassis binary
 /// alongside the `pack/` tree. Returns the manifest.
 fn write_pack(root: &Path, components: &[PackComponent], settings: ChassisSettings) -> Result<PackageManifest> {
-    let pack_dir = root.join("pack");
+    let pack_dir = root.join(PACK_DIR);
     if pack_dir.exists() {
         fs::remove_dir_all(&pack_dir).with_context(|| format!("clear {}", pack_dir.display()))?;
     }
-    let objects_dir = pack_dir.join("objects");
+    let objects_dir = pack_dir.join(OBJECTS_DIR);
     fs::create_dir_all(&objects_dir).with_context(|| format!("create {}", objects_dir.display()))?;
 
     let mut entries = Vec::with_capacity(components.len());
@@ -120,7 +171,7 @@ mod tests {
     use std::path::Path;
 
     use aether_chassis::boot_manifest::ChassisSettings;
-    use aether_chassis::package::{Sha256, decode_manifest};
+    use aether_chassis::package::{Sha256, decode_manifest, package_assets_root};
     use sha2::{Digest, Sha256 as Sha256Hasher};
 
     use super::{DEPOT_LICENSE_FILES, PackComponent, emit_depot, write_pack};
@@ -182,9 +233,16 @@ mod tests {
             named("beta", vec![9, 9, 9, 9]),
             named("alpha_twin", vec![0x00, 0x61, 0x73, 0x6d, 1, 2, 3]),
         ];
-        let manifest =
-            emit_depot(&out, &license_root, &chassis_src, "aether-desktop", &components, ChassisSettings::default())
-                .expect("emit");
+        let manifest = emit_depot(
+            &out,
+            &license_root,
+            &chassis_src,
+            "aether-desktop",
+            &components,
+            ChassisSettings::default(),
+            None,
+        )
+        .expect("emit");
 
         assert!(out.join("aether-desktop").exists(), "chassis binary copied into the depot root");
 
@@ -331,7 +389,8 @@ mod tests {
         let out = dir.join("depot");
         let settings =
             ChassisSettings { title: plan.title.clone(), window_mode: plan.window_mode.clone(), tick_hz: plan.tick_hz };
-        let manifest = emit_depot(&out, &dir, &chassis_src, chassis_bin, &components, settings).expect("emit depot");
+        let manifest =
+            emit_depot(&out, &dir, &chassis_src, chassis_bin, &components, settings, None).expect("emit depot");
 
         let manifest_bytes = fs::read(out.join("pack").join("manifest")).expect("read manifest");
         let decoded = decode_manifest(&manifest_bytes).expect("chassis decoder reads the emitted manifest");
@@ -346,6 +405,73 @@ mod tests {
         assert_eq!(decoded.entries[1].config, None, "the config-less entry has no config object");
 
         assert!(out.join("aether-headless").exists(), "the headless chassis bin is shipped into the depot");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn emitted_depot_ships_the_asset_tree_where_the_chassis_boot_looks_for_it() {
+        // A depot's assets are the one part of `pack/` that is not
+        // content-addressed: a component reads one by mailing the path an
+        // author wrote, so the tree has to arrive verbatim, at its original
+        // relative paths, at the exact root the chassis gives the `assets`
+        // namespace. The chassis's own `package_assets_root` is the oracle,
+        // the same way `decode_manifest` is the oracle for the manifest.
+        //
+        // Two emit bugs this catches, both of which leave every other
+        // assertion in this file green: copying the tree before `write_pack`
+        // (which clears `pack/` wholesale, so the assets vanish), and
+        // flattening a nested directory into the asset root.
+        use std::env;
+        use std::fs;
+        use std::process;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = env::temp_dir().join(format!("aether-xtask-assets-{}-{seq}", process::id()));
+        fs::create_dir_all(dir.join("assets").join("meshes")).expect("create asset tree");
+        write_license_root(&dir);
+        fs::write(dir.join("assets").join("teapot.dsl"), b"; teapot").expect("write a root asset");
+        fs::write(dir.join("assets").join("meshes").join("box.dsl"), b"; box").expect("write a nested asset");
+
+        let chassis_src = dir.join("fake-chassis");
+        fs::write(&chassis_src, b"chassis-binary-bytes").expect("write fake chassis binary");
+
+        let out = dir.join("depot");
+        let components = vec![PackComponent {
+            wasm: vec![0x00, 0x61, 0x73, 0x6d, 1],
+            config: None,
+            name: None,
+            export: None,
+            replicas: None,
+        }];
+        emit_depot(
+            &out,
+            &dir,
+            &chassis_src,
+            "aether-desktop",
+            &components,
+            ChassisSettings::default(),
+            Some(&dir.join("assets")),
+        )
+        .expect("emit depot with assets");
+
+        let root = package_assets_root(&out).expect("the chassis boot finds the asset root");
+        assert_eq!(fs::read(root.join("teapot.dsl")).expect("the root asset shipped"), b"; teapot");
+        assert_eq!(
+            fs::read(root.join("meshes").join("box.dsl")).expect("the nested asset shipped"),
+            b"; box",
+            "a nested asset keeps its relative path",
+        );
+        assert!(out.join("pack").join("manifest").exists(), "the manifest survives the asset copy");
+
+        // No `--assets` ships no asset root, so a depot that never named one
+        // keeps the ordinary beside-the-binary default at boot.
+        let bare = dir.join("bare-depot");
+        emit_depot(&bare, &dir, &chassis_src, "aether-desktop", &components, ChassisSettings::default(), None)
+            .expect("emit depot without assets");
+        assert!(package_assets_root(&bare).is_none(), "no --assets means no shipped root");
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -373,7 +499,8 @@ mod tests {
         fs::write(&chassis_src, b"chassis-binary-bytes").expect("write fake chassis binary");
 
         let out = dir.join("depot");
-        emit_depot(&out, &dir, &chassis_src, "aether-desktop", &[], ChassisSettings::default()).expect("emit depot");
+        emit_depot(&out, &dir, &chassis_src, "aether-desktop", &[], ChassisSettings::default(), None)
+            .expect("emit depot");
 
         for file in DEPOT_LICENSE_FILES {
             let shipped = fs::read(out.join(file)).unwrap_or_else(|_| panic!("{file} shipped into the depot root"));
