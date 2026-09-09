@@ -1,6 +1,9 @@
 //! Public wire vocabulary for the `aether.window` manager.
 
-use aether_data::{KindId, MailId, MailboxId};
+use aether_data::{KindId, MailboxId};
+// The forwarding correlation's own type, gated with it.
+#[cfg(any(feature = "desktop", feature = "synthetic"))]
+use aether_data::MailId;
 use aether_kinds::{WindowId, WindowMode};
 use serde::{Deserialize, Serialize};
 
@@ -219,14 +222,23 @@ pub enum RequestWindowRedrawResult {
 }
 
 /// Manager-private id-bearing command forwarded by one window child.
+///
+/// `internal` names who sends it — a window child to its own manager, never a
+/// peer — not whether the type can be named. The manager identity's always-on
+/// `#[actor]` markers declare this command and [`ApplyWindowCommandResult`] as
+/// its handler contract whether or not the runtime half compiles, which is what
+/// `describe_handlers` reports, so the pair and the [`WindowCommand`] it carries
+/// are reachable rather than crate-private items no marker-only build can
+/// construct.
 #[aether_data::kind(name = "aether.window.internal.apply_command", eq)]
-pub(crate) struct ApplyWindowCommand {
+pub struct ApplyWindowCommand {
     pub window: WindowId,
     pub command: WindowCommand,
 }
 
+/// The seven per-window operations a child forwards to its manager.
 #[derive(aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum WindowCommand {
+pub enum WindowCommand {
     Close,
     SetMode { mode: WindowMode, width: Option<u32>, height: Option<u32> },
     SetTitle { title: String },
@@ -236,6 +248,9 @@ pub(crate) enum WindowCommand {
     RequestRedraw,
 }
 
+/// Only a runtime refuses a command, so the mapping compiles with the runtime
+/// half — a marker-only build carries the command vocabulary without it.
+#[cfg(feature = "runtime")]
 impl WindowCommand {
     /// This command's own `Err` reply, carrying `error`.
     ///
@@ -258,9 +273,10 @@ impl WindowCommand {
     }
 }
 
-/// Manager-private result returned to the forwarding child.
+/// Manager-private result returned to the forwarding child — the declared
+/// reply of [`ApplyWindowCommand`], and reachable for the same reason.
 #[aether_data::kind(name = "aether.window.internal.apply_command_result", eq)]
-pub(crate) enum ApplyWindowCommandResult {
+pub enum ApplyWindowCommandResult {
     Close(CloseWindowResult),
     SetMode(SetWindowModeResult),
     SetTitle(SetWindowTitleResult),
@@ -271,12 +287,17 @@ pub(crate) enum ApplyWindowCommandResult {
 }
 
 /// Correlation stored on the private manager request.
+///
+/// Only a window-bearing runtime forwards, so this and [`RetireWindow`] carry
+/// the same gate their crate-root re-export already carries.
+#[cfg(any(feature = "desktop", feature = "synthetic"))]
 #[aether_data::kind(name = "aether.window.internal.forward_context", copy, eq)]
 pub(crate) struct WindowForwardContext {
     pub inbound: MailId,
 }
 
 /// Manager-private request that retires a child after platform-originated close.
+#[cfg(any(feature = "desktop", feature = "synthetic"))]
 #[aether_data::kind(name = "aether.window.internal.retire", copy, eq)]
 pub(crate) struct RetireWindow;
 
