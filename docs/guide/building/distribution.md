@@ -101,14 +101,18 @@ cargo xtask package \
 
 `--chassis` selects `desktop` or `headless`. Component order is autoload order.
 Repeated `--config` flags pair by position with `--components`; trailing
-components may omit config. `--title` and `--window-mode` apply to the desktop
-chassis; `--tick-hz` applies to headless. Those three settings ride into
-`pack/manifest` and the depot boot applies them below argv/env and above the
-compiled defaults, so a shipped depot comes up titled and in its window mode
-while an operator's `AETHER_WINDOW_*` still overrides it.
+components may omit config. `--title`, `--window-mode`, and `--clear-color`
+apply to the desktop chassis; `--tick-hz` applies to headless. Those four
+settings ride into `pack/manifest` and the depot boot applies them below
+argv/env and above the compiled defaults, so a shipped depot comes up titled, in
+its window mode, and on its own background while an operator's
+`AETHER_WINDOW_*` / `AETHER_RENDER_CLEAR_COLOR` still overrides it.
+`--clear-color` is sRGB `rrggbb` hex; what the background should be is a
+property of what is drawn, so a product that is a line drawing ships its paper
+here rather than asking every operator for a flag.
 
 For explicit actor export, instance name, or richer per-component control, use
-the JSON `--spec` form. A spec carries the chassis, the three chassis settings,
+the JSON `--spec` form. A spec carries the chassis, the four chassis settings,
 and per-component `package`-or-`wasm` plus `config` / `config_json`, `name`, and
 `export`. Relative paths in a spec resolve against the spec file's directory,
 not an arbitrary process working directory.

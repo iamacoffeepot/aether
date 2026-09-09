@@ -1,6 +1,7 @@
 {
   "chassis": "desktop",
   "title": "aether",
+  "clear_color": "f6f2e9",
   "components": [
     {
       "package": "aether-puppet",

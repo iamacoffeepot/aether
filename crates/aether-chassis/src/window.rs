@@ -308,7 +308,7 @@ mod tests {
         let settings = ChassisSettings {
             title: Some("depot".to_owned()),
             window_mode: Some("windowed:640x480".to_owned()),
-            tick_hz: None,
+            ..ChassisSettings::default()
         };
         apply_manifest_window_settings(&mut sources, &settings).expect("apply window settings");
         let resolved = sources.resolve::<WindowConfig>().expect("resolve window config");
@@ -328,7 +328,8 @@ mod tests {
         // and the key is removed before the guard drops.
         unsafe { env::set_var("AETHER_WINDOW_MODE", "fullscreen-borderless") };
         let mut sources = ConfigSources::new(None);
-        let settings = ChassisSettings { title: None, window_mode: Some("windowed:640x480".to_owned()), tick_hz: None };
+        let settings =
+            ChassisSettings { window_mode: Some("windowed:640x480".to_owned()), ..ChassisSettings::default() };
         let resolved =
             apply_manifest_window_settings(&mut sources, &settings).and_then(|()| sources.resolve::<WindowConfig>());
         // SAFETY: same guarded scope.

@@ -38,8 +38,9 @@
 //!
 //! - the 8-byte magic [`MANIFEST_MAGIC`];
 //! - the one-byte [`MANIFEST_VERSION`];
-//! - the three optional [`ChassisSettings`] (`title`, `window_mode` as
-//!   optional strings; `tick_hz` as an optional `u32`);
+//! - the four optional [`ChassisSettings`] (`title`, `window_mode` as
+//!   optional strings; `tick_hz` as an optional `u32`; `clear_color` as an
+//!   optional string — v2 appended it after `tick_hz`);
 //! - a `u32` entry count;
 //! - then per entry: the object hash (32 raw bytes), the optional config
 //!   hash (a presence byte then 32 raw bytes), the optional `name` /
@@ -79,7 +80,7 @@ pub const MANIFEST_MAGIC: &[u8; 8] = b"AEPKGMAN";
 /// Bumped on any incompatible change to the byte layout; the decoder
 /// rejects an unrecognized version ([`ManifestDecodeError::UnsupportedVersion`])
 /// rather than misreading newer bytes as v1.
-pub const MANIFEST_VERSION: u8 = 1;
+pub const MANIFEST_VERSION: u8 = 2;
 
 /// The `pack/` subdirectory of a package holding the manifest and objects.
 const PACK_DIR: &str = "pack";
@@ -240,6 +241,7 @@ pub fn encode_manifest(manifest: &PackageManifest) -> Vec<u8> {
     put_opt_string(&mut out, manifest.settings.title.as_deref());
     put_opt_string(&mut out, manifest.settings.window_mode.as_deref());
     put_opt_u32(&mut out, manifest.settings.tick_hz);
+    put_opt_string(&mut out, manifest.settings.clear_color.as_deref());
     let count = u32::try_from(manifest.entries.len()).expect("package entry count fits in 32 bits");
     out.extend_from_slice(&count.to_le_bytes());
     for entry in &manifest.entries {
@@ -383,6 +385,7 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<PackageManifest, ManifestDecodeEr
     let title = reader.take_opt_string()?;
     let window_mode = reader.take_opt_string()?;
     let tick_hz = reader.take_opt_u32()?;
+    let clear_color = reader.take_opt_string()?;
     let count = reader.take_u32()?;
     // No `with_capacity(count)`: `count` is untrusted file input, so a bogus
     // large count must not preallocate — `take` fails fast when the body is
@@ -396,7 +399,7 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<PackageManifest, ManifestDecodeEr
         let replicas = reader.take_opt_u32()?;
         entries.push(PackageEntry { object, config, name, export, replicas });
     }
-    Ok(PackageManifest { settings: ChassisSettings { title, window_mode, tick_hz }, entries })
+    Ok(PackageManifest { settings: ChassisSettings { title, window_mode, tick_hz, clear_color }, entries })
 }
 
 /// One package object source: the `pack/objects` directory of one package
@@ -621,7 +624,12 @@ mod tests {
 
     fn sample_manifest() -> PackageManifest {
         PackageManifest {
-            settings: ChassisSettings { title: Some("hud".to_owned()), window_mode: None, tick_hz: Some(30) },
+            settings: ChassisSettings {
+                title: Some("hud".to_owned()),
+                window_mode: None,
+                tick_hz: Some(30),
+                clear_color: Some("f6f2e9".to_owned()),
+            },
             entries: vec![PackageEntry {
                 object: Sha256([0xab; 32]),
                 config: Some(Sha256([0xcd; 32])),
@@ -643,6 +651,7 @@ mod tests {
                 title: Some("pkg".to_owned()),
                 window_mode: Some("windowed:800x600".to_owned()),
                 tick_hz: None,
+                clear_color: Some("3f4b61".to_owned()),
             },
             entries: vec![
                 PackageEntry {
@@ -674,11 +683,13 @@ mod tests {
         // bump, not an accident.
         let mut expected = Vec::new();
         expected.extend_from_slice(b"AEPKGMAN"); // magic
-        expected.push(1); // MANIFEST_VERSION
+        expected.push(2); // MANIFEST_VERSION
         expected.extend_from_slice(&[0x01, 0x03, 0x00, 0x00, 0x00]); // title: present, len 3
         expected.extend_from_slice(b"hud");
         expected.push(0x00); // window_mode: absent
         expected.extend_from_slice(&[0x01, 0x1e, 0x00, 0x00, 0x00]); // tick_hz: present, 30
+        expected.extend_from_slice(&[0x01, 0x06, 0x00, 0x00, 0x00]); // clear_color: present, len 6
+        expected.extend_from_slice(b"f6f2e9");
         expected.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]); // entry count: 1
         expected.extend_from_slice(&[0xab; 32]); // object hash
         expected.push(0x01); // config: present
@@ -778,6 +789,7 @@ mod tests {
             title: Some("depot".to_owned()),
             window_mode: Some("windowed:640x480".to_owned()),
             tick_hz: Some(120),
+            clear_color: Some("f6f2e9".to_owned()),
         };
         let manifest = PackageManifest {
             settings: settings.clone(),

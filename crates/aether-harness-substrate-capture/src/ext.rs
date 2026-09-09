@@ -136,21 +136,36 @@ pub trait RenderHarnessBuilderExt {
     /// instrument stays off for every other scenario.
     #[must_use]
     fn with_render_pass_timings(self) -> Self;
+
+    /// Compose the pumped render cap clearing to `clear_color` (sRGB
+    /// `rrggbb` hex, the `AETHER_RENDER_CLEAR_COLOR` vocabulary) instead of
+    /// the compiled dark field — the harness-side spelling of the knob a
+    /// depot package carries, so a scenario can render a line drawing on the
+    /// paper the product ships with rather than on the field it never
+    /// shows.
+    #[must_use]
+    fn with_render_clear_color(self, clear_color: &str) -> Self;
 }
 
 impl RenderHarnessBuilderExt for SubstrateHarnessBuilder {
     fn with_render(self) -> Self {
-        render_hook(self, false)
+        render_hook(self, false, aether_render::DEFAULT_CLEAR_COLOR)
     }
 
     fn with_render_pass_timings(self) -> Self {
-        render_hook(self, true)
+        render_hook(self, true, aether_render::DEFAULT_CLEAR_COLOR)
+    }
+
+    fn with_render_clear_color(self, clear_color: &str) -> Self {
+        render_hook(self, false, clear_color)
     }
 }
 
-/// The shared render hook both builder entry points register, differing
-/// only in whether the booted cap measures per-pass GPU durations.
-fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool) -> SubstrateHarnessBuilder {
+/// The shared render hook every builder entry point registers, differing
+/// only in whether the booted cap measures per-pass GPU durations and what
+/// it clears to.
+fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool, clear_color: &str) -> SubstrateHarnessBuilder {
+    let clear_color = clear_color.to_owned();
     builder.render_hook(Box::new(move |passive, wiring, width, height| {
         let RenderHookWiring { mailer, observed_kinds, assets_dir } = wiring;
         // The `FrameCheck` / similarity scorer lives in
@@ -167,7 +182,7 @@ fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool) -> Substrat
             .boot_pumped_actor::<RenderCapability>(
                 RenderTuningConfig {
                     vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
-                    clear_color: aether_render::DEFAULT_CLEAR_COLOR.to_owned(),
+                    clear_color: clear_color.clone(),
                     pass_timings,
                 },
                 params,

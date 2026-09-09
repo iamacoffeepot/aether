@@ -310,6 +310,7 @@ mod tests {
             title: Some("bundle".to_owned()),
             window_mode: Some("windowed:800x600".to_owned()),
             tick_hz: Some(30),
+            clear_color: Some("f6f2e9".to_owned()),
         };
         let manifest = write_pack(&root, &components, settings.clone()).expect("write pack");
 
@@ -364,6 +365,7 @@ mod tests {
             "chassis": "headless",
             "title": "loco-motion",
             "tick_hz": 30,
+            "clear_color": "f6f2e9",
             "components": [
                 { "wasm": "alpha.wasm", "config": "alpha.cfg", "name": "first", "export": "entry" },
                 { "wasm": "beta.wasm" }
@@ -373,8 +375,9 @@ mod tests {
         fs::write(&spec_path, spec).expect("write spec");
 
         // `--chassis desktop` is the flag default; the spec's `headless` wins.
-        let plan = resolve_package_plan(Some(&spec_path), PackageChassis::Desktop, &[], &[], None, None, None)
-            .expect("resolve spec plan");
+        let plan =
+            resolve_package_plan(Some(&spec_path), PackageChassis::Desktop, &[], &[], ChassisSettings::default())
+                .expect("resolve spec plan");
         assert_eq!(plan.chassis, PackageChassis::Headless, "spec chassis overrides the flag default");
 
         let (_, chassis_bin) = plan.chassis.substrate();
@@ -387,15 +390,14 @@ mod tests {
         fs::write(&chassis_src, b"headless-binary-bytes").expect("write fake chassis");
         write_license_root(&dir);
         let out = dir.join("depot");
-        let settings =
-            ChassisSettings { title: plan.title.clone(), window_mode: plan.window_mode.clone(), tick_hz: plan.tick_hz };
         let manifest =
-            emit_depot(&out, &dir, &chassis_src, chassis_bin, &components, settings, None).expect("emit depot");
+            emit_depot(&out, &dir, &chassis_src, chassis_bin, &components, plan.settings, None).expect("emit depot");
 
         let manifest_bytes = fs::read(out.join("pack").join("manifest")).expect("read manifest");
         let decoded = decode_manifest(&manifest_bytes).expect("chassis decoder reads the emitted manifest");
         assert_eq!(decoded, manifest, "the decoded manifest equals what emit_depot wrote");
         assert_eq!(decoded.settings.title.as_deref(), Some("loco-motion"), "spec title rides into the manifest");
+        assert_eq!(decoded.settings.clear_color.as_deref(), Some("f6f2e9"), "spec clear_color rides into the manifest");
         assert_eq!(decoded.settings.tick_hz, Some(30), "spec tick rate rides into the manifest");
         assert_eq!(decoded.entries.len(), 2);
         assert_eq!(decoded.entries[0].name.as_deref(), Some("first"));

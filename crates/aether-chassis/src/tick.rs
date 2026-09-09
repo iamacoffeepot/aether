@@ -72,9 +72,9 @@ impl TickConfig {
 /// lose to the manifest, the one case where env did not beat it. Asking which
 /// layer won answers the question the fold cannot.
 ///
-/// A `title` / `window_mode` in the manifest is a desktop knob the headless
-/// chassis has no window for, so it is warn-ignored here (mirroring the bundle
-/// bins).
+/// A `title` / `window_mode` / `clear_color` in the manifest is a desktop knob
+/// the headless chassis has no window for, so it is warn-ignored here
+/// (mirroring the bundle bins).
 ///
 /// # Errors
 ///
@@ -84,10 +84,10 @@ pub fn apply_manifest_tick_settings(
     sources: &mut ConfigSources,
     settings: &ChassisSettings,
 ) -> Result<(), ConfigError> {
-    if settings.title.is_some() || settings.window_mode.is_some() {
+    if settings.title.is_some() || settings.window_mode.is_some() || settings.clear_color.is_some() {
         tracing::warn!(
             target: "aether_substrate::boot",
-            "depot package sets title/window_mode, which the headless chassis ignores (no window)",
+            "depot package sets title/window_mode/clear_color, which the headless chassis ignores (no window)",
         );
     }
     // A `0` cadence is the unset sentinel (`nonzero` maps it to the default), so
@@ -151,7 +151,7 @@ mod tests {
         // `TickConfig`. Hermetic sources so the resolve reads no env — the "no
         // higher source" case is deterministic.
         let mut sources = ConfigSources::hermetic();
-        let settings = ChassisSettings { title: None, window_mode: None, tick_hz: Some(30) };
+        let settings = ChassisSettings { tick_hz: Some(30), ..ChassisSettings::default() };
         apply_manifest_tick_settings(&mut sources, &settings).expect("apply tick settings");
         let resolved = sources.resolve::<TickConfig>().expect("resolve tick config");
         assert_eq!(resolved.hz, 30, "manifest tick_hz fills the default cadence");
@@ -170,7 +170,7 @@ mod tests {
         // and the key is removed before the guard drops.
         unsafe { env::set_var("AETHER_TICK_HZ", "120") };
         let mut sources = ConfigSources::new(None);
-        let settings = ChassisSettings { title: None, window_mode: None, tick_hz: Some(30) };
+        let settings = ChassisSettings { tick_hz: Some(30), ..ChassisSettings::default() };
         let resolved =
             apply_manifest_tick_settings(&mut sources, &settings).and_then(|()| sources.resolve::<TickConfig>());
         // SAFETY: same guarded scope.
@@ -192,7 +192,7 @@ mod tests {
         // and the key is removed before the guard drops.
         unsafe { env::set_var("AETHER_TICK_HZ", DEFAULT_TICK_HZ.to_string()) };
         let mut sources = ConfigSources::new(None);
-        let settings = ChassisSettings { title: None, window_mode: None, tick_hz: Some(30) };
+        let settings = ChassisSettings { tick_hz: Some(30), ..ChassisSettings::default() };
         let resolved =
             apply_manifest_tick_settings(&mut sources, &settings).and_then(|()| sources.resolve::<TickConfig>());
         // SAFETY: same guarded scope.
