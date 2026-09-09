@@ -117,11 +117,15 @@ cargo run -p aether-chassis-headless --bin aether-headless -- --print-config
 
 ## Run the demo
 
+![The Utah teapot drawn as pen-plotter line art by the puppet component](docs/media/puppet-turntable.png)
+
 ```sh
 cargo xtask package --profile release --spec demo/puppet-turntable.json --assets crates/aether-mesh/examples
 ```
 
-A line-art teapot turning on a turntable in the desktop chassis; drag to orbit.
+The Utah teapot as pen-plotter line art, turning on a turntable in the desktop
+chassis; drag to orbit. The image above is one frame of that run, captured
+through the substrate harness from the same two config files the demo ships.
 That writes a depot to `target/package/`; run `target/package/aether-desktop`
 with no flags at all, because everything the demo needs is inside it.
 
@@ -138,8 +142,6 @@ cargo run -p aether-chassis-desktop --bin aether-desktop -- \
 ```
 
 See [demo/README.md](demo/README.md).
-
-<!-- demo capture pending -->
 
 ## Status
 
