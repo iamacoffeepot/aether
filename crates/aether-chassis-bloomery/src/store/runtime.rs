@@ -160,6 +160,10 @@ pub struct OutstandingOrder {
     /// what let a hung order outlive every one of them. Never replaced on
     /// re-record or rediscovery — a deadline that moves is not a deadline.
     pub deadline_unix_millis: u64,
+    /// Content address of the assembled prompt-manifest bytes retained as
+    /// attempt evidence (ADR-0214). `None` on a mechanical lane or a row
+    /// recorded before this column existed.
+    pub prompt_manifest: Option<Vec<u8>>,
     /// Whether this row is a live dispatch or only a submit intent (#5564).
     ///
     /// The registry row is written *before* `submit` runs so the local lane can
@@ -1196,7 +1200,11 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
 /// `21` is the instruction-bundle pin on the scoping-run ledger (ADR-0214):
 /// `scope_runs.instructions`, nullable. A pre-column row is an unpinned run;
 /// dispatch refuses it at the provenance gate rather than inventing a pin.
-const SCHEMA_VERSION: i64 = 21;
+///
+/// `22` is the assembled prompt-manifest digest on each order row (ADR-0214):
+/// `prompt_manifest`, nullable. A pre-column row names no retained manifest;
+/// the lane still consumes the bundle from the sealed pin.
+const SCHEMA_VERSION: i64 = 22;
 
 /// Historical TEXT stamp written beside v2 decisions rows before the digest
 /// column existed. Kept only so migration 17 can map it onto the v2 digest.
@@ -1406,6 +1414,16 @@ fn migrate_schema(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()>
         migration.execute_batch("ALTER TABLE scope_runs ADD COLUMN instructions BLOB;")?;
     }
 
+    // Version 22 (ADR-0214): the assembled prompt-manifest digest on each
+    // order-bearing row. Nullable with no backfill — a pre-column dispatch
+    // retained only the pin, and inventing a digest would name bytes this
+    // host never stored.
+    for table in ORDER_BEARING_TABLES {
+        if !has_column(migration, table, "prompt_manifest")? {
+            migration.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN prompt_manifest BLOB;"))?;
+        }
+    }
+
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
@@ -1610,7 +1628,8 @@ CREATE TABLE IF NOT EXISTS outstanding_orders (
     configs              BLOB NOT NULL,
     profile              BLOB NOT NULL,
     deadline_unix_millis INTEGER NOT NULL,
-    lifecycle            TEXT NOT NULL DEFAULT 'submitted'
+    lifecycle            TEXT NOT NULL DEFAULT 'submitted',
+    prompt_manifest      BLOB
 );
 CREATE TABLE IF NOT EXISTS parked_question (
     bloom                BLOB NOT NULL,
@@ -1626,6 +1645,7 @@ CREATE TABLE IF NOT EXISTS parked_question (
     profile              BLOB NOT NULL,
     deadline_unix_millis INTEGER NOT NULL,
     lifecycle            TEXT NOT NULL DEFAULT 'submitted',
+    prompt_manifest      BLOB,
     PRIMARY KEY (bloom, question)
 );
 CREATE TABLE IF NOT EXISTS study_index (
@@ -1856,7 +1876,7 @@ fn is_constraint_violation(error: &rusqlite::Error) -> bool {
 /// `parked_question` keyed by the question that parked it — select through this
 /// one spelling, so they cannot drift apart column-wise.
 const ORDER_COLUMNS: &str = "nonce, bloom, workpiece, scope_revision, candidate, displayed_digest, stage, \
-                             transformation, configs, profile, deadline_unix_millis, lifecycle";
+                             transformation, configs, profile, deadline_unix_millis, lifecycle, prompt_manifest";
 
 /// The [`CandidateHash`] columns, in the order [`candidate_hash_from_row`] reads
 /// them. List and latest share this spelling so they cannot drift.
@@ -1896,6 +1916,7 @@ fn order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutstandingOrder>
         // terminates the order accountably rather than trusting a corrupt one.
         deadline_unix_millis: u64::try_from(row.get::<_, i64>(10)?).unwrap_or_default(),
         lifecycle: OrderLifecycle::parse(&row.get::<_, String>(11)?),
+        prompt_manifest: row.get(12)?,
     })
 }
 
@@ -1941,7 +1962,7 @@ fn order_params<'a>(
     order: &'a OutstandingOrder,
     deadline: &'a i64,
     lifecycle: &'a dyn rusqlite::ToSql,
-) -> [&'a dyn rusqlite::ToSql; 12] {
+) -> [&'a dyn rusqlite::ToSql; 13] {
     [
         &order.nonce,
         &order.bloom,
@@ -1955,6 +1976,7 @@ fn order_params<'a>(
         &order.profile,
         deadline,
         lifecycle,
+        &order.prompt_manifest,
     ]
 }
 
@@ -1968,7 +1990,7 @@ impl StoreBackend for SqliteStore {
         let changed = self.conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO outstanding_orders ({ORDER_COLUMNS}) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
             ),
             order_params(order, &deadline, &lifecycle).as_slice(),
         )?;
@@ -2044,7 +2066,7 @@ impl StoreBackend for SqliteStore {
         self.conn.execute(
             &format!(
                 "INSERT OR REPLACE INTO parked_question (question, {ORDER_COLUMNS}) \
-                 VALUES (?13, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+                 VALUES (?14, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
             ),
             [order_params(order, &deadline, &lifecycle).as_slice(), &[&question as &dyn rusqlite::ToSql]]
                 .concat()

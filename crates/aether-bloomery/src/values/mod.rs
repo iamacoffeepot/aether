@@ -94,7 +94,9 @@ pub use pipeline::{
     PipelineManifestError,
 };
 pub use price::{LongContextBand, PriceRates, PriceTable, SealedPriceTable};
-pub use process_instructions::{ModelProcessInstructions, ModelProcessInstructionsError};
+pub use process_instructions::{
+    INSTRUCTION_MANIFEST_DIGEST_ENV, INSTRUCTION_MANIFEST_ENV, ModelProcessInstructions, ModelProcessInstructionsError,
+};
 pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use proof::{VerifiedTree, VerifyGateSet, VerifyProof, VerifyReuse};
 pub use question::Question;

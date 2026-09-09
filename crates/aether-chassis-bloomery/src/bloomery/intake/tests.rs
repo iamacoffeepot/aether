@@ -108,6 +108,8 @@ fn dispatch_record(
         stage: StageId::Verify,
         transformation: transformation(),
         configs: ConfigRegistry::default(),
+        instruction_bundle: None,
+        prompt_manifest: None,
     }
 }
 
@@ -351,7 +353,7 @@ fn dispatch_and_record_writes_the_order_row_and_submits() {
     let candidate = Digest::from_bytes([5; 32]);
     let record = dispatch_record("n-dispatch", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate);
 
-    let handle = answered(dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS));
+    let handle = answered(dispatch_and_record(&shell, &mut store, None, &record, NOW_UNIX_MILLIS));
     assert_eq!(handle, WorkHandle::new(Nonce("n-dispatch".to_owned())));
     // The dispatch reached the executor surface...
     assert_eq!(fake.dispatched_nonces(), vec!["n-dispatch".to_owned()]);
@@ -437,7 +439,7 @@ fn the_order_row_is_readable_by_the_executor_the_dispatch_hands_it_to() {
         Digest::from_bytes([5; 32]),
     );
 
-    dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS).unwrap();
+    dispatch_and_record(&shell, &mut store, None, &record, NOW_UNIX_MILLIS).unwrap();
 
     assert_eq!(
         *resolved.lock().unwrap(),
@@ -473,7 +475,7 @@ fn a_refused_submit_leaves_no_order_row_behind() {
         Digest::from_bytes([5; 32]),
     );
 
-    let error = dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS).unwrap_err();
+    let error = dispatch_and_record(&shell, &mut store, None, &record, NOW_UNIX_MILLIS).unwrap_err();
 
     assert!(matches!(error, DispatchError::Submit(_)), "a refused submit surfaces as a submit fault, got {error:?}");
     assert!(store.lookup_order("n-refused").unwrap().is_none(), "the rolled-back row is gone");
@@ -496,8 +498,8 @@ fn a_dispatch_deadline_is_absolute_and_a_re_record_does_not_move_it() {
         Digest::from_bytes([5; 32]),
     );
 
-    dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS).unwrap();
-    dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS + 600_000).unwrap();
+    dispatch_and_record(&shell, &mut store, None, &record, NOW_UNIX_MILLIS).unwrap();
+    dispatch_and_record(&shell, &mut store, None, &record, NOW_UNIX_MILLIS + 600_000).unwrap();
 
     assert_eq!(
         store.lookup_order("n-redrive").unwrap().expect("the order is outstanding").deadline_unix_millis,
@@ -521,7 +523,7 @@ fn intake_cycle_admits_a_matching_upload_and_the_reducer_integrates_it() {
     let shell = shell(fake.clone());
     let mut store = store();
     let record = dispatch_record("n-e2e", bloom, &workpiece, scope_revision, candidate);
-    let handle = answered(dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS));
+    let handle = answered(dispatch_and_record(&shell, &mut store, None, &record, NOW_UNIX_MILLIS));
 
     // The worker's run completed and uploaded one nonce-named evidence artifact.
     let run_id = fake.seed_run("n-e2e", RunStatus::Completed, Some(RunConclusion::Success));
@@ -725,8 +727,8 @@ fn a_rate_limited_arm_does_not_withhold_another_arms_finished_result() {
     // dispatch (ADR-0214); this test is about which arm a handle routes to.
     local_record.configs = authorize_instructions(&mut store, &reference_instructions());
     let handles = vec![
-        answered(dispatch_and_record(&shell, &mut store, &actions_record, NOW_UNIX_MILLIS)),
-        answered(dispatch_and_record(&shell, &mut store, &local_record, NOW_UNIX_MILLIS)),
+        answered(dispatch_and_record(&shell, &mut store, None, &actions_record, NOW_UNIX_MILLIS)),
+        answered(dispatch_and_record(&shell, &mut store, None, &local_record, NOW_UNIX_MILLIS)),
     ];
 
     let mut claims = HashMap::new();
@@ -782,7 +784,7 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
     let mut store = store();
     let bloom = BloomId(Digest::from_bytes([1; 32]));
     let record = dispatch_record("n-bad", bloom, &workpiece, scope_revision, candidate);
-    let handle = answered(dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS));
+    let handle = answered(dispatch_and_record(&shell, &mut store, None, &record, NOW_UNIX_MILLIS));
 
     let run_id = fake.seed_run("n-bad", RunStatus::Completed, Some(RunConclusion::Success));
     fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name: "evidence-n-bad-log".to_owned(), size_bytes: 10 }]);
@@ -835,7 +837,7 @@ fn a_pending_handle_is_reported_and_neither_completed_nor_admitted() {
     let mut store = store();
     let bloom = BloomId(Digest::from_bytes([1; 32]));
     let record = dispatch_record("n-pending", bloom, &workpiece, scope_revision, candidate);
-    let handle = answered(dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS));
+    let handle = answered(dispatch_and_record(&shell, &mut store, None, &record, NOW_UNIX_MILLIS));
 
     let _ = fake.seed_run("n-pending", RunStatus::InProgress, None);
 
@@ -2070,7 +2072,7 @@ fn a_measured_attempt_writes_one_priced_study_row_and_an_unmeasured_one_writes_n
         model: "muse-spark-1.2-contributor".to_owned(),
         effort: ReasoningEffort::Medium,
     });
-    let handle = answered(dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS));
+    let handle = answered(dispatch_and_record(&shell, &mut store, None, &record, NOW_UNIX_MILLIS));
 
     let run_id = fake.seed_run("n-study", RunStatus::Completed, Some(RunConclusion::Success));
     fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name: "evidence-n-study".to_owned(), size_bytes: 10 }]);
@@ -2163,7 +2165,7 @@ fn second_attempt(
 ) -> (WorkHandle, SeededClaims) {
     let candidate = Digest::from_bytes([5; 32]);
     let record = dispatch_record(nonce, bloom, workpiece, scope_revision, candidate);
-    let handle = answered(dispatch_and_record(shell, store, &record, NOW_UNIX_MILLIS));
+    let handle = answered(dispatch_and_record(shell, store, None, &record, NOW_UNIX_MILLIS));
     let run_id = fake.seed_run(nonce, RunStatus::Completed, Some(RunConclusion::Success));
     fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name: format!("evidence-{nonce}"), size_bytes: 10 }]);
 

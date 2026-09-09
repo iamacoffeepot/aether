@@ -605,29 +605,30 @@ fn drain_dispatch_topics(
     tracked: &mut Vec<TrackedHandle>,
     backoff: &mut Option<BackoffCursor>,
     store: &mut dyn StoreBackend,
+    mut artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
     reader_enabled: bool,
     now_unix_millis: u64,
 ) {
     // Drain + submit the newly-decided dispatches, acking the submitted prefix.
-    let dispatched = drain_and_dispatch(store, executor, now_unix_millis);
+    let dispatched = drain_and_dispatch(store, artifacts.as_deref_mut(), executor, now_unix_millis);
     fold_submitted_drain(tracked, backoff, store, Topic::Dispatch, "dispatch", dispatched);
     // Drain + submit the whole-bloom aggregate reviews (ADR-0153) the
     // same way — its handles ride the same intake cycle, and a
     // transient failure joins the shared backoff window.
-    let reviews = drain_and_dispatch_aggregate(store, executor, now_unix_millis);
+    let reviews = drain_and_dispatch_aggregate(store, artifacts.as_deref_mut(), executor, now_unix_millis);
     fold_submitted_drain(tracked, backoff, store, Topic::AggregateReview, "aggregate-review", reviews);
     // Drain + submit the whole-bloom aggregate verifies the same way —
     // the mechanical gate the fold passes before its critic dispatches.
-    let verifies = drain_and_dispatch_aggregate_verify(store, executor, now_unix_millis);
+    let verifies = drain_and_dispatch_aggregate_verify(store, artifacts.as_deref_mut(), executor, now_unix_millis);
     fold_submitted_drain(tracked, backoff, store, Topic::AggregateVerify, "aggregate-verify", verifies);
-    let bases = drain_and_dispatch_base_verify(store, executor, now_unix_millis);
+    let bases = drain_and_dispatch_base_verify(store, artifacts.as_deref_mut(), executor, now_unix_millis);
     fold_submitted_drain(tracked, backoff, store, Topic::BaseVerify, "base-verify", bases);
     // Drain + submit the pre-bloom scoping runs (ADR-0208) the same
     // way. Its handles ride the same intake cycle and a transient
     // failure joins the shared backoff window; what differs is only
     // what the entry names, which is why it is its own topic.
-    let scopes = drain_and_dispatch_scope(store, executor, now_unix_millis);
+    let scopes = drain_and_dispatch_scope(store, artifacts.as_deref_mut(), executor, now_unix_millis);
     fold_submitted_drain(tracked, backoff, store, Topic::ScopeDispatch, "scope-dispatch", scopes);
     // Cancel the lanes of members an operator withdrew (#5327), on the
     // same tick and the same ack-prefix discipline. No handles are
@@ -645,14 +646,14 @@ fn drain_dispatch_topics(
     }
     // Replay the attempts whose parked questions were answered (#3664),
     // on the same shared handle tracking and backoff window.
-    let redispatched = drain_and_redispatch(store, executor, now_unix_millis);
+    let redispatched = drain_and_redispatch(store, artifacts.as_deref_mut(), executor, now_unix_millis);
     fold_submitted_drain(tracked, backoff, store, Topic::Redispatch, "redispatch", redispatched);
     // Drain + submit the bloom-level readers a landing decided (ADR-0216).
     // Last of the submitting drains because it is last on the line: its
     // subject only exists once a bloom has landed, so nothing else this tick
     // can be waiting behind it. `reader_enabled` off drains the same rows and
     // journals each as a declined read instead of submitting it.
-    let studies = drain_and_dispatch_study(store, executor, reader_enabled, now_unix_millis);
+    let studies = drain_and_dispatch_study(store, artifacts.as_deref_mut(), executor, reader_enabled, now_unix_millis);
     fold_submitted_drain(tracked, backoff, store, Topic::Study, "study", studies);
 }
 
@@ -1544,6 +1545,7 @@ fn apply_submitting_settle(
 /// worker that already holds the call.
 fn settle_submitting_dispatch(
     store: &mut dyn StoreBackend,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
     nonce: &str,
     sequence: u64,
@@ -1561,7 +1563,7 @@ fn settle_submitting_dispatch(
         );
         return Ok(SubmittingSettle::Waiting);
     };
-    match dispatch_and_record(executor, store, &record, now_unix_millis) {
+    match dispatch_and_record(executor, store, artifacts, &record, now_unix_millis) {
         Ok(Settled::InFlight) => Ok(SubmittingSettle::Waiting),
         Ok(Settled::Answered(handle)) => {
             if dispatch_entry_still_live(store, &record.bloom.0, &record.workpiece)? {
@@ -1638,6 +1640,7 @@ fn retire_submitted_if_dead(
 /// submit the order. The caller owns the ack-prefix / hold / stop policy.
 fn submit_dispatch_entry(
     store: &mut dyn StoreBackend,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
     payload: DispatchPayload,
     sequence: u64,
@@ -1660,6 +1663,9 @@ fn submit_dispatch_entry(
         stage: payload.stage,
         transformation: payload.transformation,
         configs: payload.configs,
+
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
 
     if let Err(error) = overlay_member_advisory(store, &mut record, sequence) {
@@ -1683,7 +1689,7 @@ fn submit_dispatch_entry(
     if park_composition_refine_without_findings(&record, sequence) {
         return Ok(DispatchSubmit::Parked);
     }
-    match dispatch_and_record(executor, store, &record, now_unix_millis) {
+    match dispatch_and_record(executor, store, artifacts, &record, now_unix_millis) {
         Ok(Settled::Answered(handle)) => Ok(DispatchSubmit::Submitted(handle)),
         Ok(Settled::InFlight) => Ok(DispatchSubmit::InFlight),
         Err(error) if error.is_permanent() => {
@@ -1732,6 +1738,7 @@ fn submit_dispatch_entry(
 /// and so must not ack past a parked submit.
 fn drain_and_dispatch(
     store: &mut dyn StoreBackend,
+    mut artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
@@ -1754,7 +1761,14 @@ fn drain_and_dispatch(
         // row, a local lane still spending).
         if dispatch_still_submitting(store, &nonce.0)? {
             if apply_submitting_settle(
-                settle_submitting_dispatch(store, executor, &nonce.0, entry.sequence, now_unix_millis)?,
+                settle_submitting_dispatch(
+                    store,
+                    artifacts.as_deref_mut(),
+                    executor,
+                    &nonce.0,
+                    entry.sequence,
+                    now_unix_millis,
+                )?,
                 &mut handles,
                 &mut ack_through,
                 &mut transient_failure,
@@ -1806,7 +1820,14 @@ fn drain_and_dispatch(
             held = true;
             continue;
         }
-        match submit_dispatch_entry(store, executor, payload, entry.sequence, now_unix_millis)? {
+        match submit_dispatch_entry(
+            store,
+            artifacts.as_deref_mut(),
+            executor,
+            payload,
+            entry.sequence,
+            now_unix_millis,
+        )? {
             DispatchSubmit::Submitted(handle) => {
                 handles.push(handle);
                 ack_if_unblocked(held, &mut ack_through, entry.sequence);
@@ -1907,6 +1928,7 @@ fn compose_aggregate_task(
 
 fn drain_and_dispatch_aggregate(
     store: &mut dyn StoreBackend,
+    mut artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
@@ -1922,7 +1944,14 @@ fn drain_and_dispatch_aggregate(
         // workpiece, so this is hoisted above payload decode.
         if dispatch_still_submitting(store, &nonce.0)? {
             if apply_submitting_settle(
-                settle_submitting_dispatch(store, executor, &nonce.0, entry.sequence, now_unix_millis)?,
+                settle_submitting_dispatch(
+                    store,
+                    artifacts.as_deref_mut(),
+                    executor,
+                    &nonce.0,
+                    entry.sequence,
+                    now_unix_millis,
+                )?,
                 &mut handles,
                 &mut ack_through,
                 &mut transient_failure,
@@ -2036,8 +2065,11 @@ fn submit_aggregate_review(
         // The bloom-wide registry (ADR-0174): the critic has no member
         // axis, so this is the only scope the overlay walks.
         configs: payload.configs,
+
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
-    match dispatch_and_record(executor, store, &record, now_unix_millis) {
+    match dispatch_and_record(executor, store, artifacts, &record, now_unix_millis) {
         Ok(Settled::Answered(handle)) => Ok(DispatchSubmit::Submitted(handle)),
         Ok(Settled::InFlight) => Ok(DispatchSubmit::InFlight),
         Err(error) if error.is_permanent() => {
@@ -2075,6 +2107,7 @@ fn submit_aggregate_review(
 /// gets the fold and runs.
 fn drain_and_dispatch_aggregate_verify(
     store: &mut dyn StoreBackend,
+    mut artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
@@ -2086,7 +2119,14 @@ fn drain_and_dispatch_aggregate_verify(
         let nonce = dispatch_nonce(entry.sequence);
         if dispatch_still_submitting(store, &nonce.0)? {
             if apply_submitting_settle(
-                settle_submitting_dispatch(store, executor, &nonce.0, entry.sequence, now_unix_millis)?,
+                settle_submitting_dispatch(
+                    store,
+                    artifacts.as_deref_mut(),
+                    executor,
+                    &nonce.0,
+                    entry.sequence,
+                    now_unix_millis,
+                )?,
                 &mut handles,
                 &mut ack_through,
                 &mut transient_failure,
@@ -2138,8 +2178,11 @@ fn drain_and_dispatch_aggregate_verify(
             // resolved model for the same reason the member `Verify` does not.
             transformation: payload.transformation,
             configs: ConfigRegistry::default(),
+
+            instruction_bundle: None,
+            prompt_manifest: None,
         };
-        match dispatch_and_record(executor, store, &record, now_unix_millis) {
+        match dispatch_and_record(executor, store, artifacts, &record, now_unix_millis) {
             Ok(Settled::Answered(handle)) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
@@ -2183,6 +2226,7 @@ fn drain_and_dispatch_aggregate_verify(
 /// base axis is the `base` the transformation checks out.
 fn drain_and_dispatch_base_verify(
     store: &mut dyn StoreBackend,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
@@ -2217,8 +2261,11 @@ fn drain_and_dispatch_base_verify(
             stage: StageId::BaseVerify,
             transformation: payload.transformation,
             configs: ConfigRegistry::default(),
+
+            instruction_bundle: None,
+            prompt_manifest: None,
         };
-        match dispatch_and_record(executor, store, &record, now_unix_millis) {
+        match dispatch_and_record(executor, store, artifacts, &record, now_unix_millis) {
             Ok(Settled::Answered(handle)) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
@@ -2374,6 +2421,7 @@ fn consume_replayed_hold(store: &mut dyn StoreBackend, bloom: &[u8], question: &
 /// — the ordering the integrate correspondence learned the hard way (#3667).
 fn drain_and_redispatch(
     store: &mut dyn StoreBackend,
+    mut artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
@@ -2384,7 +2432,14 @@ fn drain_and_redispatch(
     for entry in entries {
         let nonce = redispatch_nonce(entry.sequence);
         if dispatch_still_submitting(store, &nonce.0)? {
-            let settle = settle_submitting_dispatch(store, executor, &nonce.0, entry.sequence, now_unix_millis)?;
+            let settle = settle_submitting_dispatch(
+                store,
+                artifacts.as_deref_mut(),
+                executor,
+                &nonce.0,
+                entry.sequence,
+                now_unix_millis,
+            )?;
             let consume_hold = matches!(&settle, SubmittingSettle::Track(_));
             if apply_submitting_settle(
                 settle,
@@ -2430,7 +2485,7 @@ fn drain_and_redispatch(
             break;
         }
 
-        match dispatch_and_record(executor, store, &record, now_unix_millis) {
+        match dispatch_and_record(executor, store, artifacts, &record, now_unix_millis) {
             Ok(Settled::Answered(handle)) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
@@ -3179,6 +3234,7 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
                 &mut state.tracked,
                 &mut state.backoff,
                 store,
+                state.artifacts.as_mut(),
                 &executor,
                 state.retrospect_reader_enabled,
                 clock.now_unix_millis,

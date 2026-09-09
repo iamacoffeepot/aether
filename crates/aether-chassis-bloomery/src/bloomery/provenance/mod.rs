@@ -170,6 +170,18 @@ impl fmt::Display for ProvenanceRefusal {
 
 impl Error for ProvenanceRefusal {}
 
+/// What a gated dispatch was admitted under: the assembled prompt manifest and
+/// the exact instruction-bundle bytes the lane must consume.
+#[derive(Clone, Debug)]
+pub struct AdmittedProcess {
+    /// The closure-checked prompt manifest this dispatch runs under.
+    pub manifest: PromptManifest,
+    /// Canonical wire bytes of the authorized [`ModelProcessInstructions`].
+    pub bundle_bytes: Vec<u8>,
+    /// Content address of [`Self::bundle_bytes`] — the sealed pin.
+    pub bundle_address: Digest,
+}
+
 /// Resolve, verify, authorize, and assemble the prompt manifest one model
 /// dispatch runs under, or refuse the dispatch.
 ///
@@ -185,7 +197,7 @@ impl Error for ProvenanceRefusal {}
 pub fn admit_model_dispatch(
     store: &mut dyn StoreBackend,
     record: &DispatchRecord,
-) -> Result<PromptManifest, ProvenanceRefusal> {
+) -> Result<AdmittedProcess, ProvenanceRefusal> {
     // The record's registry is already the member's layered over the bloom's, so
     // a bloom-wide lookup over it resolves the member's pin when it seals one and
     // the bloom's otherwise. A member cannot *widen* what the host authorized —
@@ -203,17 +215,17 @@ pub fn admit_model_dispatch(
         return Err(ProvenanceRefusal::ContentMismatch { pinned, stored });
     }
 
-    decode_config::<ModelProcessInstructions>(&kind, &bytes, schema_digest.as_deref())
-        .map_err(ProvenanceRefusal::Unresolvable)?
-        .validate()
-        .map_err(|error| ProvenanceRefusal::Incomplete { bundle: pinned, error })?;
+    let bundle = decode_config::<ModelProcessInstructions>(&kind, &bytes, schema_digest.as_deref())
+        .map_err(ProvenanceRefusal::Unresolvable)?;
+    bundle.validate().map_err(|error| ProvenanceRefusal::Incomplete { bundle: pinned, error })?;
 
     if !store.instructions_authorized(pinned.as_bytes()).map_err(ProvenanceRefusal::Store)? {
         return Err(ProvenanceRefusal::Unauthorized { bundle: pinned });
     }
 
-    assemble_manifest(slots(record, pinned), &AuthorizedPolicy { bundle: pinned }, &no_signers())
-        .map_err(ProvenanceRefusal::Closure)
+    let manifest = assemble_manifest(slots(record, pinned), &AuthorizedPolicy { bundle: pinned }, &no_signers())
+        .map_err(ProvenanceRefusal::Closure)?;
+    Ok(AdmittedProcess { manifest, bundle_bytes: bytes, bundle_address: pinned })
 }
 
 /// The slots this dispatch's prompt is assembled from, in prompt order.

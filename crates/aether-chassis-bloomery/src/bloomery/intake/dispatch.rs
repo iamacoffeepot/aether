@@ -10,6 +10,7 @@ use aether_bloomery::{
 use aether_bloomery_github::{ExecutorError, GithubError};
 use aether_data::wire::to_vec;
 
+use crate::artifacts::{ArtifactsCapabilityState, PutResult};
 use crate::bloomery::executor::{ExecutorPort, ExecutorPortError, LocalExecutorError, Settled};
 use crate::bloomery::provenance::{ProvenanceRefusal, admit_model_dispatch, gated, journal_refusal};
 use crate::store::{OrderLifecycle, OutstandingOrder, RecordOutcome, StoreBackend};
@@ -75,6 +76,13 @@ pub struct DispatchRecord {
     /// the compiled line would re-dispatch the fleet default for a bloom that
     /// sealed something else.
     pub profile: AgentProfile,
+    /// Exact authorized instruction-bundle bytes a model lane consumes. `None`
+    /// on a mechanical lane. Not persisted: the bundle lives in the config store
+    /// under the sealed pin; this field is the host-to-executor hand-off.
+    pub instruction_bundle: Option<Vec<u8>>,
+    /// Content address of the assembled prompt-manifest bytes retained as
+    /// attempt evidence. Persisted on the order row.
+    pub prompt_manifest: Option<Digest>,
 }
 
 impl DispatchRecord {
@@ -82,7 +90,12 @@ impl DispatchRecord {
     /// its reducer context, so the two cannot name different nonces or lanes.
     #[must_use]
     pub fn to_order(&self) -> WorkOrder {
-        WorkOrder { transformation: self.transformation.clone(), nonce: self.nonce.clone() }
+        WorkOrder {
+            transformation: self.transformation.clone(),
+            nonce: self.nonce.clone(),
+            instruction_bundle: self.instruction_bundle.clone(),
+            prompt_manifest: self.prompt_manifest,
+        }
     }
 
     /// Whether this order is the reserved composition workpiece's weave repair.
@@ -117,6 +130,7 @@ impl DispatchRecord {
             // agent the bloom's catalog named rather than the compiled line's.
             profile: to_vec(&self.profile).unwrap_or_default(),
             lifecycle: OrderLifecycle::Submitting,
+            prompt_manifest: self.prompt_manifest.map(|digest| digest.as_bytes().to_vec()),
         }
     }
 }
@@ -282,16 +296,38 @@ impl DispatchError {
 pub fn dispatch_and_record(
     port: &dyn ExecutorPort,
     store: &mut dyn StoreBackend,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
     record: &DispatchRecord,
     now_unix_millis: u64,
 ) -> Result<Settled<WorkHandle>, DispatchError> {
-    if gated(&record.transformation.command)
-        && let Err(refusal) = admit_model_dispatch(store, record)
-    {
-        journal_refusal(store, record, &refusal);
-        return Err(DispatchError::Provenance(refusal));
+    let mut record = record.clone();
+    if gated(&record.transformation.command) {
+        match admit_model_dispatch(store, &record) {
+            Err(refusal) => {
+                journal_refusal(store, &record, &refusal);
+                return Err(DispatchError::Provenance(refusal));
+            }
+            Ok(admitted) => {
+                if let Ok(manifest_bytes) = to_vec(&admitted.manifest) {
+                    let address = Digest::of_wire_bytes(&manifest_bytes);
+                    if let Some(artifacts) = artifacts {
+                        let parents = vec![admitted.bundle_address.to_hex(), record.displayed_digest.to_hex()];
+                        if let PutResult::Err { error } = artifacts.put(&manifest_bytes, &parents) {
+                            tracing::warn!(
+                                target: "aether_chassis_bloomery::provenance",
+                                nonce = %record.nonce.0,
+                                %error,
+                                "assembled prompt manifest was not retained in the artifact store",
+                            );
+                        }
+                    }
+                    record.prompt_manifest = Some(address);
+                }
+                record.instruction_bundle = Some(admitted.bundle_bytes);
+            }
+        }
     }
-    record_dispatch_at(store, record, now_unix_millis).map_err(DispatchError::Store)?;
+    record_dispatch_at(store, &record, now_unix_millis).map_err(DispatchError::Store)?;
     match port.submit(&record.to_order()) {
         Settled::InFlight => Ok(Settled::InFlight),
         Settled::Answered(Ok(handle)) => {

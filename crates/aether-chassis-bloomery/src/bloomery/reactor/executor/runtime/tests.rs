@@ -1445,6 +1445,8 @@ fn an_expired_order_that_does_not_decode_is_reclaimed_before_it_is_read() {
             profile: to_vec(&StageCatalog::profile_of(StageId::Construct)).unwrap(),
             deadline_unix_millis: AT_THE_DEADLINE,
             lifecycle: OrderLifecycle::Submitted,
+
+            prompt_manifest: None,
         })
         .unwrap();
     let mut tracked = track(vec![WorkHandle::new(Nonce(nonce.clone()))]);
@@ -2465,6 +2467,9 @@ fn an_aggregate_verify_failure_can_produce_a_repair_candidate() {
             tree,
         ),
         configs: ConfigRegistry::default(),
+
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
     record_dispatch(&mut store, &verify).unwrap();
     let AdmitDecision::Admitted(_) = admit_uploaded(
@@ -2560,6 +2565,9 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
             tree,
         ),
         configs: ConfigRegistry::default(),
+
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
     record_dispatch(&mut store, &verify).unwrap();
     let AdmitDecision::Admitted(_) = admit_uploaded(
@@ -3049,6 +3057,9 @@ fn an_unconfigured_shell_refuses_actions_lanes_naming_the_missing_knobs() {
             digest(0xB0),
         ),
         nonce: Nonce("probe".to_owned()),
+
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
     let refusal = shell.submit(&order).expect_err("a verify lane routes to Actions, which is unconfigured");
     let rendered = refusal.to_string();
@@ -3072,6 +3083,9 @@ fn an_unconfigured_actions_refusal_is_permanent_so_the_drain_parks_it() {
                 digest(0xB0),
             ),
             nonce: Nonce("probe".to_owned()),
+
+            instruction_bundle: None,
+            prompt_manifest: None,
         })
         .expect_err("the stub refuses every submit");
 
@@ -4127,6 +4141,7 @@ mod offloaded_adapter_calls {
             profile: to_vec(&StageCatalog::profile_of(StageId::Construct)).unwrap(),
             deadline_unix_millis,
             lifecycle: OrderLifecycle::Submitted,
+            prompt_manifest: None,
         }
     }
 

@@ -217,6 +217,7 @@ fn plant_completed_order(store: &mut SqliteStore, worktrees: &Path, bloom: Bloom
             profile: to_vec(&StageCatalog::profile_of(StageId::Construct)).unwrap(),
             deadline_unix_millis: u64::MAX / 2,
             lifecycle: OrderLifecycle::Submitted,
+            prompt_manifest: None,
         })
         .unwrap();
 

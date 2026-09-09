@@ -279,6 +279,7 @@ impl TransformRunner for ProcessTransformRunner {
         let mut lane = self.lane_override.as_ref().unwrap_or(&spec.entrypoint).command();
         construct_lane_env(&mut lane, inherited_env());
         export_build_env(&mut lane, spec);
+        export_instruction_manifest(&mut lane, spec).map_err(LocalExecutorError::Io)?;
         lane.current_dir(spec.worktree_dir);
         // Command, `--out`, `--nonce`, and the optional `--diff-base` /
         // `--seeded` / model-lane flags. A Construct checkpoint is
@@ -479,6 +480,19 @@ fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) 
 ///
 /// A `build_jobs` of zero states no cap, leaving cargo's default of one job per
 /// core — an explicit `CARGO_BUILD_JOBS=0` is a cargo error, not "unlimited".
+fn export_instruction_manifest(lane: &mut Command, spec: &RunSpec<'_>) -> io::Result<()> {
+    let Some(bytes) = spec.instruction_bundle else {
+        return Ok(());
+    };
+    let path = spec.evidence_dir.join("instruction-manifest");
+    fs::write(&path, bytes)?;
+    lane.env(aether_bloomery::INSTRUCTION_MANIFEST_ENV, &path);
+    if let Some(digest) = spec.instruction_bundle_digest {
+        lane.env(aether_bloomery::INSTRUCTION_MANIFEST_DIGEST_ENV, digest);
+    }
+    Ok(())
+}
+
 fn export_build_env(lane: &mut Command, spec: &RunSpec<'_>) {
     // Unix lanes reach the slot's target through the checkout's `target`
     // symlink ([`link_slot_target`]) instead of this export: the absolute
@@ -1146,6 +1160,9 @@ mod tests {
             bloom: None,
             receipt: None,
             entrypoint: LaneProgram::default(),
+
+            instruction_bundle: None,
+            instruction_bundle_digest: None,
         }
     }
 

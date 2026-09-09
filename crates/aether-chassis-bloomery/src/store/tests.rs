@@ -442,6 +442,7 @@ fn order_due_at(nonce: &str, deadline_unix_millis: u64) -> OutstandingOrder {
         configs: vec![3, 3],
         deadline_unix_millis,
         lifecycle: OrderLifecycle::Submitted,
+        prompt_manifest: None,
     }
 }
 
@@ -1858,7 +1859,7 @@ mod schema_digest_migration {
         drop(conn);
 
         let mut store = SqliteStore::open(&path).expect("a v16 store migrates");
-        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 21);
+        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 22);
         let journal = store.replay_journal().unwrap();
         assert_eq!(journal.len(), 2);
         let v2 = journal.iter().find(|row| row.idempotency_key == "v2").unwrap();
@@ -2250,7 +2251,7 @@ mod outbox_results {
         drop(conn);
 
         let mut store = SqliteStore::open(&path).expect("a v18 store migrates");
-        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 21);
+        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 22);
         let journal = store.replay_journal().unwrap();
         assert_eq!(journal.len(), 1);
         assert_eq!(journal[0].idempotency_key, "v18-journal");

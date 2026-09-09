@@ -35,6 +35,7 @@ use aether_bloomery::{BloomId, ConfigScopes, ModelOverride, StageId, StudyPayloa
 use aether_bloomery_github::short_hex;
 use aether_data::wire::from_bytes;
 
+use crate::artifacts::ArtifactsCapabilityState;
 use crate::bloomery::dispatch_model;
 use crate::bloomery::executor::{ExecutorPort, Settled};
 use crate::bloomery::intake::{DispatchRecord, dispatch_and_record, dispatch_nonce};
@@ -57,6 +58,7 @@ use super::transformation_has_subject;
 /// the drain — the same triple every other drain returns.
 pub(super) fn drain_and_dispatch_study(
     store: &mut dyn StoreBackend,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
     reader_enabled: bool,
     now_unix_millis: u64,
@@ -121,7 +123,7 @@ pub(super) fn drain_and_dispatch_study(
         payload.transformation.model = Some(dispatch_model(StageId::Study, &payload.profile, &model_override));
 
         let record = study_record(entry.sequence, payload);
-        match dispatch_and_record(executor, store, &record, now_unix_millis) {
+        match dispatch_and_record(executor, store, artifacts, &record, now_unix_millis) {
             Ok(Settled::Answered(handle)) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
@@ -186,5 +188,7 @@ fn study_record(sequence: u64, payload: StudyPayload) -> DispatchRecord {
         // this is the only scope the overlay and the ADR-0214 provenance gate
         // walk.
         configs: payload.configs,
+        instruction_bundle: None,
+        prompt_manifest: None,
     }
 }

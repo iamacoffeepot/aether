@@ -104,6 +104,11 @@ pub struct RunSpec<'a> {
     /// program and leading arguments a dispatch spawns before the work order's
     /// own argv. A host override on the runner replaces it.
     pub entrypoint: super::lane_program::LaneProgram,
+    /// Exact authorized instruction-bundle bytes a model lane consumes.
+    /// Written outside the checkout and named in the child's env (ADR-0214).
+    pub instruction_bundle: Option<&'a [u8]>,
+    /// Content address of those bytes, so the lane can assert what it read.
+    pub instruction_bundle_digest: Option<&'a str>,
 }
 
 /// A running (or finished) transform child — the lifecycle the backend maps onto

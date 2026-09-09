@@ -9,13 +9,11 @@
 //! array yields an empty one and a note in `findings` prose. Entries are not
 //! repaired — the intake refuses a malformed emission whole.
 
-use aether_bloomery::RetrospectClaim;
+use aether_bloomery::{ModelProcessInstructions, RetrospectClaim};
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::bloom::{RETROSPECT, RETROSPECT_FINDING_CONTRACT};
-use crate::transform::conventions;
 use crate::transform::lane::Resumed;
 use crate::transform::{Measurements, TransformArgs, run_model_lane, write_evidence_json};
 
@@ -51,14 +49,17 @@ const INCOMPLETE_NOTE: &str = "the reader did not complete; filing nothing";
 /// sit in `##` sections after the static text; they are never interpolated into
 /// it.
 fn assemble_retrospect_prompt(
+    bundle: &ModelProcessInstructions,
     bloom: Option<&str>,
     receipt: Option<&str>,
     diff_base: Option<&str>,
     subject: Option<&str>,
 ) -> String {
-    let conventions_section = format!("{}\n\n", conventions::section());
     format!(
-        "{conventions_section}{RETROSPECT}\n\n{RETROSPECT_FINDING_CONTRACT}\n{}{}{}",
+        "{}\n\n{}\n\n{}\n{}{}{}",
+        bundle.conventions,
+        bundle.retrospect,
+        bundle.retrospect_finding_contract,
         context_section("Bloom", bloom),
         context_section("Receipt digest", receipt),
         landed_range_section(diff_base, subject),
@@ -201,8 +202,9 @@ fn stamp_retrospect_evidence(nonce: Option<&str>, record: &Value, measured: Meas
 /// The `retrospect.read` lane: assemble the prompt from the bundle fields and
 /// the order's context slots, run the resolved harness, and stamp evidence.
 /// Like the other model lanes it needs a credential, so it runs worker-side.
-pub(super) fn run_retrospect(args: &TransformArgs) -> Result<()> {
+pub(super) fn run_retrospect(args: &TransformArgs, bundle: &ModelProcessInstructions) -> Result<()> {
     let prompt = assemble_retrospect_prompt(
+        bundle,
         args.bloom.as_deref(),
         args.receipt.as_deref(),
         args.diff_base.as_deref(),
@@ -215,10 +217,11 @@ pub(super) fn run_retrospect(args: &TransformArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        INCOMPLETE_NOTE, RETROSPECT, RETROSPECT_FINDING_CONTRACT, UNPARSEABLE_NOTE, assemble_retrospect_prompt,
-        parse_retrospect_claims, stamp_retrospect_evidence,
+        INCOMPLETE_NOTE, UNPARSEABLE_NOTE, assemble_retrospect_prompt, parse_retrospect_claims,
+        stamp_retrospect_evidence,
     };
     use crate::transform::Measurements;
+    use crate::transform::instructions::fixture_bundle;
     use crate::transform::messages::derive_result_record;
     use serde_json::json;
 
@@ -314,10 +317,11 @@ mod tests {
         let receipt = "receipt-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let base = "base-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
         let head = "head-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
-        let prompt = assemble_retrospect_prompt(Some(bloom), Some(receipt), Some(base), Some(head));
+        let bundle = fixture_bundle();
+        let prompt = assemble_retrospect_prompt(&bundle, Some(bloom), Some(receipt), Some(base), Some(head));
 
-        assert!(prompt.contains(RETROSPECT), "the process instructions are present");
-        assert!(prompt.contains(RETROSPECT_FINDING_CONTRACT), "the finding contract is present");
+        assert!(prompt.contains(&bundle.retrospect), "the process instructions are present");
+        assert!(prompt.contains(&bundle.retrospect_finding_contract), "the finding contract is present");
         assert!(prompt.contains("## Bloom"), "{prompt}");
         assert!(prompt.contains("## Receipt digest"), "{prompt}");
         assert!(prompt.contains("## Landed range"), "{prompt}");

@@ -121,6 +121,8 @@ fn order(command: &str, nonce: &str) -> WorkOrder {
             model: None,
         },
         nonce: Nonce(nonce.to_owned()),
+        instruction_bundle: None,
+        prompt_manifest: None,
     }
 }
 

@@ -1,5 +1,5 @@
 //! The `construct.implement` lane (#3511): assemble the prompt from the
-//! lane's in-repo instruction source plus the checked-out subject, run
+//! authorized instruction bundle plus the checked-out subject, run
 //! headless Claude, gate on a produced candidate, and stamp the evidence.
 
 use std::fs;
@@ -7,6 +7,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::process::Command;
 
+use aether_bloomery::ModelProcessInstructions;
 use anyhow::Result;
 
 use crate::transform::claude::assemble_construct_prompt;
@@ -39,14 +40,6 @@ const COMMIT_MESSAGE_DELIVERABLE: &str = ".bloomery-commit-message";
 /// left it behind is visible in `git status` rather than silently folded into
 /// the captured candidate.
 const SURFACE_REQUEST_DELIVERABLE: &str = ".bloomery-surface-request";
-
-/// The lane-owned in-repo instruction source (#3572). Embedded at build time so
-/// the construct lane owns its process natively — the prompt is assembled from
-/// this text, never from `.claude/skills/implement` in the worker's checkout.
-/// Reachable outside this module (`transform` is itself crate-private) so
-/// `cargo xtask bloom instructions` imports this exact text into the ADR-0214
-/// bundle rather than a second copy of it.
-pub const CONSTRUCT_INSTRUCTIONS: &str = include_str!("construct_instructions.md");
 
 /// Stamp the broker-matched `nonce`, the command id, and the candidate-produced
 /// signal onto the derived result `record`, producing the construct lane's
@@ -187,22 +180,19 @@ fn capture_produced_candidate(out_dir: &Path) -> bool {
     })
 }
 
-/// The `construct.implement` lane: assemble the prompt from the lane's in-repo
-/// instruction source plus the checked-out subject, run headless Claude at the
+/// The `construct.implement` lane: assemble the prompt from the authorized
+/// instruction bundle plus the checked-out subject, run headless Claude at the
 /// resolved model (or the operator's ambient default when none is resolved,
 /// #3592), capture the stream-json transcript, derive the result record
 /// in-repo, and write it as nonce-tagged evidence (#3572). This lane needs a
 /// Claude credential, so it runs worker-side (BYO) — never on the coordinator's
 /// zero-secret path.
-pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
-    // The lane owns its process: the prompt is assembled from the in-repo
-    // instruction source and the checked-out subject, never from a skill in the
-    // worker's checkout. It is piped on the child's stdin. The curated lane
-    // context rides along (#4647, #5141) so the conventions reach the agent
-    // whichever harness is forked, rather than depending on the CLI to go and
-    // find them — and rather than inlining the whole subject-tree CLAUDE.md.
+pub(super) fn run_construct(args: &TransformArgs, bundle: &ModelProcessInstructions) -> Result<()> {
+    // The lane consumes the authorized bundle the host handed it (ADR-0214):
+    // instruction text is those bytes unchanged, never files in this checkout.
     let prompt = assemble_construct_prompt(
-        CONSTRUCT_INSTRUCTIONS,
+        bundle,
+        &bundle.construct,
         args.subject.as_deref(),
         args.task.as_deref(),
         args.seeded.as_deref(),
@@ -226,7 +216,7 @@ pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
     // through `write_evidence_json` is covered.
     let _beat = heartbeat::Beat::start(&args.out);
     let applied = fixers::apply(Path::new("."), &args.out);
-    let lint = lint_check::run(Path::new("."), args, run.record["session_id"].as_str());
+    let lint = lint_check::run(Path::new("."), args, run.record["session_id"].as_str(), &bundle.construct_lint_repair);
     let fixers = lint.fixers.map_or(applied, |repaired| applied.merged(repaired));
 
     // Take the commit-message deliverable before the candidate is inspected, and
@@ -265,12 +255,23 @@ mod tests {
     use aether_bloomery::{LANE_WORKPIECE_HEADER, pin_workpiece_description};
 
     use super::{
-        COMMIT_MESSAGE_DELIVERABLE, CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, Deliverables, FixerReport, LintReport,
-        Measurements, SURFACE_REQUEST_DELIVERABLE, porcelain_signals_candidate, stamp_construct_evidence,
-        take_commit_message, take_surface_request,
+        COMMIT_MESSAGE_DELIVERABLE, CONSTRUCT_IMPLEMENT, Deliverables, FixerReport, LintReport, Measurements,
+        SURFACE_REQUEST_DELIVERABLE, porcelain_signals_candidate, stamp_construct_evidence, take_commit_message,
+        take_surface_request,
     };
     use crate::transform::claude::assemble_construct_prompt;
-    use crate::transform::conventions::LANE_CONTEXT;
+    use crate::transform::conventions;
+    use crate::transform::instructions::fixture_bundle;
+
+    const CONSTRUCT_SOURCE: &str = include_str!("construct_instructions.md");
+    const LANE_CONTEXT: &str = include_str!("lane_context.md");
+
+    fn assembled(subject: Option<&str>, task: Option<&str>, seeded: Option<&str>) -> String {
+        let mut bundle = fixture_bundle();
+        bundle.conventions = conventions::section(LANE_CONTEXT);
+        bundle.construct = CONSTRUCT_SOURCE.to_owned();
+        assemble_construct_prompt(&bundle, &bundle.construct, subject, task, seeded)
+    }
 
     #[test]
     fn construct_evidence_binds_the_nonce_carries_the_record_and_the_candidate_signal() {
@@ -482,9 +483,8 @@ mod tests {
     // never reads `.claude/skills/implement` (#3572). Pure: no Claude spawn.
     #[test]
     fn construct_prompt_assembles_from_the_in_repo_instructions_and_subject() {
-        let prompt =
-            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some("thread the work order"), None);
-        assert!(prompt.contains(CONSTRUCT_INSTRUCTIONS), "the instruction source rides the prompt");
+        let prompt = assembled(Some("abc123"), Some("thread the work order"), None);
+        assert!(prompt.contains(CONSTRUCT_SOURCE), "the instruction source rides the prompt");
         assert!(prompt.contains("## Subject"), "the checked-out subject is appended as its own section");
         assert!(prompt.contains("abc123"), "the exact checked-out commit is named in the prompt");
         assert!(
@@ -501,17 +501,17 @@ mod tests {
         assert!(!prompt.contains("\n## Lane\n"), "a header-less task grows no lane tail");
 
         // With no subject supplied, the prompt still stands and names no commit.
-        let subjectless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, Some("still has a task"), None);
+        let subjectless = assembled(None, Some("still has a task"), None);
         assert!(subjectless.contains("## Subject"));
         assert!(subjectless.contains("\n## Task\n"));
-        assert!(subjectless.contains(CONSTRUCT_INSTRUCTIONS));
+        assert!(subjectless.contains(CONSTRUCT_SOURCE));
 
         // With no task, the prompt still stands and appends no `## Task` section —
         // the fail-legible subject-only path for a member with no description.
-        let taskless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), None, None);
+        let taskless = assembled(Some("abc123"), None, None);
         assert!(taskless.contains("## Subject"));
         assert!(!taskless.contains("\n## Task\n"), "no persisted description means no task section");
-        assert!(taskless.contains(CONSTRUCT_INSTRUCTIONS));
+        assert!(taskless.contains(CONSTRUCT_SOURCE));
     }
 
     // The curated lane context rides the prompt itself (#4647, #5141) rather
@@ -521,15 +521,14 @@ mod tests {
     // the long general rules, and a per-lane tail may follow it.
     #[test]
     fn conventions_ride_the_prompt_ahead_of_the_work_order() {
-        let prompt =
-            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some("thread the work order"), None);
+        let prompt = assembled(Some("abc123"), Some("thread the work order"), None);
         assert!(
             prompt.contains("Tests must earn their place"),
             "the curated lane context carries the testing doctrine",
         );
         assert!(prompt.starts_with("## Conventions\n"), "shared conventions lead so sibling lanes share a prefix");
         let conventions_at = prompt.find("## Conventions\n").expect("the conventions get their own section");
-        let instructions_at = prompt.find(CONSTRUCT_INSTRUCTIONS).expect("the lane instructions still ride");
+        let instructions_at = prompt.find(CONSTRUCT_SOURCE).expect("the lane instructions still ride");
         let task_at = prompt.find("\n## Task\n").expect("the work order keeps its section");
         assert!(conventions_at < instructions_at, "lane context leads the lane-specific instructions");
         assert!(instructions_at < task_at, "the work order stays after the long general rules");
@@ -540,8 +539,7 @@ mod tests {
     // cannot act on. A wholesale embed returning is this test going red.
     #[test]
     fn assembled_construct_prompt_carries_lane_context_not_the_whole_claude_md() {
-        let prompt =
-            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some("thread the work order"), None);
+        let prompt = assembled(Some("abc123"), Some("thread the work order"), None);
 
         assert!(prompt.contains(LANE_CONTEXT), "the curated lane context rides the prompt");
         assert!(prompt.contains("Tests must earn their place"), "testing doctrine stays");
@@ -587,21 +585,11 @@ mod tests {
     #[test]
     fn sibling_lane_prompts_share_a_byte_identical_prefix_through_the_work_order() {
         let body = "# Wave-3 member work order\n\nImplement the sealed plan.\n";
-        let left = assemble_construct_prompt(
-            CONSTRUCT_INSTRUCTIONS,
-            Some("abc123"),
-            Some(&pin_workpiece_description("issue-1111", body)),
-            None,
-        );
-        let right = assemble_construct_prompt(
-            CONSTRUCT_INSTRUCTIONS,
-            Some("abc123"),
-            Some(&pin_workpiece_description("issue-2222", body)),
-            None,
-        );
+        let left = assembled(Some("abc123"), Some(&pin_workpiece_description("issue-1111", body)), None);
+        let right = assembled(Some("abc123"), Some(&pin_workpiece_description("issue-2222", body)), None);
 
         let prefix_len = left.bytes().zip(right.bytes()).take_while(|(a, b)| a == b).count();
-        let stable = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some(body), None);
+        let stable = assembled(Some("abc123"), Some(body), None);
         assert!(
             prefix_len >= stable.len(),
             "common prefix ({prefix_len}) must cover the stable bulk ({})",
@@ -628,8 +616,17 @@ mod tests {
     // Conventions lead, so distinct instruction texts still share lane context.
     #[test]
     fn conventions_lead_so_distinct_lane_instructions_still_share_them() {
-        let construct = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some("shared order"), None);
-        let review = assemble_construct_prompt("REVIEW INSTRUCTIONS ONLY", Some("abc123"), Some("shared order"), None);
+        let construct = assembled(Some("abc123"), Some("shared order"), None);
+        let mut review_bundle = fixture_bundle();
+        review_bundle.conventions = conventions::section(LANE_CONTEXT);
+        review_bundle.review = "REVIEW INSTRUCTIONS ONLY".to_owned();
+        let review = assemble_construct_prompt(
+            &review_bundle,
+            &review_bundle.review,
+            Some("abc123"),
+            Some("shared order"),
+            None,
+        );
         let prefix_len = construct.bytes().zip(review.bytes()).take_while(|(a, b)| a == b).count();
         assert!(construct.starts_with("## Conventions\n"), "lane context leads the prompt");
         assert!(
@@ -648,33 +645,23 @@ mod tests {
     // and a cold start is told it might be sitting on mid-refactor garbage.
     #[test]
     fn construct_prompt_names_the_seeded_state_only_when_seeded() {
-        let cold =
-            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some("thread the work order"), None);
+        let cold = assembled(Some("abc123"), Some("thread the work order"), None);
         assert!(!cold.contains("## Seeded state"), "a cold start grows no seeded-state section");
-        assert!(!cold.contains("mid-refactor garbage"), "the trust posture is not static boilerplate on a cold start");
         assert!(
-            !CONSTRUCT_INSTRUCTIONS.contains("## Seeded state")
-                && !CONSTRUCT_INSTRUCTIONS.contains("mid-refactor garbage"),
+            !CONSTRUCT_SOURCE.contains("## Seeded state"),
             "the instruction source must not name a checkpoint the dispatch may not have",
         );
 
-        let seeded = assemble_construct_prompt(
-            CONSTRUCT_INSTRUCTIONS,
-            Some("def456"),
-            Some("thread the work order"),
-            Some("def456"),
-        );
+        let seeded = assembled(Some("def456"), Some("thread the work order"), Some("def456"));
         let task_at = seeded.find("\n## Task\n").expect("the work order keeps its section");
         let seeded_at = seeded.find("\n## Seeded state\n").expect("a seeded dispatch names the checkpoint");
         assert!(task_at < seeded_at, "the seeded-state section sits after the shared work order");
         assert!(seeded.contains("`def456`"), "the prompt names the checkpoint commit");
-        assert!(seeded.contains("untrusted"), "the prompt names the checkpoint's trust posture");
-        assert!(seeded.contains("mid-refactor garbage"), "the prompt states what a dead attempt's partial tree can be");
+        assert!(seeded.contains("## Seeded checkpoint"), "the hex rides a context slot, not the instruction text");
 
         let body = "shared order";
-        let cold_sibling = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some(body), None);
-        let seeded_sibling =
-            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some(body), Some("def456"));
+        let cold_sibling = assembled(Some("abc123"), Some(body), None);
+        let seeded_sibling = assembled(Some("abc123"), Some(body), Some("def456"));
         let prefix_len = cold_sibling.bytes().zip(seeded_sibling.bytes()).take_while(|(a, b)| a == b).count();
         assert!(
             cold_sibling[..prefix_len].contains(body),
@@ -699,8 +686,7 @@ mod tests {
     // back in front of the model is what it still exists to catch.
     #[test]
     fn construct_prompt_keeps_authoring_checks_and_leaves_verify_gates_to_verify() {
-        let prompt =
-            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some("thread the work order"), None);
+        let prompt = assembled(Some("abc123"), Some("thread the work order"), None);
 
         assert!(prompt.contains("cargo fmt"), "formatting stays as cheap authoring feedback");
         assert!(prompt.contains("focused tests"), "focused behavior tests stay as cheap authoring feedback");

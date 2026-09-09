@@ -134,6 +134,9 @@ fn run_recorded(parse_from: Vec<String>, recorded: Vec<String>, worktree: &Path)
             env: inherited_env_names(),
             process_id: Some(process::id()),
             argv: recorded,
+            instruction_manifest: env::var_os(aether_bloomery::INSTRUCTION_MANIFEST_ENV)
+                .map(|value| value.to_string_lossy().into_owned()),
+            instruction_manifest_digest: env::var(aether_bloomery::INSTRUCTION_MANIFEST_DIGEST_ENV).ok(),
         },
     )?;
 

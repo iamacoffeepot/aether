@@ -442,6 +442,9 @@ mod tests {
                 Digest::from_bytes([0xB0; 32]),
             ),
             configs: aether_bloomery::ConfigRegistry::default(),
+
+            instruction_bundle: None,
+            prompt_manifest: None,
         };
         record_dispatch(store, &record).unwrap();
     }
@@ -479,6 +482,9 @@ mod tests {
                 Digest::from_bytes([0xB0; 32]),
             ),
             configs,
+
+            instruction_bundle: None,
+            prompt_manifest: None,
         };
         record.transformation.model =
             Some(ResolvedModel { harness: Harness::Grok, model: model.to_owned(), effort: ReasoningEffort::Medium });

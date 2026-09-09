@@ -18,6 +18,7 @@ use core::fmt;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::digest::Digest;
 use crate::ids::Nonce;
 use crate::values::{
     CandidateRef, CompositionParents, RetrospectClaim, StudyCall, StudyCost, SuppressionRequest, SurfaceRequest,
@@ -35,6 +36,24 @@ pub struct WorkOrder {
     /// The idempotency nonce — the durable correlation key `submit` returns as
     /// the handle and the other three messages resolve the run from.
     pub nonce: Nonce,
+    /// Exact authorized instruction-bundle bytes a model lane consumes (ADR-0214).
+    ///
+    /// `None` on a mechanical lane, which has no process instructions. The local
+    /// backend writes these bytes outside the checkout; the Actions backend
+    /// carries them as a workflow input.
+    pub instruction_bundle: Option<Vec<u8>>,
+    /// Content address of the assembled prompt-manifest bytes retained as
+    /// attempt evidence. `None` on a mechanical lane, or when assembly did not
+    /// run.
+    pub prompt_manifest: Option<Digest>,
+}
+
+impl WorkOrder {
+    /// A mechanical-lane order: no instruction bundle, no retained manifest.
+    #[must_use]
+    pub fn new(transformation: Transformation, nonce: Nonce) -> Self {
+        Self { transformation, nonce, instruction_bundle: None, prompt_manifest: None }
+    }
 }
 
 /// What `submit` returns and `cancel` / `inspect` / `stream_evidence` take.

@@ -107,6 +107,10 @@ pub enum LaneMode {
     /// worker can still deliver; a completed run is recovered as a machinery
     /// fault so the order cannot outlive the lane.
     WrongSubject,
+    /// A construct run that edits an in-repo instruction file in the checkout.
+    /// The candidate capture includes that edit, so a later dispatch stands on
+    /// a tree whose instruction files are not the sealed bundle (ADR-0214).
+    EditsInstructions,
 }
 
 impl fmt::Display for LaneMode {
@@ -308,6 +312,12 @@ pub struct LaneRun {
     /// reached the spawn (ADR-0215) without running a real lane.
     #[serde(default)]
     pub argv: Vec<String>,
+    /// Path the host named in `AETHER_BLOOMERY_INSTRUCTION_MANIFEST`, when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_manifest: Option<String>,
+    /// Digest the host named in `AETHER_BLOOMERY_INSTRUCTION_MANIFEST_DIGEST`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_manifest_digest: Option<String>,
 }
 
 /// Append `run` to the ledger in `dir`.

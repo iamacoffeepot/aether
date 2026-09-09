@@ -43,7 +43,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::{
     Conclusion, CorrespondenceError, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, LaneObservation, Nonce,
-    SharedCorrespondence, VerifyFailureSet, WorkHandle, WorkOrder, is_model_lane,
+    SharedCorrespondence, VerifyFailureSet, WorkHandle, WorkOrder, config_address, is_model_lane,
 };
 
 use crate::client::{ActionsApi, GithubError, RunConclusion, RunStatus, WorkflowRun, name_carries_nonce};
@@ -73,6 +73,13 @@ pub const INPUT_MODEL: &str = "model";
 /// The input key carrying the resolved reasoning-effort tier — the model
 /// wrapper's sibling of [`INPUT_MODEL`].
 pub const INPUT_EFFORT: &str = "effort";
+
+/// Gzip+base64 of the authorized instruction-bundle bytes a model lane consumes.
+/// The wrapper writes them outside the checkout before `cargo xtask transform`.
+pub const INPUT_MANIFEST: &str = "manifest";
+
+/// Content address of those bytes — the sealed pin the lane asserts against.
+pub const INPUT_MANIFEST_DIGEST: &str = "manifest_digest";
 
 /// An executor-port fault. Its own type because the port needs an arm the value
 /// vocabulary does not carry — a message asked to act on a run that does not
@@ -359,6 +366,13 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
                 .ok_or_else(|| ExecutorError::UnresolvedModel(order.nonce.clone()))?;
             inputs.insert(INPUT_MODEL.to_owned(), resolved.model.clone());
             inputs.insert(INPUT_EFFORT.to_owned(), resolved.effort.as_str().to_owned());
+            if let Some(bytes) = order.instruction_bundle.as_deref() {
+                inputs.insert(INPUT_MANIFEST.to_owned(), gzip_base64(bytes));
+                inputs.insert(
+                    INPUT_MANIFEST_DIGEST.to_owned(),
+                    config_address("aether.bloomery.model_process_instructions", bytes).to_hex(),
+                );
+            }
         }
         self.client.dispatch_workflow(self.workflow_of(lane), &self.git_ref, &inputs)?;
         self.lock().insert(order.nonce.0.clone(), lane);
@@ -434,13 +448,52 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
     }
 }
 
+/// Gzip then standard-base64, so a ~56KiB instruction bundle fits in a
+/// workflow_dispatch input (GitHub caps each input at 64KiB of text).
+fn gzip_base64(bytes: &[u8]) -> String {
+    use std::io::Write;
+
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(bytes).expect("gzip write to memory");
+    let compressed = encoder.finish().expect("gzip finish");
+    base64_encode(&compressed)
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut chunks = bytes.chunks_exact(3);
+    for chunk in chunks.by_ref() {
+        let n = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        out.push(TABLE[(n & 0x3f) as usize] as char);
+    }
+    let rem = chunks.remainder();
+    if rem.len() == 1 {
+        let n = u32::from(rem[0]) << 16;
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rem.len() == 2 {
+        let n = (u32::from(rem[0]) << 16) | (u32::from(rem[1]) << 8);
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        out.push('=');
+    }
+    out
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use aether_bloomery::{
         Conclusion, Digest, ExecutionLimits, ExecutionStatus, ExecutorBackend, Harness, NetworkProfile, Nonce,
         REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolvedModel, Transformation, VerifyFailure, VerifyFailureSet,
-        WorkHandle, WorkOrder,
+        WorkHandle, WorkOrder, config_address,
     };
 
     use std::sync::Arc;
@@ -478,6 +531,8 @@ mod tests {
                 model: None,
             },
             nonce: Nonce(nonce.to_owned()),
+            instruction_bundle: None,
+            prompt_manifest: None,
         }
     }
 
@@ -587,6 +642,29 @@ mod tests {
         assert_eq!(inputs.get("effort").map(String::as_str), Some("xhigh"));
         assert_eq!(inputs.get("command").map(String::as_str), Some(REVIEW_CRITIC_COMMAND));
         assert_eq!(inputs.get("subject").map(String::as_str), Some(CHECKOUT_SHA1));
+    }
+
+    #[test]
+    fn a_model_lane_carries_the_authorized_bundle_as_a_workflow_input() {
+        let fake = FakeGithub::new();
+        let mut order = model_order("n-bundle");
+        order.instruction_bundle = Some(b"sealed-bundle".to_vec());
+        executor(fake.clone()).submit(&order).unwrap();
+
+        let inputs = fake.dispatched_inputs("n-bundle").unwrap();
+        let bundle = b"sealed-bundle".as_slice();
+        let encoded = super::gzip_base64(bundle);
+        let digest = config_address("aether.bloomery.model_process_instructions", bundle).to_hex();
+        assert_eq!(
+            inputs.get("manifest").map(String::as_str),
+            Some(encoded.as_str()),
+            "the wrapper receives gzip+base64 of the authorized bytes",
+        );
+        assert_eq!(
+            inputs.get("manifest_digest").map(String::as_str),
+            Some(digest.as_str()),
+            "the digest is the domain-tagged address of those bytes",
+        );
     }
 
     #[test]

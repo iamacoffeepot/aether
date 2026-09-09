@@ -130,6 +130,7 @@ pub fn order_for(nonce: &str, bloom: &BloomId) -> OutstandingOrder {
         configs: vec![3, 3],
         deadline_unix_millis: 1_700_000_060_000,
         lifecycle: OrderLifecycle::Submitted,
+        prompt_manifest: None,
     }
 }
 

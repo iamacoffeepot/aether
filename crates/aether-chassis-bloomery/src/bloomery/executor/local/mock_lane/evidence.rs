@@ -50,6 +50,8 @@ pub struct Outcome {
     pub evidence: Option<Vec<u8>>,
     /// The process exit code.
     pub exit_code: i32,
+    /// Relative path the candidate body is written to. `None` uses [`CANDIDATE_FILE`].
+    pub candidate_path: Option<&'static str>,
     /// The candidate body to write into the worktree, or `None` to leave it
     /// clean.
     ///
@@ -118,11 +120,22 @@ pub fn outcome_for(command: &str, nonce: &str, mode: LaneMode, subject: Option<&
     };
 
     match mode {
-        LaneMode::NoEvidence => return Outcome { evidence: None, exit_code: 0, candidate: None },
-        LaneMode::ExitsNonZero => return Outcome { evidence: None, exit_code: 2, candidate: None },
-        LaneMode::EmptyEvidence => return Outcome { evidence: Some(Vec::new()), exit_code: 0, candidate: None },
+        LaneMode::NoEvidence => {
+            return Outcome { evidence: None, exit_code: 0, candidate_path: None, candidate: None };
+        }
+        LaneMode::ExitsNonZero => {
+            return Outcome { evidence: None, exit_code: 2, candidate_path: None, candidate: None };
+        }
+        LaneMode::EmptyEvidence => {
+            return Outcome { evidence: Some(Vec::new()), exit_code: 0, candidate_path: None, candidate: None };
+        }
         LaneMode::MalformedEvidence => {
-            return Outcome { evidence: Some(b"{not json".to_vec()), exit_code: 0, candidate: None };
+            return Outcome {
+                evidence: Some(b"{not json".to_vec()),
+                exit_code: 0,
+                candidate_path: None,
+                candidate: None,
+            };
         }
         LaneMode::Pass
         | LaneMode::Fail
@@ -132,7 +145,8 @@ pub fn outcome_for(command: &str, nonce: &str, mode: LaneMode, subject: Option<&
         | LaneMode::NeverExits
         | LaneMode::Declines
         | LaneMode::DeclinesRequestingSurface
-        | LaneMode::WrongSubject => {}
+        | LaneMode::WrongSubject
+        | LaneMode::EditsInstructions => {}
     }
 
     if command == CONSTRUCT_IMPLEMENT_COMMAND {
@@ -166,7 +180,14 @@ fn stamp_claimed_subject(evidence: &mut Value, mode: LaneMode, subject: Option<&
 }
 
 fn authored_pass(mode: LaneMode) -> bool {
-    matches!(mode, LaneMode::Pass | LaneMode::MismatchedNonce | LaneMode::NeverExits | LaneMode::WrongSubject)
+    matches!(
+        mode,
+        LaneMode::Pass
+            | LaneMode::MismatchedNonce
+            | LaneMode::NeverExits
+            | LaneMode::WrongSubject
+            | LaneMode::EditsInstructions
+    )
 }
 
 fn construct_outcome(
@@ -220,11 +241,15 @@ fn construct_outcome(
         }]);
     }
     stamp_claimed_subject(&mut evidence, mode, subject);
-    Outcome {
-        evidence: Some(evidence_bytes(&evidence)),
-        exit_code: 0,
-        candidate: authored_pass(mode).then(|| format!("the candidate a mock construct lane left for run {nonce}.\n")),
-    }
+    let (candidate_path, candidate) = if mode == LaneMode::EditsInstructions {
+        (
+            Some("xtask/src/transform/construct_instructions.md"),
+            Some(format!("replaced process instructions for run {nonce}\n")),
+        )
+    } else {
+        (None, authored_pass(mode).then(|| format!("the candidate a mock construct lane left for run {nonce}.\n")))
+    };
+    Outcome { evidence: Some(evidence_bytes(&evidence)), exit_code: 0, candidate_path, candidate }
 }
 
 fn review_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: Option<&str>) -> Outcome {
@@ -252,7 +277,7 @@ fn review_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: 
         "result_record": result_record(false, findings.as_str()),
     });
     stamp_claimed_subject(&mut review, mode, subject);
-    Outcome { evidence: Some(evidence_bytes(&review)), exit_code: 0, candidate: None }
+    Outcome { evidence: Some(evidence_bytes(&review)), exit_code: 0, candidate_path: None, candidate: None }
 }
 
 /// A scoping run's evidence (ADR-0208): a pass fills the workpiece's fields
@@ -277,7 +302,7 @@ fn scope_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: O
         "result_record": result_record(false, findings.as_str()),
     });
     stamp_claimed_subject(&mut scope, mode, subject);
-    Outcome { evidence: Some(evidence_bytes(&scope)), exit_code: 0, candidate: None }
+    Outcome { evidence: Some(evidence_bytes(&scope)), exit_code: 0, candidate_path: None, candidate: None }
 }
 
 /// A reader's evidence (ADR-0216): a pass stamps the work orders it will not
@@ -315,7 +340,7 @@ fn retrospect_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subje
         "result_record": result_record(false, Some("filed what the bloom will not fix.")),
     });
     stamp_claimed_subject(&mut retrospect, mode, subject);
-    Outcome { evidence: Some(evidence_bytes(&retrospect)), exit_code: 0, candidate: None }
+    Outcome { evidence: Some(evidence_bytes(&retrospect)), exit_code: 0, candidate_path: None, candidate: None }
 }
 
 fn verify_environment_outcome(command: &str, evidence_nonce: &str) -> Outcome {
@@ -335,6 +360,7 @@ fn verify_environment_outcome(command: &str, evidence_nonce: &str) -> Outcome {
             "findings": findings,
         }))),
         exit_code: 1,
+        candidate_path: None,
         candidate: None,
     }
 }
@@ -353,7 +379,12 @@ fn verify_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: 
         object.insert("findings".to_owned(), Value::String(verify_findings(command)));
     }
     stamp_claimed_subject(&mut evidence, mode, subject);
-    Outcome { evidence: Some(evidence_bytes(&evidence)), exit_code: i32::from(!passed), candidate: None }
+    Outcome {
+        evidence: Some(evidence_bytes(&evidence)),
+        exit_code: i32::from(!passed),
+        candidate_path: None,
+        candidate: None,
+    }
 }
 
 /// A digest that is not the one the order displayed.
@@ -382,7 +413,11 @@ fn wrong_subject(displayed: Option<&str>) -> String {
 /// A directory could not be created or a file could not be written.
 pub fn apply(outcome: &Outcome, worktree: &Path, out: &Path) -> io::Result<()> {
     if let Some(candidate) = &outcome.candidate {
-        fs::write(worktree.join(CANDIDATE_FILE), candidate)?;
+        let path = worktree.join(outcome.candidate_path.unwrap_or(CANDIDATE_FILE));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, candidate)?;
     }
     if let Some(evidence) = &outcome.evidence {
         fs::create_dir_all(out)?;
