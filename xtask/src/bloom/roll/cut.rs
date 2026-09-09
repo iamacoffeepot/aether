@@ -28,7 +28,7 @@ pub fn create(shell: &impl Shell, repo: &Repo, remote: &str, day: &Day) -> Resul
 
 #[cfg(test)]
 mod tests {
-    const REPO: &str = "/mnt/dev/bloomery/fleet.git";
+    const REPO: &str = "/srv/fleet.git";
 
     use super::create;
     use crate::bloom::roll::day::Day;
