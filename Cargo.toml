@@ -69,6 +69,69 @@ members = [
     "crates/aether-test-fixtures-behavior",
     "xtask",
 ]
+# What a bare `cargo build` / `cargo test` / `cargo clippy` at the root selects:
+# the engine. Without this cargo defaults to every member, so a first clone
+# compiled the Bloomery coordinator, its terminal console, the wasm test
+# fixtures, and SQLite from C before it produced a single engine artifact —
+# none of which a contributor reading `docs/guide/` is there for.
+#
+# The split is by role, not by dependency: the members left out are the build
+# pipeline (`xtask`), the Bloomery coordinator and its satellites, the
+# `aether-puppet` lane driver, and the `aether-test-fixtures-*` wasm crates
+# `cargo xtask dist` cross-builds by `-p`. Nothing below depends on any of
+# them, so leaving them out narrows the build rather than deferring it.
+#
+# Every gate that must still see the whole tree says so in its own argv —
+# `--workspace` on the clippy / rustdoc / nextest members of `cargo xtask
+# transform verify.*`, a `crates` path on the jscpd and cargo-machete scans,
+# and `-p` on every xtask build. A gate that reads this default instead would
+# go quiet on the crates it stopped selecting, so widening one is an explicit
+# flag, never an inherited default.
+default-members = [
+    "crates/aether-substrate",
+    "crates/aether-chassis",
+    "crates/aether-chassis-desktop",
+    "crates/aether-chassis-headless",
+    "crates/aether-chassis-harness",
+    "crates/aether-chassis-hub",
+    "crates/aether-harness-substrate",
+    "crates/aether-harness-substrate-capture",
+    "crates/aether-substrate-harness-cap",
+    "crates/aether-codec",
+    "crates/aether-data",
+    "crates/aether-kinds",
+    "crates/aether-math",
+    "crates/aether-actor",
+    "crates/aether-actor-derive",
+    "crates/aether-audio",
+    "crates/aether-behavior",
+    "crates/aether-behavior-derive",
+    "crates/aether-http-derive",
+    "crates/aether-data-derive",
+    "crates/aether-derive",
+    "crates/aether-fs",
+    "crates/aether-inventory",
+    "crates/aether-mesh",
+    "crates/aether-kit-commons",
+    "crates/aether-kit-widget",
+    "crates/aether-rpc",
+    "crates/aether-fleet",
+    "crates/aether-harness-fleet",
+    "crates/aether-harness-perf",
+    "crates/aether-clipboard",
+    "crates/aether-window",
+    "crates/aether-lifecycle",
+    "crates/aether-tcp",
+    "crates/aether-component",
+    "crates/aether-subscribe-ui-tests",
+    "crates/aether-http",
+    "crates/aether-trace",
+    "crates/aether-render",
+    "crates/aether-text",
+    "crates/aether-anthropic",
+    "crates/aether-process",
+    "crates/aether-mcp",
+]
 exclude = [
     # The cargo-fuzz harness (issue 1562) is its own nested crate on the
     # nightly toolchain; keeping it out of the workspace members leaves

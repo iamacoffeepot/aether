@@ -164,7 +164,7 @@ worktree from that exact commit:
 - Claude Code: `.claude/worktrees/issue-<N>`.
 
 The implementation follows the Plan literally, runs focused verification plus
-`cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings`, reviews
+`cargo fmt -- --check` and `cargo clippy --workspace --all-targets -- -D warnings`, reviews
 the complete diff, checks every changed path against the declared surface, then
 plain-pushes and opens a draft PR that closes the issue. Existing artifacts are
 possible live ownership claims and require a verified resume, never opportunistic
