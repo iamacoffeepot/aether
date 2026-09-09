@@ -453,41 +453,16 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
 fn gzip_base64(bytes: &[u8]) -> String {
     use std::io::Write;
 
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
     use flate2::Compression;
     use flate2::write::GzEncoder;
 
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    // Writing to a Vec cannot fail: GzEncoder's only error is the inner Write.
     encoder.write_all(bytes).expect("gzip write to memory");
     let compressed = encoder.finish().expect("gzip finish");
-    base64_encode(&compressed)
-}
-
-fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    let mut chunks = bytes.chunks_exact(3);
-    for chunk in chunks.by_ref() {
-        let n = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
-        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
-        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
-        out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
-        out.push(TABLE[(n & 0x3f) as usize] as char);
-    }
-    let rem = chunks.remainder();
-    if rem.len() == 1 {
-        let n = u32::from(rem[0]) << 16;
-        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
-        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
-        out.push('=');
-        out.push('=');
-    } else if rem.len() == 2 {
-        let n = (u32::from(rem[0]) << 16) | (u32::from(rem[1]) << 8);
-        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
-        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
-        out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
-        out.push('=');
-    }
-    out
+    STANDARD.encode(compressed)
 }
 
 #[cfg(test)]

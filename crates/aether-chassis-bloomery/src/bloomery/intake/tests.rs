@@ -11,11 +11,11 @@ use std::sync::{Arc, Mutex};
 use aether_bloomery::testing::{compiled_resolved, with_compiled_manifest};
 use aether_bloomery::{
     BloomDraft, BloomId, BloomRecord, CandidateRef, CompositionParents, Conclusion, ConfigRegistry, Decision, Digest,
-    Event, Evidence, EvidenceKind, EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey,
-    LaneObservation, Membership, NetworkProfile, Nonce, Observation, Outcome, PipelineManifest, Provenance,
-    RetrospectClaim, Snapshot, SpendWindow, StageCatalog, StageId, StageVerdict, Statement, StudyCall, StudyCost,
-    SuppressionRequest, SurfacePathRequest, SurfaceRequest, Transformation, VerifyFailure, VerifyFailureSet,
-    WorkHandle, WorkOrder, WorkpieceId, config_address, reduce,
+    Event, Evidence, EvidenceKind, EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, Harness,
+    IdempotencyKey, LaneObservation, Membership, NetworkProfile, Nonce, Observation, Outcome, PipelineManifest,
+    Provenance, ReasoningEffort, ResolvedModel, RetrospectClaim, Snapshot, SpendWindow, StageCatalog, StageId,
+    StageVerdict, Statement, StudyCall, StudyCost, SuppressionRequest, SurfacePathRequest, SurfaceRequest,
+    Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, config_address, reduce,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
@@ -370,6 +370,33 @@ fn dispatch_and_record_writes_the_order_row_and_submits() {
     // the same catalog terminate differently, which is the property the sealed
     // catalog exists to deny.
     assert_eq!(stored.deadline_unix_millis, NOW_UNIX_MILLIS + 3_600_000);
+}
+
+#[test]
+fn a_gated_dispatch_without_an_artifact_store_records_no_prompt_manifest() {
+    // The row names retained bytes or nothing: a host with no artifacts store
+    // never held the assembled prompt, so the journaled address must stay None
+    // rather than naming bytes nothing holds.
+    let workpiece = WorkpieceId("wp-return".to_owned());
+    let scope_revision = Digest::from_bytes([2; 32]);
+    let candidate = Digest::from_bytes([5; 32]);
+    let fake = FakeGithub::new();
+    let shell = shell(fake);
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let mut record = dispatch_record("n-no-store", bloom, &workpiece, scope_revision, candidate);
+    record.transformation.command = "construct.implement".to_owned();
+    record.transformation.model = Some(ResolvedModel {
+        harness: Harness::Claude,
+        model: "claude-opus-5".to_owned(),
+        effort: ReasoningEffort::High,
+    });
+    record.configs = authorize_instructions(&mut store, &reference_instructions());
+    answered(dispatch_and_record(&shell, &mut store, None, &record, NOW_UNIX_MILLIS));
+    assert!(
+        store.lookup_order("n-no-store").unwrap().unwrap().prompt_manifest.is_none(),
+        "the row names retained bytes or nothing",
+    );
 }
 
 /// An executor whose `submit` reads the journal back through its own

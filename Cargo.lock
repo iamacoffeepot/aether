@@ -182,6 +182,7 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-bloomery",
  "aether-bloomery-git",
+ "base64",
  "flate2",
  "jsonwebtoken",
  "reqwest",

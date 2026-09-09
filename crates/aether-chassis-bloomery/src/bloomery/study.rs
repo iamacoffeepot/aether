@@ -442,7 +442,6 @@ mod tests {
                 Digest::from_bytes([0xB0; 32]),
             ),
             configs: aether_bloomery::ConfigRegistry::default(),
-
             instruction_bundle: None,
             prompt_manifest: None,
         };
@@ -482,7 +481,6 @@ mod tests {
                 Digest::from_bytes([0xB0; 32]),
             ),
             configs,
-
             instruction_bundle: None,
             prompt_manifest: None,
         };

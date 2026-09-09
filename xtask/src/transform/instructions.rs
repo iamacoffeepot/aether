@@ -22,13 +22,17 @@ use anyhow::{Context, Result, bail};
 /// The env is missing, the named file cannot be read, the bytes do not decode,
 /// or the re-derived address does not match [`INSTRUCTION_MANIFEST_DIGEST_ENV`].
 pub fn load() -> Result<ModelProcessInstructions> {
-    let path = env_os(INSTRUCTION_MANIFEST_ENV).ok_or_else(|| {
+    resolve(env_os(INSTRUCTION_MANIFEST_ENV), env_os(INSTRUCTION_MANIFEST_DIGEST_ENV))
+}
+
+fn resolve(path: Option<OsString>, expected: Option<OsString>) -> Result<ModelProcessInstructions> {
+    let path = path.ok_or_else(|| {
         anyhow::anyhow!(
             "model lane refused: `{INSTRUCTION_MANIFEST_ENV}` is unset; the host must hand the authorized \
              instruction bundle (ADR-0214)"
         )
     })?;
-    let expected = env_os(INSTRUCTION_MANIFEST_DIGEST_ENV).ok_or_else(|| {
+    let expected = expected.ok_or_else(|| {
         anyhow::anyhow!(
             "model lane refused: `{INSTRUCTION_MANIFEST_DIGEST_ENV}` is unset; the host must name the \
              bundle's content address (ADR-0214)"
@@ -89,7 +93,12 @@ pub fn fixture_bundle() -> ModelProcessInstructions {
 
 #[cfg(test)]
 mod tests {
-    use super::load;
+    use std::fs;
+
+    use aether_bloomery::ConfigKind;
+    use aether_data::wire::to_vec;
+
+    use super::resolve;
 
     #[test]
     fn a_model_lane_refuses_to_start_without_the_manifest_env() {
@@ -97,10 +106,39 @@ mod tests {
         // files in the checkout, so a candidate that edited those files replaced
         // the process that judged it (ADR-0214). Missing env must name the
         // variable and refuse, never assemble from the tree.
-        let err = load().expect_err("an unset manifest env must refuse").to_string();
+        let err = resolve(None, None).expect_err("an unset manifest env must refuse").to_string();
         assert!(
             err.contains(aether_bloomery::INSTRUCTION_MANIFEST_ENV),
             "the refusal must name the missing variable, got {err}"
         );
+    }
+
+    #[test]
+    fn a_model_lane_refuses_when_the_digest_env_is_unset() {
+        let err = resolve(Some("unused".into()), None).expect_err("an unset digest env must refuse").to_string();
+        assert!(
+            err.contains(aether_bloomery::INSTRUCTION_MANIFEST_DIGEST_ENV),
+            "the refusal must name the missing digest variable, got {err}"
+        );
+    }
+
+    #[test]
+    fn a_digest_mismatch_names_both_addresses() {
+        // The arm that makes a substituted file loud instead of silent: the
+        // lane re-derives the address from the bytes it read, and a mismatch
+        // names both the file's address and the env's. Weakening the check to
+        // trust the file would fail this.
+        let bundle = super::fixture_bundle();
+        let bytes = to_vec(&bundle).expect("fixture bundle encodes");
+        let path = std::env::temp_dir().join(format!("aether-xtask-instruction-mismatch-{}", std::process::id()));
+        fs::write(&path, &bytes).expect("write fixture bundle");
+        let actual = bundle.address().to_hex();
+        let expected = "00".repeat(32);
+        let err = resolve(Some(path.clone().into()), Some(expected.clone().into()))
+            .expect_err("a substituted file must refuse")
+            .to_string();
+        let _ = fs::remove_file(&path);
+        assert!(err.contains(&actual), "the refusal must name the file's address, got {err}");
+        assert!(err.contains(&expected), "and the env's address, got {err}");
     }
 }

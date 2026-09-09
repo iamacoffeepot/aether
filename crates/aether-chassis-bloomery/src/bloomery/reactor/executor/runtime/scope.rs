@@ -103,7 +103,6 @@ pub(super) fn drain_and_dispatch_scope(
             stage: payload.stage,
             transformation: payload.transformation,
             configs,
-
             instruction_bundle: None,
             prompt_manifest: None,
         };

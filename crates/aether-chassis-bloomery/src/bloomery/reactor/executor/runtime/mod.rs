@@ -1663,7 +1663,6 @@ fn submit_dispatch_entry(
         stage: payload.stage,
         transformation: payload.transformation,
         configs: payload.configs,
-
         instruction_bundle: None,
         prompt_manifest: None,
     };
@@ -2073,7 +2072,6 @@ fn submit_aggregate_review(
         // The bloom-wide registry (ADR-0174): the critic has no member
         // axis, so this is the only scope the overlay walks.
         configs: payload.configs,
-
         instruction_bundle: None,
         prompt_manifest: None,
     };
@@ -2186,7 +2184,6 @@ fn drain_and_dispatch_aggregate_verify(
             // resolved model for the same reason the member `Verify` does not.
             transformation: payload.transformation,
             configs: ConfigRegistry::default(),
-
             instruction_bundle: None,
             prompt_manifest: None,
         };
@@ -2269,7 +2266,6 @@ fn drain_and_dispatch_base_verify(
             stage: StageId::BaseVerify,
             transformation: payload.transformation,
             configs: ConfigRegistry::default(),
-
             instruction_bundle: None,
             prompt_manifest: None,
         };

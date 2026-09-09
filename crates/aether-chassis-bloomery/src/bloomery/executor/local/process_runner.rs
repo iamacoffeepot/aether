@@ -463,6 +463,24 @@ fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) 
     Ok(args)
 }
 
+/// Write the authorized instruction-bundle bytes to the evidence directory
+/// (outside the checkout) and name the file plus its content address in
+/// [`aether_bloomery::INSTRUCTION_MANIFEST_ENV`] /
+/// [`aether_bloomery::INSTRUCTION_MANIFEST_DIGEST_ENV`]. A mechanical lane
+/// carrying no bundle is a no-op.
+fn export_instruction_manifest(lane: &mut Command, spec: &RunSpec<'_>) -> io::Result<()> {
+    let Some(bytes) = spec.instruction_bundle else {
+        return Ok(());
+    };
+    let path = spec.evidence_dir.join("instruction-manifest");
+    fs::write(&path, bytes)?;
+    lane.env(aether_bloomery::INSTRUCTION_MANIFEST_ENV, &path);
+    if let Some(digest) = spec.instruction_bundle_digest {
+        lane.env(aether_bloomery::INSTRUCTION_MANIFEST_DIGEST_ENV, digest);
+    }
+    Ok(())
+}
+
 /// Point a lane's build at its slot's own target directory and cap how much of
 /// the host it may use doing so (#4912).
 ///
@@ -480,19 +498,6 @@ fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) 
 ///
 /// A `build_jobs` of zero states no cap, leaving cargo's default of one job per
 /// core — an explicit `CARGO_BUILD_JOBS=0` is a cargo error, not "unlimited".
-fn export_instruction_manifest(lane: &mut Command, spec: &RunSpec<'_>) -> io::Result<()> {
-    let Some(bytes) = spec.instruction_bundle else {
-        return Ok(());
-    };
-    let path = spec.evidence_dir.join("instruction-manifest");
-    fs::write(&path, bytes)?;
-    lane.env(aether_bloomery::INSTRUCTION_MANIFEST_ENV, &path);
-    if let Some(digest) = spec.instruction_bundle_digest {
-        lane.env(aether_bloomery::INSTRUCTION_MANIFEST_DIGEST_ENV, digest);
-    }
-    Ok(())
-}
-
 fn export_build_env(lane: &mut Command, spec: &RunSpec<'_>) {
     // Unix lanes reach the slot's target through the checkout's `target`
     // symlink ([`link_slot_target`]) instead of this export: the absolute
@@ -1160,7 +1165,6 @@ mod tests {
             bloom: None,
             receipt: None,
             entrypoint: LaneProgram::default(),
-
             instruction_bundle: None,
             instruction_bundle_digest: None,
         }

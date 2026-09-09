@@ -12,7 +12,7 @@ use aether_data::wire::to_vec;
 
 use crate::artifacts::{ArtifactsCapabilityState, PutResult};
 use crate::bloomery::executor::{ExecutorPort, ExecutorPortError, LocalExecutorError, Settled};
-use crate::bloomery::provenance::{ProvenanceRefusal, admit_model_dispatch, gated, journal_refusal};
+use crate::bloomery::provenance::{AdmittedProcess, ProvenanceRefusal, admit_model_dispatch, gated, journal_refusal};
 use crate::store::{OrderLifecycle, OutstandingOrder, RecordOutcome, StoreBackend};
 
 /// The idempotency nonce a drained outbox entry dispatches under.
@@ -308,21 +308,7 @@ pub fn dispatch_and_record(
                 return Err(DispatchError::Provenance(refusal));
             }
             Ok(admitted) => {
-                if let Ok(manifest_bytes) = to_vec(&admitted.manifest) {
-                    let address = Digest::of_wire_bytes(&manifest_bytes);
-                    if let Some(artifacts) = artifacts {
-                        let parents = vec![admitted.bundle_address.to_hex(), record.displayed_digest.to_hex()];
-                        if let PutResult::Err { error } = artifacts.put(&manifest_bytes, &parents) {
-                            tracing::warn!(
-                                target: "aether_chassis_bloomery::provenance",
-                                nonce = %record.nonce.0,
-                                ?error,
-                                "assembled prompt manifest was not retained in the artifact store",
-                            );
-                        }
-                    }
-                    record.prompt_manifest = Some(address);
-                }
+                record.prompt_manifest = retain_prompt_manifest(artifacts, &record, &admitted);
                 record.instruction_bundle = Some(admitted.bundle_bytes);
             }
         }
@@ -340,6 +326,47 @@ pub fn dispatch_and_record(
             // to expire an order no run was ever started for.
             let _ = store.consume_order(&record.nonce.0);
             Err(DispatchError::Submit(error))
+        }
+    }
+}
+
+/// Retain assembled prompt-manifest bytes and return the address only when the
+/// store actually holds them. A missing store, a put fault, or an encode fault
+/// each warn and hand back `None` — the journaled row then names retained bytes
+/// or nothing, never an address nothing holds.
+fn retain_prompt_manifest(
+    artifacts: Option<&mut ArtifactsCapabilityState>,
+    record: &DispatchRecord,
+    admitted: &AdmittedProcess,
+) -> Option<Digest> {
+    let Ok(manifest_bytes) = to_vec(&admitted.manifest) else {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::provenance",
+            nonce = %record.nonce.0,
+            "assembled prompt manifest did not encode; the order names no retained address",
+        );
+        return None;
+    };
+    let address = Digest::of_wire_bytes(&manifest_bytes);
+    let Some(artifacts) = artifacts else {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::provenance",
+            nonce = %record.nonce.0,
+            "no artifacts store configured; assembled prompt manifest was not retained",
+        );
+        return None;
+    };
+    let parents = vec![admitted.bundle_address.to_hex(), record.displayed_digest.to_hex()];
+    match artifacts.put(&manifest_bytes, &parents) {
+        PutResult::Ok { .. } => Some(address),
+        PutResult::Err { error } => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::provenance",
+                nonce = %record.nonce.0,
+                ?error,
+                "assembled prompt manifest was not retained in the artifact store",
+            );
+            None
         }
     }
 }

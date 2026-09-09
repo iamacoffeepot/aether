@@ -1484,7 +1484,6 @@ fn an_expired_order_that_does_not_decode_is_reclaimed_before_it_is_read() {
             profile: to_vec(&StageCatalog::profile_of(StageId::Construct)).unwrap(),
             deadline_unix_millis: AT_THE_DEADLINE,
             lifecycle: OrderLifecycle::Submitted,
-
             prompt_manifest: None,
         })
         .unwrap();
@@ -2506,7 +2505,6 @@ fn an_aggregate_verify_failure_can_produce_a_repair_candidate() {
             tree,
         ),
         configs: ConfigRegistry::default(),
-
         instruction_bundle: None,
         prompt_manifest: None,
     };
@@ -2604,7 +2602,6 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
             tree,
         ),
         configs: ConfigRegistry::default(),
-
         instruction_bundle: None,
         prompt_manifest: None,
     };
@@ -3096,7 +3093,6 @@ fn an_unconfigured_shell_refuses_actions_lanes_naming_the_missing_knobs() {
             digest(0xB0),
         ),
         nonce: Nonce("probe".to_owned()),
-
         instruction_bundle: None,
         prompt_manifest: None,
     };
@@ -3122,7 +3118,6 @@ fn an_unconfigured_actions_refusal_is_permanent_so_the_drain_parks_it() {
                 digest(0xB0),
             ),
             nonce: Nonce("probe".to_owned()),
-
             instruction_bundle: None,
             prompt_manifest: None,
         })

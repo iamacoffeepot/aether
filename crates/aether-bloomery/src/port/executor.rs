@@ -48,14 +48,6 @@ pub struct WorkOrder {
     pub prompt_manifest: Option<Digest>,
 }
 
-impl WorkOrder {
-    /// A mechanical-lane order: no instruction bundle, no retained manifest.
-    #[must_use]
-    pub fn new(transformation: Transformation, nonce: Nonce) -> Self {
-        Self { transformation, nonce, instruction_bundle: None, prompt_manifest: None }
-    }
-}
-
 /// What `submit` returns and `cancel` / `inspect` / `stream_evidence` take.
 /// **The handle is the nonce**: `workflow_dispatch` returns no run id, so the
 /// nonce the order carried is the correlation key the backend resolves the run
