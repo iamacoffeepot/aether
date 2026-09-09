@@ -3697,6 +3697,7 @@ fn a_reconcile_resumes_its_journaled_author_session_on_the_pinned_checkout() {
         seen[1].worktree, seen[0].worktree,
         "the repair runs in the checkout owned by the member's author session",
     );
+    drop(seen);
 }
 
 #[test]
