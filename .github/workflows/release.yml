@@ -10,11 +10,14 @@ name: Release
 # Gates no merge. Nothing here is a required status check, and a red run
 # leaves `main` untouched — it means the release did not publish.
 #
-# Each archive is a `cargo xtask package` depot (ADR-0163 §1): the desktop
-# chassis binary, the two workspace license files, and a content-addressed
-# `pack/` holding the puppet demo component, with the headless and hub
-# chassis binaries staged beside them so one download carries every way to
-# run the engine.
+# Each platform publishes one depot archive plus one archive per remaining
+# chassis binary. The depot (ADR-0163 §1) is `cargo xtask package` over the
+# checked-in `demo/puppet-turntable.json` spec: the desktop chassis binary,
+# the two workspace license files, and a content-addressed `pack/` holding
+# the puppet demo. The spec file owns what goes in it, so the headless and
+# hub binaries ship as their own archives rather than being dropped into a
+# depot they are not part of — each carrying the same two license files,
+# because a statically linked binary is redistributed with its notices.
 on:
   push:
     tags:
@@ -100,11 +103,11 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      # The platform half of the archive name, read off the toolchain's own
+      # The platform half of every archive name, read off the toolchain's own
       # host triple rather than the runner label: `macos-latest` moved from
       # x86_64 to Apple silicon once already, and a hardcoded label would
       # have gone on claiming the old architecture.
-      - name: Name this platform's archive
+      - name: Name this platform's archives
         shell: bash
         run: |
           set -euo pipefail
@@ -119,28 +122,32 @@ jobs:
             *-linux-*) os=linux ;;
             *) echo "unrecognized host triple $host" >&2; exit 1 ;;
           esac
+          echo "PLATFORM=${os}-${arch}" >> "$GITHUB_ENV"
           echo "STEM=aether-${VERSION}-${os}-${arch}" >> "$GITHUB_ENV"
 
-      # The depot is staged under its own archive-stem directory so the
-      # archive unpacks into one named folder instead of scattering a binary,
-      # two licenses and a `pack/` tree into the extraction directory.
+      # Each archive is staged under its own stem directory so it unpacks
+      # into one named folder rather than scattering binaries, licenses and a
+      # `pack/` tree into the extraction directory.
       #
-      # `--title aether` is the desktop window title the depot boots with;
-      # it rides into `pack/manifest` and is not part of any filename.
-      - name: Build the desktop depot with the puppet demo
+      # The depot's contents are the spec file's business, not this
+      # workflow's: `demo/puppet-turntable.json` names the chassis, the
+      # components, and the chassis settings, and `--assets` points at the
+      # asset directory it loads from.
+      - name: Build the demo depot
         shell: bash
         run: |
           cargo xtask package \
             --profile release \
-            --chassis desktop \
-            --components aether-puppet \
-            --title aether \
+            --spec demo/puppet-turntable.json \
+            --assets crates/aether-mesh/examples \
             --out "target/staging/${STEM}"
 
-      # `cargo xtask package` ships exactly one chassis binary, so every other
-      # one the workspace publishes is built and staged beside it here — today
-      # `aether-headless` and `aether-hub`. They share the depot's licenses;
-      # only the desktop binary reads `pack/` at boot.
+      # `cargo xtask package` ships exactly one chassis binary, and the spec
+      # owns which — so every other binary the workspace publishes gets its
+      # own archive here rather than being dropped into a depot it is not part
+      # of. Each takes the two workspace license files for the same reason the
+      # depot does: the binary statically links dependencies whose notices
+      # have to travel with it.
       #
       # The list, the cargo selectors, and the host-platform filename (`.exe`
       # on Windows) all come from `cargo xtask bins`, which reads the same
@@ -155,8 +162,15 @@ jobs:
           inventory="${RUNNER_TEMP}/chassis-bins.json"
           cargo xtask bins --json > "$inventory"
 
+          # The depot's own binary, skipped below. A spec naming another
+          # chassis would leave this file absent from the depot and see its
+          # binary shipped twice while the desktop one shipped not at all, so
+          # the mismatch fails here rather than reaching a release.
           depot=$(jq -r '.package_chassis.desktop' "$inventory")
-          echo "depot chassis binary: $depot"
+          if [ ! -e "target/staging/${STEM}/${depot}" ]; then
+            echo "the depot does not carry ${depot} — the spec selected another chassis" >&2
+            exit 1
+          fi
 
           plan="${RUNNER_TEMP}/chassis-bins.tsv"
           jq -r --arg depot "$depot" '
@@ -165,31 +179,47 @@ jobs:
 
           while IFS=$'\t' read -r package bin file; do
             cargo build --release -p "$package" --bin "$bin"
-            cp "target/release/${file}" "target/staging/${STEM}/"
+            staged="target/staging/${bin}-${VERSION}-${PLATFORM}"
+            mkdir -p "$staged"
+            cp "target/release/${file}" LICENSE-MIT LICENSE-APACHE "$staged/"
           done < "$plan"
 
-          ls -l "target/staging/${STEM}"
+          ls -R target/staging
 
-      # `COPYFILE_DISABLE` keeps bsdtar on macOS from writing `._` AppleDouble
-      # siblings for every extended-attributed file into the tarball.
-      - name: Archive the depot (tar.gz)
+      # One archive per staged directory. `COPYFILE_DISABLE` keeps bsdtar on
+      # macOS from writing `._` AppleDouble siblings for every
+      # extended-attributed file into the tarball.
+      - name: Archive the staged trees (tar.gz)
         if: runner.os != 'Windows'
         shell: bash
         env:
           COPYFILE_DISABLE: '1'
-        run: tar -czf "${STEM}.tar.gz" -C target/staging "${STEM}"
-      - name: Archive the depot (zip)
+        run: |
+          set -euo pipefail
+          for dir in target/staging/*/; do
+            stem=$(basename "$dir")
+            tar -czf "${stem}.tar.gz" -C target/staging "$stem"
+          done
+          ls -l ./*.tar.gz
+      - name: Archive the staged trees (zip)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path "target/staging/$env:STEM" -DestinationPath "$env:STEM.zip"
+        run: |
+          Get-ChildItem -Directory target/staging | ForEach-Object {
+            Compress-Archive -Path $_.FullName -DestinationPath "$($_.Name).zip"
+          }
+          Get-ChildItem *.zip
 
-      - name: Upload the platform archive
+      - name: Upload this platform's archives
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ${{ env.STEM }}
-          # One archive per leg — `.tar.gz` on Linux and macOS, `.zip` on
-          # Windows — so the glob resolves to exactly one file.
-          path: ${{ env.STEM }}.*
+          name: aether-${{ env.VERSION }}-${{ env.PLATFORM }}
+          # `.tar.gz` on Linux and macOS, `.zip` on Windows — one of the two
+          # globs matches nothing on any given leg, which is not an error as
+          # long as the pair matches something.
+          path: |
+            *.tar.gz
+            *.zip
           if-no-files-found: error
 
   release:

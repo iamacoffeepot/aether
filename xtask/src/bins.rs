@@ -94,14 +94,14 @@ mod tests {
 
     #[test]
     fn json_carries_the_paths_release_yml_reads() {
-        // Tripwire: `.github/workflows/release.yml` reads
-        // `package_chassis.desktop` out of this JSON to tell the depot's own
-        // chassis binary from the ones it builds and stages beside it, and it
-        // reads each entry's `package` / `bin` / `file` to do that staging. No
-        // pull request executes that workflow — it runs on a version-tag push
-        // or a manual dispatch — so a field rename here would go unnoticed
-        // until a release run failed mid-build. That is the exact failure issue
-        // 5707 fixed. Pin the parsed paths.
+        // Tripwire: `.github/workflows/release.yml` reads this JSON twice over
+        // — `package_chassis.desktop` to recognize the binary its depot
+        // already carries, then each remaining entry's `package` / `bin` /
+        // `file` to build that chassis and stage it as its own release
+        // archive. No pull request executes that workflow (it runs on a
+        // version-tag push or a manual dispatch), so a field rename here would
+        // go unnoticed until a release run failed mid-build. That is the exact
+        // failure issue 5707 fixed. Pin the parsed paths.
         let json = serde_json::to_value(inventory()).expect("serialize the bins inventory");
 
         assert_eq!(

@@ -56,9 +56,10 @@ cargo xtask bins --json    # the same, plus the depot filename per `--chassis`
 `aether-desktop.exe`. The `--json` form adds `package_chassis`, keyed by the
 values `cargo xtask package --chassis` accepts. `.github/workflows/release.yml`
 reads both: `package_chassis.desktop` tells it which binary the depot already
-carries, and the remaining `chassis_bins` entries are what it builds and stages
-beside it. Prefer this over hardcoding a binary name — no pull request runs
-that workflow, so nothing in CI catches a name that has gone stale.
+carries, and each remaining `chassis_bins` entry is a binary it builds and
+ships as its own archive. Prefer this over hardcoding a binary name — no pull
+request runs that workflow, so nothing in CI catches a name that has gone
+stale.
 
 ## Package depot
 
@@ -199,22 +200,29 @@ git tag -a 0.4.0-alpha -m "…"
 git push origin 0.4.0-alpha
 ```
 
-The push builds one package depot per platform and attaches them to the
-release as its assets:
+Each platform builds a package depot from the checked-in
+`demo/puppet-turntable.json` spec plus one archive per remaining chassis
+binary, and every archive is attached to the release:
 
-| Runner | Archive |
-| --- | --- |
-| `ubuntu-latest` | `aether-<version>-linux-x86_64.tar.gz` |
-| `macos-latest` | `aether-<version>-macos-arm64.tar.gz` |
-| `windows-latest` | `aether-<version>-windows-x86_64.zip` |
+| Platform | Depot | Chassis binaries |
+| --- | --- | --- |
+| `linux-x86_64` | `aether-<version>-linux-x86_64.tar.gz` | `aether-headless-…`, `aether-hub-…`.tar.gz |
+| `macos-arm64` | `aether-<version>-macos-arm64.tar.gz` | `aether-headless-…`, `aether-hub-…`.tar.gz |
+| `windows-x86_64` | `aether-<version>-windows-x86_64.zip` | `aether-headless-…`, `aether-hub-…`.zip |
 
-The platform half of each name is read from the toolchain's own host triple,
-so it follows a runner image that changes architecture rather than asserting a
-stale one. Each archive unpacks to a single directory of that same name
-holding a `cargo xtask package` depot — the desktop chassis binary, both
-workspace license files, and the `aether-puppet` demo component in `pack/` —
-with the `aether-headless` and `aether-hub` binaries staged beside them, so one
-download carries every way to run the engine.
+Every name carries `<version>-<platform>`, and the platform half is read from
+the toolchain's own host triple, so it follows a runner image that changes
+architecture rather than asserting a stale one. Each archive unpacks to a
+single directory of that same name.
+
+The depot archive holds what the spec says: the chassis binary it names, the
+components it selects, and both workspace license files. The spec owns that
+list, which is why the other chassis binaries are their own archives rather
+than extra files inside a depot they are not part of — each ships with the
+same two license files, since a statically linked binary is redistributed
+with its notices. The set of those binaries comes from
+`cargo xtask bins --json`, so a chassis added to the inventory ships from the
+next tag with no workflow edit.
 
 The release is marked a pre-release whenever the version carries a
 pre-release suffix, which every tag cut so far does (`-alpha`). Its body is
