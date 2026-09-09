@@ -46,7 +46,15 @@ enum Mode {
     Succeed,
     FirstLaunchRefuses,
     FailAfterOutput,
+    LingerAfterTerminal,
 }
+
+/// How long [`Stub::linger_after_terminal`] stays up past its terminal record.
+///
+/// Longer than the lane's own linger window by enough that a lane which waits
+/// for the process instead of ending the run is caught by a wall-clock
+/// assertion rather than by hanging the suite.
+pub const LINGER_SECS: u64 = 30;
 
 impl Stub {
     /// A stub that prints a canned transcript and exits 0 on every launch.
@@ -63,6 +71,13 @@ impl Stub {
     /// A stub that prints a canned transcript and then exits nonzero.
     pub fn fail_after_output() -> Self {
         Self::write(Mode::FailAfterOutput)
+    }
+
+    /// A stub that prints a canned transcript and then stays up for
+    /// [`LINGER_SECS`] — the Muse shape, where the CLI accepts a fresh turn from
+    /// its own background-terminal client after the lane's turn has ended.
+    pub fn linger_after_terminal() -> Self {
+        Self::write(Mode::LingerAfterTerminal)
     }
 
     /// Absolute path of the stand-in executable, for `peak.command`.
@@ -144,11 +159,14 @@ pub fn args(command: impl Into<String>, out: PathBuf) -> TransformArgs {
 
 fn script(record: &Path, mode: Mode) -> String {
     let after_record = match mode {
-        Mode::Succeed => "emit\n",
+        Mode::Succeed => "emit\n".to_owned(),
         Mode::FirstLaunchRefuses => {
-            "if [ \"$n\" -eq 1 ]; then\n  echo 'No conversation found' >&2\n  exit 1\nfi\nemit\n"
+            "if [ \"$n\" -eq 1 ]; then\n  echo 'No conversation found' >&2\n  exit 1\nfi\nemit\n".to_owned()
         }
-        Mode::FailAfterOutput => "emit\nexit 1\n",
+        Mode::FailAfterOutput => "emit\nexit 1\n".to_owned(),
+        // `exec sleep` so the lingering process is the one the lane holds and
+        // signals, not a shell waiting on a grandchild it would leave behind.
+        Mode::LingerAfterTerminal => format!("emit\nexec sleep {LINGER_SECS}\n"),
     };
     format!(
         "#!/bin/sh\n\
@@ -164,7 +182,7 @@ fn script(record: &Path, mode: Mode) -> String {
          cat > \"$record/$n/stdin\"\n",
         record.display(),
     ) + EMIT
-        + after_record
+        + &after_record
 }
 
 const EMIT: &str = r#"
