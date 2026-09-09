@@ -94,11 +94,14 @@ mod tests {
 
     #[test]
     fn json_carries_the_paths_release_yml_reads() {
-        // Tripwire: `.github/workflows/release.yml` renames the depot binary by
-        // reading `package_chassis.desktop` out of this JSON, and that workflow
-        // is `workflow_dispatch:`-only — nothing in CI executes it, so a field
-        // rename here would go unnoticed until a release run failed at step 2.
-        // That is the exact failure issue 5707 fixed. Pin the parsed paths.
+        // Tripwire: `.github/workflows/release.yml` reads
+        // `package_chassis.desktop` out of this JSON to tell the depot's own
+        // chassis binary from the ones it builds and stages beside it, and it
+        // reads each entry's `package` / `bin` / `file` to do that staging. No
+        // pull request executes that workflow — it runs on a version-tag push
+        // or a manual dispatch — so a field rename here would go unnoticed
+        // until a release run failed mid-build. That is the exact failure issue
+        // 5707 fixed. Pin the parsed paths.
         let json = serde_json::to_value(inventory()).expect("serialize the bins inventory");
 
         assert_eq!(
@@ -108,5 +111,9 @@ mod tests {
         );
         assert!(json.pointer("/chassis_bins/0/bin").is_some(), "each entry publishes its `bin` selector");
         assert!(json.pointer("/chassis_bins/0/package").is_some(), "each entry publishes its `package` selector");
+        assert!(
+            json.pointer("/chassis_bins/0/file").is_some(),
+            "release.yml copies each staged binary by its published `file` name",
+        );
     }
 }

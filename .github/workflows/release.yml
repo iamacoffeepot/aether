@@ -1,49 +1,271 @@
 name: Release
 
-# Manually triggered: build the standalone loco-motion game for Windows and
-# upload a zip of the package depot to download and hand out. `cargo xtask
-# package` emits a depot directory (the chassis executable plus a content-
-# addressed `pack/`); the job renames the chassis exe to `loco-motion.exe` and
-# zips the whole directory. The host target on `windows-latest` is
-# `x86_64-pc-windows-msvc`, so `cargo xtask package` cross-builds the component
-# for wasm32 and builds the desktop chassis for Windows in one step.
+# Cut a release from a version tag. Pushing a bare-semver tag (`0.4.0-alpha`
+# — the repository's existing tags carry no `v` prefix) builds one chassis
+# package per platform and publishes them on a GitHub Release for that tag.
+# `workflow_dispatch` runs the identical build as a dry run: it uploads the
+# same archives as workflow artifacts and creates no release, so a change to
+# this file can be exercised before a tag is ever pushed.
+#
+# Gates no merge. Nothing here is a required status check, and a red run
+# leaves `main` untouched — it means the release did not publish.
+#
+# Each archive is a `cargo xtask package` depot (ADR-0163 §1): the desktop
+# chassis binary, the two workspace license files, and a content-addressed
+# `pack/` holding the puppet demo component, with the headless and hub
+# chassis binaries staged beside them so one download carries every way to
+# run the engine.
 on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+      - '[0-9]+.[0-9]+.[0-9]+-*'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  windows-package:
-    name: Windows loco-motion package
-    runs-on: windows-latest
+  # The version every archive name and the release itself is built from,
+  # resolved once so the three platform legs cannot disagree about it.
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Resolve the version and its release channel
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A tag push names its own version. A dry run has no tag, so it
+          # takes the workspace version — the archives then carry the names
+          # the next real tag would produce, which is the point of the
+          # rehearsal.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version=$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          fi
+          if [ -z "$version" ]; then
+            echo "could not resolve a version to package" >&2
+            exit 1
+          fi
+
+          # Semver's pre-release field is everything after the first `-`, and
+          # every tag cut so far has one (`-alpha`). A release without one is
+          # the first stable cut and publishes as a full release.
+          prerelease=false
+          case "$version" in
+            *-*) prerelease=true ;;
+          esac
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "packaging $version (prerelease=$prerelease)"
+
+  package:
+    name: Package (${{ matrix.os }})
+    needs: version
+    runs-on: ${{ matrix.os }}
+    # A cold release build compiles the workspace at `--release` for the host
+    # plus the component for wasm32 on a free runner. The cap sits well above
+    # the observed wall-clock so it catches a stalled runner rather than
+    # policing build time.
+    timeout-minutes: 90
+    strategy:
+      # One platform failing should not cancel the other two mid-build: the
+      # release holds either way, and the surviving legs' logs and artifacts
+      # are what says whether the failure is platform-specific.
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install ALSA dev headers (cpal Linux backend)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # Same toolchain provisioning as desktop-nightly.yml, the other lane
+      # that builds this workspace across all three host platforms.
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - name: Build the standalone game package (release)
-        run: cargo xtask package --profile release --chassis desktop --components aether-kit-commons --title loco-motion
-      # Ask xtask which file the `--chassis desktop` depot just emitted rather
-      # than spelling it here. This job is `workflow_dispatch:`-only, so a
-      # hardcoded name silently rots: the chassis bins were renamed in
-      # `2de90fdba` and this step went on renaming `aether-substrate.exe` — a
-      # file that had not existed since — until issue 5707. `xtask bins --json`
-      # reads `inventory::CHASSIS_BINS`, the same constant `xtask package`
-      # builds from, and reports the host-platform filename (`.exe` here).
-      - name: Rename the chassis executable for hand-out
+
+      # The platform half of the archive name, read off the toolchain's own
+      # host triple rather than the runner label: `macos-latest` moved from
+      # x86_64 to Apple silicon once already, and a hardcoded label would
+      # have gone on claiming the old architecture.
+      - name: Name this platform's archive
+        shell: bash
         run: |
-          $json = cargo xtask bins --json | Out-String
-          if ($LASTEXITCODE -ne 0) { throw "cargo xtask bins failed" }
-          $chassis = ($json | ConvertFrom-Json).package_chassis.desktop
-          Write-Host "desktop chassis binary: $chassis"
-          Rename-Item "target/package/$chassis" loco-motion.exe
-      - name: Zip the package depot
-        run: Compress-Archive -Path target/package/* -DestinationPath loco-motion-windows.zip
-      - name: Upload the Windows package
+          set -euo pipefail
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          arch=${host%%-*}
+          case "$arch" in
+            aarch64) arch=arm64 ;;
+          esac
+          case "$host" in
+            *-apple-darwin) os=macos ;;
+            *-pc-windows-*) os=windows ;;
+            *-linux-*) os=linux ;;
+            *) echo "unrecognized host triple $host" >&2; exit 1 ;;
+          esac
+          echo "STEM=aether-${VERSION}-${os}-${arch}" >> "$GITHUB_ENV"
+
+      # The depot is staged under its own archive-stem directory so the
+      # archive unpacks into one named folder instead of scattering a binary,
+      # two licenses and a `pack/` tree into the extraction directory.
+      #
+      # `--title aether` is the desktop window title the depot boots with;
+      # it rides into `pack/manifest` and is not part of any filename.
+      - name: Build the desktop depot with the puppet demo
+        shell: bash
+        run: |
+          cargo xtask package \
+            --profile release \
+            --chassis desktop \
+            --components aether-puppet \
+            --title aether \
+            --out "target/staging/${STEM}"
+
+      # `cargo xtask package` ships exactly one chassis binary, so every other
+      # one the workspace publishes is built and staged beside it here — today
+      # `aether-headless` and `aether-hub`. They share the depot's licenses;
+      # only the desktop binary reads `pack/` at boot.
+      #
+      # The list, the cargo selectors, and the host-platform filename (`.exe`
+      # on Windows) all come from `cargo xtask bins`, which reads the same
+      # `inventory::CHASSIS_BINS` constant `xtask package` builds from. Nothing
+      # in CI executes this workflow, so a name spelled here by hand would rot
+      # unnoticed the way the depot binary's did (issue 5707); a chassis added
+      # to the inventory ships from the next tag with no edit here.
+      - name: Stage the remaining chassis binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          inventory="${RUNNER_TEMP}/chassis-bins.json"
+          cargo xtask bins --json > "$inventory"
+
+          depot=$(jq -r '.package_chassis.desktop' "$inventory")
+          echo "depot chassis binary: $depot"
+
+          plan="${RUNNER_TEMP}/chassis-bins.tsv"
+          jq -r --arg depot "$depot" '
+            .chassis_bins[] | select(.file != $depot) | [.package, .bin, .file] | @tsv
+          ' "$inventory" > "$plan"
+
+          while IFS=$'\t' read -r package bin file; do
+            cargo build --release -p "$package" --bin "$bin"
+            cp "target/release/${file}" "target/staging/${STEM}/"
+          done < "$plan"
+
+          ls -l "target/staging/${STEM}"
+
+      # `COPYFILE_DISABLE` keeps bsdtar on macOS from writing `._` AppleDouble
+      # siblings for every extended-attributed file into the tarball.
+      - name: Archive the depot (tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          COPYFILE_DISABLE: '1'
+        run: tar -czf "${STEM}.tar.gz" -C target/staging "${STEM}"
+      - name: Archive the depot (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "target/staging/$env:STEM" -DestinationPath "$env:STEM.zip"
+
+      - name: Upload the platform archive
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: loco-motion-windows
-          path: loco-motion-windows.zip
+          name: ${{ env.STEM }}
+          # One archive per leg — `.tar.gz` on Linux and macOS, `.zip` on
+          # Windows — so the glob resolves to exactly one file.
+          path: ${{ env.STEM }}.*
           if-no-files-found: error
+
+  release:
+    name: Publish the release
+    needs: [ version, package ]
+    # A dry run stops at the uploaded artifacts. Only a tag push publishes.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    # `gh release create` writes a release object and uploads its assets to
+    # this repository, which the read-only default token cannot do. Nothing
+    # else in the workflow needs write, so the elevation lives here.
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.version.outputs.version }}
+      PRERELEASE: ${{ needs.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+          # Each leg uploaded under its own archive-stem name; flatten them
+          # into one directory so the release attaches the archives, not the
+          # per-leg folders they arrived in.
+          merge-multiple: true
+
+      # The notes come from the tree at the tag: a `CHANGELOG.md` section for
+      # this exact version if the file carries one, the tag's own message
+      # otherwise. The repository has no changelog today, so the tag message
+      # is the live path and the changelog path activates the day one lands.
+      - name: Compose the release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes="${RUNNER_TEMP}/release-notes.md"
+          : > "$notes"
+
+          if [ -f CHANGELOG.md ]; then
+            # A section is the body under a `## ` heading whose first word is
+            # this version, with or without the `## [0.4.0-alpha] - date`
+            # bracket convention, up to the next `## ` heading.
+            awk -v version="$VERSION" '
+              /^## / {
+                if (found) { exit }
+                heading = $0
+                sub(/^## +/, "", heading)
+                gsub(/[][]/, "", heading)
+                split(heading, parts, / +/)
+                if (parts[1] == version) { found = 1 }
+                next
+              }
+              found { print }
+            ' CHANGELOG.md > "$notes"
+          fi
+
+          if [ ! -s "$notes" ]; then
+            git for-each-ref --format='%(contents)' "refs/tags/${TAG}" > "$notes"
+          fi
+          if [ ! -s "$notes" ]; then
+            echo "Release ${VERSION}." > "$notes"
+          fi
+
+          echo "NOTES=$notes" >> "$GITHUB_ENV"
+          echo "--- release notes ---"
+          cat "$notes"
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -l artifacts
+
+          args=( "$TAG" --title "$TAG" --notes-file "$NOTES" --verify-tag )
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=( --prerelease )
+          fi
+          gh release create "${args[@]}" artifacts/*

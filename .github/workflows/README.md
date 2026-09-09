@@ -28,12 +28,30 @@ each file opens with one.
 | `fuzz-nightly.yml` | 06:17 | Coverage-guided fuzz of the codec / wire targets |
 | `desktop-nightly.yml` | 07:37 | Chassis tests on the macOS / Windows matrix |
 
+**Release** — the one workflow a `git push` of a tag triggers:
+
+| Workflow | Fires on | Purpose |
+| --- | --- | --- |
+| `release.yml` | a bare-semver tag (`0.4.0-alpha`), or `workflow_dispatch` | Builds a chassis package per platform and publishes them on the tag's GitHub Release |
+
+`release.yml` is the only workflow with a `contents: write` job, and the only
+one that publishes anything outside the Actions tab. It builds a
+`cargo xtask package` depot on `ubuntu-latest`, `macos-latest`, and
+`windows-latest` — the desktop chassis plus the `aether-puppet` demo
+component, with the headless and hub binaries staged beside them — and
+attaches `aether-<version>-<os>-<arch>.tar.gz` (`.zip` on Windows) to a
+release marked pre-release whenever the version carries a pre-release
+suffix. A `workflow_dispatch` run is the dry run: identical build, archives
+uploaded as workflow artifacts, no release created. Cutting a release is
+therefore bumping `[workspace.package] version`, tagging that version, and
+pushing the tag; see
+[`docs/guide/building/distribution.md`](../../docs/guide/building/distribution.md).
+
 **On demand:**
 
 | Workflow | Purpose |
 | --- | --- |
 | `perf-registry.yml` | Replicated real-`Registry` read-scaling + owner-ceiling band on Linux (ADR-0085) |
-| `release.yml` | Build and upload the standalone Windows game bundle |
 | `transform.yml` | ADR-0149 zero-secret transform worker lane |
 | `transform-model.yml` | ADR-0149 BYO-credential model lane (fork-run only) |
 
