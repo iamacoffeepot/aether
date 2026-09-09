@@ -751,7 +751,7 @@ pub struct DispatchProcessView {
     pub boot_id: String,
 }
 
-/// A line-snapped page of `transcript.jsonl` or `prompt.md`.
+/// A line-snapped page of one retained dispatch evidence file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DispatchFilePage {
     /// Complete lines in this page. A line longer than the per-line cap is
