@@ -14,6 +14,7 @@
 //! per cell; `AETHER_PERF_CELL` puts it in that child mode and
 //! `AETHER_PERF_CELL_ISOLATION=0` turns isolation off.
 
+#![forbid(unsafe_code)]
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 // Binning + axis math: latency samples and bin counts are small positive
 // values, so the f64 <-> integer casts are benign. Matches the same

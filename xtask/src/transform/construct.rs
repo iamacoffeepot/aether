@@ -716,7 +716,7 @@ mod tests {
         for needle in [
             "clippy --workspace --all-targets --keep-going --message-format=json",
             "doc --workspace --no-deps --document-private-items --all-features --keep-going",
-            "nextest run --all-features --profile ci --no-fail-fast",
+            "nextest run --workspace --all-features --profile ci --no-fail-fast",
             "scripts/check-suppressions.py",
             "jscpd@5.0.12",
             "--no-ignore --skip-target-dir crates",

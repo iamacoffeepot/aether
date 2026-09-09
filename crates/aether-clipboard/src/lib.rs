@@ -6,6 +6,8 @@
 //! deterministic in-memory backend by default, and unavailable chassis compose
 //! [`HeadlessClipboardCapability`] so both requests fail fast.
 
+#![forbid(unsafe_code)]
+
 pub mod kinds;
 pub use kinds::*;
 

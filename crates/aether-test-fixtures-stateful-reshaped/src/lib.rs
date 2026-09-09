@@ -6,6 +6,7 @@
 //! (the saved bundle carries the old id), warns, and boots fresh — the
 //! counter resets to its `init` zero instead of restoring.
 
+#![forbid(unsafe_code)]
 // See `stateful_replace_typed.rs`: `rehydrate` takes its `State` by value
 // (the by-value persistence contract); clippy reads that as needlessly
 // owned for an all-`Copy` state, so silence the false positive.
@@ -56,7 +57,6 @@ impl WasmActor for Counter {
         self.count += 1;
     }
 
-    //noinspection DuplicatedCode -- actor macros require one query handler per hot-swap fixture type.
     #[handler::manual]
     fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {

@@ -7,6 +7,8 @@
 //! run — is the shared `chassis_main!` body; the hub's env is the raw
 //! source stack, so each member resolves at the seam that consumes it.
 
+#![forbid(unsafe_code)]
+
 use aether_chassis::chassis_main;
 use aether_chassis_hub::{HubChassis, HubCli};
 

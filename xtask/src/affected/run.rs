@@ -82,9 +82,21 @@ fn dist() -> CommandPlan {
     CommandPlan { args: strings(&["xtask", "dist"]), env: Vec::new() }
 }
 
+/// The run-everything plan. `--workspace` is stated because the root manifest
+/// names `default-members`: an unflagged nextest run selects the engine crates
+/// and would report a full-suite pass having never built the rest.
 fn workspace_tests() -> CommandPlan {
     CommandPlan {
-        args: strings(&["nextest", "run", "--all-features", "--profile", "ci", "--partition", "slice:1/1"]),
+        args: strings(&[
+            "nextest",
+            "run",
+            "--workspace",
+            "--all-features",
+            "--profile",
+            "ci",
+            "--partition",
+            "slice:1/1",
+        ]),
         env: REQUIRED_ENV.to_vec(),
     }
 }
@@ -194,7 +206,16 @@ mod tests {
         assert_eq!(plan.commands[0].args, strings(&["xtask", "dist"]));
         assert_eq!(
             plan.commands[1].args,
-            strings(&["nextest", "run", "--all-features", "--profile", "ci", "--partition", "slice:1/1"])
+            strings(&[
+                "nextest",
+                "run",
+                "--workspace",
+                "--all-features",
+                "--profile",
+                "ci",
+                "--partition",
+                "slice:1/1"
+            ])
         );
         assert_eq!(plan.commands[1].env, REQUIRED_ENV);
     }

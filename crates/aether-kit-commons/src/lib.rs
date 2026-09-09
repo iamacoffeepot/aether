@@ -41,6 +41,8 @@
 //! shims it emits are wasm32-only and inert in a host rlib, so the integration
 //! tests link the same artifact.
 
+#![forbid(unsafe_code)]
+
 extern crate alloc;
 
 pub mod bundle;

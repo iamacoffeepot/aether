@@ -4,6 +4,8 @@
 //! deployment doesn't support. Produces the `aether-headless`
 //! binary over the shared `aether-chassis` composition layer.
 
+#![forbid(unsafe_code)]
+
 pub mod chassis;
 pub mod cli;
 pub mod driver;

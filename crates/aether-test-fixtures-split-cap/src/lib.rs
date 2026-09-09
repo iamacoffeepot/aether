@@ -8,6 +8,8 @@
 //! name-inventory entry) up to here, so it survives a `--no-default-features`
 //! build where `mod runtime` is `#[cfg]`-stripped.
 
+#![forbid(unsafe_code)]
+
 use aether_actor::actor;
 
 // The two kinds below keep the explicit derive: rewriting them onto

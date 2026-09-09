@@ -202,9 +202,10 @@ impl VerifyInvocation {
     /// for one `-p <crate>` per crate. Traded rather than appended, because
     /// `--workspace` and `-p` are cargo's two spellings of the same choice and
     /// a command carrying both selects the whole workspace regardless — the run
-    /// would compile every crate while reporting itself as narrowed. `verify.test`
-    /// states no `--workspace` (nextest's own default is the workspace), so there
-    /// the package flags are the whole change.
+    /// would compile every crate while reporting itself as narrowed. Every
+    /// compiling member states `--workspace`, because the root manifest's
+    /// `default-members` is the engine and an unflagged run would judge a
+    /// candidate on the crates that subset happens to reach.
     ///
     /// Explicit packages on `schedule` win over a closure's, because they *are*
     /// the selection — CI's affected step already computed the reverse-dependency
@@ -393,7 +394,14 @@ fn compiled_member(id: &str) -> Option<VerifyInvocation> {
             // the store-backed tests would open it read-write (#4714). Stating
             // the value is what makes the two environments the same one, not a
             // divergence from CI.
-            args: &["nextest", "run", "--all-features", "--profile", "ci", "--no-fail-fast"],
+            //
+            // `--workspace` is stated rather than inherited. The root manifest
+            // names `default-members` — the engine crates — so an unflagged
+            // nextest run selects that subset and reports a full-suite pass
+            // over a tree it never built the pipeline half of. The narrowing
+            // seam trades this flag for `-p` exactly as it does on clippy and
+            // doc, so a scoped run is unaffected.
+            args: &["nextest", "run", "--workspace", "--all-features", "--profile", "ci", "--no-fail-fast"],
             env: &[("AETHER_REQUIRE_RUNTIME", "1"), ("AETHER_STORE_PATH", ":memory:")],
             requires: &["cargo", "cargo-nextest"],
             // The prepare cross-builds every component crate for wasm32, so the
@@ -3250,12 +3258,15 @@ mod tests {
         let flags: Vec<String> = unscoped.iter().filter(|flag| *flag != "--workspace").cloned().collect();
         assert_eq!(args[..flags.len()], flags[..], "narrowing may drop the selection and no other flag");
 
-        // nextest states no `--workspace` at all — the workspace is its own
-        // default — so there the package flags are the entire narrowing.
+        // nextest narrows the same way, from the same stated `--workspace`.
         let test = verify_command("verify.test").expect("verify.test mapped");
         assert_eq!(
             test.scheduled_args(&scope, None, TestSchedule::default()),
-            [owned(test.args), owned(&["-p", "aether-chassis-bloomery", "-p", "aether-math"])].concat(),
+            [
+                owned(test.args).into_iter().filter(|arg| arg != "--workspace").collect::<Vec<_>>(),
+                owned(&["-p", "aether-chassis-bloomery", "-p", "aether-math"]),
+            ]
+            .concat(),
         );
     }
 
@@ -3450,6 +3461,10 @@ mod tests {
         let test = verify_command("verify.test").expect("verify.test mapped");
         let workspace = Scope::resolve(None);
         let canonical = owned(test.args);
+        // What the canonical argv becomes once a package selection replaces its
+        // `--workspace`, read off the invocation rather than restated so the two
+        // move together.
+        let selected: Vec<String> = canonical.iter().filter(|arg| *arg != "--workspace").cloned().collect();
 
         assert_eq!(
             test.scheduled_args(&workspace, None, TestSchedule::default()),
@@ -3461,7 +3476,7 @@ mod tests {
         let affected = TestSchedule { packages: &packages, ..TestSchedule::default() };
         assert_eq!(
             test.scheduled_args(&workspace, None, affected),
-            [canonical.clone(), owned(&["-p", "aether-math", "-p", "xtask"])].concat(),
+            [selected.clone(), owned(&["-p", "aether-math", "-p", "xtask"])].concat(),
             "affected selection is -p flags composed onto the canonical argv",
         );
 
@@ -3477,7 +3492,7 @@ mod tests {
         let both = TestSchedule { packages: &packages, partition: Some("slice:1/1"), prepared: true };
         assert_eq!(
             test.scheduled_args(&workspace, None, both),
-            [canonical, owned(&["-p", "aether-math", "-p", "xtask", "--partition", "slice:1/1"])].concat(),
+            [selected, owned(&["-p", "aether-math", "-p", "xtask", "--partition", "slice:1/1"])].concat(),
         );
         assert_eq!(test.should_prepare(&workspace, both.prepared), None);
     }

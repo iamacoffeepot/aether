@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // Geometry throughout, and the numeric lints are answered the way
 // `aether-math` and `aether-mesh` answer them. Counts and indices cast to
 // and from `f32` are bounded by the mesh; `mul_add` changes float

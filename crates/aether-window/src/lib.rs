@@ -1,10 +1,12 @@
-//! Public `aether.window` actor identity, wire vocabulary, and sender facade.
+//! `aether.window` actor identity, wire vocabulary, and sender facade.
 //!
-//! [`WindowCapability`] is the neutral alias callers use. A chassis installs
-//! its concrete fail-fast headless runtime, the
-//! [`DesktopWindowCapability`] implementation behind `desktop`, or the
-//! [`SyntheticWindowCapability`] test implementation behind `synthetic`.
-//! Every implementation claims the same `aether.window` mailbox.
+//! [`WindowCapability`] is the neutral alias callers address; every chassis
+//! installs a runtime that claims the same `aether.window` mailbox. The
+//! default is the fail-fast headless one, `desktop` swaps in
+//! [`DesktopWindowCapability`] over a real winit window, and `synthetic` swaps
+//! in [`SyntheticWindowCapability`], the deterministic in-memory manager that
+//! harness tests drive. One named window is addressed as a [`WindowInstance`]
+//! child of the manager.
 
 // Handler methods take decoded request payloads by value as part of the
 // actor dispatch ABI; the facade also consumes owned request values.

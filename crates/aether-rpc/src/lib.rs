@@ -1,19 +1,19 @@
-//! `aether.rpc` — generic TCP RPC transport (issues 750, 763).
+//! `aether.rpc`: a generic TCP RPC transport.
 //!
-//! The type-erased wire vocabulary (`WireFrame` + its substructs) and
-//! the outbound `RpcClient` live in [`wire`] — target-agnostic, always
-//! on, re-exported at the module root so `aether_rpc::*`
-//! resolves them directly (ADR-0124). The substrate-bound
-//! [`server::RpcServerCapability`] (the singleton actor that binds a
-//! TCP listener, accepts connections, and dispatches inbound `Call`
-//! envelopes into the local actor system) sits next to them.
+//! The type-erased wire vocabulary (`WireFrame` and its substructs) and the
+//! outbound `RpcClient` live in [`wire`], target-agnostic and always on,
+//! re-exported at the crate root so `aether_rpc::*` resolves them directly
+//! (ADR-0124). [`server::RpcServerCapability`] sits beside them: the singleton
+//! actor that binds a TCP listener, accepts connections, and dispatches
+//! inbound `Call` envelopes into the local actor system. [`frame_size`] holds
+//! the configurable frame ceiling it installs into the codec.
 //!
-//! Native-only: no wasm guest addresses this transport, so the crate carries
-//! no ADR-0122 identity/runtime marker ladder — its dependencies are flat and
-//! unconditional. It knows nothing of `aether-fleet`; the hub supervisor that
-//! forwards over this transport depends on this crate, never the reverse.
-//!
-//! See issues 750 and 763 for the full design, ADR-0124 for the layout.
+//! Native only. No wasm guest addresses this transport, so the crate carries
+//! no identity/runtime feature ladder and its dependencies are flat. It knows
+//! nothing of `aether-fleet`: the hub supervisor that forwards over this
+//! transport depends on this crate, never the reverse.
+
+#![forbid(unsafe_code)]
 
 // The frame-size config member (ADR-0156 §6) is native-only config machinery:
 // its `#[derive(aether_substrate::Config)]` emits a confique layer + clap

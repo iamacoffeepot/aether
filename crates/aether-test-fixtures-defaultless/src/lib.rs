@@ -13,6 +13,7 @@
 //! scenarios stay intact; this crate exists only to exercise the
 //! no-default load path.
 
+#![forbid(unsafe_code)]
 // The `#[handler]` methods take `&mut self` to match the dispatch ABI even
 // though these actors are stateless.
 #![allow(clippy::unused_self)]

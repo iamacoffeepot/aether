@@ -1,31 +1,25 @@
-//! The two HTTP capabilities, co-located (ADR-0121): the egress client
-//! ([`client`], the `aether.http` egress cap) and the ingress server
-//! ([`server`], the `aether.http.server` cap). They stay two distinct
-//! capabilities — separate cap structs, separate `NAMESPACE` / mailboxes —
-//! sharing one crate and one [`kinds`] module, the wire vocabulary both
-//! own (ADR-0121). The substrate core dispatches none of the HTTP kinds,
-//! so they live with the capabilities rather than in `aether-kinds`.
+//! The two HTTP capabilities: the egress client ([`client`], on the
+//! `aether.http` mailbox) and the ingress server ([`server`], on
+//! `aether.http.server`). They are separate capabilities with separate cap
+//! structs and mailboxes, sharing one crate and one [`kinds`] module, the wire
+//! vocabulary both own. The substrate core dispatches none of the HTTP kinds,
+//! so they live here and not in `aether-kinds`.
 //!
-//! ## Crate shape
+//! [`typed`] and [`stream`] are the route-authoring surface, written against
+//! the server; the `#[http::router]` and `#[http::route]` macros come from
+//! `aether-http-derive` and are re-exported here so a route sits next to the
+//! `FromRequest` / `Path` / `Ctx` types this crate owns. The crate depends on
+//! `aether-component` because a deferred reply names `ComponentHostCapability`
+//! to resolve the handler component it answers through.
 //!
-//! Extracted by the arc that dissolved the capabilities monolith
-//! (iamacoffeepot/aether#3758) as its final per-cap crate.
-//! Both caps move as one unit because they are one wire vocabulary split
-//! across two directions — [`kinds`] is shared, and the typed route surface
-//! ([`typed`], [`stream`]) is authored against the server while the client
-//! is the egress side of the same `aether.http` family.
-//!
-//! It depends downward on `aether-component` because `defer` names
-//! `ComponentHostCapability` to resolve the handler component a deferred
-//! request is answered through (ADR-0154).
-//!
-//! The ADR-0122 identity/runtime split rides the `runtime` feature: the mail
-//! kinds, the wasm-safe cap identities with their `HandlesKind` markers, the
-//! typed route surface, and the stream handles compile always-on, so a
-//! marker-only wasm guest can address `ctx.actor::<HttpCapability>()` and
-//! author `#[http::router]` routes without dragging the substrate through.
-//! The `aether_substrate`-typed half (both cap states, the listener and its
-//! dispatch shards, the deferred-reply obligation table) is gated behind it.
+//! The `runtime` feature carries the `aether_substrate`-typed half: both cap
+//! states, the listener and its dispatch shards, and the deferred-reply
+//! obligation table. The kinds, cap identities, typed routes, and stream
+//! handles compile always-on, so a wasm guest can address
+//! `ctx.actor::<HttpCapability>()` and author routes without pulling the
+//! substrate through (ADR-0122).
+
+#![forbid(unsafe_code)]
 
 // ADR-0131: self-alias so the `#[http::router]` macro's emitted
 // `::aether_http::…` paths resolve inside this crate's own route fixtures

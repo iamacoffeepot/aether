@@ -70,7 +70,6 @@ pub fn normalize_prefix(raw: &str) -> Result<String, String> {
 /// private runtime module, so the five-line check is mirrored rather
 /// than imported). The host-stamped `_self` forms skip it: the stamp
 /// already names a live in-process mailbox.
-//noinspection DuplicatedCode -- intentionally mirrored from the window cap without coupling private runtimes.
 pub fn validate_route_mailbox(registry: &Registry, id: MailboxId) -> Result<(), String> {
     match registry.entry(id) {
         Some(MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)) => Ok(()),

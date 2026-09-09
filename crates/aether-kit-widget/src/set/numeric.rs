@@ -654,7 +654,6 @@ impl WasmActor for NumericWidget {
     }
 
     #[handler::single]
-    //noinspection DuplicatedCode -- actor macros require one pointer handler per concrete widget type.
     /// A press on a stepper button steps the value there and then and starts
     /// the press-and-hold repeat; anywhere else in the box places the caret
     /// and arms a selection drag.

@@ -1,32 +1,24 @@
-//! Tiny scalar `f32` math for Aether: `Vec2`, `Vec3`, `Vec4`, `Mat4`, `Quat`, `Aabb`, `Rect2`, colors.
-//!
-//! Designed for WASM guest components and native substrate alike —
-//! `no_std`, no heap, no SIMD, no generics. Scalar code that LLVM +
-//! wasm-opt can auto-vectorise when the deployment target enables
-//! `simd128`, with an explicit SIMD feature to add later once a real
-//! hot loop demands it (camera/transform math does not).
+//! Tiny scalar `f32` math: `Vec2`, `Vec3`, `Vec4`, `Mat4`, `Quat`, `Aabb`,
+//! `Rect2`, `Rigid`, and colors. `no_std`, no heap, no SIMD, no generics, so
+//! wasm guest components and the native substrate share one set of types.
 //!
 //! # Conventions
 //!
-//! Two decisions are baked in at the type level. Changing them later
-//! would ripple through every caller, so they are called out loudly:
+//! Two decisions are baked into the types, and changing either would ripple
+//! through every caller:
 //!
-//! - **Column-major `Mat4`.** Stored as `[Vec4; 4]` where each `Vec4`
-//!   is one column. This matches wgpu / GLSL / HLSL uniform upload
-//!   layout, so a `Mat4` can be copied straight into a uniform buffer
-//!   without transpose. `M * v` is "apply `M` to `v`" as in standard
-//!   linear algebra.
-//! - **YXZ Euler order.** `Quat::from_euler_yxz(yaw, pitch, roll)`
-//!   applies yaw around `Y` (world up) first, then pitch around the
-//!   rotated local `X` (right), then roll around the rotated local
-//!   `Z` (forward). This is the natural order for an FPS / free-look
-//!   camera. Other orders are not offered; add one only when a
-//!   concrete use case forces it.
+//! - **Column-major `Mat4`.** Stored as `[Vec4; 4]`, one `Vec4` per column.
+//!   That matches wgpu / GLSL / HLSL uniform layout, so a `Mat4` copies
+//!   straight into a uniform buffer with no transpose. `M * v` applies `M` to
+//!   `v`, as in standard linear algebra.
+//! - **YXZ Euler order.** `Quat::from_euler_yxz(yaw, pitch, roll)` applies yaw
+//!   around `Y` (world up), then pitch around the rotated local `X` (right),
+//!   then roll around the rotated local `Z` (forward): the natural order for
+//!   an FPS or free-look camera. No other order is offered.
 //!
-//! World space is right-handed, `Y` up, `-Z` forward. Projection
-//! matrices (`perspective_rh`, `orthographic_rh`) emit wgpu-style
-//! clip space with depth in `[0, 1]` (not OpenGL's `[-1, 1]`), so
-//! the output matrix uploads without any clip-space remap.
+//! World space is right-handed, `Y` up, `-Z` forward. `perspective_rh` and
+//! `orthographic_rh` emit wgpu-style clip space with depth in `[0, 1]`, not
+//! OpenGL's `[-1, 1]`, so the matrix uploads without a clip-space remap.
 
 #![no_std]
 #![forbid(unsafe_code)]

@@ -246,7 +246,7 @@ isn't composed on that chassis.
 
 ```sh
 cargo fmt -- --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Fix either failure locally, then push the implementation branch. CI owns the

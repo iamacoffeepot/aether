@@ -1,49 +1,38 @@
-//! `aether.lifecycle` cap (ADR-0082). The non-generic capability the
-//! chassis drives one frame at a time.
+//! `aether.lifecycle` capability: the frame lifecycle the chassis drives one
+//! step at a time (ADR-0082).
 //!
-//! The chassis owns cadence: it sends [`LifecycleAdvance`](aether_kinds::LifecycleAdvance) once per
-//! frame. The cap owns everything else — the lifecycle graph (a data
-//! graph of `{ stage_kind, next, optional quit }` edges, in
-//! `mod graph`), the subscriber table keyed by stage kind and
-//! the fan-out (the sender side + `broadcast_to_subscribers` in
-//! `mod subscribers`), and the settlement gating (the
-//! advance state machine in `mod settlement`). Because it
-//! is `#[actor(singleton)]`d like
-//! `WindowCapability` and `RenderCapability`, its
-//! `NAMESPACE` is wasm-reachable: a component subscribes a stage via
+//! The chassis owns cadence and sends
+//! [`LifecycleAdvance`](aether_kinds::LifecycleAdvance) once per frame. This
+//! capability owns everything else: the lifecycle graph
+//! ([`LifecycleGraphData`] and its typestate builder, a graph of
+//! `{ stage_kind, next, optional quit }` edges), the subscriber table keyed by
+//! stage kind and its fan-out ([`LifecycleMailboxExt`] is the send-side
+//! facade), the [`LifecycleConfig`] init config, and the settlement gating. It
+//! is a singleton, so its namespace is reachable from wasm: a component
+//! subscribes to a stage with
 //! `ctx.actor::<LifecycleCapability>().subscribe::<Render>()`.
 //!
-//! On each [`LifecycleAdvance`](aether_kinds::LifecycleAdvance) the cap:
+//! On each advance the capability:
 //!
-//! 1. Broadcasts the current state's signal to every subscriber
-//!    registered for that stage kind. Stage kinds are empty ZSTs, so
-//!    the payload is empty — the broadcast *is* the signal; any data a
-//!    subscriber needs rides its own mail (e.g. the camera publishes
-//!    `view_proj` to `aether.render`).
-//! 2. Subscribes the settlement registry on the broadcast's chain
-//!    root and defers the state-pointer mutation to [`Settled`](aether_kinds::trace::Settled)
-//!    (ADR-0082 §6) — so cadence couples to actual subscriber drain
-//!    time. When no settlement registry is wired (a registry-less test
-//!    harness) it falls back to fire-and-advance.
-//! 3. On settle, advances the resolved edge — `quit` if `quit_pending`
-//!    is set and the state declares a quit edge (consuming the flag),
-//!    otherwise `next` — and replies
-//!    [`LifecycleAdvanceComplete`](aether_kinds::LifecycleAdvanceComplete)
-//!    to the chassis loop that issued the advance.
+//! 1. Broadcasts the current state's signal to every subscriber registered for
+//!    that stage kind. Stage kinds are empty ZSTs, so the broadcast carries no
+//!    payload and is itself the signal; data a subscriber needs rides its own
+//!    mail (the camera publishes `view_proj` to `aether.render`, for example).
+//! 2. Subscribes the settlement registry on the broadcast's chain root and
+//!    defers the state-pointer move until that chain settles, so cadence
+//!    tracks real subscriber drain time. With no settlement registry wired (a
+//!    registry-less test harness) it falls back to fire-and-advance.
+//! 3. On settle, follows the resolved edge (`quit` when `quit_pending` is set
+//!    and the state declares a quit edge, consuming the flag, otherwise
+//!    `next`) and replies
+//!    [`LifecycleAdvanceComplete`](aether_kinds::LifecycleAdvanceComplete) to
+//!    the chassis loop that issued the advance.
 //!
-//! Extracted by the arc that dissolved the capabilities monolith
-//! (iamacoffeepot/aether#3749) as a leaf per-cap crate. Owns the lifecycle graph ([`LifecycleGraphData`] + its
-//! typestate builder), the [`LifecycleConfig`] init config, the
-//! [`LifecycleCapability`] identity + its subscriber-table / settlement
-//! runtime (`runtime`), and the send-side [`LifecycleMailboxExt`] facade.
-//! It is a pure leaf — no other capability depends on it, so capabilities
-//! keeps no `aether-lifecycle` dependency (no facade).
-//!
-//! The `aether.lifecycle.*` mail kinds ([`LifecycleAdvance`](aether_kinds::LifecycleAdvance), the
-//! subscribe family, the stage-signal ZSTs) stay in `aether-kinds`: they
-//! are substrate protocol vocabulary many actors address rather than a
-//! cap-internal detail, so this crate only references them.
+//! The `aether.lifecycle.*` mail kinds stay in `aether-kinds`: they are
+//! substrate protocol vocabulary many actors address, not a detail of this
+//! capability.
 
+#![forbid(unsafe_code)]
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the
 // decoded bytes so callers can't see references.
