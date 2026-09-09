@@ -183,7 +183,7 @@ class ResolverTests(unittest.TestCase):
     def test_output_carries_canonical_evidence(self) -> None:
         result = self.success(["crates/aether-kit/**"], ["crates/aether-kit/src/lib.rs"])
         surface = result["surfaces"][0]
-        self.assertTrue(surface["default_applies"] is False)
+        self.assertIs(surface["default_applies"], False)
         self.assertIn(
             {"glob": "crates/*/Cargo.toml", "tier": "human"},
             surface["matched_policy_rules"],
