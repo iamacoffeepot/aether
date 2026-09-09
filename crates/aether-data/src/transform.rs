@@ -20,9 +20,7 @@ use core::fmt;
 // Both name fields of [`TransformEntry`], which the same gate compiles out on
 // wasm — the guest side reaches them through `__transform_runtime`'s own
 // re-exports instead.
-#[cfg(not(target_arch = "wasm32"))]
 use crate::KindId;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::ids::TransformId;
 
 /// Why a transform invocation failed (ADR-0048 §6). Encoding /
