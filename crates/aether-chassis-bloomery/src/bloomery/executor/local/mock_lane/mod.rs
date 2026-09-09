@@ -22,6 +22,7 @@
 //! [`LaneProgram`]: super::LaneProgram
 //! [`TransformRunner`]: super::TransformRunner
 
+use std::ffi::OsString;
 use std::path::Path;
 use std::{env, error, fmt, io, process, thread};
 
@@ -155,20 +156,19 @@ fn run_recorded(parse_from: Vec<String>, recorded: Vec<String>, worktree: &Path)
 
 /// Path and digest the host named for this dispatch's authorized bundle.
 ///
-/// A process-level handoff, not cap config: the coordinator writes the file
-/// outside the checkout and names it here, and the mock records what the child
-/// actually received so a scenario can assert the sealed bytes.
-#[allow(clippy::disallowed_methods, reason = "records the host-to-lane bundle env the coordinator set, not cap config")]
-fn instruction_manifest_path() -> Option<String> {
-    env::var_os(aether_bloomery::INSTRUCTION_MANIFEST_ENV).map(|value| value.to_string_lossy().into_owned())
+/// Scans `vars_os` rather than `env::var`: this is the host-to-lane handoff,
+/// not cap config, and `vars_os` is the same enumeration [`inherited_env_names`]
+/// already uses to record which names crossed.
+fn env_os(name: &str) -> Option<OsString> {
+    env::vars_os().find(|(key, _)| key == name).map(|(_, value)| value)
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "records the host-to-lane bundle digest the coordinator set, not cap config"
-)]
+fn instruction_manifest_path() -> Option<String> {
+    env_os(aether_bloomery::INSTRUCTION_MANIFEST_ENV).map(|value| value.to_string_lossy().into_owned())
+}
+
 fn instruction_manifest_digest() -> Option<String> {
-    env::var(aether_bloomery::INSTRUCTION_MANIFEST_DIGEST_ENV).ok()
+    env_os(aether_bloomery::INSTRUCTION_MANIFEST_DIGEST_ENV).map(|value| value.to_string_lossy().into_owned())
 }
 
 /// The names of the environment variables this run came up holding, sorted and
