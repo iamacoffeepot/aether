@@ -93,7 +93,7 @@ pub fn fixture_bundle() -> ModelProcessInstructions {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{env, fs, process};
 
     use aether_bloomery::ConfigKind;
     use aether_data::wire::to_vec;
@@ -130,7 +130,7 @@ mod tests {
         // trust the file would fail this.
         let bundle = super::fixture_bundle();
         let bytes = to_vec(&bundle).expect("fixture bundle encodes");
-        let path = std::env::temp_dir().join(format!("aether-xtask-instruction-mismatch-{}", std::process::id()));
+        let path = env::temp_dir().join(format!("aether-xtask-instruction-mismatch-{}", process::id()));
         fs::write(&path, &bytes).expect("write fixture bundle");
         let actual = bundle.address().to_hex();
         let expected = "00".repeat(32);
