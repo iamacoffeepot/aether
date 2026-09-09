@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
-use crate::transform::lane::Usage;
+use crate::transform::lane::{Call, Usage};
 
 /// The `YYYY/MM/DD` levels between `sessions` and a session's own directory —
 /// the walk's bound, so a large history costs a directory listing per level
@@ -38,7 +38,7 @@ pub(super) fn from_session_log(session_id: &str) -> Option<Usage> {
     // The parent log holds only the main agent's steps; each subagent gets its
     // own. A total that read the parent alone would understate a fan-out run,
     // in the one direction that flatters the cheap lane.
-    let mut total = Usage { input: 0, cache_read: 0, cache_write: 0, output: 0 };
+    let mut total = Usage { input: 0, cache_read: 0, cache_write: 0, output: 0, calls: Vec::new() };
     add_log(&session.join("session.jsonl"), &mut total);
     for subagent in read_dir_sorted(&session.join("subagent")) {
         add_log(&subagent.join("session.jsonl"), &mut total);
@@ -101,7 +101,18 @@ fn add_log(path: &Path, total: &mut Usage) {
     }
 }
 
-/// Add every `model_completed` step in the `log` text into `total`.
+/// Add every `model_completed` step in the `log` text into `total`, both as its
+/// own call and into the aggregate columns.
+///
+/// The per-call breakdown is not decoration. A Muse lap used to report the sums
+/// alone, and two host-side readers take the calls instead: the session pool
+/// reads the last call's prompt as the context a resume would re-read and
+/// **skips the deposit entirely** when a record names no calls
+/// (`local executor backend: result record has no per-call usage; skipping
+/// session deposit`), and the sealed price table selects its long-context band
+/// per call. Measured across bloom `b7f0e4568d4a`: every Muse dispatch logged
+/// that warning, every lap acquired the pool arm `fresh`, and one member burned
+/// three cold laps redesigning from scratch.
 fn add_steps(log: &str, total: &mut Usage) {
     for step in log.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok()) {
         let Some(usage) = step.pointer("/payload/event/usage").filter(|_| {
@@ -117,10 +128,18 @@ fn add_steps(log: &str, total: &mut Usage) {
         // folding them would bill every cached token at the uncached rate.
         // `reasoning_tokens` is left alone: it is a subset of `output_tokens`,
         // so adding it would double-count.
-        total.input += count("input_tokens").saturating_sub(count("cache_read_tokens"));
-        total.cache_read += count("cache_read_tokens");
-        total.cache_write += count("cache_write_tokens");
-        total.output += count("output_tokens");
+        let call = Call {
+            input: count("input_tokens").saturating_sub(count("cache_read_tokens")),
+            cache_read: count("cache_read_tokens"),
+            cache_write: count("cache_write_tokens"),
+            output: count("output_tokens"),
+        };
+
+        total.input += call.input;
+        total.cache_read += call.cache_read;
+        total.cache_write += call.cache_write;
+        total.output += call.output;
+        total.calls.push(call);
     }
 }
 
@@ -172,7 +191,7 @@ mod tests {
             r#"{"payload":{"event":{"kind":"goal_usage_attribution","usage":{"input_tokens":99999,"output_tokens":99999}}}}"#,
         );
 
-        let mut total = Usage { input: 0, cache_read: 0, cache_write: 0, output: 0 };
+        let mut total = Usage { input: 0, cache_read: 0, cache_write: 0, output: 0, calls: Vec::new() };
         add_steps(log, &mut total);
 
         assert_eq!(total.input, 21460, "uncached input only: 20475 + (21450 - 20465)");
@@ -181,13 +200,44 @@ mod tests {
         assert_eq!(total.cache_write, 0, "a reported zero is a zero");
     }
 
+    // Tripwire: the host reads the *calls*, not the totals. The session pool
+    // takes the last call's prompt as the context a resume would re-read and
+    // refuses to deposit a lap that reports none — measured across bloom
+    // b7f0e4568d4a, every Muse dispatch logged "result record has no per-call
+    // usage; skipping session deposit" and every lap ran the pool arm `fresh`.
+    // So the breakdown has to survive the aggregation, in call order, with the
+    // same cached-input split the totals use.
+    #[test]
+    fn each_model_step_is_kept_as_its_own_call_so_a_lap_can_be_deposited() {
+        let log = concat!(
+            r#"{"payload":{"event":{"kind":"model_completed","usage":{"input_tokens":20475,"output_tokens":955,"cache_read_tokens":0}}}}"#,
+            "\n",
+            r#"{"payload":{"event":{"kind":"model_completed","usage":{"input_tokens":21450,"output_tokens":289,"cache_read_tokens":20465,"cache_write_tokens":7}}}}"#,
+            "\n",
+            r#"{"payload":{"event":{"kind":"goal_usage_attribution","usage":{"input_tokens":99999,"output_tokens":99999}}}}"#,
+        );
+
+        let mut total = Usage { input: 0, cache_read: 0, cache_write: 0, output: 0, calls: Vec::new() };
+        add_steps(log, &mut total);
+
+        let columns: Vec<(u64, u64, u64, u64)> =
+            total.calls.iter().map(|call| (call.input, call.cache_read, call.cache_write, call.output)).collect();
+        assert_eq!(
+            columns,
+            vec![(20475, 0, 0, 955), (985, 20465, 7, 289)],
+            "one entry per model step, in log order, uncached input split out of each",
+        );
+        assert_eq!(total.calls.len(), 2, "the attribution row is bookkeeping over the steps, not a call");
+    }
+
     // A log that cannot be read leaves the total untouched, so a run whose log
     // is missing records unmeasured rather than a fabricated zero.
     #[test]
     fn an_unreadable_log_contributes_nothing() {
-        let mut total = Usage { input: 7, cache_read: 0, cache_write: 0, output: 3 };
+        let mut total = Usage { input: 7, cache_read: 0, cache_write: 0, output: 3, calls: Vec::new() };
         add_log(Path::new("/nonexistent/session.jsonl"), &mut total);
         assert_eq!((total.input, total.output), (7, 3));
+        assert!(total.calls.is_empty(), "an unreadable log names no calls, which reads as unmeasured");
     }
 
     // The date directories are walked, not computed, so a session written
