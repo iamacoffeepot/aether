@@ -37,9 +37,9 @@ use super::strand::readopt_stranded_dispatches;
 use super::{
     BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState, GitCandidatePush,
     NameEvidenceClaims, Stores, TickClock, TrackedHandle, admitted_candidate_pushes, backoff_delay, candidate_push_at,
-    default_candidate_push, dispatch_origin, drain_and_cancel, fold_drain_backoff, is_silent,
-    is_stale, journal_publications, next_backoff, observe_heartbeat, seed_dispatches, seed_tracked,
-    select_stale_handles, silence_from, timeout_verdict,
+    default_candidate_push, dispatch_origin, drain_and_cancel, fold_drain_backoff, is_silent, is_stale,
+    journal_publications, next_backoff, observe_heartbeat, seed_dispatches, seed_tracked, select_stale_handles,
+    silence_from, timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;

@@ -1984,7 +1984,14 @@ fn drain_and_dispatch_aggregate(
             ack_through = Some(entry.sequence);
             continue;
         }
-        match submit_aggregate_review(store, artifacts.as_deref_mut(), executor, payload, entry.sequence, now_unix_millis)? {
+        match submit_aggregate_review(
+            store,
+            artifacts.as_deref_mut(),
+            executor,
+            payload,
+            entry.sequence,
+            now_unix_millis,
+        )? {
             DispatchSubmit::Submitted(handle) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
