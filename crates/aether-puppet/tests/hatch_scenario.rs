@@ -1,14 +1,3 @@
-// The direction oracle below is pixel arithmetic: a probe offset is a
-// rounded distance, an index is a pixel count, and a mean is a sum over a
-// count of windows — none of which has a lossless conversion. The crate
-// under test carries the same note at its own root for the same reason.
-#![allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss
-)]
-
 //! The hatching has to read as shading from wherever the eye stands.
 //!
 //! One subject, three azimuths a third of a turn apart, and one number
@@ -43,7 +32,6 @@
 //! announce one.
 
 use std::cmp::Reverse;
-use std::env;
 use std::f32::consts::{PI, TAU};
 use std::fmt::Write as _;
 use std::fs;
@@ -308,7 +296,11 @@ const DIRECTION_SWEEP: [f32; 12] = [0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 
 
 /// Orientations the oracle bins strokes into: one every 7.5 degrees over
 /// the half turn an undirected line spans.
-const DIRECTIONS: usize = 24;
+const DIRECTIONS: u16 = 24;
+
+/// The same count as an array length. Widening a `u16` into a `usize`
+/// loses nothing on any target this builds for.
+const BINS: usize = DIRECTIONS as usize;
 
 /// How far along a candidate direction the line probe reaches, in pixels,
 /// and how many of its `2 * REACH` samples have to be ink before the
@@ -320,13 +312,13 @@ const DIRECTIONS: usize = 24;
 /// stroke as readily as across it, and a whole-image gradient histogram
 /// measured the same spread on a collapsed view as on a crossed one. A
 /// probe asks what a reader's eye asks — does a line continue this way.
-const REACH: i32 = 5;
-const ON_A_LINE: u32 = 8;
+const REACH: i8 = 5;
+const ON_A_LINE: usize = 8;
 
 /// How far inside the silhouette the oracle looks, in pixels. The outline
 /// is a closed curve carrying every orientation there is, so leaving it in
 /// hands the histogram a background of directions the hatching never drew.
-const INSET: u32 = 8;
+const INSET: usize = 8;
 
 /// The neighbourhood one verdict is reached over, and how far apart those
 /// neighbourhoods sit.
@@ -337,8 +329,8 @@ const INSET: u32 = 8;
 /// contour banding is whether two directions meet inside one patch, so
 /// the window is a few hatch spacings across and the verdict is per
 /// window.
-const WINDOW: u32 = 48;
-const STEP: u32 = 16;
+const WINDOW: usize = 48;
+const STEP: usize = 16;
 
 /// How much of the leading orientation's weight the second one has to
 /// carry before the window counts as crossing rather than as one family
@@ -362,54 +354,92 @@ const SECOND_SHARE: f64 = 0.35;
 /// than this is never a fault.
 const CROSSING_FLOOR: f64 = 20.0;
 
-/// Which pixels are ink, and which of those sit far enough inside the
-/// subject for the outline not to speak for them.
-fn ink_and_inside(img: &Image) -> (Vec<bool>, Vec<bool>) {
-    let background = rgba_at(img, 0, 0);
-    let (width, height) = (img.width as usize, img.height as usize);
-    let mut ink = vec![false; width * height];
-    for y in 0..img.height {
-        for x in 0..img.width {
-            let at = rgba_at(img, x, y);
-            ink[y as usize * width + x as usize] =
-                at.iter().take(3).zip(background).any(|(&here, paper)| here.abs_diff(paper) > INK_MARGIN);
-        }
-    }
-
-    // The silhouette is the span between the first and last ink on each
-    // row, as in `ink_coverage`; inside it is that span held clear of its
-    // own edge by `INSET` in every direction.
-    let mut span = vec![false; width * height];
-    for y in 0..height {
-        let row: Vec<usize> = (0..width).filter(|&x| ink[y * width + x]).collect();
-        let (Some(&first), Some(&last)) = (row.first(), row.last()) else {
-            continue;
-        };
-        span[y * width + first..=y * width + last].fill(true);
-    }
-
-    let inset = INSET as usize;
-    let mut inside = vec![false; width * height];
-    for y in inset..height - inset {
-        for x in inset..width - inset {
-            inside[y * width + x] = [y - inset, y, y + inset]
-                .into_iter()
-                .flat_map(|row| [x - inset, x, x + inset].map(move |column| row * width + column))
-                .all(|at| span[at]);
-        }
-    }
-
-    (ink, inside)
+/// One capture reduced to what the direction oracle reads: which pixels
+/// are ink, and which of those sit far enough inside the subject for the
+/// outline not to speak for them.
+struct Page {
+    width: usize,
+    height: usize,
+    ink: Vec<bool>,
+    inside: Vec<bool>,
 }
 
-/// The pixel offsets each candidate direction probes along.
-fn probes() -> Vec<Vec<(i32, i32)>> {
+impl Page {
+    fn read(img: &Image) -> Self {
+        let background = rgba_at(img, 0, 0);
+        let mut ink = Vec::with_capacity(img.width as usize * img.height as usize);
+        for y in 0..img.height {
+            for x in 0..img.width {
+                ink.push(
+                    rgba_at(img, x, y)
+                        .iter()
+                        .take(3)
+                        .zip(background)
+                        .any(|(&at, paper)| at.abs_diff(paper) > INK_MARGIN),
+                );
+            }
+        }
+
+        // The silhouette is the span between the first and last ink on
+        // each row, as in `ink_coverage`; inside it is that span held
+        // clear of its own edge by `INSET` in every direction.
+        let width = usize::try_from(img.width).expect("an image is not wider than the address space");
+        let height = usize::try_from(img.height).expect("an image is not taller than the address space");
+        let mut span = vec![false; ink.len()];
+        for y in 0..height {
+            let row: Vec<usize> = (0..width).filter(|&x| ink[y * width + x]).collect();
+            let (Some(&first), Some(&last)) = (row.first(), row.last()) else {
+                continue;
+            };
+            span[y * width + first..=y * width + last].fill(true);
+        }
+
+        let mut inside = vec![false; ink.len()];
+        for y in INSET..height - INSET {
+            for x in INSET..width - INSET {
+                inside[y * width + x] = [y - INSET, y, y + INSET]
+                    .into_iter()
+                    .flat_map(|row| [x - INSET, x, x + INSET].map(move |column| row * width + column))
+                    .all(|at| span[at]);
+            }
+        }
+
+        Self { width, height, ink, inside }
+    }
+}
+
+/// The integer offset nearest `value`.
+///
+/// Chosen by comparison rather than by a cast: no conversion from a float
+/// to an integer is lossless, and this one's answer is bounded by the
+/// probe's own reach — so the nearest of the eleven candidates *is* the
+/// rounding, stated as what it is.
+fn nearest(value: f32) -> i8 {
+    (-REACH..=REACH)
+        .min_by(|a, b| {
+            let (from_a, from_b) = ((f32::from(*a) - value).abs(), (f32::from(*b) - value).abs());
+
+            // Ties go outward, which is what rounding a half does.
+            from_a.total_cmp(&from_b).then(b.abs().cmp(&a.abs()))
+        })
+        .unwrap_or(0)
+}
+
+/// What each candidate direction probes along, as flat offsets into an
+/// image `width` pixels wide.
+fn probes(width: usize) -> Vec<Vec<isize>> {
+    let stride = isize::try_from(width).expect("an image is not wider than the address space");
+
     (0..DIRECTIONS)
         .map(|direction| {
-            let (sin, cos) = (PI * direction as f32 / DIRECTIONS as f32).sin_cos();
+            let (sin, cos) = (PI * f32::from(direction) / f32::from(DIRECTIONS)).sin_cos();
             (-REACH..=REACH)
                 .filter(|step| *step != 0)
-                .map(|step| ((cos * step as f32).round() as i32, (sin * step as f32).round() as i32))
+                .map(|step| {
+                    let (across, down) = (nearest(cos * f32::from(step)), nearest(sin * f32::from(step)));
+
+                    isize::from(down) * stride + isize::from(across)
+                })
                 .collect()
         })
         .collect()
@@ -417,32 +447,27 @@ fn probes() -> Vec<Vec<(i32, i32)>> {
 
 /// Which direction each ink pixel's line runs in, or `None` where no
 /// direction carries enough ink for the pixel to be on a line at all.
-fn stroke_directions(img: &Image) -> Vec<Option<usize>> {
-    let (ink, inside) = ink_and_inside(img);
-    let probes = probes();
-    let (width, height) = (img.width as i32, img.height as i32);
-    let mut running = vec![None; ink.len()];
+fn stroke_directions(page: &Page) -> Vec<Option<u16>> {
+    let probes = probes(page.width);
+    let margin = usize::try_from(REACH).expect("the probe reach is positive");
+    let mut running = vec![None; page.ink.len()];
 
-    for y in REACH..height - REACH {
-        for x in REACH..width - REACH {
-            let at = (y * width + x) as usize;
-            if !(ink[at] && inside[at]) {
+    for y in margin..page.height - margin {
+        for x in margin..page.width - margin {
+            let at = y * page.width + x;
+            if !(page.ink[at] && page.inside[at]) {
                 continue;
             }
 
-            let along = |offsets: &Vec<(i32, i32)>| {
-                offsets.iter().filter(|(dx, dy)| ink[((y + dy) * width + x + dx) as usize]).count() as u32
-            };
-            let (best, hits) = probes.iter().enumerate().map(|(direction, offsets)| (direction, along(offsets))).fold(
-                (0, 0),
-                |held, candidate| {
-                    if candidate.1 > held.1 {
-                        candidate
-                    } else {
-                        held
-                    }
-                },
-            );
+            let (best, hits) = (0..DIRECTIONS).zip(&probes).fold((0, 0), |held, (direction, offsets)| {
+                let hits = offsets.iter().filter(|step| page.ink[at.wrapping_add_signed(**step)]).count();
+
+                if hits > held.1 {
+                    (direction, hits)
+                } else {
+                    held
+                }
+            });
             if hits >= ON_A_LINE {
                 running[at] = Some(best);
             }
@@ -454,26 +479,27 @@ fn stroke_directions(img: &Image) -> Vec<Option<usize>> {
 
 /// The angle between one window's two leading stroke directions, in
 /// degrees, and zero where it has only one.
-fn crossing_angle(window: &[f64; DIRECTIONS]) -> f64 {
-    let apart = |a: usize, b: usize| a.abs_diff(b).min(DIRECTIONS - a.abs_diff(b));
-    let heaviest = |over: &dyn Fn(usize) -> bool| {
-        (0..DIRECTIONS).filter(|&d| over(d)).fold(None, |held: Option<usize>, d| match held {
-            Some(best) if window[best] >= window[d] => Some(best),
-            _ => Some(d),
+fn crossing_angle(window: &[f64; BINS]) -> f64 {
+    let apart = |a: u16, b: u16| a.abs_diff(b).min(DIRECTIONS - a.abs_diff(b));
+    let weight = |direction: u16| window[usize::from(direction)];
+    let heaviest = |over: &dyn Fn(u16) -> bool| {
+        (0..DIRECTIONS).filter(|&direction| over(direction)).fold(None, |held: Option<u16>, direction| match held {
+            Some(best) if weight(best) >= weight(direction) => Some(best),
+            _ => Some(direction),
         })
     };
 
-    let Some(first) = heaviest(&|_| true).filter(|&d| window[d] > 0.0) else {
+    let Some(first) = heaviest(&|_| true).filter(|&direction| weight(direction) > 0.0) else {
         return 0.0;
     };
-    let Some(second) = heaviest(&|d| apart(first, d) > 1) else {
+    let Some(second) = heaviest(&|direction| apart(first, direction) > 1) else {
         return 0.0;
     };
-    if window[second] < SECOND_SHARE * window[first] {
+    if weight(second) < SECOND_SHARE * weight(first) {
         return 0.0;
     }
 
-    apart(first, second) as f64 * 180.0 / DIRECTIONS as f64
+    f64::from(apart(first, second)) * 180.0 / f64::from(DIRECTIONS)
 }
 
 /// How widely the strokes cross in this view, in degrees.
@@ -484,18 +510,18 @@ fn crossing_angle(window: &[f64; DIRECTIONS]) -> f64 {
 /// hatched window legitimately carries one, and averaging those in would
 /// measure the tone ramp instead of the crossing.
 fn crossing_spread(img: &Image) -> f64 {
-    let running = stroke_directions(img);
-    let (width, height) = (img.width, img.height);
-    let mut windows: Vec<(usize, [f64; DIRECTIONS])> = Vec::new();
+    let page = Page::read(img);
+    let running = stroke_directions(&page);
+    let mut windows: Vec<(usize, [f64; BINS])> = Vec::new();
 
-    for top in (0..height.saturating_sub(WINDOW)).step_by(STEP as usize) {
-        for left in (0..width.saturating_sub(WINDOW)).step_by(STEP as usize) {
-            let mut counts = [0.0; DIRECTIONS];
+    for top in (0..page.height.saturating_sub(WINDOW)).step_by(STEP) {
+        for left in (0..page.width.saturating_sub(WINDOW)).step_by(STEP) {
+            let mut counts = [0.0; BINS];
             let mut ink = 0;
             for y in top..top + WINDOW {
                 for x in left..left + WINDOW {
-                    if let Some(direction) = running[(y * width + x) as usize] {
-                        counts[direction] += 1.0;
+                    if let Some(direction) = running[y * page.width + x] {
+                        counts[usize::from(direction)] += 1.0;
                         ink += 1;
                     }
                 }
@@ -509,8 +535,10 @@ fn crossing_spread(img: &Image) -> f64 {
 
     windows.sort_by_key(|(ink, _)| Reverse(*ink));
     let densest = &windows[..windows.len().div_ceil(3)];
+    let (crossing, counted) =
+        densest.iter().fold((0.0, 0.0), |held, (_, counts)| (held.0 + crossing_angle(counts), held.1 + 1.0));
 
-    densest.iter().map(|(_, counts)| crossing_angle(counts)).sum::<f64>() / densest.len() as f64
+    crossing / counted
 }
 
 /// The strokes have to keep crossing from wherever the eye stands.
@@ -595,7 +623,6 @@ fn hatch_directions_keep_crossing_through_a_turn() {
         .zip(&staged)
         .map(|(&azimuth, (_, _, view))| {
             let png = swept.captured(view).expect("the capture step ran");
-            keep(view, png);
 
             (azimuth, crossing_spread(&decode_png(png).expect("decode the captured png")))
         })
@@ -610,18 +637,4 @@ fn hatch_directions_keep_crossing_through_a_turn() {
              {CROSSING_FLOOR:.0} a drawing whose families still cross holds; the turn measured {report}",
         );
     }
-}
-
-/// Write one view out under the directory `AETHER_PUPPET_SWEEP_DIR` names,
-/// or do nothing when it is unset. The sweep is the argument a change to
-/// the stroke directions is made with, and the argument is the pictures.
-fn keep(view: &str, png: &[u8]) {
-    // Test-only: the harness has no capability config to route a
-    // developer's output directory through.
-    #[allow(clippy::disallowed_methods, reason = "test-only output path, not capability configuration")]
-    let Ok(directory) = env::var("AETHER_PUPPET_SWEEP_DIR") else {
-        return;
-    };
-
-    fs::write(Path::new(&directory).join(format!("{view}.png")), png).expect("write the swept view");
 }
