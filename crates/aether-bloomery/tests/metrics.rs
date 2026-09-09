@@ -14,9 +14,9 @@ use aether_bloomery::{
     AgentSelection, BloomId, BloomStatus, CandidateRef, Decision, Decisions, Event, Evidence, EvidenceKind, Fact,
     Harness, MemberDependency, MetricBloom, MetricDispatch, MetricsLedger, ModelOverride, Outcome, ReasoningEffort,
     ResolvedConfigs, SealError, Snapshot, SpendWindow, StageId, StageOverride, StudyCost, StudyRecord, SupersedeError,
-    reduce,
+    WorkpieceId, reduce,
 };
-use common::{compiled_resolved, digest, draft, draft_with_member_override, event, membership, workpiece};
+use common::{claim, compiled_resolved, digest, draft, draft_with_member_override, event, membership, workpiece};
 
 const MEMBER: &str = "wp-a";
 const REVISION: u8 = 10;
@@ -212,6 +212,53 @@ fn a_refold_from_the_same_journal_is_byte_identical_and_the_cursor_resumes() {
         snapshot = snapshot.apply(event, decisions, &configs);
     }
     assert_eq!(encoded_rows(&resumed, live.bloom), first, "resuming from the cursor matches a full fold");
+}
+
+/// The plausible bug: AggregateReview (and AggregateVerify) fold as an empty
+/// bloom-level workpiece, so the timeline paints a second tail beside the
+/// composition cursor for the same integration subject.
+#[test]
+fn aggregate_gate_spans_belong_to_the_composition_workpiece() {
+    let mut journal = Journal::sealed(&escalating());
+    journal.admit(
+        &event("integrate", Fact::Integrate { bloom: journal.bloom, claim: claim(MEMBER, REVISION, TREE) }),
+        Some(3_000),
+    );
+    let decisions = journal.admit(
+        &event(
+            "resolve",
+            Fact::Resolve { bloom: journal.bloom, tree: digest(30), head: digest(40), lineage: Vec::new() },
+        ),
+        Some(4_000),
+    );
+    assert!(
+        decisions.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
+        "resolve dispatches the critic: {decisions:?}"
+    );
+    assert!(
+        decisions.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })),
+        "resolve dispatches the mechanical gate: {decisions:?}"
+    );
+
+    let timeline = journal.ledger.timeline(journal.bloom);
+    let composition = WorkpieceId::COMPOSITION;
+    for stage in [StageId::AggregateReview, StageId::AggregateVerify] {
+        let span = timeline
+            .spans
+            .iter()
+            .find(|span| span.stage == stage)
+            .unwrap_or_else(|| panic!("{stage:?} must appear on the timeline: {:?}", timeline.spans));
+        assert_eq!(
+            span.workpiece, composition,
+            "{stage:?} is a composition span, not a bloom-level empty workpiece: {span:?}"
+        );
+    }
+    assert!(
+        timeline.spans.iter().all(|span| !span.workpiece.is_empty()
+            || (span.stage != StageId::AggregateReview && span.stage != StageId::AggregateVerify)),
+        "no aggregate identity may sit on an empty workpiece: {:?}",
+        timeline.spans
+    );
 }
 
 /// Timeline spans carry the envelope stamp when the journal row has one, and

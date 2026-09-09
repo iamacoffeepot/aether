@@ -9,6 +9,8 @@ use ratatui::style::Modifier;
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
 use crate::cursor::Cursor;
+use aether_bloomery::WorkpieceId;
+
 use crate::dto::{BloomStatus, DigestHex, MemberView, MetricsTimeline, TimelineSpan};
 use crate::keys::{KeyHint, Outcome};
 use crate::palette;
@@ -178,15 +180,27 @@ fn rows_of(doc: &MetricsTimeline, store: &Store, width: usize) -> Vec<LaneRow> {
                 names.push(member.workpiece.clone());
             }
         }
+        if bloom.composition.is_some() {
+            let composition = String::from(WorkpieceId::COMPOSITION);
+            if !names.contains(&composition) {
+                names.push(composition);
+            }
+        }
     }
     names
         .into_iter()
         .map(|workpiece| {
             let member_spans: Vec<TimelineSpan> =
                 doc.spans.iter().filter(|span| span.workpiece == workpiece).cloned().collect();
+            let is_composition = workpiece == WorkpieceId::COMPOSITION;
             let member = live.and_then(|bloom| bloom.members.iter().find(|member| member.workpiece == workpiece));
+            let composition = live.and_then(|bloom| bloom.composition.as_ref()).filter(|_| is_composition);
             let silence = silence_of(member);
-            let wedged = member.is_some_and(|member| member.wedge.is_some());
+            let wedged = if is_composition {
+                composition.is_some_and(|composition| composition.wedge.is_some())
+            } else {
+                member.is_some_and(|member| member.wedge.is_some())
+            };
             let live_bloom =
                 live.is_some_and(|bloom| !matches!(bloom.status, Some(BloomStatus::Landed | BloomStatus::Superseded)));
             let spans_for_paint: Vec<TimelineSpan> = if reconstructed {
@@ -211,7 +225,17 @@ fn rows_of(doc: &MetricsTimeline, store: &Store, width: usize) -> Vec<LaneRow> {
                 },
             );
             let stage = last.map_or_else(
-                || member.map(|member| member_status_state(member).to_owned()).unwrap_or_default(),
+                || {
+                    if is_composition {
+                        composition
+                            .and_then(|composition| composition.cursor.as_ref())
+                            .and_then(|cursor| cursor.stage)
+                            .map(|stage| stage.to_string())
+                            .unwrap_or_default()
+                    } else {
+                        member.map(|member| member_status_state(member).to_owned()).unwrap_or_default()
+                    }
+                },
                 |span| span.stage.to_string(),
             );
             LaneRow {
@@ -305,5 +329,48 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("test backend");
         terminal.draw(|frame| timeline.render(frame, frame.area(), &store)).expect("draw");
         assert_eq!(super::super::super::row_caret(&terminal, "wp-a"), "  ");
+    }
+
+    #[test]
+    fn an_aggregate_review_span_paints_on_the_composition_row() {
+        // The plausible bug: the critic's span carries an empty workpiece, so
+        // the timeline paints a "(bloom)" tail beside the composition cursor
+        // for the same integration subject.
+        let bloom = DigestHex::from_bytes([1; 32]);
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_timeline(
+            bloom,
+            Ok(MetricsTimeline {
+                bloom,
+                spans: vec![
+                    TimelineSpan {
+                        workpiece: "wp-a".to_owned(),
+                        stage: StageId::Construct,
+                        started_unix_millis: Some(500),
+                        ..TimelineSpan::default()
+                    },
+                    TimelineSpan {
+                        workpiece: aether_bloomery::WorkpieceId::COMPOSITION.to_owned(),
+                        stage: StageId::AggregateReview,
+                        started_unix_millis: Some(1_000),
+                        ..TimelineSpan::default()
+                    },
+                ],
+                ..MetricsTimeline::default()
+            }),
+        );
+        let mut timeline = Timeline::new(bloom);
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("test backend");
+        terminal.draw(|frame| timeline.render(frame, frame.area(), &store)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area();
+        let painted: String =
+            (0..area.height).flat_map(|y| (0..area.width).map(move |x| buffer[(x, y)].symbol().to_owned())).collect();
+        assert!(painted.contains("aether.bloomery"), "the critic span belongs on the composition row: {painted}");
+        assert!(
+            !painted.contains("(bloom)"),
+            "an empty-workpiece bloom tail must not sit beside the composition: {painted}"
+        );
+        assert!(painted.contains("Aggregate"), "the span keeps its aggregate dispatch identity: {painted}");
     }
 }

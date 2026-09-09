@@ -210,7 +210,8 @@ impl MetricsSeat {
     }
 }
 
-/// One per-member stage span on a bloom timeline.
+/// One stage span on a bloom timeline — a member lane, or the composition
+/// workpiece's integration tail.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TimelineSpan {
     pub workpiece: String,
@@ -426,7 +427,8 @@ impl MetricsLedger {
         cells.into_values().collect()
     }
 
-    /// Per-member stage spans for `bloom`, capped at [`TIMELINE_SPAN_CAP`].
+    /// Stage spans for `bloom`, capped at [`TIMELINE_SPAN_CAP`]. Member lanes
+    /// and the composition's aggregate-gate identities share this list.
     #[must_use]
     pub fn timeline(&self, bloom: BloomId) -> MetricsTimeline {
         let mut spans: Vec<TimelineSpan> = self
