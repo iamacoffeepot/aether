@@ -72,6 +72,8 @@ struct SightParams {
     face_lift: f32,
     // Whether the hatch gate runs here at all — see `hatched` below.
     gate: f32,
+    // How far a family's threshold is dithered — `Settings::hatch_dither`.
+    dither: f32,
     // This frame's pose: one affine map per bone as three rows, which
     // is the whole of what a pose costs the frame
     // (iamacoffeepot/aether#4462).
@@ -293,11 +295,6 @@ fn occluded(probe: vec3<f32>, normal: vec3<f32>) -> bool {
     return front > 0.0 && front <= length(lifted - params.eye) - RAY_MIN;
 }
 
-// Threshold dither, so a hatch family's boundary breaks up instead of
-// slabbing into a hard edge across a flat region. `extract::DITHER`,
-// restated; the two must move together.
-const DITHER: f32 = 0.055;
-
 // Whether a hatch point survives the tone gate — `extract::tone_gate`'s
 // own predicate, asked here because this is where the posed normal it
 // reads exists.
@@ -314,9 +311,11 @@ const DITHER: f32 = 0.055;
 // the run at it and `width_scale` drops the isolated survivors — which
 // is exactly what `lit_runs` did by discarding a run of one.
 //
-// `params.gate` is off for a subject with no rig, whose curves arrive
-// already split: nothing turns their normals, so the answer is settled
-// at load and re-deciding it through a second `sin` could only disagree.
+// `params.gate` is off only for a subject whose verdict was settled at
+// load and whose curves therefore arrive already split
+// (`Settings::gate_settles_at_load`): no rig to turn a normal and a key
+// light standing in the world rather than on the camera rig. Re-deciding
+// a settled question through a second `sin` could only disagree.
 fn hatched(family: f32, p: vec3<f32>, n: vec3<f32>) -> bool {
     if params.gate < 0.5 || family < 0.0 {
         return true;
@@ -329,7 +328,7 @@ fn hatched(family: f32, p: vec3<f32>, n: vec3<f32>) -> bool {
         limit = params.thresholds.z;
     }
 
-    return tone_at(p, n) < limit + tone_noise(p) * DITHER;
+    return tone_at(p, n) < limit + tone_noise(p) * params.dither;
 }
 
 // The verdict, one texel per point: drawn or not.

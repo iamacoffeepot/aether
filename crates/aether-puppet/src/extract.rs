@@ -57,16 +57,69 @@ impl CreaseSides {
     }
 }
 
+/// What [`Settings::light`] is a direction *in*.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LightFrame {
+    /// A world direction. The right answer for a lit scene, where the
+    /// light belongs to the room rather than to the viewer.
+    ///
+    /// Wrong for a subject on a turntable, and visibly so: the lit side
+    /// stays put while the camera walks around it, so one azimuth shows
+    /// the fully lit side and comes back a bare outline while the
+    /// opposite one shows the fully shaded side and comes back a solid
+    /// mesh. Nothing in between reads as a tone ramp because no view
+    /// carries both ends of one.
+    World,
+    /// A direction in the camera's own frame: `x` to the viewer's right,
+    /// `y` up, `z` toward the viewer.
+    ///
+    /// Where an illustrator's key light stands. It is placed relative to
+    /// the drawing rather than to the subject, so it stays over the same
+    /// shoulder while the subject turns and *every* view has a lit side
+    /// and a shaded side to run a ramp between.
+    Camera,
+}
+
 #[derive(Clone)]
 pub struct Settings {
-    /// World distance between hatch lines, in model units.
+    /// Distance between hatch lines, as a fraction of the subject's
+    /// longest bounding-box axis.
+    ///
+    /// A fraction rather than a world distance because a spacing tuned
+    /// against one subject's scale means nothing on the next one: the
+    /// same number that rules a readable hatch on a head-sized sculpt
+    /// draws a wire mesh on a subject three times the size, and the
+    /// drawing is supposed to be a property of the style, not of what
+    /// units the modeller happened to work in.
     pub hatch_spacing: f32,
+    /// Per-family multiplier over [`Self::hatch_spacing`].
+    ///
+    /// Each successive family is a little sparser than the last, so the
+    /// step from one family to two adds tone rather than doubling it.
+    pub hatch_family_spacing: [f32; 3],
     /// Tone below which each successive hatch family switches on.
+    ///
+    /// The ramp the drawing shades with: above the first, bare paper;
+    /// below the last, all three families crossing. They want to be
+    /// spread across the range tone actually reaches — from
+    /// [`Self::ambient`] at the terminator to `1` under the key light —
+    /// because a threshold set below the ambient floor names a tone no
+    /// point on the subject has and that family never draws.
     pub hatch_thresholds: [f32; 3],
+    /// How far a hatch threshold is dithered, in tone.
+    ///
+    /// Comparing tone against a constant puts a family's edge exactly on
+    /// a level curve of the lighting, which reads as a ruled line slicing
+    /// across the figure. Perturbing the threshold by
+    /// [`noise`](crate::math3::noise) lets the family break into dashes
+    /// as it fades, which is what a hand does. Zero rules the boundary.
+    pub hatch_dither: f32,
     /// Angle of the primary hatch family, in the model's XY plane.
     pub hatch_tilt: f32,
-    /// Direction the key light arrives from.
+    /// Direction the key light arrives from, read in [`Self::light_frame`].
     pub light: Vec3,
+    /// Whether [`Self::light`] is a world direction or a camera-frame one.
+    pub light_frame: LightFrame,
     /// Floor of the shading term, so nothing reads as pure black.
     pub ambient: f32,
     /// How much the face is lifted out of the hatching. The drawn face is
@@ -137,9 +190,20 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             hatch_spacing: 0.020,
-            hatch_thresholds: [0.62, 0.44, 0.30],
+            hatch_family_spacing: [1.0, 1.30, 1.62],
+            // Spread across the range tone reaches. Under the old
+            // numbers the last family switched on at 0.30 against an
+            // ambient floor of 0.28, so two thirds of the ramp lived in
+            // the last two percent of the tone range and the drawing had
+            // one step in it rather than three.
+            hatch_thresholds: [0.72, 0.58, 0.44],
+            hatch_dither: 0.070,
             hatch_tilt: 0.62,
-            light: Vec3::new(-0.46, 0.52, 0.78),
+            // Over the viewer's left shoulder and a little above, which
+            // is where an inker puts it. Read in the camera's frame, so
+            // it stays there through a turn.
+            light: Vec3::new(-0.52, 0.55, 0.66),
+            light_frame: LightFrame::Camera,
             ambient: 0.28,
             face_lift: 0.60,
             relaxation: 2,
@@ -178,9 +242,68 @@ impl Settings {
     }
 
     /// Lighting term at a point: `0` in shadow, `1` fully lit.
+    ///
+    /// Reads [`Self::light`] as a world direction, so ask
+    /// [`Self::resolved`] for the settings a view shades with rather than
+    /// sampling this against a camera-frame light.
     pub fn tone(&self, point: &SurfacePoint) -> f32 {
         let lambert = point.normal.dot(self.light.normalize()).max(0.0);
         self.ambient + (1.0 - self.ambient) * lambert + self.face_lift * face_weight(point.pos)
+    }
+
+    /// The key light as a world direction, given where the eye stands.
+    #[must_use]
+    pub fn key_light(&self, eye: Vec3, target: Vec3) -> Vec3 {
+        match self.light_frame {
+            LightFrame::World => self.light,
+            LightFrame::Camera => {
+                let back = (eye - target).normalize_or(Vec3::Z);
+                let right = Vec3::Y.cross(back).normalize_or(Vec3::X);
+                let up = back.cross(right);
+
+                (right * self.light.x + up * self.light.y + back * self.light.z).normalize_or(back)
+            }
+        }
+    }
+
+    /// This view's shading: the authored style with everything the eye
+    /// decides already decided, stated in the world frame.
+    ///
+    /// Tone is sampled once per point of every hatch curve and again per
+    /// vertex by the wash, so the view enters here, once, and everything
+    /// downstream reads a plain [`LightFrame::World`] `Settings` that
+    /// knows nothing about a camera.
+    ///
+    /// `charted` says whether a face is actually being drawn on this
+    /// subject. [`Self::face_lift`] exists to keep hatch off an authored
+    /// face; with no face charted there is no face to protect, and the
+    /// lift's window is then just a bright box somewhere in the subject's
+    /// own bounds — a hole in the shading of a subject that never had a
+    /// face to begin with.
+    #[must_use]
+    pub fn resolved(&self, eye: Vec3, target: Vec3, charted: bool) -> Self {
+        Self {
+            light: self.key_light(eye, target),
+            light_frame: LightFrame::World,
+            face_lift: if charted {
+                self.face_lift
+            } else {
+                0.0
+            },
+            ..self.clone()
+        }
+    }
+
+    /// Whether the tone gate can be settled once, at load.
+    ///
+    /// Only when nothing it reads can move under it afterwards. A key
+    /// light on the camera rig turns with every orbit, so the verdict it
+    /// reaches at load is the verdict for one azimuth and wrong for the
+    /// rest — that subject's hatching goes to the GPU ungated and is
+    /// gated in the vertex stage instead, the same place a rig's does.
+    #[must_use]
+    pub fn gate_settles_at_load(&self) -> bool {
+        self.light_frame == LightFrame::World
     }
 }
 
@@ -219,12 +342,21 @@ pub fn silhouettes(mesh: &Mesh, eye: Vec3) -> Vec<Curve3> {
 pub fn hatching(mesh: &Mesh, settings: &Settings) -> Vec<Curve3> {
     let mut out = Vec::new();
 
+    // The spacing is authored as a fraction of the subject, so it is the
+    // subject that says what it means in world units. A degenerate mesh
+    // has no scale to measure against and gets no hatching rather than a
+    // division by zero.
+    let extent = mesh.max - mesh.min;
+    let reach = extent.x.max(extent.y).max(extent.z);
+    if !reach.is_finite() || reach <= 0.0 {
+        return out;
+    }
+
     for (family, axis) in settings.hatch_axes().into_iter().enumerate() {
-        // Each successive family is sparser than the last. Equal spacing
-        // would make the cross-hatched regions four times the density of
-        // the single-hatched ones and the tone ramp would break at the
-        // first threshold instead of climbing through it.
-        let spacing = settings.hatch_spacing * [1.0, 1.45, 1.95][family];
+        let spacing = settings.hatch_spacing * reach * settings.hatch_family_spacing[family];
+        if !spacing.is_finite() || spacing <= 0.0 {
+            continue;
+        }
 
         for (plane, segments) in mesh.level_sets(&mesh.projected(axis), spacing) {
             let template = Curve3 {
@@ -392,6 +524,32 @@ fn nose_creases(mesh: &Mesh, labels: &Labels, window: &Anchor, settings: &Settin
     weld::curves(to_points(segments), &template)
 }
 
+/// Which hatch families survive at each point, given the light and the
+/// point's own normal and position.
+///
+/// A function of the pose and of the light, and of nothing else. It reads
+/// each point's normal, and skinning turns normals; it reads the key
+/// light, and a light stated in the camera's frame turns with every
+/// orbit. Whichever of the two can still move afterwards, the gate has to
+/// stand downstream of it — which is why the only subject gated here, at
+/// load, is the one [`Settings::gate_settles_at_load`] describes and the
+/// rest are gated in the vertex stage (`sight.wgsl`'s `hatched`). Left at
+/// load against either, the shading freezes to one pose or one azimuth
+/// and slides under the drawing (iamacoffeepot/aether#4336).
+pub fn tone_gate(curves: Vec<Curve3>, settings: &Settings) -> Vec<Curve3> {
+    curves
+        .into_iter()
+        .flat_map(|curve| {
+            let limit = match curve.class {
+                FeatureClass::Hatch { level } => settings.hatch_thresholds[usize::from(level)],
+                FeatureClass::Silhouette | FeatureClass::Decal => return vec![curve],
+            };
+
+            lit_runs(&curve, |point| settings.tone(point) < limit + noise(point.pos) * settings.hatch_dither)
+        })
+        .collect()
+}
+
 /// The view-independent drawing: everything that describes the surface
 /// rather than the viewer.
 ///
@@ -402,37 +560,10 @@ fn nose_creases(mesh: &Mesh, labels: &Labels, window: &Anchor, settings: &Settin
 /// split. The offline renderer recomputes all of it every frame because it
 /// has no reason not to; here that difference is most of the budget.
 ///
-/// Ungated. Every point carries the [`Anchorage`](crate::mesh::Anchorage)
-/// it was found at, so a pose skins these curves rather than re-solving
-/// them, and [`tone_gate`] then runs against the normals the pose gave
-/// them. A subject with no rig gates once, here at load, and never again.
-/// Which hatch families survive at each point, given the light and the
-/// point's own normal and position.
-///
-/// Not a function of the eye, which is why a still subject gates once at
-/// load rather than on every redraw — the gate costs a lambert term, a
-/// face-lift falloff and a noise sample for every point of every hatch
-/// curve, all of it reaching the same verdict as the frame before.
-///
-/// Not a function of the eye, but a function of the *pose*: it reads each
-/// point's normal, and skinning turns normals. So a posed subject gates
-/// after every skinning pass instead (iamacoffeepot/aether#4336) — left at
-/// load, the shading freezes to the rest pose and slides under a moving
-/// body.
-pub fn tone_gate(curves: Vec<Curve3>, settings: &Settings) -> Vec<Curve3> {
-    curves
-        .into_iter()
-        .flat_map(|curve| {
-            let limit = match curve.class {
-                FeatureClass::Hatch { level } => settings.hatch_thresholds[usize::from(level)],
-                FeatureClass::Silhouette | FeatureClass::Decal => return vec![curve],
-            };
-
-            lit_runs(&curve, |point| settings.tone(point) < limit + noise(point.pos) * DITHER)
-        })
-        .collect()
-}
-
+/// Ungated, and every point carries the
+/// [`Anchorage`](crate::mesh::Anchorage) it was found at — so a pose skins
+/// these curves rather than re-solving them, and [`tone_gate`] then runs
+/// against the normals the pose gave them.
 pub fn surface(mesh: &Mesh, labels: Option<&Labels>, anchors: Option<&Anchors>, settings: &Settings) -> Vec<Curve3> {
     let mut out = hatching(mesh, settings);
 
@@ -448,10 +579,6 @@ pub fn surface(mesh: &Mesh, labels: Option<&Labels>, anchors: Option<&Anchors>, 
 
     out
 }
-
-/// Threshold dither, so a family's boundary breaks up instead of slabbing
-/// into a hard edge across a flat region.
-const DITHER: f32 = 0.055;
 
 /// Split a curve into the runs whose points pass `keep`, preserving order.
 fn lit_runs(curve: &Curve3, keep: impl Fn(&SurfacePoint) -> bool) -> Vec<Curve3> {

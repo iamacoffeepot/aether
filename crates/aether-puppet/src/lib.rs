@@ -381,6 +381,52 @@ impl Puppet {
         Vec3::new(0.0, self.look.height, 0.0)
     }
 
+    /// The style this frame shades with: the authored settings resolved
+    /// against where the eye stands and whether a face is being drawn.
+    ///
+    /// Everything downstream of here — the tone gate, the shader's tone
+    /// block, the wash's own shading — reads a world-frame style and
+    /// never learns that the key light was authored on the camera rig.
+    fn shading(&self, eye: Vec3) -> extract::Settings {
+        self.settings.resolved(eye, self.target(), self.charting())
+    }
+
+    /// Whether a face is actually drawn on this subject, which is the
+    /// only thing [`extract::Settings::face_lift`] exists to protect.
+    fn charting(&self) -> bool {
+        self.anchors.is_some() && self.settings.face.is_some()
+    }
+
+    /// Whether the shader gates the hatching, rather than a load-time
+    /// pass having settled it.
+    fn gates_on_gpu(&self) -> bool {
+        self.skin.is_some() || !self.settings.gate_settles_at_load()
+    }
+
+    /// Re-solve the view-independent drawing under a style that changed
+    /// after the subject landed.
+    ///
+    /// The hatch planes are level sets of the *style* over the subject,
+    /// so a new spacing or tilt is a new set of curves rather than a new
+    /// uniform — which is why this exists and why it is a mail rather
+    /// than something the frame does. The material survey, the anchors
+    /// and the rig are properties of the subject and stand.
+    fn re_extract(&mut self) {
+        let Some(subject) = self.subject.take() else {
+            return;
+        };
+
+        self.surface = extract::surface(&subject, self.labels.as_ref(), self.anchors.as_ref(), &self.settings);
+        if !self.gates_on_gpu() {
+            let shading = self.shading(self.eye());
+            self.surface = extract::tone_gate(mem::take(&mut self.surface), &shading);
+        }
+        self.strokes.subject_changed(&subject, self.skin.as_ref());
+        self.easel.subject_changed();
+        self.drawn_from = None;
+        self.subject = Some(subject);
+    }
+
     /// Invalidate only what chart state contributes to. Surface extraction,
     /// the material survey, and resident GPU geometry remain valid.
     fn chart_changed(&mut self) {
@@ -609,11 +655,11 @@ impl Puppet {
         // side is the lay-out and the pack: extraction above, and the rail
         // solve inside `solve`.
         //
-        // `bound` is `Some` only for a rigged subject, and it decides two
-        // things at once: what the resident curves are packed against, so
-        // their vertex stage can pose them, and whether the tone gate
-        // runs on the GPU at all — an unrigged subject's curves were
-        // gated at load, against normals nothing turns.
+        // `bound` is `Some` only for a rigged subject, and it decides
+        // what the resident curves are packed against so their vertex
+        // stage can pose them. Where the tone gate runs is a separate
+        // question — `gates_on_gpu` — because a key light on the camera
+        // rig moves the verdict under a subject that has no rig at all.
         let drawing = Drawing { resident: &self.surface, volatile: &self.volatile };
         let required_texels = match easel::program::sight::required_texels(drawing) {
             Ok(required_texels) => required_texels,
@@ -650,7 +696,7 @@ impl Puppet {
         let posing = strokes::Posing {
             bound: self.skin.as_ref().map(|skin| deform::Bound { rest: subject, skin }),
             bones: self.bones,
-            tone: easel::program::sight::ToneUniforms::of(&self.settings, self.skin.is_some()),
+            tone: easel::program::sight::ToneUniforms::of(&self.shading(frame.eye), self.gates_on_gpu()),
         };
         let drawing = Drawing { resident: &self.surface, volatile: &self.volatile };
         if !self.strokes.solve(drawing, frame.eye, view_proj, bias, posing) && self.strokes.live() {
@@ -964,14 +1010,16 @@ impl WasmActor for Puppet {
             }
         }
 
-        // Ungated when a rig is in: the gate reads each point's normal and
-        // skinning turns normals, so it moves to the vertex stage that
-        // poses them (`sight.wgsl`'s `hatched`). With no rig nothing
-        // turns, and the load-time gate is the whole of it — which is why
-        // the shader's own gate is switched off for that subject rather
-        // than asked to agree with this one.
-        if self.skin.is_none() {
-            self.surface = extract::tone_gate(mem::take(&mut self.surface), &self.settings);
+        // Ungated when anything the gate reads can still move: a rig
+        // turns normals, and a key light on the camera rig turns the
+        // light. Either way the gate goes to the vertex stage that has
+        // both (`sight.wgsl`'s `hatched`). When neither can move, the
+        // load-time gate is the whole of it — which is why the shader's
+        // own gate is switched off for that subject rather than asked to
+        // agree with this one.
+        if !self.gates_on_gpu() {
+            let shading = self.shading(self.eye());
+            self.surface = extract::tone_gate(mem::take(&mut self.surface), &shading);
         }
         self.posed = self.skin.as_ref().map(|skin| subject.deformable(skin));
         // A fresh subject stands at rest, and `subject_changed` below has
@@ -1028,6 +1076,24 @@ impl WasmActor for Puppet {
         {
             tracing::warn!(target: "aether_puppet", error = %error, "GPU silhouette candidate refused this subject");
         }
+    }
+
+    /// Retune the whole hatching style, and re-solve the drawing under it.
+    ///
+    /// # Agent
+    /// Absolute: every field replaces its counterpart, so read the current
+    /// style back with the defaults before changing one number. A style
+    /// carrying a non-finite value or a spacing at or below zero is
+    /// refused whole and logged.
+    #[handler::single]
+    fn on_hatch(&mut self, _ctx: &mut WasmCtx<'_>, hatch: Hatch) {
+        if !hatch.is_solvable() {
+            tracing::warn!(target: "aether_puppet", "hatch style refused; the drawing keeps the style it had");
+            return;
+        }
+
+        hatch.apply(&mut self.settings);
+        self.re_extract();
     }
 
     /// Choose a named face while preserving the direction she is looking.
@@ -1108,12 +1174,13 @@ impl WasmActor for Puppet {
             aspect: self.aspect,
             field_of_view: FIELD_OF_VIEW,
         };
+        let shading = self.shading(view.eye);
         let painted = easel::Subject {
             mesh: subject,
             posed: self.posed.as_ref().filter(|_| !self.pose.is_rest()),
             scores,
             palette: &self.palette,
-            settings: &self.settings,
+            settings: &shading,
             ink: self.strokes.ink_plane(),
             chart: None,
             skin: self.skin.as_ref(),
@@ -1209,12 +1276,13 @@ impl WasmActor for Puppet {
             // the frame's ink from, one dispatch ago in this same handler
             // (iamacoffeepot/aether#4451).
             let ink = self.strokes.ink_plane();
+            let shading = self.shading(eye);
             let painted = easel::Subject {
                 mesh: painted_mesh,
                 posed: self.posed.as_ref().filter(|_| !self.pose.is_rest()),
                 scores,
                 palette: &self.palette,
-                settings: &self.settings,
+                settings: &shading,
                 ink,
                 chart,
                 skin: self.skin.as_ref(),

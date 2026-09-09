@@ -361,20 +361,26 @@ pub struct ToneUniforms {
     pub ambient: f32,
     pub thresholds: [f32; 3],
     pub face_lift: f32,
+    /// How far a family's threshold is dithered.
+    pub dither: f32,
     /// Whether the shader gates hatching at all.
     ///
-    /// One or zero, and it is which side of the pose the gate stands on
-    /// rather than a preference. A subject with no rig turns no normals,
-    /// so its hatching is gated once at load and arrives here already
-    /// split into lit runs — gating a second time would re-decide a
-    /// settled question through a different `sin`. A rigged subject
-    /// carries its surface curves ungated precisely because the normals
-    /// the gate reads are the ones this stage just posed.
+    /// One or zero, and it is which side of the load the gate stands on
+    /// rather than a preference. A subject whose verdict cannot move
+    /// after extraction — no rig to turn a normal, and a key light
+    /// standing in the world rather than on the camera rig — is gated
+    /// once at load and arrives here already split into lit runs; gating
+    /// a second time would re-decide a settled question through a
+    /// different `sin`. Everything else carries its surface curves
+    /// ungated precisely because the normals and the light the gate
+    /// reads are this frame's.
     pub gate: bool,
 }
 
 impl ToneUniforms {
-    /// The gate, read off the settings a subject was extracted with.
+    /// The gate, read off the settings this frame shades with —
+    /// [`Settings::resolved`]'s, not the authored ones, since the shader
+    /// has no camera frame to read a key light in.
     #[must_use]
     pub fn of(settings: &Settings, gate: bool) -> Self {
         Self {
@@ -382,6 +388,7 @@ impl ToneUniforms {
             ambient: settings.ambient,
             thresholds: settings.hatch_thresholds,
             face_lift: settings.face_lift,
+            dither: settings.hatch_dither,
             gate,
         }
     }
@@ -439,6 +446,7 @@ impl SightUniforms {
                 self.tone.thresholds[2],
                 self.tone.face_lift,
                 f32::from(u8::from(self.tone.gate)),
+                self.tone.dither,
             ];
             for (lane, value) in window[Self::TONE..].chunks_exact_mut(4).zip(lit) {
                 lane.copy_from_slice(&value.to_le_bytes());
