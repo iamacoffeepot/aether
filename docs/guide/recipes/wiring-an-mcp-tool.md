@@ -16,23 +16,24 @@ The seam is two files in `aether-mcp`:
 - `crates/aether-mcp/src/args.rs` — the request/response structs the agent sees,
   with their `JsonSchema` doc comments. **The doc comments are the agent-facing
   contract** — the schema your MCP client shows is generated from them.
-- `crates/aether-mcp/src/tools/mod.rs` — the `#[tool]` method on `impl Mcp`: parse the
-  args, build the envelope, await the reply, decode it, map errors.
+- `crates/aether-mcp/src/tools/mod.rs` — the `#[tool_router]` block on `impl Mcp`.
+  Each `#[tool]` method here is a thin registration: it deserializes
+  `Parameters(args)` and hands off to the body in a sibling module under
+  `crates/aether-mcp/src/tools/`, wrapping the result in `guard_response_size`.
+  The bodies live beside their subject — `logs_cost.rs`, `mail.rs`, `capture.rs`,
+  `components.rs`, `describe.rs`, `engine.rs` — so the tool surface reads as a
+  file listing rather than one flat file.
 
-Task-level adapters that group several live component kinds follow the same
-contract with one extra boundary. Keep their ergonomic DTOs in `args.rs`, put
-the task-to-live JSON conversion and settled relay in a focused module under
-`crates/aether-mcp/src/tools/`, and register only the public router methods in
-`tools/mod.rs`. The terrain family is the worked example: it requires exact
-loaded `LoadResult.name` mailboxes, resolves request and reply descriptors from
-the per-engine live kind cache, dispatches through `MailSpec` / `deliver_one`,
-decodes through `decode_reply_events`, and applies `guard_response_size` at
-every router method. It does not link the component crate or copy its Rust wire
-types into the coordinator.
+An adapter that groups several live component kinds follows the same contract
+with one extra boundary. Keep its ergonomic DTOs in `args.rs` and its
+task-to-live JSON conversion and settled relay in that module: resolve request
+and reply descriptors from the per-engine live kind cache, dispatch through
+`MailSpec` / `deliver_one`, and decode through `decode_reply_events`. Do not
+link the component crate or copy its Rust wire types into the coordinator.
 
 ## The exemplar: `actor_cost`
 
-[`actor_cost`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-mcp/src/tools/mod.rs) dumps one actor's per-handler cost
+[`actor_cost`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-mcp/src/tools/logs_cost.rs) dumps one actor's per-handler cost
 table. It's small but exercises every interesting part: a tagged-id filter
 argument, a wire request/reply round-trip, decode of a reply kind into a JSON
 response, and error mapping. Read it alongside this page; the steps below name its
@@ -55,11 +56,14 @@ request derives `Deserialize` (the agent fills it), the responses derive
 /// execution-cost EWMA table. Measure-only — no scheduling effect.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ActorCostArgs {
-    /// Engine UUID to pull from (from `list_engines`).
-    pub engine_id: String,
-    /// Mailbox name of the actor to query (e.g. `"aether.audio"`,
-    /// `"aether.component/aether.embedded:camera"`).
-    pub mailbox_name: String,
+    /// Engine UUID to pull from (from `list_engines`). Omit to target the
+    /// sole supervised engine; with zero or several engines an omitted id
+    /// is an error naming the situation, never a guess.
+    #[serde(default)]
+    pub engine_id: Option<String>,
+    /// Address of the actor to query (e.g. `"aether.audio"`,
+    /// `"aether.component/aether.embedded:camera"`, or a tagged `mbx-…` id).
+    pub address: String,
     /// Optional kind-id filter (tagged `knd-XXXX-XXXX-XXXX` or raw
     /// decimal). Omitted dumps every handler row the actor declares.
     #[serde(default)]
@@ -71,7 +75,7 @@ pub struct ActorCostArgs {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ActorCostResponse {
     pub engine_id: String,
-    pub mailbox_name: String,
+    pub address: String,
     pub rows: Vec<ActorCostRow>,
 }
 ```
@@ -81,6 +85,12 @@ What the conventions buy you here:
 - **Tagged ids are `String`, not the typed newtype.** `engine_id` and `kind_id`
   arrive as strings the agent pastes back from a prior call (`list_engines`,
   `describe_kinds`), and you parse them in the tool body. JSON has no `KindId`.
+- **`engine_id` is `Option<String>`, and the response echoes the resolved one.**
+  Every engine-taking tool resolves it the same way, so an auto-resolved answer
+  says which engine produced it.
+- **The recipient argument is `address`.** One spelling across the whole tool
+  surface, accepting a canonical lineage, an ADR-0166 abbreviation, or a tagged
+  `mbx-…` id.
 - **`Option` + `#[serde(default)]` for every optional field**, with the doc
   comment stating what omitting it means. The agent reads the schema; spell the
   default behavior out rather than leaving it implicit.
@@ -88,26 +98,31 @@ What the conventions buy you here:
   `ActorCostRow` carries `kind_id: String` (a tagged string), not the wire
   `KindId` — the same id-as-string rule, now on the way out.
 
-## Step 2 — the `#[tool]` method (`tools/mod.rs`)
+## Step 2 — the registration and the body
 
-The method lives on `impl Mcp` inside the `#[tool_router]` block. The `#[tool]`
-attribute registers it and uses the `description` string plus the args struct's
-schema as the surface the agent sees; `Parameters(args)` unwraps the deserialized
-request.
+The registration lives on `impl Mcp` inside the `#[tool_router]` block in
+`tools/mod.rs`. The `#[tool]` attribute registers it and uses the `description`
+string plus the args struct's schema as the surface the agent sees;
+`Parameters(args)` unwraps the deserialized request, and the method delegates
+straight to its module:
 
 ```rust
 #[tool(
     description = "Dump one actor's per-handler execution-cost EWMA table. \
-                   Sends aether.cost.tail to the named mailbox and decodes \
+                   Sends aether.cost.tail to the addressed mailbox and decodes \
                    aether.cost.tail_result. MEASURE-ONLY ..."
 )]
-pub async fn actor_cost(
-    &self,
-    Parameters(args): Parameters<ActorCostArgs>,
-) -> Result<String, McpError> {
-    let engine = parse_engine_id(&args.engine_id)?;
-    let engine_id_str = args.engine_id.clone();
-    let mailbox_name = args.mailbox_name.clone();
+pub async fn actor_cost(&self, Parameters(args): Parameters<ActorCostArgs>) -> Result<String, McpError> {
+    guard_response_size("actor_cost", logs_cost::actor_cost(self, args).await)
+}
+```
+
+The body is a free function in `tools/logs_cost.rs`:
+
+```rust
+pub(super) async fn actor_cost(mcp: &Mcp, args: ActorCostArgs) -> Result<String, McpError> {
+    let (engine, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
+    let address = args.address.clone();
 
     // Parse the tagged id back into the wire newtype.
     let kind = match args.kind_id.as_deref() {
@@ -118,8 +133,8 @@ pub async fn actor_cost(
     // Build the typed request, resolve the recipient the agent named,
     // address it by id, and await the reply.
     let request = CostTail { kind };
-    let (mailbox_id, _) = self.resolve_engine_address(engine, &args.mailbox_name).await.map_err(internal)?;
-    let reply = self
+    let (mailbox_id, _) = mcp.resolve_engine_address(engine, &args.address).await.map_err(internal)?;
+    let reply = mcp
         .session
         .call_one(engine_envelope_by_id(engine, mailbox_id, &request))
         .await
@@ -129,14 +144,14 @@ pub async fn actor_cost(
     match CostTailResult::decode_from_bytes(&reply.payload) {
         Some(CostTailResult::Ok { rows }) => {
             let response = ActorCostResponse {
-                engine_id: engine_id_str,
-                mailbox_name,
+                engine_id,
+                address,
                 rows: rows.into_iter().map(/* CostRow -> ActorCostRow */).collect(),
             };
             json(&response)
         }
         Some(CostTailResult::Err { error }) => {
-            Err(internal_msg(&format!("actor_cost: {mailbox_name} — {error}")))
+            Err(internal_msg(&format!("actor_cost: {} — {error}", args.address)))
         }
         None => Err(internal_msg("undecodable CostTailResult")),
     }
@@ -145,19 +160,21 @@ pub async fn actor_cost(
 
 The skeleton every tool follows:
 
-1. **Parse the string ids up front** — `parse_engine_id`, `parse_kind_id`,
-   `parse_mailbox_id`. These return `McpError::invalid_params` on a malformed id, so
-   a bad id is rejected before any mail moves.
+1. **Resolve the engine and parse the string ids up front** —
+   `mcp.resolve_engine(args.engine_id.as_deref())` returns the wire id plus the
+   string to echo, and `parse_kind_id` / `parse_mailbox_id` return
+   `McpError::invalid_params` on a malformed id, so a bad id is rejected before
+   any mail moves.
 2. **Build the typed request kind, then resolve the recipient before you
-   address it.** A mailbox name the agent typed is often a rendered lineage
-   address — `aether.component/aether.embedded:web`, the form `load_component`
+   address it.** An address the agent typed is often a rendered lineage —
+   `aether.component/aether.embedded:web`, the form `load_component`
    hands back — which is a path of nodes rather than one name to hash.
-   `self.resolve_engine_address(engine, name)` takes whichever form arrives: a
+   `mcp.resolve_engine_address(engine, address)` takes whichever form arrives: a
    tagged `mbx-…` parses locally, and anything else goes to the engine's
    inventory cap, which folds the path and replies with the id plus its
    canonical rendering. Pass that id to `engine_envelope_by_id(engine,
    mailbox_id, &request)`, which stamps `K::ID` and encodes the payload;
-   `self.session.call_one(...)` relays it as a wire `Call` and awaits the
+   `mcp.session.call_one(...)` relays it as a wire `Call` and awaits the
    correlated reply. The by-name `engine_envelope(engine, name, &request)`
    hashes its name as a single segment, so it is for the fixed chassis-cap
    constants a tool writes itself (`INVENTORY_CAP`, `RENDER_CAP`,
@@ -169,7 +186,9 @@ The skeleton every tool follows:
    `tagged_id::encode` so the agent receives `knd-…` strings, not raw integers
    ([ADR-0064](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0064-type-tagged-opaque-ids-on-the-mcp-wire.md)).
 5. **`json(&response)`** serializes the struct to the string `rmcp` wraps as the
-   tool's text content.
+   tool's text content, and the registration wraps that in `guard_response_size`
+   so an oversized response spills to a host file instead of flooding the tool
+   channel.
 
 ## The conventions checklist
 
@@ -213,7 +232,8 @@ After the build, bring the harness up and call the tool against a real engine:
 ## Verify against current code
 
 This recipe names live symbols — `ActorCostArgs`, `Mcp::actor_cost`, `CostTail` /
-`CostTailResult`, `engine_envelope`, `parse_kind_id`, `tagged_id::encode`. Before
+`CostTailResult`, `resolve_engine`, `resolve_engine_address`, `engine_envelope`,
+`parse_kind_id`, `guard_response_size`, `tagged_id::encode`. Before
 following it, confirm they still exist in `crates/aether-mcp/src/args.rs` and
 `crates/aether-mcp/src/tools/`
 and `crates/aether-kinds/src/lib.rs`; if a name has moved, fix the recipe as part
