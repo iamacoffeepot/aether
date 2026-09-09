@@ -58,7 +58,7 @@ use super::transformation_has_subject;
 /// the drain — the same triple every other drain returns.
 pub(super) fn drain_and_dispatch_study(
     store: &mut dyn StoreBackend,
-    artifacts: Option<&mut ArtifactsCapabilityState>,
+    mut artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
     reader_enabled: bool,
     now_unix_millis: u64,
@@ -123,7 +123,7 @@ pub(super) fn drain_and_dispatch_study(
         payload.transformation.model = Some(dispatch_model(StageId::Study, &payload.profile, &model_override));
 
         let record = study_record(entry.sequence, payload);
-        match dispatch_and_record(executor, store, artifacts, &record, now_unix_millis) {
+        match dispatch_and_record(executor, store, artifacts.as_deref_mut(), &record, now_unix_millis) {
             Ok(Settled::Answered(handle)) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);

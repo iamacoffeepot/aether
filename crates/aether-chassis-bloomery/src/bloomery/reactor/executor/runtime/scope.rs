@@ -63,7 +63,7 @@ pub(super) fn scope_run_bloom() -> Digest {
 /// drain returns.
 pub(super) fn drain_and_dispatch_scope(
     store: &mut dyn StoreBackend,
-    artifacts: Option<&mut ArtifactsCapabilityState>,
+    mut artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
@@ -107,7 +107,7 @@ pub(super) fn drain_and_dispatch_scope(
             instruction_bundle: None,
             prompt_manifest: None,
         };
-        match dispatch_and_record(executor, store, artifacts, &record, now_unix_millis) {
+        match dispatch_and_record(executor, store, artifacts.as_deref_mut(), &record, now_unix_millis) {
             Ok(Settled::Answered(handle)) => {
                 // After the order is submitted, never before: the ledger row
                 // says "this run is in flight under this nonce", and a nonce

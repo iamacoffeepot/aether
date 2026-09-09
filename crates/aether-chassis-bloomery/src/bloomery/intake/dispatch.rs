@@ -316,7 +316,7 @@ pub fn dispatch_and_record(
                             tracing::warn!(
                                 target: "aether_chassis_bloomery::provenance",
                                 nonce = %record.nonce.0,
-                                %error,
+                                ?error,
                                 "assembled prompt manifest was not retained in the artifact store",
                             );
                         }

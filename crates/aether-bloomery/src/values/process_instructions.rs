@@ -23,7 +23,7 @@ pub const INSTRUCTION_MANIFEST_ENV: &str = "AETHER_BLOOMERY_INSTRUCTION_MANIFEST
 
 /// Content address of the file [`INSTRUCTION_MANIFEST_ENV`] names.
 ///
-/// The lane re-derives [`ModelProcessInstructions::address`] from the bytes it
+/// The lane re-derives [`ConfigKind::address`](super::ConfigKind::address) from the bytes it
 /// read and refuses a mismatch, so a substituted file cannot silently become
 /// process policy.
 pub const INSTRUCTION_MANIFEST_DIGEST_ENV: &str = "AETHER_BLOOMERY_INSTRUCTION_MANIFEST_DIGEST";

@@ -1984,7 +1984,7 @@ fn drain_and_dispatch_aggregate(
             ack_through = Some(entry.sequence);
             continue;
         }
-        match submit_aggregate_review(store, executor, payload, entry.sequence, now_unix_millis)? {
+        match submit_aggregate_review(store, artifacts.as_deref_mut(), executor, payload, entry.sequence, now_unix_millis)? {
             DispatchSubmit::Submitted(handle) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
@@ -2008,6 +2008,7 @@ fn drain_and_dispatch_aggregate(
 /// the ack-prefix / stop policy, matching [`submit_dispatch_entry`].
 fn submit_aggregate_review(
     store: &mut dyn StoreBackend,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
     payload: AggregateReviewPayload,
     sequence: u64,
@@ -2182,7 +2183,7 @@ fn drain_and_dispatch_aggregate_verify(
             instruction_bundle: None,
             prompt_manifest: None,
         };
-        match dispatch_and_record(executor, store, artifacts, &record, now_unix_millis) {
+        match dispatch_and_record(executor, store, artifacts.as_deref_mut(), &record, now_unix_millis) {
             Ok(Settled::Answered(handle)) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
@@ -2226,7 +2227,7 @@ fn drain_and_dispatch_aggregate_verify(
 /// base axis is the `base` the transformation checks out.
 fn drain_and_dispatch_base_verify(
     store: &mut dyn StoreBackend,
-    artifacts: Option<&mut ArtifactsCapabilityState>,
+    mut artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
@@ -2265,7 +2266,7 @@ fn drain_and_dispatch_base_verify(
             instruction_bundle: None,
             prompt_manifest: None,
         };
-        match dispatch_and_record(executor, store, artifacts, &record, now_unix_millis) {
+        match dispatch_and_record(executor, store, artifacts.as_deref_mut(), &record, now_unix_millis) {
             Ok(Settled::Answered(handle)) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
@@ -2485,7 +2486,7 @@ fn drain_and_redispatch(
             break;
         }
 
-        match dispatch_and_record(executor, store, artifacts, &record, now_unix_millis) {
+        match dispatch_and_record(executor, store, artifacts.as_deref_mut(), &record, now_unix_millis) {
             Ok(Settled::Answered(handle)) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);

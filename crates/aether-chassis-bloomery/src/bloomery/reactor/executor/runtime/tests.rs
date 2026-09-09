@@ -37,8 +37,7 @@ use super::strand::readopt_stranded_dispatches;
 use super::{
     BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState, GitCandidatePush,
     NameEvidenceClaims, Stores, TickClock, TrackedHandle, admitted_candidate_pushes, backoff_delay, candidate_push_at,
-    default_candidate_push, dispatch_origin, drain_and_cancel, drain_and_dispatch, drain_and_dispatch_aggregate,
-    drain_and_dispatch_aggregate_verify, drain_and_dispatch_scope, drain_and_redispatch, fold_drain_backoff, is_silent,
+    default_candidate_push, dispatch_origin, drain_and_cancel, fold_drain_backoff, is_silent,
     is_stale, journal_publications, next_backoff, observe_heartbeat, seed_dispatches, seed_tracked,
     select_stale_handles, silence_from, timeout_verdict,
 };
@@ -62,6 +61,46 @@ use crate::store::{
     StoreBackend,
 };
 use aether_bloomery_github::{LandingSource, candidate_ref_name, member_checkpoint_ref_name};
+
+fn drain_and_dispatch(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    now_unix_millis: u64,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    super::drain_and_dispatch(store, None, executor, now_unix_millis)
+}
+
+fn drain_and_dispatch_aggregate(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    now_unix_millis: u64,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    super::drain_and_dispatch_aggregate(store, None, executor, now_unix_millis)
+}
+
+fn drain_and_dispatch_aggregate_verify(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    now_unix_millis: u64,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    super::drain_and_dispatch_aggregate_verify(store, None, executor, now_unix_millis)
+}
+
+fn drain_and_dispatch_scope(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    now_unix_millis: u64,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    super::drain_and_dispatch_scope(store, None, executor, now_unix_millis)
+}
+
+fn drain_and_redispatch(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    now_unix_millis: u64,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    super::drain_and_redispatch(store, None, executor, now_unix_millis)
+}
 
 // A capturing executor backend: it records every submitted `WorkOrder` so a test
 // can assert exactly what `drain_and_dispatch` built — the advisory description it
