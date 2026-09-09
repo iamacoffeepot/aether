@@ -292,6 +292,15 @@ fn bloom_lines(view: &ViewDocument, store: &Store, id: DigestHex) -> Vec<Line> {
     }
     push_alert_section(&mut lines, bloom);
     if let Some(composition) = &bloom.composition {
+        // The composition frame is a tree-walk child of its bloom, not only a
+        // needs-you jump: without this row the drill-down dead-ends at labels.
+        lines.push(Line {
+            key: RowKey::Other(12),
+            text: format!("composition  {}  {}", bloom.id.prefix(), bloom.id.as_hex()),
+            enter: Some(Nav::focus(Focus::composition(bloom.id))),
+            digest: None,
+            openable: false,
+        });
         push_composition_section(&mut lines, composition);
     }
     lines.extend(lease_lines(bloom));
@@ -575,9 +584,10 @@ fn reference_line(key: RowKey, title: &str, digest: DigestHex) -> Line {
 
 #[cfg(test)]
 mod tests {
-    use super::Detail;
+    use super::{Detail, RowKey};
     use crate::dto::{
-        BloomView, CandidateRef, CompositionCursorView, DigestHex, MemberView, ReviewParkView, ViewDocument,
+        BloomView, CandidateRef, CompositionCursorView, CompositionView, DigestHex, MemberView, ReviewParkView,
+        StageId, ViewDocument,
     };
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
@@ -667,6 +677,41 @@ mod tests {
         let (mut detail, store) = detail_over(Focus::bloom(digest(1)), view);
         walk_to_digest(&mut detail, &store, question);
         assert_eq!(detail.openable_digest(), Some(question));
+    }
+
+    #[test]
+    fn a_bloom_detail_walks_to_its_composition() {
+        // The plausible bug: the composition frame is a needs-you-only jump,
+        // so tree-walking from the bloom dead-ends at unselectable labels and
+        // the drill-down is two trees depending on where the operator starts.
+        let bloom = digest(1);
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: bloom,
+                composition: Some(CompositionView {
+                    cursor: Some(CompositionCursorView {
+                        stage: Some(StageId::Construct),
+                        attempts: 2,
+                        candidate: None,
+                    }),
+                    ..CompositionView::default()
+                }),
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        let (mut detail, store) = detail_over(Focus::bloom(bloom), view);
+        for _ in 0..32 {
+            if detail.selected_key() == Some(&RowKey::Other(12)) {
+                break;
+            }
+            assert_eq!(detail.handle_key(KeyEvent::from(KeyCode::Char('j')), &store), Outcome::Handled);
+        }
+        assert_eq!(detail.selected_key(), Some(&RowKey::Other(12)));
+        assert_eq!(
+            detail.handle_key(KeyEvent::from(KeyCode::Enter), &store),
+            Outcome::Push(Nav::focus(Focus::composition(bloom)))
+        );
     }
 
     #[test]
