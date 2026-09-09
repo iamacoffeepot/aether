@@ -56,7 +56,13 @@ jobs:
       # resolves the same file). `rust-toolchain.toml` declares the components.
       - run: rustup toolchain install
       - name: Install ALSA dev headers (cpal Linux backend)
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        # Third-party apt sources baked into the runner image (Google Chrome and
+        # friends) are dropped before the update: nothing here installs from them,
+        # and a stale index on one of their CDNs fails the whole update with a
+        # Hash Sum mismatch (2026-09-09). Only Ubuntu's own sources are consulted.
+        run: |
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu*' -delete
+          sudo apt-get update && sudo apt-get install -y libasound2-dev
       - id: transform
         continue-on-error: true
         run: cargo xtask transform ${{ inputs.command }} --out evidence --nonce ${{ inputs.nonce }}
