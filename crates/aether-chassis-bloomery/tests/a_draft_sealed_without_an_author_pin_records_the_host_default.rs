@@ -12,10 +12,12 @@
 
 use aether_bloomery::{
     ApprovalPolicy, ConfigKind, ConfigRegistry, Digest, Event, Fact, FakeKeyProvider, ModelProcessInstructions,
-    Observation, PIPELINE_MANIFEST_PATH, Provenance, Statement, Tier, decode_recorded_event,
+    Observation, PIPELINE_MANIFEST_PATH, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Statement,
+    Tier, WorkpieceId, decode_recorded_event,
 };
 use aether_chassis_bloomery::bloomery::reference_instructions;
-use aether_chassis_bloomery::store::{CommissionBackend, StoreBackend};
+use aether_chassis_bloomery::commission::task_text;
+use aether_chassis_bloomery::store::{CommissionBackend, RevisionEvidence, StoreBackend};
 use aether_data::Kind;
 use aether_harness_bloomery::{HarnessBuilder, Repo, ScenarioHarness, member};
 use serde_json::Value;
@@ -33,11 +35,7 @@ fn a_draft_sealed_without_an_author_pin_records_the_host_default() {
     let mut harness = HarnessBuilder::local_authority(&authority).start("seal-default-instruction-pin");
 
     let expected = reference_instructions().address();
-    let revision = harness.author_scope_revision(WORKPIECE, &["docs/guide/**"]);
-    harness
-        .commission_store()
-        .insert_approval(&auto_approval(revision), &FakeKeyProvider)
-        .expect("the auto-tier approval stores");
+    let revision = seed_complete_revision(&harness, WORKPIECE, &["docs/guide/**"]);
 
     let policy = ApprovalPolicy { default: Tier::Auto, rules: Vec::new() };
     let (status, stored) =
@@ -70,6 +68,37 @@ fn a_draft_sealed_without_an_author_pin_records_the_host_default() {
 
     let pin = sealed_instruction_pin(&mut harness);
     assert_eq!(pin, expected, "the sealed bloom records the host's unique authorized bundle");
+}
+
+fn seed_complete_revision(harness: &ScenarioHarness, workpiece: &str, surface: &[&str]) -> Digest {
+    let mut store = harness.commission_store();
+    let workpiece = WorkpieceId(workpiece.to_owned());
+    let intent = Statement {
+        words: format!("scope {}", workpiece.0).into_bytes(),
+        provenance: Provenance::ObservationAttestation(Observation { source: "scenario".to_owned() }),
+        parents: Vec::new(),
+    };
+    store.create(&workpiece, &intent).expect("the commission is created");
+    let revision = ScopeRevision {
+        schema: SCOPE_REVISION_SCHEMA,
+        workpiece,
+        predecessor: None,
+        problem: "the harness authored this scope".to_owned(),
+        design: "design notes so the gate's completeness check admits".to_owned(),
+        plan: "plan so the gate's completeness check admits".to_owned(),
+        declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
+        dogfood_brief: "dogfood".to_owned(),
+        routing: ScopeRouting { size: "S".to_owned(), model: String::new() },
+        dependencies: Vec::new(),
+        description: String::new(),
+        implements: Vec::new(),
+        declared_crates: Vec::new(),
+        declared_reads: Vec::new(),
+    };
+    let revision = ScopeRevision { description: task_text(&revision), ..revision };
+    let digest = store.write_revision(&revision, &RevisionEvidence::default()).expect("the complete revision writes");
+    store.insert_approval(&auto_approval(digest), &FakeKeyProvider).expect("the auto-tier approval stores");
+    digest
 }
 
 fn auto_approval(scope: Digest) -> Statement {
