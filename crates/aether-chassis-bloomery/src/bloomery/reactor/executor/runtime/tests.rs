@@ -16,9 +16,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use aether_bloomery::testing::digest;
 use aether_bloomery::{
-    Admit, AgentSelection, AggregateReviewPayload, BloomId, CandidateRef, Conclusion, ConfigKind, ConfigRegistry,
-    Digest, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, LaneObservation,
-    ModelOverride, Nonce, Observation, Provenance, ReasoningEffort, RedispatchPayload, ReviewPass,
+    Admit, AgentSelection, AggregateReviewPayload, AggregateVerifyPayload, BloomId, CandidateRef, Conclusion,
+    ConfigKind, ConfigRegistry, Digest, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness,
+    LaneObservation, ModelOverride, Nonce, Observation, Provenance, ReasoningEffort, RedispatchPayload, ReviewPass,
     SharedCorrespondence, StageCatalog, StageId, StageOverride, Statement, TimeoutRecord, Topic, Transformation,
     VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
     split_lane_identity,
@@ -38,9 +38,9 @@ use super::{
     BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState, GitCandidatePush,
     NameEvidenceClaims, Stores, TickClock, TrackedHandle, admitted_candidate_pushes, backoff_delay, candidate_push_at,
     default_candidate_push, dispatch_origin, drain_and_cancel, drain_and_dispatch, drain_and_dispatch_aggregate,
-    drain_and_dispatch_scope, drain_and_redispatch, fold_drain_backoff, is_silent, is_stale, journal_publications,
-    next_backoff, observe_heartbeat, seed_dispatches, seed_tracked, select_stale_handles, silence_from,
-    timeout_verdict,
+    drain_and_dispatch_aggregate_verify, drain_and_dispatch_scope, drain_and_redispatch, fold_drain_backoff, is_silent,
+    is_stale, journal_publications, next_backoff, observe_heartbeat, seed_dispatches, seed_tracked,
+    select_stale_handles, silence_from, timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -332,6 +332,25 @@ fn enqueue_aggregate_review(store: &mut SqliteStore, bloom: BloomId, workpiece: 
     };
     store.claim_seal(payload.bloom.as_bytes(), &[workpiece.to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap()
+}
+
+// Enqueue one bloom-level aggregate-verify dispatch. Same seal as the review
+// helper: a queued verify belongs to a live bloom, and the drain reads that
+// membership to tell a live plan from a retired one. The empty workpiece is
+// the bloom-level order's "no member axis" (see the review drain test).
+fn enqueue_aggregate_verify(store: &mut SqliteStore, bloom: BloomId, workpiece: &str, subject: u8) -> u64 {
+    let payload = AggregateVerifyPayload {
+        bloom: bloom.0,
+        profile: StageCatalog::profile_of(StageId::AggregateVerify),
+        transformation: Transformation::for_aggregate_verify(
+            &StageCatalog::binding_of(StageId::AggregateVerify),
+            digest(subject),
+            digest(subject),
+            digest(subject),
+        ),
+    };
+    store.claim_seal(payload.bloom.as_bytes(), &[workpiece.to_owned()]).unwrap();
+    store.enqueue_topic(Topic::AggregateVerify, &to_vec(&payload).unwrap(), None).unwrap()
 }
 
 // ADR-0153 — the aggregate-review topic drains into a bloom-level order: the
@@ -3822,7 +3841,8 @@ mod offloaded_adapter_calls {
     use super::super::offload::{AdapterOffload, MAX_IN_FLIGHT};
     use super::{
         CandidatePush, CapturingBackend, NOW_UNIX_MILLIS, NameEvidenceClaims, RecordingPush, Stores, drain_and_cancel,
-        drain_and_dispatch, enqueue_construct_dispatch, pull_and_admit, tick_clock_at, track,
+        drain_and_dispatch, drain_and_dispatch_aggregate_verify, enqueue_aggregate_verify, enqueue_construct_dispatch,
+        pull_and_admit, tick_clock_at, track,
     };
     use crate::bloomery::outbox::TopicOutbox;
     use crate::bloomery::{ExecutorPort, ExecutorPortError, ExecutorShell, Settled};
@@ -4303,6 +4323,94 @@ mod offloaded_adapter_calls {
         );
         assert_eq!(ack_through, Some(parked_sequence), "the outbox entry is acked once cancel answers");
         assert!(handles.is_empty(), "no handle remains tracked for a withdrawn member's submit");
+    }
+
+    /// The same settle-before-retire rule on the aggregate-verify drain: a
+    /// bloom withdrawn while that drain's submit is parked must cancel the
+    /// run once submit answers. Pre-fix the drain saw `bloom_still_live`
+    /// false, acked past the unacked entry, and never re-asked submit — the
+    /// handle sat in the offload, the `submitting` row was never consumed,
+    /// and the lane kept running. The first assertion that fails on that
+    /// head is `cancelled` naming the nonce.
+    #[test]
+    fn a_withdrawal_of_a_parked_aggregate_verify_submit_cancels_the_run_once_it_answers() {
+        let mut store = SqliteStore::open(":memory:").unwrap();
+        let bloom = BloomId(digest(1));
+        let parked_sequence = enqueue_aggregate_verify(&mut store, bloom, "wp-keep", 6);
+        let parked_nonce = format!("dispatch-{parked_sequence}");
+
+        let backend = Arc::new(LatchedSubmit::default());
+        let shell = ExecutorShell::new(Arc::clone(&backend));
+        let pusher: Arc<dyn CandidatePush> = Arc::new(RecordingPush::default());
+        let binding = binding();
+        let mut offload = AdapterOffload::new();
+
+        offload.open_round();
+        {
+            let port = offload.port(&shell);
+            let (handles, ack_through, _) =
+                drain_and_dispatch_aggregate_verify(&mut store, &port, NOW_UNIX_MILLIS).unwrap();
+            assert!(handles.is_empty(), "a submit a worker holds returns no handle");
+            assert!(ack_through.is_none(), "the outbox entry stays unacked while submit is in flight");
+            assert_eq!(
+                store.lookup_order(&parked_nonce).unwrap().expect("the reservation is addressable").lifecycle,
+                OrderLifecycle::Submitting,
+            );
+        }
+        offload.start_wanted(&mut NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE), &shell, &pusher);
+
+        store
+            .commit(
+                &JournalWrite {
+                    idempotency_key: "withdraw-aggregate-verify",
+                    event: b"withdraw",
+                    decisions: b"released",
+                    decider: "test-build",
+                },
+                &[MembershipMutation { workpiece: "wp-keep".to_owned(), bloom: bloom.0.as_bytes().to_vec() }],
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        backend.open();
+        let release = Instant::now() + Duration::from_secs(5);
+        while backend.submitted() == 0 && Instant::now() < release {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(backend.submitted(), 1, "releasing the park runs submit once");
+
+        let mut handles = Vec::new();
+        let mut ack_through = None;
+        let budget = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < budget {
+            offload.open_round();
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            {
+                let port = offload.port(&shell);
+                let (new_handles, new_ack, _) =
+                    drain_and_dispatch_aggregate_verify(&mut store, &port, NOW_UNIX_MILLIS).unwrap();
+                handles = new_handles;
+                ack_through = new_ack;
+            }
+            offload.start_wanted(&mut ctx, &shell, &pusher);
+            if backend.cancelled().contains(&parked_nonce) && store.lookup_order(&parked_nonce).unwrap().is_none() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            backend.cancelled().contains(&parked_nonce),
+            "the answered submit must be cancelled once the bloom has left, got {:?}",
+            backend.cancelled(),
+        );
+        assert!(
+            store.lookup_order(&parked_nonce).unwrap().is_none(),
+            "the submitting row is consumed, not left outstanding"
+        );
+        assert_eq!(ack_through, Some(parked_sequence), "the outbox entry is acked once cancel answers");
+        assert!(handles.is_empty(), "no handle remains tracked for a withdrawn bloom's aggregate verify");
     }
 
     /// A `submitting` row with no live worker after a restart is re-driven from
