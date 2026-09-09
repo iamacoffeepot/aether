@@ -84,6 +84,12 @@ mod config;
 mod shard;
 
 pub use config::HttpServerConfig;
+// The shard identity is always-on like the supervisor's (ADR-0122), so it is
+// reachable like one — `aether-tcp`'s `TcpListenerActor` and `aether-fleet`'s
+// `FleetProxy` export their per-cap child identity the same way. Nothing
+// addresses a shard by name; what the export carries is the type, so a
+// marker-only build has a reachable identity rather than a dead one.
+pub use shard::HttpDispatchShard;
 // The `Config` derive on `HttpServerConfig` emits these native-only sibling
 // types in `config`; chassis CLI / boot wiring addresses them through the
 // `server::` path, so re-export them here.
