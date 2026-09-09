@@ -123,13 +123,17 @@ Study = { agent = { harness = "Claude", model = "claude-opus-5" } }
 
 # Grok writes, Sonnet judges. The calibrated assignment: grok-4.6 High on
 # Construct/Refine/Reconcile, claude-sonnet-5 High on the two review seats.
+# The reader sits on Opus, as ADR-0216 calibrated it (owner decision
+# 2026-09-09): its whole job is judgment over a landed batch, and a weak
+# reader fills the backlog with noise that costs more to triage than the
+# seat's premium on one lane per landing.
 [model_overrides.grok-build-sonnet-judge.per_stage]
 Construct = { agent = { harness = "Grok", model = "grok-4.6" }, reasoning_effort = "High" }
 Refine = { agent = { harness = "Grok", model = "grok-4.6" }, reasoning_effort = "High" }
 Reconcile = { agent = { harness = "Grok", model = "grok-4.6" }, reasoning_effort = "High" }
 Review = { agent = { harness = "Claude", model = "claude-sonnet-5" }, reasoning_effort = "High" }
 AggregateReview = { agent = { harness = "Claude", model = "claude-sonnet-5" }, reasoning_effort = "High" }
-Study = { agent = { harness = "Claude", model = "claude-sonnet-5" }, reasoning_effort = "High" }
+Study = { agent = { harness = "Claude", model = "claude-opus-5" }, reasoning_effort = "High" }
 
 [forecasts.none]
 predicted_tokens = 0
