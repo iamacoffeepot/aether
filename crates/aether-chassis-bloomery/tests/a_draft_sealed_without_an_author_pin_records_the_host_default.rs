@@ -88,7 +88,7 @@ fn seed_complete_revision(harness: &ScenarioHarness, workpiece: &str, surface: &
         plan: "plan so the gate's completeness check admits".to_owned(),
         declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
         dogfood_brief: "dogfood".to_owned(),
-        routing: ScopeRouting { size: "S".to_owned(), model: String::new() },
+        routing: ScopeRouting { size: "S".to_owned(), model: "construct: test".to_owned() },
         dependencies: Vec::new(),
         description: String::new(),
         implements: Vec::new(),
