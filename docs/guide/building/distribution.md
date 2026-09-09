@@ -6,8 +6,9 @@ Aether has two packaging commands with different consumers:
 - `cargo xtask package` emits a shippable package depot: one chassis binary
   plus a content-addressed pack of components.
 
-Neither command is the same as merging a PR, tagging a version, or publishing a
-GitHub Release.
+Neither command is the same as merging a PR. Tagging a version is what
+publishes a GitHub Release, and it does so by running `cargo xtask package` on
+each platform — see [Cutting a release](#cutting-a-release).
 
 ## Distribution tree
 
@@ -53,10 +54,12 @@ cargo xtask bins --json    # the same, plus the depot filename per `--chassis`
 
 `file` is the host-platform filename, so a Windows runner is told
 `aether-desktop.exe`. The `--json` form adds `package_chassis`, keyed by the
-values `cargo xtask package --chassis` accepts, which is how
-`.github/workflows/release.yml` finds the executable it renames for hand-out.
-Prefer this over hardcoding a binary name: that workflow is manually triggered,
-so nothing in CI catches a name that has gone stale.
+values `cargo xtask package --chassis` accepts. `.github/workflows/release.yml`
+reads both: `package_chassis.desktop` tells it which binary the depot already
+carries, and each remaining `chassis_bins` entry is a binary it builds and
+ships as its own archive. Prefer this over hardcoding a binary name — no pull
+request runs that workflow, so nothing in CI catches a name that has gone
+stale.
 
 ## Package depot
 
@@ -91,8 +94,8 @@ For a real product, name the chassis and the components:
 cargo xtask package \
   --profile release \
   --chassis desktop \
-  --components aether-kit-commons \
-  --title loco-motion
+  --components aether-puppet \
+  --title aether
 ```
 
 `--chassis` selects `desktop` or `headless`. Component order is autoload order.
@@ -142,14 +145,14 @@ Keep these operations distinct:
 - **land**: merge an approved PR through the repository workflow;
 - **dist**: produce the development/test artifact tree;
 - **package**: produce a shippable package depot;
-- **release workflow**: the checked-in manual workflow currently builds a
-  Windows `loco-motion` package artifact — a zip of the depot;
 - **bump**: move the workspace version and re-lock — see below;
-- **version/tag/publication policy**: only the bump is specified today.
+- **release**: push the version tag, which packages every platform and
+  publishes the archives on that tag's GitHub Release — see
+  [Cutting a release](#cutting-a-release).
 
 ADR-0092 proposes a release-branch workflow but remains Proposed; it is not
 current repository policy. Contributor lifecycle skills do not publish a
-software release.
+software release — the tag push does.
 
 ## Bumping the workspace version
 
@@ -185,8 +188,59 @@ The cut is four steps:
    accumulated while nothing re-locked it.
 3. **Land the bump as its own PR** (`chore(release): …`) through the ordinary
    flow. Nothing else rides that PR, so the version move is one commit.
-4. **Tag the merged commit** and run the `Release` workflow against it for the
-   hand-out artifact.
+4. **Tag the merged commit and push the tag**, which publishes the release —
+   see below.
+
+## Cutting a release
+
+`.github/workflows/release.yml` turns a version tag into a published GitHub
+Release. It triggers on a push of a bare-semver tag; the repository's tags
+carry no `v` prefix (`0.1.0-alpha`, `0.3.0-alpha`), so once the bump above and
+the version's `CHANGELOG.md` section are on `main` the cut is:
+
+```sh
+git tag -a 0.4.0-alpha -m "…"
+git push origin 0.4.0-alpha
+```
+
+Each platform builds a package depot from the checked-in
+`demo/puppet-turntable.json` spec plus one archive per remaining chassis
+binary, and every archive is attached to the release:
+
+| Platform | Depot | Chassis binaries |
+| --- | --- | --- |
+| `linux-x86_64` | `aether-<version>-linux-x86_64.tar.gz` | `aether-headless-…`, `aether-hub-…`.tar.gz |
+| `macos-arm64` | `aether-<version>-macos-arm64.tar.gz` | `aether-headless-…`, `aether-hub-…`.tar.gz |
+| `windows-x86_64` | `aether-<version>-windows-x86_64.zip` | `aether-headless-…`, `aether-hub-…`.zip |
+
+Every name carries `<version>-<platform>`, and the platform half is read from
+the toolchain's own host triple, so it follows a runner image that changes
+architecture rather than asserting a stale one. Each archive unpacks to a
+single directory of that same name.
+
+The depot archive holds what the spec says: the chassis binary it names, the
+components it selects, and both workspace license files. The spec owns that
+list, which is why the other chassis binaries are their own archives rather
+than extra files inside a depot they are not part of — each ships with the
+same two license files, since a statically linked binary is redistributed
+with its notices. The set of those binaries comes from
+`cargo xtask bins --json`, so a chassis added to the inventory ships from the
+next tag with no workflow edit.
+
+The release is marked a pre-release whenever the version carries a
+pre-release suffix, which every tag cut so far does (`-alpha`). Its body is
+[`CHANGELOG.md`](https://github.com/iamacoffeepot/aether/blob/main/CHANGELOG.md)'s
+section for that version, and the tag's own message when the changelog carries
+no such section. The heading is matched on its first word, so
+`## 0.4.0-alpha (unreleased)` resolves the same as `## 0.4.0-alpha`, and only
+a `## ` heading ends a section — the `###` subheadings inside one stay part of
+it. So the changelog section is written before the tag, not after: what it
+says at the tagged commit is what the release page shows.
+
+Running the workflow from the Actions tab (`workflow_dispatch`) is the dry
+run: the identical build, archives named from the current workspace version
+and uploaded as workflow artifacts, and no release created. Reach for it to
+exercise a change to the workflow before a tag depends on it.
 
 ## Verification and cleanup
 

@@ -203,9 +203,11 @@ and `Lint title` are required status checks, and required pull-request reviews
 are not configured.
 
 The checked-in [Release workflow](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/release.yml)
-currently builds a manually dispatched Windows `loco-motion` package artifact.
-Do not infer an undocumented tag, version, or release-branch procedure from
-that workflow name.
+builds a package depot per platform on a bare-semver tag push and publishes
+the archives on that tag's GitHub Release; `workflow_dispatch` runs the same
+build as an artifact-only dry run. That is the whole of the procedure — do not
+infer a release-branch or version-policy step beyond
+[Cutting a release](../building/distribution.md#cutting-a-release).
 
 ## Verification checklist
 
