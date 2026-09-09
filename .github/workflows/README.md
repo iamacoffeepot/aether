@@ -28,6 +28,20 @@ each file opens with one.
 | `fuzz-nightly.yml` | 06:17 | Coverage-guided fuzz of the codec / wire targets |
 | `desktop-nightly.yml` | 07:37 | Chassis tests on the macOS / Windows matrix |
 
+**Security scans** — advisory, never a required check; results land in the
+repository's code-scanning tab rather than on a pull request:
+
+| Workflow | Fires on | Purpose |
+| --- | --- | --- |
+| `codeql.yml` | push to `main`, Mon 03:27 UTC | CodeQL `security-and-quality` over rust / actions / javascript-typescript / python |
+
+Deliberately not on `pull_request`: `ci.yml` is the merge gate, this scan gates
+nothing, and source-based Rust extraction over the workspace is slow enough to
+be a real per-pull-request cost. A finding a pull request introduces surfaces on
+the landing commit instead. The scan is also what *closes* alerts — an alert
+whose code is gone stays open until an analysis of the same category runs again
+and doesn't find it, so a period with no scheduled scan freezes the tab.
+
 **On demand:**
 
 | Workflow | Purpose |
@@ -83,5 +97,6 @@ invokes it.
    reading the Actions tab. `alert` issues are machine-filed tickets;
    `issue-labels.yml` exempts them from the title lint.
 8. **Cron offsets are unique.** Scheduled workflows spread their minute
-   fields (`:17`, `:37`, …) so nothing piles onto the same tick; the table
-   above is the registry — check it before adding a schedule.
+   fields (`:17`, `:37`, …) so nothing piles onto the same tick; the nightly
+   and security-scan tables above are the registry — check them before
+   adding a schedule.
