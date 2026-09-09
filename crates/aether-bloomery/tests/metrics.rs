@@ -214,7 +214,7 @@ fn a_refold_from_the_same_journal_is_byte_identical_and_the_cursor_resumes() {
     assert_eq!(encoded_rows(&resumed, live.bloom), first, "resuming from the cursor matches a full fold");
 }
 
-/// The plausible bug: AggregateReview (and AggregateVerify) fold as an empty
+/// The plausible bug: `AggregateReview` (and `AggregateVerify`) fold as an empty
 /// bloom-level workpiece, so the timeline paints a second tail beside the
 /// composition cursor for the same integration subject.
 #[test]
