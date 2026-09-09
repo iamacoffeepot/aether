@@ -40,6 +40,8 @@ fn record(configs: ConfigRegistry) -> DispatchRecord {
         },
         configs,
         profile: StageCatalog::profile_of(StageId::Construct),
+        instruction_bundle: None,
+        prompt_manifest: None,
     }
 }
 
@@ -135,7 +137,7 @@ fn an_authorized_bundle_admits_with_the_task_as_context() {
     let bundle = reference_instructions();
     let registry = authorize_instructions(&mut store, &bundle);
 
-    let manifest = admit_model_dispatch(&mut store, &record(registry)).expect("an authorized bundle admits");
+    let manifest = admit_model_dispatch(&mut store, &record(registry)).expect("an authorized bundle admits").manifest;
     let instructions: Vec<_> = manifest.slots.iter().filter(|slot| slot.role == SlotRole::Instruction).collect();
 
     assert_eq!(instructions.len(), 1, "one instruction slot: the process policy");
@@ -159,6 +161,8 @@ fn scope_record(configs: ConfigRegistry) -> DispatchRecord {
         transformation: Transformation::for_scoping_run(&StageCatalog::binding_of(StageId::Scope), subject, digest(3)),
         configs,
         profile: StageCatalog::profile_of(StageId::Scope),
+        instruction_bundle: None,
+        prompt_manifest: None,
     }
 }
 
@@ -172,7 +176,8 @@ fn a_scope_fill_record_admits_the_run_pin_as_the_sole_instruction_slot() {
     let bundle = reference_instructions();
     let registry = authorize_instructions(&mut store, &bundle);
 
-    let manifest = admit_model_dispatch(&mut store, &scope_record(registry)).expect("a pinned scoping run admits");
+    let manifest =
+        admit_model_dispatch(&mut store, &scope_record(registry)).expect("a pinned scoping run admits").manifest;
     let instructions: Vec<_> = manifest.slots.iter().filter(|slot| slot.role == SlotRole::Instruction).collect();
 
     assert_eq!(instructions.len(), 1, "one instruction slot: the process policy");

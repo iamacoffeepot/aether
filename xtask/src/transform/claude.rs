@@ -6,8 +6,9 @@ use std::fs;
 
 use anyhow::{Context, Result, bail};
 
-use aether_bloomery::{SCOPE_FILL_COMMAND, split_lane_identity};
+use aether_bloomery::{ModelProcessInstructions, SCOPE_FILL_COMMAND, split_lane_identity};
 
+use crate::transform::TransformArgs;
 use crate::transform::lane::{
     Resumed, execute, export_build_dir, resume_handle_rejected, resumed_prompt, without_resume,
 };
@@ -17,7 +18,6 @@ use crate::transform::review::REVIEW_CRITIC;
 use crate::transform::review_mcp;
 use crate::transform::sccache::{self, CompilerCache};
 use crate::transform::scratch::Scratch;
-use crate::transform::{TransformArgs, conventions};
 
 /// The harness's runner-facing name, for the binary and for error text.
 const CLAUDE: &str = "claude";
@@ -98,70 +98,40 @@ fn claude_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str>, 
     argv
 }
 
-/// Assemble the headless-Claude prompt for the construct lane from the lane-owned
-/// `instructions`, the curated lane context, the checked-out `subject`, and the
-/// work-order `task` — pure so the assembly is testable without spawning Claude
-/// (#3572). The subject header names the exact sealed tree the worker is on; the
-/// `## Task` section carries the operator's work-order description (#3595) so
-/// the model is told *what* to build, not just *where*.
-///
-/// `seeded` names the construct checkpoint this dispatch resumes from (#4994).
-/// Present only when the reducer seeded the checkout from a dead attempt's
-/// partial capture; the prompt then names that commit and its trust-but-verify
-/// posture. `None` is a cold start from the sealed (or spliced) base, and the
-/// prompt says nothing about a checkpoint the worker does not have. The section
-/// sits after the work order so a cold sibling still shares the cached prefix
-/// through the stable bulk (#4985).
+/// Assemble the headless-Claude prompt from the authorized instruction bundle,
+/// the checked-out `subject`, and the work-order `task` — pure so the assembly
+/// is testable without spawning Claude (#3572). Instruction text is the bundle's
+/// bytes unchanged (ADR-0214); commit hex, task body, and checkpoint identity
+/// ride as context sections, never interpolated into process policy.
 ///
 /// Prompt caching is prefix-exact (#4985). The shared bulk leads — conventions
-/// first (the same curated lane context every lane of a bloom inlines, #5141),
-/// then the lane instructions, subject, and work-order body — and anything that
-/// varies per lane (a leading `Workpiece:` identity header, #4984) sits in a
-/// trailing `## Lane` section. Sibling lanes then share the cached prefix; each
-/// writes only the tail. A `None` task appends none (the fail-legible path for a
-/// member with no persisted description). The conventions section is never
-/// optional: a missing `lane_context.md` is a compile error, not a silent omit.
+/// first, then the lane instructions, subject, and work-order body — and anything
+/// that varies per lane (a leading `Workpiece:` identity header, #4984) sits in a
+/// trailing `## Lane` section.
 pub(super) fn assemble_construct_prompt(
+    bundle: &ModelProcessInstructions,
     instructions: &str,
     subject: Option<&str>,
     task: Option<&str>,
     seeded: Option<&str>,
 ) -> String {
-    let subject_line = subject.map_or_else(
-        || "You are working in the checked-out subject tree — the sealed source this work order named.".to_owned(),
-        |subject| {
-            format!(
-                "You are working in the checked-out subject tree at commit `{subject}` — \
-                 the exact sealed source this work order named.",
-            )
-        },
+    let subject_body = subject.map_or_else(
+        || bundle.subject_unspecified.clone(),
+        |commit| format!("{}\n\n## Subject commit\n\n`{commit}`", bundle.subject_at_commit),
     );
-    let conventions_section = format!("{}\n\n", conventions::section());
     let (task_body, lane_identity) = task.map_or(("", None), split_lane_identity);
     let task_section = if task_body.is_empty() {
         String::new()
     } else {
         format!("\n## Task\n\n{task_body}\n")
     };
-    let seeded_section = seeded.map_or_else(String::new, seeded_state_section);
+    let seeded_section = seeded.map_or_else(String::new, |commit| {
+        format!("\n## Seeded state\n\n{}\n\n## Seeded checkpoint\n\n`{commit}`\n", bundle.seeded_state)
+    });
     let lane_section = lane_identity.map_or_else(String::new, |id| format!("\n## Lane\n\n{id}\n"));
     format!(
-        "{conventions_section}{instructions}\n\n## Subject\n\n{subject_line}\n{task_section}{seeded_section}{lane_section}"
-    )
-}
-
-/// The trailing `## Seeded state` section: present only when this dispatch
-/// resumes from a construct checkpoint (#4994). Names the commit and the
-/// trust-but-verify posture a partial tree demands.
-fn seeded_state_section(commit: &str) -> String {
-    format!(
-        "\n## Seeded state\n\n\
-         This dispatch resumes from checkpoint `{commit}`. A prior attempt on this workpiece died \
-         mid-stage and left that partial tree as your starting point rather than the clean sealed \
-         base. The tree is untrusted: it can be mid-refactor garbage that does not compile. Verify \
-         what is there before building on it, and discard it if it is not a foundation. A lane that \
-         silently inherits a broken tree and assumes it is the base produces a worse candidate than \
-         one that started cold.\n"
+        "{}\n\n{instructions}\n\n## Subject\n\n{subject_body}\n{task_section}{seeded_section}{lane_section}",
+        bundle.conventions
     )
 }
 

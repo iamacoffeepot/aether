@@ -279,6 +279,7 @@ impl TransformRunner for ProcessTransformRunner {
         let mut lane = self.lane_override.as_ref().unwrap_or(&spec.entrypoint).command();
         construct_lane_env(&mut lane, inherited_env());
         export_build_env(&mut lane, spec);
+        export_instruction_manifest(&mut lane, spec).map_err(LocalExecutorError::Io)?;
         lane.current_dir(spec.worktree_dir);
         // Command, `--out`, `--nonce`, and the optional `--diff-base` /
         // `--seeded` / model-lane flags. A Construct checkpoint is
@@ -460,6 +461,24 @@ fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) 
         }
     }
     Ok(args)
+}
+
+/// Write the authorized instruction-bundle bytes to the evidence directory
+/// (outside the checkout) and name the file plus its content address in
+/// [`aether_bloomery::INSTRUCTION_MANIFEST_ENV`] /
+/// [`aether_bloomery::INSTRUCTION_MANIFEST_DIGEST_ENV`]. A mechanical lane
+/// carrying no bundle is a no-op.
+fn export_instruction_manifest(lane: &mut Command, spec: &RunSpec<'_>) -> io::Result<()> {
+    let Some(bytes) = spec.instruction_bundle else {
+        return Ok(());
+    };
+    let path = spec.evidence_dir.join("instruction-manifest");
+    fs::write(&path, bytes)?;
+    lane.env(aether_bloomery::INSTRUCTION_MANIFEST_ENV, &path);
+    if let Some(digest) = spec.instruction_bundle_digest {
+        lane.env(aether_bloomery::INSTRUCTION_MANIFEST_DIGEST_ENV, digest);
+    }
+    Ok(())
 }
 
 /// Point a lane's build at its slot's own target directory and cap how much of
@@ -1146,6 +1165,8 @@ mod tests {
             bloom: None,
             receipt: None,
             entrypoint: LaneProgram::default(),
+            instruction_bundle: None,
+            instruction_bundle_digest: None,
         }
     }
 

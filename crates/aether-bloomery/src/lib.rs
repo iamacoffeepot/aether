@@ -418,6 +418,8 @@ pub use values::GrantRequest;
 pub use values::HTTP_READ_TIMEOUT;
 pub use values::Harness;
 pub use values::HoldRequest;
+pub use values::INSTRUCTION_MANIFEST_DIGEST_ENV;
+pub use values::INSTRUCTION_MANIFEST_ENV;
 pub use values::JUDGMENT_TAG;
 pub use values::JournalEntry;
 pub use values::JournalView;

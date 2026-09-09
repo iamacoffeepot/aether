@@ -485,6 +485,8 @@ impl DispatchRecord {
             profile: from_bytes(&order.profile).ok()?,
             transformation: from_bytes(&order.transformation).ok()?,
             configs: from_bytes(&order.configs).ok()?,
+            instruction_bundle: None,
+            prompt_manifest: order.prompt_manifest.as_deref().and_then(Digest::from_slice),
         })
     }
 }

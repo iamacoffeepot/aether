@@ -14,6 +14,20 @@
 
 use alloc::string::String;
 
+/// Path to the authorized instruction-bundle bytes a model lane consumes.
+///
+/// The host writes those bytes outside the checkout and names the file here.
+/// A lane that starts without this variable refuses rather than reading
+/// instruction files from the candidate (ADR-0214).
+pub const INSTRUCTION_MANIFEST_ENV: &str = "AETHER_BLOOMERY_INSTRUCTION_MANIFEST";
+
+/// Content address of the file [`INSTRUCTION_MANIFEST_ENV`] names.
+///
+/// The lane re-derives [`ConfigKind::address`](super::ConfigKind::address) from the bytes it
+/// read and refuses a mismatch, so a substituted file cannot silently become
+/// process policy.
+pub const INSTRUCTION_MANIFEST_DIGEST_ENV: &str = "AETHER_BLOOMERY_INSTRUCTION_MANIFEST_DIGEST";
+
 /// Host-operator-authorized model-process instructions (ADR-0214).
 ///
 /// Every field is complete static instruction text. A renderer must consume the

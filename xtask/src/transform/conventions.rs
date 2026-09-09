@@ -2,28 +2,20 @@
 //!
 //! The lanes used to *point* at `CLAUDE.md` — "read it before editing" — which
 //! only lands if the forked harness happens to read it. Headless Claude
-//! auto-loads it; Muse reads neither. So the lane
-//! inlines the conventions here, at prompt assembly. #5141 curates that
-//! inline from [`LANE_CONTEXT`] rather than the whole subject-tree
-//! `CLAUDE.md`: MCP / runtime / wasm / pipeline workflow have no lane tool
-//! surface, and a missing file is a compile error rather than a silent omit.
+//! auto-loads it; Muse reads neither. So the authorized bundle inlines the
+//! curated lane context as its `conventions` field, and the transform renders
+//! that field rather than reading a file from the checkout.
 
-/// The curated conventions every model lane inlines (#5141). Sibling of the
-/// instruction sources; `include_str!` so a missing file fails the xtask
-/// build — assembly cannot drop the section the way a missing `CLAUDE.md`
-/// used to.
-pub(super) const LANE_CONTEXT: &str = include_str!("lane_context.md");
-
-/// Render the curated lane context as the prompt section the lanes carry it in.
-/// Reachable outside this module so `cargo xtask bloom instructions` imports
-/// this exact section.
-pub fn section() -> String {
+/// Render the curated lane context as the prompt section the import command
+/// records on the bundle. The transform no longer reads this file; it consumes
+/// the authorized bundle's `conventions` field.
+pub fn section(lane_context: &str) -> String {
     format!(
         "## Conventions\n\n\
          The curated lane context — the conventions this repository is written to. Follow them as \
          written. Where they and the lane instructions disagree about how code in this repository \
          is written, they win; where they describe a workflow this dispatch is not running \
          (opening pull requests, driving CI), they do not apply to you.\n\n\
-         {LANE_CONTEXT}"
+         {lane_context}"
     )
 }

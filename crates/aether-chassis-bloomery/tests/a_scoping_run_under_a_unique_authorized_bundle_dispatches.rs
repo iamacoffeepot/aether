@@ -53,7 +53,8 @@ fn a_scoping_run_under_a_unique_authorized_bundle_dispatches_that_bundle() {
     configs.insert::<ModelProcessInstructions>(pin);
     let subject = rows[0].subject.as_deref().and_then(Digest::from_slice).expect("an enqueued run names its subject");
     let manifest = admit_model_dispatch(&mut store, &scope_record(commission, subject, base, configs))
-        .expect("the run's pin admits");
+        .expect("the run's pin admits")
+        .manifest;
     let instructions: Vec<_> = manifest.slots.iter().filter(|slot| slot.role == SlotRole::Instruction).collect();
     assert_eq!(instructions.len(), 1, "one instruction slot: the process policy");
     assert_eq!(instructions[0].artifact, expected, "and it is the run's pinned bundle");
@@ -71,5 +72,7 @@ fn scope_record(workpiece: WorkpieceId, subject: Digest, checkout: Digest, confi
         transformation: Transformation::for_scoping_run(&StageCatalog::binding_of(StageId::Scope), subject, checkout),
         configs,
         profile: StageCatalog::profile_of(StageId::Scope),
+        instruction_bundle: None,
+        prompt_manifest: None,
     }
 }

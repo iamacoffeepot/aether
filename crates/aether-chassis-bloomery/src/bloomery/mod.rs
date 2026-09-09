@@ -87,7 +87,8 @@ pub use notify::{
 pub use outbox::TopicOutbox;
 #[cfg(feature = "github")]
 pub use provenance::{
-    ProcessPolicy, ProvenanceRefusal, admit_model_dispatch, drain_refusals, gated, journal_refusal, refusal_fault,
+    AdmittedProcess, ProcessPolicy, ProvenanceRefusal, admit_model_dispatch, drain_refusals, gated, journal_refusal,
+    refusal_fault,
 };
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 pub use provenance::{authorize_instructions, pin_instructions, reference_instructions};

@@ -11,9 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf, absolute};
 
 use aether_bloomery::{
-    FieldKind, LANE_WORKPIECE_HEADER, NamedPath, NamedSymbol, PathOrigin, SCOPE_FILL_COMMAND, SCOPE_VERIFY_SCHEMA,
-    ScopeRouting, ScopeVerifyInput, ScopeVerifyReport, WorkpieceId, WorkpieceRefusal, encode_hex, split_lane_identity,
-    verify_scope,
+    FieldKind, LANE_WORKPIECE_HEADER, ModelProcessInstructions, NamedPath, NamedSymbol, PathOrigin, SCOPE_FILL_COMMAND,
+    SCOPE_VERIFY_SCHEMA, ScopeRouting, ScopeVerifyInput, ScopeVerifyReport, WorkpieceId, WorkpieceRefusal, encode_hex,
+    split_lane_identity, verify_scope,
 };
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -24,13 +24,6 @@ use crate::symbols::references::{self, ReferenceSearch, Role};
 use crate::transform::claude::assemble_construct_prompt;
 use crate::transform::lane::Resumed;
 use crate::transform::{LaneRun, Measurements, TransformArgs, run_model_lane, write_evidence_json};
-
-/// The lane-owned in-repo instruction source. Embedded at build time so the
-/// scoping lane owns its process natively — the prompt is assembled from this
-/// text, never from `.claude/skills/scope` in the worker's checkout.
-/// Reachable outside this module so `cargo xtask bloom instructions` imports
-/// this exact text.
-pub const SCOPE_INSTRUCTIONS: &str = include_str!("scope_instructions.md");
 
 /// The three-valued status the local backend already knows how to read, matching
 /// the review lane's contract.
@@ -88,26 +81,23 @@ fn stamp_scope_evidence(
     evidence
 }
 
-fn assemble_scope_prompt(subject: Option<&str>, task: Option<&str>, run_dir: &Path, setter: &str) -> String {
-    let mut prompt = assemble_construct_prompt(SCOPE_INSTRUCTIONS, subject, task, None);
-    prompt.push_str(&emission_section(run_dir, setter));
+fn assemble_scope_prompt(
+    bundle: &ModelProcessInstructions,
+    subject: Option<&str>,
+    task: Option<&str>,
+    run_dir: &Path,
+    setter: &str,
+) -> String {
+    let mut prompt = assemble_construct_prompt(bundle, &bundle.scope, subject, task, None);
+    prompt.push_str(&emission_section(bundle, run_dir, setter));
     prompt
 }
 
-fn emission_section(run_dir: &Path, setter: &str) -> String {
-    let run = run_dir.display();
+fn emission_section(bundle: &ModelProcessInstructions, run_dir: &Path, setter: &str) -> String {
     format!(
-        "\n## Emission\n\n\
-         This run's directory is `{run}`. The setter binary is `{setter}`.\n\n\
-         Fill each authored field by invoking the setter as its own process, value by file — never \
-         as a `--value` argv scalar:\n\n\
-         ```\n\
-         cargo xtask scope set <field> --run {run} --value-file <path>\n\
-         ```\n\n\
-         `--value-file -` reads stdin. `<field>` is one of: problem, evidence, success, approach, \
-         rejected-option, plan-step, acceptance, declared-surface, edge, routing-hint.\n\n\
-         `inverse-search` and `implements` are derived; do not set them. Write no source, open \
-         nothing, and stop when the authored fields are written.\n"
+        "\n## Emission\n\n{}\n\n## Emission target\n\nrun `{}`\nsetter `{setter}`\n",
+        bundle.scope_emission,
+        run_dir.display(),
     )
 }
 
@@ -122,9 +112,10 @@ fn run_directory(out: &Path) -> PathBuf {
 
 /// The `scope.fill` lane: assemble the prompt with the shared cached prefix,
 /// run the resolved harness, replay the call log, and stamp evidence.
-pub(super) fn run_scope(args: &TransformArgs) -> Result<()> {
+pub(super) fn run_scope(args: &TransformArgs, bundle: &ModelProcessInstructions) -> Result<()> {
     let run_dir = run_directory(&args.out);
-    let prompt = assemble_scope_prompt(args.subject.as_deref(), args.task.as_deref(), &run_dir, &setter_binary());
+    let prompt =
+        assemble_scope_prompt(bundle, args.subject.as_deref(), args.task.as_deref(), &run_dir, &setter_binary());
     let run = run_model_lane(&prompt, args, Resumed::AfterReset)?;
     write_evidence_json(&args.out, &finalize(args, &run_dir, run))
 }
@@ -387,7 +378,8 @@ mod tests {
     };
     use crate::transform::Measurements;
     use crate::transform::claude::assemble_construct_prompt;
-    use crate::transform::construct::CONSTRUCT_INSTRUCTIONS;
+    use crate::transform::conventions;
+    use crate::transform::instructions::fixture_bundle;
     use aether_bloomery::{NamedPath, NamedSymbol, PathOrigin, SCOPE_VERIFY_SCHEMA, ScopeVerifyReport, verify_scope};
     use serde_json::json;
     use std::path::Path;
@@ -400,9 +392,12 @@ mod tests {
         // and the per-run Emission directory sits only after that prefix.
         let subject = Some("abc123");
         let task = Some("shared order");
-        let construct = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, subject, task, None);
+        let mut bundle = fixture_bundle();
+        bundle.conventions = conventions::section(include_str!("../lane_context.md"));
+        bundle.scope_emission = "Fill each authored field via cargo xtask scope set.".to_owned();
+        let construct = assemble_construct_prompt(&bundle, &bundle.construct, subject, task, None);
         let run = Path::new("/run/scope-nonce-test");
-        let scope = assemble_scope_prompt(subject, task, run, "cargo xtask");
+        let scope = assemble_scope_prompt(&bundle, subject, task, run, "cargo xtask");
         let prefix_len = construct.bytes().zip(scope.bytes()).take_while(|(a, b)| a == b).count();
         assert!(scope.starts_with("## Conventions\n"), "lane context leads the prompt");
         assert!(

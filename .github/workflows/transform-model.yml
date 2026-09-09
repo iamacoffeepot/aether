@@ -60,6 +60,14 @@ on:
         description: "Scope-revision digest hex the returned evidence names (attempt-artifact binding); empty = legacy evidence-<nonce> name"
         required: false
         default: ""
+      manifest:
+        description: "Gzip+base64 of the authorized instruction-bundle bytes (ADR-0214); written outside the checkout"
+        required: false
+        default: ""
+      manifest_digest:
+        description: "Content address of those bytes; the lane asserts it matches what it read"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -80,6 +88,20 @@ jobs:
           node-version: "20"
       - name: Install the Claude Code CLI
         run: npm install -g @anthropic-ai/claude-code
+      - name: Materialize the authorized instruction bundle
+        env:
+          MANIFEST: ${{ inputs.manifest }}
+          MANIFEST_DIGEST: ${{ inputs.manifest_digest }}
+        run: |
+          set -euo pipefail
+          if [ -z "$MANIFEST" ] || [ -z "$MANIFEST_DIGEST" ]; then
+            echo "::error::model lane requires manifest and manifest_digest (ADR-0214)"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/aether-manifest"
+          printf '%s' "$MANIFEST" | base64 -d | gzip -d > "$RUNNER_TEMP/aether-manifest/bundle"
+          echo "AETHER_BLOOMERY_INSTRUCTION_MANIFEST=$RUNNER_TEMP/aether-manifest/bundle" >> "$GITHUB_ENV"
+          echo "AETHER_BLOOMERY_INSTRUCTION_MANIFEST_DIGEST=$MANIFEST_DIGEST" >> "$GITHUB_ENV"
       - name: Run the model lane (worker-side, BYO credential)
         id: transform
         continue-on-error: true

@@ -2850,7 +2850,7 @@ mod tests {
     use std::path::Path;
 
     use crate::cargo::WASM_TARGET;
-    use crate::transform::construct::{CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS};
+    use crate::transform::construct::CONSTRUCT_IMPLEMENT;
     use crate::transform::peak_memory;
     use crate::transform::review::REVIEW_CRITIC;
     use crate::transform::sccache::CompilerCache;
@@ -3170,6 +3170,7 @@ mod tests {
         // the moment a flag moved (#5078). Verify's typed map is the authority:
         // every umbrella member must still resolve, and none of the heavy argv
         // may appear in construct prose.
+        const CONSTRUCT_SOURCE: &str = include_str!("../construct_instructions.md");
         for id in verify_check_members() {
             assert!(verify_command(id).is_some(), "{id} must resolve via verify_command");
         }
@@ -3178,20 +3179,20 @@ mod tests {
             let invocation = verify_command(id).expect("member mapped");
             let stated = argv(&invocation).join(" ");
             assert!(
-                !CONSTRUCT_INSTRUCTIONS.contains(&stated),
+                !CONSTRUCT_SOURCE.contains(&stated),
                 "{id} runs `{stated}`, which construct_instructions.md must not restate — Verify owns that argv",
             );
             for &(key, value) in invocation.env {
                 let setting = format!("{key}={value}");
                 assert!(
-                    !CONSTRUCT_INSTRUCTIONS.contains(&setting),
+                    !CONSTRUCT_SOURCE.contains(&setting),
                     "{id} runs under {setting}, which is Verify's environment, not construct prose",
                 );
             }
             if let Some(prepare) = invocation.prepare {
                 let prepare = format!("cargo {}", prepare.join(" "));
                 assert!(
-                    !CONSTRUCT_INSTRUCTIONS.contains(&prepare),
+                    !CONSTRUCT_SOURCE.contains(&prepare),
                     "{id} is preceded by `{prepare}`, which is Verify's prepare, not a construct step",
                 );
             }

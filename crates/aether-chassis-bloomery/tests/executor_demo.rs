@@ -54,6 +54,8 @@ fn work_order(nonce: &str) -> WorkOrder {
             }),
         },
         nonce: Nonce(nonce.to_owned()),
+        instruction_bundle: None,
+        prompt_manifest: None,
     }
 }
 

@@ -13,11 +13,10 @@
 //!   checked-out **subject** tree, and writes the nonce-tagged **result record**
 //!   (cost / tokens / turns) derived in-repo from the run transcript (#3572; the
 //!   lane no longer shells out to `scripts/agent-usage-record.mjs`, which #3565
-//!   deletes). The lane assembles its prompt from its own in-repo instruction
-//!   source (`construct_instructions.md`) plus the subject — it owns its process
-//!   natively rather than delegating to `.claude/skills/implement`. Unlike the
-//!   verify lane it needs a credential, so it runs **worker-side** (BYO); the
-//!   coordinator never sees it.
+//!   deletes). The lane assembles its prompt from the authorized instruction
+//!   bundle the host handed it (ADR-0214), never from files in the checkout.
+//!   Unlike the verify lane it needs a credential, so it runs **worker-side**
+//!   (BYO); the coordinator never sees it.
 //! - The **bloom-level reader** (`retrospect.read`, ADR-0216) — reads what a
 //!   bloom landed and stamps `retrospect_findings` as untrusted claims. It
 //!   never writes to the tree.
@@ -30,6 +29,7 @@ mod grok;
 #[cfg(test)]
 mod harness_stub;
 mod heartbeat;
+mod instructions;
 mod lane;
 mod lint_check;
 mod messages;
@@ -46,7 +46,7 @@ mod verify;
 
 use std::path::{Path, PathBuf};
 
-use aether_bloomery::{Harness, SCOPE_FILL_COMMAND, VerifyFailureSet};
+use aether_bloomery::{Harness, SCOPE_FILL_COMMAND, VerifyFailureSet, is_model_lane};
 use anyhow::{Result, bail};
 use clap::Args;
 use serde::Serialize;
@@ -517,20 +517,24 @@ fn build_evidence(
 /// and failed.
 pub fn run(args: &TransformArgs) -> Result<()> {
     reject_test_schedule(args)?;
-    if args.command == CONSTRUCT_IMPLEMENT {
-        return construct::run_construct(args);
-    }
-    if args.command == REVIEW_CRITIC {
-        return review::run_review(args);
-    }
-    if args.command == SCOPE_FILL_COMMAND {
-        return scope::run_scope(args);
-    }
-    if args.command == RETROSPECT_READ {
-        return retrospect::run_retrospect(args);
-    }
     if args.command == REVIEW_REPORT {
         return review_mcp::serve(&args.out);
+    }
+    if is_model_lane(&args.command) {
+        let bundle = instructions::load()?;
+        if args.command == CONSTRUCT_IMPLEMENT {
+            return construct::run_construct(args, &bundle);
+        }
+        if args.command == REVIEW_CRITIC {
+            return review::run_review(args, &bundle);
+        }
+        if args.command == SCOPE_FILL_COMMAND {
+            return scope::run_scope(args, &bundle);
+        }
+        if args.command == RETROSPECT_READ {
+            return retrospect::run_retrospect(args, &bundle);
+        }
+        bail!("{} is a model lane this transform does not implement", args.command);
     }
     if let Some(position) = Position::of(&args.command) {
         return verify::run_verify_check(args, position);

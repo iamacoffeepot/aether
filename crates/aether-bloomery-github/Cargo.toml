@@ -14,6 +14,13 @@ publish = false
 # The pure reducer + value vocabulary. `default-features = false` links only
 # the rlib core, never the guest-SDK `runtime` feature (issue #3497).
 aether-bloomery = { path = "../aether-bloomery", default-features = false }
+# Gzip of the instruction-bundle workflow input (ADR-0214): GitHub caps each
+# workflow_dispatch string at 64KiB, and the uncompressed bundle is larger.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Standard-alphabet encode of those gzipped bytes; the wrapper decodes with
+# `base64 -d`. Same crate the workspace already depends on (`aether-http`,
+# `aether-mcp`).
+base64 = { workspace = true }
 # Neutral git vocabulary (git-data trait, `GitSource`, object ids, mainline
 # ref, source errors). This crate is the GitHub REST/projection adapter over
 # that vocabulary (ADR-0199).

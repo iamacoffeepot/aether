@@ -37,10 +37,9 @@ use super::strand::readopt_stranded_dispatches;
 use super::{
     BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState, GitCandidatePush,
     NameEvidenceClaims, Stores, TickClock, TrackedHandle, admitted_candidate_pushes, backoff_delay, candidate_push_at,
-    default_candidate_push, dispatch_origin, drain_and_cancel, drain_and_dispatch, drain_and_dispatch_aggregate,
-    drain_and_dispatch_aggregate_verify, drain_and_dispatch_scope, drain_and_redispatch, fold_drain_backoff, is_silent,
-    is_stale, journal_publications, next_backoff, observe_heartbeat, seed_dispatches, seed_tracked,
-    select_stale_handles, silence_from, timeout_verdict,
+    default_candidate_push, dispatch_origin, drain_and_cancel, fold_drain_backoff, is_silent, is_stale,
+    journal_publications, next_backoff, observe_heartbeat, seed_dispatches, seed_tracked, select_stale_handles,
+    silence_from, timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -62,6 +61,46 @@ use crate::store::{
     StoreBackend,
 };
 use aether_bloomery_github::{LandingSource, candidate_ref_name, member_checkpoint_ref_name};
+
+fn drain_and_dispatch(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    now_unix_millis: u64,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    super::drain_and_dispatch(store, None, executor, now_unix_millis)
+}
+
+fn drain_and_dispatch_aggregate(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    now_unix_millis: u64,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    super::drain_and_dispatch_aggregate(store, None, executor, now_unix_millis)
+}
+
+fn drain_and_dispatch_aggregate_verify(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    now_unix_millis: u64,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    super::drain_and_dispatch_aggregate_verify(store, None, executor, now_unix_millis)
+}
+
+fn drain_and_dispatch_scope(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    now_unix_millis: u64,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    super::drain_and_dispatch_scope(store, None, executor, now_unix_millis)
+}
+
+fn drain_and_redispatch(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    now_unix_millis: u64,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    super::drain_and_redispatch(store, None, executor, now_unix_millis)
+}
 
 // A capturing executor backend: it records every submitted `WorkOrder` so a test
 // can assert exactly what `drain_and_dispatch` built — the advisory description it
@@ -1445,6 +1484,7 @@ fn an_expired_order_that_does_not_decode_is_reclaimed_before_it_is_read() {
             profile: to_vec(&StageCatalog::profile_of(StageId::Construct)).unwrap(),
             deadline_unix_millis: AT_THE_DEADLINE,
             lifecycle: OrderLifecycle::Submitted,
+            prompt_manifest: None,
         })
         .unwrap();
     let mut tracked = track(vec![WorkHandle::new(Nonce(nonce.clone()))]);
@@ -2465,6 +2505,8 @@ fn an_aggregate_verify_failure_can_produce_a_repair_candidate() {
             tree,
         ),
         configs: ConfigRegistry::default(),
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
     record_dispatch(&mut store, &verify).unwrap();
     let AdmitDecision::Admitted(_) = admit_uploaded(
@@ -2560,6 +2602,8 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
             tree,
         ),
         configs: ConfigRegistry::default(),
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
     record_dispatch(&mut store, &verify).unwrap();
     let AdmitDecision::Admitted(_) = admit_uploaded(
@@ -3049,6 +3093,8 @@ fn an_unconfigured_shell_refuses_actions_lanes_naming_the_missing_knobs() {
             digest(0xB0),
         ),
         nonce: Nonce("probe".to_owned()),
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
     let refusal = shell.submit(&order).expect_err("a verify lane routes to Actions, which is unconfigured");
     let rendered = refusal.to_string();
@@ -3072,6 +3118,8 @@ fn an_unconfigured_actions_refusal_is_permanent_so_the_drain_parks_it() {
                 digest(0xB0),
             ),
             nonce: Nonce("probe".to_owned()),
+            instruction_bundle: None,
+            prompt_manifest: None,
         })
         .expect_err("the stub refuses every submit");
 
@@ -4127,6 +4175,7 @@ mod offloaded_adapter_calls {
             profile: to_vec(&StageCatalog::profile_of(StageId::Construct)).unwrap(),
             deadline_unix_millis,
             lifecycle: OrderLifecycle::Submitted,
+            prompt_manifest: None,
         }
     }
 

@@ -7,7 +7,7 @@
 //! derived from the findings file. Harnesses without tool injection
 //! (muse / grok) keep the terminal `VERDICT:` parse.
 
-use aether_bloomery::Harness;
+use aether_bloomery::{Harness, ModelProcessInstructions};
 use anyhow::Result;
 
 use crate::transform::claude::assemble_construct_prompt;
@@ -23,13 +23,6 @@ use crate::transform::{Measurements, TransformArgs, resolve_harness, run_model_l
 /// stage). Recognized here so an unknown id stays unmapped exactly as in the
 /// other lanes.
 pub(super) use aether_bloomery::REVIEW_CRITIC_COMMAND as REVIEW_CRITIC;
-
-/// The review lane's in-repo instruction source, embedded like the construct
-/// lane's: the critic prompt is assembled from this text plus the subject and
-/// the work order, never from skill text in the worker's checkout.
-/// Reachable outside this module so `cargo xtask bloom instructions` imports
-/// this exact text.
-pub const REVIEW_INSTRUCTIONS: &str = include_str!("review_instructions.md");
 
 /// What a critic's final message claims. `Environment` is not a judgment of the
 /// candidate at all: it is the critic reporting that the ground step naming the
@@ -71,22 +64,10 @@ fn verdict_line(line: &str) -> Option<ReviewVerdict> {
 /// own empty-diff rule made every aggregate review a mandatory finding. Naming
 /// the source here keeps one instruction text honest for both, rather than
 /// giving the critic a stage flag to branch its own reading on.
-fn candidate_section(diff_base: Option<&str>) -> String {
+fn candidate_section(bundle: &ModelProcessInstructions, diff_base: Option<&str>) -> String {
     diff_base.map_or_else(
-        || {
-            String::from(
-                "\n## Candidate\n\nThe candidate is **uncommitted**: it is the change the working tree carries. \
-                 Show it with `git status --porcelain` and `git diff HEAD`.\n",
-            )
-        },
-        |base| {
-            format!(
-                "\n## Candidate\n\nThe candidate is **committed**: it is everything the range `{base}..HEAD` \
-                 carries. Show it with `git diff {base}..HEAD`, and read the commits it spans with \
-                 `git log --oneline {base}..HEAD`. The working tree is a clean checkout of that range's head, \
-                 so `git diff HEAD` is empty here and says nothing about the candidate.\n"
-            )
-        },
+        || format!("\n## Candidate\n\n{}\n", bundle.review_candidate_working_tree),
+        |base| format!("\n## Candidate\n\n{}\n\n## Diff base\n\n`{base}`\n", bundle.review_candidate_committed),
     )
 }
 
@@ -105,35 +86,9 @@ fn candidate_section(diff_base: Option<&str>) -> String {
 /// `10a1228c` spent three judge rounds and eight of nine findings that way). The
 /// question is narrower and answerable: did each member's intent survive the
 /// weaving?
-fn composition_contract(diff_base: Option<&str>) -> String {
-    let Some(base) = diff_base else {
-        return String::new();
-    };
-
-    format!(
-        "\n## Composition review\n\n\
-         This is a **composition review**. The candidate is the *weave*: the fold of several members' \
-         already-reviewed candidates, plus every edit authored at a seam where they collided. Each member \
-         passed its own review before it entered this tree, and each is finished and immutable. Your subject \
-         is the weaving, not the members.\n\n\
-         Judge exactly three things:\n\n\
-         1. **The seam edits.** Every change in the range that no member authored — the reconciliation work. \
-         Read these in full, on all five pillars below.\n\
-         2. **The files more than one member touched.** Find them with \
-         `git log --format='%H' {base}..HEAD | while read c; do git diff-tree --no-commit-id --name-only -r \"$c\"; \
-         done | sort | uniq -d`. A file two members changed is where one intent can quietly overwrite another.\n\
-         3. **Per-member acceptance.** For each work order in the `## Task` section, check that what it promised \
-         is still visibly present in the composed tree. This is a presence check against the order, not a re-review \
-         of how the member implemented it.\n\n\
-         **Do not re-read the member diffs.** The member work orders and candidates are reference input — they \
-         tell you what each member set out to do, so you can tell whether the weave preserved it. A defect in a \
-         member's own code that the weave faithfully carried through is *not* a finding of this review: it belongs \
-         to a member that is already done, and it is filed as new work rather than reopening finished work. If you \
-         see one and it is serious, `report_note` it as member-scope; do not `report_finding` it.\n\n\
-         Findings freeze per subject, exactly as member review findings do: on a re-review of a repaired weave, \
-         discharge the frozen findings you were given and judge only what changed. Do not open a fresh full pass \
-         over work you already judged.\n"
-    )
+fn composition_contract(bundle: &ModelProcessInstructions, diff_base: Option<&str>) -> String {
+    diff_base
+        .map_or_else(String::new, |_| format!("\n## Composition review\n\n{}\n", bundle.review_composition_contract))
 }
 
 /// The findings prose an `environment` verdict produces: the critic's own report
@@ -484,7 +439,7 @@ fn status_token(verdict: ReviewVerdict) -> &'static str {
 /// backend's verdict derivation reads. Fail-closed at every shortfall. Like the
 /// construct lane it needs a credential, so it runs worker-side — never on the
 /// zero-secret path.
-pub(super) fn run_review(args: &TransformArgs) -> Result<()> {
+pub(super) fn run_review(args: &TransformArgs, bundle: &ModelProcessInstructions) -> Result<()> {
     // Pillars 3 and 5 judge the candidate against the repository's stated
     // conventions, so the critic is given the curated lane context rather than
     // told to go and read them (#4647, #5141) — a critic without the rules
@@ -498,10 +453,12 @@ pub(super) fn run_review(args: &TransformArgs) -> Result<()> {
     // whose candidate is a committed range is the composition's review, and its
     // subject is the weave rather than the members.
     let prompt = assemble_construct_prompt(
+        bundle,
         &format!(
-            "{REVIEW_INSTRUCTIONS}{}{}",
-            candidate_section(args.diff_base.as_deref()),
-            composition_contract(args.diff_base.as_deref()),
+            "{}{}{}",
+            bundle.review,
+            candidate_section(bundle, args.diff_base.as_deref()),
+            composition_contract(bundle, args.diff_base.as_deref()),
         ),
         args.subject.as_deref(),
         args.task.as_deref(),
@@ -530,6 +487,7 @@ mod tests {
         Measurements, ReviewVerdict, candidate_section, composition_contract, conclude_from_reports,
         parse_review_verdict, review_conclusion, stamp_reports_evidence, stamp_review_evidence,
     };
+    use crate::transform::instructions::fixture_bundle;
     use crate::transform::messages::{MAX_ASSISTANT_TEXT_BYTES, derive_result_record};
     use crate::transform::review_reports::{FindingClass, FindingReport, Reports};
 
@@ -561,18 +519,18 @@ mod tests {
         // mandatory finding (#4723). An order that names a diff base must direct
         // the critic at the range instead, and must not leave the working-tree
         // command standing next to it for the critic to run and believe.
-        let ranged = candidate_section(Some("abc123"));
+        let bundle = fixture_bundle();
+        let ranged = candidate_section(&bundle, Some("abc123"));
 
-        assert!(ranged.contains("git diff abc123..HEAD"), "the range is the candidate: {ranged}");
-        assert!(!ranged.contains("git status --porcelain"), "a committed candidate is not a working-tree probe");
+        assert!(ranged.contains("review-candidate-committed"), "the committed-range field rides: {ranged}");
+        assert!(ranged.contains("## Diff base"), "the hex is a context slot: {ranged}");
+        assert!(ranged.contains("`abc123`"), "the named base is present: {ranged}");
+        assert!(!ranged.contains("review-candidate-working-tree"), "a committed candidate is not a working-tree probe");
 
-        // The member contract is unchanged: no base named, the working tree is
-        // the candidate, and an empty one stays a finding.
-        let working_tree = candidate_section(None);
+        let working_tree = candidate_section(&bundle, None);
 
-        assert!(working_tree.contains("git diff HEAD"));
-        assert!(working_tree.contains("git status --porcelain"));
-        assert!(!working_tree.contains(".."), "a working-tree candidate names no range");
+        assert!(working_tree.contains("review-candidate-working-tree"), "{working_tree}");
+        assert!(!working_tree.contains("## Diff base"), "a working-tree candidate names no range");
     }
 
     #[test]
@@ -583,16 +541,13 @@ mod tests {
         // that does not exist there; a contract missing from the composition
         // review is the 10a1228c behaviour — a full re-read of every member,
         // eight member-scope findings out of nine, and three judge rounds.
-        let composition = composition_contract(Some("abc123"));
+        let bundle = fixture_bundle();
+        let composition = composition_contract(&bundle, Some("abc123"));
 
         assert!(composition.contains("## Composition review"), "{composition}");
-        assert!(composition.contains("Do not re-read the member diffs"), "{composition}");
-        assert!(composition.contains("reference input"), "the member work orders are reference: {composition}");
-        assert!(composition.contains("abc123..HEAD"), "the overlap probe spans the weave's range: {composition}");
-        assert!(composition.contains("immutable"), "members are done: {composition}");
-        assert!(composition.contains("freeze"), "findings discharge rather than re-open: {composition}");
+        assert!(composition.contains("review-composition-contract"), "{composition}");
 
-        assert!(composition_contract(None).is_empty(), "a member review carries no composition contract");
+        assert!(composition_contract(&bundle, None).is_empty(), "a member review carries no composition contract");
     }
 
     #[test]

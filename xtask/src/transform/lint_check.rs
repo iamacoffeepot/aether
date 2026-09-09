@@ -135,7 +135,7 @@ pub(super) struct Outcome {
 /// hands off. `session` is the handle the construct turn reported, which the
 /// repair turn resumes so the model reads its findings with its own work still
 /// in context rather than re-deriving it from a cold prompt.
-pub(super) fn run(worktree: &Path, args: &TransformArgs, session: Option<&str>) -> Outcome {
+pub(super) fn run(worktree: &Path, args: &TransformArgs, session: Option<&str>, repair_instructions: &str) -> Outcome {
     let deadline = Instant::now() + LINT_ROUND_BUDGET;
     let packages = OwningPackages(fixers::scoped_packages(worktree, &args.out));
     if packages.0.is_empty() {
@@ -146,7 +146,7 @@ pub(super) fn run(worktree: &Path, args: &TransformArgs, session: Option<&str>) 
     let report = round(
         || check(worktree, &args.out, &packages, deadline),
         |found| {
-            let repaired = repair(args, session, &packages.0, found, deadline);
+            let repaired = repair(args, session, &packages.0, found, deadline, repair_instructions);
             applied = repaired.then(|| fixers::apply(worktree, &args.out));
             repaired
         },
@@ -236,7 +236,14 @@ fn check_argv(packages: &[String]) -> Vec<String> {
 }
 
 /// Buy the model one turn on `findings`, returning whether it ran.
-fn repair(args: &TransformArgs, session: Option<&str>, packages: &[String], findings: &str, deadline: Instant) -> bool {
+fn repair(
+    args: &TransformArgs,
+    session: Option<&str>,
+    packages: &[String],
+    findings: &str,
+    deadline: Instant,
+    repair_instructions: &str,
+) -> bool {
     if Instant::now() >= deadline {
         eprintln!("construct lane: lint round out of budget before the repair turn; handing off");
         return false;
@@ -252,7 +259,7 @@ fn repair(args: &TransformArgs, session: Option<&str>, packages: &[String], find
     let mut resumed = args.clone();
     resumed.out = args.out.join(REPAIR_OUT_DIR);
     resumed.resume = Some(session.to_owned());
-    match run_model_lane(&repair_prompt(packages, findings), &resumed, Resumed::SameTree) {
+    match run_model_lane(&repair_prompt(repair_instructions, packages, findings), &resumed, Resumed::SameTree) {
         Ok(_) => true,
         Err(error) => {
             eprintln!("construct lane: the lint repair turn did not run ({error:#}); handing off");
@@ -268,23 +275,10 @@ fn repair(args: &TransformArgs, session: Option<&str>, packages: &[String], find
 /// it, arguing with a lint or re-reading the work order spends the lane's last
 /// window for nothing, while an honest "not mine to fix" costs one line and
 /// still reaches the reviewer.
-fn repair_prompt(packages: &[String], findings: &str) -> String {
+fn repair_prompt(instructions: &str, packages: &[String], findings: &str) -> String {
     format!(
-        "## Remaining lint findings\n\n\
-         Your candidate is in the working tree, exactly as you left it plus whatever \
-         the mechanical fixers rewrote: this lane ran `cargo fmt` over the files you changed and then \
-         a `MachineApplicable` `cargo clippy --fix` over the packages that own them. Nothing was \
-         reverted and nothing was reset.\n\n\
-         A scoped `cargo clippy --no-deps --all-targets` over those same packages ({packages}) still \
-         reports the diagnostics below. These are the ones `--fix` has no automatic suggestion for — \
-         typically the pedantic rename and import-path lints — and the workspace denies warnings, so \
-         each one is a failure of the gate that judges this candidate next.\n\n\
-         Fix them in the working tree now. You get this one turn: nothing else runs after it, and the \
-         authoritative lint verdict is dedicated Verify's, not this check's, so spend the turn on the \
-         tree rather than on reporting back. Keep the change inside this work order's surface — if a \
-         finding is genuinely not yours to fix here, leave it and say so in one line.\n\n\
-         ```\n{findings}\n```\n",
-        packages = packages.join(", "),
+        "{instructions}\n\n## Lint packages\n\n{}\n\n## Remaining lint findings\n\n```\n{findings}\n```\n",
+        packages.join(", "),
     )
 }
 
@@ -293,6 +287,7 @@ mod tests {
     use std::cell::Cell;
 
     use super::{Check, Judge, OwningPackages, Report, check_argv, repair_prompt, round};
+    use crate::transform::instructions::fixture_bundle;
 
     fn names(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
@@ -446,15 +441,26 @@ mod tests {
     // The repair turn resumes the construct conversation on the tree it just
     // wrote. A prompt that let it believe the tree was reset — the other
     // resume posture in this lane — would send it to redo the whole work order
-    // against findings taken from the disk it was told to distrust.
+    // against findings taken from the disk it was told to distrust. The
+    // authorized bundle carries that posture; this function's job is to attach
+    // the packages and findings without replacing it.
     #[test]
     fn the_repair_prompt_names_the_tree_the_findings_came_from() {
-        let prompt = repair_prompt(&names(&["aether-math", "xtask"]), "warning: field names");
+        let bundle = fixture_bundle();
+        let prompt =
+            repair_prompt(&bundle.construct_lint_repair, &names(&["aether-math", "xtask"]), "warning: field names");
 
-        assert!(prompt.contains("exactly as you left it"), "the turn continues on its own tree");
-        assert!(prompt.contains("Nothing was reverted and nothing was reset."));
+        assert!(
+            prompt.contains(&bundle.construct_lint_repair),
+            "the authorized repair instructions ride the prompt; this function does not replace them with a reset \
+             posture",
+        );
         assert!(prompt.contains("aether-math, xtask"), "the prompt names the packages that were checked");
         assert!(prompt.contains("warning: field names"), "the distilled findings ride the prompt");
-        assert!(prompt.contains("one turn"), "the bound is stated: it changes what the turn should spend itself on");
+        assert!(prompt.contains("## Lint packages"), "packages are a context slot, not inlined into the instructions");
+        assert!(
+            prompt.contains("## Remaining lint findings"),
+            "diagnostics are a context slot, not inlined into the instructions"
+        );
     }
 }

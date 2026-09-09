@@ -22,6 +22,7 @@
 //! [`LaneProgram`]: super::LaneProgram
 //! [`TransformRunner`]: super::TransformRunner
 
+use std::ffi::OsString;
 use std::path::Path;
 use std::{env, error, fmt, io, process, thread};
 
@@ -134,6 +135,8 @@ fn run_recorded(parse_from: Vec<String>, recorded: Vec<String>, worktree: &Path)
             env: inherited_env_names(),
             process_id: Some(process::id()),
             argv: recorded,
+            instruction_manifest: instruction_manifest_path(),
+            instruction_manifest_digest: instruction_manifest_digest(),
         },
     )?;
 
@@ -149,6 +152,23 @@ fn run_recorded(parse_from: Vec<String>, recorded: Vec<String>, worktree: &Path)
     }
 
     Ok(outcome.exit_code)
+}
+
+/// Path and digest the host named for this dispatch's authorized bundle.
+///
+/// Scans `vars_os` rather than `env::var`: this is the host-to-lane handoff,
+/// not cap config, and `vars_os` is the same enumeration [`inherited_env_names`]
+/// already uses to record which names crossed.
+fn env_os(name: &str) -> Option<OsString> {
+    env::vars_os().find(|(key, _)| key == name).map(|(_, value)| value)
+}
+
+fn instruction_manifest_path() -> Option<String> {
+    env_os(aether_bloomery::INSTRUCTION_MANIFEST_ENV).map(|value| value.to_string_lossy().into_owned())
+}
+
+fn instruction_manifest_digest() -> Option<String> {
+    env_os(aether_bloomery::INSTRUCTION_MANIFEST_DIGEST_ENV).map(|value| value.to_string_lossy().into_owned())
 }
 
 /// The names of the environment variables this run came up holding, sorted and

@@ -91,6 +91,8 @@ fn construct_order(subject: Digest, nonce: &str) -> aether_bloomery::WorkOrder {
             digest(0xB0),
         ),
         nonce: Nonce(nonce.to_owned()),
+        instruction_bundle: None,
+        prompt_manifest: None,
     }
 }
 
@@ -216,6 +218,8 @@ fn a_verify_status_field_drives_the_verdict() {
             digest(0xB0),
         ),
         nonce: Nonce("n-v".to_owned()),
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
     let handle = exec.submit(&order).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();
@@ -248,6 +252,8 @@ fn a_passing_verify_body_projects_the_empty_failure_set() {
             digest(0xB0),
         ),
         nonce: Nonce("n-pass".to_owned()),
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
 
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
@@ -271,6 +277,8 @@ fn a_malformed_body_failure_set_fails_closed() {
             digest(0xB0),
         ),
         nonce: Nonce("n-bad-set".to_owned()),
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
 
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
@@ -304,6 +312,8 @@ fn an_environment_status_yields_an_executor_fault_rather_than_a_failing_review()
             digest(0xC0),
         ),
         nonce: Nonce("n-env".to_owned()),
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
     let upload = NameEvidenceClaims.claim_for(&reference).expect("the fault name round-trips through the claim seam");
@@ -335,6 +345,8 @@ fn a_verify_lane_environment_status_is_an_executor_fault() {
             digest(0xB0),
         ),
         nonce: Nonce("n-verify-env".to_owned()),
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
     let upload =
@@ -369,6 +381,8 @@ fn an_unrecognized_or_absent_status_still_fails_closed_on_the_exit() {
             digest(0xC0),
         ),
         nonce: Nonce(nonce.to_owned()),
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
 
     for (label, body) in [
@@ -409,6 +423,8 @@ fn verify_order(subject: Digest, nonce: &str) -> aether_bloomery::WorkOrder {
             digest(0xB0),
         ),
         nonce: Nonce(nonce.to_owned()),
+        instruction_bundle: None,
+        prompt_manifest: None,
     }
 }
 
@@ -1361,6 +1377,8 @@ fn an_authored_environment_fault_still_carries_measured_cost_and_calls() {
             digest(0xC0),
         ),
         nonce: Nonce("n-env-cost".to_owned()),
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
     let upload = NameEvidenceClaims.claim_for(&reference).expect("the fault name round-trips through the claim seam");
@@ -1751,6 +1769,8 @@ fn an_aggregate_review_spawn_names_the_range_a_member_spawn_does_not() {
             digest(0xBA),
         ),
         nonce: Nonce(test_nonce("aggregate")),
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
     exec.submit(&review).unwrap();
 
@@ -1785,6 +1805,8 @@ fn an_aggregate_review_spawn_names_the_range_a_member_spawn_does_not() {
             digest(0xB0),
         ),
         nonce: Nonce(test_nonce("verify")),
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
     exec.submit(&verify).unwrap();
     assert_eq!(
@@ -1843,6 +1865,8 @@ fn an_unresolvable_diff_base_refuses_the_submit() {
             digest(0xBA),
         ),
         nonce: Nonce(test_nonce("unseeded")),
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
 
     match exec.submit(&review) {
@@ -2128,6 +2152,7 @@ fn member_order_at(nonce: &str, workpiece: &str, stage: StageId) -> OutstandingO
         profile: Vec::new(),
         deadline_unix_millis: 1_700_000_000_000,
         lifecycle: OrderLifecycle::Submitted,
+        prompt_manifest: None,
     }
 }
 
@@ -3237,6 +3262,8 @@ fn a_critic_does_not_resume_the_constructors_session() {
             digest(0xC0),
         ),
         nonce: Nonce(test_nonce("critic")),
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
     critic.transformation.model = Some(ResolvedModel {
         harness: Harness::Claude,
@@ -3527,6 +3554,8 @@ fn a_judge_dispatch_never_acquires_a_builder_session() {
             digest(0xC0),
         ),
         nonce: Nonce(test_nonce("judge")),
+        instruction_bundle: None,
+        prompt_manifest: None,
     };
     critic.transformation.model = Some(ResolvedModel {
         harness: Harness::Claude,
@@ -4003,6 +4032,7 @@ fn contained_member_store(dir: &TempDir, verify: &str, queued: &str) -> SqliteSt
                 profile: to_vec(&StageCatalog::profile_of(stage)).unwrap(),
                 deadline_unix_millis: 1_700_000_000_000,
                 lifecycle: OrderLifecycle::Submitted,
+                prompt_manifest: None,
             })
             .unwrap();
     }

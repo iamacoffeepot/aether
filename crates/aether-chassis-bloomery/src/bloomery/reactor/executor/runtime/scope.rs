@@ -30,6 +30,7 @@
 use aether_bloomery::control::decode_scope_dispatch;
 use aether_bloomery::{BloomId, ConfigRegistry, Digest, ModelProcessInstructions, Topic, WorkHandle};
 
+use crate::artifacts::ArtifactsCapabilityState;
 use crate::bloomery::executor::{ExecutorPort, Settled};
 use crate::bloomery::intake::{DispatchRecord, dispatch_and_record, dispatch_nonce};
 use crate::bloomery::outbox::TopicOutbox;
@@ -62,6 +63,7 @@ pub(super) fn scope_run_bloom() -> Digest {
 /// drain returns.
 pub(super) fn drain_and_dispatch_scope(
     store: &mut dyn StoreBackend,
+    mut artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
@@ -101,8 +103,10 @@ pub(super) fn drain_and_dispatch_scope(
             stage: payload.stage,
             transformation: payload.transformation,
             configs,
+            instruction_bundle: None,
+            prompt_manifest: None,
         };
-        match dispatch_and_record(executor, store, &record, now_unix_millis) {
+        match dispatch_and_record(executor, store, artifacts.as_deref_mut(), &record, now_unix_millis) {
             Ok(Settled::Answered(handle)) => {
                 // After the order is submitted, never before: the ledger row
                 // says "this run is in flight under this nonce", and a nonce

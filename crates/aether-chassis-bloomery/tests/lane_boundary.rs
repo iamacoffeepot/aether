@@ -23,8 +23,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs, thread};
 
 use aether_bloomery::{
-    BloomId, BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, CommissionStatus, RETROSPECT_READ_COMMAND,
-    REVIEW_CRITIC_COMMAND, VERIFY_MEMBER_COMMAND, VerifyFailure, VerifyFailureSet,
+    BloomId, BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, CommissionStatus, INSTRUCTION_MANIFEST_DIGEST_ENV,
+    INSTRUCTION_MANIFEST_ENV, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_MEMBER_COMMAND, VerifyFailure,
+    VerifyFailureSet,
 };
 use aether_chassis_bloomery::bloomery::admits_lane_key;
 use aether_chassis_bloomery::bloomery::mock_lane::{FOREIGN_SESSION_ID, LaneMode, LaneRun, LaneScript, read_ledger};
@@ -176,6 +177,12 @@ const COORDINATOR_KNOBS: [&str; 6] = [
 /// reading a platform's own bookkeeping as a leak.
 const SELF_STAMPED: [&str; 1] = ["__CF_USER_TEXT_ENCODING"];
 
+/// Names the dispatch writes onto the child after constructing its environment
+/// from the allow list — host-to-lane contract, not coordinator inheritance.
+/// `CARGO_TARGET_DIR` is the same class on non-unix; unix lanes reach the slot
+/// target through a checkout symlink instead, so it does not appear here.
+const DISPATCH_STAMPED: [&str; 2] = [INSTRUCTION_MANIFEST_ENV, INSTRUCTION_MANIFEST_DIGEST_ENV];
+
 #[test]
 fn a_lane_child_comes_up_on_a_constructed_environment_not_the_coordinators() {
     // The incident this prevents: on 2026-08-25 a base verify recorded forty
@@ -211,8 +218,12 @@ fn a_lane_child_comes_up_on_a_constructed_environment_not_the_coordinators() {
         for knob in COORDINATOR_KNOBS {
             assert!(!child.contains(knob), "{}: the coordinator's {knob} reached its lane child", run.command);
         }
-        let leaked: Vec<&&str> =
-            child.iter().filter(|key| !admits_lane_key(OsStr::new(key)) && !SELF_STAMPED.contains(key)).collect();
+        let leaked: Vec<&&str> = child
+            .iter()
+            .filter(|key| {
+                !admits_lane_key(OsStr::new(key)) && !SELF_STAMPED.contains(key) && !DISPATCH_STAMPED.contains(key)
+            })
+            .collect();
         assert!(
             leaked.is_empty(),
             "{}: the child's environment is constructed from the allow list, so nothing outside it can appear: \

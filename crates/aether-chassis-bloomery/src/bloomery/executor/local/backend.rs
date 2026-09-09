@@ -14,10 +14,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::{
     BackendObjectId, BloomId, CandidateRef, CompositionParents, Conclusion, ConfigRegistry, ConfigScopes, Digest,
-    EvidenceRef, ExecutionStatus, ExecutorBackend, FoldContribution, LaneObservation, Nonce, ObservedLaneWrites,
-    PipelineManifest, PriceTable, ResolvedModel, RetrospectClaim, SessionSlug, SharedCorrespondence, StageId,
-    StageVerdict, StudyCost, SuppressionRequest, SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle,
-    WorkOrder, WorkpieceId, is_model_lane, narrow_composition,
+    EvidenceRef, ExecutionStatus, ExecutorBackend, FoldContribution, LaneObservation, ModelProcessInstructions, Nonce,
+    ObservedLaneWrites, PipelineManifest, PriceTable, ResolvedModel, RetrospectClaim, SessionSlug,
+    SharedCorrespondence, StageId, StageVerdict, StudyCost, SuppressionRequest, SurfaceRequest, Transformation,
+    VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, config_address, is_model_lane, narrow_composition,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_git::source::candidate_ref_name;
@@ -349,6 +349,9 @@ struct PendingRun {
     // The sealed manifest's `[entrypoint]` for this bloom, used when the host
     // has not overridden the lane program.
     entrypoint: LaneProgram,
+    // Authorized instruction-bundle bytes a model lane consumes (ADR-0214).
+    instruction_bundle: Option<Vec<u8>>,
+    instruction_bundle_digest: Option<String>,
 }
 
 impl PendingRun {
@@ -384,6 +387,8 @@ impl PendingRun {
             bloom: self.bloom_hex.as_deref(),
             receipt: self.receipt_hex.as_deref(),
             entrypoint: self.entrypoint.clone(),
+            instruction_bundle: self.instruction_bundle.as_deref(),
+            instruction_bundle_digest: self.instruction_bundle_digest.as_deref(),
         }
     }
 }
@@ -1080,6 +1085,11 @@ impl LocalExecutor {
             priority,
             bloom_hex: identity.as_ref().map(|identity| aether_bloomery::encode_hex(&identity.bloom)),
             receipt_hex: Some(hex_digest(&subject)),
+            instruction_bundle: order.instruction_bundle.clone(),
+            instruction_bundle_digest: order
+                .instruction_bundle
+                .as_ref()
+                .map(|bytes| config_address(ModelProcessInstructions::NAME, bytes).to_hex()),
         })
     }
 

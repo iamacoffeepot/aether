@@ -4,44 +4,41 @@
 //! Two kinds of field live here, and the difference is worth stating because it
 //! decides what a reviewer checks.
 //!
-//! The four **lane instruction sources** are imported by reference — the same
-//! `include_str!` constants the `construct.implement`, `review.critic` and
-//! `scope.fill` lanes assemble their prompts from, plus the curated lane
-//! context every one of them inlines. Nothing is retyped, so those four cannot
-//! drift from what the lanes run. The two reader fields are authored here
-//! (there was no in-repo original) and the `retrospect.read` lane imports them
-//! by reference the same way.
+//! The four **lane instruction sources** are imported from the repository files
+//! this command still reads — the `construct.implement`, `review.critic` and
+//! `scope.fill` instruction files, plus the curated lane context. The transform
+//! no longer compiles those files in; this import is the one remaining reader
+//! (ADR-0214). The two reader fields are authored here (there was no in-repo
+//! original).
 //!
 //! The rest are **framing texts** the lanes and the coordinator build with
 //! `format!` at assembly time, interpolating a commit, a package list, or a
 //! path into them. ADR-0214 forbids that in a bundle field: instruction text is
 //! complete and static, and the variable half is a prompt-manifest context slot.
 //! So each one is written out here in its static form, naming the slot its
-//! interpolation moves to. That makes them copies, and a copy can drift — which
-//! is exactly what ADR-0214's transport change ends, by making the host render
-//! the bundle's bytes and deleting the in-repo original. Until then the import
-//! is a snapshot, and re-running it is how the bundle catches up.
+//! interpolation moves to. The transform consumes these bundle bytes; re-running
+//! this import is how a process-policy change is authored.
 //!
 //! The two reader fields have no original at all. `retrospect.read` has never
 //! run, so its process instructions and its finding contract are authored here
 //! from ADR-0216 §2 and §3 and from the wire shape
 //! [`RetrospectClaim`](aether_bloomery::RetrospectClaim) already fixes.
 
+use std::fs;
+use std::path::Path;
+
 use aether_bloomery::ModelProcessInstructions;
 
-use crate::transform::construct::CONSTRUCT_INSTRUCTIONS;
 use crate::transform::conventions;
-use crate::transform::review::REVIEW_INSTRUCTIONS;
-use crate::transform::scope::SCOPE_INSTRUCTIONS;
 
 /// Assemble the bundle. Validation is the caller's, so a field left empty by a
 /// bad edit is reported as the named field rather than silently recorded.
 pub(super) fn imported() -> ModelProcessInstructions {
     ModelProcessInstructions {
-        conventions: conventions::section(),
-        construct: CONSTRUCT_INSTRUCTIONS.to_owned(),
-        review: REVIEW_INSTRUCTIONS.to_owned(),
-        scope: SCOPE_INSTRUCTIONS.to_owned(),
+        conventions: conventions::section(&source("src/transform/lane_context.md")),
+        construct: source("src/transform/construct_instructions.md"),
+        review: source("src/transform/review_instructions.md"),
+        scope: source("src/transform/scope/scope_instructions.md"),
         subject_unspecified: SUBJECT_UNSPECIFIED.to_owned(),
         subject_at_commit: SUBJECT_AT_COMMIT.to_owned(),
         seeded_state: SEEDED_STATE.to_owned(),
@@ -58,6 +55,11 @@ pub(super) fn imported() -> ModelProcessInstructions {
         retrospect: RETROSPECT.to_owned(),
         retrospect_finding_contract: RETROSPECT_FINDING_CONTRACT.to_owned(),
     }
+}
+
+fn source(relative: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+    fs::read_to_string(&path).unwrap_or_else(|error| panic!("read instruction source {}: {error}", path.display()))
 }
 
 /// Subject framing when the dispatch names no commit. From the construct lane's
@@ -198,7 +200,7 @@ composed tree builds. Do not reopen finished member work; repair at the seam.";
 /// never run, so there is no in-repo original to import. The bloom id, the
 /// receipt digest, and the landed range are context slots, never interpolated
 /// into this text.
-pub const RETROSPECT: &str = "\
+const RETROSPECT: &str = "\
 You are the reader at the end of the line. A bloom has landed: its members were built, reviewed, verified, woven, \
 and merged, and the range it landed is checked out for you. Read what it left behind and file the work it will not \
 fix.
@@ -238,7 +240,7 @@ in what you actually read, and small enough to be one member of a future bloom."
 /// `scope_emission`, and the contract
 /// [`RetrospectFinding::normalize`](aether_bloomery::RetrospectFinding::normalize)
 /// judges. Authored here for the same reason [`RETROSPECT`] is.
-pub const RETROSPECT_FINDING_CONTRACT: &str = "\
+const RETROSPECT_FINDING_CONTRACT: &str = "\
 Emit your findings as the top-level `retrospect_findings` array of this lane's evidence — a JSON array of objects, \
 each one work order:
 

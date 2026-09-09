@@ -10,8 +10,9 @@ use aether_bloomery::{
 use aether_bloomery_github::{ExecutorError, GithubError};
 use aether_data::wire::to_vec;
 
+use crate::artifacts::{ArtifactsCapabilityState, PutResult};
 use crate::bloomery::executor::{ExecutorPort, ExecutorPortError, LocalExecutorError, Settled};
-use crate::bloomery::provenance::{ProvenanceRefusal, admit_model_dispatch, gated, journal_refusal};
+use crate::bloomery::provenance::{AdmittedProcess, ProvenanceRefusal, admit_model_dispatch, gated, journal_refusal};
 use crate::store::{OrderLifecycle, OutstandingOrder, RecordOutcome, StoreBackend};
 
 /// The idempotency nonce a drained outbox entry dispatches under.
@@ -75,6 +76,13 @@ pub struct DispatchRecord {
     /// the compiled line would re-dispatch the fleet default for a bloom that
     /// sealed something else.
     pub profile: AgentProfile,
+    /// Exact authorized instruction-bundle bytes a model lane consumes. `None`
+    /// on a mechanical lane. Not persisted: the bundle lives in the config store
+    /// under the sealed pin; this field is the host-to-executor hand-off.
+    pub instruction_bundle: Option<Vec<u8>>,
+    /// Content address of the assembled prompt-manifest bytes retained as
+    /// attempt evidence. Persisted on the order row.
+    pub prompt_manifest: Option<Digest>,
 }
 
 impl DispatchRecord {
@@ -82,7 +90,12 @@ impl DispatchRecord {
     /// its reducer context, so the two cannot name different nonces or lanes.
     #[must_use]
     pub fn to_order(&self) -> WorkOrder {
-        WorkOrder { transformation: self.transformation.clone(), nonce: self.nonce.clone() }
+        WorkOrder {
+            transformation: self.transformation.clone(),
+            nonce: self.nonce.clone(),
+            instruction_bundle: self.instruction_bundle.clone(),
+            prompt_manifest: self.prompt_manifest,
+        }
     }
 
     /// Whether this order is the reserved composition workpiece's weave repair.
@@ -117,6 +130,7 @@ impl DispatchRecord {
             // agent the bloom's catalog named rather than the compiled line's.
             profile: to_vec(&self.profile).unwrap_or_default(),
             lifecycle: OrderLifecycle::Submitting,
+            prompt_manifest: self.prompt_manifest.map(|digest| digest.as_bytes().to_vec()),
         }
     }
 }
@@ -282,16 +296,24 @@ impl DispatchError {
 pub fn dispatch_and_record(
     port: &dyn ExecutorPort,
     store: &mut dyn StoreBackend,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
     record: &DispatchRecord,
     now_unix_millis: u64,
 ) -> Result<Settled<WorkHandle>, DispatchError> {
-    if gated(&record.transformation.command)
-        && let Err(refusal) = admit_model_dispatch(store, record)
-    {
-        journal_refusal(store, record, &refusal);
-        return Err(DispatchError::Provenance(refusal));
+    let mut record = record.clone();
+    if gated(&record.transformation.command) {
+        match admit_model_dispatch(store, &record) {
+            Err(refusal) => {
+                journal_refusal(store, &record, &refusal);
+                return Err(DispatchError::Provenance(refusal));
+            }
+            Ok(admitted) => {
+                record.prompt_manifest = retain_prompt_manifest(artifacts, &record, &admitted);
+                record.instruction_bundle = Some(admitted.bundle_bytes);
+            }
+        }
     }
-    record_dispatch_at(store, record, now_unix_millis).map_err(DispatchError::Store)?;
+    record_dispatch_at(store, &record, now_unix_millis).map_err(DispatchError::Store)?;
     match port.submit(&record.to_order()) {
         Settled::InFlight => Ok(Settled::InFlight),
         Settled::Answered(Ok(handle)) => {
@@ -304,6 +326,47 @@ pub fn dispatch_and_record(
             // to expire an order no run was ever started for.
             let _ = store.consume_order(&record.nonce.0);
             Err(DispatchError::Submit(error))
+        }
+    }
+}
+
+/// Retain assembled prompt-manifest bytes and return the address only when the
+/// store actually holds them. A missing store, a put fault, or an encode fault
+/// each warn and hand back `None` — the journaled row then names retained bytes
+/// or nothing, never an address nothing holds.
+fn retain_prompt_manifest(
+    artifacts: Option<&mut ArtifactsCapabilityState>,
+    record: &DispatchRecord,
+    admitted: &AdmittedProcess,
+) -> Option<Digest> {
+    let Ok(manifest_bytes) = to_vec(&admitted.manifest) else {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::provenance",
+            nonce = %record.nonce.0,
+            "assembled prompt manifest did not encode; the order names no retained address",
+        );
+        return None;
+    };
+    let address = Digest::of_wire_bytes(&manifest_bytes);
+    let Some(artifacts) = artifacts else {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::provenance",
+            nonce = %record.nonce.0,
+            "no artifacts store configured; assembled prompt manifest was not retained",
+        );
+        return None;
+    };
+    let parents = vec![admitted.bundle_address.to_hex(), record.displayed_digest.to_hex()];
+    match artifacts.put(&manifest_bytes, &parents) {
+        PutResult::Ok { .. } => Some(address),
+        PutResult::Err { error } => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::provenance",
+                nonce = %record.nonce.0,
+                ?error,
+                "assembled prompt manifest was not retained in the artifact store",
+            );
+            None
         }
     }
 }
