@@ -107,28 +107,11 @@ cargo run -p aether-chassis-headless --bin aether-headless -- --print-config
 
 ## Run the demo
 
-`aether-puppet` is the in-tree mascot: a subject mesh redrawn every frame as
-pen-plotter line art, with an idle motor and a turntable driving it. Package it
-into a desktop depot and run that depot. The module exports three actors
-(`Puppet`, `Idle`, `Turntable`) and declares no default, so the component entry
-names the export it wants, which is the `--spec` form rather than
-`--components`:
-
 ```sh
-cat > puppet.json <<'JSON'
-{
-  "chassis": "desktop",
-  "title": "aether puppet",
-  "components": [{ "package": "aether-puppet", "export": "aether.puppet" }]
-}
-JSON
-
-cargo xtask package --spec puppet.json --out target/puppet-demo
-./target/puppet-demo/aether-desktop
+cargo xtask package --profile release --spec demo/puppet-turntable.json --assets crates/aether-mesh/examples
 ```
 
-A window opens on an empty sheet; mail `aether.puppet.load` with a subject mesh
-in the `assets` namespace and she is inked in, draggable with the mouse.
+A line-art teapot turning on a turntable in the desktop chassis; drag to orbit.
 
 <!-- demo capture pending -->
 
