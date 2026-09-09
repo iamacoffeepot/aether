@@ -34,10 +34,10 @@ The guest/actor SDK is **`aether-actor`** — the `Actor` / `WasmActor` traits, 
 
 ## Commands
 
-- Build: `cargo build` (release: `cargo build --release`)
+- Build: `cargo build` (release: `cargo build --release`). The root manifest's `default-members` is the engine, so a bare build skips the Bloomery coordinator, `xtask`, and the wasm test fixtures; add `--workspace` to select every member.
 - Run: `cargo run -p <crate>` — workspace root has no default binary. Each chassis binary lives in its crate: `cargo run -p aether-chassis-hub --bin aether-hub`, `-p aether-chassis-desktop --bin aether-desktop` (desktop), or `-p aether-chassis-headless --bin aether-headless`.
 - Test: `cargo test` (single test: `cargo test <name>`; single-threaded with output: `cargo test -- --nocapture --test-threads=1`)
-- Lint: `cargo clippy --all-targets -- -D warnings`
+- Lint: `cargo clippy --workspace --all-targets -- -D warnings`
 - Format: `cargo fmt` (check-only: `cargo fmt -- --check`)
 - Type/borrow check only: `cargo check`
 
@@ -66,7 +66,7 @@ Wasm components are discovered structurally (issue 439): a `cargo metadata` pack
 
 ## Local checks and CI
 
-GitHub Actions is the full build engine. Before opening or updating an implementation PR, run `cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings`; the expensive build/test/package matrix belongs to CI unless the issue asks for local proof. Branch protection requires `CI pass` and `Lint title`. Those checks prove the tree and title, not direct review, thread resolution, dogfood, or landing authority.
+GitHub Actions is the full build engine. Before opening or updating an implementation PR, run `cargo fmt -- --check` and `cargo clippy --workspace --all-targets -- -D warnings`; the expensive build/test/package matrix belongs to CI unless the issue asks for local proof. Branch protection requires `CI pass` and `Lint title`. Those checks prove the tree and title, not direct review, thread resolution, dogfood, or landing authority.
 
 The working loop opens a draft, watches the current head, and repairs deterministic failures inside the approved surface. `scripts/wave-status.sh --wait <PR>` polls the checked-in CI aggregate; a fix pushed to the same branch supersedes the old run. Once green, `/implement` performs direct review, fix-or-justify handling, thread resolution, and required dogfood locally through the checked-in skills. No hosted lifecycle wrapper is implied by a script or skill name.
 

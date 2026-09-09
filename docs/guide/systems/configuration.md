@@ -181,7 +181,7 @@ that a knob is declared once and resolved by the layer, never read ad-hoc.
 
 A `clippy.toml` `disallowed-methods` entry bans `std::env::var` / `std::env::var_os`
 workspace-wide to keep that rule mechanical: a capability that reads the
-environment directly fails `cargo clippy -- -D warnings` (the CI gate). A
+environment directly fails `cargo clippy --workspace -- -D warnings` (the CI gate). A
 legitimately external read — the config machinery
 itself, a process-level tuning knob, a standard `HOME` / `XDG` lookup, a build
 script, or test code — carries an `#[allow(clippy::disallowed_methods)]` with a
