@@ -31,7 +31,7 @@ use aether_actor::{HandlesKind, Manual};
 #[cfg(feature = "github")]
 use aether_bloomery::EnumerateClaims;
 use aether_bloomery::{
-    Admit, ApprovalPolicy, BloomDraft, BloomId, Event, MemberDependency, MetricsQuery, Query, ResolvedConfigs,
+    Admit, ApprovalPolicy, BloomDraft, BloomId, Digest, Event, MemberDependency, MetricsQuery, Query, ResolvedConfigs,
     SpendQuery, Statement, StoreClass, Workpiece, WorkpieceId,
 };
 use aether_data::wire::to_vec;
@@ -167,6 +167,10 @@ pub struct ApiCapabilityState {
     /// Bearer token commission routes require. Empty refuses every commission
     /// request.
     pub(super) control_token: String,
+    /// The unique authorized instruction-bundle address, when this host
+    /// selected exactly one. Injected into a draft that names no pin of its
+    /// own before the spec is frozen (ADR-0214).
+    pub(super) default_instruction_pin: Option<Digest>,
     /// The doctor's latest completed pass, overlaid on `GET /view`.
     #[cfg(feature = "github")]
     pub(super) doctor: Option<DoctorReport>,

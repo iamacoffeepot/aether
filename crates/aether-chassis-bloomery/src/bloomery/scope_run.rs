@@ -81,6 +81,7 @@ pub fn scope_dispatch_payload(
     intent: Digest,
     base: Digest,
     sketch: &str,
+    instructions: Option<Digest>,
 ) -> ScopeDispatchPayload {
     let binding = StageCatalog::binding_of(StageId::Scope);
     let subject = scope_run_subject(&commission, intent, base);
@@ -98,6 +99,7 @@ pub fn scope_dispatch_payload(
         // dispatches. No `ModelOverride` is resolved against it — that type is
         // sealed into a *bloom's* registry, and there is no bloom here.
         profile: StageCatalog::profile_of(StageId::Scope),
+        instructions,
     }
 }
 
@@ -226,7 +228,8 @@ pub fn open_scope_run(
 
     let ordinal =
         store.next_scope_run_ordinal(&commission.0).map_err(|error| ScopeRunRefusal::Store(error.to_string()))?;
-    let payload = scope_dispatch_payload(commission.clone(), ordinal, intent, base, sketch);
+    let instructions = unique_authorized_pin(store)?;
+    let payload = scope_dispatch_payload(commission.clone(), ordinal, intent, base, sketch, instructions);
     let encoded = to_vec(&payload).map_err(|error| ScopeRunRefusal::Encode(error.to_string()))?;
 
     let sequence = store
@@ -236,10 +239,21 @@ pub fn open_scope_run(
             intent: intent.as_bytes().as_slice(),
             base: base.as_bytes().as_slice(),
             subject: payload.subject.as_bytes().as_slice(),
+            instructions: instructions.as_ref().map(|pin| pin.as_bytes().as_slice()),
             payload: &encoded,
         })
         .map_err(|error| ScopeRunRefusal::Store(error.to_string()))?;
     Ok(OpenedScopeRun { sequence, ordinal, subject: payload.subject })
+}
+
+/// The host's selected instruction bundle: the unique authorized address, or
+/// none when the host authorized zero or more than one.
+fn unique_authorized_pin(store: &mut dyn StoreBackend) -> Result<Option<Digest>, ScopeRunRefusal> {
+    let listed = store.list_authorized_instructions().map_err(|error| ScopeRunRefusal::Store(error.to_string()))?;
+    Ok(match listed.as_slice() {
+        [only] => Digest::from_slice(only),
+        _ => None,
+    })
 }
 
 #[cfg(test)]
@@ -258,6 +272,7 @@ mod tests {
             subject: None,
             verdict: None,
             revision: (kind == "frozen").then(|| digest(7).as_bytes().to_vec()),
+            instructions: None,
         }
     }
 

@@ -33,6 +33,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use aether_data::wire::{Error as WireError, from_bytes};
+
 use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
@@ -610,6 +612,52 @@ pub struct ScopeDispatchPayload {
     /// resolved against it — that type is sealed into a *bloom's* registry and
     /// there is no bloom here.
     pub profile: AgentProfile,
+    /// The instruction-bundle address this run dispatches under (ADR-0214).
+    /// Resolved from the host's unique authorized bundle when the run is
+    /// created, and retained across retries of this ordinal. Absent when the
+    /// host authorized none — dispatch then refuses at the provenance gate.
+    pub instructions: Option<Digest>,
+}
+
+/// Frozen pre-pin wire shape of [`ScopeDispatchPayload`].
+///
+/// The positional codec cannot read a six-field payload as seven. A row written
+/// before the pin decodes through this shape and carries `instructions: None`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+struct ScopeDispatchPayloadPrePin {
+    commission: WorkpieceId,
+    ordinal: u64,
+    subject: Digest,
+    intent: Digest,
+    base: Digest,
+    stage: StageId,
+    transformation: Transformation,
+    profile: AgentProfile,
+}
+
+impl From<ScopeDispatchPayloadPrePin> for ScopeDispatchPayload {
+    fn from(prior: ScopeDispatchPayloadPrePin) -> Self {
+        Self {
+            commission: prior.commission,
+            ordinal: prior.ordinal,
+            subject: prior.subject,
+            intent: prior.intent,
+            base: prior.base,
+            stage: prior.stage,
+            transformation: prior.transformation,
+            profile: prior.profile,
+            instructions: None,
+        }
+    }
+}
+
+/// Decode a scoping-run outbox payload, carrying a pre-pin row forward with the
+/// bundle pin absent.
+///
+/// # Errors
+/// The bytes are neither the current shape nor the pre-pin shape.
+pub fn decode_scope_dispatch(bytes: &[u8]) -> Result<ScopeDispatchPayload, WireError> {
+    from_bytes(bytes).or_else(|_| from_bytes::<ScopeDispatchPayloadPrePin>(bytes).map(ScopeDispatchPayload::from))
 }
 
 /// The integration dispatch outbox payload (ADR-0152 §Resolution drives

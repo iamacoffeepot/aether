@@ -42,8 +42,8 @@ use std::fmt;
 use aether_bloomery::{
     Admit, AuthorityDoor, AuthorizedSigner, ClosureViolation, ConfigResolveError, ConfigScopes, Digest,
     Ed25519KeyProvider, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, KeyId, ModelProcessInstructions,
-    ModelProcessInstructionsError, PromptManifest, ProvenanceIndex, SCOPE_FILL_COMMAND, Slot, SlotRole, StageId,
-    Statement, Topic, assemble_manifest, config_address, decode_config, is_model_lane,
+    ModelProcessInstructionsError, PromptManifest, ProvenanceIndex, Slot, SlotRole, StageId, Statement, Topic,
+    assemble_manifest, config_address, decode_config, is_model_lane,
 };
 #[cfg(any(test, feature = "testing"))]
 use aether_bloomery::{ConfigKind, ConfigRegistry};
@@ -59,16 +59,14 @@ use crate::store::StoreBackend;
 /// Whether this dispatch must present validated instruction provenance before it
 /// may reach a worker.
 ///
-/// Every model lane except the pre-bloom scoping run. A scoping run is dispatched
-/// before any bloom exists, so it carries no sealed registry a pin could live in
-/// (ADR-0214 §Resolve defaults before sealing asks for a pin on the durable scope
-/// run itself, which is a persisted identity this gate does not yet have). Gating
-/// it against a registry that cannot hold a pin would refuse every scoping run
-/// rather than enforce anything, so it is excluded here, by name, until that pin
-/// exists.
+/// Every model lane, including the pre-bloom scoping run. A scoping run pins its
+/// bundle on the durable run record rather than a bloom registry (ADR-0214
+/// §Resolve defaults before sealing); the drain copies that pin into the order's
+/// `configs` so this gate resolves it the same way construct, review, and
+/// aggregate review do.
 #[must_use]
 pub fn gated(command: &str) -> bool {
-    is_model_lane(command) && command != SCOPE_FILL_COMMAND
+    is_model_lane(command)
 }
 
 /// Why a dispatch was refused before it could reach a model.

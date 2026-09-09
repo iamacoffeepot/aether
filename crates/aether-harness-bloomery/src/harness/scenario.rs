@@ -144,12 +144,18 @@ impl ScenarioHarness {
                 .expect("genesis correspondence records");
         }
 
-        let mut configs = author_instructions(&store_path);
-        configs.overlay(author_manifest(&store_path));
-        let authorized = configs
-            .address::<ModelProcessInstructions>()
-            .expect("the authored instruction bundle seals its own address")
-            .to_hex();
+        let mut configs = author_manifest(&store_path);
+        let authorized = if builder.authorize_instructions {
+            let instructions = author_instructions(&store_path);
+            let authorized = instructions
+                .address::<ModelProcessInstructions>()
+                .expect("the authored instruction bundle seals its own address")
+                .to_hex();
+            configs.overlay(instructions);
+            authorized
+        } else {
+            String::new()
+        };
         if let Some(secs) = builder.wall_clock_secs {
             configs.overlay(author_catalog(&store_path, secs));
         }
@@ -1001,7 +1007,7 @@ fn in_process_env(
         poll_interval_secs: builder.poll_interval_secs,
         local_lane_enabled: scripted,
         local_lane_commands: if scripted {
-            "construct.,review.,verify.,retrospect.".to_owned()
+            "construct.,review.,verify.,scope.,retrospect.".to_owned()
         } else {
             defaults.local_lane_commands
         },

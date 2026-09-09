@@ -18,10 +18,10 @@ use aether_bloomery::testing::digest;
 use aether_bloomery::{
     Admit, AgentSelection, AggregateReviewPayload, AggregateVerifyPayload, BloomId, CandidateRef, Conclusion,
     ConfigKind, ConfigRegistry, Digest, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness,
-    LaneObservation, ModelOverride, Nonce, Observation, Provenance, ReasoningEffort, RedispatchPayload, ReviewPass,
-    SharedCorrespondence, StageCatalog, StageId, StageOverride, Statement, TimeoutRecord, Topic, Transformation,
-    VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
-    split_lane_identity,
+    LaneObservation, ModelOverride, ModelProcessInstructions, Nonce, Observation, Provenance, ReasoningEffort,
+    RedispatchPayload, ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride, Statement,
+    TimeoutRecord, Topic, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId,
+    pin_workpiece_description, split_lane_identity,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
@@ -579,6 +579,7 @@ fn drain_and_dispatch_submits_each_dispatch_and_records_its_order() {
 }
 
 fn seed_commission(store: &mut SqliteStore, id: &str) -> (WorkpieceId, Digest) {
+    authorize_instructions(store, &reference_instructions());
     let commission = WorkpieceId(id.to_owned());
     let intent = Statement {
         words: format!("scope {id}").into_bytes(),
@@ -613,6 +614,12 @@ fn a_scope_run_drains_with_no_bloom_in_the_store() {
         store.lookup_scope_run(&nonce.0).unwrap(),
         Some((commission.0.clone(), opened.ordinal)),
         "the dispatched row names the run from its outbox sequence alone",
+    );
+    let configs: ConfigRegistry = from_bytes(&order.configs).expect("the order carries a registry");
+    assert_eq!(
+        configs.address::<ModelProcessInstructions>(),
+        Some(reference_instructions().address()),
+        "the drain copies the run's pin into the order the lane is handed",
     );
 }
 

@@ -151,6 +151,7 @@ pub struct HarnessBuilder {
     github_fixture: bool,
     socket_read_timeout: Option<Duration>,
     step_budget: Duration,
+    authorize_instructions: bool,
 }
 
 impl HarnessBuilder {
@@ -177,6 +178,7 @@ impl HarnessBuilder {
             github_fixture: true,
             socket_read_timeout: Some(SOCKET_READ_TIMEOUT),
             step_budget: Duration::from_secs(20),
+            authorize_instructions: true,
         }
     }
 
@@ -203,6 +205,7 @@ impl HarnessBuilder {
             github_fixture: true,
             socket_read_timeout: None,
             step_budget: Duration::from_mins(2),
+            authorize_instructions: true,
         }
     }
 
@@ -231,6 +234,7 @@ impl HarnessBuilder {
             github_fixture: false,
             socket_read_timeout: Some(SOCKET_READ_TIMEOUT),
             step_budget: Duration::from_secs(30),
+            authorize_instructions: true,
         }
     }
 
@@ -321,6 +325,16 @@ impl HarnessBuilder {
     #[must_use]
     pub fn script(mut self, script: &LaneScript) -> Self {
         self.script = Some(script.clone());
+        self
+    }
+
+    /// Boot without authorizing a model-process instruction bundle (ADR-0214).
+    ///
+    /// Every model dispatch, including a pre-bloom scoping run, then refuses at
+    /// the provenance gate. The default authorizes the suite's reference bundle.
+    #[must_use]
+    pub const fn without_authorized_instructions(mut self) -> Self {
+        self.authorize_instructions = false;
         self
     }
 
