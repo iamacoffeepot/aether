@@ -319,7 +319,6 @@ pub(super) fn stage_blob_file(tag: &str, bytes: &[u8]) -> PathBuf {
 /// the `RpcServer`'s local Calls settle and close). Returns the
 /// chassis (kept alive for its dispatcher threads) and the RPC
 /// port an `RpcSession` dials.
-//noinspection DuplicatedCode -- the inventory variant deliberately extends this typed builder chain.
 pub(super) fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
@@ -368,7 +367,6 @@ pub(super) fn connect_mcp(port: u16) -> Mcp {
 /// `descriptors::all()`. Used by ADR-0091's end-to-end check that
 /// the MCP encode path picks the registered kind up via
 /// `aether.inventory.kinds`.
-//noinspection DuplicatedCode -- this variant extends the base hub with inventory and extra descriptors.
 pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChassis<TestChassis>, u16) {
     use aether_inventory::InventoryCapability;
 

@@ -1,17 +1,16 @@
-//! `aether.fs` cap. Owns the full ADR-0041 stack — its mail kinds
-//! ([`kinds`], ADR-0121), the [`FileAdapter`] trait + `LocalFileAdapter`
-//! (`adapter`), the `AdapterRegistry` + env-driven [`NamespaceRoots`]
-//! (`registry`), and the [`FsCapability`] itself. Chassis mains
-//! resolve a [`NamespaceRoots`] (typically via `NamespaceRoots::from_env`)
-//! and pass it through `with_actor::<FsCapability>(roots)` — `init`
-//! builds the adapter registry and returns `BootError` on failure (per
-//! ADR-0063 fail-fast).
+//! `aether.fs` capability: the file-I/O mail surface (ADR-0041).
 //!
-//! Threading: the actor dispatcher thread pulls envelopes from the
-//! `aether.fs` mailbox and routes them through the macro-emitted
-//! `NativeDispatch::__aether_dispatch_envelope`. Adapter calls run
-//! synchronously on that thread; ADR-0041 flagged a future host-fn
-//! fast path for asset-sized streaming.
+//! Owns the whole stack: the mail kinds ([`kinds`]), the [`FileAdapter`] trait
+//! and its `LocalFileAdapter`, the [`AdapterRegistry`] over the `save`,
+//! `assets`, and `config` namespaces, and the [`FsCapability`] itself. A
+//! chassis main resolves a [`NamespaceRoots`] (usually through
+//! `NamespaceRoots::from_env`) and passes it to
+//! `with_actor::<FsCapability>(roots)`; `init` builds the adapter registry and
+//! returns `BootError` when a root is unusable, so a misconfigured chassis
+//! fails at boot and not at the first read.
+//!
+//! Adapter calls run synchronously on the actor's dispatcher thread, the one
+//! that pulls envelopes from the `aether.fs` mailbox.
 
 pub mod kinds;
 
