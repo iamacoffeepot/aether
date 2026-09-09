@@ -30,7 +30,7 @@
 use aether_bloomery::{BloomId, ConfigRegistry, Digest, Topic, WorkHandle, control::ScopeDispatchPayload};
 use aether_data::wire::from_bytes;
 
-use crate::bloomery::executor::ExecutorPort;
+use crate::bloomery::executor::{ExecutorPort, Settled};
 use crate::bloomery::intake::{DispatchRecord, dispatch_and_record, dispatch_nonce};
 use crate::bloomery::outbox::TopicOutbox;
 use crate::store::StoreBackend;
@@ -100,8 +100,8 @@ pub(super) fn drain_and_dispatch_scope(
             configs: ConfigRegistry::default(),
         };
         match dispatch_and_record(executor, store, &record, now_unix_millis) {
-            Ok(handle) => {
-                // After the order is recorded, never before: the ledger row
+            Ok(Settled::Answered(handle)) => {
+                // After the order is submitted, never before: the ledger row
                 // says "this run is in flight under this nonce", and a nonce
                 // written for a submit that never happened would make the
                 // intake walk back from an upload that cannot exist.
@@ -109,6 +109,7 @@ pub(super) fn drain_and_dispatch_scope(
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
             }
+            Ok(Settled::InFlight) => break,
             Err(error) if error.is_permanent() => {
                 // A permanent refusal never clears on retry, so the entry is
                 // acked past and the run stops with no `dispatched` row — which

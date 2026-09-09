@@ -48,9 +48,11 @@ fn a_bloom_lands_though_each_dispatch_parks_in_the_adapter() {
 
     // Construct: the seal's dispatch decision is in the outbox, and the turn
     // that drains it hands the submit to a worker rather than waiting on it.
-    // The order row is written before the call runs, so it is readable while
-    // the call is still parked; what has to hold is that the entry is not acked
-    // until the answer lands and the handle is tracked.
+    // The order row is written as `submitting` before the call runs, so session
+    // reuse can still resolve it, but `await_order` (and every other "waiting
+    // on a run" reader) only sees it once the worker answers and the row is
+    // promoted. What has to hold is that the entry is not acked until the
+    // answer lands and the handle is tracked.
     harness.stall_next_dispatch(STALL);
     let construct = harness.await_order();
     let candidate = harness.seed_capture(bloom, WORKPIECE, digest(0xC1), digest(0xC2));

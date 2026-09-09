@@ -36,7 +36,7 @@ use aether_bloomery_github::short_hex;
 use aether_data::wire::from_bytes;
 
 use crate::bloomery::dispatch_model;
-use crate::bloomery::executor::ExecutorPort;
+use crate::bloomery::executor::{ExecutorPort, Settled};
 use crate::bloomery::intake::{DispatchRecord, dispatch_and_record, dispatch_nonce};
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::provenance::{ProvenanceRefusal, journal_refusal};
@@ -122,10 +122,11 @@ pub(super) fn drain_and_dispatch_study(
 
         let record = study_record(entry.sequence, payload);
         match dispatch_and_record(executor, store, &record, now_unix_millis) {
-            Ok(handle) => {
+            Ok(Settled::Answered(handle)) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
             }
+            Ok(Settled::InFlight) => break,
             Err(error) if error.is_permanent() => {
                 // Including a provenance refusal (ADR-0214): the reader is a
                 // model lane, so it passes the same gate, and a bloom whose

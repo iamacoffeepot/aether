@@ -127,8 +127,8 @@ mod runtime;
 #[cfg(feature = "runtime")]
 pub use runtime::{
     AppendOutcome, CANDIDATE_HASH_OCCASION_LAND, CANDIDATE_HASH_OCCASION_SEAL, CandidateHash, CommitOutcome,
-    JournalOpenError, JournalWrite, OutstandingOrder, ProofFactRow, ProofFactWrite, RecordOutcome, ScopeRunOpen,
-    ScopeRunRow, SealOutcome, SqliteStore, StoreBackend, StoreCapabilityState, StudyRow, now_unix_millis,
+    JournalOpenError, JournalWrite, OrderLifecycle, OutstandingOrder, ProofFactRow, ProofFactWrite, RecordOutcome,
+    ScopeRunOpen, ScopeRunRow, SealOutcome, SqliteStore, StoreBackend, StoreCapabilityState, StudyRow, now_unix_millis,
 };
 
 #[cfg(all(test, feature = "runtime"))]

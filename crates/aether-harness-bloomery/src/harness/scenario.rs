@@ -801,7 +801,8 @@ impl ScenarioHarness {
         self.coordinator.as_ref().map(Coordinator::boot_log_tail)
     }
 
-    /// The nonces the store still holds as outstanding orders.
+    /// The nonces the store still holds as order rows, including submit-intent
+    /// reservations. The liveness oracle treats those as work in flight.
     ///
     /// # Panics
     /// The store could not be opened or read.
@@ -809,7 +810,7 @@ impl ScenarioHarness {
     pub fn outstanding(&self) -> Vec<String> {
         SqliteStore::open(&self.store_path)
             .expect("the coordinator's journal opens for reading")
-            .list_outstanding_nonces()
+            .list_order_nonces()
             .expect("the outstanding-order registry reads")
     }
 

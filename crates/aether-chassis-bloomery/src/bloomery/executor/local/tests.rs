@@ -54,7 +54,7 @@ use crate::bloomery::REQUIRED_KIT;
 use crate::bloomery::executor::{OutstandingDispatch, ReconcileLanes};
 use crate::bloomery::intake::{EvidenceClaims, NameEvidenceClaims};
 use crate::session::{SessionKey, SessionManifest};
-use crate::store::{CommissionBackend, OutstandingOrder, RevisionEvidence, SqliteStore, StoreBackend};
+use crate::store::{CommissionBackend, OrderLifecycle, OutstandingOrder, RevisionEvidence, SqliteStore, StoreBackend};
 
 // A correspondence seeded with the two commits these orders carry — the
 // checkout target (`for_member_stage`'s third arg, `digest(0xC0)`) and the
@@ -2127,6 +2127,7 @@ fn member_order_at(nonce: &str, workpiece: &str, stage: StageId) -> OutstandingO
         configs: vec![3, 3],
         profile: Vec::new(),
         deadline_unix_millis: 1_700_000_000_000,
+        lifecycle: OrderLifecycle::Submitted,
     }
 }
 
@@ -4001,6 +4002,7 @@ fn contained_member_store(dir: &TempDir, verify: &str, queued: &str) -> SqliteSt
                 configs: to_vec(&ConfigRegistry::default()).unwrap(),
                 profile: to_vec(&StageCatalog::profile_of(stage)).unwrap(),
                 deadline_unix_millis: 1_700_000_000_000,
+                lifecycle: OrderLifecycle::Submitted,
             })
             .unwrap();
     }

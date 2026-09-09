@@ -10,9 +10,9 @@ use aether_bloomery::{
 use aether_bloomery_github::{ExecutorError, GithubError};
 use aether_data::wire::to_vec;
 
-use crate::bloomery::executor::{ExecutorPort, ExecutorPortError, LocalExecutorError};
+use crate::bloomery::executor::{ExecutorPort, ExecutorPortError, LocalExecutorError, Settled};
 use crate::bloomery::provenance::{ProvenanceRefusal, admit_model_dispatch, gated, journal_refusal};
-use crate::store::{OutstandingOrder, RecordOutcome, StoreBackend};
+use crate::store::{OrderLifecycle, OutstandingOrder, RecordOutcome, StoreBackend};
 
 /// The idempotency nonce a drained outbox entry dispatches under.
 ///
@@ -116,6 +116,7 @@ impl DispatchRecord {
             // And again for the sealed profile, so a replayed lane dispatches the
             // agent the bloom's catalog named rather than the compiled line's.
             profile: to_vec(&self.profile).unwrap_or_default(),
+            lifecycle: OrderLifecycle::Submitting,
         }
     }
 }
@@ -234,17 +235,27 @@ impl DispatchError {
 }
 
 /// Record a work order's outstanding reducer context and submit it through the
-/// executor shell, in one host step (#3502).
+/// executor port, in one host step (#3502).
 ///
-/// **Records first.** `submit` is synchronous into the local executor, which
-/// starts the lane on a free slot inside that call and resolves the order's
-/// (bloom, workpiece, stage) from this very registry row to decide session
-/// reuse. Submitting first therefore hands the executor a nonce it cannot
-/// resolve: every journaled resume — a refine's construct session, a dependent
-/// construct's predecessor session — reads as "no such order" and silently
-/// falls through to the pool, where the member's own grown context is refused
-/// on the context cap. A submit that then fails removes the row it wrote, so a
-/// dispatch that never reached the worker lane leaves no registry entry behind.
+/// **Records first.** The local executor starts the lane inside `submit` and
+/// resolves the order's (bloom, workpiece, stage) from this very registry row
+/// to decide session reuse. Submitting first therefore hands the executor a
+/// nonce it cannot resolve: every journaled resume — a refine's construct
+/// session, a dependent construct's predecessor session — reads as "no such
+/// order" and silently falls through to the pool, where the member's own grown
+/// context is refused on the context cap.
+///
+/// The row is written as [`OrderLifecycle::Submitting`]. Readers that mean
+/// "waiting on a run" ignore it, so handing `submit` to a worker no longer
+/// publishes a reservation as a dispatch (#5564). When the port answers with a
+/// handle the row is promoted to [`OrderLifecycle::Submitted`]; a submit that
+/// then fails removes the row it wrote, so a dispatch that never reached the
+/// worker lane leaves no registry entry behind. [`Settled::InFlight`] leaves
+/// the submitting row in place and the outbox entry unacked — the same "not
+/// asked yet" reading every other offloaded call uses. After a restart there
+/// is no live worker, the outbox is still unacked, and the drain re-drives
+/// under the same nonce: `INSERT OR IGNORE` reuses the submitting row rather
+/// than inserting a second one.
 ///
 /// `now_unix_millis` is the clock reading the order's ADR-0177 deadline is
 /// computed from — taken by the caller once per tick, and injected rather than
@@ -273,7 +284,7 @@ pub fn dispatch_and_record(
     store: &mut dyn StoreBackend,
     record: &DispatchRecord,
     now_unix_millis: u64,
-) -> Result<WorkHandle, DispatchError> {
+) -> Result<Settled<WorkHandle>, DispatchError> {
     if gated(&record.transformation.command)
         && let Err(refusal) = admit_model_dispatch(store, record)
     {
@@ -281,11 +292,18 @@ pub fn dispatch_and_record(
         return Err(DispatchError::Provenance(refusal));
     }
     record_dispatch_at(store, record, now_unix_millis).map_err(DispatchError::Store)?;
-    port.submit(&record.to_order()).map_err(|error| {
-        // Nothing reached the worker lane, so the row describes a dispatch that
-        // does not exist; drop it rather than leave the deadline sweep to expire
-        // an order no run was ever started for.
-        let _ = store.consume_order(&record.nonce.0);
-        DispatchError::Submit(error)
-    })
+    match port.submit(&record.to_order()) {
+        Settled::InFlight => Ok(Settled::InFlight),
+        Settled::Answered(Ok(handle)) => {
+            store.mark_order_submitted(&record.nonce.0).map_err(DispatchError::Store)?;
+            Ok(Settled::Answered(handle))
+        }
+        Settled::Answered(Err(error)) => {
+            // Nothing reached the worker lane, so the row describes a dispatch
+            // that does not exist; drop it rather than leave the deadline sweep
+            // to expire an order no run was ever started for.
+            let _ = store.consume_order(&record.nonce.0);
+            Err(DispatchError::Submit(error))
+        }
+    }
 }
