@@ -1,7 +1,8 @@
 # ADR-0193: Suppression requests are lane-stated and reviewer-granted
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-14
+- **Amended:** 2026-09-09 — status: implemented on `main`; `SuppressionRequest`, `SuppressionDisposition`, and `reduce_suppression_disposition` are in `crates/aether-bloomery/src/reduce/suppression.rs` (`2d6dfaace`).
 - **Amended:** 2026-08-26 — §5's mechanism sentence was corrected to the post-ADR-0191 route (`reduce_suppression_disposition`); the decision is unchanged.
 
 ## Context

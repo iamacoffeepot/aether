@@ -1,23 +1,18 @@
-//! Smoke component for ADR-0021 input subscriptions. Observes the
-//! substrate-published input kinds (Key / `MouseMove` / `MouseButton`)
-//! and counts each dispatch. `Tick` is a frame-lifecycle stage
-//! (`aether.lifecycle`, ADR-0082), not an input stream, so it is not
-//! part of this input-streams demo.
+//! Smoke component for input subscriptions. It subscribes to the
+//! substrate-published input kinds (`Key`, `MouseMove`, `MouseButton`) through
+//! the `aether.window` facade and gives each one a handler, which is all it
+//! takes to receive them: nothing subscribes on a component's behalf, so a
+//! component that wants input asks for it from `wire`.
 //!
-//! Pre-issue-775 the example emitted a `demo.input_observed { stream,
-//! code }` to `hub.claude.broadcast` so the driving Claude session
-//! saw each dispatch land via `receive_mail`. With
-//! `BroadcastCapability` retired the broadcast goes away; handlers
-//! still run (and trigger any tracing the substrate captures), but no
-//! observation kind is emitted.
+//! The handlers are empty. Running this component exercises the subscription
+//! and dispatch path end to end, visible in whatever tracing the substrate
+//! captures, without producing output of its own.
 //!
-//! Each input kind has its own `#[handler]` method. Issue 640 retired
-//! the cap-side manifest auto-subscribe walker (and the macro-side
-//! walker retired earlier in #403); components subscribe from the
-//! `wire` hook through the typed `aether.window` facade.
+//! `Tick` is a frame-lifecycle stage on `aether.lifecycle`, not an input
+//! stream, so it is not part of this demo.
 
-// Stateless logger: each `#[handler]` keeps `&mut self` for the
-// ADR-0033 / ADR-0038 dispatch ABI but doesn't need any field access.
+// Stateless logger: each handler keeps `&mut self` for the dispatch ABI but
+// touches no fields.
 #![allow(clippy::unused_self)]
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};

@@ -1,7 +1,8 @@
 # ADR-0184: Bloom Calibration Is Measured from the Journal
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-12
+- **Amended:** 2026-09-09 — status: implemented on `main`; `CalibrationLedger` folds the journal in `crates/aether-bloomery/src/calibration.rs` and the chassis control runtime holds it beside the snapshot (#4988).
 - **Amended:** 2026-09-09 (#5824) — the per-cell blooms seal in sequence and the fixture mainline is reset between them. See §Decision, "Benchmark blooms".
 
 ## Context

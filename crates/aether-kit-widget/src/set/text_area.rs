@@ -351,8 +351,6 @@ impl WidgetDefaults for TextAreaWidget {
         self.edit.clear_composition();
     }
 
-    //noinspection DuplicatedCode -- actor macros require one handler per type; the implementation is shared.
-
     fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, gained: FocusGained) {
         self.state.gain_focus(gained.keyboard);
         self.reconcile_scroll();
@@ -543,7 +541,6 @@ impl WasmActor for TextAreaWidget {
     }
 
     #[handler::single]
-    //noinspection DuplicatedCode -- actor macros require one collect handler per concrete widget type.
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()));
     }

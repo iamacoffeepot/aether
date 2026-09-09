@@ -20,7 +20,7 @@ cargo fmt -- --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-GitHub Actions is the full build engine and merge gate. `CI pass` aggregates
+GitHub Actions is the merge gate: a pull request runs the affected subset of the test suite on one shard, and `main` runs the full suite across three. `CI pass` aggregates
 the jobs that must be green: `Format`, `Clippy`, `Rustdoc`, the sharded `Test`
 matrix, `Duplicate code` (jscpd), `Unused dependencies` (cargo-machete), `Cargo
 lock freshness`, and `New suppressions` on pull requests. Branch protection

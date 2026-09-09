@@ -105,7 +105,6 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
 // `self_id` match the recipient is always `Remote`, so the path is identical
 // to a bare `mail::send_mail`.
 impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
-    //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
@@ -122,7 +121,6 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
         );
     }
 
-    //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
@@ -139,7 +137,6 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
         );
     }
 
-    //noinspection DuplicatedCode
     // Runtime-name send escape hatch (the `MailSender::send_to_named` contract):
     // the recipient name is supplied at runtime, no compile-time `R` to resolve.
     #[allow(clippy::disallowed_methods)]
@@ -161,7 +158,6 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
         mail::prev_correlation()
     }
 
-    //noinspection DuplicatedCode
     fn send_detached<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
@@ -178,7 +174,6 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
         );
     }
 
-    //noinspection DuplicatedCode
     // Runtime-name detached escape hatch — the `send_to_named` counterpart.
     #[allow(clippy::disallowed_methods)]
     // the runtime-name routing path itself — same ADR-0099 §4 parse → fold as `send_to_named`
@@ -194,7 +189,6 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
         );
     }
 
-    //noinspection DuplicatedCode
     // By-id detached send: the inherent `send_to` with `ChainMode::Detached`.
     fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
         let bytes = payload.encode_into_bytes();

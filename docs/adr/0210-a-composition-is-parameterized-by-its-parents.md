@@ -1,7 +1,8 @@
 # ADR-0210: A composition is parameterized by its parents
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-22
+- **Amended:** 2026-09-09 — status: implemented on `main`; `crates/aether-bloomery/src/reduce/narrowing.rs` picks the parent set from the refusing diagnostic's paths and composes over exactly that subset (`78342c7fc`).
 
 ## Context
 

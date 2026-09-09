@@ -1,7 +1,8 @@
 # ADR-0199: The Bloomery Owns Its Source and Its Work Orders
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-15
+- **Amended:** 2026-09-09 — status: implemented on `main`; `LocalGitData` implements `GitDataApi` over the fleet-host bare repository and `crates/aether-bloomery-git/src/replica/` carries the one-directional GitHub replication (#5170).
 
 ## Context
 

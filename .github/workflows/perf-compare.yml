@@ -20,6 +20,12 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
 
+# The floor both jobs start from; each elevates at job level with a comment
+# saying why. Without it a job added later would silently inherit the
+# repository default token instead of this read-only one.
+permissions:
+  contents: read
+
 # Perf runs are expensive (two release builds + K interleaved trials);
 # cancel a superseded run when the PR is pushed again.
 concurrency:

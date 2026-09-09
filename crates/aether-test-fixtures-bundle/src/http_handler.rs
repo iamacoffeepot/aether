@@ -194,7 +194,6 @@ impl WasmActor for StreamingHttpHandler {
     /// # Agent
     /// Not sent manually — the `aether.http.server` cap dispatches it on
     /// every inbound request; this actor binds the `/` catch-all in `wire`.
-    //noinspection DuplicatedCode -- actor macros require one request handler per fixture actor type.
     #[handler::single]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
         HttpResponseStreamOpen { status: 200, headers: Vec::new() }
@@ -207,7 +206,6 @@ impl WasmActor for StreamingHttpHandler {
     /// Not sent manually — the cap sends one `HttpStreamCredit` per freed
     /// window slot; the handler emits at most that many `HttpResponseChunk`s
     /// in response.
-    //noinspection DuplicatedCode -- actor macros require one credit handler per fixture actor type.
     #[handler::manual]
     fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
         self.progress.spend_credit(ctx, &credit);

@@ -418,8 +418,9 @@ impl NativeActor for LifecycleCapability {
     }
 
     /// Remove `mailbox` from every lifecycle stage's subscriber set in
-    /// one shot — the lifecycle-family counterpart of
-    /// `InputCapability::on_unsubscribe_all`.
+    /// one shot — the lifecycle-family counterpart of the window
+    /// family's `aether.window.unsubscribe_all`, the other half of the
+    /// subscription surface now that no input capability exists.
     /// The externally sendable bulk form; drop-time cleanup happens
     /// through [`Self::on_monitor_notice`] instead, so nothing mails
     /// this on the component path anymore. No mailbox-validation: the
@@ -636,8 +637,8 @@ mod tests {
     fn on_unsubscribe_all_purges_mailbox_from_every_stage() {
         // A dropped trampoline's mailbox must leave every stage's
         // subscriber set in one shot (the drop-cleanup contract,
-        // mirroring `InputCapability::on_unsubscribe_all`), while
-        // co-subscribers on a shared stage survive.
+        // mirroring the window family's `aether.window.unsubscribe_all`),
+        // while co-subscribers on a shared stage survive.
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::mail::{MailId, MailboxId, Source};
 

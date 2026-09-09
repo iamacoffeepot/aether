@@ -910,7 +910,6 @@ mod tests {
     fn enum_shape_merges_variants_and_field_names() {
         let shape = KindShape {
             name: Cow::Borrowed("test.result"),
-            //noinspection DuplicatedCode
             schema: SchemaShape::Enum {
                 variants: vec![
                     VariantShape::Unit { discriminant: 0 },

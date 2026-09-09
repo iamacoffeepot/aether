@@ -1,38 +1,31 @@
 //! Proc macros for the typed route-authoring surface over the
-//! `aether.http.server` capability (ADR-0131 / ADR-0154). Two attribute
-//! macros, re-exported through `aether_http` so consumers
-//! write `#[http::router]` / `#[http::route]` next to the
-//! `http::FromRequest` / `http::Path` / `http::Ctx` runtime types the
-//! parent crate owns.
+//! `aether.http.server` capability. Two attributes, re-exported through
+//! `aether-http` so a consumer writes `#[http::router]` and `#[http::route]`
+//! beside the `http::FromRequest` / `http::Path` / `http::Ctx` runtime types
+//! the parent crate owns.
 //!
-//! `#[http::router]` sits on an actor's `impl` block, *above* `#[actor]`
-//! (or `#[runtime]`). Attribute macros expand outer-first, so `router`
-//! runs first: it consumes the `#[http::route(<Method|any>, "<template>")]`
-//! attributes on methods, groups routes that share a `(static-head,
-//! method)` claim, mints one hidden request-shaped route kind per group,
-//! emits one `#[handler]` glue per group that matches the request's path
-//! segments against every template in the group (binding `{capture}`
-//! segments through `FromPathSegment` and running `FromRequest`
-//! extractors), injects the `RegisterRouteSelf` registration into `wire`,
-//! and hands `#[actor]` an ordinary impl block.
+//! `#[http::router]` sits on an actor's `impl` block, above `#[actor]` (or
+//! `#[runtime]`). Attribute macros expand outer first, so `router` runs first:
+//! it consumes the `#[http::route(<Method|any>, "<template>")]` attributes on
+//! the methods, groups the routes sharing a `(static-head, method)` claim,
+//! mints one hidden request-shaped route kind per group, emits one
+//! `#[handler]` per group that matches the request's path segments against
+//! every template in the group (binding `{capture}` segments through
+//! `FromPathSegment` and running `FromRequest` extractors), injects the
+//! `RegisterRouteSelf` registration into `wire`, and hands `#[actor]` an
+//! ordinary impl block.
 //!
-//! A template's *static head* — its leading run of literal segments — is
-//! the prefix claimed with the cap (ADR-0130 keys routes by `(prefix,
-//! method)`); the capture and sub-path matching runs entirely in the
-//! generated guest-side glue, so the capability never grows a routing
-//! trie (ADR-0154 §1). Routes that share a `(static-head, method)` claim
-//! collapse into one registration and one dispatcher, most-specific
-//! template first, `404` when none match.
+//! A template's static head, its leading run of literal segments, is what is
+//! claimed with the capability, which keys routes by `(prefix, method)`.
+//! Capture and sub-path matching run in the generated guest-side glue, so the
+//! capability never grows a routing trie (ADR-0154). Routes sharing a claim
+//! collapse into one registration and one dispatcher, most specific template
+//! first, `404` when none match.
 //!
-//! Bare `#[http::router]` registers every route exclusively (today's
-//! default); `#[http::router(shared)]` registers them all `shared: true`
-//! instead (ADR-0136) — the impl-level opt-in for a component built to
-//! run as N interchangeable instances of one round-robin member set.
-//!
-//! The macros only emit token paths at the runtime vocabulary
-//! (`::aether_http::…`, `::aether_data::…`, `::serde::…`);
-//! they name none of those types directly, so this crate depends on
-//! nothing but `syn` / `quote` / `proc-macro2`.
+//! Bare `#[http::router]` registers every route exclusively.
+//! `#[http::router(shared)]` registers them all `shared: true` instead
+//! (ADR-0136), the opt-in for a component built to run as N interchangeable
+//! instances of one round-robin member set.
 
 use std::cmp::Reverse;
 

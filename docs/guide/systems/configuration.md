@@ -91,9 +91,13 @@ parse default.
 Discovery is the `--print-config` flag on any chassis binary: it walks the same
 declarations and prints every knob — its environment key, the value it resolves
 to and which source that value came from, its default, and its doc — then exits
-without booting. That listing is generated from the field annotations, so it
-can't drift from what the engine actually reads. It's the first place to look
-when you're unsure what a build will do with a given variable.
+without booting. The walk is *composition-derived* (ADR-0156): composing a cap
+with `with_actor` accumulates that cap's config member into the chassis's
+aggregate, so the dump and the unknown-key sweep list exactly the knobs this
+chassis wires and nothing else — headless doesn't "know" the window and audio
+knobs it never composes. That listing is generated from the field annotations,
+so it can't drift from what the engine actually reads. It's the first place to
+look when you're unsure what a build will do with a given variable.
 
 ## Configuring a running engine
 
@@ -110,10 +114,12 @@ Over MCP there are three ways to set configuration, from coarsest to finest:
 - **A chassis config file** is the persistent per-deployment layer. Pass
   `--config path/to/chassis.toml` on the chassis command line, or set
   `AETHER_CONFIG_FILE` as a fallback for the file path. The file is sectioned by
-  subsystem, for example `[http]`, `[http-server]`, `[fs]`, `[anthropic]`,
-  `[actor]`, `[scheduler]`, `[settlement]`,
-  `[chassis]`, plus chassis-specific sections such as `[window]`, `[tick]`, and
-  hub `[engine]`. Environment variables still override file values.
+  subsystem, and a section name is the config struct's own `cli_prefix` (or the
+  `section` its derive pins): `[http]`, `[http-server]`, `[process]`, `[rpc]`,
+  `[lifecycle]`, `[actor]`, `[scheduler]`, `[settlement]`, `[registry]`,
+  `[chassis]`, plus chassis-specific sections such as `[window]`, `[audio]`,
+  `[render]`, `[tick]`, and the hub's `[hub]`. Environment variables still
+  override file values.
 - **Per-spawn arguments** are how a spawned engine is configured. `spawn_substrate`
   forwards its `args` to the substrate as command-line arguments — the addressed
   machine channel (ADR-0162) — so you can spawn one engine with `--tick-hz …`

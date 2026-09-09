@@ -45,12 +45,22 @@ Call `list_engines(show: "alive")`, then a narrow read-only query such as
 Capture the matching recently-dead detail promptly; it is a bounded sidecar, not
 a durable audit log.
 
+`collect_failure_evidence` gathers this preservation pass in one bounded,
+non-mutating call: hand it the `primary_error` you already have plus the actor
+and component addresses and kind names you suspect, and it returns the fleet row
+(live or recently dead), the selected kinds' full schemas, the selected
+components' descriptions, and per actor a log tail and its complete cost table.
+Selectors are capped (8 actors, 8 components, 16 kinds, one optional frame) and
+each observation is individually budgeted, so a wedged actor records a `timeout`
+entry instead of stalling the bundle. It never sends mail or replays the failed
+operation, so it is safe on a non-idempotent one.
+
 ## 3. Read logs at known boundaries
 
 Start with the original recipient:
 
 ```text
-actor_logs(engine_id, mailbox_name = "<exact recipient>")
+actor_logs(engine_id, address = "<exact recipient>")
 ```
 
 Then inspect only downstream actors you can establish from the contract or log

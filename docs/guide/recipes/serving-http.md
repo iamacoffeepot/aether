@@ -242,7 +242,9 @@ form instead — `register_route` / `unregister_route`, which take the target
 (`String`), `method` (`Option<HttpMethod>` — a bare variant string like
 `"Get"`, or `null` to match every method; the seven variants are `Get`,
 `Post`, `Put`, `Delete`, `Patch`, `Head`, `Options`), `kind` (the route's
-request `KindId`), and `mailbox` (the handler's `MailboxId`). Over the MCP
+request `KindId`), `mailbox` (the handler's `MailboxId`), and `shared` (the
+ADR-0136 member-set flag — `false` claims the prefix exclusively, `true` joins
+the round-robin set on it). Over the MCP
 wire both tagged ids render as ADR-0064 strings — `knd-…` and `mbx-…` — so
 the values below come from `describe_kinds` (the `kind` for
 `aether.http.server.request`, or a route-specific kind's own id) and from
@@ -258,7 +260,8 @@ registered:
   "prefix": "/api",
   "method": "Get",
   "kind": "knd-…",     // aether.http.server.request's id, from describe_kinds
-  "mailbox": "mbx-…"   // the handler's mailbox_id, from load_component's reply
+  "mailbox": "mbx-…",  // the handler's mailbox_id, from load_component's reply
+  "shared": false
 }
 ```
 

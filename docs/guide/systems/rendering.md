@@ -58,7 +58,7 @@ the `RenderCapability` actor. It handles these payload kinds:
 | `aether.render.draw_shapes` | `{ space, clip, shapes }` | per-tick rounded, stroked, shadowed, optionally textured boxes evaluated as a distance field; accumulates into the frame |
 | `aether.render.material.textured` | `{ texture_id, blend, rects }` | per-tick depth-tested world-space textured rects |
 | `aether.render.material.coverage` | `{ texture_id, rects }` | per-tick depth-tested world-space coverage bands from an R8 texture |
-| `aether.render.capture_frame` | `{ mails, after_mails }` | atomic "set state, read back a PNG, clean up" |
+| `aether.render.capture_frame` | `{ window, mails, after_mails, checks, similarity }` | atomic "set state, read back a PNG, clean up"; a windowed runtime rejects an omitted `window` rather than guessing one |
 | `aether.render.program.register` | `{ wgsl, bindings, transients, passes }` → `program.register_result` | register an authored render program (ADR-0170); reply carries the `program_id` |
 | `aether.render.program.dispatch` | `{ program_id, bindings, uniforms }` | execute a registered program once at the next frame record; fire-and-forget |
 | `aether.render.program.destroy` | `{ program_id }` | release a registered program; fire-and-forget |
@@ -298,8 +298,11 @@ wire time, and the actor simply never submits — a no-op where there's no GPU
 anyway.
 
 **From an agent over MCP — stage, then capture.** Use `capture_frame`: its
-`mails` bundle dispatches before the readback (the state that should appear) and
-`after_mails` after (cleanup), all around one synchronous PNG read. So to see a
+required `window_id` names the render target (the tagged `mbx-…` string
+`aether.window.list` reports; the tool never guesses a primary or focused
+window), its `mails` bundle dispatches before the readback (the state that should
+appear) and `after_mails` after (cleanup), all around one synchronous PNG read.
+So to see a
 camera change, stage the `aether.kit.camera.*` driver mail (or a `DrawTriangle`
 directly) in `mails` and read the frame back inline. The renderer's retained
 geometry means a capture that doesn't advance a tick still shows the last live
