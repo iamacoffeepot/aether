@@ -1599,7 +1599,7 @@ resolves a `Key` press plus the cached `Modifiers` into one `EditCommand`, and
 
 **The chord modifier is `ctrl` *or* `meta`, always.** Cmd is the chord on
 macOS and Ctrl everywhere else, and a widget cannot ask the substrate which
-platform its window is on — the input cap reports the physical modifiers and
+platform its window is on — the window cap reports the physical modifiers and
 nothing more. Accepting either costs nothing here, because no control in the
 set binds the two to different meanings; a control that ever needs to should
 say so loudly rather than quietly diverging.
@@ -1631,7 +1631,7 @@ to copy leaves the control enabled and sets `read_only`.
 ## Root-owned focus and input
 
 Widgets never subscribe to input. The panel root subscribes the pointer and
-keyboard streams once (the input cap) and the frame stage once (the lifecycle
+keyboard streams once (the window cap) and the frame stage once (the lifecycle
 cap), then routes every event through a `Focus` helper it embeds — the
 input-side counterpart to `Composite`. `Focus` holds child hit rects in layout
 order, pointer/keyboard eligibility, dynamic visible/enabled availability,

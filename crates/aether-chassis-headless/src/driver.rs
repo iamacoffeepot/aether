@@ -40,8 +40,7 @@ use aether_chassis::next_chassis_correlation;
 /// pieces the timer loop needs at construction time, then `boot()`
 /// captures them on a [`HeadlessTimerRunning`] that drives the loop.
 ///
-/// Pre-ADR-0082 this drove `Tick` mail directly to `aether.input`;
-/// it now fires `LifecycleAdvance` at `aether.lifecycle`, and the
+/// The timer fires `LifecycleAdvance` at `aether.lifecycle`, and the
 /// `LifecycleCapability` owns the broadcast vocabulary so the substrate
 /// observes a labelled `aether.lifecycle` root for every frame chain.
 pub struct HeadlessTimerDriverCapability {
@@ -61,8 +60,7 @@ pub struct HeadlessTimerRunning {
     /// `aether.lifecycle` mailbox id, cached at boot. Each tick fires
     /// one `LifecycleAdvance` here; the lifecycle driver broadcasts the
     /// current stage (Tick) directly to its stage subscriber set
-    /// (issue 1490 retired the `Tick → aether.input` relay; components
-    /// subscribe `Tick` on `aether.lifecycle`).
+    /// (components subscribe `Tick` on `aether.lifecycle`).
     lifecycle_mailbox: MailboxId,
     /// Kind id of [`LifecycleAdvance`], pre-resolved so the timer
     /// loop body stays alloc-free per tick.

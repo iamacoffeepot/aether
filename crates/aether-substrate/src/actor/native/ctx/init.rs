@@ -62,7 +62,7 @@ impl<'a> NativeInitCtx<'a> {
     /// `Addressable::NAMESPACE`; for instanced actors it's
     /// `"{NAMESPACE}:{subname}"` (ADR-0079). Init may use this to
     /// publish its own address — e.g. dispatch
-    /// `aether.input.subscribe { mailbox: ctx.self_id() }` before
+    /// `aether.window.subscribe { mailbox: ctx.self_id() }` before
     /// registration completes; replies route correctly once the spawn
     /// lifecycle finishes inserting the entry.
     #[must_use]

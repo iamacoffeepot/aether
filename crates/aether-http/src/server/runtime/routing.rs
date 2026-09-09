@@ -65,8 +65,8 @@ pub fn normalize_prefix(raw: &str) -> Result<String, String> {
 }
 
 /// Registrant-mailbox validation for the explicit-`mailbox`
-/// registration forms — the route twin of `aether.input`'s
-/// `validate_subscriber_mailbox` (that helper lives in the input cap's
+/// registration forms — the route twin of `aether.window`'s
+/// `validate_subscriber_mailbox` (that helper lives in the window cap's
 /// private runtime module, so the five-line check is mirrored rather
 /// than imported). The host-stamped `_self` forms skip it: the stamp
 /// already names a live in-process mailbox.
@@ -162,7 +162,7 @@ pub fn register_route(
 /// Release `mailbox`'s membership in the `(prefix, method)` route
 /// (ADR-0136); the last member's release drops the route. Idempotent —
 /// releasing a route that isn't held (or a set the mailbox never
-/// joined) is still `Ok`, mirroring the input cap's unsubscribe
+/// joined) is still `Ok`, mirroring the window cap's unsubscribe
 /// semantics.
 ///
 /// # Panics

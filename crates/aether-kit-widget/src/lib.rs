@@ -1432,7 +1432,7 @@ impl WasmActor for Widget {
 
     /// The root subscribes the frame stage once (the root-subscribes-once
     /// pattern). `Tick` is a frame-lifecycle stage, so it rides
-    /// `aether.lifecycle` (ADR-0082), not the input cap. A non-root node
+    /// `aether.lifecycle` (ADR-0082), not the window cap. A non-root node
     /// is driven by its parent's `Collect`, so it subscribes nothing.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         if self.config.root {

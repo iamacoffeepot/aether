@@ -48,7 +48,7 @@ impl Publishes<Shutdown> for LifecycleCapability {}
 /// `.send(&LifecycleSubscribe { .. })` so component code stops
 /// reconstructing the kind struct (and the `.0` field unwraps) at every
 /// call site — same shape and rationale as
-/// `InputMailboxExt` on the `aether.input` cap.
+/// `WindowManagerMailboxExt` on the `aether.window` cap.
 ///
 /// Blanket-impl'd over [`MailboxForward<LifecycleCapability>`], so it reaches
 /// every handle `ctx.actor::<LifecycleCapability>()` can return — the §12
