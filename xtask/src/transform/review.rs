@@ -65,12 +65,10 @@ fn verdict_line(line: &str) -> Option<ReviewVerdict> {
 /// the source here keeps one instruction text honest for both, rather than
 /// giving the critic a stage flag to branch its own reading on.
 fn candidate_section(bundle: &ModelProcessInstructions, diff_base: Option<&str>) -> String {
-    match diff_base {
-        Some(base) => {
-            format!("\n## Candidate\n\n{}\n\n## Diff base\n\n`{base}`\n", bundle.review_candidate_committed)
-        }
-        None => format!("\n## Candidate\n\n{}\n", bundle.review_candidate_working_tree),
-    }
+    diff_base.map_or_else(
+        || format!("\n## Candidate\n\n{}\n", bundle.review_candidate_working_tree),
+        |base| format!("\n## Candidate\n\n{}\n\n## Diff base\n\n`{base}`\n", bundle.review_candidate_committed),
+    )
 }
 
 /// The `## Composition review` section, present only when the order names a diff

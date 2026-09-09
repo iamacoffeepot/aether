@@ -24,6 +24,7 @@
 //! from ADR-0216 §2 and §3 and from the wire shape
 //! [`RetrospectClaim`](aether_bloomery::RetrospectClaim) already fixes.
 
+use std::fs;
 use std::path::Path;
 
 use aether_bloomery::ModelProcessInstructions;
@@ -58,7 +59,7 @@ pub(super) fn imported() -> ModelProcessInstructions {
 
 fn source(relative: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read instruction source {}: {error}", path.display()))
+    fs::read_to_string(&path).unwrap_or_else(|error| panic!("read instruction source {}: {error}", path.display()))
 }
 
 /// Subject framing when the dispatch names no commit. From the construct lane's

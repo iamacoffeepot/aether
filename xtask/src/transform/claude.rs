@@ -115,10 +115,10 @@ pub(super) fn assemble_construct_prompt(
     task: Option<&str>,
     seeded: Option<&str>,
 ) -> String {
-    let subject_body = match subject {
-        Some(commit) => format!("{}\n\n## Subject commit\n\n`{commit}`", bundle.subject_at_commit),
-        None => bundle.subject_unspecified.clone(),
-    };
+    let subject_body = subject.map_or_else(
+        || bundle.subject_unspecified.clone(),
+        |commit| format!("{}\n\n## Subject commit\n\n`{commit}`", bundle.subject_at_commit),
+    );
     let (task_body, lane_identity) = task.map_or(("", None), split_lane_identity);
     let task_section = if task_body.is_empty() {
         String::new()

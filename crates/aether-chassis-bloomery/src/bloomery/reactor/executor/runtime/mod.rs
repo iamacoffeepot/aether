@@ -653,7 +653,7 @@ fn drain_dispatch_topics(
     // subject only exists once a bloom has landed, so nothing else this tick
     // can be waiting behind it. `reader_enabled` off drains the same rows and
     // journals each as a declined read instead of submitting it.
-    let studies = drain_and_dispatch_study(store, artifacts.as_deref_mut(), executor, reader_enabled, now_unix_millis);
+    let studies = drain_and_dispatch_study(store, artifacts, executor, reader_enabled, now_unix_millis);
     fold_submitted_drain(tracked, backoff, store, Topic::Study, "study", studies);
 }
 

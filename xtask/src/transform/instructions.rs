@@ -20,6 +20,10 @@ use anyhow::{Context, Result, bail};
 /// # Errors
 /// The env is missing, the named file cannot be read, the bytes do not decode,
 /// or the re-derived address does not match [`INSTRUCTION_MANIFEST_DIGEST_ENV`].
+#[allow(
+    clippy::disallowed_methods,
+    reason = "host-to-lane handoff of the authorized bundle path and digest, not cap config"
+)]
 pub fn load() -> Result<ModelProcessInstructions> {
     let path = env::var_os(INSTRUCTION_MANIFEST_ENV).ok_or_else(|| {
         anyhow::anyhow!(

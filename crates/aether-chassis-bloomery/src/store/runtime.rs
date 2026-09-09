@@ -1414,17 +1414,19 @@ fn migrate_schema(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()>
         migration.execute_batch("ALTER TABLE scope_runs ADD COLUMN instructions BLOB;")?;
     }
 
-    // Version 22 (ADR-0214): the assembled prompt-manifest digest on each
-    // order-bearing row. Nullable with no backfill — a pre-column dispatch
-    // retained only the pin, and inventing a digest would name bytes this
-    // host never stored.
+    add_prompt_manifest_column(migration)?;
+    migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+/// Schema v22 (ADR-0214): assembled prompt-manifest digest on each order row.
+/// Nullable with no backfill — a pre-column dispatch retained only the pin.
+fn add_prompt_manifest_column(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
     for table in ORDER_BEARING_TABLES {
         if !has_column(migration, table, "prompt_manifest")? {
             migration.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN prompt_manifest BLOB;"))?;
         }
     }
-
-    migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
 

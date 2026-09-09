@@ -10,6 +10,7 @@
 //! store under the address the dispatch row names.
 
 use std::fs;
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -35,10 +36,8 @@ fn a_candidate_that_edits_instruction_files_still_runs_the_sealed_bundle() {
     let mut retained = Vec::new();
     pump_until(&mut harness, "construct and review both dispatched", |harness| {
         for order in harness.orders() {
-            if let Some(address) = order.prompt_manifest {
-                if !retained.contains(&address) {
-                    retained.push(address);
-                }
+            if let Some(address) = order.prompt_manifest.filter(|address| !retained.contains(address)) {
+                retained.push(address);
             }
         }
         let ledger = harness.ledger();
@@ -75,7 +74,7 @@ fn a_candidate_that_edits_instruction_files_still_runs_the_sealed_bundle() {
     let edited = construct
         .worktree
         .as_deref()
-        .map(std::path::Path::new)
+        .map(Path::new)
         .map(|tree| tree.join("xtask/src/transform/construct_instructions.md"))
         .expect("construct records its checkout");
     assert!(
@@ -94,9 +93,11 @@ fn assert_manifest_artifact(harness: &aether_harness_bloomery::ScenarioHarness, 
     match harness.artifact(&digest.to_hex()) {
         GetResult::Ok { bytes, .. } => {
             assert!(!bytes.is_empty(), "the artifact store holds the assembled manifest bytes");
-            assert_eq!(aether_bloomery::Digest::of_wire_bytes(&bytes), digest, "the row names those bytes' address");
+            assert_eq!(Digest::of_wire_bytes(&bytes), digest, "the row names those bytes' address");
         }
-        other => panic!("the dispatch row's prompt-manifest address must resolve in the artifact store, got {other:?}"),
+        GetResult::Err { .. } => {
+            panic!("the dispatch row's prompt-manifest address must resolve in the artifact store")
+        }
     }
 }
 

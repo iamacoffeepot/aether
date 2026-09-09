@@ -449,11 +449,14 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
 }
 
 /// Gzip then standard-base64, so a ~56KiB instruction bundle fits in a
-/// workflow_dispatch input (GitHub caps each input at 64KiB of text).
+/// `workflow_dispatch` input (GitHub caps each input at 64KiB of text).
 fn gzip_base64(bytes: &[u8]) -> String {
     use std::io::Write;
 
-    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(bytes).expect("gzip write to memory");
     let compressed = encoder.finish().expect("gzip finish");
     base64_encode(&compressed)
