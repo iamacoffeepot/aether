@@ -1184,6 +1184,28 @@ fn dispatch_already_submitted(store: &mut dyn StoreBackend, sequence: u64) -> ru
         .is_some_and(|order| order.lifecycle == OrderLifecycle::Submitted))
 }
 
+/// True when this outbox row has a submit-intent reservation — a worker still
+/// holds `submit`, or a restart left the row with no live worker. The drain
+/// must settle that row before any retire decision (#5564).
+fn dispatch_still_submitting(store: &mut dyn StoreBackend, sequence: u64) -> rusqlite::Result<bool> {
+    Ok(store
+        .lookup_order(&dispatch_nonce(sequence).0)?
+        .is_some_and(|order| order.lifecycle == OrderLifecycle::Submitting))
+}
+
+/// Whether this dispatch's bloom and member are still the live plan. Silent:
+/// the caller logs the consequence (cancel a run, or retire undispatched).
+fn dispatch_entry_still_live(
+    store: &mut dyn StoreBackend,
+    bloom: &Digest,
+    workpiece: &WorkpieceId,
+) -> rusqlite::Result<bool> {
+    if !store.holds_active_membership(bloom.as_bytes())? {
+        return Ok(false);
+    }
+    Ok(workpiece.is_composition() || store.holds_member_membership(bloom.as_bytes(), &workpiece.0)?)
+}
+
 /// Advance the contiguous ack prefix unless a held Reconcile earlier in this
 /// batch blocked it. Later successes past a hold stay unacked so the hold
 /// re-drains.
@@ -1248,6 +1270,12 @@ fn member_still_live(
 /// spend the member's budget and route it into repair. A withdrawn member's
 /// lane is cancelled and its order consumed, and no evidence is admitted —
 /// there is no longer anything for evidence to be about.
+///
+/// A `submitting` row is not in `list_outstanding_nonces`, so a withdrawal
+/// whose only row is still a submit-intent cancels nothing here and acks.
+/// [`drain_and_dispatch`] settles that row before retiring the matching
+/// outbox entry: it re-asks submit, and cancels the run if the member (or
+/// bloom) is no longer live once the handle exists.
 ///
 /// Returns the highest contiguously-processed outbox sequence to ack (`None`
 /// when nothing processed). A decode failure or a cancel fault stops the ack
@@ -1372,7 +1400,8 @@ enum CancelStop {
 /// stored `DispatchRecord` says which member a nonce belongs to. An order that
 /// no longer decodes is consumed anyway — its run is already cancelled, and
 /// leaving the row outstanding would keep the deadline reaper probing a run
-/// nobody is waiting for.
+/// nobody is waiting for. Submit-intent rows are not in that list: they are
+/// settled by [`drain_and_dispatch`] before the matching outbox entry retires.
 fn cancel_member_orders(
     store: &mut dyn StoreBackend,
     executor: &dyn ExecutorPort,
@@ -1389,32 +1418,47 @@ fn cancel_member_orders(
         if !names_member {
             continue;
         }
-        match executor.cancel(&WorkHandle::new(Nonce(nonce.clone()))) {
-            // A worker holds the kill (#5564). The entry stays unacked exactly
-            // as an unreached one does, but silently: nothing has failed, and
-            // the completion wake re-drives this drain.
-            Settled::InFlight => return Err(CancelStop::InFlight),
-            Settled::Answered(Ok(())) => {}
-            Settled::Answered(Err(error)) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    sequence,
-                    nonce = %nonce,
-                    %error,
-                    "withdrawn member's cancel failed; leaving the entry unacked to re-drive",
-                );
-                return Err(CancelStop::Unreached);
-            }
-        }
-        store.consume_order(&nonce).map_err(CancelStop::Store)?;
-        tracing::info!(
-            target: "aether_chassis_bloomery::executor",
-            sequence,
-            nonce = %nonce,
-            workpiece = %payload.workpiece.0,
-            "withdrawn member's lane cancelled and its order consumed",
-        );
+        cancel_and_consume_order(store, executor, &nonce, sequence, &payload.workpiece.0)?;
     }
+    Ok(())
+}
+
+/// Cancel one nonce through the port and consume its order — the withdrawal
+/// path's durable effect, reused when drain settles a submit the member (or
+/// bloom) no longer owns. No fact is admitted: there is no longer anything
+/// for evidence to be about.
+fn cancel_and_consume_order(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    nonce: &str,
+    sequence: u64,
+    workpiece: &str,
+) -> Result<(), CancelStop> {
+    match executor.cancel(&WorkHandle::new(Nonce(nonce.to_owned()))) {
+        // A worker holds the kill (#5564). The entry stays unacked exactly
+        // as an unreached one does, but silently: nothing has failed, and
+        // the completion wake re-drives this drain.
+        Settled::InFlight => return Err(CancelStop::InFlight),
+        Settled::Answered(Ok(())) => {}
+        Settled::Answered(Err(error)) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                nonce = %nonce,
+                %error,
+                "withdrawn member's cancel failed; leaving the entry unacked to re-drive",
+            );
+            return Err(CancelStop::Unreached);
+        }
+    }
+    store.consume_order(nonce).map_err(CancelStop::Store)?;
+    tracing::info!(
+        target: "aether_chassis_bloomery::executor",
+        sequence,
+        nonce = %nonce,
+        workpiece = %workpiece,
+        "withdrawn member's lane cancelled and its order consumed",
+    );
     Ok(())
 }
 
@@ -1441,6 +1485,117 @@ enum DispatchSubmit {
     Parked,
     Refused,
     Transient,
+}
+
+/// How a drain settles an outbox entry that already has a `submitting` row.
+///
+/// Overlay and park already ran when the row was written; this re-asks
+/// `submit` against the stored order and, once a handle exists, cancels the
+/// run if the member or bloom has since left.
+enum SubmittingSettle {
+    Track(WorkHandle),
+    Retired,
+    Waiting,
+    Refused,
+    Transient,
+}
+
+/// Re-ask `submit` for a reservation, then keep or cancel the handle.
+///
+/// `dispatch_and_record` is the right re-ask: `INSERT OR IGNORE` reuses the
+/// submitting row, and the offload recognizes the nonce. Going through
+/// [`submit_dispatch_entry`] would re-run overlay/park and could ack past a
+/// worker that already holds the call.
+fn settle_submitting_dispatch(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    sequence: u64,
+    now_unix_millis: u64,
+) -> rusqlite::Result<SubmittingSettle> {
+    let nonce = dispatch_nonce(sequence);
+    let Some(order) = store.lookup_order(&nonce.0)? else {
+        return Ok(SubmittingSettle::Retired);
+    };
+    let Some(record) = DispatchRecord::from_stored(&order) else {
+        tracing::error!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            nonce = %order.nonce,
+            "submitting order did not decode; leaving the entry unacked to re-drive",
+        );
+        return Ok(SubmittingSettle::Waiting);
+    };
+    match dispatch_and_record(executor, store, &record, now_unix_millis) {
+        Ok(Settled::InFlight) => Ok(SubmittingSettle::Waiting),
+        Ok(Settled::Answered(handle)) => {
+            if dispatch_entry_still_live(store, &record.bloom.0, &record.workpiece)? {
+                Ok(SubmittingSettle::Track(handle))
+            } else {
+                match cancel_and_consume_order(store, executor, &handle.nonce.0, sequence, &record.workpiece.0) {
+                    Ok(()) => Ok(SubmittingSettle::Retired),
+                    Err(CancelStop::Store(error)) => Err(error),
+                    Err(CancelStop::InFlight | CancelStop::Unreached) => Ok(SubmittingSettle::Waiting),
+                }
+            }
+        }
+        Err(error) if error.is_permanent() => {
+            tracing::error!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                bloom = ?record.bloom.0,
+                workpiece = %record.workpiece.0,
+                stage = ?record.stage,
+                nonce = %record.nonce.0,
+                %error,
+                "dispatch submit refused permanently; parking the entry instead of re-driving",
+            );
+            Ok(SubmittingSettle::Refused)
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                %error,
+                "dispatch submit/record failed; stopping the ack prefix to re-drive",
+            );
+            Ok(SubmittingSettle::Transient)
+        }
+    }
+}
+
+/// Cancel a `submitted` row whose bloom or member is no longer live. `Live`
+/// means keep the existing ack-and-skip (a held sibling, a still-walking
+/// member). `Waiting` means a worker holds cancel.
+enum SubmittedRetire {
+    Live,
+    Retired,
+    Waiting,
+}
+
+fn retire_submitted_if_dead(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    sequence: u64,
+) -> rusqlite::Result<SubmittedRetire> {
+    let nonce = dispatch_nonce(sequence);
+    let Some(order) = store.lookup_order(&nonce.0)? else {
+        return Ok(SubmittedRetire::Retired);
+    };
+    let Some(record) = DispatchRecord::from_stored(&order) else {
+        return match cancel_and_consume_order(store, executor, &nonce.0, sequence, &order.workpiece) {
+            Ok(()) => Ok(SubmittedRetire::Retired),
+            Err(CancelStop::Store(error)) => Err(error),
+            Err(CancelStop::InFlight | CancelStop::Unreached) => Ok(SubmittedRetire::Waiting),
+        };
+    };
+    if dispatch_entry_still_live(store, &record.bloom.0, &record.workpiece)? {
+        return Ok(SubmittedRetire::Live);
+    }
+    match cancel_and_consume_order(store, executor, &nonce.0, sequence, &record.workpiece.0) {
+        Ok(()) => Ok(SubmittedRetire::Retired),
+        Err(CancelStop::Store(error)) => Err(error),
+        Err(CancelStop::InFlight | CancelStop::Unreached) => Ok(SubmittedRetire::Waiting),
+    }
 }
 
 /// Overlay the advisory, park a composition Refine that has no findings, and
@@ -1531,6 +1686,11 @@ fn submit_dispatch_entry(
 /// failed entry re-drains on the next tick rather than being acked past. The
 /// factored-out network side, unit-testable against a `SqliteStore` + a
 /// fake-GitHub-backed shell without the mail harness.
+///
+/// A `submitting` row is settled before its entry is retired (#5564): the drain
+/// re-asks `submit` ahead of any live-membership check, leaves the entry
+/// unacked while the worker holds the call, and cancels the run if the member
+/// or bloom has left once a handle exists.
 fn drain_and_dispatch(
     store: &mut dyn StoreBackend,
     executor: &dyn ExecutorPort,
@@ -1548,6 +1708,42 @@ fn drain_and_dispatch(
     // successes in this batch must not extend the prefix past it.
     let mut held = false;
     for entry in entries {
+        // A worker already holds this nonce's submit, or a restart left the
+        // reservation. Settle that row before any retire decision: acking past
+        // it here would leak the in-flight run (untracked handle, unconsumed
+        // row, a local lane still spending).
+        if dispatch_still_submitting(store, entry.sequence)? {
+            match settle_submitting_dispatch(store, executor, entry.sequence, now_unix_millis)? {
+                SubmittingSettle::Track(handle) => {
+                    handles.push(handle);
+                    ack_if_unblocked(held, &mut ack_through, entry.sequence);
+                }
+                SubmittingSettle::Retired => ack_if_unblocked(held, &mut ack_through, entry.sequence),
+                SubmittingSettle::Waiting => break,
+                SubmittingSettle::Refused => {
+                    ack_if_unblocked(held, &mut ack_through, entry.sequence);
+                    break;
+                }
+                SubmittingSettle::Transient => {
+                    transient_failure = Some(entry.sequence);
+                    break;
+                }
+            }
+            continue;
+        }
+        // Submit already answered on an earlier drain that could not ack past a
+        // held sibling — or answered on this nonce and cancel is still out for
+        // a member that has since left. Re-submitting would start a second run;
+        // acking a dead member's submitted row without cancel would leak it.
+        if dispatch_already_submitted(store, entry.sequence)? {
+            match retire_submitted_if_dead(store, executor, entry.sequence)? {
+                SubmittedRetire::Live | SubmittedRetire::Retired => {
+                    ack_if_unblocked(held, &mut ack_through, entry.sequence);
+                }
+                SubmittedRetire::Waiting => break,
+            }
+            continue;
+        }
         let Ok(payload) = from_bytes::<DispatchPayload>(&entry.payload) else {
             tracing::warn!(
                 target: "aether_chassis_bloomery::executor",
@@ -1556,10 +1752,6 @@ fn drain_and_dispatch(
             );
             break;
         };
-        if dispatch_already_submitted(store, entry.sequence)? {
-            ack_if_unblocked(held, &mut ack_through, entry.sequence);
-            continue;
-        }
         if !bloom_still_live(store, &payload.bloom, entry.sequence, "dispatch")? {
             ack_if_unblocked(held, &mut ack_through, entry.sequence);
             continue;

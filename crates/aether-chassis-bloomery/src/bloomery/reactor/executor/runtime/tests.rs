@@ -3809,8 +3809,9 @@ mod offloaded_adapter_calls {
 
     use aether_bloomery::testing::digest;
     use aether_bloomery::{
-        BloomId, CancelDispatchPayload, ConfigRegistry, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce,
-        ObservedLaneWrites, StageCatalog, StageId, Topic, Transformation, WorkHandle, WorkOrder, WorkpieceId,
+        BloomId, CancelDispatchPayload, ConfigRegistry, EvidenceRef, ExecutionStatus, ExecutorBackend,
+        MembershipMutation, Nonce, ObservedLaneWrites, StageCatalog, StageId, Topic, Transformation, WorkHandle,
+        WorkOrder, WorkpieceId,
     };
     use aether_data::wire::to_vec;
     use aether_data::{MailId, MailboxId, Source};
@@ -3825,7 +3826,7 @@ mod offloaded_adapter_calls {
     };
     use crate::bloomery::outbox::TopicOutbox;
     use crate::bloomery::{ExecutorPort, ExecutorPortError, ExecutorShell, Settled};
-    use crate::store::{OrderLifecycle, OutstandingOrder, SqliteStore, StoreBackend};
+    use crate::store::{JournalWrite, OrderLifecycle, OutstandingOrder, SqliteStore, StoreBackend};
 
     /// A backend whose lane-write sweep parks until the test opens the gate.
     ///
@@ -4200,6 +4201,108 @@ mod offloaded_adapter_calls {
             );
             assert!(store.list_outstanding_nonces().unwrap().iter().any(|nonce| nonce == &parked_nonce));
         }
+    }
+
+    /// A withdrawal that lands while that member's own submit is still parked
+    /// must cancel the run once submit answers. Pre-fix the drain saw
+    /// `member_still_live` false, acked past the unacked entry, and never
+    /// re-asked submit — the handle sat in the offload forever, the
+    /// `submitting` row was never consumed, and the lane kept running.
+    #[test]
+    fn a_withdrawal_of_a_parked_submit_cancels_the_run_once_it_answers() {
+        let mut store = SqliteStore::open(":memory:").unwrap();
+        let bloom = BloomId(digest(1));
+        store.claim_seal(bloom.0.as_bytes(), &["wp-keep".to_owned()]).unwrap();
+
+        let (parked_sequence, _) = enqueue_construct_dispatch(&mut store, bloom, "wp-parked", 6);
+        let parked_nonce = format!("dispatch-{parked_sequence}");
+
+        let backend = Arc::new(LatchedSubmit::default());
+        let shell = ExecutorShell::new(Arc::clone(&backend));
+        let pusher: Arc<dyn CandidatePush> = Arc::new(RecordingPush::default());
+        let binding = binding();
+        let mut offload = AdapterOffload::new();
+
+        offload.open_round();
+        {
+            let port = offload.port(&shell);
+            let (handles, ack_through, _) = drain_and_dispatch(&mut store, &port, NOW_UNIX_MILLIS).unwrap();
+            assert!(handles.is_empty(), "a submit a worker holds returns no handle");
+            assert!(ack_through.is_none(), "the outbox entry stays unacked while submit is in flight");
+            assert_eq!(
+                store.lookup_order(&parked_nonce).unwrap().expect("the reservation is addressable").lifecycle,
+                OrderLifecycle::Submitting,
+            );
+        }
+        offload.start_wanted(&mut NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE), &shell, &pusher);
+
+        store
+            .enqueue_topic(
+                Topic::CancelDispatch,
+                &to_vec(&CancelDispatchPayload { bloom: bloom.0, workpiece: WorkpieceId("wp-parked".to_owned()) })
+                    .unwrap(),
+                None,
+            )
+            .unwrap();
+        store
+            .commit(
+                &JournalWrite {
+                    idempotency_key: "withdraw-parked",
+                    event: b"withdraw",
+                    decisions: b"released",
+                    decider: "test-build",
+                },
+                &[MembershipMutation { workpiece: "wp-parked".to_owned(), bloom: bloom.0.as_bytes().to_vec() }],
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        offload.open_round();
+        {
+            let port = offload.port(&shell);
+            let ack_cancel = drain_and_cancel(&mut store, &port).unwrap();
+            assert!(ack_cancel.is_some(), "a submitting-only member is not in list_outstanding_nonces, so cancel acks");
+        }
+
+        backend.open();
+        let release = Instant::now() + Duration::from_secs(5);
+        while backend.submitted() == 0 && Instant::now() < release {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(backend.submitted(), 1, "releasing the park runs submit once");
+
+        let mut handles = Vec::new();
+        let mut ack_through = None;
+        let budget = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < budget {
+            offload.open_round();
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            {
+                let port = offload.port(&shell);
+                let (new_handles, new_ack, _) = drain_and_dispatch(&mut store, &port, NOW_UNIX_MILLIS).unwrap();
+                handles = new_handles;
+                ack_through = new_ack;
+                let _ = drain_and_cancel(&mut store, &port).unwrap();
+            }
+            offload.start_wanted(&mut ctx, &shell, &pusher);
+            if backend.cancelled().contains(&parked_nonce) && store.lookup_order(&parked_nonce).unwrap().is_none() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            backend.cancelled().contains(&parked_nonce),
+            "the answered submit must be cancelled once the member has left, got {:?}",
+            backend.cancelled(),
+        );
+        assert!(
+            store.lookup_order(&parked_nonce).unwrap().is_none(),
+            "the submitting row is consumed, not left outstanding"
+        );
+        assert_eq!(ack_through, Some(parked_sequence), "the outbox entry is acked once cancel answers");
+        assert!(handles.is_empty(), "no handle remains tracked for a withdrawn member's submit");
     }
 
     /// A `submitting` row with no live worker after a restart is re-driven from
