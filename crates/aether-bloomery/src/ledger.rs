@@ -8,7 +8,7 @@
 use alloc::string::String;
 
 use crate::digest::Digest;
-use crate::ids::{BloomId, StageId};
+use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::reduce::Decision;
 use crate::values::{
     AgentProfile, ConfigRegistry, ConfigScopes, DispatchKey, ModelOverride, ResolvedConfigs, ResolvedModel,
@@ -28,7 +28,12 @@ pub struct SeatDispatch<'a> {
 }
 
 impl<'a> SeatDispatch<'a> {
-    /// The member or bloom-review dispatch this effect is, if it is one.
+    /// The member or composition-tail dispatch this effect is, if it is one.
+    ///
+    /// Aggregate review keeps its persisted [`DispatchKey::Bloom`] slot and
+    /// stage identity. The timeline workpiece is the composition (ADR-0191):
+    /// painting it as an empty bloom-level row beside the composition cursor
+    /// was a second tail for the same subject.
     pub fn from_effect(effect: &'a Decision) -> Option<Self> {
         match effect {
             Decision::DispatchAttempt {
@@ -56,7 +61,7 @@ impl<'a> SeatDispatch<'a> {
                     bloom: *bloom,
                     key: DispatchKey::Bloom { stage: StageId::AggregateReview },
                     stage: StageId::AggregateReview,
-                    workpiece: String::new(),
+                    workpiece: String::from(WorkpieceId::COMPOSITION),
                     command: &transformation.command,
                     profile,
                     registry: configs,
