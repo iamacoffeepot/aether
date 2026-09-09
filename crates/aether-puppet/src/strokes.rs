@@ -55,8 +55,10 @@ use crate::mesh::Mesh;
 /// or the drawing comes apart: the bone table both dispatches skin from,
 /// the sculpt-and-rig the resident curves are packed against, and the
 /// tone gate that reads the normals the same table turned. `bound` is
-/// `None` for a subject with no rig, which is also the only case where
-/// the gate is already settled on the CPU.
+/// `None` for a subject with no rig; whether the gate was already settled
+/// on the CPU is a separate question the `tone` block's own flag answers,
+/// because a key light on the camera rig unsettles it for a subject that
+/// has no rig at all.
 #[derive(Clone, Copy)]
 pub struct Posing<'a> {
     pub bound: Option<Bound<'a>>,

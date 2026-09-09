@@ -1,5 +1,9 @@
 //! The mail shapes peers send the puppet.
 
+use aether_math::Vec3;
+
+use crate::extract::{LightFrame, Settings};
+
 /// Padding the canonical material field was baked with, as a fraction of
 /// the mesh's longest axis on each side.
 pub const DEFAULT_MATERIAL_FIELD_PADDING: f32 = 0.12;
@@ -70,6 +74,119 @@ impl Default for Load {
 pub enum LoadResult {
     Ok { vertices: u32, faces: u32, bones: u32 },
     Err { reason: String },
+}
+
+/// Retune the hatching — the whole of the shading style, in one mail.
+///
+/// Absolute, like [`Pose`]: every field replaces its counterpart, and a
+/// field left at its default is that default rather than "leave what was
+/// there". Send [`Hatch::default()`] to put the authored style back.
+///
+/// The hatch planes are world-space level sets solved off the subject, so
+/// a mail that changes [`Hatch::spacing`], [`Hatch::family_spacing`] or
+/// [`Hatch::tilt`] re-extracts them; the rest are read per frame and cost
+/// nothing but the next redraw. A field that is not finite, or a spacing
+/// that is not positive, leaves the whole style alone and logs — a style
+/// half-applied is harder to reason about than one refused.
+///
+/// # Agent
+/// This is the knob to turn when the drawing reads too sparse or too
+/// dense. `spacing` is a fraction of the subject's longest axis, so it
+/// means the same thing on any subject; `thresholds` is the tone ramp,
+/// spread between `ambient` and `1`.
+#[aether_data::kind(name = "aether.puppet.hatch", copy, partial_eq)]
+pub struct Hatch {
+    /// Distance between hatch lines, as a fraction of the subject's
+    /// longest bounding-box axis. Must be positive.
+    pub spacing: f32,
+    /// Per-family multiplier over `spacing`. Each successive family is a
+    /// little sparser, so the step from one family to two adds tone
+    /// rather than doubling it. Every entry must be positive.
+    pub family_spacing: [f32; 3],
+    /// Tone below which each successive family switches on: bare paper
+    /// above the first, all three crossing below the last. Spread them
+    /// across the range tone reaches — `ambient` at the terminator to `1`
+    /// under the key light — or a family names a tone nothing has and
+    /// never draws.
+    pub thresholds: [f32; 3],
+    /// How far a threshold is dithered, in tone, so a family breaks into
+    /// dashes as it fades instead of ruling its boundary across the
+    /// figure. Zero rules it.
+    pub dither: f32,
+    /// Angle of the primary family, in radians.
+    pub tilt: f32,
+    /// Where the key light stands, as a direction.
+    ///
+    /// Read in the camera's frame unless `world_light` — `x` to the
+    /// viewer's right, `y` up, `z` toward the viewer — which is where an
+    /// illustrator's key light stands and what gives a turning subject a
+    /// lit side and a shaded side in every view.
+    pub light: [f32; 3],
+    /// Read `light` as a world direction instead. Right for a lit scene,
+    /// wrong for a subject on a turntable: the lit side stays put while
+    /// the camera walks around it, so one azimuth comes back a bare
+    /// outline and the opposite one a solid mesh.
+    pub world_light: bool,
+    /// Floor of the shading term, so nothing reads as pure black.
+    pub ambient: f32,
+}
+
+impl Default for Hatch {
+    /// The authored style, read off [`Settings`] rather than restated
+    /// here — two spellings of one default drift, and this one has to be
+    /// the style the subject already carries or a round trip through the
+    /// mail changes the drawing.
+    fn default() -> Self {
+        Self::of(&Settings::default())
+    }
+}
+
+impl Hatch {
+    /// The style a settings block is currently carrying.
+    #[must_use]
+    pub fn of(settings: &Settings) -> Self {
+        Self {
+            spacing: settings.hatch_spacing,
+            family_spacing: settings.hatch_family_spacing,
+            thresholds: settings.hatch_thresholds,
+            dither: settings.hatch_dither,
+            tilt: settings.hatch_tilt,
+            light: settings.light.to_array(),
+            world_light: settings.light_frame == LightFrame::World,
+            ambient: settings.ambient,
+        }
+    }
+
+    /// Whether every number here is one a drawing can be solved from.
+    ///
+    /// A spacing at or below zero divides the subject into infinitely
+    /// many planes, and a light of zero length has no direction to shade
+    /// from; neither is a style, so a mail carrying one is refused whole.
+    #[must_use]
+    pub fn is_solvable(&self) -> bool {
+        let scalars = [self.dither, self.tilt, self.ambient];
+
+        scalars.iter().chain(&self.thresholds).chain(&self.light).all(|value| value.is_finite())
+            && self.spacing > 0.0
+            && self.family_spacing.iter().all(|spacing| *spacing > 0.0 && spacing.is_finite())
+            && Vec3::from_array(self.light).length() > 0.0
+    }
+
+    /// Write this style onto the settings that carry it.
+    pub fn apply(&self, settings: &mut Settings) {
+        settings.hatch_spacing = self.spacing;
+        settings.hatch_family_spacing = self.family_spacing;
+        settings.hatch_thresholds = self.thresholds;
+        settings.hatch_dither = self.dither;
+        settings.hatch_tilt = self.tilt;
+        settings.light = Vec3::from_array(self.light);
+        settings.light_frame = if self.world_light {
+            LightFrame::World
+        } else {
+            LightFrame::Camera
+        };
+        settings.ambient = self.ambient;
+    }
 }
 
 /// Select one of the chart's named faces.
