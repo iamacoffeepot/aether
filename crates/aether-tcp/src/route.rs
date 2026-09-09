@@ -119,11 +119,9 @@ pub trait TcpWasmExt {
 }
 
 impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
-    //noinspection DuplicatedCode
     fn connect(&self, addr: &str, name: Option<&str>, consumer: Option<aether_data::MailboxId>) {
         self.send(&Connect { addr: addr.into(), name: name.map(Into::into), consumer });
     }
-    //noinspection DuplicatedCode
     fn bind_listener(&self, addr: &str, name: Option<&str>, consumer: Option<aether_data::MailboxId>) {
         self.send(&BindListener { addr: addr.into(), name: name.map(Into::into), consumer });
     }
@@ -136,18 +134,15 @@ impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
     fn close(&self, listener_name: &str) {
         self.listener::<TcpListenerActor>(listener_name).send(&Close::default());
     }
-    //noinspection DuplicatedCode
     fn session_write(&self, listener_name: &str, session_name: &str, bytes: &[u8]) {
         self.session::<TcpSessionActor>(listener_name, session_name).send(&SessionWrite { bytes: bytes.to_vec() });
     }
     fn session_close(&self, listener_name: &str, session_name: &str) {
         self.session::<TcpSessionActor>(listener_name, session_name).send(&SessionClose::default());
     }
-    //noinspection DuplicatedCode
     fn connect_session_write(&self, name: &str, bytes: &[u8]) {
         self.connect_session::<TcpSessionActor>(name).send(&SessionWrite { bytes: bytes.to_vec() });
     }
-    //noinspection DuplicatedCode
     fn connect_session_close(&self, name: &str) {
         self.connect_session::<TcpSessionActor>(name).send(&SessionClose::default());
     }
@@ -159,7 +154,6 @@ impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
             self.resolve::<TcpListenerActor>(listener_name).resolve::<TcpSessionActor>(session_name).mailbox_id().0,
         )
     }
-    //noinspection DuplicatedCode
     fn connect_session<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
         self.at::<R>(self.resolve::<TcpSessionActor>(name).mailbox_id().0)
     }
@@ -225,11 +219,9 @@ pub trait TcpNativeExt {
 
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
-    //noinspection DuplicatedCode
     fn connect(&self, addr: &str, name: Option<&str>, consumer: Option<aether_data::MailboxId>) {
         self.send(&Connect { addr: addr.into(), name: name.map(Into::into), consumer });
     }
-    //noinspection DuplicatedCode
     fn bind_listener(&self, addr: &str, name: Option<&str>, consumer: Option<aether_data::MailboxId>) {
         self.send(&BindListener { addr: addr.into(), name: name.map(Into::into), consumer });
     }
@@ -242,18 +234,15 @@ impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
     fn close(&self, listener_name: &str) {
         self.listener::<TcpListenerActor>(listener_name).send(&Close::default());
     }
-    //noinspection DuplicatedCode
     fn session_write(&self, listener_name: &str, session_name: &str, bytes: &[u8]) {
         self.session::<TcpSessionActor>(listener_name, session_name).send(&SessionWrite { bytes: bytes.to_vec() });
     }
     fn session_close(&self, listener_name: &str, session_name: &str) {
         self.session::<TcpSessionActor>(listener_name, session_name).send(&SessionClose::default());
     }
-    //noinspection DuplicatedCode
     fn connect_session_write(&self, name: &str, bytes: &[u8]) {
         self.connect_session::<TcpSessionActor>(name).send(&SessionWrite { bytes: bytes.to_vec() });
     }
-    //noinspection DuplicatedCode
     fn connect_session_close(&self, name: &str) {
         self.connect_session::<TcpSessionActor>(name).send(&SessionClose::default());
     }
@@ -265,7 +254,6 @@ impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
             self.resolve::<TcpListenerActor>(listener_name).resolve::<TcpSessionActor>(session_name).mailbox_id().0,
         )
     }
-    //noinspection DuplicatedCode
     fn connect_session<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
         self.at::<R>(self.resolve::<TcpSessionActor>(name).mailbox_id().0)
     }

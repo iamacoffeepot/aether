@@ -1,7 +1,8 @@
 # ADR-0196: Bloom Members Form a Resolved Dependency Graph
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-15
+- **Amended:** 2026-09-09 — status: implemented on `main`; `validate_member_graph` resolves the edge set at the seal door and `crates/aether-bloomery/src/reduce/readiness.rs` schedules on it (#5022); the derived-edge clause was later revised by ADR-0204, which makes a surface overlap an ordering fact rather than a dispatch gate.
 
 ## Context
 

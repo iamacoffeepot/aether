@@ -1,7 +1,8 @@
 # ADR-0172: GPU stroke visibility through a stroke-parameter field
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-04
+- **Amended:** 2026-09-09 — status: implemented on `main`; the stroke-parameter visibility field and the ink pass are `crates/aether-puppet/src/easel/program/{sight,stroke}.rs` (#4428); `visibility::runs` survives only as the CPU parity oracle.
 
 ## Context
 

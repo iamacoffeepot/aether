@@ -1,26 +1,16 @@
-//! `aether.trace` cap (ADR-0080 §4, slimmed by ADR-0086 Phase 3c).
+//! `aether.trace` capability: a thin dispatch cap.
 //!
-//! Post-3c this is a thin dispatch cap. It owns the `aether.trace`
-//! mailbox solely to service [`DispatchTraced`] — the atomic batched
-//! dispatch backing the MCP `send_mail_traced` tool (issue 749). It
-//! resolves each envelope's name addressing through the substrate
-//! registry and dispatches every spec inheriting the inbound chain, so
-//! all children share one root.
+//! It owns the `aether.trace` mailbox to service [`DispatchTraced`], the
+//! atomic batched dispatch behind the MCP `send_mail_traced` tool. It resolves
+//! each envelope's name addressing through the substrate registry and
+//! dispatches every spec inheriting the inbound chain, so all children share
+//! one root.
 //!
-//! The trace *fold* it used to host — per-root counters + the parent →
-//! mail graph that fed `describe_tree` / `describe_window`, plus the
-//! legacy `Settled`-mail emission — retired in ADR-0086:
-//!
-//! - Settlement moved to the emit-time counter on the chassis
-//!   `TraceHandle` (Phase 2): the producer hooks fire `Settled`
-//!   synchronously through the `SettlementRegistry`, so this cap is no
-//!   longer a settlement authority.
-//! - Trace storage decentralized to per-actor rings, queried via
-//!   `aether.trace.tail` and stitched client-side by the guided walk
-//!   (the sibling [`walk`] module, Phase 3b).
-//! - The central `ShardedTraceQueue` + drainer that fed this cap's fold
-//!   retired with the fold (Phase 3c) — there is no `BatchedTraceEvents`
-//!   stream anymore.
+//! It is not a settlement authority and holds no trace fold. Settlement is an
+//! emit-time counter on the chassis `TraceHandle`, whose producer hooks fire
+//! `Settled` synchronously through the `SettlementRegistry`, and trace storage
+//! is per-actor rings queried through `aether.trace.tail` and stitched
+//! client-side by the guided walk in the sibling [`walk`] module (ADR-0086).
 
 #![forbid(unsafe_code)]
 

@@ -4,11 +4,11 @@
 // `lints.workspace = true` in the manifest (iamacoffeepot/aether#854 Phase 1.a).
 #![allow(clippy::option_if_let_else)]
 
-//! Proc-macro home for the actor SDK attributes: `#[actor]`,
-//! `#[runtime]`, `#[handler]`, `#[fallback]`, `#[capability]`, and
-//! `#[local]`, plus the `export_asset!` asset embed (ADR-0163). The
-//! data-layer `Kind` / `Schema` derives live in `aether-data-derive`
-//! and are re-exported by `aether-data`.
+//! Proc macros for the actor SDK: the `#[actor]`, `#[runtime]`, `#[handler]`,
+//! `#[handler_set]`, `#[fallback]`, `#[capability]`, and `#[local]`
+//! attributes, plus the `export_asset!` asset embed. `aether-actor` re-exports
+//! all of them; a component depends on that crate, not on this one. The
+//! data-layer `Kind` and `Schema` derives live in `aether-data-derive`.
 
 mod asset;
 mod diagnostics;

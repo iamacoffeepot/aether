@@ -221,11 +221,11 @@ recipe.
 `NativeBinding` handler-reply path — is the complete router: it reaches
 every `SourceAddr`, including the `Component` local-RPC-server reply target
 an MCP-spawned engine tags. If you instead reach for the raw
-`HubOutbound::send_reply`, note that it silently drops a
-`SourceAddr::Component` target (iamacoffeepot/aether#1321), so an
-MCP-spawned caller's reply never lands. Reply through `ctx.reply` /
-`ctx.reply_to`; the headless window cap's `runtime.rs` records the same
-hazard.
+`HubOutbound::send_reply`, note that it is a silent no-op on a
+`SourceAddr::Component` target (iamacoffeepot/aether#1321) — that variant is
+`Mailer::send_reply`'s job, not the hub's — so an MCP-spawned caller's reply
+never lands. Reply through `ctx.reply` / `ctx.reply_to`; `HubOutbound::send_reply`'s
+own doc comment records the fork.
 
 ## 3. Give it a config if it needs one
 
@@ -233,23 +233,32 @@ A config-free cap uses `type Config = ();` — text does, holding only CPU
 state. A cap with tunables declares a struct and derives `Config` on it,
 so its knobs flow through the same config-file/env/argv source stack every
 other cap uses rather than a raw `env::var` read. That dance —
-`#[derive(aether_substrate::Config)]`, the emitted overlay,
-`resolve_with_file`, wiring into the chassis CLI and TOML section — is
-[Configuration](../systems/configuration.md). Pass the resolved struct as
-the `with_actor::<X>(config)` argument in the next step. Keep an empty
-config a struct rather than `()` if you expect knobs later, so the
-composition site doesn't churn when the first one lands (the input cap's
-`InputConfig` does exactly this).
+`#[derive(aether_substrate::Config)]`, the emitted overlay, the struct's
+TOML section, and flattening the overlay into the chassis CLI — is
+[Configuration](../systems/configuration.md). You do not hand the resolved
+struct to the builder: composing the cap declares its config *type*, and the
+chassis resolves the value off the source stack. Keep an empty config a struct
+rather than `()` if you expect knobs later, so the composition site doesn't
+churn when the first one lands.
 
 ## 4. Register with the chassis builder
 
 A mailbox is only on the air once a chassis builder claims it. The
 builder is `aether_substrate::chassis::builder::Builder`; you add a cap
-with `with_actor::<X>(config)` ([ADR-0070][adr70] / [ADR-0071][adr71]):
+with `with_actor::<X>(params)` ([ADR-0070][adr70] / [ADR-0071][adr71]),
+where `params` is the cap's composer-supplied construction input (`A::Params`),
+not its config:
 
 ```rust
 builder.with_actor::<TextCapability>(())
 ```
+
+Composing a cap also accumulates its `A::Config` member into the chassis config
+aggregate (ADR-0156), which is what puts its knobs in `--print-config` and the
+unknown-key sweep. When a composer needs to pin an explicit config value rather
+than let the stack resolve it, `with_actor_configured::<X>(params, config)` is
+the paired form — the `A::Config` type binds the value to the actor at the call,
+so an orphaned override can't be written.
 
 Where that line goes depends on which chassis should carry the cap:
 
@@ -268,10 +277,11 @@ Where that line goes depends on which chassis should carry the cap:
   compositions for this reason.
 - **One chassis only** — add it to that chassis's own builder chain:
   `desktop/chassis.rs`, `headless/chassis.rs`, or `hub/chassis.rs` in
-  the chassis crates. The desktop renderer
-  (`with_actor::<RenderCapability>(render_config)`) is desktop-only this
-  way; the headless companion (`HeadlessRenderCapability`) claims the same
-  `aether.render` name on the headless chassis.
+  the chassis crates. `HeadlessRenderCapability` is composed with
+  `with_actor` on the headless chassis alone; the desktop `RenderCapability`
+  claims the same `aether.render` name there, booted as a pumped actor by the
+  desktop driver (`ctx.boot_pumped_actor::<RenderCapability>(…)`) because it
+  must run on the winit thread.
 
 The builder claims `A::NAMESPACE` as it boots each cap and enforces
 **one claimant per name**: a second cap claiming an already-owned mailbox

@@ -145,7 +145,7 @@ collision. Give specs unique names, then describe and safely probe every expecte
 lineage.
 
 `spawn_substrate` may also take a `mails` list — init mail (each entry
-`{recipient_name, kind_name, params?}`, a `send_mail` item without `engine_id`)
+`{address, kind_name, params?}`, a `send_mail` item without `engine_id`)
 dispatched after the readiness wait above, so an entry addressed at a boot
 component never races its load. Each item settles like a `send_mail` item and
 the response carries a per-item `mails` status list alongside the engine

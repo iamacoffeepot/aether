@@ -4,85 +4,60 @@
 // `lints.workspace = true` in the manifest (iamacoffeepot/aether#854 Phase 1.a).
 #![allow(clippy::option_if_let_else)]
 
-//! Proc-macro home for `aether-data`'s data-layer macros:
-//! `#[derive(Kind)]`, `#[derive(Schema)]`, `#[derive(Storage)]`, and `#[transform]`.
+//! Proc macros for `aether-data`: the `#[kind]` attribute, the `Kind`,
+//! `Schema`, and `Storage` derives, and `#[transform]`. `aether-data`
+//! re-exports all of them behind its `derive` feature, so a consumer depends
+//! on that crate and not on this one. They live apart because Rust forbids a
+//! `proc-macro = true` crate from exporting runtime items.
 //!
-//! `Kind` and `Schema` are per ADR-0019 / ADR-0031 / ADR-0032. `Storage`
-//! is the ADR-0059 TLV shape: a sibling derive that emits a nominal
-//! `Kind::ID` without a positional codec. This crate is kept separate
-//! from `aether-data` because Rust requires
-//! proc-macro crates to opt into `proc-macro = true` and forbids them
-//! from exporting non-macro items; pairing them in the same crate would
-//! force every consumer through the proc-macro toolchain even when they
-//! just want the runtime traits.
-//!
-//! The attribute grammar is exactly one key: `#[kind(name = "…")]`, a string
-//! literal, required. `parse_kind_attr` rejects anything else. The naming
-//! grammar the literal must follow is written out in
+//! `#[aether_data::kind(name = "…")]` is the usual declaration form: it names
+//! the kind and emits the standard stack (`Debug`, `Clone`, `Kind`, `Schema`,
+//! serde), with options for the contract variations (`eq`, `partial_eq`,
+//! `copy`, `default`, `pod`, `no_serde`, `derive(…)`). The `Kind` and `Schema`
+//! derives are the longhand, and their one helper attribute is
+//! `#[kind(name = "…")]`: a string literal, required, nothing else accepted.
+//! The grammar that literal must follow is written out in
 //! `docs/guide/systems/mail-and-kinds.md` and enforced by
 //! `crates/aether-kinds/tests/kind_name_grammar.rs`.
 //!
-//! `Kind` emits the `aether_data::Kind` impl (`const NAME`, `const ID`) plus
-//! the `#[link_section]` statics for
-//! both `aether.kinds` (canonical schema bytes) and
-//! `aether.kinds.labels` (nominal sidecar). The ID is
+//! `Kind` emits `const NAME` and `const ID` plus the `#[link_section]` statics
+//! for `aether.kinds` (canonical schema bytes) and `aether.kinds.labels` (the
+//! nominal sidecar). The id is
 //! `fnv1a_64_prefixed(KIND_DOMAIN, canonical_bytes_of(name, schema))`,
-//! matching the substrate-side derivation byte-for-byte (ADR-0030
-//! Phase 2 / ADR-0032). The `KIND_DOMAIN` prefix disjoins the
-//! `Kind::ID` space from `MailboxId` (issue #186). Consumers must also
-//! derive (or hand-roll) `Schema` on the type — the Kind derive walks
-//! `<Self as Schema>::SCHEMA` for canonical bytes and
-//! `<Self as Schema>::LABEL_NODE` for the labels tree.
+//! matching the substrate-side derivation byte for byte (ADR-0030), and the
+//! `KIND_DOMAIN` prefix keeps the `Kind::ID` space disjoint from `MailboxId`.
+//! The derive reads `<Self as Schema>::SCHEMA` and `LABEL_NODE`, so the type
+//! must implement `Schema` too.
 //!
-//! `Schema` emits three consts per impl: `SCHEMA` (the `SchemaType`
-//! tree, const-constructible per ADR-0031), `LABEL` (the
-//! `Option<&'static str>` Rust type path from `module_path!()`), and
-//! `LABEL_NODE` (the parallel-shape labels tree the kind's sidecar
-//! record embeds). It also emits `CastEligible` so `repr_c` flags
-//! propagate — field types used as cast-shaped payloads get
-//! eligibility for free without a second derive — and the owned
-//! `WireEncode` / `WireDecode` impls that walk the same field list
-//! (ADR-0188), so a schema change is a codec change.
+//! `Schema` emits `SCHEMA` (the const-constructible `SchemaType` tree),
+//! `LABEL` (the Rust type path from `module_path!()`), and `LABEL_NODE` (the
+//! parallel labels tree the sidecar record embeds), plus `CastEligible` so a
+//! `repr_c` flag propagates to field types used as cast-shaped payloads, plus
+//! the `WireEncode` / `WireDecode` impls that walk the same field list: a
+//! schema change is a codec change. Field types resolve through
+//! `<FieldT as Schema>::SCHEMA`, except `Vec<u8>`, which stable Rust cannot
+//! specialize against `Vec<T>`; the derive matches that field syntactically
+//! and emits `SchemaType::Bytes` and `LabelNode::Anonymous` directly.
 //!
-//! Field-type handling delegates to `<FieldT as Schema>::SCHEMA` /
-//! `LABEL_NODE` for all cross-crate resolution. The one exception is
-//! `Vec<u8>` — stable Rust forbids the specialization (`Vec<u8>` would
-//! overlap `Vec<T>` because `u8: Schema`), so the derive pattern-matches
-//! the field type's syntax and emits `SchemaType::Bytes` /
-//! `LabelNode::Anonymous` directly when it sees `Vec<u8>`. Every other
-//! shape goes through trait dispatch.
+//! `Storage` is the sibling TLV shape: a nominal `Kind::ID` with no positional
+//! codec.
 //!
-//! A transform is a **data-layer primitive** — a pure `Kind -> Kind`
-//! function with zero dependence on the actor framework. Its runtime
-//! types (`TransformEntry`, `TransformError`, the link-time inventory)
-//! live in `aether-data`; this crate is the sibling proc-macro that
-//! `aether-data` cannot itself be (`proc-macro = true` forbids
-//! exporting runtime items). `aether-data` re-exports the macro as
-//! `aether_data::transform` behind the `derive` feature.
-//!
-//! The macro's three ADR-0048 §1 responsibilities:
-//!
-//! 1. **Stable name-based `transform_id`.**
-//!    `fnv1a_64(TRANSFORM_DOMAIN ++ "{crate}::{module_path}::{fn}")`,
-//!    tagged `Tag::Transform`. Built at the *consumer's* compile time
-//!    from `concat!(env!("CARGO_PKG_NAME"), "::", module_path!(), "::",
-//!    fn)` so identity tracks the fully-qualified name, not the
-//!    position in the file.
-//! 2. **Deny-list purity scan.** Walks the body's expression paths and
-//!    rejects host-fn imports, handler-context types, the sync
-//!    request/reply primitive, and compile-time-catchable
-//!    nondeterminism sources (`std::env`, `std::time`, `core::time`).
-//!    Best-effort: it sees only the immediate body, not helper-fn
-//!    bodies, and there is no runtime sandbox (ADR-0048
-//!    Consequences/Negative). First-party review is the other defense.
-//! 3. **Link-time inventory submission.** Emits an `inventory::submit!`
-//!    of a `TransformEntry` carrying the id, input/output kind ids, the
-//!    name, and a type-erased `invoke` thunk that decodes each input
-//!    slice, calls the user fn, and encodes the output.
-//!
-//! There is no FFI shim, no `extern "C"`, no custom section — the
-//! original wasm-export design was deferred (ADR-0048 revision
-//! 2026-05-20).
+//! `#[transform]` marks a pure `Kind -> Kind` function with no dependence on
+//! the actor framework; its runtime types live in `aether-data`. The macro
+//! mints a `transform_id` of
+//! `fnv1a_64(TRANSFORM_DOMAIN ++ "{crate}::{module_path}::{fn}")` tagged
+//! `Tag::Transform`, built at the consumer's compile time so identity tracks
+//! the fully qualified name and not a position in the file. It scans the
+//! body's expression paths against a deny list, rejecting host-fn imports,
+//! handler-context types, the sync request/reply primitive, and
+//! compile-time-catchable nondeterminism (`std::env`, `std::time`,
+//! `core::time`). The scan sees the immediate body only, not the bodies of
+//! helpers it calls, and there is no runtime sandbox, so review is the other
+//! defense (ADR-0048). It then submits a `TransformEntry` to the link-time
+//! inventory carrying the id, the input and output kind ids, the name, and a
+//! type-erased `invoke` thunk that decodes each input slice, calls the
+//! function, and encodes the output. There is no FFI shim and no custom
+//! section.
 
 use core::iter;
 

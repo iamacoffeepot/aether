@@ -148,12 +148,12 @@ cargo xtask dev-component \
   --mailbox-id mbx-...
 ```
 
-The approved workflow calls this the existing-lineage mode, but the live
-`replace_component` contract concretely accepts a tagged mailbox id, not a
-lineage string. `dev-component` therefore does not hash or infer a mailbox id
-from a name. A malformed id is rejected before the watcher starts.
-`--mailbox-id` and `--export` conflict because replace-first mode already has a
-hosted actor to reuse.
+The flag takes a tagged id only: `dev-component` does not hash or infer a
+mailbox id from a name, and a malformed id is rejected before the watcher
+starts. (The `replace_component` tool itself is wider — its `address` accepts a
+canonical lineage, an ADR-0166 abbreviation, or the tagged id — but the flag
+stays narrow so the watcher never guesses.) `--mailbox-id` and `--export`
+conflict because replace-first mode already has a hosted actor to reuse.
 
 The package root is watched recursively and generated target output is ignored.
 Edits are debounced, rebuilds are serialized, and edits arriving during a pass
@@ -203,7 +203,7 @@ current parameter shape.
 ```text
 send_mail({
   engine_id,
-  recipient_name: "<LoadResult.name>",
+  address: "<LoadResult.name>",
   kind_name: "aether.ping",
   params: { "seq": 7 }
 })
@@ -224,7 +224,7 @@ upload_component(staged_path = ".../my_component.wasm", name = "my-component-dev
 
 replace_component(
   engine_id,
-  mailbox_id = "<LoadResult.mailbox_id>",
+  address = "<LoadResult.name or LoadResult.mailbox_id>",
   selector = "<new_hash>"
 )
 ```

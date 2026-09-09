@@ -168,13 +168,15 @@ quad and capture in one call, with the dispatch staged in the same `mails`
 bundle so the freshly written pixels appear in the captured frame:
 
 ```jsonc
-// capture_frame
+// capture_frame — window_id is required; it is the tagged mbx- string
+// aether.window.list reports for the target window.
 {
+  "window_id": "mbx-…",
   "mails": [
-    { "recipient_name": "aether.render", "kind_name": "aether.render.program.dispatch",
+    { "address": "aether.render", "kind_name": "aether.render.program.dispatch",
       "params": { "program_id": 0, "bindings": [SOURCE_ID, OUTPUT_ID], "geometries": [],
                   "uniforms": [0, 0, 0, 63, 0, 0, 128, 63] } },
-    { "recipient_name": "aether.render", "kind_name": "aether.render.draw_textured_quads",
+    { "address": "aether.render", "kind_name": "aether.render.draw_textured_quads",
       "params": { "texture_id": OUTPUT_ID, "space": "Screen", "clip": null, "blend": "Straight",
                   "quads": [ { "x": 16.0, "y": 8.0, "width": 128.0, "height": 128.0,
                                "u0": 0.0, "v0": 0.0, "u1": 1.0, "v1": 1.0,
@@ -332,15 +334,17 @@ Stage the dispatch and an overlay quad in one `capture_frame` so the freshly
 drawn pixels land in the captured frame:
 
 ```jsonc
-// capture_frame
+// capture_frame — window_id is required; it is the tagged mbx- string
+// aether.window.list reports for the target window.
 {
+  "window_id": "mbx-…",
   "mails": [
-    { "recipient_name": "aether.render", "kind_name": "aether.render.program.dispatch",
+    { "address": "aether.render", "kind_name": "aether.render.program.dispatch",
       "params": { "program_id": 0, "bindings": [TARGET_ID], "geometries": [GEOMETRY_ID],
                   // color (1,1,1,1) then depth 0.5, padded to 32 bytes
                   "uniforms": [0,0,128,63, 0,0,128,63, 0,0,128,63, 0,0,128,63,
                                0,0,0,63,   0,0,0,0,    0,0,0,0,    0,0,0,0] } },
-    { "recipient_name": "aether.render", "kind_name": "aether.render.draw_textured_quads",
+    { "address": "aether.render", "kind_name": "aether.render.draw_textured_quads",
       "params": { "texture_id": TARGET_ID, "space": "Screen", "clip": null, "blend": "Straight",
                   "quads": [ { "x": 16.0, "y": 8.0, "width": 128.0, "height": 128.0,
                                "u0": 0.0, "v0": 0.0, "u1": 1.0, "v1": 1.0,

@@ -456,7 +456,6 @@ impl NativeActor for RpcServerCapability {
         })
     }
 
-    //noinspection DuplicatedCode -- RPC and HTTP own distinct connection state and shutdown semantics.
     fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
         // A disabled server (ADR-0155 §3) bound no socket and spawned no
         // accept thread, so there is nothing to unblock or join.

@@ -59,7 +59,6 @@ impl NativeActor for HttpDispatchShard {
         })
     }
 
-    //noinspection DuplicatedCode -- HTTP and RPC own distinct connection state and shutdown semantics.
     fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
         // Stop every per-connection reader. Shutting the socket down
         // wakes the blocked `read()`; the reader sees the flag and exits.

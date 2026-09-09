@@ -1,6 +1,8 @@
 # Driving a bloom over the REST control API
 
-The Bloomery coordinator ships a REST control ingress (ADR-0149 §Packaging):
+The Bloomery coordinator is a consumer built on the engine, not part of it: it
+is a chassis (`aether-chassis-bloomery`) composed from the same caps any other
+application composes. Its REST control ingress (ADR-0149 §Packaging) is
 a native `BloomeryApiCapability` router mounted on the `aether.http.server`
 capability, so an operator authors a stored commission, shapes and seals a
 draft, supersedes, and reads the live blooms / view document / journal /

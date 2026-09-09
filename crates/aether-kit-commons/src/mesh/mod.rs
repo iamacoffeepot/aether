@@ -115,7 +115,6 @@ impl WasmActor for MeshViewer {
         Ok(MeshViewer { cache: MeshCache::default() })
     }
 
-    //noinspection DuplicatedCode
     /// Issue 640 / 1378: subscribe to the `Render` lifecycle stage so the
     /// cached triangles re-emit once per frame, after the `Tick` chain
     /// has settled (ADR-0082 §11). The viewer has no per-tick compute —

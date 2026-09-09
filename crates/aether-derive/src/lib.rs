@@ -1,12 +1,16 @@
-//! Engine-wide derive macros (ADR-0090 unit g, iamacoffeepot/aether#1264).
+//! Engine-wide derive macros, re-exported as `aether_substrate::Config` and
+//! `aether_substrate::StageArgv`. Write those paths; nothing depends on this
+//! crate by name.
 //!
-//! The `Config` derive collapses a cap's domain struct + confique
-//! `*Layer` + clap `*Overlay` + `from_layer` mapping into one
-//! `#[derive(aether_substrate::Config)]` annotation. Re-exported from
-//! `aether-substrate::Config`; downstream callers write the
-//! `aether_substrate::Config` path rather than reaching in here.
+//! `Config` turns a capability's resolved-config struct into the whole
+//! ADR-0090 quartet in one annotation: the confique `*Layer`, the clap
+//! `*Overlay`, the `FromArgvThenEnv` impl, and inherent `from_env` /
+//! `from_argv_then_env` constructors that resolve argv over env over default.
 //!
-//! Crate skeleton — the actual emission lives in subsequent commits.
+//! `StageArgv` derives the argv staging for a hand-written chassis CLI root,
+//! delegating to each field's own `stage_argv`. A field that cannot be staged
+//! needs an explicit `#[stage(skip)]`; an unannotated field whose type does
+//! not implement `StageArgv` is a compile error.
 
 #![forbid(unsafe_code)]
 

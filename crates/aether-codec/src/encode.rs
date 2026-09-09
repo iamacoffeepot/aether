@@ -835,7 +835,6 @@ mod tests {
 
     #[test]
     fn cast_struct_array_length_mismatch_errors() {
-        //noinspection DuplicatedCode
         let schema = cast_struct(vec![NamedField {
             name: "xs".into(),
             ty: SchemaType::Array { element: SchemaCell::owned(SchemaType::Scalar(Primitive::U8)), len: 4 },
@@ -870,7 +869,6 @@ mod tests {
 
         // DrawTriangle's shape: { verts: [Vertex; 3] } where Vertex is
         // 5 f32s. Cast wire format = 60 bytes, no internal padding.
-        //noinspection DuplicatedCode
         let vertex = SchemaType::Struct {
             repr_c: true,
             fields: vec![
