@@ -1731,6 +1731,13 @@ fn a_v20_store_gains_an_unpinned_scope_run_column() {
              decider         TEXT,
              decisions_schema TEXT
          );
+         CREATE TABLE commissions (
+             id               TEXT PRIMARY KEY,
+             intent           BLOB NOT NULL,
+             current_revision BLOB,
+             current_ordinal  INTEGER,
+             status           TEXT NOT NULL CHECK (status IN ('open', 'cancelled', 'landed'))
+         );
          CREATE TABLE scope_runs (
              sequence   INTEGER PRIMARY KEY AUTOINCREMENT,
              commission TEXT NOT NULL REFERENCES commissions(id),
@@ -1744,6 +1751,11 @@ fn a_v20_store_gains_an_unpinned_scope_run_column() {
              evidence   BLOB,
              revision   BLOB
          );",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO commissions (id, intent, status) VALUES (?1, ?2, 'open')",
+        rusqlite::params!["wp-v20", b"intent"],
     )
     .unwrap();
     conn.execute(
@@ -1765,16 +1777,9 @@ fn a_v20_store_gains_an_unpinned_scope_run_column() {
     assert!(rows[0].instructions.is_none(), "migration invents no pin");
 
     store
-        .conn
-        .execute(
-            "INSERT INTO commissions (id, intent, status) VALUES (?1, ?2, 'open')",
-            rusqlite::params!["wp-pinned", b"intent"],
-        )
-        .unwrap();
-    store
         .enqueue_scope_run(&ScopeRunOpen {
-            commission: "wp-pinned",
-            ordinal: 1,
+            commission: "wp-v20",
+            ordinal: 2,
             intent: b"intent",
             base: b"base",
             subject: b"subject",
@@ -1782,9 +1787,9 @@ fn a_v20_store_gains_an_unpinned_scope_run_column() {
             payload: b"payload",
         })
         .unwrap();
-    let rows = store.list_scope_runs("wp-pinned").unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].instructions.as_deref(), Some(b"pin".as_slice()));
+    let rows = store.list_scope_runs("wp-v20").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].instructions.as_deref(), Some(b"pin".as_slice()));
 }
 
 mod schema_digest_migration {
