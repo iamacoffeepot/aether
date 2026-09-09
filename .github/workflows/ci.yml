@@ -396,8 +396,7 @@ jobs:
         # Hash Sum mismatch (2026-09-09). Only Ubuntu's own sources are consulted.
         run: |
           sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu*' -delete
-          sudo apt-get update && sudo apt-get install -y libasound2-dev
-          mesa-vulkan-drivers mold
+          sudo apt-get update && sudo apt-get install -y libasound2-dev mesa-vulkan-drivers mold
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # rust-cache keys on the job id, which the matrix does not vary,
