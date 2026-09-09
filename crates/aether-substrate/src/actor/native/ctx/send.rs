@@ -168,7 +168,6 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
 // substrate-internal spawner + actor registry.
 
 impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
-    //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
@@ -185,7 +184,6 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
         );
     }
 
-    //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
@@ -206,7 +204,6 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
         );
     }
 
-    //noinspection DuplicatedCode
     // Runtime-name send escape hatch (the `Resolver::send_to_named` contract):
     // the recipient name is supplied at runtime, no compile-time `R` to resolve.
     #[allow(clippy::disallowed_methods)]
@@ -228,7 +225,6 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
         self.binding.prev_correlation()
     }
 
-    //noinspection DuplicatedCode
     fn send_detached<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
@@ -247,7 +243,6 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
         );
     }
 
-    //noinspection DuplicatedCode
     // Runtime-name detached escape hatch — the `send_to_named` counterpart.
     #[allow(clippy::disallowed_methods)]
     // the runtime-name routing path itself — same ADR-0099 §4 parse → fold as `send_to_named`
@@ -256,7 +251,6 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
         self.binding.push_envelope_buffered(mailbox_id_from_path(name).0, K::ID.0, &bytes, 1, None, None);
     }
 
-    //noinspection DuplicatedCode
     // By-id detached send — the by-name body with the caller's id, `None` /
     // `None` lineage minting a fresh root (ADR-0080 §7).
     fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {

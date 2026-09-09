@@ -48,7 +48,6 @@ impl WasmActor for Hello {
         Ok(Hello {})
     }
 
-    //noinspection DuplicatedCode
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
     }
