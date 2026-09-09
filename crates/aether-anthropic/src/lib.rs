@@ -17,6 +17,8 @@
 //! `wasm32-unknown-unknown`; the `export!` FFI it emits is wasm32-only and inert
 //! in the native rlib the host integration test links.
 
+#![forbid(unsafe_code)]
+
 // The wire kinds carry the marker face; the guest component and its callers
 // share this vocabulary crate (ADR-0066).
 mod kinds;

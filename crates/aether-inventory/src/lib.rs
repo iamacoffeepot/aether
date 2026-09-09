@@ -64,6 +64,8 @@
 //! `NAMESPACE`, so `aether.inventory` reverses through the same static
 //! map it serves.
 
+#![forbid(unsafe_code)]
+
 // Handler-signature kinds must be importable at module root because
 // `#[actor]` emits `impl HandlesKind<K> for InventoryCapability {}`
 // markers always-on, outside the `feature = "runtime"` gate. The reply

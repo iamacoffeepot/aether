@@ -15,6 +15,8 @@
 //! The identities are wasm-safe ZSTs; everything `aether_substrate`-typed —
 //! both runtime states and the embedder channel — rides the `runtime` feature.
 
+#![forbid(unsafe_code)]
+
 pub mod cap;
 #[cfg(feature = "runtime")]
 pub mod events;

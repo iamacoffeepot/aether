@@ -12,6 +12,8 @@
 //! is per-actor rings queried through `aether.trace.tail` and stitched
 //! client-side by the guided walk in the sibling [`walk`] module (ADR-0086).
 
+#![forbid(unsafe_code)]
+
 // Handler-signature kind must be importable at module root because
 // `#[actor]` emits `impl HandlesKind<DispatchTraced> for X {}` always-on,
 // outside the `feature = "runtime"` gate. The reply kind

@@ -20,6 +20,8 @@
 //! deliberately separate: a binary wants argv/env/file config, the sweep, and
 //! the fatal aborter; a test harness wants none of them.
 
+#![forbid(unsafe_code)]
+
 pub mod chassis;
 pub mod cli;
 pub mod env;

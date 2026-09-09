@@ -9,6 +9,8 @@
 //! OBJ for any external viewer. The v1 DSL has no boolean composition; that
 //! implementation lives on the `archive/csg-bsp` branch.
 
+#![forbid(unsafe_code)]
+
 pub mod ast;
 pub mod cleanup;
 pub mod debug;

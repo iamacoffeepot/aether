@@ -12,6 +12,8 @@
 //! Adapter calls run synchronously on the actor's dispatcher thread, the one
 //! that pulls envelopes from the `aether.fs` mailbox.
 
+#![forbid(unsafe_code)]
+
 pub mod kinds;
 
 mod adapter;

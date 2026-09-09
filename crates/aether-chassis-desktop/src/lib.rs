@@ -10,6 +10,8 @@
 //! (`aether-render`), so the chassis carries no GPU code: the driver is a
 //! pure pump host for the render + window actors.
 
+#![forbid(unsafe_code)]
+
 pub mod chassis;
 pub mod cli;
 pub mod driver;

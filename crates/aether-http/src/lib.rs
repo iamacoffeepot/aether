@@ -19,6 +19,8 @@
 //! `ctx.actor::<HttpCapability>()` and author routes without pulling the
 //! substrate through (ADR-0122).
 
+#![forbid(unsafe_code)]
+
 // ADR-0131: self-alias so the `#[http::router]` macro's emitted
 // `::aether_http::…` paths resolve inside this crate's own route fixtures
 // (the pattern `aether-actor` / `aether-substrate` already use for their

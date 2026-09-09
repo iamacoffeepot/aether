@@ -26,6 +26,7 @@
 //! handlers so desktop-designed components do not warn-storm, and
 //! `Err`-replying `CaptureFrame` and `CreateTexture`.
 
+#![forbid(unsafe_code)]
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the
 // decoded bytes so callers can't see references.

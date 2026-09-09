@@ -10,6 +10,7 @@
 //! `Kind::ID`), so a replacement compiled against it sees `decode_kind` =
 //! `None` and boots fresh.
 
+#![forbid(unsafe_code)]
 // `rehydrate` takes its `State` by value — the macro hands the decoded
 // state over to be moved into the actor (so a real `State` with heap
 // fields needs no clone). This fixture's `CounterState` is all-`Copy`, so

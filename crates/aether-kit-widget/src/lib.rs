@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // `#[handler]` methods take their decoded mail by value per the ADR-0033
 // dispatch ABI; the macro-generated trampoline owns the payload and hands
 // it off, so a by-value parameter is the contract, not a copy the body

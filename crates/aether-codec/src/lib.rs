@@ -18,6 +18,8 @@
 //! `aether_data::wire` body (ADR-0118). `aether-rpc` and the fleet harness are
 //! its consumers.
 
+#![forbid(unsafe_code)]
+
 mod cast;
 #[cfg(test)]
 mod conformance;

@@ -25,6 +25,8 @@
 //! address `ctx.actor::<ComponentHostCapability>()` and resolve a loaded peer
 //! without naming the substrate (ADR-0122).
 
+#![forbid(unsafe_code)]
+
 extern crate alloc;
 
 pub mod component;

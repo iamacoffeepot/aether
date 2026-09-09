@@ -27,6 +27,8 @@
 //! (ADR-0136), the opt-in for a component built to run as N interchangeable
 //! instances of one round-robin member set.
 
+#![forbid(unsafe_code)]
+
 use std::cmp::Reverse;
 
 use proc_macro::TokenStream;

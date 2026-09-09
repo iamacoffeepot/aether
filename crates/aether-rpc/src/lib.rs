@@ -13,6 +13,8 @@
 //! nothing of `aether-fleet`: the hub supervisor that forwards over this
 //! transport depends on this crate, never the reverse.
 
+#![forbid(unsafe_code)]
+
 // The frame-size config member (ADR-0156 §6) is native-only config machinery:
 // its `#[derive(aether_substrate::Config)]` emits a confique layer + clap
 // overlay that never build for a wasm guest (which never frames anyway), so the

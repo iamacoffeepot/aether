@@ -60,6 +60,8 @@
 //!
 //! [#3458]: https://github.com/iamacoffeepot/aether/issues/3458
 
+#![forbid(unsafe_code)]
+
 // Declared even though the crate is `std`, so the vocabulary's imports name
 // `alloc` directly and a `std`-only type cannot reach the value types unnoticed.
 // See the crate docs above for why the crate is `std` at all (issue #3497).

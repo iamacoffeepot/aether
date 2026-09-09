@@ -32,6 +32,7 @@
 //! substrate protocol vocabulary many actors address, not a detail of this
 //! capability.
 
+#![forbid(unsafe_code)]
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the
 // decoded bytes so callers can't see references.

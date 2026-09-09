@@ -11,6 +11,8 @@
 //! The control core (`aether-bloomery`) stays adapter-neutral: it does not
 //! depend on this crate (ADR-0149 §The boundary).
 
+#![forbid(unsafe_code)]
+
 use aether_bloomery::{Digest, encode_hex};
 
 /// A digest's first six bytes as hex — the short form every human-facing

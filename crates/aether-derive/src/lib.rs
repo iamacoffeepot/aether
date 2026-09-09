@@ -12,6 +12,8 @@
 //! needs an explicit `#[stage(skip)]`; an unannotated field whose type does
 //! not implement `StageArgv` is a compile error.
 
+#![forbid(unsafe_code)]
+
 use proc_macro::TokenStream;
 
 mod config;
