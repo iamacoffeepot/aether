@@ -487,6 +487,7 @@ mod tests {
         Measurements, ReviewVerdict, candidate_section, composition_contract, conclude_from_reports,
         parse_review_verdict, review_conclusion, stamp_reports_evidence, stamp_review_evidence,
     };
+    use crate::transform::instructions::fixture_bundle;
     use crate::transform::messages::{MAX_ASSISTANT_TEXT_BYTES, derive_result_record};
     use crate::transform::review_reports::{FindingClass, FindingReport, Reports};
 
@@ -518,7 +519,7 @@ mod tests {
         // mandatory finding (#4723). An order that names a diff base must direct
         // the critic at the range instead, and must not leave the working-tree
         // command standing next to it for the critic to run and believe.
-        let bundle = crate::transform::instructions::fixture_bundle();
+        let bundle = fixture_bundle();
         let ranged = candidate_section(&bundle, Some("abc123"));
 
         assert!(ranged.contains("review-candidate-committed"), "the committed-range field rides: {ranged}");
@@ -540,7 +541,7 @@ mod tests {
         // that does not exist there; a contract missing from the composition
         // review is the 10a1228c behaviour — a full re-read of every member,
         // eight member-scope findings out of nine, and three judge rounds.
-        let bundle = crate::transform::instructions::fixture_bundle();
+        let bundle = fixture_bundle();
         let composition = composition_contract(&bundle, Some("abc123"));
 
         assert!(composition.contains("## Composition review"), "{composition}");

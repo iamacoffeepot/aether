@@ -3170,11 +3170,11 @@ mod tests {
         // the moment a flag moved (#5078). Verify's typed map is the authority:
         // every umbrella member must still resolve, and none of the heavy argv
         // may appear in construct prose.
+        const CONSTRUCT_SOURCE: &str = include_str!("../construct_instructions.md");
         for id in verify_check_members() {
             assert!(verify_command(id).is_some(), "{id} must resolve via verify_command");
         }
 
-        const CONSTRUCT_SOURCE: &str = include_str!("../construct_instructions.md");
         for id in ["verify.clippy", "verify.docs", "verify.test", "verify.suppress", "verify.dup", "verify.deps"] {
             let invocation = verify_command(id).expect("member mapped");
             let stated = argv(&invocation).join(" ");

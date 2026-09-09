@@ -62,7 +62,7 @@ fn env_os(name: &str) -> Option<OsString> {
 }
 
 #[cfg(test)]
-pub(crate) fn fixture_bundle() -> ModelProcessInstructions {
+pub fn fixture_bundle() -> ModelProcessInstructions {
     let field = |name: &str| format!("Reference {name} instructions for scenarios.");
     ModelProcessInstructions {
         conventions: field("conventions"),
