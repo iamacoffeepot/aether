@@ -24,6 +24,7 @@ const HINTS: &[KeyHint] = &[
     KeyHint { keys: "t", action: "timeline" },
     KeyHint { keys: "d", action: "days" },
     KeyHint { keys: "c", action: "cost" },
+    KeyHint { keys: "o", action: "logs" },
     KeyHint { keys: "Esc", action: "back" },
     KeyHint { keys: "r", action: "refresh" },
     KeyHint { keys: "q", action: "quit" },
@@ -142,6 +143,7 @@ impl Detail {
             KeyCode::Char('t') => self.bloom_id().map_or(Outcome::Handled, |id| Outcome::Push(Nav::timeline(id))),
             KeyCode::Char('d') => Outcome::Push(Nav::days()),
             KeyCode::Char('c') => Outcome::Push(Nav::cost()),
+            KeyCode::Char('o') => Outcome::Push(Nav::coordinator_log()),
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -609,6 +611,21 @@ mod tests {
             assert_eq!(detail.handle_key(KeyEvent::from(KeyCode::Char('j')), store), Outcome::Handled);
         }
         panic!("never reached digest {}", target.as_hex());
+    }
+
+    #[test]
+    fn o_opens_the_coordinator_log() {
+        // The plausible bug: the footer paints `o logs` while the match
+        // drops it, so the advertised door goes nowhere.
+        let view = ViewDocument {
+            blooms: vec![BloomView { id: digest(1), ..BloomView::default() }],
+            ..ViewDocument::default()
+        };
+        let (mut detail, store) = detail_over(Focus::bloom(digest(1)), view);
+        assert_eq!(
+            detail.handle_key(KeyEvent::from(KeyCode::Char('o')), &store),
+            Outcome::Push(Nav::coordinator_log())
+        );
     }
 
     #[test]

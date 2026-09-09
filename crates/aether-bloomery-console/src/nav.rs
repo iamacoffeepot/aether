@@ -16,6 +16,7 @@ pub enum Nav {
     Days,
     Cost,
     Backlog,
+    CoordinatorLog,
 }
 
 impl Nav {
@@ -54,6 +55,11 @@ impl Nav {
         Self::Backlog
     }
 
+    #[must_use]
+    pub fn coordinator_log() -> Self {
+        Self::CoordinatorLog
+    }
+
     /// Crumb the footer trail paints. Exhaustive so a new variant must name itself.
     #[must_use]
     pub fn label(&self) -> String {
@@ -66,6 +72,7 @@ impl Nav {
             Self::Days => "days".to_owned(),
             Self::Cost => "cost".to_owned(),
             Self::Backlog => "backlog".to_owned(),
+            Self::CoordinatorLog => "coordinator log".to_owned(),
         }
     }
 }
