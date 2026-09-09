@@ -30,7 +30,7 @@ pub(super) fn move_effects(
     bloom: BloomId,
     workpiece: &WorkpieceId,
     scope_revision: Digest,
-    progress: StageProgress,
+    progress: &StageProgress,
     targets: DispatchTargets,
     sealed: SealedLine<'_>,
 ) -> [Decision; 2] {
@@ -70,7 +70,7 @@ pub(super) fn move_effects_with_candidate(
     bloom: BloomId,
     workpiece: &WorkpieceId,
     scope_revision: Digest,
-    progress: StageProgress,
+    progress: &StageProgress,
     targets: DispatchTargets,
     candidate: Option<Digest>,
     sealed: SealedLine<'_>,
@@ -93,12 +93,12 @@ pub(super) fn move_effects_with_checkpoint(
     bloom: BloomId,
     workpiece: &WorkpieceId,
     scope_revision: Digest,
-    progress: StageProgress,
+    progress: &StageProgress,
     (targets, construct_checkpoint_base): (DispatchTargets, Option<Digest>),
     candidate: Option<Digest>,
     sealed: SealedLine<'_>,
 ) -> [Decision; 2] {
-    let advance = Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress };
+    let advance = Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress: *progress };
     if sealed.withheld() {
         return [advance, Decision::DeferDispatch { bloom, workpiece: workpiece.clone() }];
     }
@@ -485,7 +485,7 @@ pub(super) fn reduce_member_executor_fault(
         *bloom,
         workpiece,
         member.scope_revision,
-        cursor,
+        &cursor,
         (targets, construct_checkpoint_base),
         cursor.candidate.map(|current| current.tree),
         SealedLine::of(record, member),
@@ -558,7 +558,7 @@ fn advance_after_pass(
         bloom,
         workpiece,
         member.scope_revision,
-        progress,
+        &progress,
         (targets, construct_checkpoint_base),
         candidate.map(|current| current.tree),
         SealedLine::of(record, member),
@@ -595,7 +595,7 @@ fn retry_or_wedge(
             bloom,
             workpiece,
             member.scope_revision,
-            progress,
+            &progress,
             (targets, construct_checkpoint_base),
             candidate.map(|current| current.tree),
             SealedLine::of(record, member),

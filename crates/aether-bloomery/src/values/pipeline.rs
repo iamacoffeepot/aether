@@ -333,6 +333,25 @@ impl PipelineManifest {
             .or_else(|| VerifyFailure::declared(position, name))
     }
 
+    /// Re-intern `failures` against this vocabulary.
+    ///
+    /// Journal decode assigns an unknown name the next free declared bit in
+    /// arrival order, so a row naming only the later of two appended identities
+    /// lands on bit 10 even when this vocabulary declared it at 11. Each
+    /// retained name takes the position this manifest actually declared; a
+    /// name this vocabulary does not carry keeps the decoded identity so the
+    /// row still folds. A declared bit with no retained name stays at its
+    /// recorded position: re-interning renames what it can name and never
+    /// drops a bit. Idempotent on a set already interned here.
+    #[must_use]
+    pub fn intern_set(&self, failures: VerifyFailureSet) -> VerifyFailureSet {
+        failures
+            .named()
+            .map(|failure| self.intern(failure.as_str()).unwrap_or(failure))
+            .collect::<VerifyFailureSet>()
+            .union(failures.unnamed())
+    }
+
     /// Whether this vocabulary declares `failure` — the same identity at the
     /// same position.
     #[must_use]
@@ -608,6 +627,18 @@ mod tests {
         assert_eq!(novel.position(), 10);
         assert!(eleven.declares_verifier(novel));
         assert!(eleven.undeclared_verifiers(VerifyFailureSet::one(novel)).is_empty());
+
+        // A row decoded without this manifest interned the later identity by
+        // arrival onto bit 10. intern_set remaps it onto the bit the
+        // vocabulary declared, which is what the live intern assigned.
+        let mut twelve = PipelineManifest::compiled();
+        twelve.verifiers.identities.push(String::from("verify.a"));
+        twelve.verifiers.identities.push(String::from("verify.b"));
+        let arrival = VerifyFailureSet::one(VerifyFailure::declared(10, "verify.b").expect("bit 10 is declarable"));
+        let live = VerifyFailureSet::one(twelve.intern("verify.b").expect("verify.b is declared at 11"));
+        assert_eq!(arrival.positions().collect::<Vec<_>>(), [10]);
+        assert_eq!(twelve.intern_set(arrival), live);
+        assert_eq!(live.positions().collect::<Vec<_>>(), [11]);
 
         // A vocabulary that moves a compiled identity off its own bit is
         // refused rather than re-interned: every stored mask was written

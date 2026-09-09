@@ -312,9 +312,9 @@ pub struct CalibrationLedger {
     studies: Vec<Study>,
     /// Members holding a resolution claim right now.
     claimed: BTreeSet<(BloomId, WorkpieceId)>,
-    /// The sealed lane vocabulary each bloom recorded. A failing position is
-    /// named from this list — the manifest that interned the bit — rather than
-    /// from the compiled ten.
+    /// The sealed lane vocabulary each bloom recorded. Zero columns render from
+    /// this list; failing verdicts name themselves off the set, whose declared
+    /// members survive decode.
     manifests: BTreeMap<BloomId, PipelineManifest>,
 }
 
@@ -520,19 +520,14 @@ impl CalibrationLedger {
         let Some(id) = self.lanes.get(&(bloom, workpiece.clone())).cloned() else {
             return;
         };
-        let names = self.declared_identities(bloom);
         let Some(slot) = self.slots.get_mut(&id) else {
             return;
         };
-        // Named through the bloom's recorded manifest: a position is a bit the
-        // sealed vocabulary interned, and the name at that index is the column.
-        // A position past the declared width has no name here and is counted
-        // nowhere — intake already refuses that verdict on a live fold.
-        for position in failed.positions() {
-            let Some(name) = names.get(usize::from(position)) else {
-                continue;
-            };
-            let count = slot.failures.entry(name.clone()).or_insert(0);
+        // Named from the set itself: declared names survive decode, so a
+        // replayed row keys the same column the live fold keyed rather than
+        // the arrival-interned bit's occupant in the recorded manifest.
+        for failure in failed.named() {
+            let count = slot.failures.entry(String::from(failure.as_str())).or_insert(0);
             *count = count.saturating_add(1);
         }
     }

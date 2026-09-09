@@ -192,7 +192,7 @@ pub(super) fn resume_entries(
             bloom,
             workpiece,
             member.scope_revision,
-            progress,
+            &progress,
             DispatchTargets { subject: member.scope_revision, checkout: just_checkout },
             sealed,
         ));
