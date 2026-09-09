@@ -71,6 +71,7 @@ const LIVE_HINTS: &[KeyHint] = &[
     KeyHint { keys: "d", action: "days" },
     KeyHint { keys: "c", action: "cost" },
     KeyHint { keys: "b", action: "backlog" },
+    KeyHint { keys: "o", action: "logs" },
     KeyHint { keys: "r", action: "refresh" },
     KeyHint { keys: "q", action: "quit" },
 ];
@@ -83,6 +84,7 @@ const HISTORY_HINTS: &[KeyHint] = &[
     KeyHint { keys: "d", action: "days" },
     KeyHint { keys: "c", action: "cost" },
     KeyHint { keys: "b", action: "backlog" },
+    KeyHint { keys: "o", action: "logs" },
     KeyHint { keys: "Esc", action: "back" },
     KeyHint { keys: "r", action: "refresh" },
     KeyHint { keys: "q", action: "quit" },
@@ -192,6 +194,7 @@ impl Board {
             KeyCode::Char('d') => Outcome::Push(Nav::days()),
             KeyCode::Char('c') => Outcome::Push(Nav::cost()),
             KeyCode::Char('b') => Outcome::Push(Nav::backlog()),
+            KeyCode::Char('o') => Outcome::Push(Nav::coordinator_log()),
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -698,6 +701,21 @@ mod tests {
             .collect();
         assert_eq!(live, vec![digest(1)]);
         assert_eq!(history, vec![digest(2), digest(3)]);
+    }
+
+    #[test]
+    fn o_opens_the_coordinator_log() {
+        // The plausible bug: the footer paints `o logs` while the match
+        // drops it, so the advertised door goes nowhere.
+        let store = Store::new(Duration::from_secs(1));
+        assert_eq!(
+            Board::new().handle_key(KeyEvent::from(KeyCode::Char('o')), &store),
+            Outcome::Push(Nav::coordinator_log())
+        );
+        assert_eq!(
+            Board::history().handle_key(KeyEvent::from(KeyCode::Char('o')), &store),
+            Outcome::Push(Nav::coordinator_log())
+        );
     }
 
     #[test]

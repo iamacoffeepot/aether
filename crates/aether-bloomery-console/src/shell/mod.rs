@@ -277,6 +277,16 @@ impl Shell {
             (ResourceKey::Commission(id), Ok(_)) => {
                 self.store.apply_commission(id, Err("commission lane returned a non-commission body".to_owned()));
             }
+            (ResourceKey::CoordinatorLogs(query), Ok(ResourceBody::CoordinatorLogs(page))) => {
+                self.store.apply_coordinator_logs(query, Ok(page));
+            }
+            (ResourceKey::CoordinatorLogs(query), Err(error)) => {
+                self.store.apply_coordinator_logs(query, Err(error));
+            }
+            (ResourceKey::CoordinatorLogs(query), Ok(_)) => {
+                self.store
+                    .apply_coordinator_logs(query, Err("coordinator-log lane returned a non-log body".to_owned()));
+            }
         }
     }
 

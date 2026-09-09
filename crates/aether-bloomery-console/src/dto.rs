@@ -799,6 +799,34 @@ pub struct ScopeRevisionView {
     pub description: String,
 }
 
+/// One `GET /logs/coordinator` entry. `level` stays a string so a
+/// coordinator naming a new severity degrades to a painted word rather
+/// than failing the whole page.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CoordinatorLogEntry {
+    #[serde(default)]
+    pub timestamp_unix_micros: u64,
+    #[serde(default)]
+    pub level: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub cursor: String,
+}
+
+/// One bounded `GET /logs/coordinator` page, oldest first.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CoordinatorLogsView {
+    #[serde(default)]
+    pub entries: Vec<CoordinatorLogEntry>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub notice: Option<String>,
+}
+
 /// `GET /spend`. `per_bloom` keys are the REST hex spelling of a bloom id.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SpendWindowView {
