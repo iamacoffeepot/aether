@@ -222,14 +222,23 @@ pub enum RequestWindowRedrawResult {
 }
 
 /// Manager-private id-bearing command forwarded by one window child.
+///
+/// `internal` names who sends it — a window child to its own manager, never a
+/// peer — not whether the type can be named. The manager identity's always-on
+/// `#[actor]` markers declare this command and [`ApplyWindowCommandResult`] as
+/// its handler contract whether or not the runtime half compiles, which is what
+/// `describe_handlers` reports, so the pair and the [`WindowCommand`] it carries
+/// are reachable rather than crate-private items no marker-only build can
+/// construct.
 #[aether_data::kind(name = "aether.window.internal.apply_command", eq)]
-pub(crate) struct ApplyWindowCommand {
+pub struct ApplyWindowCommand {
     pub window: WindowId,
     pub command: WindowCommand,
 }
 
+/// The seven per-window operations a child forwards to its manager.
 #[derive(aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum WindowCommand {
+pub enum WindowCommand {
     Close,
     SetMode { mode: WindowMode, width: Option<u32>, height: Option<u32> },
     SetTitle { title: String },
@@ -264,14 +273,10 @@ impl WindowCommand {
     }
 }
 
-/// Manager-private result returned to the forwarding child.
-///
-/// The reply half of the private forwarding protocol: a manager runtime
-/// produces it and a forwarding child consumes it, so it rides the same
-/// `runtime` gate both of those halves do.
-#[cfg(feature = "runtime")]
+/// Manager-private result returned to the forwarding child — the declared
+/// reply of [`ApplyWindowCommand`], and reachable for the same reason.
 #[aether_data::kind(name = "aether.window.internal.apply_command_result", eq)]
-pub(crate) enum ApplyWindowCommandResult {
+pub enum ApplyWindowCommandResult {
     Close(CloseWindowResult),
     SetMode(SetWindowModeResult),
     SetTitle(SetWindowTitleResult),
