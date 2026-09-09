@@ -774,6 +774,7 @@ dependencies = [
  "aether-window",
  "inventory",
  "serde",
+ "serde_json",
  "tracing",
 ]
 
