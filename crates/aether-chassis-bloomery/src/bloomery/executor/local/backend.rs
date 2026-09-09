@@ -37,8 +37,8 @@ use super::quarantine;
 use super::runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use super::session_reuse::{
     AcquireRequest, DEFAULT_CACHE_TTL_SECS, DEFAULT_DEPENDENCY_INCREMENT_TOKENS, DEFAULT_PRICING_CLIFF_TOKENS,
-    MissReason, PredecessorCandidate, RefineResume, ReuseArm, SPLICED_RESET_NOTE, decide_predecessor_resume,
-    decide_refine_resume, plan_for, usable_session_id,
+    MissReason, PredecessorCandidate, ResumeDecision, ReuseArm, SPLICED_RESET_NOTE, decide_predecessor_resume,
+    decide_repair_resume, plan_for, usable_session_id,
 };
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::CoordinatorConfig;
@@ -1296,7 +1296,7 @@ impl LocalExecutor {
     }
 
     fn acquire_reuse(&self, pending: &PendingRun, worktree_dir: &Path) -> Option<super::ReusePlan> {
-        if let Some(plan) = self.journaled_refine_plan(pending, worktree_dir) {
+        if let Some(plan) = self.journaled_repair_plan(pending, worktree_dir) {
             return Some(plan);
         }
         if let Some(plan) = self.journaled_predecessor_plan(pending, worktree_dir) {
@@ -1318,13 +1318,13 @@ impl LocalExecutor {
         }))
     }
 
-    /// Same-member Refine resume from the construct session journaled on this
+    /// Same-member repair resume from the construct session journaled on this
     /// workpiece. Only a missing handle falls through to the pool; a journaled
     /// handle resumes whatever context it carries, and an unparseable one
-    /// launches fresh. Context never diverts a refine to the pool — the pool
+    /// launches fresh. Context never diverts a repair to the pool — the pool
     /// key is the findings overlay, which is a colder start than the construct
     /// session it would replace.
-    fn journaled_refine_plan(&self, pending: &PendingRun, worktree_dir: &Path) -> Option<super::ReusePlan> {
+    fn journaled_repair_plan(&self, pending: &PendingRun, worktree_dir: &Path) -> Option<super::ReusePlan> {
         let Some(OrderIdentity { bloom, workpiece, stage, .. }) = self.order_identity(&pending.nonce) else {
             // The registry row is written before the submit that starts this
             // lane, so a nonce that does not resolve here means the dispatch
@@ -1335,14 +1335,15 @@ impl LocalExecutor {
             );
             return None;
         };
-        if stage != StageId::Refine {
+        if !matches!(stage, StageId::Refine | StageId::Reconcile) {
             return None;
         }
         let Some((session_id, _context)) = self.lookup_construct_session(&bloom, &workpiece) else {
             tracing::warn!(
                 nonce = %pending.nonce,
                 workpiece = %workpiece,
-                "local executor backend: refine lap has no journaled construct session for its workpiece; falling through to the pool"
+                ?stage,
+                "local executor backend: repair lap has no journaled construct session for its workpiece; falling through to the pool"
             );
             return None;
         };
@@ -1350,7 +1351,8 @@ impl LocalExecutor {
             tracing::warn!(
                 nonce = %pending.nonce,
                 workpiece = %workpiece,
-                "local executor backend: refine lap carries no sealed profile, so its journaled construct session cannot be keyed; falling through to the pool"
+                ?stage,
+                "local executor backend: repair lap carries no sealed profile, so its journaled construct session cannot be keyed; falling through to the pool"
             );
             return None;
         };
@@ -1362,9 +1364,9 @@ impl LocalExecutor {
             worktree: worktree_dir,
             command: &pending.command,
         };
-        Some(match decide_refine_resume(&session_id) {
-            RefineResume::Resumed(id) => plan_for(&request, ReuseArm::Resumed, None, Some(id)),
-            RefineResume::Fresh { miss } => plan_for(&request, ReuseArm::Fresh, miss, None),
+        Some(match decide_repair_resume(&session_id) {
+            ResumeDecision::Resumed(id) => plan_for(&request, ReuseArm::Resumed, None, Some(id)),
+            ResumeDecision::Fresh { miss } => plan_for(&request, ReuseArm::Fresh, miss, None),
         })
     }
 
@@ -1396,12 +1398,12 @@ impl LocalExecutor {
             command: &pending.command,
         };
         Some(match decide_predecessor_resume(&candidates, now, warmth, increment, cliff) {
-            RefineResume::Resumed(id) => {
+            ResumeDecision::Resumed(id) => {
                 let mut plan = plan_for(&request, ReuseArm::Resumed, None, Some(id));
                 plan.edge = true;
                 plan
             }
-            RefineResume::Fresh { miss } => plan_for(&request, ReuseArm::Fresh, miss, None),
+            ResumeDecision::Fresh { miss } => plan_for(&request, ReuseArm::Fresh, miss, None),
         })
     }
 

@@ -2944,6 +2944,27 @@ fn grok_order(subject: Digest, nonce: &str, task: &str) -> aether_bloomery::Work
     order
 }
 
+fn reconcile_order(subject: Digest, nonce: &str, task: &str, checkout: Digest) -> aether_bloomery::WorkOrder {
+    let mut order = aether_bloomery::WorkOrder {
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(StageId::Reconcile),
+            subject,
+            checkout,
+            digest(0xC0),
+        ),
+        nonce: Nonce(nonce.to_owned()),
+        instruction_bundle: None,
+        prompt_manifest: None,
+    };
+    order.transformation.model = Some(ResolvedModel {
+        harness: Harness::Claude,
+        model: "claude-opus-5".to_owned(),
+        effort: ReasoningEffort::High,
+    });
+    order.transformation.description = Some(task.to_owned());
+    order
+}
+
 fn reuse_evidence(nonce: &str, session_id: &str, input_tokens: u64) -> String {
     format!(
         r#"{{"command":"construct.implement","nonce":"{nonce}","produced_candidate":true,"result_record":{{"schema":1,"is_error":false,"session_id":"{session_id}","input":{input_tokens},"cache_read":0,"cache_write":4000,"output":200,"num_turns":3,"duration_ms":1200,"calls":[{{"input":{input_tokens},"cache_read":0,"cache_write":4000,"output":200}}],"result":{{"num_turns":3,"session_id":"{session_id}"}}}}}}"#
@@ -3643,6 +3664,111 @@ fn a_refine_resumes_the_journaled_construct_session_at_any_context() {
     assert_eq!(stamped["session_reuse"]["arm"], "resumed");
     assert_eq!(stamped["session_reuse"]["output_tokens"], 200);
     assert_eq!(stamped["session_reuse"]["duration_millis"], 1_200);
+}
+
+#[test]
+fn a_reconcile_resumes_its_journaled_author_session_on_the_pinned_checkout() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let construct = test_nonce("construct");
+    let reconcile = test_nonce("reconcile");
+    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
+        .with_message_store(member_store(
+            &store,
+            &[
+                member_order_at(&construct, "issue-A", StageId::Construct),
+                member_order_at(&reconcile, "issue-A", StageId::Reconcile),
+            ],
+        ));
+
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &construct, "issue-A")).unwrap()).unwrap();
+    exec.stream_evidence(&exec.submit(&reconcile_order(digest(5), &reconcile, "issue-A", digest(0xB0))).unwrap())
+        .unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[1].resume.as_deref(), Some("sess-1"), "Reconcile resumes this member's author session");
+    assert_eq!(
+        seen[1].checkout.as_deref(),
+        Some(to_hex(&digest(0xB0)).as_str()),
+        "session selection must preserve the Reconcile order's pinned checkout",
+    );
+    assert_eq!(
+        seen[1].worktree, seen[0].worktree,
+        "the repair runs in the checkout owned by the member's author session",
+    );
+    drop(seen);
+}
+
+#[test]
+fn a_base_assembly_reconcile_without_an_author_does_not_borrow_another_members_session() {
+    // A base assembly can collide before this member has constructed. Give
+    // another member the same pool task so its handle is an available lure;
+    // the fresh member's own session tree must keep that handle out.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let author = test_nonce("author");
+    let reconcile = test_nonce("base-assembly");
+    let sessions = super::SessionReuse::memory();
+    sessions.set_head_hash("head-A");
+    sessions.set_now(1_000);
+    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
+        .with_session_reuse(sessions)
+        .with_message_store(member_store(
+            &store,
+            &[
+                member_order_at(&author, "issue-A", StageId::Construct),
+                member_order_at(&reconcile, "issue-B", StageId::Reconcile),
+            ],
+        ));
+
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &author, "shared-task")).unwrap()).unwrap();
+    exec.stream_evidence(&exec.submit(&reconcile_order(digest(5), &reconcile, "shared-task", digest(0xB0))).unwrap())
+        .unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert!(seen[1].resume.is_none(), "a member with no author session launches its base assembly fresh");
+    assert_ne!(seen[1].worktree, seen[0].worktree, "each member keeps its own session checkout");
+    drop(seen);
+    let stamped = stamped_evidence(&base, &reconcile);
+    assert_eq!(stamped["session_reuse"]["arm"], "fresh");
+    assert_eq!(stamped["session_reuse"]["miss"], "slot_mismatch");
+}
+
+#[test]
+fn a_rejected_reconcile_author_session_relaunches_fresh_on_the_pinned_checkout() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let construct = test_nonce("construct");
+    let reconcile = test_nonce("reconcile");
+    let runner = ReuseRunner::new(Arc::clone(&seen)).with_session_id("bad-id").rejecting_resume("bad-id");
+    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path()).with_message_store(member_store(
+        &store,
+        &[
+            member_order_at(&construct, "issue-A", StageId::Construct),
+            member_order_at(&reconcile, "issue-A", StageId::Reconcile),
+        ],
+    ));
+
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &construct, "issue-A")).unwrap()).unwrap();
+    let refs = exec
+        .stream_evidence(&exec.submit(&reconcile_order(digest(5), &reconcile, "issue-A", digest(0xB0))).unwrap())
+        .unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[1].resume.as_deref(), Some("bad-id"), "the first start names the journaled author id");
+    assert!(seen[2].resume.is_none(), "the refused author handle relaunches cold");
+    assert!(
+        seen[1..].iter().all(|spec| spec.checkout.as_deref() == Some(to_hex(&digest(0xB0)).as_str())),
+        "both starts preserve the Reconcile order's pinned checkout",
+    );
+    drop(seen);
+    assert_eq!(refs.len(), 1, "the dispatch still completes");
+    let stamped = stamped_evidence(&base, &reconcile);
+    assert_eq!(stamped["session_reuse"]["arm"], "fresh");
+    assert_eq!(stamped["session_reuse"]["miss"], "resume_refused");
 }
 
 #[test]
