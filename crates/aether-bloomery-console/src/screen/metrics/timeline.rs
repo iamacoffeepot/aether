@@ -2,6 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use aether_bloomery::WorkpieceId;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
@@ -9,8 +10,6 @@ use ratatui::style::Modifier;
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
 use crate::cursor::Cursor;
-use aether_bloomery::WorkpieceId;
-
 use crate::dto::{BloomStatus, DigestHex, MemberView, MetricsTimeline, TimelineSpan};
 use crate::keys::{KeyHint, Outcome};
 use crate::palette;

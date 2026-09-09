@@ -23,20 +23,17 @@ pub struct SeatDispatch<'a> {
     pub workpiece: String,
     pub command: &'a str,
     pub profile: &'a AgentProfile,
-    /// Bloom-wide overlay registry, when the decision carries one. Aggregate
-    /// verify does not: its decision has no configs field, and the mechanical
-    /// lane never mints a seat anyway.
-    pub registry: Option<&'a ConfigRegistry>,
+    pub registry: &'a ConfigRegistry,
     pub displayed: Digest,
 }
 
 impl<'a> SeatDispatch<'a> {
     /// The member or composition-tail dispatch this effect is, if it is one.
     ///
-    /// Aggregate verify and review keep their persisted [`DispatchKey::Bloom`]
-    /// slot and stage identity. The timeline workpiece is the composition
-    /// (ADR-0191): painting them as an empty bloom-level row beside the
-    /// composition cursor was a second tail for the same subject.
+    /// Aggregate review keeps its persisted [`DispatchKey::Bloom`] slot and
+    /// stage identity. The timeline workpiece is the composition (ADR-0191):
+    /// painting it as an empty bloom-level row beside the composition cursor
+    /// was a second tail for the same subject.
     pub fn from_effect(effect: &'a Decision) -> Option<Self> {
         match effect {
             Decision::DispatchAttempt {
@@ -55,7 +52,7 @@ impl<'a> SeatDispatch<'a> {
                 workpiece: workpiece.0.clone(),
                 command: &transformation.command,
                 profile,
-                registry: Some(configs),
+                registry: configs,
                 displayed: candidate.unwrap_or(*scope_revision),
             }),
             Decision::DispatchAggregateReview { bloom, transformation, profile, configs, .. } => {
@@ -67,20 +64,7 @@ impl<'a> SeatDispatch<'a> {
                     workpiece: String::from(WorkpieceId::COMPOSITION),
                     command: &transformation.command,
                     profile,
-                    registry: Some(configs),
-                    displayed,
-                })
-            }
-            Decision::DispatchAggregateVerify { bloom, transformation, profile, .. } => {
-                let displayed = transformation.inputs.first().copied()?;
-                Some(Self {
-                    bloom: *bloom,
-                    key: DispatchKey::Bloom { stage: StageId::AggregateVerify },
-                    stage: StageId::AggregateVerify,
-                    workpiece: String::from(WorkpieceId::COMPOSITION),
-                    command: &transformation.command,
-                    profile,
-                    registry: None,
+                    registry: configs,
                     displayed,
                 })
             }
@@ -95,8 +79,10 @@ impl<'a> SeatDispatch<'a> {
 
     /// The sealed catalog profile with the member's override resolved over it.
     pub fn agent(&self, configs: &ResolvedConfigs) -> ResolvedModel {
-        self.registry
-            .and_then(|registry| configs.resolve::<ModelOverride>(ConfigScopes::bloom_wide(registry)).ok().flatten())
+        configs
+            .resolve::<ModelOverride>(ConfigScopes::bloom_wide(self.registry))
+            .ok()
+            .flatten()
             .unwrap_or_default()
             .resolve(self.stage, self.profile)
     }

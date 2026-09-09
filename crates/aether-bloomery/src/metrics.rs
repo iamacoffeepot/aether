@@ -276,7 +276,8 @@ impl MetricsLedger {
     /// Every dispatch row, in (sequence, id) order — the persist surface.
     #[must_use]
     pub fn dispatch_rows(&self) -> Vec<MetricDispatch> {
-        let mut rows: Vec<MetricDispatch> = self.dispatches.values().map(|acc| self.dispatch_row(acc)).collect();
+        let mut rows: Vec<MetricDispatch> =
+            self.dispatches.iter().map(|((_, key, _), acc)| self.dispatch_row(key, acc)).collect();
         rows.sort_by(|a, b| a.sequence.cmp(&b.sequence).then_with(|| a.id.cmp(&b.id)));
         rows
     }
@@ -525,14 +526,14 @@ impl MetricsLedger {
         acc
     }
 
-    fn dispatch_row(&self, acc: &DispatchAcc) -> MetricDispatch {
+    fn dispatch_row(&self, key: &DispatchKey, acc: &DispatchAcc) -> MetricDispatch {
         let study = self
             .studies
             .iter()
             .find(|study| (study.bloom, study.subject) == (acc.bloom, acc.displayed))
             .map(|study| study.detail);
         MetricDispatch {
-            id: dispatch_id(acc),
+            id: dispatch_id(key, acc),
             bloom: acc.bloom,
             workpiece: acc.workpiece.clone(),
             stage: acc.stage,
@@ -581,11 +582,15 @@ fn day_label(envelope: Option<u64>) -> String {
     envelope.map_or_else(|| String::from(RECONSTRUCTED_WINDOW), window_label)
 }
 
-fn dispatch_id(acc: &DispatchAcc) -> String {
+fn dispatch_id(key: &DispatchKey, acc: &DispatchAcc) -> String {
+    let workpiece = match key {
+        DispatchKey::Member { .. } => acc.workpiece.as_str(),
+        DispatchKey::Bloom { .. } => "",
+    };
     let mut id = String::from("fold:");
     id.push_str(&acc.bloom.0.to_hex());
     id.push(':');
-    id.push_str(&acc.workpiece);
+    id.push_str(workpiece);
     id.push(':');
     id.push_str(stage_slug(acc.stage));
     id.push(':');
