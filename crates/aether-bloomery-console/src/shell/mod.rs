@@ -569,6 +569,29 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_sample_dims_the_quiet_status_line() {
+        // The plausible bug: a failed poll keeps the last heads on the quiet
+        // pane at full brightness, so stale mainline/observed read as live
+        // fact while the board around them dims.
+        let view = ViewDocument { mainline: digest(1), observed: digest(2), ..ViewDocument::default() };
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
+
+        let mut fresh = Shell::showing(&view, None);
+        terminal.draw(|frame| fresh.render(frame)).expect("draw");
+        assert!(
+            !right_column_modifiers(&terminal, "mainline").iter().any(|modifier| modifier.contains(Modifier::DIM)),
+            "live heads painted dim"
+        );
+
+        let mut stale = Shell::showing(&view, Some("connection refused"));
+        terminal.draw(|frame| stale.render(frame)).expect("draw");
+        assert!(
+            right_column_modifiers(&terminal, "mainline").iter().any(|modifier| modifier.contains(Modifier::DIM)),
+            "stale heads painted as live fact"
+        );
+    }
+
+    #[test]
     fn a_resource_has_at_most_one_inflight_request() {
         // The plausible bug: every frame re-sends /view while the live lane
         // is still out, flooding the coordinator and losing the one-inflight
