@@ -30,7 +30,7 @@ boundary:
 | `load_component.config_path` or `replace_component.config_path` | `aether-mcp` | reads structured JSON and schema-encodes it for the selected component |
 | a Bytes parameter/config's `{"$file": path}` | `aether-mcp` | reads the whole host file, then rejects it if it exceeds the RPC frame cap |
 | `capture_frame.similarity.reference_path` | substrate render capability | joins a relative path beneath the configured assets root and reads the reference PNG |
-| `capture_frame.save_path` | `aether-mcp` | creates missing parent directories and overwrites the destination with the full-resolution PNG |
+| `capture_frame.save_path` | `aether-mcp` | rejects a relative path up front, then creates missing parent directories and overwrites the destination with the full-resolution PNG |
 | reply spill path | `aether-mcp` | creates a uniquely named file in its process temporary directory and returns the path |
 
 “Absolute path” is a routing fact, not authorization. Never copy a host path

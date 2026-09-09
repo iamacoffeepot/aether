@@ -16,6 +16,16 @@ For any unexpected result:
 - [ ] Collect reachable logs, descriptions, costs, traces, and frames.
 - [ ] Decide who owns the engine/component before terminating or dropping it.
 
+`collect_failure_evidence` gathers most of that middle step in one bounded,
+non-mutating call: pass the original error as `primary_error`, the engine, and
+the explicit actors, components, kinds, and window that matter. It records the
+fleet row, kind schemas, component descriptions, log tails, cost tables, and an
+optional frame, marking each observation `ok`, `error`, `timeout`, or
+`budget_exhausted` rather than failing the bundle. Reach for it before
+terminate, restart, replace, or retry destroys what is still reachable; it
+cannot reconstruct evidence already evicted from a ring. The per-tool detail is
+in [Inspect and debug](inspect-and-debug.md).
+
 ## Symptom-first matrix
 
 | Symptom | First discriminating check | Safe next action |
@@ -141,8 +151,8 @@ retry the same base or invent mailbox ids.
 ## Replacement failure
 
 Replacement uses a stable mailbox binding on success, but recovery must trust
-observation rather than intent. `drain_timeout_ms` is currently ignored, so
-changing it cannot recover a stuck or failed splice. Pre-splice validation
+observation rather than intent. The splice is structural, so there is no drain
+argument to lengthen or retry. Pre-splice validation
 errors preserve the old guest; later instantiation failure can leave the
 trampoline empty, while rehydrate failure leaves the new guest installed even
 though the operation returns `Err`.
