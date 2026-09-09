@@ -565,12 +565,12 @@ shared prefix.
 A dash in a namespace is a naming convention, not addressing grammar. Use it
 only for a genuine adjacent sibling of an existing bare base:
 `aether.kit.camera-controller` is the controller actor beside the bare
-`aether.kit.camera` actor. The dash has no addressing semantics — it makes
-neither actor a child of the other, and the full `NAMESPACE` still yields the
-`ActorId` before lineage yields the `MailboxId`. Do not use a dash merely to
-spell a multi-word segment: `aether.kit.terra` is the bare Terra actor even
-though its implementation type is `TerraEditor`, not
-`aether.kit.terra-editor`.
+`aether.kit.camera` actor, and `aether.puppet-idle` and
+`aether.puppet-turntable` sit beside `aether.puppet`. The dash has no addressing
+semantics — it makes neither actor a child of the other, and the full
+`NAMESPACE` still yields the `ActorId` before lineage yields the `MailboxId`. Do
+not use a dash merely to spell a multi-word segment; that is what an underscore
+is for, as in `aether.kit.widget.menu_bar` and `aether.kit.widget.text_field`.
 
 A capability can also dress up its mail surface with **extension-trait helpers** —
 typed methods on the mailbox handle that stand in for raw kind sends.
@@ -603,7 +603,7 @@ address it straight by type, `ctx.actor::<R>()`.
 
 An **instanced** actor is one of many sharing a prefix. Its `NAMESPACE` is that
 prefix, and each live instance gets its own `ActorId` by folding a runtime
-discriminator in — `hash(NAMESPACE:subname)`, rendered `aether.net.session:42` —
+discriminator in — `hash(NAMESPACE:subname)`, rendered `aether.tcp.session:42` —
 with its `MailboxId` folding that ActorId under the parent's lineage, so two
 instances under one parent differ by subname. The case that drives this is
 sockets: a singleton listener accepts connections and spawns a session actor per

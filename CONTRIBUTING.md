@@ -20,20 +20,26 @@ cargo fmt -- --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-GitHub Actions is the full build engine and merge gate. It owns the expensive
-workspace tests, docs, marker/feature boundaries, wasm packaging, duplicate-code
-and unused-dependency checks, and other applicable contract jobs. The required
-checks are `Lint title` and `CI pass`; see
+GitHub Actions is the merge gate: a pull request runs the affected subset of the test suite on one shard, and `main` runs the full suite across three. `CI pass` aggregates
+the jobs that must be green: `Format`, `Clippy`, `Rustdoc`, the sharded `Test`
+matrix, `Duplicate code` (jscpd), `Unused dependencies` (cargo-machete), `Cargo
+lock freshness`, and `New suppressions` on pull requests. Branch protection
+requires `CI pass` and `Lint title`, which enforces a Conventional Commit pull
+request title with a lowercase subject; see
 [.github/workflows/README.md](.github/workflows/README.md) for the CI
 conventions.
 
-If you want to reproduce a specific CI check locally before pushing, the
-workspace commands are:
+To reproduce a check locally before pushing, narrow to the crate or the test:
 
 ```
 cargo test -p <crate>
 cargo test <name>
 ```
+
+`cargo xtask transform verify.check --out <dir>` runs the whole mechanical set
+under the same invocations CI uses, writing its evidence into `<dir>`; the
+individual ids are `verify.fmt`, `verify.clippy`, `verify.docs`, `verify.test`,
+`verify.dup`, `verify.deps`, and `verify.suppress`.
 
 See [Local checks and CI](docs/guide/local-verification.md) for verification and
 [Agent and contributor workflow](docs/guide/contributing/agent-workflow.md) for
@@ -46,3 +52,8 @@ and required dogfood are clear. Landing is separately authorized.
 Codex uses `AGENTS.md` and `.agents/skills/`; Claude Code uses `CLAUDE.md` and
 `.claude/skills/`. The checked-in skill for the active surface owns exact
 mutations and pause boundaries.
+
+## Reporting a vulnerability
+
+Do not open a public issue for a security problem. [SECURITY.md](SECURITY.md)
+has the private reporting route.

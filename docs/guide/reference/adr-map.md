@@ -27,7 +27,7 @@ rg -l 'HTTP server|settlement|component' docs/adr
 | Topic | Start with | Continue with |
 |---|---|---|
 | Mail-only engine boundary | ADR-0002 | ADR-0013, ADR-0017 |
-| Typed identity/schema | ADR-0003, ADR-0004 | ADR-0064, ADR-0118 |
+| Typed identity/schema | ADR-0005, ADR-0030 | ADR-0031, ADR-0032, ADR-0065, ADR-0118 |
 | Components and wasm hosting | ADR-0022 (**superseded by ADR-0038**), ADR-0033 | ADR-0096, ADR-0099 |
 | Instanced actors | ADR-0079 | ADR-0114, ADR-0138 |
 | Reply classes | ADR-0112 | ADR-0134 |
@@ -85,7 +85,7 @@ and topology while preserving earlier public concepts.
 | Mesh DSL and meshing | ADR-0026, ADR-0051–ADR-0053, ADR-0056–ADR-0057, ADR-0062 |
 | Audio baseline/scheduling/samples | ADR-0039, ADR-0103, ADR-0104, ADR-0126, ADR-0127 |
 | Widgets/composition/editor | ADR-0117, ADR-0140, ADR-0141 |
-| World/terrain workbench | ADR-0140–ADR-0143 |
+| Terrain marks and proposals | ADR-0142, ADR-0143 — Accepted, but the `aether-kit-terrain` crate they cite is no longer in the tree; read them as history |
 
 The old DAG and handle-store designs (ADRs 0045, 0047, 0049) are superseded.
 Residual id types are not evidence that those native subsystems still ship.
@@ -96,7 +96,7 @@ Residual id types are not evidence that those native subsystems still ship.
 |---|---|
 | Provider content generation | ADR-0050, interpreted against shipped provider code |
 | Tick-native simulation | ADR-0144 (Accepted) |
-| Player sessions over TCP | ADR-0145 (**Proposed**, partially realized in code) |
+| Player sessions over TCP | ADR-0145 (Accepted, partially realized in code) |
 
 ADR-0050 contains deferred/historical provider discussion. The current
 `anthropic` and shared content-generation modules define the shipped set.

@@ -28,17 +28,31 @@ each file opens with one.
 | `fuzz-nightly.yml` | 06:17 | Coverage-guided fuzz of the codec / wire targets |
 | `desktop-nightly.yml` | 07:37 | Chassis tests on the macOS / Windows matrix |
 
+**Security scans** — advisory, never a required check; results land in the
+repository's code-scanning tab rather than on a pull request:
+
+| Workflow | Fires on | Purpose |
+| --- | --- | --- |
+| `codeql.yml` | push to `main`, Mon 03:27 UTC | CodeQL `security-and-quality` over rust / actions / javascript-typescript / python |
+
+Deliberately not on `pull_request`: `ci.yml` is the merge gate, this scan gates
+nothing, and source-based Rust extraction over the workspace is slow enough to
+be a real per-pull-request cost. A finding a pull request introduces surfaces on
+the landing commit instead. The scan is also what *closes* alerts — an alert
+whose code is gone stays open until an analysis of the same category runs again
+and doesn't find it, so a period with no scheduled scan freezes the tab.
+
 **Release** — the one workflow a `git push` of a tag triggers:
 
 | Workflow | Fires on | Purpose |
 | --- | --- | --- |
 | `release.yml` | a bare-semver tag (`0.4.0-alpha`), or `workflow_dispatch` | Builds a chassis package per platform and publishes them on the tag's GitHub Release |
 
-`release.yml` is the only workflow with a `contents: write` job, and the only
-one that publishes anything outside the Actions tab. On `ubuntu-latest`,
-`macos-latest`, and `windows-latest` it builds a `cargo xtask package` depot
-from the checked-in demo spec plus one archive per remaining chassis binary,
-and attaches every `aether-<version>-<os>-<arch>` /
+`release.yml` is the only workflow carrying a `contents: write` job, and the
+only one that publishes an artifact anyone outside the Actions tab can
+download. On `ubuntu-latest`, `macos-latest`, and `windows-latest` it builds a
+`cargo xtask package` depot from the checked-in demo spec plus one archive per
+remaining chassis binary, and attaches every `aether-<version>-<os>-<arch>` /
 `aether-<bin>-<version>-<os>-<arch>` archive (`.tar.gz`, `.zip` on Windows) to
 a release marked pre-release whenever the version carries a pre-release
 suffix. A `workflow_dispatch` run is the dry run: identical build, archives
@@ -101,5 +115,6 @@ invokes it.
    reading the Actions tab. `alert` issues are machine-filed tickets;
    `issue-labels.yml` exempts them from the title lint.
 8. **Cron offsets are unique.** Scheduled workflows spread their minute
-   fields (`:17`, `:37`, …) so nothing piles onto the same tick; the table
-   above is the registry — check it before adding a schedule.
+   fields (`:17`, `:37`, …) so nothing piles onto the same tick; the nightly
+   and security-scan tables above are the registry — check them before
+   adding a schedule.

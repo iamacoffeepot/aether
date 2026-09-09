@@ -1,7 +1,8 @@
 # ADR-0205: The Coordinator Is The Only Writer Of The Day
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-19
+- **Amended:** 2026-09-09 — status: implemented on `main`; an operator change enters as a memberless seal through `crates/aether-bloomery/src/control/mod.rs` and integrates like any other bloom (`5eac695f3`).
 
 ## Context
 

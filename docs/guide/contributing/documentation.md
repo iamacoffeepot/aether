@@ -14,6 +14,7 @@ code, and decision records should remain single-sourced.
 | [`AGENTS.md`](https://github.com/iamacoffeepot/aether/blob/main/AGENTS.md) | Concise Codex repository constraints and routing |
 | [`CLAUDE.md`](https://github.com/iamacoffeepot/aether/blob/main/CLAUDE.md) | Claude Code operational context |
 | `.agents/skills/` | Executable Codex workflow contracts |
+| `.claude/skills/` | Executable Claude Code workflow contracts |
 | Public Rust documentation and source | Current static API and implementation |
 | Live MCP schemas and introspection | Current tool arguments and running-engine vocabulary |
 | GitHub issues, PRs, checks, and threads | Current work state and review evidence |
@@ -40,8 +41,9 @@ mdbook build docs
 ```
 
 The [Docs workflow](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/docs.yml) builds the book for
-pull requests that touch the guide, evidence viewer, book configuration, or
-workflow. On `main` it also publishes the generated book to GitHub Pages. The
+pull requests that touch the guide, the evidence viewer, the pipeline deck, the
+book configuration, or the workflow itself. On `main` it also publishes the
+generated book to GitHub Pages. The
 `Docs` job inside the Rust [CI workflow](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/ci.yml) is
 different: it builds Rust API documentation with rustdoc. Do not confuse a
 green rustdoc job with a successfully built mdBook, or vice versa.

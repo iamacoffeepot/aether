@@ -1,7 +1,8 @@
 # ADR-0177: Bloom budget, transformation limits, and dispatch deadlines
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-10
+- **Amended:** 2026-09-09 — status: implemented on `main`; `Budget` is gone from the draft/spec vocabulary, `ExecutionLimits { wall_clock_secs }` and the persisted `deadline_unix_millis` are in `crates/aether-bloomery/src/values/timeout.rs`, and the timeout record is written at intake (#4829).
 
 ## Context
 

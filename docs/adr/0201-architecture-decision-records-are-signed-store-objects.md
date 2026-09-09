@@ -1,7 +1,8 @@
 # ADR-0201: Architecture Decision Records Are Signed Store Objects
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-18
+- **Amended:** 2026-09-09 — status: implemented on `main`; the `Adr` value, its append-only transition log, and the `AuthorityDoor::Accept` ratification check are in `crates/aether-chassis-bloomery/src/store/adr/` (#5170).
 
 ## Context
 

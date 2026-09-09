@@ -71,6 +71,8 @@ into `pack/objects/`.
 ```text
 <out>/
   aether-desktop              # the chassis binary (`aether-headless` under `--chassis headless`; .exe on Windows)
+  LICENSE-MIT                 # the workspace licenses, shipped beside the statically linked binary
+  LICENSE-APACHE
   pack/manifest               # the persisted, versioned package manifest
   pack/objects/<sha256>       # component wasm + config bytes, content-addressed
 ```
@@ -156,7 +158,7 @@ software release — the tag push does.
 
 Every crate takes its version from `[workspace.package] version` in the root
 `Cargo.toml` — no crate carries a literal, and no doc, script, or workflow
-spells one either. The ten `env!("CARGO_PKG_VERSION")` sites read it at compile
+spells one either. Every `env!("CARGO_PKG_VERSION")` site reads it at compile
 time. So the bump is one edit and the lockfiles that edit invalidates:
 
 ```sh
@@ -193,7 +195,8 @@ The cut is four steps:
 
 `.github/workflows/release.yml` turns a version tag into a published GitHub
 Release. It triggers on a push of a bare-semver tag; the repository's tags
-carry no `v` prefix (`0.1.0-alpha`, `0.3.0-alpha`), so the cut is:
+carry no `v` prefix (`0.1.0-alpha`, `0.3.0-alpha`), so once the bump above and
+the version's `CHANGELOG.md` section are on `main` the cut is:
 
 ```sh
 git tag -a 0.4.0-alpha -m "…"
@@ -226,9 +229,13 @@ next tag with no workflow edit.
 
 The release is marked a pre-release whenever the version carries a
 pre-release suffix, which every tag cut so far does (`-alpha`). Its body is
-the `CHANGELOG.md` section for that exact version when the file exists on the
-tag, and the tag's own message otherwise — the live path today, since the
-repository has no changelog.
+[`CHANGELOG.md`](https://github.com/iamacoffeepot/aether/blob/main/CHANGELOG.md)'s
+section for that version, and the tag's own message when the changelog carries
+no such section. The heading is matched on its first word, so
+`## 0.4.0-alpha (unreleased)` resolves the same as `## 0.4.0-alpha`, and only
+a `## ` heading ends a section — the `###` subheadings inside one stay part of
+it. So the changelog section is written before the tag, not after: what it
+says at the tagged commit is what the release page shows.
 
 Running the workflow from the Actions tab (`workflow_dispatch`) is the dry
 run: the identical build, archives named from the current workspace version

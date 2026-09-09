@@ -247,10 +247,12 @@ jobs:
           # the archives themselves, not the three folders they arrived in.
           merge-multiple: true
 
-      # The notes come from the tree at the tag: a `CHANGELOG.md` section for
-      # this exact version if the file carries one, the tag's own message
-      # otherwise. The repository has no changelog today, so the tag message
-      # is the live path and the changelog path activates the day one lands.
+      # The notes come from the tree at the tag: the `CHANGELOG.md` section
+      # for this exact version if the file carries one, the tag's own message
+      # otherwise. The heading match is on its first word, so both
+      # `## 0.4.0-alpha` and `## 0.4.0-alpha (unreleased)` resolve, and only a
+      # `## ` heading ends the section — the `### Highlights` subheadings the
+      # changelog uses stay inside it.
       - name: Compose the release notes
         shell: bash
         run: |

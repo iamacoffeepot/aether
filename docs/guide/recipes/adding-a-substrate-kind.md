@@ -22,8 +22,8 @@ engine registry, including dynamically loaded component kinds.
 The clipboard contract is a compact current exemplar:
 
 - kinds: `aether-clipboard/src/kinds.rs`;
-- identity/helpers: `clipboard/mod.rs`;
-- real/headless handlers: `clipboard/runtime/{mod,headless}.rs`;
+- identity/helpers: `aether-clipboard/src/lib.rs`;
+- real/headless handlers: `aether-clipboard/src/runtime/{mod,headless}.rs`;
 - live discovery: inventory registry → `describe_kinds`/`describe_handlers`.
 
 ## 2. Declare request and reply
