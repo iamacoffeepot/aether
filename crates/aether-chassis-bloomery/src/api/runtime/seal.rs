@@ -15,9 +15,10 @@ use serde::de::DeserializeOwned;
 
 use aether_actor::Manual;
 use aether_bloomery::{
-    Admit, ApprovalPolicy, AuthorityDoor, BloomDraft, BloomId, BloomSpec, CommissionStatus, ConfigScopes,
-    DependencyError, Digest, Event, Fact, IdempotencyKey, MemberDependency, Membership, ScopeRevision, SpendCeiling,
-    Statement, SurfacePattern, WorkpieceId, resolve_member_dependencies, surface_intersection,
+    Admit, ApprovalPolicy, AuthorityDoor, BloomDraft, BloomId, BloomSpec, CommissionStatus, ConfigRegistry,
+    ConfigScopes, DependencyError, Digest, Event, Fact, IdempotencyKey, MemberDependency, Membership,
+    ModelProcessInstructions, ScopeRevision, SpendCeiling, Statement, SurfacePattern, WorkpieceId,
+    resolve_member_dependencies, surface_intersection,
 };
 use aether_data::wire::to_vec;
 use aether_http::HttpServerResponse;
@@ -38,6 +39,21 @@ use crate::bloomery::{
 use crate::control::ControlCore;
 use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
 use crate::store::{LoadCommission, LoadCommissionResult, RecordDispatchDescription, StoreCapability};
+
+/// Record the host's unique authorized bundle as an explicit pin when the
+/// author did not supply one (ADR-0214 §Resolve defaults before sealing).
+///
+/// A default may simplify authoring, but dispatch must not consult whatever
+/// default happens to be installed later. No unique default leaves the
+/// registry unpinned; the provenance gate refuses at dispatch, as today.
+fn pin_default_instructions(registry: &mut ConfigRegistry, pin: Option<Digest>) {
+    if registry.address::<ModelProcessInstructions>().is_some() {
+        return;
+    }
+    if let Some(pin) = pin {
+        registry.insert::<ModelProcessInstructions>(pin);
+    }
+}
 
 /// Which door a completed seal admits through (#4638): a first seal, or a
 /// supersession of `predecessor`. Both carry the identical [`BloomSpec`] — the
@@ -328,6 +344,7 @@ impl ApiCapabilityState {
         Self::journal_surface_overlaps(ctx, &draft.proposals, projections);
         let mut gated = draft;
         gated.proposals = sealed_proposals;
+        pin_default_instructions(&mut gated.configs, self.default_instruction_pin);
         // Pass 2. No above-auto member → seal synchronously (the all-auto fast
         // path, byte-for-byte #3583). Otherwise defer: dispatch one `Verify` per
         // above-auto member and hold the seal until every signature verifies.

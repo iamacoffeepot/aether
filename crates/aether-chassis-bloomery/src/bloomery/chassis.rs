@@ -789,6 +789,7 @@ impl BootableChassis for BloomeryChassis {
             hub_outbound: Arc::clone(&boot.outbound),
         };
         let setups = actor_setups(&github, &coordinator, &session, &notify)?;
+        let default_instruction_pin = setups.executor.authorized_instructions.unique_address();
 
         // #3947's explicit `with_aborter` is superseded by the seam inversion:
         // `composed` (which `build` routes through) installs `OutboundFatalAborter`
@@ -887,6 +888,7 @@ impl BootableChassis for BloomeryChassis {
                 artifacts_root,
                 control_token: coordinator.http_control_token,
                 store_class,
+                default_instruction_pin,
             })
             // The benchmark sequencer (ADR-0184). It holds the fixture, so a
             // coordinator that is not in trial mode mounts it refusing.
@@ -952,6 +954,7 @@ impl BootableChassis for BloomeryChassis {
                 artifacts_root,
                 control_token: coordinator.http_control_token,
                 store_class,
+                default_instruction_pin: None,
             })
             // No GitHub adapter is linked, so no fixture repository is mounted
             // and a benchmark run has nothing to replay — which the live class

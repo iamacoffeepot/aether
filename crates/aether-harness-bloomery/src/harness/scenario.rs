@@ -47,7 +47,10 @@ use aether_substrate::chassis::builder::BuiltChassis;
 use super::digest;
 use super::drive::{member, member_with, passed};
 use super::roots::FixtureRoots;
-use super::{BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, Lane, POLL, Reader};
+use super::{
+    BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, InstructionAuthorization, Lane, POLL,
+    Reader,
+};
 use crate::oracle::{Oracle, is_answerable, liveness};
 use crate::scenario::{LaneScript, Scenario};
 use crate::script::write_lane_scripts;
@@ -144,12 +147,8 @@ impl ScenarioHarness {
                 .expect("genesis correspondence records");
         }
 
-        let mut configs = author_instructions(&store_path);
-        configs.overlay(author_manifest(&store_path));
-        let authorized = configs
-            .address::<ModelProcessInstructions>()
-            .expect("the authored instruction bundle seals its own address")
-            .to_hex();
+        let mut configs = author_manifest(&store_path);
+        let authorized = overlay_authorized_instructions(builder.authorize_instructions, &store_path, &mut configs);
         if let Some(secs) = builder.wall_clock_secs {
             configs.overlay(author_catalog(&store_path, secs));
         }
@@ -1001,7 +1000,7 @@ fn in_process_env(
         poll_interval_secs: builder.poll_interval_secs,
         local_lane_enabled: scripted,
         local_lane_commands: if scripted {
-            "construct.,review.,verify.,retrospect.".to_owned()
+            "construct.,review.,verify.,scope.,retrospect.".to_owned()
         } else {
             defaults.local_lane_commands
         },
@@ -1121,6 +1120,30 @@ impl ForkedLaneSettings<'_> {
             env.push((String::from("AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS"), secs.to_string()));
         }
         env
+    }
+}
+
+/// Author the suite's reference bundle into the coordinator store when the
+/// cell authorizes a unique default, and overlay that pin onto `configs`.
+///
+/// Returns the authorized address hex the host config consumes, or empty when
+/// the cell authorizes nothing.
+fn overlay_authorized_instructions(
+    authorize: InstructionAuthorization,
+    store_path: &str,
+    configs: &mut ConfigRegistry,
+) -> String {
+    match authorize {
+        InstructionAuthorization::Empty => String::new(),
+        InstructionAuthorization::Unique => {
+            let instructions = author_instructions(store_path);
+            let authorized = instructions
+                .address::<ModelProcessInstructions>()
+                .expect("the authored instruction bundle seals its own address")
+                .to_hex();
+            configs.overlay(instructions);
+            authorized
+        }
     }
 }
 

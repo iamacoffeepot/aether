@@ -258,6 +258,9 @@ pub struct ScopeRunOpen<'a> {
     /// The run's content-addressed subject — the digest of
     /// (commission, intent, base).
     pub subject: &'a [u8],
+    /// The instruction-bundle pin this run dispatches under, when the host
+    /// selected one at creation. Same address type a bloom registry pins.
+    pub instructions: Option<&'a [u8]>,
     /// The wire-encoded `ScopeDispatchPayload` the outbox row carries.
     pub payload: &'a [u8],
 }
@@ -280,6 +283,9 @@ pub struct ScopeRunRow {
     pub verdict: Option<String>,
     /// The frozen revision digest, on a `frozen` row.
     pub revision: Option<Vec<u8>>,
+    /// The instruction-bundle pin, on an `enqueued` row. Absent when the host
+    /// authorized no unique default at creation.
+    pub instructions: Option<Vec<u8>>,
 }
 
 /// One append-only proof-fact row (ADR-0200). Column order is the wire:
@@ -485,6 +491,12 @@ pub trait StoreBackend: Send {
 
     /// Whether this host authorizes the bundle at `digest` as process policy.
     fn instructions_authorized(&mut self, digest: &[u8]) -> rusqlite::Result<bool>;
+
+    /// Every instruction-bundle address this host currently authorizes, in
+    /// digest order. The unique-default rule reads this set: exactly one
+    /// address is the host's selected pin, and any other cardinality leaves
+    /// the run unpinned.
+    fn list_authorized_instructions(&mut self) -> rusqlite::Result<Vec<Vec<u8>>>;
 
     /// Every stored configuration, in address order — the whole-table read the
     /// control core fills its resolved set from (ADR-0174).
@@ -1180,7 +1192,11 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
 /// `submit` is in flight, `submitted` once a handle exists. Existing rows
 /// default to `submitted` — they were recorded by a build that submitted
 /// inline, so they are live dispatches. The journal is untouched.
-const SCHEMA_VERSION: i64 = 20;
+///
+/// `21` is the instruction-bundle pin on the scoping-run ledger (ADR-0214):
+/// `scope_runs.instructions`, nullable. A pre-column row is an unpinned run;
+/// dispatch refuses it at the provenance gate rather than inventing a pin.
+const SCHEMA_VERSION: i64 = 21;
 
 /// Historical TEXT stamp written beside v2 decisions rows before the digest
 /// column existed. Kept only so migration 17 can map it onto the v2 digest.
@@ -1381,6 +1397,13 @@ fn migrate_schema(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()>
                 "ALTER TABLE {table} ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'submitted';"
             ))?;
         }
+    }
+
+    // Version 21 (ADR-0214): the instruction-bundle pin on a scoping run.
+    // Added nullable with no backfill — a pre-column row names no bundle, and
+    // inventing one would attribute process policy the operator never selected.
+    if has_table(migration, "scope_runs")? && !has_column(migration, "scope_runs", "instructions")? {
+        migration.execute_batch("ALTER TABLE scope_runs ADD COLUMN instructions BLOB;")?;
     }
 
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -2104,6 +2127,12 @@ impl StoreBackend for SqliteStore {
 
     fn instructions_authorized(&mut self, digest: &[u8]) -> rusqlite::Result<bool> {
         self.conn.prepare("SELECT 1 FROM authorized_instructions WHERE digest = ?1")?.exists(rusqlite::params![digest])
+    }
+
+    fn list_authorized_instructions(&mut self) -> rusqlite::Result<Vec<Vec<u8>>> {
+        let mut stmt = self.conn.prepare("SELECT digest FROM authorized_instructions ORDER BY digest")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
     }
 
     fn record_dispatch_description(
@@ -3121,9 +3150,9 @@ impl StoreBackend for SqliteStore {
     fn enqueue_scope_run(&mut self, run: &ScopeRunOpen<'_>) -> rusqlite::Result<u64> {
         let write = self.conn.transaction()?;
         write.execute(
-            "INSERT INTO scope_runs (commission, ordinal, kind, intent, base, subject) \
-             VALUES (?1, ?2, 'enqueued', ?3, ?4, ?5)",
-            rusqlite::params![run.commission, run.ordinal, run.intent, run.base, run.subject],
+            "INSERT INTO scope_runs (commission, ordinal, kind, intent, base, subject, instructions) \
+             VALUES (?1, ?2, 'enqueued', ?3, ?4, ?5, ?6)",
+            rusqlite::params![run.commission, run.ordinal, run.intent, run.base, run.subject, run.instructions],
         )?;
         write.execute(
             "INSERT INTO outbox (topic, payload) VALUES (?1, ?2)",
@@ -3195,8 +3224,8 @@ impl StoreBackend for SqliteStore {
 
     fn list_scope_runs(&mut self, commission: &str) -> rusqlite::Result<Vec<ScopeRunRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT ordinal, kind, nonce, subject, verdict, revision FROM scope_runs WHERE commission = ?1 \
-             ORDER BY sequence",
+            "SELECT ordinal, kind, nonce, subject, verdict, revision, instructions FROM scope_runs \
+             WHERE commission = ?1 ORDER BY sequence",
         )?;
         let rows = stmt.query_map(rusqlite::params![commission], |row| {
             Ok(ScopeRunRow {
@@ -3206,6 +3235,7 @@ impl StoreBackend for SqliteStore {
                 subject: row.get::<_, Option<Vec<u8>>>(3)?,
                 verdict: row.get::<_, Option<String>>(4)?,
                 revision: row.get::<_, Option<Vec<u8>>>(5)?,
+                instructions: row.get::<_, Option<Vec<u8>>>(6)?,
             })
         })?;
         rows.collect()

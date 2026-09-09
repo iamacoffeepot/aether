@@ -219,7 +219,7 @@ fn a_v6_store_gains_empty_commission_tables() {
     let mut store = SqliteStore::open(path).expect("a v6 store migrates");
     assert!(store.list(None).expect("list").is_empty(), "migration invents no commissions");
     let flags: i64 = store.conn.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("user_version");
-    assert_eq!(flags, 20, "the open stamps the current schema");
+    assert_eq!(flags, 21, "the open stamps the current schema");
     assert!(
         store.load_projection(&workpiece("wp-1")).expect("load").is_none(),
         "migration invents no replica-issue numbers"
@@ -946,11 +946,13 @@ fn a_scope_run_writes_its_ledger_row_and_its_outbox_row_together() {
     assert_eq!(payload.transformation.command, SCOPE_FILL_COMMAND);
     assert_eq!(payload.transformation.inputs, vec![payload.subject], "the run pins its own subject");
     assert!(payload.transformation.diff_base.is_none(), "a scoping run judges no diff");
+    assert!(payload.instructions.is_none(), "a host that authorized no unique bundle creates the run unpinned");
 
     let rows = store.list_scope_runs(&commission.0).expect("list runs");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].kind, "enqueued");
     assert_eq!(rows[0].ordinal, 1);
+    assert!(rows[0].instructions.is_none(), "the ledger row matches the payload: no pin");
 }
 
 #[test]

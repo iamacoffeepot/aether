@@ -1,8 +1,8 @@
 # The puppet turntable demo
 
-A teapot, drawn as pen-plotter line art, turning on a slow revolve. It is
-the shortest path from a clone to something on screen: no operator, no MCP
-session, no mail sent by hand.
+The Utah teapot, drawn as pen-plotter line art, turning on a slow
+revolve. It is the shortest path from a clone to something on screen: no
+operator, no MCP session, no mail sent by hand.
 
 ## Run it from the checkout
 
@@ -37,10 +37,10 @@ the thing you would upload.
 
 ## What appears
 
-A line-art teapot, revolving once every twelve seconds. Drag with the mouse
-to orbit it yourself and the wheel to dolly in and out — the turntable
-restates its own pose each frame, so the drag reads as a nudge against a
-moving subject rather than a handover.
+A line-art Utah teapot, revolving once every twelve seconds. Drag with
+the mouse to orbit it yourself and the wheel to dolly in and out — the
+turntable restates its own pose each frame, so the drag reads as a nudge
+against a moving subject rather than a handover.
 
 The packaged window is titled `aether`; the developer run gets the chassis's
 own default title, because a boot manifest deliberately drops its chassis
@@ -70,7 +70,19 @@ rather than arriving as a decode error inside the guest.
 
 ## Changing the subject
 
-The subject is `assets/teapot.dsl` — a mesh-DSL file, so it is text in the
-tree (`crates/aether-mesh/examples/`) rather than a committed binary. Point
-`puppet.json`'s `subject.path` at any other `.dsl` or `.obj` under the
-asset root and rerun. `lamp_post.dsl` and `box.dsl` sit beside the teapot.
+The subject is `assets/utah_teapot.obj` — Martin Newell's 1975 teapot,
+tessellated from its 32 bicubic Bézier patches. Wavefront OBJ is text, so
+it lives in the tree (`crates/aether-mesh/examples/`) rather than as a
+committed binary, and the demo needs no build step to have something to
+draw. Point `puppet.json`'s `subject.path` at any other `.dsl` or `.obj`
+under the asset root and rerun. `teapot.dsl`, `lamp_post.dsl` and
+`box.dsl` sit beside it.
+
+The checked-in file is a generated artefact, at ten subdivisions along
+each patch edge — 3241 vertices, 6320 triangles. To rewrite it, or to
+write a denser one somewhere else:
+
+```sh
+cargo run -p aether-mesh --example utah_teapot -- 10 \
+  > crates/aether-mesh/examples/utah_teapot.obj
+```

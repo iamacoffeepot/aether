@@ -7,9 +7,10 @@
 //! 1. `wire` issues the load `PuppetConfig::subject` names. A config that
 //!    is parsed and then never acted on leaves a live, correct, blank
 //!    puppet — the exact condition the config exists to remove.
-//! 2. The subject reader accepts `.dsl`. The demo's subject is mesh-DSL
-//!    text rather than an exported sculpt, so a reader that dispatches only
-//!    on `.obj` refuses it into the actor log and the window stays empty.
+//! 2. The subject reader accepts what the demo ships. The subject is a
+//!    Wavefront OBJ the mesh crate generates from the Utah teapot's Bézier
+//!    patches, so a reader whose extension dispatch drops `.obj` refuses it
+//!    into the actor log and the window stays empty.
 //! 3. `demo/puppet.json` says what the puppet's `Config` kind can hear.
 //!    The file is read here rather than restated, so a renamed or dropped
 //!    field fails this test instead of failing the first stranger who runs
@@ -42,7 +43,7 @@ use aether_puppet::{Look, Puppet, PuppetConfig, TurntableConfig};
 
 /// The demo's subject, and the demo's two configs — the files themselves,
 /// so this scenario and `demo/README.md` cannot drift apart.
-const TEAPOT_DSL: &[u8] = include_bytes!("../../aether-mesh/examples/teapot.dsl");
+const TEAPOT_OBJ: &[u8] = include_bytes!("../../aether-mesh/examples/utah_teapot.obj");
 const PUPPET_CONFIG_JSON: &str = include_str!("../../../demo/puppet.json");
 const TURNTABLE_CONFIG_JSON: &str = include_str!("../../../demo/turntable.json");
 
@@ -66,7 +67,7 @@ const TOLERANCE: u8 = 5;
 /// looking at a window.
 ///
 /// Measured, so the band is known to bracket rather than merely contain:
-/// the demo frame draws 2.7% of it, and every one of the three failures
+/// the demo frame draws 2.8% of it, and every one of the three failures
 /// above draws exactly 0.0% and lands under the floor. The floor is the
 /// same 0.1% `draws_scenario` uses, an order of magnitude under the
 /// measurement, so it answers "did the pen reach the frame" and nothing
@@ -113,7 +114,7 @@ fn the_demo_config_draws_the_demo_subject_with_no_mail() {
     let subject = config.subject.as_ref().expect("demo/puppet.json names a subject");
 
     let save_dir = init_save_sandbox("puppet-config");
-    let staged = write_fixture("teapot.dsl", TEAPOT_DSL);
+    let staged = write_fixture("utah_teapot.obj", TEAPOT_OBJ);
     assert_eq!(staged, subject.path, "the fixture has to land at the path the demo config names");
 
     let mut harness = SubstrateHarness::builder()
@@ -152,7 +153,7 @@ fn the_demo_config_draws_the_demo_subject_with_no_mail() {
 
     assert!(
         (FLOOR..CEILING).contains(&drawn),
-        "a config-named .dsl subject should put strokes on the frame; coverage {drawn} is either an empty frame \
+        "a config-named subject should put strokes on the frame; coverage {drawn} is either an empty frame \
          or a filled one",
     );
 }

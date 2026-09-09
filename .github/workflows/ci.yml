@@ -226,6 +226,23 @@ jobs:
           grep -v '^{' "$log" || true
           jq -Rr 'fromjson? | select(.reason == "compiler-message") | .message.rendered // empty' "$log" || true
           exit "$status"
+      # The second feature configuration of the same predicate, not a second
+      # gate: fail on any warning from a workspace crate, over the resolve the
+      # arm above cannot reach. `--workspace` unifies features across the
+      # members it selects, so every capability's `runtime` half is on and an
+      # item that exists only for that half is never dead there. A component
+      # cross-build is the opposite resolve — one package at a time, its caps
+      # marker-only, on wasm32 — which is why 67 `unused import` /
+      # `never constructed` lines accumulated under a green board.
+      #
+      # It belongs to this job rather than to `test`, whose wasm pre-build runs
+      # the same command: that step is gated on the affected set, and compile
+      # coverage is what this job answers for on every PR (see the note on the
+      # affected selection there). The calibration is not restated here — the
+      # verdict lives in `xtask/src/cargo.rs`, which `verify.test`'s `cargo
+      # xtask dist` prepare runs too, so the lane predicts this gate.
+      - name: Component wasm warning gate
+        run: cargo xtask build-wasm
 
   # Not the guide: docs.yml builds the mdBook. This job denies the
   # tracked rustdoc lints over the API docs.

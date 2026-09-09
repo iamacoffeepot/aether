@@ -48,15 +48,14 @@ fn store() -> SqliteStore {
 }
 
 // The gate covers the lanes that run a model and nothing else. A mechanical gate
-// has no instructions to ground, and the pre-bloom scoping run has no sealed
-// registry a pin could live in — gating either would refuse work that ADR-0214
-// does not ask to be refused.
+// has no instructions to ground. A scoping run pins its bundle on the durable
+// run record; the drain copies that pin into the order so this gate sees it.
 #[test]
 fn the_gate_covers_the_model_lanes_a_bloom_seals_for() {
     assert!(gated(CONSTRUCT_IMPLEMENT_COMMAND), "the construct lane runs a model under a bloom's seal");
     assert!(gated(REVIEW_CRITIC_COMMAND), "so does the critic");
     assert!(!gated(VERIFY_MEMBER_COMMAND), "a mechanical gate runs a compiler, not a model");
-    assert!(!gated(SCOPE_FILL_COMMAND), "a scoping run precedes the bloom whose registry would carry the pin");
+    assert!(gated(SCOPE_FILL_COMMAND), "a scoping run is a model lane and pins its bundle on the run");
 }
 
 // The refusal every bloom sealed before ADR-0214 gets: no pin, no dispatch. This
@@ -145,6 +144,39 @@ fn an_authorized_bundle_admits_with_the_task_as_context() {
         manifest.slots.iter().any(|slot| slot.role == SlotRole::Context),
         "the work order is present, and present as context",
     );
+}
+
+fn scope_record(configs: ConfigRegistry) -> DispatchRecord {
+    let subject = digest(2);
+    DispatchRecord {
+        nonce: Nonce("dispatch-scope".to_owned()),
+        bloom: BloomId(digest(1)),
+        workpiece: WorkpieceId("wp-scope".to_owned()),
+        scope_revision: subject,
+        candidate: subject,
+        displayed_digest: subject,
+        stage: StageId::Scope,
+        transformation: Transformation::for_scoping_run(&StageCatalog::binding_of(StageId::Scope), subject, digest(3)),
+        configs,
+        profile: StageCatalog::profile_of(StageId::Scope),
+    }
+}
+
+// The plausible bug: gating scope.fill still leaves it resolving a bloom
+// registry that cannot hold a pin, so every scoping run refuses even when the
+// run record named a bundle. The drain copies the run's pin into `configs`;
+// this is that record, and the same assembler sees one instruction slot.
+#[test]
+fn a_scope_fill_record_admits_the_run_pin_as_the_sole_instruction_slot() {
+    let mut store = store();
+    let bundle = reference_instructions();
+    let registry = authorize_instructions(&mut store, &bundle);
+
+    let manifest = admit_model_dispatch(&mut store, &scope_record(registry)).expect("a pinned scoping run admits");
+    let instructions: Vec<_> = manifest.slots.iter().filter(|slot| slot.role == SlotRole::Instruction).collect();
+
+    assert_eq!(instructions.len(), 1, "one instruction slot: the process policy");
+    assert_eq!(instructions[0].artifact, bundle.address(), "and it is the run's pinned bundle");
 }
 
 // A refused dispatch reaches the journal rather than only a log line: the parked

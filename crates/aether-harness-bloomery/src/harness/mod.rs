@@ -116,6 +116,20 @@ pub enum Reader {
     On,
 }
 
+/// Whether the host authorizes a model-process instruction bundle at boot
+/// (ADR-0214).
+///
+/// An axis rather than a fourth `bool` on the builder, like [`Reader`]: the
+/// two states have names, and a cell that boots with no authorized bundle
+/// says so.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InstructionAuthorization {
+    /// The suite's unique reference bundle — the host default.
+    Unique,
+    /// Empty table; every model dispatch refuses at the provenance gate.
+    Empty,
+}
+
 /// Lane axis: no local lane, the mock-lane binary at the end of the argv, or
 /// the sealed `[entrypoint]` with no host override.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -151,6 +165,7 @@ pub struct HarnessBuilder {
     github_fixture: bool,
     socket_read_timeout: Option<Duration>,
     step_budget: Duration,
+    authorize_instructions: InstructionAuthorization,
 }
 
 impl HarnessBuilder {
@@ -177,6 +192,7 @@ impl HarnessBuilder {
             github_fixture: true,
             socket_read_timeout: Some(SOCKET_READ_TIMEOUT),
             step_budget: Duration::from_secs(20),
+            authorize_instructions: InstructionAuthorization::Unique,
         }
     }
 
@@ -203,6 +219,7 @@ impl HarnessBuilder {
             github_fixture: true,
             socket_read_timeout: None,
             step_budget: Duration::from_mins(2),
+            authorize_instructions: InstructionAuthorization::Unique,
         }
     }
 
@@ -231,6 +248,7 @@ impl HarnessBuilder {
             github_fixture: false,
             socket_read_timeout: Some(SOCKET_READ_TIMEOUT),
             step_budget: Duration::from_secs(30),
+            authorize_instructions: InstructionAuthorization::Unique,
         }
     }
 
@@ -321,6 +339,16 @@ impl HarnessBuilder {
     #[must_use]
     pub fn script(mut self, script: &LaneScript) -> Self {
         self.script = Some(script.clone());
+        self
+    }
+
+    /// Boot without authorizing a model-process instruction bundle (ADR-0214).
+    ///
+    /// Every model dispatch, including a pre-bloom scoping run, then refuses at
+    /// the provenance gate. The default authorizes the suite's reference bundle.
+    #[must_use]
+    pub const fn without_authorized_instructions(mut self) -> Self {
+        self.authorize_instructions = InstructionAuthorization::Empty;
         self
     }
 

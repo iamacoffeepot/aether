@@ -9,7 +9,7 @@
 
 use super::runtime::{
     AppendOutcome, CANDIDATE_HASH_OCCASION_SEAL, CommitOutcome, JournalWrite, OrderLifecycle, OutstandingOrder,
-    ProofFactWrite, RecordOutcome, SealOutcome, SqliteStore, StoreBackend,
+    ProofFactWrite, RecordOutcome, ScopeRunOpen, SealOutcome, SqliteStore, StoreBackend,
 };
 use aether_bloomery::persisted::DECISIONS;
 use aether_bloomery::{MembershipMutation, OutboxPayload, Topic, ViewDocument, WorkpieceId, decode_row, encode_row};
@@ -1678,7 +1678,7 @@ fn a_v11_store_gains_an_empty_scope_verify_ledger() {
         .query_row("SELECT count(*) FROM scope_verify_reports", [], |row| row.get(0))
         .expect("the ledger exists after migration");
     assert_eq!(reports, 0, "migration invents no reports");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 20);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 21);
 }
 
 #[test]
@@ -1710,7 +1710,86 @@ fn a_v15_store_gains_an_empty_candidate_hash_journal() {
         .query_row("SELECT count(*) FROM candidate_hash", [], |row| row.get(0))
         .expect("the journal exists after migration");
     assert_eq!(hashes, 0, "migration invents no hashes");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 20);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 21);
+}
+
+#[test]
+fn a_v20_store_gains_an_unpinned_scope_run_column() {
+    // Version 21 adds scope_runs.instructions nullable. Opening a schema-20
+    // file that already has the table must ALTER rather than skip it because
+    // user_version was already "current" at 20 — and must backfill nothing,
+    // because a pre-column row named no bundle.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v20-scope-runs.db").to_str().unwrap().to_owned();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE journal (
+             sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+             idempotency_key TEXT NOT NULL UNIQUE,
+             event           BLOB NOT NULL,
+             decisions       BLOB,
+             decider         TEXT,
+             decisions_schema TEXT
+         );
+         CREATE TABLE commissions (
+             id               TEXT PRIMARY KEY,
+             intent           BLOB NOT NULL,
+             current_revision BLOB,
+             current_ordinal  INTEGER,
+             status           TEXT NOT NULL CHECK (status IN ('open', 'cancelled', 'landed'))
+         );
+         CREATE TABLE scope_runs (
+             sequence   INTEGER PRIMARY KEY AUTOINCREMENT,
+             commission TEXT NOT NULL REFERENCES commissions(id),
+             ordinal    INTEGER NOT NULL CHECK (ordinal >= 1),
+             kind       TEXT NOT NULL CHECK (kind IN ('enqueued', 'dispatched', 'verdict', 'frozen')),
+             nonce      TEXT,
+             intent     BLOB,
+             base       BLOB,
+             subject    BLOB,
+             verdict    TEXT,
+             evidence   BLOB,
+             revision   BLOB
+         );",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO commissions (id, intent, status) VALUES (?1, ?2, 'open')",
+        rusqlite::params!["wp-v20", b"intent"],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO scope_runs (commission, ordinal, kind, intent, base, subject)
+         VALUES (?1, 1, 'enqueued', ?2, ?3, ?4)",
+        rusqlite::params!["wp-v20", b"intent", b"base", b"subject"],
+    )
+    .unwrap();
+    conn.execute_batch("PRAGMA user_version = 20;").unwrap();
+    drop(conn);
+
+    let mut store = SqliteStore::open(&path).expect("a v20 store migrates");
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 21);
+
+    let rows = store.list_scope_runs("wp-v20").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, "enqueued");
+    assert_eq!(rows[0].ordinal, 1);
+    assert!(rows[0].instructions.is_none(), "migration invents no pin");
+
+    store
+        .enqueue_scope_run(&ScopeRunOpen {
+            commission: "wp-v20",
+            ordinal: 2,
+            intent: b"intent",
+            base: b"base",
+            subject: b"subject",
+            instructions: Some(b"pin"),
+            payload: b"payload",
+        })
+        .unwrap();
+    let rows = store.list_scope_runs("wp-v20").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].instructions.as_deref(), Some(b"pin".as_slice()));
 }
 
 mod schema_digest_migration {
@@ -1779,7 +1858,7 @@ mod schema_digest_migration {
         drop(conn);
 
         let mut store = SqliteStore::open(&path).expect("a v16 store migrates");
-        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 20);
+        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 21);
         let journal = store.replay_journal().unwrap();
         assert_eq!(journal.len(), 2);
         let v2 = journal.iter().find(|row| row.idempotency_key == "v2").unwrap();
@@ -1927,7 +2006,7 @@ fn a_null_stamped_outbox_row_still_decodes_positionally_after_migration() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v17 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 20);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 21);
     let entries = store.drain_outbox(Some(Topic::ViewDocument.as_str())).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].payload_schema, None, "migration invents no stamp");
@@ -2171,7 +2250,7 @@ mod outbox_results {
         drop(conn);
 
         let mut store = SqliteStore::open(&path).expect("a v18 store migrates");
-        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 20);
+        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 21);
         let journal = store.replay_journal().unwrap();
         assert_eq!(journal.len(), 1);
         assert_eq!(journal[0].idempotency_key, "v18-journal");
