@@ -4,8 +4,8 @@
 //!
 //! The hub's `spawn_substrate` boot-manifest injection describes a component
 //! set as a JSON [`BootManifest`] — an ordered list of wasm + optional config
-//! file *paths* plus the three chassis knobs (title / window mode / tick
-//! rate). It reaches the spawned chassis through `AETHER_BOOT_MANIFEST`
+//! file *paths* plus the four chassis knobs (title / window mode / tick
+//! rate / clear colour). It reaches the spawned chassis through `AETHER_BOOT_MANIFEST`
 //! (`--boot-manifest`); the substrate-boot and autoload tests write the same
 //! shape directly. [`pack_from_manifest`] reads that manifest and the files it
 //! names into a [`Pack`], which the chassis autoload
@@ -63,6 +63,11 @@ pub struct ChassisSettings {
     pub window_mode: Option<String>,
     /// Headless tick cadence in hertz.
     pub tick_hz: Option<u32>,
+    /// Desktop render clear colour, sRGB `rrggbb` hex — the same
+    /// vocabulary as `AETHER_RENDER_CLEAR_COLOR`. What the background
+    /// should be is a property of what is drawn, so a product that is a
+    /// line drawing ships its paper here.
+    pub clear_color: Option<String>,
 }
 
 /// A decoded pack: chassis settings plus the ordered component list.
@@ -90,6 +95,8 @@ pub struct BootManifest {
     pub window_mode: Option<String>,
     #[serde(default)]
     pub tick_hz: Option<u32>,
+    #[serde(default)]
+    pub clear_color: Option<String>,
     /// Ordered component list — pack (and autoload) order is list order.
     pub components: Vec<ManifestComponent>,
 }
@@ -242,6 +249,7 @@ pub fn pack_from_manifest(manifest_path: &Path) -> Result<Pack, ManifestError> {
             title: manifest.title,
             window_mode: manifest.window_mode,
             tick_hz: manifest.tick_hz,
+            clear_color: manifest.clear_color,
         },
         components,
     })

@@ -69,7 +69,7 @@ use winit::window::Window;
 // knobs + `RenderParams`).
 mod capture;
 mod config;
-pub use config::DEFAULT_CLEAR_COLOR;
+pub use config::{DEFAULT_CLEAR_COLOR, apply_manifest_clear_color};
 mod device;
 // The ADR-0171 geometry registry: staged vertex/index bytes realized
 // lazily as wgpu buffers at first GPU use (the draw-pass slice records

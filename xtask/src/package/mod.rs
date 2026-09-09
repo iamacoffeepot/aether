@@ -61,6 +61,11 @@ pub struct PackageArgs {
     /// Tick cadence in hertz (headless chassis only).
     #[arg(long)]
     tick_hz: Option<u32>,
+    /// Render clear colour (desktop chassis only), sRGB `rrggbb` hex —
+    /// the same vocabulary as `AETHER_RENDER_CLEAR_COLOR`. A line-drawing
+    /// product ships its paper here.
+    #[arg(long)]
+    clear_color: Option<String>,
     /// Asset tree to ship, copied verbatim into `pack/assets`. The
     /// packaged chassis roots the `assets` namespace there, below an
     /// operator's `AETHER_ASSETS_DIR` / `--assets-dir` and above the
@@ -70,12 +75,12 @@ pub struct PackageArgs {
     assets: Option<PathBuf>,
     /// Full-fidelity depot spec (JSON) — alternative to the component
     /// and chassis-config flags. Carries chassis, `title` /
-    /// `window_mode` / `tick_hz`, and per-component `package`-or-`wasm` +
+    /// `window_mode` / `tick_hz` / `clear_color`, and per-component `package`-or-`wasm` +
     /// `config` + `name` + `export`; relative paths resolve against the
     /// spec file's directory.
     #[arg(
         long,
-        conflicts_with_all = ["components", "configs", "title", "window_mode", "tick_hz"]
+        conflicts_with_all = ["components", "configs", "title", "window_mode", "tick_hz", "clear_color"]
     )]
     spec: Option<PathBuf>,
 }
@@ -102,7 +107,7 @@ pub struct PackageArgs {
 /// - **`--components` / `--spec`** — a real product: the chosen chassis
 ///   binary plus only the selected components, with per-component
 ///   `config` / `name` / `export` and the chassis `title` / `window_mode`
-///   / `tick_hz` riding into `pack/manifest`.
+///   / `tick_hz` / `clear_color` riding into `pack/manifest`.
 ///
 /// Each object is referenced from the manifest by its sha256 hash, so
 /// identity is the content and a name is a label.
@@ -120,16 +125,17 @@ pub fn run(args: &PackageArgs) -> Result<()> {
             args.chassis,
             &args.components,
             &args.configs,
-            args.title.as_deref(),
-            args.window_mode.as_deref(),
-            args.tick_hz,
+            ChassisSettings {
+                title: args.title.clone(),
+                window_mode: args.window_mode.clone(),
+                tick_hz: args.tick_hz,
+                clear_color: args.clear_color.clone(),
+            },
         )?;
         let (chassis_package, chassis_bin) = plan.chassis.substrate();
         let components = build_planned_components(&plan, target_dir, args.profile)?;
         build_named_chassis(chassis_package, chassis_bin, args.profile)?;
-        let settings =
-            ChassisSettings { title: plan.title.clone(), window_mode: plan.window_mode.clone(), tick_hz: plan.tick_hz };
-        (chassis_bin, components, settings)
+        (chassis_bin, components, plan.settings)
     } else {
         let (chassis_package, chassis_bin) = PACKAGE_CHASSIS;
         let components = sweep_components(&metadata, target_dir, args.profile)?;

@@ -52,7 +52,7 @@ pub use kinds::*;
 #[cfg(feature = "runtime")]
 pub use runtime::{
     DEFAULT_CLEAR_COLOR, GeometryRegistry, RealizedGeometry, RenderCapabilityState, RenderParams, RenderTuningConfig,
-    RenderTuningConfigLayer, RenderTuningOverlay, StagedGeometry, WHITE_TEXTURE_ID,
+    RenderTuningConfigLayer, RenderTuningOverlay, StagedGeometry, WHITE_TEXTURE_ID, apply_manifest_clear_color,
 };
 
 // `#[actor]` sits on each capability struct (the struct-hosted ADR-0123

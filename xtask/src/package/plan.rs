@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use aether_chassis::boot_manifest::ChassisSettings;
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 
@@ -35,9 +36,9 @@ impl PackageChassis {
 #[derive(Debug)]
 pub(super) struct PackagePlan {
     pub(super) chassis: PackageChassis,
-    pub(super) title: Option<String>,
-    pub(super) window_mode: Option<String>,
-    pub(super) tick_hz: Option<u32>,
+    /// The chassis settings riding into `pack/manifest`, as the chassis
+    /// reads them back.
+    pub(super) settings: ChassisSettings,
     pub(super) components: Vec<PlannedComponent>,
 }
 
@@ -54,6 +55,8 @@ struct PackageSpec {
     window_mode: Option<String>,
     #[serde(default)]
     tick_hz: Option<u32>,
+    #[serde(default)]
+    clear_color: Option<String>,
     components: Vec<SpecComponent>,
 }
 
@@ -83,17 +86,15 @@ struct SpecComponent {
 }
 
 /// Normalize the `package` pack inputs: `--spec <file>` when present, the
-/// component + chassis-config flags otherwise. Taking the input fields rather
-/// than the args struct keeps the flag path and the spec path resolving to
-/// one plan shape.
+/// component flags plus the flag-supplied chassis `settings` otherwise.
+/// Taking the input fields rather than the args struct keeps the flag path
+/// and the spec path resolving to one plan shape.
 pub(super) fn resolve_package_plan(
     spec: Option<&Path>,
     chassis: PackageChassis,
     components: &[String],
     configs: &[PathBuf],
-    title: Option<&str>,
-    window_mode: Option<&str>,
-    tick_hz: Option<u32>,
+    settings: ChassisSettings,
 ) -> Result<PackagePlan> {
     if let Some(spec_path) = spec {
         return resolve_package_spec(spec_path, chassis);
@@ -116,13 +117,7 @@ pub(super) fn resolve_package_plan(
             export: None,
         })
         .collect();
-    Ok(PackagePlan {
-        chassis,
-        title: title.map(str::to_owned),
-        window_mode: window_mode.map(str::to_owned),
-        tick_hz,
-        components,
-    })
+    Ok(PackagePlan { chassis, settings, components })
 }
 
 /// Parse a `--spec` file into a plan. Relative paths inside the spec
@@ -164,9 +159,12 @@ fn resolve_package_spec(spec_path: &Path, chassis_flag: PackageChassis) -> Resul
     }
     Ok(PackagePlan {
         chassis: spec.chassis.unwrap_or(chassis_flag),
-        title: spec.title,
-        window_mode: spec.window_mode,
-        tick_hz: spec.tick_hz,
+        settings: ChassisSettings {
+            title: spec.title,
+            window_mode: spec.window_mode,
+            tick_hz: spec.tick_hz,
+            clear_color: spec.clear_color,
+        },
         components,
     })
 }
@@ -186,6 +184,8 @@ fn classify_component(raw: &str) -> ComponentSource {
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use aether_chassis::boot_manifest::ChassisSettings;
+
     use super::{PackageChassis, resolve_package_plan};
     use crate::package::build::ComponentSource;
 
@@ -198,12 +198,13 @@ mod tests {
         // crate owns.
         let components = vec!["aether-kit-commons".to_owned(), "build/probe.wasm".to_owned()];
         let configs = vec![PathBuf::from("camera.cfg")];
-        let plan =
-            resolve_package_plan(None, PackageChassis::Desktop, &components, &configs, Some("loco"), None, Some(60))
-                .expect("resolve flag plan");
+        let settings =
+            ChassisSettings { title: Some("loco".to_owned()), tick_hz: Some(60), ..ChassisSettings::default() };
+        let plan = resolve_package_plan(None, PackageChassis::Desktop, &components, &configs, settings)
+            .expect("resolve flag plan");
 
-        assert_eq!(plan.title.as_deref(), Some("loco"));
-        assert_eq!(plan.tick_hz, Some(60));
+        assert_eq!(plan.settings.title.as_deref(), Some("loco"));
+        assert_eq!(plan.settings.tick_hz, Some(60));
         assert_eq!(plan.components.len(), 2);
         assert!(matches!(&plan.components[0].source, ComponentSource::Package(p) if p == "aether-kit-commons"));
         assert!(matches!(&plan.components[1].source, ComponentSource::Prebuilt(_)), "a .wasm arg is a prebuilt path");
@@ -215,7 +216,7 @@ mod tests {
         assert_eq!(plan.components[1].config, None, "the trailing component is config-less");
 
         let excess = vec![PathBuf::from("a"), PathBuf::from("b"), PathBuf::from("c")];
-        let err = resolve_package_plan(None, PackageChassis::Desktop, &components, &excess, None, None, None)
+        let err = resolve_package_plan(None, PackageChassis::Desktop, &components, &excess, ChassisSettings::default())
             .expect_err("more configs than components is rejected");
         assert!(err.to_string().contains("pair by position"), "excess configs are rejected: {err}");
     }
@@ -236,13 +237,13 @@ mod tests {
 
         let both = dir.join("both.json");
         fs::write(&both, r#"{ "components": [ { "package": "p", "wasm": "p.wasm" } ] }"#).expect("write both spec");
-        let err = resolve_package_plan(Some(&both), PackageChassis::Desktop, &[], &[], None, None, None)
+        let err = resolve_package_plan(Some(&both), PackageChassis::Desktop, &[], &[], ChassisSettings::default())
             .expect_err("package and wasm together is rejected");
         assert!(err.to_string().contains("exactly one of"), "package+wasm rejected: {err}");
 
         let neither = dir.join("neither.json");
         fs::write(&neither, r#"{ "components": [ { "name": "n" } ] }"#).expect("write neither spec");
-        let err = resolve_package_plan(Some(&neither), PackageChassis::Desktop, &[], &[], None, None, None)
+        let err = resolve_package_plan(Some(&neither), PackageChassis::Desktop, &[], &[], ChassisSettings::default())
             .expect_err("neither package nor wasm is rejected");
         assert!(err.to_string().contains("exactly one of"), "neither package nor wasm rejected: {err}");
 

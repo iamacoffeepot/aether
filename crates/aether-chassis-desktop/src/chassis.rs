@@ -19,7 +19,7 @@ use aether_clipboard::{ClipboardCapability, ClipboardParams};
 use aether_component::ComponentHostParams;
 use aether_http::HttpServerCapability;
 use aether_lifecycle::{LifecycleCapability, frame_lifecycle_params};
-use aether_render::RenderTuningConfig;
+use aether_render::{RenderTuningConfig, apply_manifest_clear_color};
 use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
@@ -101,7 +101,11 @@ impl Chassis for DesktopChassis {
             // ADR-0161 R3: the render tuning `Config` (vertex-buffer cap)
             // resolves off the same stack the pooled
             // `with_actor::<RenderCapability>` path resolved it before the swap,
-            // and rides to the driver alongside the window knobs.
+            // and rides to the driver alongside the window knobs. A depot's
+            // clear colour slots in first, at the same precedence its window
+            // mode took above: a shipped line drawing comes up on paper while
+            // an operator's `AETHER_RENDER_CLEAR_COLOR` still wins.
+            apply_manifest_clear_color(&mut env.base.sources, package_settings.clear_color.as_deref())?;
             let render_config = env.base.sources.resolve::<RenderTuningConfig>()?;
             // The `assets` root threads into the pumped render actor's params
             // for `capture_frame` similarity references.

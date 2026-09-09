@@ -13,12 +13,19 @@ the desktop chassis against the checked-in boot manifest.
 cargo xtask build-wasm
 cargo run -p aether-chassis-desktop --bin aether-desktop -- \
   --boot-manifest demo/puppet-turntable.boot.json \
-  --assets-dir crates/aether-mesh/examples
+  --assets-dir crates/aether-mesh/examples \
+  --render-clear-color f6f2e9
 ```
 
 Run both from the repository root: a boot manifest's paths are resolved
 as-is, so `dist/components/aether_puppet.wasm` and `demo/puppet.json` are
 read relative to the process working directory.
+
+The last flag is the paper. A boot manifest deliberately carries no chassis
+settings (below), so the dev run asks for the background the depot ships
+with: the ink is near-black and the hatching pale grey, tuned for paper, and
+on the renderer's default dark field the hatching reads as highlight and
+turns the shading inside out.
 
 ## Build the shippable package
 
