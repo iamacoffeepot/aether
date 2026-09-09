@@ -99,6 +99,7 @@ use super::{SKIN_WGSL, TONE_WGSL};
 use crate::deform::{Anchored, BONE_LIMIT, Bound, INFLUENCES, Skin};
 use crate::extract::Settings;
 use crate::feature::{Curve3, Drawing, FeatureClass};
+use crate::hatch;
 use crate::math3::hash64;
 use crate::mesh::Mesh;
 use crate::{ribbon, style, weld};
@@ -347,7 +348,7 @@ pub struct SightUniforms {
     /// [`deform::bone_uniform`]: crate::deform::bone_uniform
     pub bones: [f32; BONE_LIMIT * 12],
     /// The tone gate's authored numbers: the key light's direction, the
-    /// shading floor, the face lift, and the three hatch thresholds.
+    /// shading floor, the face lift, and each resident hatch axis' limit.
     pub tone: ToneUniforms,
 }
 
@@ -359,7 +360,15 @@ pub struct SightUniforms {
 pub struct ToneUniforms {
     pub light: Vec3,
     pub ambient: f32,
-    pub thresholds: [f32; 3],
+    /// Tone below which each resident hatch axis draws: its rank's
+    /// threshold for an axis this view chose, and [`UNDRAWN`] for one it
+    /// did not.
+    ///
+    /// One lane per axis rather than one per rank because the shader is
+    /// handed an axis and has to answer two questions from it — is this
+    /// axis drawn here at all, and if so at what tone — and a limit no
+    /// tone reaches answers both.
+    pub limits: [f32; hatch::AXES],
     pub face_lift: f32,
     /// How far a family's threshold is dithered.
     pub dither: f32,
@@ -377,20 +386,53 @@ pub struct ToneUniforms {
     pub gate: bool,
 }
 
+/// A limit no tone reaches, so the axis carrying it never draws.
+///
+/// Tone floors at [`Settings::ambient`], which is not negative, and the
+/// dither only perturbs a threshold by [`Settings::hatch_dither`] — so
+/// a negative limit is unreachable rather than merely unlikely.
+pub const UNDRAWN: f32 = -1.0;
+
 impl ToneUniforms {
     /// The gate, read off the settings this frame shades with —
     /// [`Settings::resolved`]'s, not the authored ones, since the shader
     /// has no camera frame to read a key light in.
+    ///
+    /// Every resident axis is live here. A pass that hatches narrows it
+    /// to the three its view chose with [`Self::for_view`]; a pass that
+    /// only shades — the bake — never reads the limits at all.
     #[must_use]
     pub fn of(settings: &Settings, gate: bool) -> Self {
+        let mut limits = [UNDRAWN; hatch::AXES];
+        for (axis, limit) in limits.iter_mut().enumerate() {
+            *limit = settings.hatch_thresholds[hatch::rank(axis as u8)];
+        }
+
         Self {
             light: settings.light,
             ambient: settings.ambient,
-            thresholds: settings.hatch_thresholds,
+            limits,
             face_lift: settings.face_lift,
             dither: settings.hatch_dither,
             gate,
         }
+    }
+
+    /// Narrowed to the three axes this view hatches with.
+    ///
+    /// Which three is the eye's answer and nothing else's, so it arrives
+    /// here rather than being read off the settings: an axis the view
+    /// passed over keeps its geometry on the GPU and is refused a limit
+    /// to draw under.
+    #[must_use]
+    pub fn for_view(mut self, chosen: [u8; hatch::RANKS]) -> Self {
+        let mut narrowed = [UNDRAWN; hatch::AXES];
+        for axis in chosen {
+            narrowed[usize::from(axis)] = self.limits[usize::from(axis)];
+        }
+        self.limits = narrowed;
+
+        self
     }
 }
 
@@ -398,14 +440,14 @@ impl SightUniforms {
     /// Bytes of one `SightParams` block: a `mat4x4<f32>`, the camera and
     /// field scalars, the tone block, and the bone table — rounded to
     /// the struct's 16-byte alignment.
-    pub const BYTES: u32 = 144 + (BONE_LIMIT * 48) as u32;
+    pub const BYTES: u32 = 160 + (BONE_LIMIT * 48) as u32;
 
     /// Where the tone block starts inside one window.
     const TONE: usize = 96;
 
     /// Where the bone table starts inside one window. Sixteen-aligned,
     /// as an array of `vec4<f32>` must be.
-    const BONES: usize = 144;
+    const BONES: usize = 160;
 
     /// How many copies the blob carries — one per reach doubling.
     pub const WINDOWS: u32 = REACH_STEPS;
@@ -434,21 +476,16 @@ impl SightUniforms {
             }
 
             // `light` is a `vec3<f32>` at a sixteen-byte boundary, so
-            // `ambient` fills its padding lane; `thresholds` is the next
-            // `vec3` and starts the following boundary.
-            let lit = [
-                self.tone.light.x,
-                self.tone.light.y,
-                self.tone.light.z,
-                self.tone.ambient,
-                self.tone.thresholds[0],
-                self.tone.thresholds[1],
-                self.tone.thresholds[2],
-                self.tone.face_lift,
-                f32::from(u8::from(self.tone.gate)),
-                self.tone.dither,
-            ];
-            for (lane, value) in window[Self::TONE..].chunks_exact_mut(4).zip(lit) {
+            // `ambient` fills its padding lane; the limits are the two
+            // `vec4`s after it, so the six axes are followed by the two
+            // lanes that round the pair out. Those two are `UNDRAWN`
+            // rather than zero: nothing indexes them, and a lane that
+            // reads as "draws below tone zero" is a quieter mistake than
+            // one that reads as "draws below tone nothing".
+            let lit = [self.tone.light.x, self.tone.light.y, self.tone.light.z, self.tone.ambient];
+            let tail = [self.tone.face_lift, f32::from(u8::from(self.tone.gate)), self.tone.dither];
+            let block = lit.into_iter().chain(self.tone.limits).chain([UNDRAWN; 8 - hatch::AXES]).chain(tail);
+            for (lane, value) in window[Self::TONE..].chunks_exact_mut(4).zip(block) {
                 lane.copy_from_slice(&value.to_le_bytes());
             }
             for (lane, value) in window[Self::BONES..].chunks_exact_mut(4).zip(self.bones) {
@@ -478,7 +515,7 @@ fn class_code(class: FeatureClass) -> u64 {
     match class {
         FeatureClass::Silhouette => 0,
         FeatureClass::Decal => 1,
-        FeatureClass::Hatch { level } => 2 + u64::from(level),
+        FeatureClass::Hatch { axis } => 2 + u64::from(axis),
     }
 }
 
@@ -698,7 +735,7 @@ fn unorm(share: f32) -> u8 {
 fn stroke_class(class: FeatureClass) -> f32 {
     match class {
         FeatureClass::Silhouette | FeatureClass::Decal => -1.0,
-        FeatureClass::Hatch { level } => f32::from(level),
+        FeatureClass::Hatch { axis } => f32::from(axis),
     }
 }
 
@@ -1219,7 +1256,7 @@ mod tests {
         let heights: Vec<f32> = mesh.positions.iter().map(|at| at.y).collect();
         let template = Curve3 {
             points: Vec::new(),
-            class: FeatureClass::Hatch { level: 0 },
+            class: FeatureClass::Hatch { axis: 0 },
             pen: Pen::Pale,
             seed: 0,
             authored: false,

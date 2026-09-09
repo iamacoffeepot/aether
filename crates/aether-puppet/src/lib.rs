@@ -82,6 +82,7 @@ pub mod easel;
 pub mod extract;
 pub mod feature;
 mod gpu_silhouette;
+pub mod hatch;
 pub mod idle;
 mod kinds;
 pub mod labels;
@@ -274,6 +275,10 @@ pub struct Puppet {
     transforms: Vec<Rigid>,
     bones: [f32; deform::BONE_LIMIT * 12],
     settings: extract::Settings,
+    /// Which three of the resident hatch axes the drawing is currently
+    /// crossing with — a per-view verdict, held across views so it does
+    /// not flicker between two near-equal answers ([`hatch::Choice`]).
+    hatch: hatch::Choice,
     look: Look,
     /// The wash layer under the ink (#4349): a painted sheet standing
     /// behind the subject, re-developed when the view settles.
@@ -421,6 +426,7 @@ impl Puppet {
             let shading = self.shading(self.eye());
             self.surface = extract::tone_gate(mem::take(&mut self.surface), &shading);
         }
+        self.hatch.subject_changed(&subject.normals);
         self.strokes.subject_changed(&subject, self.skin.as_ref());
         self.easel.subject_changed();
         self.drawn_from = None;
@@ -692,11 +698,19 @@ impl Puppet {
             );
             return;
         }
+        // Which axes hatch is asked of the eye here, once per frame,
+        // because it is the one thing the gate reads that neither the
+        // load nor the pose can settle: the level sets are resident, and
+        // which three of them cross well is a fact about where the
+        // viewer is standing.
+        let (shading, target) = (self.shading(frame.eye), self.target());
+        let chosen = self.hatch.choose(&shading, frame.eye, target);
+
         let subject = self.subject.as_ref().expect("a frame is only resolved once a subject is in");
         let posing = strokes::Posing {
             bound: self.skin.as_ref().map(|skin| deform::Bound { rest: subject, skin }),
             bones: self.bones,
-            tone: easel::program::sight::ToneUniforms::of(&self.shading(frame.eye), self.gates_on_gpu()),
+            tone: easel::program::sight::ToneUniforms::of(&shading, self.gates_on_gpu()).for_view(chosen),
         };
         let drawing = Drawing { resident: &self.surface, volatile: &self.volatile };
         if !self.strokes.solve(drawing, frame.eye, view_proj, bias, posing) && self.strokes.live() {
@@ -743,6 +757,7 @@ impl WasmActor for Puppet {
             transforms: Vec::new(),
             bones: deform::bone_uniform(&[]),
             settings: extract::Settings::default(),
+            hatch: hatch::Choice::default(),
             easel: easel::Easel::default(),
             strokes: strokes::Strokes::default(),
             gpu_silhouette: gpu_silhouette::GpuSilhouette::default(),
@@ -1030,6 +1045,7 @@ impl WasmActor for Puppet {
         self.bones = deform::bone_uniform(&[]);
         self.drawn_from = None;
         self.easel.subject_changed();
+        self.hatch.subject_changed(&subject.normals);
         self.strokes.subject_changed(subject, self.skin.as_ref());
         if self.gpu_silhouette.selected()
             && let Err(error) = self.gpu_silhouette.subject_changed(subject, self.skin.as_ref())

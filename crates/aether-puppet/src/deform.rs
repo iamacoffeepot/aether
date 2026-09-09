@@ -1459,7 +1459,7 @@ mod tests {
                 .collect(),
             &Curve3 {
                 points: Vec::new(),
-                class: FeatureClass::Hatch { level: 0 },
+                class: FeatureClass::Hatch { axis: 0 },
                 pen: Pen::Pale,
                 seed: 0,
                 authored: false,

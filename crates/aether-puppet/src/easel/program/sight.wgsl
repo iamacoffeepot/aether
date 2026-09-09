@@ -66,11 +66,15 @@ struct SightParams {
     // The key light's direction, and the shading floor beneath it.
     light: vec3<f32>,
     ambient: f32,
-    // Tone below which each successive hatch family switches on.
-    thresholds: vec3<f32>,
+    // Tone below which each resident hatch axis draws — its rank's
+    // threshold for an axis this view chose, and a limit no tone reaches
+    // for one it did not. Two `vec4`s for six axes; the last two lanes
+    // are padding nothing indexes.
+    limits: array<vec4<f32>, 2>,
     // How far the face is lifted out of the hatching.
     face_lift: f32,
-    // Whether the hatch gate runs here at all — see `hatched` below.
+    // Whether the tone half of the hatch gate runs here at all — see
+    // `hatched` below. The axis choice is asked here whatever this says.
     gate: f32,
     // How far a family's threshold is dithered — `Settings::hatch_dither`.
     dither: f32,
@@ -178,7 +182,7 @@ struct Point {
     // points back to the curve's start, points on to its end, and the
     // curve's class as a code — negative where the class grazes (a
     // silhouette or a decal, which neither the facing test nor the tone
-    // gate may reach), otherwise the hatch family's own level.
+    // gate may reach), otherwise the resident hatch axis it cuts along.
     @location(2) @interpolate(flat) stroke: vec4<f32>,
 }
 
@@ -295,9 +299,14 @@ fn occluded(probe: vec3<f32>, normal: vec3<f32>) -> bool {
     return front > 0.0 && front <= length(lifted - params.eye) - RAY_MIN;
 }
 
-// Whether a hatch point survives the tone gate — `extract::tone_gate`'s
-// own predicate, asked here because this is where the posed normal it
-// reads exists.
+// Whether a hatch point draws: this view chose its axis, and it survives
+// the tone gate — `extract::tone_gate`'s own predicate, asked here
+// because this is where the posed normal it reads exists.
+//
+// The two questions ride one lane per axis. Which three axes hatch is
+// the eye's answer and never settles at load, so it is asked here for
+// every subject; the tone verdict may already have been settled at load,
+// which is what `params.gate` says.
 //
 // The gate was a load-time pass while the subject stood still and became
 // a per-pose CPU pass once the subject could turn (#4459). Now that the
@@ -316,16 +325,22 @@ fn occluded(probe: vec3<f32>, normal: vec3<f32>) -> bool {
 // (`Settings::gate_settles_at_load`): no rig to turn a normal and a key
 // light standing in the world rather than on the camera rig. Re-deciding
 // a settled question through a second `sin` could only disagree.
-fn hatched(family: f32, p: vec3<f32>, n: vec3<f32>) -> bool {
-    if params.gate < 0.5 || family < 0.0 {
+fn hatched(axis: f32, p: vec3<f32>, n: vec3<f32>) -> bool {
+    if axis < 0.0 {
         return true;
     }
-    let level = i32(family);
-    var limit = params.thresholds.x;
-    if level == 1 {
-        limit = params.thresholds.y;
-    } else if level >= 2 {
-        limit = params.thresholds.z;
+    let at = u32(axis);
+    let bank = params.limits[at >> 2u];
+    let limit = bank[at & 3u];
+    // An axis this view passed over. Its level sets are resident geometry
+    // and stay on the GPU across the turn; what changes per view is which
+    // three of them are allowed to draw, and a negative limit is how the
+    // other three are told to stand down.
+    if limit < 0.0 {
+        return false;
+    }
+    if params.gate < 0.5 {
+        return true;
     }
 
     return tone_at(p, n) < limit + tone_noise(p) * params.dither;
