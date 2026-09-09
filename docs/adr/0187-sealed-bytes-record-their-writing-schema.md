@@ -1,7 +1,8 @@
 # ADR-0187: Sealed bytes record their writing schema
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-13
+- **Amended:** 2026-09-09 — status: implemented on `main`; `PERSISTED_KINDS`, the upcast list, and the digest ledger are in `crates/aether-bloomery/src/persisted/mod.rs` (`1545680c5`).
 
 ## Context
 

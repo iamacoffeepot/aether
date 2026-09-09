@@ -1,7 +1,8 @@
 # ADR-0206: A Decision Returns The Reason It Refused
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-19
+- **Amended:** 2026-09-09 — status: implemented on `main`; the gate builder, `Outcome`, `Refusal`, and the `reads!` macro are in `crates/aether-bloomery/src/reduce/gate.rs` and the reducers decide through them (`19488975d`).
 
 ## Context
 

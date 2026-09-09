@@ -1,7 +1,8 @@
 # ADR-0209: Containment is a ninth verifier identity
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-20
+- **Amended:** 2026-09-09 — status: implemented on `main`; containment is a verify-failure identity in `VERIFY_FAILURE_NAMES` and `crates/aether-chassis-bloomery/src/bloomery/verify/containment.rs` scores it (`7268a2839`).
 - **Amended (2026-09-09, issue #5798):** the Decision's carve-out below — the Actions wrapper's `printf '%02x'` stays at two digits because the lane cannot produce bit 8 — no longer holds. #5309 appended `verify.lock` as a tenth identity the mechanical lane *does* set, so a lane mask can reach `0x100` and above, which `%02x` renders as three characters and `from_mask` refuses; the evidence upload was then dropped silently. The wrapper renders `printf '%04x'` and compares its pass/fail guards against `0000`. The decision this ADR records otherwise stands, and no journal byte changes meaning.
 
 ## Context
