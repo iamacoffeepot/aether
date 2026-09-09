@@ -135,12 +135,12 @@ impl Mesh {
     /// extension — the same dispatch the kit's mesh viewer makes, so the
     /// two agree about what a subject file is.
     ///
-    /// Both readers take text, which matters more here than it looks:
-    /// every other subject this renderer draws is a sculpt somebody
-    /// exported, which means a stranger cannot see the drawing at all
-    /// without first being handed a binary. Mesh DSL and Wavefront OBJ are
-    /// both text, so the demo's subject lives in the tree
-    /// (`crates/aether-mesh/examples/`) rather than as a committed binary.
+    /// That both readers take text matters more here than it looks: every
+    /// other subject this renderer draws is a sculpt somebody exported,
+    /// which means a stranger cannot see the drawing at all without first
+    /// being handed a binary. Mesh DSL and Wavefront OBJ are both readable
+    /// files, so the demo's subject lives in the tree
+    /// (`crates/aether-mesh/examples/`) rather than as a committed asset.
     ///
     /// # Errors
     ///

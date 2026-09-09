@@ -8,8 +8,8 @@
 //! importer, the `dsl_to_obj` example converts a `.dsl` file to Wavefront
 //! OBJ for any external viewer, and the `utah_teapot` example writes the
 //! demo's subject out of the Bézier dataset the module of that name carries.
-//! The v1 DSL has no boolean composition; that
-//! implementation lives on the `archive/csg-bsp` branch.
+//! The v1 DSL has no boolean composition; that implementation lives on the
+//! `archive/csg-bsp` branch.
 
 #![forbid(unsafe_code)]
 
