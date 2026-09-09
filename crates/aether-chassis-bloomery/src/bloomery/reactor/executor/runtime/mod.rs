@@ -2396,10 +2396,8 @@ fn drain_and_redispatch(
             ) {
                 break;
             }
-            if consume_hold {
-                if let Ok(payload) = from_bytes::<RedispatchPayload>(&entry.payload) {
-                    consume_replayed_hold(store, payload.bloom.as_bytes(), payload.question.as_bytes(), entry.sequence);
-                }
+            if consume_hold && let Ok(payload) = from_bytes::<RedispatchPayload>(&entry.payload) {
+                consume_replayed_hold(store, payload.bloom.as_bytes(), payload.question.as_bytes(), entry.sequence);
             }
             continue;
         }
