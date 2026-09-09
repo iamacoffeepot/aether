@@ -63,6 +63,21 @@ impl ProcessPolicy {
         self.authorized.is_empty()
     }
 
+    /// The unique authorized address, when the host selected exactly one bundle.
+    ///
+    /// ADR-0214's default: a host that authorizes one bundle uses it as the pin
+    /// for a scoping run and for a draft sealed without an author-supplied pin.
+    /// Zero or more than one authorized address is not a unique default — the
+    /// run or draft stays unpinned and dispatch refuses later.
+    #[must_use]
+    pub fn unique_address(&self) -> Option<Digest> {
+        let mut authorized = self.authorized.iter();
+        match (authorized.next(), authorized.next()) {
+            (Some(only), None) => Some(*only),
+            _ => None,
+        }
+    }
+
     /// How many bundles the host authorized.
     #[must_use]
     pub fn len(&self) -> usize {

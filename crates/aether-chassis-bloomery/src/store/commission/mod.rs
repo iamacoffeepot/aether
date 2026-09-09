@@ -168,6 +168,7 @@ CREATE TABLE IF NOT EXISTS scope_runs (
     verdict    TEXT,
     evidence   BLOB,
     revision   BLOB,
+    instructions BLOB,
     UNIQUE (commission, ordinal, kind)
 );
 CREATE INDEX IF NOT EXISTS scope_runs_by_commission ON scope_runs (commission, ordinal);

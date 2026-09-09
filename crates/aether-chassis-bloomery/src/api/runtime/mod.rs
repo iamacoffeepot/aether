@@ -83,7 +83,7 @@ use std::sync::Arc;
 use crate::store::{ListBloomDispatchesResult, LookupDispatchResult};
 use aether_actor::{Manual, runtime};
 use aether_bloomery::{
-    AdmitResult, EnumerateClaimsResult, LoadConfigsResult, MetricsQueryResult, QueryResult, QuerySelector,
+    AdmitResult, Digest, EnumerateClaimsResult, LoadConfigsResult, MetricsQueryResult, QueryResult, QuerySelector,
     ResolvedConfigs, SpendQueryResult, StoreClass,
 };
 use aether_http as http;
@@ -211,6 +211,10 @@ pub struct ApiParams {
     /// store proved it against the journal's own stamp — so it rides `Params`
     /// rather than being a knob this cap resolves.
     pub store_class: StoreClass,
+    /// The unique authorized instruction-bundle address, when this host
+    /// selected exactly one. Sealed into a draft that names no pin of its own
+    /// before the spec is frozen (ADR-0214 §Resolve defaults before sealing).
+    pub default_instruction_pin: Option<Digest>,
 }
 
 #[http::router]
@@ -274,6 +278,7 @@ impl NativeActor for BloomeryApiCapability {
             seal_verifications: HashMap::new(),
             control_token: params.control_token,
             store_class: params.store_class,
+            default_instruction_pin: params.default_instruction_pin,
             #[cfg(feature = "github")]
             doctor: None,
             commission_verifying: HashMap::new(),

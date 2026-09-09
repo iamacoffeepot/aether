@@ -27,8 +27,8 @@
 //! neither. The precedent is `WorkpieceId::COMPOSITION`: a reserved id inside
 //! an existing identity space, rather than a second space.
 
-use aether_bloomery::{BloomId, ConfigRegistry, Digest, Topic, WorkHandle, control::ScopeDispatchPayload};
-use aether_data::wire::from_bytes;
+use aether_bloomery::control::decode_scope_dispatch;
+use aether_bloomery::{BloomId, ConfigRegistry, Digest, ModelProcessInstructions, Topic, WorkHandle};
 
 use crate::bloomery::executor::{ExecutorPort, Settled};
 use crate::bloomery::intake::{DispatchRecord, dispatch_and_record, dispatch_nonce};
@@ -70,7 +70,7 @@ pub(super) fn drain_and_dispatch_scope(
     let mut ack_through = None;
     let mut transient_failure = None;
     for entry in entries {
-        let Ok(payload) = from_bytes::<ScopeDispatchPayload>(&entry.payload) else {
+        let Ok(payload) = decode_scope_dispatch(&entry.payload) else {
             tracing::warn!(
                 target: "aether_chassis_bloomery::executor",
                 sequence = entry.sequence,
@@ -83,7 +83,13 @@ pub(super) fn drain_and_dispatch_scope(
         }
 
         // The subject is the displayed digest: the returning evidence binds to
-        // it, and there is no candidate for it to fall back from.
+        // it, and there is no candidate for it to fall back from. The pin lives
+        // on the run, not a bloom registry (ADR-0214): copy it into the order
+        // so `admit_model_dispatch` resolves it the same way construct does.
+        let mut configs = ConfigRegistry::default();
+        if let Some(pin) = payload.instructions {
+            configs.insert::<ModelProcessInstructions>(pin);
+        }
         let record = DispatchRecord {
             nonce: dispatch_nonce(entry.sequence),
             bloom: BloomId(scope_run_bloom()),
@@ -94,10 +100,7 @@ pub(super) fn drain_and_dispatch_scope(
             displayed_digest: payload.subject,
             stage: payload.stage,
             transformation: payload.transformation,
-            // No sealed registry exists before a bloom does, and the scope
-            // command is not `construct.implement`, so no overlay would read
-            // this even if one were supplied.
-            configs: ConfigRegistry::default(),
+            configs,
         };
         match dispatch_and_record(executor, store, &record, now_unix_millis) {
             Ok(Settled::Answered(handle)) => {
