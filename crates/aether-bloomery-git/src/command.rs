@@ -9,6 +9,7 @@ use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::client::{GitCommit, GitDataError};
 
@@ -18,15 +19,14 @@ use crate::client::{GitCommit, GitDataError};
 /// sees, and an `.invalid` domain renders there as an unattributed commit.
 pub const BLOOMERY_AUTHOR: (&str, &str) = ("bloomery", "bloomery@iamateapot.dev");
 
-/// Who a locally minted commit is committed by, timestamp included. Pinned, and
-/// never seen: the roll rewrites the committer side onto the operator identity
-/// and the real moment of the linearization, so this value reaches no landed
-/// commit. Holding it fixed is half of what keeps a re-mint byte-identical.
-pub const BLOOMERY_COMMITTER: [(&str, &str); 3] = [
-    ("GIT_COMMITTER_NAME", "bloomery"),
-    ("GIT_COMMITTER_EMAIL", "bloomery@aether.invalid"),
-    ("GIT_COMMITTER_DATE", "@0 +0000"),
-];
+/// Who a locally minted commit is committed by. The roll rewrites the committer
+/// side onto the operator identity when it linearizes the day onto main, so
+/// this name reaches no landed commit; the day branch shows it as it is. The
+/// committer date is not pinned here: it is the moment of the mint, read from
+/// the clock like the author date, so a fold on the day branch is browsable as
+/// a commit made when it was made rather than one filed under 1970.
+pub const BLOOMERY_COMMITTER: [(&str, &str); 2] =
+    [("GIT_COMMITTER_NAME", "bloomery"), ("GIT_COMMITTER_EMAIL", "bloomery@aether.invalid")];
 
 /// The oldest git that honours the `attr.tree` source `merge()` depends on.
 /// Fail boot below this rather than paying for the driver's absence one fold
@@ -364,11 +364,13 @@ fn failed(args: &[&str], output: &Output) -> GitCommandError {
 /// object-repo fake both commit through, so the two cannot mint different shas
 /// for one input.
 ///
-/// The author date is inherited from the parents rather than read from the
-/// clock, because the sha has to stay a pure function of
-/// `(message, tree, parents)`: `GitSource::integrate` recovers from a fault
-/// between its commit and its ref update only because the retry re-creates a
-/// byte-identical commit and git hands back the same sha.
+/// Both dates are the moment of the mint, read from the clock: a fold or an
+/// integrate on the day branch is a commit made now, and a browser of that
+/// history should see it filed under now. The sha is therefore not a pure
+/// function of `(message, tree, parents)` — two mints of one input a second
+/// apart differ — so a caller that has to recover from a fault between its
+/// mint and its ref update reuses the commit it already recorded rather than
+/// counting on a byte-identical re-mint (`GitSource::integrate`).
 ///
 /// # Errors
 /// Spawn failed, or `commit-tree` refused the tree or one of the parents.
@@ -381,14 +383,14 @@ pub fn commit_tree(repo: &Path, message: &str, tree: &str, parents: &[String]) -
     args.extend(["-m".to_owned(), message.to_owned()]);
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
 
-    let authored = format!("@{} +0000", inherited_author_secs(repo, parents));
+    let now = format!("@{} +0000", mint_moment_secs());
     let identity = [
         ("GIT_AUTHOR_NAME", BLOOMERY_AUTHOR.0),
         ("GIT_AUTHOR_EMAIL", BLOOMERY_AUTHOR.1),
-        ("GIT_AUTHOR_DATE", authored.as_str()),
+        ("GIT_AUTHOR_DATE", now.as_str()),
         BLOOMERY_COMMITTER[0],
         BLOOMERY_COMMITTER[1],
-        BLOOMERY_COMMITTER[2],
+        ("GIT_COMMITTER_DATE", now.as_str()),
     ];
     let output = run_env(repo, &borrowed, &identity)?;
     if !output.status.success() {
@@ -400,33 +402,11 @@ pub fn commit_tree(repo: &Path, message: &str, tree: &str, parents: &[String]) -
     Ok(trim_bytes(&output.stdout))
 }
 
-/// The moment a commit over `parents` is authored at: the newest one already
-/// recorded on a parent, in whole seconds since the epoch.
-///
-/// A real moment that is nonetheless a pure function of the inputs — the two
-/// properties otherwise in tension here, since a clock read would mint a second
-/// commit on every retry. A fold's merge inherits the lane capture it merges
-/// in, which is when the work was actually produced; a tree-replace integrate
-/// inherits the branch it extends. Taking the newest rather than a fixed side
-/// is what keeps the dates along a branch from going backwards.
-///
-/// A parentless commit has nothing to inherit and stays at the epoch. The only
-/// ones are the claim registry's holds and their tombstones, which live on
-/// `bloomery/claims/*` and never reach landed history.
-fn inherited_author_secs(repo: &Path, parents: &[String]) -> i64 {
-    parents.iter().filter_map(|parent| newest_stamp(repo, parent)).max().unwrap_or(0)
-}
-
-/// The later of `sha`'s author and committer timestamps, or `None` when `sha`
-/// names no commit. Both sides are read because either can be the real one: a
-/// bloomery-minted parent's committer date is the pinned epoch, and a rebased
-/// parent's author date predates its committer date.
-fn newest_stamp(repo: &Path, sha: &str) -> Option<i64> {
-    run_ok(repo, &["show", "--no-patch", "--format=%at %ct", sha, "--"])
-        .ok()?
-        .split_whitespace()
-        .filter_map(|stamp| stamp.parse::<i64>().ok())
-        .max()
+/// The moment a mint happens, in whole seconds since the epoch. A clock that
+/// reads before the epoch is not a time git can file a commit under, so it
+/// reads as the epoch itself rather than failing the mint.
+fn mint_moment_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs())
 }
 
 /// Read commit object `sha` (`cat-file`). A missing or non-commit object is
