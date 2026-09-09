@@ -1734,7 +1734,7 @@ mod tests {
     }
 
     /// Issue iamacoffeepot/aether#723: chassis-source ticks are minted
-    /// via `push_chassis_root_mail`, and the window cap fanout
+    /// via `push_chassis_root_mail`, and the lifecycle cap fanout
     /// propagates `(root, parent_mail)` from the inbound through
     /// `NativeCtx::fanout` so each subscriber-bound copy lands in the
     /// same causal chain. Verified by registering a closure-bound
@@ -1764,9 +1764,9 @@ mod tests {
         // correct variant: the handler does immediate work (push into
         // a captured Vec) rather than enqueueing onto a downstream
         // inbox, so the producer-side `Received`/`Finished` bracket
-        // belongs on the call site. `validate_subscriber_mailbox`
-        // accepts both `Inbox` and `Inline` so the window cap's
-        // subscribe path still admits this mailbox. Pre-#845 this
+        // belongs on the call site. The lifecycle cap's subscribe
+        // path admits an `Inline` mailbox as readily as an `Inbox`
+        // one, so this mailbox takes stage broadcasts. Pre-#845 this
         // used `register_inbox` and the substrate's `run_frame`
         // silently swallowed the resulting in_flight leak; strict
         // propagation surfaces the variant mismatch as a
