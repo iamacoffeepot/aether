@@ -486,6 +486,8 @@ mod tests {
             env: Vec::new(),
             process_id: None,
             argv: Vec::new(),
+            instruction_manifest: None,
+            instruction_manifest_digest: None,
         }
     }
 
@@ -592,6 +594,8 @@ mod tests {
             env: Vec::new(),
             process_id: None,
             argv: Vec::new(),
+            instruction_manifest: None,
+            instruction_manifest_digest: None,
         };
 
         append_run(dir.path(), &run("wp-a", StageId::Construct, "n-1")).unwrap();
