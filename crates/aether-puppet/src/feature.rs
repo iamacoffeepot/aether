@@ -7,6 +7,7 @@
 
 use aether_math::Vec3;
 
+use crate::hatch;
 use crate::mesh::{Anchorage, Crossing};
 
 /// Which physical pen draws a stroke. A plotter changes pens between
@@ -56,8 +57,10 @@ pub enum FeatureClass {
     Silhouette,
     /// An authored surface marking — eye, brow, mouth.
     Decal,
-    /// Tone. `level` 0 is the first pass, 1 the cross, 2 the third.
-    Hatch { level: u8 },
+    /// Tone. `axis` names which of the resident hatch axes this curve is
+    /// a level set of; [`hatch::rank`] takes that to the rank of the tone
+    /// ramp it draws at — 0 the first pass, 1 the cross, 2 the third.
+    Hatch { axis: u8 },
 }
 
 impl FeatureClass {
@@ -66,7 +69,7 @@ impl FeatureClass {
         match self {
             Self::Silhouette => 2.0,
             Self::Decal => 1.3,
-            Self::Hatch { level } => 0.9 - 0.14 * f32::from(level),
+            Self::Hatch { axis } => 0.9 - 0.14 * hatch::rank(axis) as f32,
         }
     }
 

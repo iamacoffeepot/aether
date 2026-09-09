@@ -6,6 +6,21 @@
 
 use aether_math::Vec3;
 
+/// The camera's own frame at a view: to the viewer's right, up, and
+/// toward the viewer.
+///
+/// Everything authored relative to the drawing rather than to the
+/// subject is stated in this frame — where the key light stands, and
+/// which way a hatch family's strokes run once the eye has projected
+/// them — so the two read the same basis rather than each building one.
+#[must_use]
+pub fn camera_frame(eye: Vec3, target: Vec3) -> (Vec3, Vec3, Vec3) {
+    let back = (eye - target).normalize_or(Vec3::Z);
+    let right = Vec3::Y.cross(back).normalize_or(Vec3::X);
+
+    (right, back.cross(right), back)
+}
+
 /// splitmix64.
 pub fn hash64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);

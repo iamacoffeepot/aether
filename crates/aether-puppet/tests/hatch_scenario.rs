@@ -16,11 +16,22 @@
 //! solid end breaks the band's ceiling and the 3.7x spread between them
 //! names the flip itself.
 //!
+//! The second gate here asks the other half of the same question. Ink
+//! measures how much the drawing draws; it cannot see *which way* the
+//! strokes run, and stroke direction has its own way of failing on a
+//! turntable — hatch families whose axes share a plane of the model
+//! project to one screen angle from the two azimuths whose view direction
+//! lies in that plane, and the cross-hatch collapses into contour bands
+//! there. So a twelve-view sweep measures how widely the families cross
+//! where the drawing is darkest, and holds every view above a floor
+//! (iamacoffeepot/aether#5878).
+//!
 //! `SubstrateHarness` rather than `FleetHarness` per the harness decision
 //! rule: the assertion is about rendered output. The window size is
 //! mailed to the puppet directly because the harness has no window to
 //! announce one.
 
+use std::cmp::Reverse;
 use std::f32::consts::{PI, TAU};
 use std::fmt::Write as _;
 use std::fs;
@@ -250,4 +261,380 @@ fn hatching_reads_as_shading_from_every_azimuth() {
          they were {report}",
         high / low,
     );
+}
+
+/// The subject the direction sweep turns, and the framing the demo turns
+/// it at (`demo/turntable.json`).
+///
+/// A teapot rather than the sphere the ink test uses, and measured rather
+/// than assumed: a sphere's level sets curve out from under the plane they
+/// were cut on fast enough that three families sharing one screen
+/// direction still meet at an angle over most of it, so the sphere reads a
+/// collapse as a mild dip. Swept on the sphere, the head this replaces
+/// measures 60.6, 26.2, 16.8, 29.7, 45.2, 66.9, 70.0, 47.1, 24.7, 23.0,
+/// 34.4 and 52.3 degrees — no floor separates the azimuths that collapse
+/// from the ones that do not. The teapot's body is a surface of revolution
+/// about the axis the turntable sweeps, so its normals stay near
+/// horizontal over a wide band and the collapse shows there as what the
+/// eye sees: contour banding.
+const TEAPOT_OBJ: &[u8] = include_bytes!("../../aether-mesh/examples/utah_teapot.obj");
+const TEAPOT_DISTANCE: f32 = 4.0;
+const TEAPOT_HEIGHT: f32 = 0.6;
+
+/// The frame the direction sweep is read at — the demo's own, so the
+/// number is measured on the picture the collapse was seen in.
+const SWEEP_WIDTH: u32 = 960;
+const SWEEP_HEIGHT: u32 = 600;
+
+/// Azimuths the direction sweep walks: a whole turn in twelve steps, so
+/// the two views a world-fixed axis set collapses at land on samples
+/// rather than between them. All three of the old axes lay in the model's
+/// XY plane, and at 90 and 270 the view direction lies in that plane too
+/// — every family then projects to the same screen angle and the
+/// cross-hatch rules one set of near-horizontal bands.
+const DIRECTION_SWEEP: [f32; 12] = [0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 210.0, 240.0, 270.0, 300.0, 330.0];
+
+/// Orientations the oracle bins strokes into: one every 7.5 degrees over
+/// the half turn an undirected line spans.
+const DIRECTIONS: u16 = 24;
+
+/// The same count as an array length. Widening a `u16` into a `usize`
+/// loses nothing on any target this builds for.
+const BINS: usize = DIRECTIONS as usize;
+
+/// How far along a candidate direction the line probe reaches, in pixels,
+/// and how many of its `2 * REACH` samples have to be ink before the
+/// pixel counts as a point on a line running that way.
+///
+/// A probe rather than an image gradient because a gradient answers the
+/// wrong question here: the hatch is dithered into dashes and drawn with
+/// a wobble, so a stroke's ends and kinks throw gradients along the
+/// stroke as readily as across it, and a whole-image gradient histogram
+/// measured the same spread on a collapsed view as on a crossed one. A
+/// probe asks what a reader's eye asks — does a line continue this way.
+const REACH: i8 = 5;
+const ON_A_LINE: usize = 8;
+
+/// How far inside the silhouette the oracle looks, in pixels. The outline
+/// is a closed curve carrying every orientation there is, so leaving it in
+/// hands the histogram a background of directions the hatching never drew.
+const INSET: usize = 8;
+
+/// The neighbourhood one verdict is reached over, and how far apart those
+/// neighbourhoods sit.
+///
+/// Crossing is local: a view whose families all rule the same direction
+/// still spreads orientations across the whole figure, because the level
+/// sets curve over a rounded subject. What separates a cross-hatch from
+/// contour banding is whether two directions meet inside one patch, so
+/// the window is a few hatch spacings across and the verdict is per
+/// window.
+const WINDOW: usize = 48;
+const STEP: usize = 16;
+
+/// How much of the leading orientation's weight the second one has to
+/// carry before the window counts as crossing rather than as one family
+/// with a little noise beside it.
+const SECOND_SHARE: f64 = 0.35;
+
+/// Least mean crossing angle a view may draw at, in degrees.
+///
+/// Measured, not derived. Over the twelve views this sweep walks, the
+/// resident axis set draws at 36.4, 30.2, 23.5, 23.2, 24.8, 28.7, 46.8,
+/// 28.8, 31.3, 43.3, 22.9 and 25.5 degrees; the three world-fixed axes it
+/// replaces drew at 48.0, 33.7, 18.8, 35.6, 37.9, 58.3, 47.8, 22.7, 23.2,
+/// 26.9, 29.2 and 40.5. The old set is not uniformly worse — it is
+/// *uneven*, running from 18.8 to 58.3 over one turn, and the low end is
+/// the collapse. The new set runs from 22.9 to 46.8, which is the same
+/// drawing seen from any side.
+///
+/// The floor sits under the new set's worst view and over the old set's,
+/// so the sweep fails on the head this replaces and passes on this one.
+/// It is a floor rather than a band deliberately: crossing more widely
+/// than this is never a fault.
+const CROSSING_FLOOR: f64 = 20.0;
+
+/// One capture reduced to what the direction oracle reads: which pixels
+/// are ink, and which of those sit far enough inside the subject for the
+/// outline not to speak for them.
+struct Page {
+    width: usize,
+    height: usize,
+    ink: Vec<bool>,
+    inside: Vec<bool>,
+}
+
+impl Page {
+    fn read(img: &Image) -> Self {
+        let background = rgba_at(img, 0, 0);
+        let mut ink = Vec::with_capacity(img.width as usize * img.height as usize);
+        for y in 0..img.height {
+            for x in 0..img.width {
+                ink.push(
+                    rgba_at(img, x, y)
+                        .iter()
+                        .take(3)
+                        .zip(background)
+                        .any(|(&at, paper)| at.abs_diff(paper) > INK_MARGIN),
+                );
+            }
+        }
+
+        // The silhouette is the span between the first and last ink on
+        // each row, as in `ink_coverage`; inside it is that span held
+        // clear of its own edge by `INSET` in every direction.
+        let width = usize::try_from(img.width).expect("an image is not wider than the address space");
+        let height = usize::try_from(img.height).expect("an image is not taller than the address space");
+        let mut span = vec![false; ink.len()];
+        for y in 0..height {
+            let row: Vec<usize> = (0..width).filter(|&x| ink[y * width + x]).collect();
+            let (Some(&first), Some(&last)) = (row.first(), row.last()) else {
+                continue;
+            };
+            span[y * width + first..=y * width + last].fill(true);
+        }
+
+        let mut inside = vec![false; ink.len()];
+        for y in INSET..height - INSET {
+            for x in INSET..width - INSET {
+                inside[y * width + x] = [y - INSET, y, y + INSET]
+                    .into_iter()
+                    .flat_map(|row| [x - INSET, x, x + INSET].map(move |column| row * width + column))
+                    .all(|at| span[at]);
+            }
+        }
+
+        Self { width, height, ink, inside }
+    }
+}
+
+/// The integer offset nearest `value`.
+///
+/// Chosen by comparison rather than by a cast: no conversion from a float
+/// to an integer is lossless, and this one's answer is bounded by the
+/// probe's own reach — so the nearest of the eleven candidates *is* the
+/// rounding, stated as what it is.
+fn nearest(value: f32) -> i8 {
+    (-REACH..=REACH)
+        .min_by(|a, b| {
+            let (from_a, from_b) = ((f32::from(*a) - value).abs(), (f32::from(*b) - value).abs());
+
+            // Ties go outward, which is what rounding a half does.
+            from_a.total_cmp(&from_b).then(b.abs().cmp(&a.abs()))
+        })
+        .unwrap_or(0)
+}
+
+/// What each candidate direction probes along, as flat offsets into an
+/// image `width` pixels wide.
+fn probes(width: usize) -> Vec<Vec<isize>> {
+    let stride = isize::try_from(width).expect("an image is not wider than the address space");
+
+    (0..DIRECTIONS)
+        .map(|direction| {
+            let (sin, cos) = (PI * f32::from(direction) / f32::from(DIRECTIONS)).sin_cos();
+            (-REACH..=REACH)
+                .filter(|step| *step != 0)
+                .map(|step| {
+                    let (across, down) = (nearest(cos * f32::from(step)), nearest(sin * f32::from(step)));
+
+                    isize::from(down) * stride + isize::from(across)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Which direction each ink pixel's line runs in, or `None` where no
+/// direction carries enough ink for the pixel to be on a line at all.
+fn stroke_directions(page: &Page) -> Vec<Option<u16>> {
+    let probes = probes(page.width);
+    let margin = usize::try_from(REACH).expect("the probe reach is positive");
+    let mut running = vec![None; page.ink.len()];
+
+    for y in margin..page.height - margin {
+        for x in margin..page.width - margin {
+            let at = y * page.width + x;
+            if !(page.ink[at] && page.inside[at]) {
+                continue;
+            }
+
+            let (best, hits) = (0..DIRECTIONS).zip(&probes).fold((0, 0), |held, (direction, offsets)| {
+                let hits = offsets.iter().filter(|step| page.ink[at.wrapping_add_signed(**step)]).count();
+
+                if hits > held.1 {
+                    (direction, hits)
+                } else {
+                    held
+                }
+            });
+            if hits >= ON_A_LINE {
+                running[at] = Some(best);
+            }
+        }
+    }
+
+    running
+}
+
+/// The angle between one window's two leading stroke directions, in
+/// degrees, and zero where it has only one.
+fn crossing_angle(window: &[f64; BINS]) -> f64 {
+    let apart = |a: u16, b: u16| a.abs_diff(b).min(DIRECTIONS - a.abs_diff(b));
+    let weight = |direction: u16| window[usize::from(direction)];
+    let heaviest = |over: &dyn Fn(u16) -> bool| {
+        (0..DIRECTIONS).filter(|&direction| over(direction)).fold(None, |held: Option<u16>, direction| match held {
+            Some(best) if weight(best) >= weight(direction) => Some(best),
+            _ => Some(direction),
+        })
+    };
+
+    let Some(first) = heaviest(&|_| true).filter(|&direction| weight(direction) > 0.0) else {
+        return 0.0;
+    };
+    let Some(second) = heaviest(&|direction| apart(first, direction) > 1) else {
+        return 0.0;
+    };
+    if weight(second) < SECOND_SHARE * weight(first) {
+        return 0.0;
+    }
+
+    f64::from(apart(first, second)) * 180.0 / f64::from(DIRECTIONS)
+}
+
+/// How widely the strokes cross in this view, in degrees.
+///
+/// The mean crossing angle over the third of the windows carrying the
+/// most stroke ink. The densest third rather than all of them because
+/// that is where the ramp has three families running at once — a lightly
+/// hatched window legitimately carries one, and averaging those in would
+/// measure the tone ramp instead of the crossing.
+fn crossing_spread(img: &Image) -> f64 {
+    let page = Page::read(img);
+    let running = stroke_directions(&page);
+    let mut windows: Vec<(usize, [f64; BINS])> = Vec::new();
+
+    for top in (0..page.height.saturating_sub(WINDOW)).step_by(STEP) {
+        for left in (0..page.width.saturating_sub(WINDOW)).step_by(STEP) {
+            let mut counts = [0.0; BINS];
+            let mut ink = 0;
+            for y in top..top + WINDOW {
+                for x in left..left + WINDOW {
+                    if let Some(direction) = running[y * page.width + x] {
+                        counts[usize::from(direction)] += 1.0;
+                        ink += 1;
+                    }
+                }
+            }
+            if ink > 0 {
+                windows.push((ink, counts));
+            }
+        }
+    }
+    assert!(!windows.is_empty(), "the capture carries no strokes to measure a direction on");
+
+    windows.sort_by_key(|(ink, _)| Reverse(*ink));
+    let densest = &windows[..windows.len().div_ceil(3)];
+    let (crossing, counted) =
+        densest.iter().fold((0.0, 0.0), |held, (_, counts)| (held.0 + crossing_angle(counts), held.1 + 1.0));
+
+    crossing / counted
+}
+
+/// The strokes have to keep crossing from wherever the eye stands.
+///
+/// The demo's own subject at the demo's own framing, swept twelve ways,
+/// and one number per view: how widely the hatch families cross where the
+/// drawing is darkest. A teapot rather than the ink test's sphere for the
+/// reason [`TEAPOT_OBJ`] gives.
+///
+/// What this catches is a stroke direction that belongs to the world
+/// rather than to the view. Three plane families fixed in one plane of
+/// the model project to one screen angle from the two azimuths whose view
+/// direction lies in that plane, and the cross-hatch collapses into
+/// contour bands there once per half turn (iamacoffeepot/aether#5878).
+#[test]
+fn hatch_directions_keep_crossing_through_a_turn() {
+    let Some(wasm_path) = require_runtime("aether_puppet") else {
+        return;
+    };
+    let save_dir = init_save_sandbox("puppet-hatch-directions");
+    let subject = write_fixture("utah_teapot.obj", TEAPOT_OBJ);
+
+    let mut harness = SubstrateHarness::builder()
+        .size(SWEEP_WIDTH, SWEEP_HEIGHT)
+        .namespace_roots(test_namespace_roots(save_dir))
+        .with_render()
+        .with_component_host()
+        .build()
+        .expect("boot a rendering harness with a component host");
+    load_puppet(&mut harness, &wasm_path);
+
+    harness
+        .execute(vec![
+            (
+                "size",
+                puppet().send(&WindowSize {
+                    window: WindowId(1),
+                    width: SWEEP_WIDTH,
+                    height: SWEEP_HEIGHT,
+                    scale_factor: 1.0,
+                }),
+            ),
+            (
+                "subject",
+                puppet().send(&Load {
+                    namespace: "assets".to_owned(),
+                    path: subject,
+                    labels: String::new(),
+                    material_field_padding: 0.12,
+                    rig: String::new(),
+                    palette: String::new(),
+                }),
+            ),
+        ])
+        .expect("the size and subject load settle");
+
+    // Three steps per view under three labels, because a label addresses
+    // one step's result: the eye moves, the drawing and its textures
+    // settle a frame behind, and only then is the view read.
+    let staged: Vec<(String, String, String)> = DIRECTION_SWEEP
+        .iter()
+        .map(|azimuth| (format!("look-{azimuth:.0}"), format!("prime-{azimuth:.0}"), format!("view-{azimuth:.0}")))
+        .collect();
+    let steps = staged
+        .iter()
+        .zip(DIRECTION_SWEEP)
+        .flat_map(|((look, prime, view), azimuth)| {
+            [
+                (
+                    look.as_str(),
+                    puppet().send(&Look { azimuth, elevation: 12.0, distance: TEAPOT_DISTANCE, height: TEAPOT_HEIGHT }),
+                ),
+                (prime.as_str(), HarnessOp::advance(5)),
+                (view.as_str(), HarnessOp::capture()),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let swept = harness.execute(steps).expect("the sweep runs");
+
+    let measured: Vec<(f32, f64)> = DIRECTION_SWEEP
+        .iter()
+        .zip(&staged)
+        .map(|(&azimuth, (_, _, view))| {
+            let png = swept.captured(view).expect("the capture step ran");
+
+            (azimuth, crossing_spread(&decode_png(png).expect("decode the captured png")))
+        })
+        .collect();
+    let report =
+        measured.iter().map(|(azimuth, spread)| format!("{azimuth:.0} {spread:.1}")).collect::<Vec<_>>().join(", ");
+
+    for (azimuth, spread) in &measured {
+        assert!(
+            *spread >= CROSSING_FLOOR,
+            "the strokes at azimuth {azimuth:.0} cross at a mean {spread:.1} degrees, under the \
+             {CROSSING_FLOOR:.0} a drawing whose families still cross holds; the turn measured {report}",
+        );
+    }
 }
