@@ -347,9 +347,13 @@ pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
     Digest::pinned("c0a9677ad8116334fe7b217401fb5f14b06965ae33af4add641f685c5768f3e6");
 
 /// The stamp on durable scoping-run records written before the instruction-bundle
-/// pin (ADR-0214). Probe placeholder until CI reports the frozen pre-pin digest.
+/// pin (ADR-0214).
+///
+/// This kind had no prior ledger line. The identity is the digest CI reported
+/// for the frozen pre-pin shape on the throwaway probe, then copied into this
+/// literal — never recomputed from the type here (#5500).
 pub const SCOPE_RUN_PRE_PIN_DIGEST: Digest =
-    Digest::pinned("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    Digest::pinned("69a3489bd2a7d4d5782fe357dcb9c33a861ae8a6f40dfcf9708b3bc2d3f44e7d");
 
 /// Decode journaled [`Decisions`] under the writing-schema digest stamped
 /// beside them (ADR-0187).
@@ -596,6 +600,7 @@ pub static PERSISTED_KINDS: &[&PersistedKind] = &[
     &PIPELINE_MANIFEST,
     &PRICE_TABLE,
     &SPEND_CEILING,
+    &SCOPE_RUN,
     &STAGE_CATALOG,
 ];
 
@@ -669,16 +674,5 @@ mod tests {
         let schema = Digest::of_domain_tagged(SCHEMA_DIGEST_DOMAIN, &rendering);
         let value = Digest::of_domain_tagged("event", &rendering);
         assert_ne!(schema, value);
-    }
-
-    #[test]
-    fn probe_scope_run_schema_digests() {
-        use aether_data::Kind;
-
-        use super::SCOPE_RUN;
-        use crate::values::{ScopeRun, ScopeRunPrePin};
-
-        let prior = schema_digest(ScopeRun::NAME, &<ScopeRunPrePin as Schema>::SCHEMA).expect("pre-pin schema renders");
-        panic!("SCOPE_RUN current={} prior={}", SCOPE_RUN.current_digest(), prior);
     }
 }

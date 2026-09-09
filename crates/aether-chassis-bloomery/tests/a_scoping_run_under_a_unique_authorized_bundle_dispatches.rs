@@ -1,21 +1,23 @@
 #![cfg(all(unix, feature = "github"))]
 
 //! A scoping run under a host that authorized exactly one instruction bundle
-//! dispatches with that bundle as the manifest's sole instruction slot
+//! pins that bundle on the durable run record, and the same provenance gate
+//! construct uses assembles it as the manifest's sole instruction slot
 //! (ADR-0214).
 //!
-//! The drain copies the run's pin into the order's registry, and the same
-//! provenance gate construct uses assembles the prompt. This scenario asserts
-//! on that assembled manifest — what the dispatched lane is authorized to run
-//! under — not on a real model.
+//! The GitHub actions backend refuses a model lane with no resolved model, so
+//! this scenario does not wait on an outstanding order. What the mock lane
+//! would be handed is the assembled manifest: the drain copies the run's pin
+//! into the order's registry, and `admit_model_dispatch` is that assembly.
+//! The capturing-backend unit test next to the drain is what sees the order
+//! itself.
 
 use aether_bloomery::{
     BloomId, ConfigKind, ConfigRegistry, Digest, ModelProcessInstructions, Nonce, Observation, Provenance, SlotRole,
-    StageId, Statement, Transformation, WorkpieceId,
+    StageCatalog, StageId, Statement, Transformation, WorkpieceId,
 };
 use aether_chassis_bloomery::bloomery::{DispatchRecord, admit_model_dispatch, open_scope_run, reference_instructions};
-use aether_chassis_bloomery::store::{CommissionBackend, OutstandingOrder, StoreBackend};
-use aether_data::wire::from_bytes;
+use aether_chassis_bloomery::store::{CommissionBackend, StoreBackend};
 use aether_harness_bloomery::{HarnessBuilder, HarnessRoots};
 
 #[test]
@@ -35,39 +37,36 @@ fn a_scoping_run_under_a_unique_authorized_bundle_dispatches_that_bundle() {
     let base = harness.view().mainline;
     open_scope_run(&mut store, &commission, intent_digest, base, "scope sketch")
         .expect("the run opens with the host pin");
-    drop(store);
 
-    let orders = harness.await_orders(1);
-    assert_eq!(orders[0].workpiece, commission.0, "the scoping run is the outstanding order");
+    let rows = store.list_scope_runs(&commission.0).expect("the run ledger reads");
+    let pin = rows
+        .first()
+        .and_then(|row| row.instructions.as_deref())
+        .and_then(Digest::from_slice)
+        .expect("the host's unique authorized bundle is pinned on the run");
+    assert_eq!(pin, expected, "exactly one authorized address is the default pin");
 
-    let configs: ConfigRegistry = from_bytes(&orders[0].configs).expect("the order carries a registry");
-    assert_eq!(
-        configs.address::<ModelProcessInstructions>(),
-        Some(expected),
-        "the drain handed the lane the host's unique authorized bundle",
-    );
-
-    let mut store = harness.commission_store();
-    let manifest = admit_model_dispatch(&mut store, &scope_record(&orders[0], configs))
-        .expect("the dispatched order's pin admits");
+    let mut configs = ConfigRegistry::default();
+    configs.insert::<ModelProcessInstructions>(pin);
+    let subject = rows[0].subject.as_deref().and_then(Digest::from_slice).expect("an enqueued run names its subject");
+    let manifest = admit_model_dispatch(&mut store, &scope_record(commission, subject, base, configs))
+        .expect("the run's pin admits");
     let instructions: Vec<_> = manifest.slots.iter().filter(|slot| slot.role == SlotRole::Instruction).collect();
     assert_eq!(instructions.len(), 1, "one instruction slot: the process policy");
     assert_eq!(instructions[0].artifact, expected, "and it is the run's pinned bundle");
 }
 
-fn scope_record(order: &OutstandingOrder, configs: ConfigRegistry) -> DispatchRecord {
-    let subject = Digest::from_slice(&order.displayed_digest).expect("a recorded order displays a whole digest");
+fn scope_record(workpiece: WorkpieceId, subject: Digest, checkout: Digest, configs: ConfigRegistry) -> DispatchRecord {
     DispatchRecord {
-        nonce: Nonce(order.nonce.clone()),
-        bloom: BloomId(Digest::from_slice(&order.bloom).expect("a recorded order names a bloom")),
-        workpiece: WorkpieceId(order.workpiece.clone()),
+        nonce: Nonce("dispatch-scope".to_owned()),
+        bloom: BloomId(Digest::from_bytes([0x51; 32])),
+        workpiece,
         scope_revision: subject,
         candidate: subject,
         displayed_digest: subject,
         stage: StageId::Scope,
-        transformation: from_bytes::<Transformation>(&order.transformation)
-            .expect("the order carries a transformation"),
+        transformation: Transformation::for_scoping_run(&StageCatalog::binding_of(StageId::Scope), subject, checkout),
         configs,
-        profile: from_bytes(&order.profile).expect("the order carries a profile"),
+        profile: StageCatalog::profile_of(StageId::Scope),
     }
 }

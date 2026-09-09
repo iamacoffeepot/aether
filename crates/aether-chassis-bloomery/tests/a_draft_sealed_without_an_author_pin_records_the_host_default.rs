@@ -11,10 +11,11 @@
 //! not consult whatever default happens to be installed then.
 
 use aether_bloomery::{
-    ConfigKind, Event, Fact, ModelProcessInstructions, PIPELINE_MANIFEST_PATH, decode_recorded_event,
+    ApprovalPolicy, ConfigKind, ConfigRegistry, Digest, Event, Fact, FakeKeyProvider, ModelProcessInstructions,
+    Observation, PIPELINE_MANIFEST_PATH, Provenance, Statement, Tier, decode_recorded_event,
 };
 use aether_chassis_bloomery::bloomery::reference_instructions;
-use aether_chassis_bloomery::store::StoreBackend;
+use aether_chassis_bloomery::store::{CommissionBackend, StoreBackend};
 use aether_data::Kind;
 use aether_harness_bloomery::{HarnessBuilder, Repo, ScenarioHarness, member};
 use serde_json::Value;
@@ -33,8 +34,19 @@ fn a_draft_sealed_without_an_author_pin_records_the_host_default() {
 
     let expected = reference_instructions().address();
     let revision = harness.author_scope_revision(WORKPIECE, &["docs/guide/**"]);
-    let base = harness.view().mainline;
+    harness
+        .commission_store()
+        .insert_approval(&auto_approval(revision), &FakeKeyProvider)
+        .expect("the auto-tier approval stores");
 
+    let policy = ApprovalPolicy { default: Tier::Auto, rules: Vec::new() };
+    let (status, stored) =
+        harness.post("/configs", &serde_json::json!({ "kind": ApprovalPolicy::NAME, "value": policy }).to_string());
+    assert_eq!(status, 200, "the auto-tier policy authors: {stored}");
+
+    let mut configs = ConfigRegistry::default();
+    configs.insert::<ApprovalPolicy>(policy.address());
+    let base = harness.view().mainline;
     let (status, opened) = harness.post("/drafts", "null");
     assert_eq!(status, 201, "a draft opens: {opened}");
     let opened: Value = serde_json::from_str(&opened).expect("the draft view is JSON");
@@ -43,6 +55,7 @@ fn a_draft_sealed_without_an_author_pin_records_the_host_default() {
     let patch = serde_json::json!({
         "base": base.to_hex(),
         "proposals": [member(WORKPIECE, revision)],
+        "configs": configs,
     });
     let (status, patched) = harness.request("PATCH", &format!("/drafts/{draft}"), &patch.to_string());
     assert_eq!(status, 200, "the draft takes a base and a member: {patched}");
@@ -59,7 +72,17 @@ fn a_draft_sealed_without_an_author_pin_records_the_host_default() {
     assert_eq!(pin, expected, "the sealed bloom records the host's unique authorized bundle");
 }
 
-fn sealed_instruction_pin(harness: &mut ScenarioHarness) -> aether_bloomery::Digest {
+fn auto_approval(scope: Digest) -> Statement {
+    Statement {
+        words: scope.as_bytes().to_vec(),
+        provenance: Provenance::ObservationAttestation(Observation {
+            source: "aether.bloomery.approve_gate:auto-tier".to_owned(),
+        }),
+        parents: vec![scope],
+    }
+}
+
+fn sealed_instruction_pin(harness: &mut ScenarioHarness) -> Digest {
     harness
         .commission_store()
         .replay_journal()

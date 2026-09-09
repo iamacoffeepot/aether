@@ -47,7 +47,10 @@ use aether_substrate::chassis::builder::BuiltChassis;
 use super::digest;
 use super::drive::{member, member_with, passed};
 use super::roots::FixtureRoots;
-use super::{BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, Lane, POLL, Reader};
+use super::{
+    BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, InstructionAuthorization, Lane, POLL,
+    Reader,
+};
 use crate::oracle::{Oracle, is_answerable, liveness};
 use crate::scenario::{LaneScript, Scenario};
 use crate::script::write_lane_scripts;
@@ -145,17 +148,7 @@ impl ScenarioHarness {
         }
 
         let mut configs = author_manifest(&store_path);
-        let authorized = if builder.authorize_instructions {
-            let instructions = author_instructions(&store_path);
-            let authorized = instructions
-                .address::<ModelProcessInstructions>()
-                .expect("the authored instruction bundle seals its own address")
-                .to_hex();
-            configs.overlay(instructions);
-            authorized
-        } else {
-            String::new()
-        };
+        let authorized = overlay_authorized_instructions(builder.authorize_instructions, &store_path, &mut configs);
         if let Some(secs) = builder.wall_clock_secs {
             configs.overlay(author_catalog(&store_path, secs));
         }
@@ -1138,6 +1131,25 @@ impl ForkedLaneSettings<'_> {
 /// cannot start a model attempt, so a suite that skipped this would observe
 /// refusals in every scenario about something else. A scenario that is *about*
 /// the gate seals a member registry that overrides it.
+fn overlay_authorized_instructions(
+    authorize: InstructionAuthorization,
+    store_path: &str,
+    configs: &mut ConfigRegistry,
+) -> String {
+    match authorize {
+        InstructionAuthorization::Empty => String::new(),
+        InstructionAuthorization::Unique => {
+            let instructions = author_instructions(store_path);
+            let authorized = instructions
+                .address::<ModelProcessInstructions>()
+                .expect("the authored instruction bundle seals its own address")
+                .to_hex();
+            configs.overlay(instructions);
+            authorized
+        }
+    }
+}
+
 fn author_instructions(store_path: &str) -> ConfigRegistry {
     pin_instructions(
         &mut SqliteStore::open(store_path).expect("the coordinator's journal opens for writing"),
