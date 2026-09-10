@@ -358,6 +358,22 @@ pub trait GitDataApi {
     /// execution failure.
     fn get_commit(&self, sha: &str) -> Result<GitCommit, GitDataError>;
 
+    /// Repository-relative paths changed by the exact `base..head` range.
+    ///
+    /// This is deliberately narrower than a merge-base comparison. Member
+    /// containment concerns the two pinned endpoints, not an unverified
+    /// merge-base comparison. Renames and copies name both their source and
+    /// destination. An adapter that cannot prove the comparison base or return
+    /// a complete path list must return an error.
+    ///
+    /// # Errors
+    /// Either object is unavailable, `base` is not an ancestor of `head`, or
+    /// the complete path list cannot be read.
+    fn changed_paths(&self, base: &str, head: &str) -> Result<Vec<String>, GitDataError> {
+        let _ = (base, head);
+        Err(GitDataError::Command("exact changed-path discovery is unsupported".to_owned()))
+    }
+
     /// Create a commit carrying `tree` with `parents`.
     ///
     /// # Errors

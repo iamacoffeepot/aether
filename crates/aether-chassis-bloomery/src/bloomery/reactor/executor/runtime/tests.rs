@@ -3095,6 +3095,8 @@ fn an_unconfigured_shell_refuses_actions_lanes_naming_the_missing_knobs() {
         nonce: Nonce("probe".to_owned()),
         instruction_bundle: None,
         prompt_manifest: None,
+        physical_run: None,
+        release_physical_run: true,
     };
     let refusal = shell.submit(&order).expect_err("a verify lane routes to Actions, which is unconfigured");
     let rendered = refusal.to_string();
@@ -3120,6 +3122,8 @@ fn an_unconfigured_actions_refusal_is_permanent_so_the_drain_parks_it() {
             nonce: Nonce("probe".to_owned()),
             instruction_bundle: None,
             prompt_manifest: None,
+            physical_run: None,
+            release_physical_run: true,
         })
         .expect_err("the stub refuses every submit");
 

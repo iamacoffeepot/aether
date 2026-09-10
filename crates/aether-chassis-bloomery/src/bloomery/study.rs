@@ -229,6 +229,39 @@ pub fn admit_study(
     Ok(StudyAdmitDecision::Admitted(StudyAdmission { bloom, subject: displayed, study_artifact }))
 }
 
+/// Record the measured cost of one shared physical run exactly once.
+///
+/// The content-addressed write and study-index projection are idempotent. The
+/// caller claims the run's durable charge bit only after this succeeds, so an
+/// artifacts outage leaves materialization retryable. The study subject is the
+/// physical identity, so member fan-out can carry latency and outcome without
+/// duplicating this cost under every logical request.
+pub fn record_shared_run_study(
+    store: &mut dyn StoreBackend,
+    artifacts: &mut ArtifactsCapabilityState,
+    bloom: BloomId,
+    run: Digest,
+    cost: StudyCost,
+) -> Result<StudyAdmission, StudyIntakeError> {
+    let record = StudyRecord { bloom, subject: run, cost };
+    let bytes = to_vec(&record)?;
+    let study_artifact = match artifacts.put(&bytes, &[digest_to_parent(&run)]) {
+        PutResult::Ok { digest } => digest,
+        PutResult::Err { error } => return Err(StudyIntakeError::Artifacts(error)),
+    };
+    store.record_study(bloom.0.as_bytes(), run.as_bytes(), &study_artifact)?;
+    Ok(StudyAdmission { bloom, subject: run, study_artifact })
+}
+
+pub fn price_shared_run_step(
+    store: &mut dyn StoreBackend,
+    dispatch: &DispatchRecord,
+    measured: StudyCost,
+    calls: Option<&[StudyCall]>,
+) -> StudyCost {
+    StudyCost { cost_micro_usd: price_of(store, dispatch, &measured, calls), ..measured }
+}
+
 /// The journal event that names an accepted study artifact so a calibration
 /// or spend read can resolve it.
 ///

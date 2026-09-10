@@ -19,10 +19,10 @@ use crate::digest::{Digest, digest_of};
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BaseReceipt, BloomSpec, CandidateRef, CompositionFinding, CompositionParents, ConfigScopes,
-    DispatchKey, Evidence, EvidenceKind, MemberDependency, OperatorHold, OperatorProposal, OperatorRepair,
-    OrphanClaimReleaseRecord, PipelineManifest, PrecheckState, ResolutionClaim, ResolvedConfigs, SpendQuiesce,
-    StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof,
-    VerifyReuse, Wedge, Withdrawal,
+    CoordinationState, DispatchKey, Evidence, EvidenceKind, MemberDependency, OperatorHold, OperatorProposal,
+    OperatorRepair, OrphanClaimReleaseRecord, PipelineManifest, PrecheckState, ResolutionClaim, ResolvedConfigs,
+    SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet,
+    VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 // Only [`Snapshot::with_green_base`] names it, and that door is behind the same cfg.
 // A plain import would be an unused one on a lib-scoped build, where the fixture
@@ -734,6 +734,9 @@ pub struct BloomRecord {
     /// Optional journal-derived aggregate pre-check scheduler state.
     #[serde(default)]
     pub precheck: Option<PrecheckState>,
+    /// Optional journal-derived shared verification and eager-head state.
+    #[serde(default)]
+    pub coordination: Option<Box<CoordinationState>>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
 }
@@ -1632,6 +1635,43 @@ impl Snapshot {
         }
     }
 
+    /// Fold coordination's durable projection and ignore its host-only queue
+    /// decisions. Keeping the whole vocabulary together makes replay's split
+    /// explicit: only `RecordCoordinationState` evolves the snapshot.
+    fn apply_coordination_effect(&mut self, effect: &Decision) {
+        if let Decision::RecordCoordinationState { bloom, state } = effect
+            && let Some(record) = self.blooms.get_mut(bloom)
+        {
+            record.coordination = state.clone().map(Box::new);
+        }
+    }
+
+    /// Fold bloom and mainline lifecycle markers. These are the direct status
+    /// transitions whose projection does not belong to a stage-specific ledger.
+    fn apply_lifecycle_effect(&mut self, effect: &Decision) {
+        match effect {
+            Decision::MarkSuperseded { bloom, by } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.status = BloomStatus::Superseded;
+                    record.superseded_by = Some(*by);
+                }
+            }
+            Decision::AdvanceMainline { to, .. } => {
+                self.mainline = *to;
+                self.observed = *to;
+            }
+            Decision::RecordObservation { head } => {
+                self.observed = *head;
+            }
+            Decision::EmitReceipt(projected) => {
+                if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
+                    record.status = BloomStatus::Landed;
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn apply_effect(&mut self, effect: &Decision) {
         match effect {
             Decision::ClaimMembership { workpiece, bloom } => {
@@ -1652,11 +1692,14 @@ impl Snapshot {
             Decision::AdvanceStage { .. } => self.apply_advance_stage(effect),
             Decision::RecordWedge { .. } => self.apply_wedge_effect(effect),
             Decision::DispatchAttempt { .. }
+            | Decision::DispatchContextualAttempt { .. }
             | Decision::DispatchIntegration { .. }
             | Decision::DispatchSplice { .. }
             | Decision::DispatchAggregateVerify { .. }
             | Decision::DispatchAggregateReview { .. }
             | Decision::DispatchPrecheck { .. }
+            | Decision::DispatchSharedRun { .. }
+            | Decision::DispatchPartialHeadRepair { .. }
             | Decision::DispatchStudy { .. }
             | Decision::DispatchLand { .. } => self.apply_dispatch_effect(effect),
             // Wholly snapshot-inert, like EmitReceipt's outbox row: a re-dispatch
@@ -1686,6 +1729,15 @@ impl Snapshot {
             | Decision::CancelPrecheck { .. }
             | Decision::PromotePrecheck { .. } => {}
             Decision::RecordPrecheckState { .. } => self.apply_precheck_effect(effect),
+            Decision::RecordCoordinationState { .. }
+            | Decision::DispatchIntegrationAppend { .. }
+            | Decision::DispatchCandidatePreparation { .. }
+            | Decision::QueueMemberVerification { .. }
+            | Decision::DispatchSharedRunPreparation { .. }
+            | Decision::QueueConstructionAdmission { .. }
+            | Decision::CancelSharedRun { .. }
+            | Decision::CancelMemberVerification { .. }
+            | Decision::DispatchCompatibilityPreview { .. } => self.apply_coordination_effect(effect),
             Decision::RecordBaseReceipt { .. } => self.apply_base_verify_effect(effect),
             Decision::RecordOrphanClaimRelease { request, target, completion } => {
                 // Opening the record and completing it write the same entry, so
@@ -1707,22 +1759,13 @@ impl Snapshot {
                     record.claims.remove(workpiece);
                 }
             }
-            Decision::MarkSuperseded { bloom, by } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    record.status = BloomStatus::Superseded;
-                    record.superseded_by = Some(*by);
-                }
-            }
             Decision::SetResolved { .. } | Decision::SetUnresolved { .. } | Decision::RecordLandingRoll { .. } => {
                 self.apply_landing_effect(effect);
             }
-            Decision::AdvanceMainline { to, .. } => {
-                self.mainline = *to;
-                self.observed = *to;
-            }
-            Decision::RecordObservation { head } => {
-                self.observed = *head;
-            }
+            Decision::MarkSuperseded { .. }
+            | Decision::AdvanceMainline { .. }
+            | Decision::RecordObservation { .. }
+            | Decision::EmitReceipt(..) => self.apply_lifecycle_effect(effect),
             Decision::RecordStageCatalog { .. } | Decision::RecordPipelineManifest { .. } => {
                 self.apply_sealed_line_effect(effect);
             }
@@ -1742,11 +1785,6 @@ impl Snapshot {
             Decision::RecordMemberMachinery { .. } => self.apply_machinery_effect(effect),
             Decision::RecordWithdrawal { .. } | Decision::MarkBloomWithdrawn { .. } => {
                 self.apply_withdrawal_effect(effect);
-            }
-            Decision::EmitReceipt(projected) => {
-                if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
-                    record.status = BloomStatus::Landed;
-                }
             }
             Decision::QueueProposal { .. } | Decision::DequeueProposal { .. } => {
                 self.apply_proposal_queue_effect(effect);
@@ -1928,7 +1966,7 @@ impl Snapshot {
             return;
         };
         if let Some(record) = self.blooms.get_mut(bloom) {
-            record.precheck = state.as_deref().cloned();
+            record.precheck.clone_from(state);
         }
     }
 
@@ -2087,6 +2125,9 @@ impl Snapshot {
             Decision::DispatchAttempt { bloom, workpiece, stage, .. } => {
                 (bloom, DispatchKey::Member { workpiece: workpiece.clone(), stage: *stage })
             }
+            Decision::DispatchContextualAttempt { dispatch } => {
+                (&dispatch.bloom, DispatchKey::Member { workpiece: dispatch.workpiece.clone(), stage: dispatch.stage })
+            }
             Decision::DispatchIntegration { bloom, .. } => (bloom, DispatchKey::Bloom { stage: StageId::Integrate }),
             Decision::DispatchSplice { bloom, workpiece, .. } => {
                 (bloom, DispatchKey::Member { workpiece: workpiece.clone(), stage: StageId::Integrate })
@@ -2095,6 +2136,16 @@ impl Snapshot {
                 (bloom, DispatchKey::Bloom { stage: StageId::AggregateVerify })
             }
             Decision::DispatchPrecheck { bloom, .. } => (bloom, DispatchKey::Bloom { stage: StageId::AggregateVerify }),
+            Decision::DispatchSharedRun { dispatch } => {
+                let Some(request) = dispatch.plan.requests.first() else {
+                    return;
+                };
+                (&request.bloom, DispatchKey::Bloom { stage: StageId::Verify })
+            }
+            Decision::DispatchPartialHeadRepair { dispatch } => (
+                &dispatch.plan.bloom,
+                DispatchKey::Member { workpiece: WorkpieceId::composition(), stage: StageId::Refine },
+            ),
             Decision::DispatchAggregateReview { bloom, .. } => {
                 (bloom, DispatchKey::Bloom { stage: StageId::AggregateReview })
             }
@@ -2243,6 +2294,7 @@ impl BloomRecord {
             vehicles: BTreeMap::new(),
             withdrawn: BTreeMap::new(),
             precheck: None,
+            coordination: None,
             superseded_by: None,
         }
     }

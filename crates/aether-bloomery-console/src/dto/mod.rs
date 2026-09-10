@@ -19,6 +19,9 @@ use serde::de::Error;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
+mod coordination;
+pub use coordination::CoordinationView;
+
 /// A digest as the REST edge renders it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct DigestHex([u8; 32]);
@@ -273,6 +276,9 @@ pub struct BloomView {
     /// Optional aggregate pre-check state; absent on older coordinators.
     #[serde(default)]
     pub precheck: Option<PrecheckView>,
+    /// Optional shared verification and eager-head state.
+    #[serde(default)]
+    pub coordination: Option<CoordinationView>,
 }
 
 /// Only the pre-check fields the board renders. The full state remains in the
@@ -377,6 +383,8 @@ pub struct LeaseView {
 pub struct MemberView {
     #[serde(default)]
     pub workpiece: String,
+    #[serde(default)]
+    pub scope_revision: DigestHex,
     #[serde(default)]
     pub resolution: Option<Present>,
     #[serde(default)]

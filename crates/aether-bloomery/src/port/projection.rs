@@ -24,8 +24,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::reduce::{BloomStatus, RecordedRefusal};
 use crate::values::{
-    CandidateRef, CompositionFinding, Evidence, LandingReceipt, OperatorHold, PrecheckState, ResolutionClaim,
-    SpendQuiesce, SurfacePathRequest, VerifyFailureSet, Wedge,
+    CandidateRef, CompositionFinding, CoordinationState, Evidence, LandingReceipt, OperatorHold, PrecheckState,
+    ResolutionClaim, SpendQuiesce, SurfacePathRequest, VerifyFailureSet, Wedge,
 };
 
 /// The self-contained render input a reconcile pushes outward: the current
@@ -172,6 +172,10 @@ pub struct BloomView {
     /// queued rows whose positional bloom elements predate this field.
     #[serde(default)]
     pub precheck: Option<PrecheckState>,
+    /// Optional eager-head and shared-run state. Member contexts, reservations,
+    /// proof freshness, and physical-run identity are derived from here.
+    #[serde(default)]
+    pub coordination: Option<CoordinationState>,
 }
 
 /// One narrowed composition's outward line (ADR-0210): the subject, the

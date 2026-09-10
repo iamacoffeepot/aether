@@ -1,10 +1,7 @@
 //! Immutable aggregate pre-check plans and their journal-replayable state.
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use aether_data::Schema;
-use aether_data::schema::{LabelNode, SchemaType};
 use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
@@ -34,9 +31,12 @@ pub struct PrecheckMember {
 pub struct PrecheckPlan {
     /// The sealed bloom this preview belongs to.
     pub bloom: BloomId,
-    /// The immutable bloom base used by the scratch fold and aggregate gate.
+    /// The immutable scratch-fold base for legacy plans, or the already
+    /// materialized selected head's checkout for eager plans. The aggregate
+    /// invocation independently retains the sealed bloom base as its diff base.
     pub base: Digest,
-    /// Eligible candidates in sealed membership order.
+    /// Eligible candidates in sealed membership order for a legacy fold, or
+    /// the selected eager head's actual member coverage order.
     pub members: Vec<PrecheckMember>,
     /// The sealed aggregate-verify gate-set identity.
     pub gate_set: Digest,
@@ -144,15 +144,6 @@ pub struct PrecheckState {
     pub promoted: bool,
     /// Whether an operator hold currently pauses idle admission.
     pub paused: bool,
-}
-
-// `Box` is wire-transparent under serde. Giving this one local instantiation
-// the same schema lets the journal keep its large replay state off the enum's
-// stack representation without changing the persisted shape.
-impl Schema for Box<PrecheckState> {
-    const SCHEMA: SchemaType = PrecheckState::SCHEMA;
-    const LABEL: Option<&'static str> = PrecheckState::LABEL;
-    const LABEL_NODE: LabelNode = PrecheckState::LABEL_NODE;
 }
 
 impl PrecheckState {

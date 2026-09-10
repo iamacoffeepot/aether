@@ -561,6 +561,7 @@ pub struct ReqwestGithub<T: HttpTransport = ReqwestTransport> {
 /// spinning forever on a misbehaving server.
 const MAX_LIST_PAGES: u32 = 100;
 const PER_PAGE: u32 = 100;
+const MAX_COMPARE_FILES: usize = 300;
 
 impl<T: HttpTransport> ReqwestGithub<T> {
     /// Build a client over `transport` bearing tokens from `token_source`,
@@ -1035,6 +1036,24 @@ struct GhCompareFile {
     patch: Option<String>,
 }
 
+/// Strict form of `GET /repos/{owner}/{repo}/compare/{base}...{head}` used for
+/// containment. Unlike conflict decoration, this read must prove the reported
+/// merge base and must include the files field.
+#[derive(Deserialize)]
+struct GhChangedPaths {
+    status: String,
+    merge_base_commit: GhRefObject,
+    files: Vec<GhCommitFile>,
+}
+
+#[derive(Deserialize)]
+struct GhCommitFile {
+    status: String,
+    filename: String,
+    #[serde(default)]
+    previous_filename: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct GhRun {
     id: u64,
@@ -1507,6 +1526,42 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
         decode::<GhCommit>(&response).map_err(git_data_error).map(GhCommit::into_git_commit)
     }
 
+    fn changed_paths(&self, base: &str, head: &str) -> Result<Vec<String>, GitDataError> {
+        let response = self.request(Method::Get, self.compare_url(base, head), None).map_err(git_data_error)?;
+        let compared: GhChangedPaths = decode(&response).map_err(git_data_error)?;
+        if !matches!(compared.status.as_str(), "ahead" | "identical") || compared.merge_base_commit.sha != base {
+            return Err(GitDataError::Command(format!(
+                "github comparison did not prove {base} is the exact base of {head}"
+            )));
+        }
+        // GitHub exposes at most 300 files through the compare endpoint.
+        // Exactly reaching the ceiling is ambiguous even when this comparison
+        // truly has 300 files, so containment refuses rather than risk a
+        // truncated path set.
+        if compared.files.len() >= MAX_COMPARE_FILES {
+            return Err(GitDataError::Command(format!(
+                "github comparison {base}..{head} reached the {MAX_COMPARE_FILES}-file response ceiling"
+            )));
+        }
+        let mut paths = BTreeSet::new();
+        for file in compared.files {
+            let renamed_or_copied = matches!(file.status.as_str(), "renamed" | "copied");
+            if file.filename.is_empty()
+                || file.previous_filename.as_ref().is_some_and(String::is_empty)
+                || (renamed_or_copied && file.previous_filename.is_none())
+            {
+                return Err(GitDataError::Command(format!(
+                    "github returned an incomplete changed path for comparison {base}..{head}"
+                )));
+            }
+            paths.insert(file.filename);
+            if let Some(previous) = file.previous_filename {
+                paths.insert(previous);
+            }
+        }
+        Ok(paths.into_iter().collect())
+    }
+
     fn is_ancestor(&self, ancestor: &str, commit: &str) -> Result<bool, GitDataError> {
         if ancestor == commit {
             return Ok(true);
@@ -1780,6 +1835,86 @@ mod tests {
             "https://api.github.com",
             "octo/shadow",
         )
+    }
+
+    fn changed_paths_response(base: &str, files: &[serde_json::Value]) -> String {
+        serde_json::json!({
+            "status": "ahead",
+            "merge_base_commit": { "sha": base },
+            "files": files,
+        })
+        .to_string()
+    }
+
+    fn changed_files(count: usize) -> Vec<serde_json::Value> {
+        (0..count)
+            .map(|index| serde_json::json!({ "status": "modified", "filename": format!("src/{index}.rs") }))
+            .collect()
+    }
+
+    #[test]
+    fn exact_changed_paths_accept_299_files_and_shape_the_pinned_compare() {
+        let body = changed_paths_response("base", &changed_files(299));
+        let github = client(200, &body);
+
+        let paths = github.changed_paths("base", "head").expect("a list below the provider cap is complete");
+
+        assert_eq!(paths.len(), 299);
+        assert_eq!(paths.first().map(String::as_str), Some("src/0.rs"));
+        let request = github.transport.last.borrow().clone().expect("compare request");
+        assert_eq!(request.method, Method::Get);
+        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/compare/base...head");
+    }
+
+    #[test]
+    fn exact_changed_paths_refuse_the_300_file_provider_ceiling() {
+        let body = changed_paths_response("base", &changed_files(300));
+        let error = client(200, &body).changed_paths("base", "head").expect_err("the cap is ambiguous");
+
+        assert!(matches!(error, GitDataError::Command(detail) if detail.contains("300-file response ceiling")));
+    }
+
+    #[test]
+    fn exact_changed_paths_include_rename_and_copy_sources() {
+        let body = changed_paths_response(
+            "base",
+            &[
+                serde_json::json!({
+                    "status": "renamed",
+                    "filename": "src/new.rs",
+                    "previous_filename": "src/old.rs",
+                }),
+                serde_json::json!({
+                    "status": "copied",
+                    "filename": "src/copy.rs",
+                    "previous_filename": "src/template.rs",
+                }),
+            ],
+        );
+
+        assert_eq!(
+            client(200, &body).changed_paths("base", "head").expect("complete rename metadata"),
+            ["src/copy.rs", "src/new.rs", "src/old.rs", "src/template.rs"],
+        );
+    }
+
+    #[test]
+    fn exact_changed_paths_refuse_a_foreign_merge_base_or_incomplete_rename() {
+        let foreign = changed_paths_response("other", &changed_files(1));
+        assert!(matches!(
+            client(200, &foreign).changed_paths("base", "head"),
+            Err(GitDataError::Command(detail)) if detail.contains("exact base")
+        ));
+
+        let incomplete =
+            changed_paths_response("base", &[serde_json::json!({ "status": "renamed", "filename": "src/new.rs" })]);
+        assert!(matches!(
+            client(200, &incomplete).changed_paths("base", "head"),
+            Err(GitDataError::Command(detail)) if detail.contains("incomplete changed path")
+        ));
+
+        let missing_files = r#"{"status":"ahead","merge_base_commit":{"sha":"base"}}"#;
+        assert!(matches!(client(200, missing_files).changed_paths("base", "head"), Err(GitDataError::Command(_))));
     }
 
     // The `Authorization: Bearer …` header the client stamps from its source.

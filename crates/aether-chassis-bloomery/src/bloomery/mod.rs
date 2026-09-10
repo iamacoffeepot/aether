@@ -7,6 +7,8 @@ mod chassis;
 mod cli;
 mod config;
 mod construct;
+#[cfg(feature = "github")]
+mod coordination;
 mod doctor;
 mod driver;
 #[cfg(feature = "github")]
@@ -131,14 +133,20 @@ pub use study::{
 pub use testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload, ScriptedVerdict};
 #[cfg(feature = "runtime")]
 pub use verify::{
-    Accumulation, Attribution, AttributionError, AttributionRequest, BaseProbe, BaseRepairWorkpiece, BatchBisect,
-    BatchComposer, BatchContext, BatchFailure, BatchFailureHooks, BatchGate, BatchMember, BatchReport, BatchRestart,
-    BloomDisposition, CoverageEntry, CoverageMap, CoverageStatus, GateOutcome, Land, LandProbe, MemberFate,
-    MissingCoverage, RepairBoard, RollDecision, RollHold, RunningGate, SurfaceOverlap, SweepContext, SweepDecision,
-    SweepOutcome, TaintSet, TestClosure, UnknownFact, attribute_gate_failure, bisect_land_order, bloom_disposition,
-    consult_proof_fact, coverage_map, decide_accumulation, decide_roll, decide_sweep, record_proof_facts,
-    repair_landed, run_batch_gate, run_sweep, unknowns,
+    Attribution, AttributionError, AttributionRequest, BaseProbe, BaseRepairWorkpiece, BatchCheck, BatchFailure,
+    BatchMember, BatchProbeReceipt, BatchProbeRequest, BatchProgress, BatchReport, BloomDisposition, CoverageEntry,
+    CoverageMap, CoverageStatus, Land, LandProbe, MissingCoverage, ProbeVerdict, RepairBoard, RollDecision, RollHold,
+    SweepContext, SweepDecision, SweepOutcome, TaintSet, TestClosure, UnknownFact, attribute_gate_failure,
+    bisect_land_order, bloom_disposition, consult_proof_fact, coverage_map, decide_roll, decide_sweep,
+    next_batch_probe, record_proof_facts, repair_landed, run_sweep, unknowns,
 };
+#[cfg(feature = "runtime")]
+pub use verify::{
+    ContextualFactError, ContextualProofFactReuse, ContextualProofReuse, ContextualRunnerReport,
+    contextual_bundle_reports, contextual_fact_key, contextual_reports, observed_probe_verdict,
+    record_contextual_facts, reuse_contextual_proof,
+};
+
 pub use verify::{
     ClosureKey, ClosureKeyError, DiscriminatedFact, DiscriminatedFacts, HostClass, ProofResult, ProofSource,
     RunnerReport, closure_key, discriminate,

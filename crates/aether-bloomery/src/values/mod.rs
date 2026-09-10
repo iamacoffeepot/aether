@@ -14,6 +14,7 @@ mod bloom;
 mod commission;
 mod composition;
 mod config;
+mod coordination;
 mod fields;
 mod finding;
 mod granularity;
@@ -72,6 +73,19 @@ pub use composition::CompositionFinding;
 pub use config::{
     ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, ResolvedConfigs, Unproducible, config_address,
     decode_config,
+};
+pub use coordination::{
+    CandidatePreparation, CandidatePreparationPlan, CompatibilityPreview, CompatibilityPreviewPlan,
+    CompatibilityPreviewRecord, CompositionContract, CompositionContractTemplate, CompositionInput, CompositionPlan,
+    ConstructContext, ConstructionAdmission, ConstructionCheckpoint, ContextualAttemptDispatch,
+    ContextualInvocationTemplate, ContextualResolutionClaim, CoordinationDiagnostic, CoordinationPolicy,
+    CoordinationState, EagerIntegrationState, FailureScope, GenerationMember, IntegrationAppendPlan,
+    IntegrationGeneration, IntegrationHead, MemberContractPin, MemberPin, MemberVerifyLatency, MemberVerifyOutcome,
+    MemberVerifyRequest, PartialHeadRepairCompletion, PartialHeadRepairDispatch, PartialHeadRepairPlan,
+    PreparedCandidate, ResolutionProof, SharedRunCompletion, SharedRunDispatch, SharedRunExecution, SharedRunMode,
+    SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunPreparation, SharedRunRecord, StableHeadReservation,
+    SurvivorGroup, VerificationContract, VerificationMode, VerificationObligation, construction_nonce_digest,
+    host_class_digest, verification_environment_digest,
 };
 pub use fields::{FieldKind, WorkpieceFact, WorkpieceFields};
 pub use finding::{

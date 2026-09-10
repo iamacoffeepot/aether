@@ -7,11 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
-    AggregateVerifyError, AttemptCompletedError, BaseReverifyError, Decision, FoldConflictError, GrantAttemptsError,
-    HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
-    NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, PrecheckError,
-    ProposalError, ResolveError, SealError, SpliceError, StudyError, SupersedeError, SuppressionDispositionError,
-    SurfaceRequestedError, VerifyFailedError, WithdrawError,
+    AggregateVerifyError, AttemptCompletedError, BaseReverifyError, CoordinationError, Decision, FoldConflictError,
+    GrantAttemptsError, HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError,
+    MemberExecutorFaultError, NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError,
+    PrecheckError, ProposalError, ResolveError, SealError, SpliceError, StudyError, SupersedeError,
+    SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -841,6 +841,10 @@ pub enum Outcome {
     PrecheckJoined { bloom: BloomId, node: Digest },
     /// A pre-check fact was refused.
     PrecheckRejected(PrecheckError),
+    /// One shared-verification or eager-integration transition was admitted.
+    CoordinationAdvanced { bloom: BloomId, subject: Digest },
+    /// A shared-verification or eager-integration transition was refused.
+    CoordinationRejected(CoordinationError),
 }
 
 impl Outcome {

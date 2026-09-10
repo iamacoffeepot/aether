@@ -511,6 +511,8 @@ mod tests {
             nonce: Nonce(nonce.to_owned()),
             instruction_bundle: None,
             prompt_manifest: None,
+            physical_run: None,
+            release_physical_run: true,
         }
     }
 

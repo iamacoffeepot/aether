@@ -10,9 +10,11 @@ use super::gate::RecordedRefusal;
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    Adjudication, BaseReverify, BloomSpec, CandidateRef, CompositionParents, ConfigRegistry, Evidence,
+    Adjudication, BaseReverify, BloomSpec, CandidatePreparation, CandidateRef, CompatibilityPreview, CompositionInput,
+    CompositionParents, ConfigRegistry, ConstructionAdmission, ConstructionCheckpoint, Evidence, IntegrationHead,
     MemberDependency, OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion,
-    PrecheckCompletion, PrecheckPreparation, ResolutionClaim, Statement, SuppressionDisposition, SurfaceRequest,
+    PartialHeadRepairCompletion, PrecheckCompletion, PrecheckPreparation, ResolutionClaim, SharedRunCompletion,
+    SharedRunPlan, SharedRunPreparation, StableHeadReservation, Statement, SuppressionDisposition, SurfaceRequest,
     VerifyFailureSet, Withdrawal,
 };
 
@@ -865,6 +867,48 @@ pub enum Fact {
     RequestPrecheck { bloom: BloomId, node: Digest },
     /// One issued pre-check run reached a terminal host result.
     PrecheckCompleted { bloom: BloomId, node: Digest, completion: PrecheckCompletion },
+    /// The source completed an exact eager append plan.
+    IntegrationAdvanced { bloom: BloomId, plan: Digest, head: IntegrationHead },
+    /// An exact eager append plan collided before advancing its parent.
+    IntegrationAppendConflicted {
+        bloom: BloomId,
+        plan: Digest,
+        generation: Digest,
+        expected_parent: Digest,
+        input: CompositionInput,
+        at: CandidateRef,
+        evidence: Evidence,
+        observed_at_unix_millis: u64,
+    },
+    /// The source refused an append without claiming a member collision.
+    IntegrationAppendRefused {
+        bloom: BloomId,
+        plan: Digest,
+        generation: Digest,
+        expected_parent: Digest,
+        detail: Digest,
+    },
+    /// The source completed one exact reconcile preparation request.
+    CandidatePrepared { bloom: BloomId, plan: Digest, preparation: CandidatePreparation },
+    /// The scheduler proposed grouping current logical requests.
+    ProposeSharedRun { bloom: BloomId, plan: SharedRunPlan },
+    /// Scratch source materialized an approved contextual run.
+    SharedRunPrepared { bloom: BloomId, plan: Digest, preparation: SharedRunPreparation },
+    /// The executor bound an approved plan to one trusted physical identity.
+    SharedRunStarted { bloom: BloomId, plan: Digest, run: Digest },
+    /// One physical run returned zero or more logical outcomes.
+    SharedRunCompleted { bloom: BloomId, completion: SharedRunCompletion },
+    /// The coordinator cadence reached a recorded reservation deadline.
+    StableHeadReservationExpired { bloom: BloomId, reservation: StableHeadReservation, observed_at_unix_millis: u64 },
+    /// A live constructor published an immutable checkpoint.
+    ConstructionCheckpointObserved { checkpoint: ConstructionCheckpoint },
+    /// The source completed a version-bound compatibility preview.
+    CompatibilityPreviewed { bloom: BloomId, plan: Digest, result: CompatibilityPreview },
+    /// A composition-owned repair of the exact current eager head settled.
+    PartialHeadRepairCompleted { bloom: BloomId, plan: Digest, completion: PartialHeadRepairCompletion },
+    /// The executor is ready to submit one queued constructor and asks the
+    /// reducer to freeze its current head context under a physical nonce.
+    RequestConstructionAdmission { admission: ConstructionAdmission },
 }
 
 impl Fact {

@@ -132,7 +132,7 @@ pub const fn transient_construction_checkpoint_ref_prefix() -> &'static str {
 /// capture distinct; promotion deletes this exact ref.
 #[must_use]
 pub fn transient_construction_checkpoint_ref_name(nonce: &Nonce, observation: u64) -> String {
-    format!("{}{}/{}", transient_construction_checkpoint_ref_prefix(), encode_hex(nonce.0.as_bytes()), observation,)
+    format!("{}{}/{}", transient_construction_checkpoint_ref_prefix(), encode_hex(nonce.0.as_bytes()), observation)
 }
 
 /// Durable pin for one version-bound checkpoint after the executor joins its
@@ -1979,7 +1979,7 @@ mod tests {
         let authored = CandidateRef { tree: authored_tree, checkout: authored_checkout };
         let namespace = bloom_id(92);
         let integration = format!("bloom/{}/integration", short_hex(&namespace.0));
-        let pinned = format!("bloom/{}/candidate/{}", short_hex(&namespace.0), authored_checkout.to_hex(),);
+        let pinned = format!("bloom/{}/candidate/{}", short_hex(&namespace.0), authored_checkout.to_hex());
         fake.seed_merge_conflict(&integration, &pinned);
         let source = git_source(&fake, false);
 

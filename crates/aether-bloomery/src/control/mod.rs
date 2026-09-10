@@ -41,8 +41,9 @@ use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::reduce::Decision;
 use crate::values::{
-    AgentProfile, ConfigRegistry, MemberCandidate, OperatorProposal, OrphanClaimRelease, PrecheckNode, PrecheckPlan,
-    Transformation,
+    AgentProfile, CandidatePreparationPlan, CompatibilityPreviewPlan, ConfigRegistry, ContextualAttemptDispatch,
+    IntegrationAppendPlan, MemberCandidate, MemberVerifyRequest, OperatorProposal, OrphanClaimRelease,
+    PartialHeadRepairDispatch, PrecheckNode, PrecheckPlan, SharedRunDispatch, SharedRunPlan, Transformation,
 };
 
 /// One active-membership mutation the store applies inside the combined
@@ -301,6 +302,17 @@ topic_vocabulary! {
     DispatchPrecheck,
     CancelPrecheck,
     PromotePrecheck,
+    IntegrationAppend,
+    CandidatePreparation,
+    MemberVerification,
+    SharedRunPreparation,
+    SharedRun,
+    CancelSharedRun,
+    CancelMemberVerification,
+    CompatibilityPreview,
+    ConstructionAdmission,
+    ContextualDispatch,
+    PartialHeadRepair,
 }
 
 impl Topic {
@@ -337,6 +349,17 @@ impl Topic {
             Self::DispatchPrecheck => "topic:dispatch_precheck",
             Self::CancelPrecheck => "topic:cancel_precheck",
             Self::PromotePrecheck => "topic:promote_precheck",
+            Self::IntegrationAppend => "topic:integration_append",
+            Self::CandidatePreparation => "topic:candidate_preparation",
+            Self::MemberVerification => "topic:member_verification",
+            Self::SharedRunPreparation => "topic:shared_run_preparation",
+            Self::SharedRun => "topic:shared_run",
+            Self::CancelSharedRun => "topic:cancel_shared_run",
+            Self::CancelMemberVerification => "topic:cancel_member_verification",
+            Self::CompatibilityPreview => "topic:compatibility_preview",
+            Self::ConstructionAdmission => "topic:construction_admission",
+            Self::ContextualDispatch => "topic:contextual_dispatch",
+            Self::PartialHeadRepair => "topic:partial_head_repair",
         }
     }
 
@@ -370,6 +393,17 @@ impl Topic {
             Decision::DispatchPrecheck { .. } => Some(Self::DispatchPrecheck),
             Decision::CancelPrecheck { .. } => Some(Self::CancelPrecheck),
             Decision::PromotePrecheck { .. } => Some(Self::PromotePrecheck),
+            Decision::DispatchIntegrationAppend { .. } => Some(Self::IntegrationAppend),
+            Decision::DispatchCandidatePreparation { .. } => Some(Self::CandidatePreparation),
+            Decision::QueueMemberVerification { .. } => Some(Self::MemberVerification),
+            Decision::DispatchSharedRunPreparation { .. } => Some(Self::SharedRunPreparation),
+            Decision::DispatchSharedRun { .. } => Some(Self::SharedRun),
+            Decision::CancelSharedRun { .. } => Some(Self::CancelSharedRun),
+            Decision::CancelMemberVerification { .. } => Some(Self::CancelMemberVerification),
+            Decision::DispatchCompatibilityPreview { .. } => Some(Self::CompatibilityPreview),
+            Decision::QueueConstructionAdmission { .. } => Some(Self::ConstructionAdmission),
+            Decision::DispatchContextualAttempt { .. } => Some(Self::ContextualDispatch),
+            Decision::DispatchPartialHeadRepair { .. } => Some(Self::PartialHeadRepair),
             Decision::ClaimMembership { .. }
             | Decision::ReleaseMembership { .. }
             | Decision::InheritClaim { .. }
@@ -480,7 +514,8 @@ impl Topic {
             | Decision::RecordBaseReceipt { .. }
             | Decision::QueueProposal { .. }
             | Decision::DequeueProposal { .. }
-            | Decision::RecordPrecheckState { .. } => None,
+            | Decision::RecordPrecheckState { .. }
+            | Decision::RecordCoordinationState { .. } => None,
         }
     }
 }
@@ -783,6 +818,66 @@ pub struct PrecheckPayload {
 pub struct PrecheckNodePayload {
     pub bloom: Digest,
     pub node: Digest,
+}
+
+/// One exact eager append source request.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationAppendPayload {
+    pub plan: IntegrationAppendPlan,
+}
+
+/// One exact reconcile preparation source request.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CandidatePreparationPayload {
+    pub plan: CandidatePreparationPlan,
+}
+
+/// One logical member request offered to the shared-run scheduler.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MemberVerificationPayload {
+    pub request: MemberVerifyRequest,
+}
+
+/// One approved run plan awaiting contextual source preparation.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SharedRunPlanPayload {
+    pub plan: SharedRunPlan,
+}
+
+/// One immutable physical run or serial lease dispatch.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SharedRunDispatchPayload {
+    pub dispatch: SharedRunDispatch,
+}
+
+/// Digest-only retirement for a physical plan or logical request.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CoordinationCancelPayload {
+    pub subject: Digest,
+}
+
+/// One bounded immutable construction-checkpoint preview.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CompatibilityPreviewPayload {
+    pub plan: CompatibilityPreviewPlan,
+}
+
+/// One construction intent offered for just-in-time physical admission.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ConstructionAdmissionPayload {
+    pub dispatch: ContextualAttemptDispatch,
+}
+
+/// One member attempt carrying its immutable eager-head context.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ContextualDispatchPayload {
+    pub dispatch: ContextualAttemptDispatch,
+}
+
+/// One exact composition-owned repair of a red eager head.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PartialHeadRepairPayload {
+    pub dispatch: PartialHeadRepairDispatch,
 }
 
 /// The payload a [`Topic::Study`] outbox row carries — the bloom-level

@@ -12,11 +12,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use aether_actor::Addressable;
 use aether_bloomery::{
     AgentSelection, BackendObjectId, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CalibrationDocument,
-    CandidateRef, ConfigKind, ConfigRegistry, Correspondence, Digest, Evidence, EvidenceKind, Fact, FakeKeyProvider,
-    Harness, KeyId, MemberDependency, Membership, ModelOverride, ModelProcessInstructions, Observation, Outcome,
-    PipelineManifest, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Snapshot, StageCatalog, StageId,
-    Statement, StoreClass, VerifyFailureSet, ViewDocument, WorkpieceId, config_address, decode_recorded_event,
-    signed_approval,
+    CandidateRef, ConfigKind, ConfigRegistry, CoordinationPolicy, Correspondence, Digest, Evidence, EvidenceKind, Fact,
+    FakeKeyProvider, Harness, KeyId, MemberDependency, Membership, ModelOverride, ModelProcessInstructions,
+    Observation, Outcome, PipelineManifest, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Snapshot,
+    StageCatalog, StageId, Statement, StoreClass, VerifyFailureSet, ViewDocument, WorkpieceId, config_address,
+    decode_recorded_event, signed_approval,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
@@ -152,6 +152,9 @@ impl ScenarioHarness {
         if let Some(secs) = builder.wall_clock_secs {
             configs.overlay(author_catalog(&store_path, secs));
         }
+        if let Some(policy) = &builder.coordination_policy {
+            configs.overlay(author_coordination_policy(&store_path, policy));
+        }
 
         let (chassis, coordinator, wire, fake) = match builder.coordinator {
             CoordinatorKind::InProcess => {
@@ -184,6 +187,7 @@ impl ScenarioHarness {
                         heartbeat_silence_secs: builder.heartbeat_silence_secs,
                         authorized_instructions: &authorized,
                         retrospect_reader_enabled: builder.reader == Reader::On,
+                        host_class: builder.host_class(),
                     },
                 );
                 (None, Some(child), Wire::from_stream(stream), None)
@@ -1024,6 +1028,7 @@ fn in_process_env(
         } else {
             defaults.operator_email
         },
+        host_class: builder.host_class().to_owned(),
         authority_backend: if builder.authority_path.is_some() {
             "local".to_owned()
         } else {
@@ -1095,6 +1100,8 @@ pub struct ForkedLaneSettings<'a> {
     /// `AETHER_BLOOMERY_RETROSPECT_READER_ENABLED` — whether the child
     /// dispatches the bloom-level reader after a landing (ADR-0216 §4).
     pub retrospect_reader_enabled: bool,
+    /// `AETHER_BLOOMERY_HOST_CLASS`, matching the sealed coordination policy.
+    pub host_class: &'a str,
 }
 
 impl ForkedLaneSettings<'_> {
@@ -1115,6 +1122,7 @@ impl ForkedLaneSettings<'_> {
             (String::from("AETHER_BLOOMERY_OPERATOR_EMAIL"), String::from("lane-harness@example.test")),
             (String::from("AETHER_BLOOMERY_AUTHORIZED_INSTRUCTIONS"), self.authorized_instructions.to_owned()),
             (String::from("AETHER_BLOOMERY_RETROSPECT_READER_ENABLED"), self.retrospect_reader_enabled.to_string()),
+            (String::from("AETHER_BLOOMERY_HOST_CLASS"), self.host_class.to_owned()),
         ];
         if let Some(secs) = self.heartbeat_silence_secs {
             env.push((String::from("AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS"), secs.to_string()));
@@ -1192,6 +1200,19 @@ fn author_catalog(store_path: &str, wall_clock_secs: u64) -> ConfigRegistry {
 
     let mut configs = ConfigRegistry::default();
     configs.insert::<StageCatalog>(address);
+    configs
+}
+
+fn author_coordination_policy(store_path: &str, policy: &CoordinationPolicy) -> ConfigRegistry {
+    let bytes = to_vec(policy).expect("the coordination policy encodes");
+    let address = config_address(CoordinationPolicy::NAME, &bytes);
+    SqliteStore::open(store_path)
+        .expect("the coordinator's journal opens for writing")
+        .record_config(address.as_bytes(), CoordinationPolicy::NAME, &bytes)
+        .expect("the coordination policy records");
+
+    let mut configs = ConfigRegistry::default();
+    configs.insert::<CoordinationPolicy>(address);
     configs
 }
 

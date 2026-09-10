@@ -80,6 +80,7 @@ fn one_bloom(id: BloomId, members: Vec<MemberView>) -> ViewDocument {
         leases: Vec::new(),
         narrowed_compositions: Vec::new(),
         precheck: None,
+        coordination: None,
     };
     ViewDocument {
         mainline: digest(0),

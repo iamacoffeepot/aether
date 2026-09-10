@@ -46,10 +46,10 @@ use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, BloomId,
-    CancelDispatchPayload, CandidateRef, ConfigRegistry, ConfigScopes, Digest, DispatchPayload, Event, ExecutionStatus,
-    Fact, LaneObservation, ModelOverride, Nonce, RedispatchPayload, ReviewPass, SharedCorrespondence, StageId,
-    StageVerdict, TimeoutRecord, Topic, VerifyFailureSet, WorkHandle, WorkpieceId, normalize_write_paths,
-    pin_workpiece_description,
+    CancelDispatchPayload, CandidateRef, ConfigRegistry, ConfigScopes, ContextualAttemptDispatch, Digest,
+    DispatchPayload, Event, ExecutionStatus, Fact, LaneObservation, MemberPin, ModelOverride, Nonce, RedispatchPayload,
+    ReviewPass, SharedCorrespondence, StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailureSet, WorkHandle,
+    WorkpieceId, normalize_write_paths, pin_workpiece_description,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_github::{GitObjectId, candidate_ref_name, member_checkpoint_ref_name, short_hex};
@@ -79,7 +79,7 @@ use crate::bloomery::provenance::drain_refusals;
 use crate::bloomery::study::{StudyAdmitDecision, UploadedStudyRecord, admit_study, study_evidence_event};
 #[cfg(any(test, feature = "testing"))]
 use crate::bloomery::testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload};
-use crate::bloomery::{CoordinatorConfig, ExecutorReactorSetup};
+use crate::bloomery::{CoordinatorConfig, ExecutorReactorSetup, HostClass};
 use crate::control::ControlCore;
 use crate::store::{
     CANDIDATE_HASH_OCCASION_SEAL, OrderLifecycle, OutstandingOrder, SqliteStore, StoreBackend, StoreConfigError,
@@ -93,6 +93,17 @@ use offload::{AdapterCall, AdapterOffload, PendingPublish};
 
 mod scope;
 use scope::drain_and_dispatch_scope;
+
+mod shared;
+use shared::{
+    drain_construction_admissions, drain_contextual_dispatches, drain_shared_cancellations, drain_shared_dispatches,
+    drive_partial_head_repairs, drive_shared_runs, observe_construction_checkpoints,
+};
+
+mod scheduler;
+use scheduler::{MemberVerificationScheduler, drain_member_verifications};
+
+mod partial_repair;
 
 mod strand;
 
@@ -405,6 +416,14 @@ fn expire_overdue_orders(
 
     let mut admits = Vec::new();
     for order in expired {
+        match store.partial_head_repair_for_nonce(&order.nonce) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(%error, nonce = %order.nonce, "partial-head repair ownership read failed; deadline re-checks next tick");
+                continue;
+            }
+        }
         if unobserved.iter().any(|nonce| nonce.0 == order.nonce) {
             continue;
         }
@@ -886,6 +905,8 @@ pub struct ExecutorReactorState {
     // than making it inline.
     offload: AdapterOffload,
     prechecks: PrecheckProjection,
+    host_class: HostClass,
+    member_verifications: MemberVerificationScheduler,
 }
 
 impl ExecutorReactorState {
@@ -925,6 +946,8 @@ impl ExecutorReactorState {
             pusher: default_candidate_push(true),
             offload: AdapterOffload::new(),
             prechecks: PrecheckProjection::default(),
+            host_class: HostClass::new("fleet"),
+            member_verifications: MemberVerificationScheduler::default(),
         }
     }
 
@@ -977,6 +1000,29 @@ Do not reopen finished member work; repair at the seam.";
 /// Shared by the first dispatch of a stage and the replay of a parked one
 /// (#3664), so a re-dispatched lane resolves its profile and prompt exactly the
 /// way the attempt that parked did.
+fn shared_member_advisory(
+    store: &mut dyn StoreBackend,
+    bloom: &[u8],
+    member: &MemberPin,
+) -> rusqlite::Result<Option<String>> {
+    let exact_key = shared::shared_member_findings_key(member);
+    let findings = if let Some(findings) = store.lookup_review_findings(bloom, &exact_key)? {
+        Some(findings)
+    } else {
+        let workpiece_findings = store.lookup_review_findings(bloom, &member.workpiece.0)?;
+        let guard =
+            store.lookup_review_findings(bloom, &shared::shared_member_findings_guard_key(&member.workpiece))?;
+        match guard.and_then(|guard| shared::guarded_shared_member_findings_key(&guard).map(str::to_owned)) {
+            Some(guarded_key) => {
+                let guarded_findings = store.lookup_review_findings(bloom, &guarded_key)?;
+                (workpiece_findings != guarded_findings).then_some(workpiece_findings).flatten()
+            }
+            None => workpiece_findings,
+        }
+    };
+    Ok(findings)
+}
+
 fn overlay_member_advisory(
     store: &mut dyn StoreBackend,
     record: &mut DispatchRecord,
@@ -1007,10 +1053,12 @@ fn overlay_member_advisory(
     // the empty workpiece key until the decomposition slices them per member, and
     // every re-opened member reads that bloom row. Looked up once here so a
     // composition Refine can seed from the same `Option` the overlay appends.
-    let findings = match store.lookup_review_findings(&bloom, &workpiece)? {
-        Some(findings) => Some(findings),
-        None => store.lookup_review_findings(&bloom, "")?,
+    let member = MemberPin {
+        workpiece: record.workpiece.clone(),
+        scope_revision: record.scope_revision,
+        candidate: CandidateRef { tree: record.candidate, checkout: record.transformation.checkout },
     };
+    let findings = shared_member_advisory(store, &bloom, &member)?.or(store.lookup_review_findings(&bloom, "")?);
     if record.is_composition_refine() {
         seed_composition_refine_order(store, record, findings.as_deref())?;
     } else if let Some(description) = store.lookup_dispatch_description(&bloom, &workpiece)? {
@@ -2388,6 +2436,28 @@ fn resolve_replay(
             "answer statement is not UTF-8; re-dispatching without the decision overlay",
         ),
     }
+    if let Some(bytes) = store.lookup_contextual_dispatch(&held.nonce)?
+        && let Ok(original) = from_bytes::<ContextualAttemptDispatch>(&bytes)
+    {
+        let replay = ContextualAttemptDispatch {
+            bloom: record.bloom,
+            workpiece: record.workpiece.clone(),
+            stage: record.stage,
+            attempt: original.attempt,
+            transformation: record.transformation.clone(),
+            scope_revision: record.scope_revision,
+            candidate: Some(record.candidate),
+            profile: record.profile.clone(),
+            configs: record.configs.clone(),
+            context: original.context,
+        };
+        store.record_contextual_dispatch(
+            &record.nonce.0,
+            &to_vec(&replay).map_err(|error| {
+                rusqlite::Error::InvalidParameterName(format!("contextual redispatch encode: {error}"))
+            })?,
+        )?;
+    }
     Ok(Some(record))
 }
 
@@ -2855,7 +2925,13 @@ fn resolve_capture_commit(
 /// decoding the other columns here would be dead work. Factored out of `init`
 /// so a test can exercise it without constructing a `NativeInitCtx`.
 fn seed_tracked(store: &mut dyn StoreBackend) -> rusqlite::Result<Vec<WorkHandle>> {
-    Ok(store.list_outstanding_nonces()?.into_iter().map(|nonce| WorkHandle::new(Nonce(nonce))).collect())
+    let mut tracked = Vec::new();
+    for nonce in store.list_outstanding_nonces()? {
+        if store.shared_step_physical_run(&nonce)?.is_none() && !store.partial_head_repair_for_nonce(&nonce)? {
+            tracked.push(WorkHandle::new(Nonce(nonce)));
+        }
+    }
+    Ok(tracked)
 }
 
 /// The same outstanding orders as [`seed_tracked`], carrying the transformation
@@ -2885,7 +2961,16 @@ fn seed_dispatches(store: &mut dyn StoreBackend) -> rusqlite::Result<Vec<Outstan
             );
             continue;
         };
-        dispatches.push(OutstandingDispatch { nonce: Nonce(nonce), transformation });
+        let (physical_run, release_physical_run) = match store.shared_step_physical_run(&nonce)? {
+            Some((run, release)) => (Digest::from_slice(&run), release),
+            None => (None, true),
+        };
+        dispatches.push(OutstandingDispatch {
+            nonce: Nonce(nonce),
+            transformation,
+            physical_run,
+            release_physical_run,
+        });
     }
     Ok(dispatches)
 }
@@ -2923,8 +3008,8 @@ fn open_artifacts(configured: Option<&str>) -> Option<ArtifactsCapabilityState> 
 /// that holds the outstanding-order table, and the content store the study lane
 /// puts an attempt's cost record into. Bundled because they are one concept —
 /// where this cycle's writes land — and travel together to every caller.
-struct Stores<'a> {
-    store: &'a mut dyn StoreBackend,
+struct Stores<'a, S: ?Sized = dyn StoreBackend + 'a> {
+    store: &'a mut S,
     artifacts: Option<&'a mut ArtifactsCapabilityState>,
 }
 
@@ -3198,6 +3283,91 @@ fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (Scripted
     }
 }
 
+/// Admit contextual and shared work in order, then offer idle pre-checks.
+fn drain_coordinated_topics(
+    stores: Stores<'_, SqliteStore>,
+    executor: &dyn ExecutorPort,
+    scheduler: &mut MemberVerificationScheduler,
+    tracked: &mut Vec<TrackedHandle>,
+    prechecks: &PrecheckProjection,
+    claims: NameEvidenceClaims,
+    now_unix_millis: u64,
+) -> Vec<Admit> {
+    let Stores { store, mut artifacts } = stores;
+    let mut admits = Vec::new();
+    let coordination_ready = match scheduler.refresh(store) {
+        Ok(ready) => ready,
+        Err(error) => {
+            tracing::warn!(%error, "coordination projection could not refresh; admission waits");
+            false
+        }
+    };
+    if coordination_ready {
+        match drain_contextual_dispatches(scheduler, store, artifacts.as_deref_mut(), executor, now_unix_millis) {
+            Ok(handles) => tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, Instant::now()))),
+            Err(error) => {
+                tracing::warn!(%error, "contextual dispatch drain failed; durable entries remain pending");
+            }
+        }
+        match drain_construction_admissions(scheduler, store, executor, now_unix_millis) {
+            Ok(pending) => admits.extend(pending),
+            Err(error) => {
+                tracing::warn!(%error, "construction admission drain failed; durable intent remains pending");
+            }
+        }
+    }
+    match drain_member_verifications(scheduler, store, now_unix_millis) {
+        Ok(pending) => admits.extend(pending),
+        Err(error) => {
+            tracing::warn!(%error, "member-verification scheduler failed; durable requests remain pending");
+        }
+    }
+    match drain_shared_dispatches(store, now_unix_millis) {
+        Ok(pending) => admits.extend(pending),
+        Err(error) => {
+            tracing::warn!(%error, "shared-run dispatch drain failed; durable entries remain pending");
+        }
+    }
+    if let Err(error) = drain_shared_cancellations(store, executor) {
+        tracing::warn!(%error, "shared-run cancellation drain failed; durable entries remain pending");
+    }
+    match drive_partial_head_repairs(store, artifacts.as_deref_mut(), executor, claims, now_unix_millis) {
+        Ok(pending) => admits.extend(pending),
+        Err(error) => {
+            tracing::warn!(%error, "partial-head repair driver failed; durable work remains pending");
+        }
+    }
+    match precheck::drain_prechecks(store, artifacts, executor, prechecks, now_unix_millis) {
+        Ok((handles, pending)) => {
+            tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, Instant::now())));
+            admits.extend(pending);
+        }
+        Err(error) => tracing::warn!(%error, "pre-check drain failed; durable requests remain pending"),
+    }
+    admits
+}
+
+/// Observe active construct lanes before intake so an arriving candidate has
+/// its final write set leased before integration releases it (ADR-0204).
+fn observe_construct_work(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    now_unix_millis: u64,
+) -> Vec<Admit> {
+    let mut admits = Vec::new();
+    match observe_lane_writes(store, executor, now_unix_millis) {
+        Ok(observed) => admits.extend(observed),
+        Err(error) => {
+            tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "lane-write observation failed");
+        }
+    }
+    match observe_construction_checkpoints(store, executor) {
+        Ok(observed) => admits.extend(observed),
+        Err(error) => tracing::warn!(%error, "construction-checkpoint observation failed"),
+    }
+    admits
+}
+
 /// One turn of the reactor's loop: drain + submit, sweep the lanes' writes,
 /// pull + admit, journal what the publisher answered, and hand every call this
 /// turn asked for to a worker.
@@ -3259,19 +3429,15 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
             );
         }
         if !skip_drain && prechecks_ready {
-            match precheck::drain_prechecks(
-                store,
-                state.artifacts.as_mut(),
+            admits.extend(drain_coordinated_topics(
+                Stores { store, artifacts: state.artifacts.as_mut() },
                 &executor,
+                &mut state.member_verifications,
+                &mut state.tracked,
                 &state.prechecks,
+                state.claims,
                 clock.now_unix_millis,
-            ) {
-                Ok((handles, pending)) => {
-                    state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, Instant::now())));
-                    admits.extend(pending);
-                }
-                Err(error) => tracing::warn!(%error, "pre-check drain failed; durable requests remain pending"),
-            }
+            ));
         }
         let newly_tracked = state.tracked.split_off(already_tracked);
 
@@ -3292,17 +3458,19 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
             }
         }
 
-        // Sweep the live construct lanes' working trees and admit what they
-        // have written (ADR-0204). Outside the backoff skip: the backoff paces
-        // a *dispatch* surface that is refusing, and an observation dispatches
-        // nothing — it reads directories this process owns. Before the pull, so
-        // a lane whose evidence lands this same turn has its final write set
-        // leased before the integration that releases it.
-        match observe_lane_writes(store, &executor, clock.now_unix_millis) {
-            Ok(observed) => admits.extend(observed),
-            Err(error) => {
-                tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "lane-write observation failed");
-            }
+        // Continue observing active authors during dispatch backoff.
+        admits.extend(observe_construct_work(store, &executor, clock.now_unix_millis));
+
+        match drive_shared_runs(
+            store,
+            state.artifacts.as_mut(),
+            &executor,
+            claims,
+            &state.host_class,
+            clock.now_unix_millis,
+        ) {
+            Ok(pending) => admits.extend(pending),
+            Err(error) => tracing::warn!(%error, "shared-run execution pass failed; durable state will retry"),
         }
 
         let (pulled, published) = pull_and_admit(
@@ -3397,6 +3565,8 @@ impl NativeActor for ExecutorReactorCapability {
                 pusher: config.pusher,
                 offload: AdapterOffload::new(),
                 prechecks: PrecheckProjection::default(),
+                host_class: config.host_class,
+                member_verifications: MemberVerificationScheduler::default(),
             });
         };
 
@@ -3480,6 +3650,8 @@ impl NativeActor for ExecutorReactorCapability {
             pusher: config.pusher,
             offload: AdapterOffload::new(),
             prechecks: PrecheckProjection::default(),
+            host_class: config.host_class,
+            member_verifications: MemberVerificationScheduler::default(),
         })
     }
 

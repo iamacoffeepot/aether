@@ -66,6 +66,10 @@ pub enum AppendOutcome {
     Duplicate,
 }
 
+#[cfg(test)]
+#[path = "shared_run_tests.rs"]
+mod shared_run_tests;
+
 /// The outcome of a [`ClaimSeal`]: the whole membership set claimed, or the
 /// first workpiece already held by an active bloom (the seal claimed nothing).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +225,120 @@ pub enum RecordOutcome {
     Recorded,
     /// The nonce was already outstanding — nothing was written.
     Duplicate,
+}
+
+/// Host-owned lifecycle of one durable shared physical verification run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedRunLifecycle {
+    Preparing,
+    Ready,
+    Running,
+    Completing,
+    Completed,
+    Cancelled,
+}
+
+impl SharedRunLifecycle {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Preparing => "preparing",
+            Self::Ready => "ready",
+            Self::Running => "running",
+            Self::Completing => "completing",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        match value {
+            "preparing" => Self::Preparing,
+            "ready" => Self::Ready,
+            "completing" => Self::Completing,
+            "completed" => Self::Completed,
+            "cancelled" => Self::Cancelled,
+            _ => Self::Running,
+        }
+    }
+}
+
+/// One persisted immutable shared-run dispatch and its restart cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedRunRow {
+    pub run: Vec<u8>,
+    pub nonce: String,
+    pub dispatch: Vec<u8>,
+    pub lifecycle: SharedRunLifecycle,
+    pub next_ordinal: u32,
+    pub deadline_unix_millis: u64,
+    pub charged: bool,
+    pub physical_cost: Option<Vec<u8>>,
+}
+
+/// One logical request's durable association with a physical run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedRunMemberRow {
+    pub run: Vec<u8>,
+    pub request: Vec<u8>,
+    pub ordinal: u32,
+    pub queued_unix_millis: u64,
+    pub deadline_unix_millis: u64,
+    pub cancelled: bool,
+    pub outcome: Option<Vec<u8>>,
+    pub latency_millis: Option<u64>,
+}
+
+/// One actual serial invocation or attribution probe, recorded before the next
+/// shared-run decision is made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedRunStepRow {
+    pub run: Vec<u8>,
+    pub ordinal: u32,
+    pub nonce: String,
+    pub request: Option<Vec<u8>>,
+    pub descriptor: Vec<u8>,
+    pub prepared: Option<Vec<u8>>,
+    pub receipt: Option<Vec<u8>>,
+    pub duration_millis: Option<u64>,
+    pub release_physical_run: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedMemberVerificationRow {
+    pub request: Vec<u8>,
+    pub sequence: u64,
+    pub payload: Vec<u8>,
+    pub queued_unix_millis: u64,
+    pub deadline_unix_millis: u64,
+    pub scheduled: bool,
+    pub proposal: Option<Vec<u8>>,
+}
+
+/// One composition-owned partial-head repair retained until its exact result
+/// reaches the journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartialHeadRepairRow {
+    pub sequence: u64,
+    pub nonce: String,
+    pub dispatch: Vec<u8>,
+    pub completion: Option<Vec<u8>>,
+    pub accounting: Option<Vec<u8>>,
+    pub result: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// One just-in-time construction admission and its immutable physical clock.
+pub struct ConstructionAdmissionRow {
+    /// Physical nonce derived from the admission topic's durable sequence.
+    pub nonce: String,
+    /// Host clock when capacity admitted this construction intent.
+    pub queued_unix_millis: u64,
+    /// Absolute deadline derived once from `queued_unix_millis`.
+    pub deadline_unix_millis: u64,
+    /// Whether the backend accepted the idle-only physical submission.
+    pub submitted: bool,
+    /// Whether fresh coordination state rejected this unsubmitted admission.
+    pub retired: bool,
 }
 
 /// One row of the per-bloom study index (issue #3523): a graded attempt's
@@ -432,6 +550,91 @@ pub trait StoreBackend: Send {
     /// the janitor still has to know which bloom a consumed evidence directory
     /// belongs to so it can honour that bloom's retention window.
     fn lookup_dispatch_owner(&mut self, nonce: &str) -> rusqlite::Result<Option<Vec<u8>>>;
+
+    /// Persist one immutable physical run and all logical request associations
+    /// atomically. Re-recording the same run is an idempotent no-op.
+    fn record_shared_run(
+        &mut self,
+        run: &SharedRunRow,
+        members: &[SharedRunMemberRow],
+    ) -> rusqlite::Result<RecordOutcome>;
+    fn lookup_shared_run(&mut self, run: &[u8]) -> rusqlite::Result<Option<SharedRunRow>>;
+    fn list_shared_runs(&mut self) -> rusqlite::Result<Vec<SharedRunRow>>;
+    fn list_open_shared_runs(&mut self) -> rusqlite::Result<Vec<SharedRunRow>>;
+    fn update_shared_run(
+        &mut self,
+        run: &[u8],
+        lifecycle: SharedRunLifecycle,
+        next_ordinal: u32,
+    ) -> rusqlite::Result<bool>;
+    fn record_shared_run_step(&mut self, step: &SharedRunStepRow) -> rusqlite::Result<RecordOutcome>;
+    fn prepare_shared_run_step(&mut self, nonce: &str, prepared: &[u8]) -> rusqlite::Result<bool>;
+    fn list_unprepared_shared_run_steps(&mut self, limit: usize) -> rusqlite::Result<Vec<SharedRunStepRow>>;
+    fn complete_shared_run_step(&mut self, nonce: &str, receipt: &[u8], duration_millis: u64)
+    -> rusqlite::Result<bool>;
+    fn shared_run_steps(&mut self, run: &[u8]) -> rusqlite::Result<Vec<SharedRunStepRow>>;
+    fn shared_step_physical_run(&mut self, nonce: &str) -> rusqlite::Result<Option<(Vec<u8>, bool)>>;
+    fn record_queued_member_verification(
+        &mut self,
+        row: &QueuedMemberVerificationRow,
+    ) -> rusqlite::Result<RecordOutcome>;
+    fn queued_member_verifications(&mut self) -> rusqlite::Result<Vec<QueuedMemberVerificationRow>>;
+    fn queued_member_verification(&mut self, request: &[u8]) -> rusqlite::Result<Option<QueuedMemberVerificationRow>>;
+    fn mark_queued_member_verifications_scheduled(&mut self, requests: &[Vec<u8>]) -> rusqlite::Result<usize>;
+    fn record_member_verification_proposal(&mut self, requests: &[Vec<u8>], proposal: &[u8]) -> rusqlite::Result<()>;
+    /// Retain cancellation even when its cross-topic dispatch has not reached
+    /// the executor reactor yet.
+    fn record_shared_run_cancellation(&mut self, plan: &[u8]) -> rusqlite::Result<RecordOutcome>;
+    fn shared_run_cancelled(&mut self, plan: &[u8]) -> rusqlite::Result<bool>;
+    fn record_partial_head_repair(&mut self, row: &PartialHeadRepairRow) -> rusqlite::Result<RecordOutcome>;
+    fn list_partial_head_repairs(&mut self) -> rusqlite::Result<Vec<PartialHeadRepairRow>>;
+    fn complete_partial_head_repair(&mut self, nonce: &str, completion: &[u8]) -> rusqlite::Result<bool>;
+    fn record_partial_head_repair_observation(
+        &mut self,
+        nonce: &str,
+        completion: &[u8],
+        accounting: Option<&[u8]>,
+    ) -> rusqlite::Result<bool>;
+    fn record_partial_head_repair_result(&mut self, nonce: &str, result: &[u8]) -> rusqlite::Result<bool>;
+    fn partial_head_repair_for_nonce(&mut self, nonce: &str) -> rusqlite::Result<bool>;
+    fn settle_partial_head_repair(&mut self, nonce: &str) -> rusqlite::Result<bool>;
+    fn record_construction_admission(
+        &mut self,
+        dispatch: &[u8],
+        nonce: &str,
+        queued_unix_millis: u64,
+        deadline_unix_millis: u64,
+    ) -> rusqlite::Result<RecordOutcome>;
+    fn construction_admission(&mut self, dispatch: &[u8]) -> rusqlite::Result<Option<ConstructionAdmissionRow>>;
+    fn construction_admission_nonce(&mut self, dispatch: &[u8]) -> rusqlite::Result<Option<String>>;
+    fn mark_construction_admission_submitted(&mut self, dispatch: &[u8]) -> rusqlite::Result<bool>;
+    fn mark_construction_admission_journaled(&mut self, dispatch: &[u8]) -> rusqlite::Result<bool>;
+    fn retire_construction_admission(&mut self, dispatch: &[u8]) -> rusqlite::Result<bool>;
+    /// Whether one admitted construction has not reached backend submission.
+    /// Admission is serialized so an idle-capacity observation cannot enqueue
+    /// a fleet of stale-head intents before control returns the first dispatch.
+    fn has_pending_construction_admission(&mut self) -> rusqlite::Result<bool>;
+    /// Cancel every still-unfinished association for one immutable request.
+    fn cancel_shared_run_member(&mut self, request: &[u8]) -> rusqlite::Result<bool>;
+    fn record_shared_run_member_outcome(
+        &mut self,
+        run: &[u8],
+        request: &[u8],
+        outcome: &[u8],
+        latency_millis: u64,
+    ) -> rusqlite::Result<bool>;
+    fn shared_run_members(&mut self, run: &[u8]) -> rusqlite::Result<Vec<SharedRunMemberRow>>;
+    /// Claim the one physical-cost write for this run. Exactly one caller sees
+    /// `true`; retries and per-member fan-out see `false`.
+    fn claim_shared_run_charge(&mut self, run: &[u8]) -> rusqlite::Result<bool>;
+    fn record_shared_run_cost(&mut self, run: &[u8], cost: &[u8]) -> rusqlite::Result<bool>;
+    /// Retain a complete contextual ledger witness. This is a logical cache
+    /// hit, separate from physical steps and invocation receipts.
+    fn record_shared_run_proof_reuse(&mut self, run: &[u8], reuse: &[u8]) -> rusqlite::Result<bool>;
+    fn shared_run_proof_reuse(&mut self, run: &[u8]) -> rusqlite::Result<Option<Vec<u8>>>;
+    /// Retain the exact eager-head context beside the scalar outstanding order.
+    fn record_contextual_dispatch(&mut self, nonce: &str, dispatch: &[u8]) -> rusqlite::Result<RecordOutcome>;
+    fn lookup_contextual_dispatch(&mut self, nonce: &str) -> rusqlite::Result<Option<Vec<u8>>>;
 
     /// Hold a parked attempt's order under the question digest that parked it
     /// (ADR-0151, #3664) — the order is consumed from `outstanding_orders` on
@@ -1215,7 +1418,7 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
 /// `22` is the assembled prompt-manifest digest on each order row (ADR-0214):
 /// `prompt_manifest`, nullable. A pre-column row names no retained manifest;
 /// the lane still consumes the bundle from the sealed pin.
-const SCHEMA_VERSION: i64 = 22;
+const SCHEMA_VERSION: i64 = 24;
 
 /// Historical TEXT stamp written beside v2 decisions rows before the digest
 /// column existed. Kept only so migration 17 can map it onto the v2 digest.
@@ -1256,23 +1459,7 @@ fn migrate_schema(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()>
     // table_info` says whether they still need it — and a store already left
     // half-migrated by an earlier build repairs on this open instead of being
     // read as done.
-    let mut pending = Vec::new();
-    for table in ORDER_BEARING_TABLES {
-        if !has_column(migration, table, "deadline_unix_millis")? {
-            pending.push(table);
-        }
-    }
-
-    if !pending.is_empty() {
-        let outstanding = count_rows(migration, "outstanding_orders")?;
-        let parked = count_rows(migration, "parked_question")?;
-        if outstanding > 0 || parked > 0 {
-            return Err(legacy_store_refusal(outstanding, parked));
-        }
-        for table in pending {
-            migration.execute_batch(&add_deadline_column(table))?;
-        }
-    }
+    migrate_deadline_columns(migration)?;
 
     // ADR-0190 (version 2): the journal records its decisions. The columns are
     // added without a default — pre-existing rows read back `NULL` and are
@@ -1426,7 +1613,35 @@ fn migrate_schema(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()>
     }
 
     add_prompt_manifest_column(migration)?;
+    migration.execute_batch(SHARED_RUN_TABLES)?;
+    if !has_column(migration, "shared_run_members", "queued_unix_millis")? {
+        migration.execute_batch(
+            "ALTER TABLE shared_run_members ADD COLUMN queued_unix_millis INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+fn migrate_deadline_columns(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    let mut pending = Vec::new();
+    for table in ORDER_BEARING_TABLES {
+        if !has_column(migration, table, "deadline_unix_millis")? {
+            pending.push(table);
+        }
+    }
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let outstanding = count_rows(migration, "outstanding_orders")?;
+    let parked = count_rows(migration, "parked_question")?;
+    if outstanding > 0 || parked > 0 {
+        return Err(legacy_store_refusal(outstanding, parked));
+    }
+    for table in pending {
+        migration.execute_batch(&add_deadline_column(table))?;
+    }
     Ok(())
 }
 
@@ -1825,6 +2040,90 @@ CREATE TABLE IF NOT EXISTS outbox_results (
 );
 ";
 
+/// Durable host execution projection for shared physical verification. The
+/// journal remains domain truth; these rows retain exact executor inputs and
+/// partial receipts across a coordinator restart.
+const SHARED_RUN_TABLES: &str = "\
+CREATE TABLE IF NOT EXISTS shared_runs (
+    run                     BLOB PRIMARY KEY,
+    nonce                   TEXT NOT NULL UNIQUE,
+    dispatch                BLOB NOT NULL,
+    lifecycle               TEXT NOT NULL,
+    next_ordinal            INTEGER NOT NULL,
+    deadline_unix_millis    INTEGER NOT NULL,
+    charged                 INTEGER NOT NULL DEFAULT 0,
+    physical_cost           BLOB
+);
+CREATE TABLE IF NOT EXISTS shared_run_members (
+    run                     BLOB NOT NULL,
+    request                 BLOB NOT NULL,
+    ordinal                 INTEGER NOT NULL,
+    queued_unix_millis      INTEGER NOT NULL,
+    deadline_unix_millis    INTEGER NOT NULL,
+    cancelled               INTEGER NOT NULL DEFAULT 0,
+    outcome                 BLOB,
+    latency_millis          INTEGER,
+    PRIMARY KEY (run, request),
+    FOREIGN KEY (run) REFERENCES shared_runs(run)
+);
+CREATE TABLE IF NOT EXISTS shared_run_steps (
+    run                     BLOB NOT NULL,
+    ordinal                 INTEGER NOT NULL,
+    nonce                   TEXT NOT NULL UNIQUE,
+    request                 BLOB,
+    descriptor              BLOB NOT NULL,
+    prepared                BLOB,
+    receipt                 BLOB,
+    duration_millis         INTEGER,
+    release_physical_run    INTEGER NOT NULL,
+    PRIMARY KEY (run, ordinal),
+    FOREIGN KEY (run) REFERENCES shared_runs(run)
+);
+CREATE INDEX IF NOT EXISTS shared_run_members_by_run ON shared_run_members(run, ordinal);
+CREATE INDEX IF NOT EXISTS shared_run_steps_by_run ON shared_run_steps(run, ordinal);
+CREATE TABLE IF NOT EXISTS contextual_dispatches (
+    nonce                   TEXT PRIMARY KEY,
+    dispatch                BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS shared_member_verification_queue (
+    request                  BLOB PRIMARY KEY,
+    sequence                 INTEGER NOT NULL UNIQUE,
+    payload                  BLOB NOT NULL,
+    queued_unix_millis       INTEGER NOT NULL,
+    deadline_unix_millis     INTEGER NOT NULL,
+    scheduled                INTEGER NOT NULL DEFAULT 0,
+    proposal                 BLOB
+);
+CREATE INDEX IF NOT EXISTS shared_member_verification_queue_order
+    ON shared_member_verification_queue(sequence);
+CREATE TABLE IF NOT EXISTS shared_run_cancellations (
+    plan                     BLOB PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS partial_head_repairs (
+    sequence                 INTEGER PRIMARY KEY,
+    nonce                    TEXT NOT NULL UNIQUE,
+    dispatch                 BLOB NOT NULL,
+    completion               BLOB,
+    accounting               BLOB,
+    result                   BLOB,
+    settled                  INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS construction_admissions (
+    dispatch                 BLOB PRIMARY KEY,
+    nonce                    TEXT NOT NULL UNIQUE,
+    queued_unix_millis       INTEGER NOT NULL,
+    deadline_unix_millis     INTEGER NOT NULL,
+    submitted                INTEGER NOT NULL DEFAULT 0,
+    journaled                INTEGER NOT NULL DEFAULT 0,
+    retired                  INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS shared_run_proof_reuse (
+    run                     BLOB PRIMARY KEY,
+    reuse                   BLOB NOT NULL,
+    FOREIGN KEY (run) REFERENCES shared_runs(run)
+);
+";
+
 /// The per-member construct session a same-member refine resumes (#5177).
 const CONSTRUCT_SESSION_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS construct_session (
@@ -1931,6 +2230,46 @@ fn order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutstandingOrder>
         deadline_unix_millis: u64::try_from(row.get::<_, i64>(10)?).unwrap_or_default(),
         lifecycle: OrderLifecycle::parse(&row.get::<_, String>(11)?),
         prompt_manifest: row.get(12)?,
+    })
+}
+
+fn shared_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SharedRunRow> {
+    Ok(SharedRunRow {
+        run: row.get(0)?,
+        nonce: row.get(1)?,
+        dispatch: row.get(2)?,
+        lifecycle: SharedRunLifecycle::parse(&row.get::<_, String>(3)?),
+        next_ordinal: u32::try_from(row.get::<_, i64>(4)?).unwrap_or_default(),
+        deadline_unix_millis: u64::try_from(row.get::<_, i64>(5)?).unwrap_or_default(),
+        charged: row.get::<_, i64>(6)? != 0,
+        physical_cost: row.get(7)?,
+    })
+}
+
+fn shared_run_member_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SharedRunMemberRow> {
+    Ok(SharedRunMemberRow {
+        run: row.get(0)?,
+        request: row.get(1)?,
+        ordinal: u32::try_from(row.get::<_, i64>(2)?).unwrap_or_default(),
+        queued_unix_millis: u64::try_from(row.get::<_, i64>(3)?).unwrap_or_default(),
+        deadline_unix_millis: u64::try_from(row.get::<_, i64>(4)?).unwrap_or_default(),
+        cancelled: row.get::<_, i64>(5)? != 0,
+        outcome: row.get(6)?,
+        latency_millis: row.get::<_, Option<i64>>(7)?.and_then(|value| u64::try_from(value).ok()),
+    })
+}
+
+fn shared_run_step_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SharedRunStepRow> {
+    Ok(SharedRunStepRow {
+        run: row.get(0)?,
+        ordinal: u32::try_from(row.get::<_, i64>(1)?).unwrap_or_default(),
+        nonce: row.get(2)?,
+        request: row.get(3)?,
+        descriptor: row.get(4)?,
+        prepared: row.get(5)?,
+        receipt: row.get(6)?,
+        duration_millis: row.get::<_, Option<i64>>(7)?.and_then(|value| u64::try_from(value).ok()),
+        release_physical_run: row.get::<_, i64>(8)? != 0,
     })
 }
 
@@ -2060,6 +2399,674 @@ impl StoreBackend for SqliteStore {
         let mut stmt = self.conn.prepare("SELECT bloom FROM dispatch_owners WHERE nonce = ?1")?;
         let mut rows = stmt.query_map(rusqlite::params![nonce], |row| row.get(0))?;
         rows.next().transpose()
+    }
+
+    fn record_shared_run(
+        &mut self,
+        run: &SharedRunRow,
+        members: &[SharedRunMemberRow],
+    ) -> rusqlite::Result<RecordOutcome> {
+        if members.iter().any(|member| member.run != run.run) {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "shared-run member names a different physical run".to_owned(),
+            ));
+        }
+        let transaction = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let member_timings = members
+            .iter()
+            .map(|member| {
+                transaction
+                    .query_row(
+                        "SELECT queued_unix_millis, deadline_unix_millis FROM shared_run_members \
+                         WHERE request = ?1 ORDER BY queued_unix_millis, rowid LIMIT 1",
+                        rusqlite::params![&member.request],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .optional()
+                    .map(|timing| {
+                        timing.unwrap_or_else(|| {
+                            (recorded_column(member.queued_unix_millis), recorded_column(member.deadline_unix_millis))
+                        })
+                    })
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let run_deadline_unix_millis = member_timings
+            .iter()
+            .map(|timing| timing.1)
+            .max()
+            .unwrap_or_else(|| recorded_column(run.deadline_unix_millis));
+        let changed = transaction.execute(
+            "INSERT OR IGNORE INTO shared_runs \
+             (run, nonce, dispatch, lifecycle, next_ordinal, deadline_unix_millis, charged, physical_cost) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                &run.run,
+                &run.nonce,
+                &run.dispatch,
+                run.lifecycle.as_str(),
+                i64::from(run.next_ordinal),
+                run_deadline_unix_millis,
+                i64::from(run.charged),
+                &run.physical_cost,
+            ],
+        )?;
+        if changed > 0 {
+            for (member, (queued_unix_millis, deadline_unix_millis)) in members.iter().zip(member_timings) {
+                transaction.execute(
+                    "INSERT INTO shared_run_members \
+                     (run, request, ordinal, queued_unix_millis, deadline_unix_millis, cancelled, outcome, latency_millis) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    rusqlite::params![
+                        &member.run,
+                        &member.request,
+                        i64::from(member.ordinal),
+                        queued_unix_millis,
+                        deadline_unix_millis,
+                        i64::from(member.cancelled),
+                        &member.outcome,
+                        member.latency_millis.map(recorded_column),
+                    ],
+                )?;
+            }
+        } else {
+            let existing = transaction
+                .query_row(
+                    "SELECT nonce, dispatch FROM shared_runs WHERE run = ?1",
+                    rusqlite::params![&run.run],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
+                .optional()?;
+            if existing.as_ref().is_none_or(|(nonce, dispatch)| nonce != &run.nonce || dispatch != &run.dispatch) {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "shared-run identity was reused with different immutable inputs".to_owned(),
+                ));
+            }
+            let mut statement = transaction
+                .prepare("SELECT request, ordinal FROM shared_run_members WHERE run = ?1 ORDER BY ordinal")?;
+            let existing_members = statement
+                .query_map(rusqlite::params![&run.run], |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, u32::try_from(row.get::<_, i64>(1)?).unwrap_or_default()))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if existing_members
+                != members.iter().map(|member| (member.request.clone(), member.ordinal)).collect::<Vec<_>>()
+            {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "shared-run membership was reused with different immutable inputs".to_owned(),
+                ));
+            }
+        }
+        transaction.commit()?;
+        Ok(if changed > 0 {
+            RecordOutcome::Recorded
+        } else {
+            RecordOutcome::Duplicate
+        })
+    }
+
+    fn lookup_shared_run(&mut self, run: &[u8]) -> rusqlite::Result<Option<SharedRunRow>> {
+        self.conn
+            .query_row(
+                "SELECT run, nonce, dispatch, lifecycle, next_ordinal, deadline_unix_millis, charged, physical_cost \
+                 FROM shared_runs WHERE run = ?1",
+                rusqlite::params![run],
+                shared_run_from_row,
+            )
+            .optional()
+    }
+
+    fn list_open_shared_runs(&mut self) -> rusqlite::Result<Vec<SharedRunRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT run, nonce, dispatch, lifecycle, next_ordinal, deadline_unix_millis, charged, physical_cost \
+             FROM shared_runs WHERE lifecycle NOT IN ('completed', 'cancelled') ORDER BY rowid",
+        )?;
+        stmt.query_map([], shared_run_from_row)?.collect()
+    }
+
+    fn list_shared_runs(&mut self) -> rusqlite::Result<Vec<SharedRunRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT run, nonce, dispatch, lifecycle, next_ordinal, deadline_unix_millis, charged, physical_cost \
+             FROM shared_runs ORDER BY rowid",
+        )?;
+        stmt.query_map([], shared_run_from_row)?.collect()
+    }
+
+    fn update_shared_run(
+        &mut self,
+        run: &[u8],
+        lifecycle: SharedRunLifecycle,
+        next_ordinal: u32,
+    ) -> rusqlite::Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE shared_runs SET lifecycle = ?2, next_ordinal = ?3 WHERE run = ?1",
+            rusqlite::params![run, lifecycle.as_str(), i64::from(next_ordinal)],
+        )? > 0)
+    }
+
+    fn record_shared_run_step(&mut self, step: &SharedRunStepRow) -> rusqlite::Result<RecordOutcome> {
+        let changed = self.conn.execute(
+            "INSERT OR IGNORE INTO shared_run_steps \
+             (run, ordinal, nonce, request, descriptor, prepared, receipt, duration_millis, release_physical_run) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                &step.run,
+                i64::from(step.ordinal),
+                &step.nonce,
+                &step.request,
+                &step.descriptor,
+                &step.prepared,
+                &step.receipt,
+                step.duration_millis.map(recorded_column),
+                i64::from(step.release_physical_run),
+            ],
+        )?;
+        if changed == 0 {
+            let existing = self
+                .conn
+                .query_row(
+                    "SELECT nonce, request, descriptor, release_physical_run FROM shared_run_steps \
+                     WHERE run = ?1 AND ordinal = ?2",
+                    rusqlite::params![&step.run, i64::from(step.ordinal)],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<Vec<u8>>>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                            row.get::<_, i64>(3)? != 0,
+                        ))
+                    },
+                )
+                .optional()?;
+            if existing.as_ref().is_none_or(|(nonce, request, descriptor, release)| {
+                nonce != &step.nonce
+                    || request != &step.request
+                    || descriptor != &step.descriptor
+                    || *release != step.release_physical_run
+            }) {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "shared-run step identity was reused with different immutable inputs".to_owned(),
+                ));
+            }
+        }
+        Ok(if changed > 0 {
+            RecordOutcome::Recorded
+        } else {
+            RecordOutcome::Duplicate
+        })
+    }
+
+    fn prepare_shared_run_step(&mut self, nonce: &str, prepared: &[u8]) -> rusqlite::Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE shared_run_steps SET prepared = ?2 WHERE nonce = ?1 AND prepared IS NULL AND receipt IS NULL",
+            rusqlite::params![nonce, prepared],
+        )? > 0)
+    }
+
+    fn list_unprepared_shared_run_steps(&mut self, limit: usize) -> rusqlite::Result<Vec<SharedRunStepRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT step.run, step.ordinal, step.nonce, step.request, step.descriptor, step.prepared, \
+                    step.receipt, step.duration_millis, step.release_physical_run \
+             FROM shared_run_steps AS step JOIN shared_runs AS run ON run.run = step.run \
+             WHERE step.prepared IS NULL AND step.receipt IS NULL \
+               AND run.lifecycle IN ('ready', 'running') ORDER BY step.rowid LIMIT ?1",
+        )?;
+        stmt.query_map(rusqlite::params![i64::try_from(limit).unwrap_or(i64::MAX)], shared_run_step_from_row)?.collect()
+    }
+
+    fn complete_shared_run_step(
+        &mut self,
+        nonce: &str,
+        receipt: &[u8],
+        duration_millis: u64,
+    ) -> rusqlite::Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE shared_run_steps SET receipt = ?2, duration_millis = ?3 \
+             WHERE nonce = ?1 AND receipt IS NULL",
+            rusqlite::params![nonce, receipt, recorded_column(duration_millis)],
+        )? > 0)
+    }
+
+    fn shared_run_steps(&mut self, run: &[u8]) -> rusqlite::Result<Vec<SharedRunStepRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT run, ordinal, nonce, request, descriptor, prepared, receipt, duration_millis, release_physical_run \
+             FROM shared_run_steps WHERE run = ?1 ORDER BY ordinal",
+        )?;
+        stmt.query_map(rusqlite::params![run], shared_run_step_from_row)?.collect()
+    }
+
+    fn shared_step_physical_run(&mut self, nonce: &str) -> rusqlite::Result<Option<(Vec<u8>, bool)>> {
+        self.conn
+            .query_row(
+                "SELECT run, release_physical_run FROM shared_run_steps WHERE nonce = ?1",
+                rusqlite::params![nonce],
+                |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+            )
+            .optional()
+    }
+
+    fn record_queued_member_verification(
+        &mut self,
+        row: &QueuedMemberVerificationRow,
+    ) -> rusqlite::Result<RecordOutcome> {
+        let changed = self.conn.execute(
+            "INSERT OR IGNORE INTO shared_member_verification_queue \
+             (request, sequence, payload, queued_unix_millis, deadline_unix_millis) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                &row.request,
+                i64::try_from(row.sequence).unwrap_or(i64::MAX),
+                &row.payload,
+                recorded_column(row.queued_unix_millis),
+                recorded_column(row.deadline_unix_millis),
+            ],
+        )?;
+        if changed > 0 {
+            return Ok(RecordOutcome::Recorded);
+        }
+        let (payload, scheduled, sequence) = self.conn.query_row(
+            "SELECT payload, scheduled, sequence \
+             FROM shared_member_verification_queue WHERE request = ?1",
+            [&row.request],
+            |stored| {
+                Ok((
+                    stored.get::<_, Vec<u8>>(0)?,
+                    stored.get::<_, i64>(1)? != 0,
+                    u64::try_from(stored.get::<_, i64>(2)?).unwrap_or_default(),
+                ))
+            },
+        )?;
+        if payload != row.payload {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "queued member verification identity changed".to_owned(),
+            ));
+        }
+        if scheduled && sequence != row.sequence {
+            self.conn.execute(
+                "UPDATE shared_member_verification_queue \
+                 SET sequence = ?2, scheduled = 0, proposal = NULL WHERE request = ?1",
+                rusqlite::params![&row.request, i64::try_from(row.sequence).unwrap_or(i64::MAX)],
+            )?;
+            Ok(RecordOutcome::Recorded)
+        } else {
+            Ok(RecordOutcome::Duplicate)
+        }
+    }
+
+    fn queued_member_verifications(&mut self) -> rusqlite::Result<Vec<QueuedMemberVerificationRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT request, sequence, payload, queued_unix_millis, deadline_unix_millis, scheduled, proposal \
+             FROM shared_member_verification_queue WHERE scheduled = 0 ORDER BY sequence",
+        )?;
+        stmt.query_map([], |row| {
+            Ok(QueuedMemberVerificationRow {
+                request: row.get(0)?,
+                sequence: u64::try_from(row.get::<_, i64>(1)?).unwrap_or_default(),
+                payload: row.get(2)?,
+                queued_unix_millis: u64::try_from(row.get::<_, i64>(3)?).unwrap_or_default(),
+                deadline_unix_millis: u64::try_from(row.get::<_, i64>(4)?).unwrap_or_default(),
+                scheduled: row.get::<_, i64>(5)? != 0,
+                proposal: row.get(6)?,
+            })
+        })?
+        .collect()
+    }
+
+    fn queued_member_verification(&mut self, request: &[u8]) -> rusqlite::Result<Option<QueuedMemberVerificationRow>> {
+        self.conn
+            .query_row(
+                "SELECT request, sequence, payload, queued_unix_millis, deadline_unix_millis, scheduled, proposal \
+                 FROM shared_member_verification_queue WHERE request = ?1",
+                [request],
+                |row| {
+                    Ok(QueuedMemberVerificationRow {
+                        request: row.get(0)?,
+                        sequence: u64::try_from(row.get::<_, i64>(1)?).unwrap_or_default(),
+                        payload: row.get(2)?,
+                        queued_unix_millis: u64::try_from(row.get::<_, i64>(3)?).unwrap_or_default(),
+                        deadline_unix_millis: u64::try_from(row.get::<_, i64>(4)?).unwrap_or_default(),
+                        scheduled: row.get::<_, i64>(5)? != 0,
+                        proposal: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    fn mark_queued_member_verifications_scheduled(&mut self, requests: &[Vec<u8>]) -> rusqlite::Result<usize> {
+        let transaction = self.conn.transaction()?;
+        let mut removed = 0;
+        for request in requests {
+            removed += transaction.execute(
+                "UPDATE shared_member_verification_queue SET scheduled = 1 WHERE request = ?1 AND scheduled = 0",
+                [request],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(removed)
+    }
+
+    fn record_member_verification_proposal(&mut self, requests: &[Vec<u8>], proposal: &[u8]) -> rusqlite::Result<()> {
+        let transaction = self.conn.transaction()?;
+        for request in requests {
+            let existing: Option<Vec<u8>> = transaction.query_row(
+                "SELECT proposal FROM shared_member_verification_queue WHERE request = ?1",
+                [request],
+                |row| row.get(0),
+            )?;
+            if existing.as_deref().is_some_and(|bytes| bytes != proposal) {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "queued member verification proposal changed".to_owned(),
+                ));
+            }
+            transaction.execute(
+                "UPDATE shared_member_verification_queue SET proposal = ?2 WHERE request = ?1 AND proposal IS NULL",
+                rusqlite::params![request, proposal],
+            )?;
+        }
+        transaction.commit()
+    }
+
+    fn record_shared_run_cancellation(&mut self, plan: &[u8]) -> rusqlite::Result<RecordOutcome> {
+        Ok(if self.conn.execute("INSERT OR IGNORE INTO shared_run_cancellations (plan) VALUES (?1)", [plan])? > 0 {
+            RecordOutcome::Recorded
+        } else {
+            RecordOutcome::Duplicate
+        })
+    }
+
+    fn shared_run_cancelled(&mut self, plan: &[u8]) -> rusqlite::Result<bool> {
+        self.conn.query_row("SELECT EXISTS(SELECT 1 FROM shared_run_cancellations WHERE plan = ?1)", [plan], |row| {
+            row.get(0)
+        })
+    }
+
+    fn record_partial_head_repair(&mut self, row: &PartialHeadRepairRow) -> rusqlite::Result<RecordOutcome> {
+        let sequence = i64::try_from(row.sequence)
+            .map_err(|_| rusqlite::Error::InvalidParameterName("partial-head repair sequence overflow".to_owned()))?;
+        if self.conn.execute(
+            "INSERT OR IGNORE INTO partial_head_repairs (sequence, nonce, dispatch) VALUES (?1, ?2, ?3)",
+            rusqlite::params![sequence, &row.nonce, &row.dispatch],
+        )? > 0
+        {
+            return Ok(RecordOutcome::Recorded);
+        }
+        let (nonce, dispatch) = self.conn.query_row(
+            "SELECT nonce, dispatch FROM partial_head_repairs WHERE sequence = ?1",
+            [sequence],
+            |stored| Ok((stored.get::<_, String>(0)?, stored.get::<_, Vec<u8>>(1)?)),
+        )?;
+        if nonce != row.nonce || dispatch != row.dispatch {
+            return Err(rusqlite::Error::InvalidParameterName("partial-head repair identity changed".to_owned()));
+        }
+        Ok(RecordOutcome::Duplicate)
+    }
+
+    fn list_partial_head_repairs(&mut self) -> rusqlite::Result<Vec<PartialHeadRepairRow>> {
+        let mut statement = self.conn.prepare(
+            "SELECT sequence, nonce, dispatch, completion, accounting, result \
+             FROM partial_head_repairs WHERE settled = 0 ORDER BY sequence",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok(PartialHeadRepairRow {
+                    sequence: u64::try_from(row.get::<_, i64>(0)?).unwrap_or_default(),
+                    nonce: row.get(1)?,
+                    dispatch: row.get(2)?,
+                    completion: row.get(3)?,
+                    accounting: row.get(4)?,
+                    result: row.get(5)?,
+                })
+            })?
+            .collect()
+    }
+
+    fn complete_partial_head_repair(&mut self, nonce: &str, completion: &[u8]) -> rusqlite::Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE partial_head_repairs SET completion = ?2 WHERE nonce = ?1 AND completion IS NULL",
+            rusqlite::params![nonce, completion],
+        )?;
+        if changed > 0 {
+            return Ok(true);
+        }
+        let retained =
+            self.conn.query_row("SELECT completion FROM partial_head_repairs WHERE nonce = ?1", [nonce], |row| {
+                row.get::<_, Option<Vec<u8>>>(0)
+            })?;
+        if retained.as_deref().is_some_and(|bytes| bytes != completion) {
+            return Err(rusqlite::Error::InvalidParameterName("partial-head repair completion changed".to_owned()));
+        }
+        Ok(false)
+    }
+
+    fn record_partial_head_repair_observation(
+        &mut self,
+        nonce: &str,
+        completion: &[u8],
+        accounting: Option<&[u8]>,
+    ) -> rusqlite::Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE partial_head_repairs SET completion = ?2, accounting = ?3 \
+             WHERE nonce = ?1 AND completion IS NULL",
+            rusqlite::params![nonce, completion, accounting],
+        )?;
+        if changed > 0 {
+            return Ok(true);
+        }
+        let retained = self.conn.query_row(
+            "SELECT completion, accounting FROM partial_head_repairs WHERE nonce = ?1",
+            [nonce],
+            |row| Ok((row.get::<_, Option<Vec<u8>>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
+        )?;
+        if retained.0.as_deref() != Some(completion) || retained.1.as_deref() != accounting {
+            return Err(rusqlite::Error::InvalidParameterName("partial-head repair observation changed".to_owned()));
+        }
+        Ok(false)
+    }
+
+    fn record_partial_head_repair_result(&mut self, nonce: &str, result: &[u8]) -> rusqlite::Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE partial_head_repairs SET result = ?2 WHERE nonce = ?1 AND result IS NULL",
+            rusqlite::params![nonce, result],
+        )?;
+        if changed > 0 {
+            return Ok(true);
+        }
+        let retained =
+            self.conn.query_row("SELECT result FROM partial_head_repairs WHERE nonce = ?1", [nonce], |row| {
+                row.get::<_, Option<Vec<u8>>>(0)
+            })?;
+        if retained.as_deref() != Some(result) {
+            return Err(rusqlite::Error::InvalidParameterName("partial-head repair result changed".to_owned()));
+        }
+        Ok(false)
+    }
+
+    fn partial_head_repair_for_nonce(&mut self, nonce: &str) -> rusqlite::Result<bool> {
+        self.conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM partial_head_repairs WHERE nonce = ?1)", [nonce], |row| row.get(0))
+    }
+
+    fn settle_partial_head_repair(&mut self, nonce: &str) -> rusqlite::Result<bool> {
+        Ok(self
+            .conn
+            .execute("UPDATE partial_head_repairs SET settled = 1 WHERE nonce = ?1 AND settled = 0", [nonce])?
+            > 0)
+    }
+
+    fn record_construction_admission(
+        &mut self,
+        dispatch: &[u8],
+        nonce: &str,
+        queued_unix_millis: u64,
+        deadline_unix_millis: u64,
+    ) -> rusqlite::Result<RecordOutcome> {
+        if self.conn.execute(
+            "INSERT OR IGNORE INTO construction_admissions \
+             (dispatch, nonce, queued_unix_millis, deadline_unix_millis) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![dispatch, nonce, queued_unix_millis, deadline_unix_millis],
+        )? > 0
+        {
+            return Ok(RecordOutcome::Recorded);
+        }
+        let retained = self.conn.query_row(
+            "SELECT nonce, queued_unix_millis, deadline_unix_millis FROM construction_admissions WHERE dispatch = ?1",
+            [dispatch],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?, row.get::<_, u64>(2)?)),
+        )?;
+        if retained != (nonce.to_owned(), queued_unix_millis, deadline_unix_millis) {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "construction admission identity or original clocks changed".to_owned(),
+            ));
+        }
+        Ok(RecordOutcome::Duplicate)
+    }
+
+    fn construction_admission(&mut self, dispatch: &[u8]) -> rusqlite::Result<Option<ConstructionAdmissionRow>> {
+        self.conn
+            .query_row(
+                "SELECT nonce, queued_unix_millis, deadline_unix_millis, submitted, retired \
+                 FROM construction_admissions WHERE dispatch = ?1",
+                [dispatch],
+                |row| {
+                    Ok(ConstructionAdmissionRow {
+                        nonce: row.get(0)?,
+                        queued_unix_millis: row.get(1)?,
+                        deadline_unix_millis: row.get(2)?,
+                        submitted: row.get(3)?,
+                        retired: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    fn construction_admission_nonce(&mut self, dispatch: &[u8]) -> rusqlite::Result<Option<String>> {
+        Ok(self.construction_admission(dispatch)?.map(|admission| admission.nonce))
+    }
+
+    fn mark_construction_admission_submitted(&mut self, dispatch: &[u8]) -> rusqlite::Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE construction_admissions SET submitted = 1 WHERE dispatch = ?1 AND submitted = 0",
+            [dispatch],
+        )? > 0)
+    }
+
+    fn mark_construction_admission_journaled(&mut self, dispatch: &[u8]) -> rusqlite::Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE construction_admissions SET journaled = 1 WHERE dispatch = ?1 AND journaled = 0",
+            [dispatch],
+        )? > 0)
+    }
+
+    fn has_pending_construction_admission(&mut self) -> rusqlite::Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM construction_admissions WHERE submitted = 0 AND retired = 0)",
+            [],
+            |row| row.get(0),
+        )
+    }
+
+    fn retire_construction_admission(&mut self, dispatch: &[u8]) -> rusqlite::Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE construction_admissions SET retired = 1 WHERE dispatch = ?1 AND submitted = 0 AND retired = 0",
+            [dispatch],
+        )? > 0)
+    }
+
+    fn cancel_shared_run_member(&mut self, request: &[u8]) -> rusqlite::Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE shared_run_members SET cancelled = 1 WHERE request = ?1 AND outcome IS NULL",
+            rusqlite::params![request],
+        )? > 0)
+    }
+
+    fn record_shared_run_member_outcome(
+        &mut self,
+        run: &[u8],
+        request: &[u8],
+        outcome: &[u8],
+        latency_millis: u64,
+    ) -> rusqlite::Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE shared_run_members SET outcome = ?3, latency_millis = ?4 \
+             WHERE run = ?1 AND request = ?2 AND outcome IS NULL",
+            rusqlite::params![run, request, outcome, recorded_column(latency_millis)],
+        )? > 0)
+    }
+
+    fn shared_run_members(&mut self, run: &[u8]) -> rusqlite::Result<Vec<SharedRunMemberRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT run, request, ordinal, queued_unix_millis, deadline_unix_millis, cancelled, outcome, latency_millis \
+             FROM shared_run_members WHERE run = ?1 ORDER BY ordinal",
+        )?;
+        stmt.query_map(rusqlite::params![run], shared_run_member_from_row)?.collect()
+    }
+
+    fn claim_shared_run_charge(&mut self, run: &[u8]) -> rusqlite::Result<bool> {
+        Ok(self
+            .conn
+            .execute("UPDATE shared_runs SET charged = 1 WHERE run = ?1 AND charged = 0", rusqlite::params![run])?
+            > 0)
+    }
+
+    fn record_shared_run_cost(&mut self, run: &[u8], cost: &[u8]) -> rusqlite::Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE shared_runs SET physical_cost = ?2 WHERE run = ?1 AND physical_cost IS NULL",
+            rusqlite::params![run, cost],
+        )? > 0)
+    }
+
+    fn record_shared_run_proof_reuse(&mut self, run: &[u8], reuse: &[u8]) -> rusqlite::Result<bool> {
+        let transaction = self.conn.transaction()?;
+        let changed = transaction.execute(
+            "INSERT OR IGNORE INTO shared_run_proof_reuse (run, reuse) VALUES (?1, ?2)",
+            rusqlite::params![run, reuse],
+        )? > 0;
+        let retained = transaction.query_row(
+            "SELECT reuse FROM shared_run_proof_reuse WHERE run = ?1",
+            rusqlite::params![run],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
+        if retained != reuse {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "shared-run proof reuse changed after retention".to_owned(),
+            ));
+        }
+        transaction.execute("UPDATE shared_runs SET charged = 1 WHERE run = ?1", rusqlite::params![run])?;
+        transaction.commit()?;
+        Ok(changed)
+    }
+
+    fn shared_run_proof_reuse(&mut self, run: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
+        self.conn
+            .query_row("SELECT reuse FROM shared_run_proof_reuse WHERE run = ?1", rusqlite::params![run], |row| {
+                row.get(0)
+            })
+            .optional()
+    }
+
+    fn record_contextual_dispatch(&mut self, nonce: &str, dispatch: &[u8]) -> rusqlite::Result<RecordOutcome> {
+        let changed = self.conn.execute(
+            "INSERT OR IGNORE INTO contextual_dispatches (nonce, dispatch) VALUES (?1, ?2)",
+            rusqlite::params![nonce, dispatch],
+        )?;
+        if changed == 0 && self.lookup_contextual_dispatch(nonce)?.as_deref() != Some(dispatch) {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "contextual dispatch nonce was reused with different immutable inputs".to_owned(),
+            ));
+        }
+        Ok(if changed > 0 {
+            RecordOutcome::Recorded
+        } else {
+            RecordOutcome::Duplicate
+        })
+    }
+
+    fn lookup_contextual_dispatch(&mut self, nonce: &str) -> rusqlite::Result<Option<Vec<u8>>> {
+        self.conn
+            .query_row("SELECT dispatch FROM contextual_dispatches WHERE nonce = ?1", rusqlite::params![nonce], |row| {
+                row.get(0)
+            })
+            .optional()
     }
 
     fn list_expired_orders(&mut self, now_unix_millis: u64) -> rusqlite::Result<Vec<OutstandingOrder>> {

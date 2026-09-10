@@ -119,7 +119,7 @@ fn project(store: &mut SqliteStore, state: Option<PrecheckState>, key: &str) -> 
             idempotency_key: IdempotencyKey(key.to_owned()),
             fact: Fact::RequestPrecheck { bloom: BloomId(digest(1)), node: digest(2) },
         },
-        vec![Decision::RecordPrecheckState { bloom: BloomId(digest(1)), state: state.map(Box::new) }],
+        vec![Decision::RecordPrecheckState { bloom: BloomId(digest(1)), state }],
     );
     let mut projection = PrecheckProjection::default();
     assert!(projection.refresh(store).unwrap());

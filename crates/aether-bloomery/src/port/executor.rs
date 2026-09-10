@@ -46,6 +46,11 @@ pub struct WorkOrder {
     /// attempt evidence. `None` on a mechanical lane, or when assembly did not
     /// run.
     pub prompt_manifest: Option<Digest>,
+    /// Shared physical lane identity. `None` preserves legacy per-order
+    /// admission; warm serial steps use one plan digest here.
+    pub physical_run: Option<Digest>,
+    /// Release the retained physical lane after this order settles.
+    pub release_physical_run: bool,
 }
 
 /// What `submit` returns and `cancel` / `inspect` / `stream_evidence` take.
@@ -217,6 +222,9 @@ pub struct LaneObservation {
     ///
     /// [`RetrospectFinding::normalize`]: crate::RetrospectFinding::normalize
     pub retrospect_findings: Vec<RetrospectClaim>,
+    /// Raw bounded contextual gate observations read from the trusted result
+    /// artifact. This is in-memory transport state and is never journaled.
+    pub contextual_observations: Option<Vec<u8>>,
 }
 
 /// A reference to one piece of evidence a run uploaded — the transport-level
@@ -253,6 +261,22 @@ pub struct ObservedLaneWrites {
     /// [`normalize_write_paths`](crate::normalize_write_paths) before the fact
     /// is admitted.
     pub paths: Vec<String>,
+}
+
+/// One immutable checkpoint captured from a live construction lane.
+///
+/// A checkpoint is only a version-bound merge-preview input. It is never
+/// verification evidence and never authorizes promotion by itself.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ObservedConstructionCheckpoint {
+    /// The live run whose checkout was captured.
+    pub nonce: Nonce,
+    /// Monotonic observation sequence within that run.
+    pub observation: u64,
+    /// Checkout the construction order started from.
+    pub starting_checkout: Digest,
+    /// Immutable tree and checkout commit containing the captured edits.
+    pub candidate: CandidateRef,
 }
 
 /// Which mounted backend a dispatch went to (#5412) — the unit an intake cycle
@@ -323,6 +347,27 @@ pub trait ExecutorBackend {
     fn settle_idle_submission(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, Self::Error> {
         let handle = WorkHandle::new(order.nonce.clone());
         Ok((self.inspect(&handle)? != ExecutionStatus::Unknown).then_some(handle))
+    }
+
+    /// Release a retained warm physical lane after cancellation or retirement.
+    /// Backends that do not retain lanes have nothing to release.
+    fn release_physical_run(&self, physical_run: &Digest) -> Result<(), Self::Error> {
+        let _ = physical_run;
+        Ok(())
+    }
+
+    /// Retain the captured result of a composition-owned partial-head repair
+    /// under the immutable repair-plan identity before the reducer admits it.
+    /// Backends without a private source namespace may leave the candidate in
+    /// its already content-addressed vehicle.
+    fn retain_partial_head_repair(
+        &self,
+        plan: &Digest,
+        candidate: &CandidateRef,
+        allowed_paths: &[String],
+    ) -> Result<(), Self::Error> {
+        let _ = (plan, candidate, allowed_paths);
+        Ok(())
     }
 
     /// Inspect the run's current execution state. A nonce with no yet-resolvable
@@ -396,6 +441,15 @@ pub trait ExecutorBackend {
     /// an absent observation, and a backend that raised here would make one
     /// unreadable checkout stop the whole sweep.
     fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
+        Vec::new()
+    }
+
+    /// Immutable checkpoints published by live construction lanes.
+    ///
+    /// Defaulted to empty for backends that cannot capture a working tree
+    /// without disturbing it. The host joins the nonce to its durable order
+    /// before proposing any preview.
+    fn observe_construction_checkpoints(&self) -> Vec<ObservedConstructionCheckpoint> {
         Vec::new()
     }
 }

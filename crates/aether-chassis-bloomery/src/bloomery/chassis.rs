@@ -38,7 +38,7 @@ use crate::bloomery::driver::BloomeryDriverCapability;
 use crate::bloomery::{
     CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, DoctorReactorCapability,
     DoctorReactorSetup, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig,
-    IntegrateReactorCapability, IntegrateReactorSetup, JanitorReactorCapability, JanitorReactorSetup,
+    HostClass, IntegrateReactorCapability, IntegrateReactorSetup, JanitorReactorCapability, JanitorReactorSetup,
     LandReactorCapability, LandReactorSetup, LaneProgram, MirrorReactorCapability, MirrorReactorSetup, NotifyConfig,
     NotifyReactorCapability, NotifyReactorSetup, ProcessPolicy, ProjectionShell, ProposeReactorCapability,
     ProposeReactorSetup, SourceReplicaShell, SourceShell, candidate_push_at, github_push_url, webhook_sink,
@@ -371,6 +371,7 @@ fn actor_setups(
             repository: repository.clone(),
         },
         executor: ExecutorReactorSetup {
+            host_class: HostClass::new(coordinator.host_class.clone()),
             executor: executor.clone(),
             correspondence: executor_correspondence,
             store_path: coordinator.store_path.clone(),

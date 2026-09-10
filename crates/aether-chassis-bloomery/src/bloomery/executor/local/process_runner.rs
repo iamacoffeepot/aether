@@ -217,6 +217,10 @@ impl ProcessTransformRunner {
 }
 
 impl TransformRunner for ProcessTransformRunner {
+    fn repository_root(&self) -> Option<PathBuf> {
+        Some(self.repo.clone())
+    }
+
     fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
         fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
         // Executor-owned member/stage axis for the mock lane. Not transform CLI:
@@ -364,6 +368,67 @@ impl TransformRunner for ProcessTransformRunner {
         let tree = decode_object_hex(tree_hex.trim())
             .ok_or_else(|| LocalExecutorError::Worktree(format!("malformed capture tree sha `{}`", tree_hex.trim())))?;
         Ok(Some(CapturedObjects { commit, tree, diff: capture_diff(worktree_dir) }))
+    }
+
+    fn capture_checkpoint(
+        &self,
+        worktree_dir: &Path,
+        evidence_dir: &Path,
+        starting_checkout: &str,
+    ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
+        if command::porcelain_entries(worktree_dir).map_err(git_error)?.is_empty() {
+            return Ok(None);
+        }
+
+        fs::create_dir_all(evidence_dir).map_err(LocalExecutorError::Io)?;
+        let index = evidence_dir.join("checkpoint-index");
+        let _ = fs::remove_file(&index);
+        let captured = (|| {
+            git_with_private_index(worktree_dir, &index, &["read-tree", starting_checkout])?;
+            git_with_private_index(worktree_dir, &index, &["add", "--all"])?;
+            let tree_hex = git_with_private_index(worktree_dir, &index, &["write-tree"])?;
+            #[allow(clippy::literal_string_with_formatting_args)]
+            // aether-suppression-request: git revspec, not a format
+            let starting_tree = git_in(worktree_dir, &["rev-parse", &format!("{starting_checkout}^{{tree}}")])?;
+            if tree_hex.trim() == starting_tree.trim() {
+                return Ok(None);
+            }
+
+            let mut commit = self.identity.overrides(worktree_dir);
+            commit.extend(["commit-tree", tree_hex.trim(), "-p", starting_checkout, "-m"].map(str::to_owned));
+            commit.push("bloomery: construction checkpoint".to_owned());
+            let commit_hex =
+                git_with_private_index(worktree_dir, &index, &commit.iter().map(String::as_str).collect::<Vec<_>>())?;
+            let commit = decode_object_hex(commit_hex.trim()).ok_or_else(|| {
+                LocalExecutorError::Worktree(format!("malformed checkpoint commit sha `{}`", commit_hex.trim()))
+            })?;
+            let tree = decode_object_hex(tree_hex.trim()).ok_or_else(|| {
+                LocalExecutorError::Worktree(format!("malformed checkpoint tree sha `{}`", tree_hex.trim()))
+            })?;
+            Ok(Some(CapturedObjects { commit, tree, diff: None }))
+        })();
+        let _ = fs::remove_file(index);
+        captured
+    }
+}
+
+/// Run one git command against a private index while reading files from the
+/// live checkout. Fixed commit dates make an unchanged observation content
+/// stable; neither environment variable is visible to the lane child.
+fn git_with_private_index(dir: &Path, index: &Path, args: &[&str]) -> Result<String, LocalExecutorError> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .env("GIT_INDEX_FILE", index)
+        .env("GIT_AUTHOR_DATE", "1970-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "1970-01-01T00:00:00Z")
+        .args(args)
+        .output()
+        .map_err(LocalExecutorError::Spawn)?;
+    if output.status.success() {
+        String::from_utf8(output.stdout)
+            .map_err(|_| LocalExecutorError::Worktree("git produced non-UTF-8 output".to_owned()))
+    } else {
+        Err(LocalExecutorError::Worktree(tail(&String::from_utf8_lossy(&output.stderr), 1000)))
     }
 }
 

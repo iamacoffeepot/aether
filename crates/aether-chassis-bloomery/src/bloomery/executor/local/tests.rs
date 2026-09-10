@@ -93,6 +93,8 @@ fn construct_order(subject: Digest, nonce: &str) -> aether_bloomery::WorkOrder {
         nonce: Nonce(nonce.to_owned()),
         instruction_bundle: None,
         prompt_manifest: None,
+        physical_run: None,
+        release_physical_run: true,
     }
 }
 
@@ -220,6 +222,8 @@ fn a_verify_status_field_drives_the_verdict() {
         nonce: Nonce("n-v".to_owned()),
         instruction_bundle: None,
         prompt_manifest: None,
+        physical_run: None,
+        release_physical_run: true,
     };
     let handle = exec.submit(&order).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();
@@ -254,6 +258,8 @@ fn a_passing_verify_body_projects_the_empty_failure_set() {
         nonce: Nonce("n-pass".to_owned()),
         instruction_bundle: None,
         prompt_manifest: None,
+        physical_run: None,
+        release_physical_run: true,
     };
 
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
@@ -279,6 +285,8 @@ fn a_malformed_body_failure_set_fails_closed() {
         nonce: Nonce("n-bad-set".to_owned()),
         instruction_bundle: None,
         prompt_manifest: None,
+        physical_run: None,
+        release_physical_run: true,
     };
 
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
@@ -314,6 +322,8 @@ fn an_environment_status_yields_an_executor_fault_rather_than_a_failing_review()
         nonce: Nonce("n-env".to_owned()),
         instruction_bundle: None,
         prompt_manifest: None,
+        physical_run: None,
+        release_physical_run: true,
     };
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
     let upload = NameEvidenceClaims.claim_for(&reference).expect("the fault name round-trips through the claim seam");
@@ -347,6 +357,8 @@ fn a_verify_lane_environment_status_is_an_executor_fault() {
         nonce: Nonce("n-verify-env".to_owned()),
         instruction_bundle: None,
         prompt_manifest: None,
+        physical_run: None,
+        release_physical_run: true,
     };
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
     let upload =
@@ -383,6 +395,8 @@ fn an_unrecognized_or_absent_status_still_fails_closed_on_the_exit() {
         nonce: Nonce(nonce.to_owned()),
         instruction_bundle: None,
         prompt_manifest: None,
+        physical_run: None,
+        release_physical_run: true,
     };
 
     for (label, body) in [
@@ -425,6 +439,8 @@ fn verify_order(subject: Digest, nonce: &str) -> aether_bloomery::WorkOrder {
         nonce: Nonce(nonce.to_owned()),
         instruction_bundle: None,
         prompt_manifest: None,
+        physical_run: None,
+        release_physical_run: true,
     }
 }
 
@@ -1379,6 +1395,8 @@ fn an_authored_environment_fault_still_carries_measured_cost_and_calls() {
         nonce: Nonce("n-env-cost".to_owned()),
         instruction_bundle: None,
         prompt_manifest: None,
+        physical_run: None,
+        release_physical_run: true,
     };
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
     let upload = NameEvidenceClaims.claim_for(&reference).expect("the fault name round-trips through the claim seam");
@@ -1808,6 +1826,8 @@ fn an_aggregate_review_spawn_names_the_range_a_member_spawn_does_not() {
         nonce: Nonce(test_nonce("aggregate")),
         instruction_bundle: None,
         prompt_manifest: None,
+        physical_run: None,
+        release_physical_run: true,
     };
     exec.submit(&review).unwrap();
 
@@ -1844,6 +1864,8 @@ fn an_aggregate_review_spawn_names_the_range_a_member_spawn_does_not() {
         nonce: Nonce(test_nonce("verify")),
         instruction_bundle: None,
         prompt_manifest: None,
+        physical_run: None,
+        release_physical_run: true,
     };
     exec.submit(&verify).unwrap();
     assert_eq!(
@@ -1904,6 +1926,8 @@ fn an_unresolvable_diff_base_refuses_the_submit() {
         nonce: Nonce(test_nonce("unseeded")),
         instruction_bundle: None,
         prompt_manifest: None,
+        physical_run: None,
+        release_physical_run: true,
     };
 
     match exec.submit(&review) {
@@ -2327,6 +2351,8 @@ fn outstanding(subject: Digest, nonce: &str) -> OutstandingDispatch {
             digest(0xC0),
             digest(0xB0),
         ),
+        physical_run: None,
+        release_physical_run: true,
     }
 }
 
@@ -2992,6 +3018,8 @@ fn reconcile_order(subject: Digest, nonce: &str, task: &str, checkout: Digest) -
         nonce: Nonce(nonce.to_owned()),
         instruction_bundle: None,
         prompt_manifest: None,
+        physical_run: None,
+        release_physical_run: true,
     };
     order.transformation.model = Some(ResolvedModel {
         harness: Harness::Claude,
@@ -3322,6 +3350,8 @@ fn a_critic_does_not_resume_the_constructors_session() {
         nonce: Nonce(test_nonce("critic")),
         instruction_bundle: None,
         prompt_manifest: None,
+        physical_run: None,
+        release_physical_run: true,
     };
     critic.transformation.model = Some(ResolvedModel {
         harness: Harness::Claude,
@@ -3614,6 +3644,8 @@ fn a_judge_dispatch_never_acquires_a_builder_session() {
         nonce: Nonce(test_nonce("judge")),
         instruction_bundle: None,
         prompt_manifest: None,
+        physical_run: None,
+        release_physical_run: true,
     };
     critic.transformation.model = Some(ResolvedModel {
         harness: Harness::Claude,

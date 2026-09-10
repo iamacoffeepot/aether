@@ -13,9 +13,10 @@ use aether_bloomery::{
     BloomDraft, BloomId, BloomRecord, CandidateRef, CompositionParents, Conclusion, ConfigRegistry, Decision, Digest,
     Event, Evidence, EvidenceKind, EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, Harness,
     IdempotencyKey, LaneObservation, Membership, NetworkProfile, Nonce, Observation, Outcome, PipelineManifest,
-    Provenance, ReasoningEffort, ResolvedModel, RetrospectClaim, Snapshot, SpendWindow, StageCatalog, StageId,
-    StageVerdict, Statement, StudyCall, StudyCost, SuppressionRequest, SurfacePathRequest, SurfaceRequest,
-    Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, config_address, reduce,
+    PrecheckNode, PrecheckPayload, Provenance, ReasoningEffort, ResolvedModel, RetrospectClaim, Snapshot, SpendWindow,
+    StageCatalog, StageId, StageVerdict, Statement, StudyCall, StudyCost, SuppressionRequest, SurfacePathRequest,
+    SurfaceRequest, Topic, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId,
+    config_address, reduce,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
@@ -33,6 +34,7 @@ use super::{
     UploadedEvidence, admit_uploaded, dispatch_and_record, dispatch_nonce, record_dispatch, run_intake_cycle,
     run_intake_cycle_now,
 };
+use crate::bloomery::findings::verification_findings_key;
 use crate::bloomery::open_scope_run;
 use crate::bloomery::{
     ExecutorPortError, ExecutorShell, LocalExecutorError, OutstandingDispatch, ReconcileLanes, ReconcileReport,
@@ -669,6 +671,7 @@ fn claim_for_carries_the_whole_observation() {
     let subject = Digest::from_bytes([3; 32]);
     let detail = Digest::from_bytes([4; 32]);
     let observation = LaneObservation {
+        contextual_observations: Some(br#"{"protocol":1,"documents":[]}"#.to_vec()),
         candidate: Some(CandidateRef { tree: Digest::from_bytes([5; 32]), checkout: Digest::from_bytes([6; 32]) }),
         findings: Some("critic findings".into()),
         failed_verifiers: VerifyFailureSet::one(VerifyFailure::Fmt),
@@ -1394,6 +1397,107 @@ fn aggregate_verify_findings_persist_on_the_composition_and_clear_on_a_pass() {
         None,
         "a passing aggregate verify clears the composition's stale findings",
     );
+}
+
+fn queued_precheck_upload(
+    store: &mut SqliteStore,
+    bloom: BloomId,
+    detail: Digest,
+    verdict: StageVerdict,
+    findings: &str,
+) -> UploadedEvidence {
+    let node = PrecheckNode {
+        plan: Digest::from_bytes([91; 32]),
+        tree: Digest::from_bytes([92; 32]),
+        head: Digest::from_bytes([93; 32]),
+        gate_set: Digest::from_bytes([94; 32]),
+    };
+    let payload = PrecheckPayload {
+        bloom: bloom.0,
+        node: node.clone(),
+        transformation: Transformation::for_aggregate_verify(
+            &StageCatalog::binding_of(StageId::AggregateVerify),
+            node.tree,
+            node.head,
+            Digest::from_bytes([95; 32]),
+        ),
+        profile: StageCatalog::profile_of(StageId::AggregateVerify),
+        configs: ConfigRegistry::default(),
+    };
+    let sequence = store.enqueue_outbox(Topic::DispatchPrecheck.as_str(), &to_vec(&payload).unwrap(), None).unwrap();
+    let record = DispatchRecord {
+        nonce: dispatch_nonce(sequence),
+        bloom,
+        workpiece: WorkpieceId::composition(),
+        scope_revision: node.digest(),
+        candidate: node.tree,
+        displayed_digest: node.tree,
+        stage: StageId::AggregateVerify,
+        transformation: payload.transformation,
+        configs: payload.configs,
+        profile: payload.profile,
+        instruction_bundle: None,
+        prompt_manifest: None,
+    };
+    record_dispatch(store, &record).unwrap();
+    store.mark_order_submitted(&record.nonce.0).unwrap();
+    UploadedEvidence {
+        nonce: record.nonce,
+        subject: node.tree,
+        detail,
+        verdict,
+        observation: LaneObservation { findings: Some(findings.to_owned()), ..LaneObservation::default() },
+    }
+}
+
+#[test]
+fn precheck_diagnostics_remain_bound_to_their_exact_receipt_after_later_results() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([90; 32]));
+    for (byte, verdict, findings) in [
+        (101, StageVerdict::VerificationFailed, "first exact compiler diagnostic"),
+        (102, StageVerdict::VerificationFailed, "a later compiler diagnostic"),
+        (103, StageVerdict::VerificationPassed, "untrusted prose on a pass"),
+        (104, StageVerdict::ExecutorFault, "untrusted prose on a host fault"),
+        (105, StageVerdict::VerificationFailed, "  \n"),
+    ] {
+        let detail = Digest::from_bytes([byte; 32]);
+        let upload = queued_precheck_upload(&mut store, bloom, detail, verdict, findings);
+        assert!(matches!(admit_uploaded(&mut store, &upload).unwrap(), AdmitDecision::Admitted(_)));
+        assert!(store.lookup_order(&upload.nonce.0).unwrap().is_none());
+    }
+    // These are typed local-lane observations. No corresponding artifact-store
+    // object was created, and later results reused the same pre-check node.
+    for (byte, expected) in [
+        (101, Some("first exact compiler diagnostic")),
+        (102, Some("a later compiler diagnostic")),
+        (103, None),
+        (104, None),
+        (105, None),
+    ] {
+        assert_eq!(
+            store
+                .lookup_review_findings(bloom.0.as_bytes(), &verification_findings_key(Digest::from_bytes([byte; 32])))
+                .unwrap()
+                .as_deref(),
+            expected,
+        );
+    }
+}
+
+#[test]
+fn a_rejected_precheck_upload_cannot_seed_exact_repair_findings() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([90; 32]));
+    let detail = Digest::from_bytes([106; 32]);
+    let mut upload = queued_precheck_upload(&mut store, bloom, detail, StageVerdict::VerificationFailed, "wrong tree");
+    upload.subject = Digest::from_bytes([107; 32]);
+    assert!(matches!(
+        admit_uploaded(&mut store, &upload).unwrap(),
+        AdmitDecision::Refused(IntakeRefusal::DigestMismatch { .. })
+    ));
+    assert!(store.lookup_order(&upload.nonce.0).unwrap().is_some());
+    assert!(store.lookup_review_findings(bloom.0.as_bytes(), &verification_findings_key(detail)).unwrap().is_none());
 }
 
 // ADR-0153 — an AggregateReview order's verdict admits as

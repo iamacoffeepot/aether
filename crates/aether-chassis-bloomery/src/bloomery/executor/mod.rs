@@ -34,8 +34,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BackendId, EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedLaneWrites, SharedCorrespondence, WorkHandle,
-    WorkOrder,
+    BackendId, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedConstructionCheckpoint,
+    ObservedLaneWrites, SharedCorrespondence, WorkHandle, WorkOrder,
 };
 use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError, LaneWorkflows};
 
@@ -208,12 +208,20 @@ where
         self.0.cancel(handle).map_err(Into::into)
     }
 
+    fn release_physical_run(&self, physical_run: &Digest) -> Result<(), Self::Error> {
+        self.0.release_physical_run(physical_run).map_err(Into::into)
+    }
+
     fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
         self.0.stream_evidence(handle).map_err(Into::into)
     }
 
     fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
         self.0.observe_writes()
+    }
+
+    fn observe_construction_checkpoints(&self) -> Vec<ObservedConstructionCheckpoint> {
+        self.0.observe_construction_checkpoints()
     }
 
     fn backend_for(&self, handle: &WorkHandle) -> BackendId {
@@ -405,6 +413,11 @@ impl ExecutorShell {
         self.backend.cancel(handle)
     }
 
+    /// Release a retained shared-run lane lease.
+    pub fn release_physical_run(&self, physical_run: &Digest) -> Result<(), ExecutorPortError> {
+        self.backend.release_physical_run(physical_run)
+    }
+
     /// Stream the references to the run's uploaded evidence, filtered to the
     /// order's nonce.
     ///
@@ -423,6 +436,12 @@ impl ExecutorShell {
     #[must_use]
     pub fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
         self.backend.observe_writes()
+    }
+
+    /// Immutable, provisional checkpoints from live construction lanes.
+    #[must_use]
+    pub fn observe_construction_checkpoints(&self) -> Vec<ObservedConstructionCheckpoint> {
+        self.backend.observe_construction_checkpoints()
     }
 
     /// Which arm of the mounted backend owns `handle` (#5412) — how the intake

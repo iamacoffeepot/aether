@@ -1,7 +1,7 @@
 //! The local-process executor backend: an in-process registry of tracked runs
 //! over the [`TransformRunner`] spawn seam, and its [`ExecutorBackend`] impl.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf, absolute};
@@ -13,17 +13,23 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::{
-    BackendObjectId, BloomId, CandidateRef, CompositionParents, Conclusion, ConfigRegistry, ConfigScopes, Digest,
-    EvidenceRef, ExecutionStatus, ExecutorBackend, FoldContribution, LaneObservation, ModelProcessInstructions, Nonce,
+    BackendObjectId, BloomId, CandidateRef, CompositionParents, Conclusion, ConfigRegistry, ConfigScopes,
+    ConstructionCheckpoint, CoordinationPolicy, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend,
+    FoldContribution, LaneObservation, ModelProcessInstructions, Nonce, ObservedConstructionCheckpoint,
     ObservedLaneWrites, PipelineManifest, PriceTable, ResolvedModel, RetrospectClaim, SessionSlug,
     SharedCorrespondence, StageId, StageVerdict, StudyCost, SuppressionRequest, SurfaceRequest, Transformation,
     VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, config_address, is_model_lane, narrow_composition,
 };
 use aether_bloomery_git::command;
-use aether_bloomery_git::source::candidate_ref_name;
+use aether_bloomery_git::source::{candidate_ref_name, partial_head_repair_ref_name};
+use aether_bloomery_git::{
+    construction_checkpoint_promotion, transient_construction_checkpoint_ref_name,
+    transient_construction_checkpoint_ref_prefix,
+};
 use aether_bloomery_github::parse_study;
 use aether_data::Kind;
 use aether_data::wire::from_bytes;
+use serde::{Deserialize, Serialize};
 use std::fs;
 
 use super::affinity::{BuilderSlots, SlotAffinity, SlotChoice, choose_slot, stamp_slot_affinity};
@@ -34,7 +40,7 @@ use super::orphan::OrphanedRun;
 use super::priority::{DispatchPriority, must_wait_behind, next_waiting, priority_of};
 use super::process_runner::{CaptureIdentity, ProcessTransformRunner};
 use super::quarantine;
-use super::runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
+use super::runner::{CapturedObjects, RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use super::session_reuse::{
     AcquireRequest, DEFAULT_CACHE_TTL_SECS, DEFAULT_DEPENDENCY_INCREMENT_TOKENS, DEFAULT_PRICING_CLIFF_TOKENS,
     MissReason, PredecessorCandidate, ResumeDecision, ReuseArm, SPLICED_RESET_NOTE, decide_predecessor_resume,
@@ -47,7 +53,9 @@ use crate::bloomery::executor::{LaneOccupancy, OutstandingDispatch, ReconcileLan
 use crate::bloomery::intake::{DispatchRecord, NameEvidenceClaims};
 use crate::bloomery::triage::MAX_TRIAGED_DIFF_BYTES;
 use crate::bloomery::triage::named_surface;
-use crate::bloomery::verify::{apply_containment, candidate_delta_base, candidate_violations, changed_paths};
+use crate::bloomery::verify::{
+    apply_containment, candidate_delta_base, candidate_violations, changed_paths, path_in_surface,
+};
 use crate::bloomery::{candidate_tree_digest, capture_commit_digest};
 use crate::session::SessionConfig;
 use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
@@ -56,6 +64,81 @@ use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
 /// checkouts under the same base dir. Evidence stays per dispatch (nonce-keyed):
 /// it is what that one attempt produced.
 const EVIDENCE_SUFFIX: &str = "-evidence";
+const OBSERVATION_SUFFIX: &str = ".observations.json";
+const MAX_OBSERVATION_DOCUMENTS: usize = 256;
+const MAX_OBSERVATION_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Deserialize, Serialize)]
+struct CollectedObservationDocument {
+    protocol: u32,
+    nonce: Option<String>,
+    gate: String,
+    invocations: Vec<CollectedObservationInvocation>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct CollectedObservationInvocation {
+    invocation: Digest,
+    at: Option<String>,
+    outcomes: BTreeMap<String, CollectedObservedResult>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CollectedObservedResult {
+    Passed,
+    Failed,
+    Unknown,
+    Infrastructure,
+}
+
+fn contextual_observation_bundle(dir: &Path, expected_nonce: &str) -> io::Result<Option<Vec<u8>>> {
+    let mut documents = Vec::new();
+    let mut gates = BTreeSet::new();
+    let mut total_bytes = 0usize;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(gate) = name.strip_suffix(OBSERVATION_SUFFIX) else {
+            continue;
+        };
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "observation artifact is not a regular file"));
+        }
+        if documents.len() == MAX_OBSERVATION_DOCUMENTS {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "too many observation documents"));
+        }
+        let length = usize::try_from(metadata.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "observation artifact is too large"))?;
+        total_bytes = total_bytes
+            .checked_add(length)
+            .filter(|total| *total <= MAX_OBSERVATION_BYTES)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "observation bundle is too large"))?;
+        let bytes = fs::read(entry.path())?;
+        let document: CollectedObservationDocument =
+            serde_json::from_slice(&bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if document.protocol != 1
+            || document.nonce.as_deref() != Some(expected_nonce)
+            || document.gate != gate
+            || gate.is_empty()
+            || !gates.insert(gate.to_owned())
+        {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "observation artifact binding mismatch"));
+        }
+        documents.push(document);
+    }
+    if documents.is_empty() {
+        return Ok(None);
+    }
+    documents.sort_by(|left, right| left.gate.cmp(&right.gate));
+    serde_json::to_vec(&serde_json::json!({ "protocol": 1, "documents": documents }))
+        .map(Some)
+        .map_err(io::Error::other)
+}
 
 /// The directory under the scratch root that holds one checkout per reusable
 /// harness session: `sessions/<slug>/tree`.
@@ -178,6 +261,16 @@ struct Run {
     // starts rather than created fresh. `None` for a run re-adopted at boot
     // whose slot could not be recovered.
     worktree_dir: Option<PathBuf>,
+    // The immutable domain and backend identities this construction started
+    // from. Checkpoint capture parents its private commit here even while the
+    // lane's files continue changing.
+    starting_checkout: Digest,
+    starting_checkout_hex: String,
+    checkpoint_observation: u64,
+    last_checkpoint_unix_millis: u64,
+    last_checkpoint: Option<CandidateRef>,
+    lease: Option<Digest>,
+    release_lease: bool,
     evidence_dir: PathBuf,
     // The digest the intake broker binds the evidence to, per `evidence_subject`.
     subject: Digest,
@@ -281,6 +374,16 @@ struct StreamedRun {
     diff_base_hex: Option<String>,
 }
 
+struct ConstructionCheckpointTarget {
+    nonce: String,
+    worktree: PathBuf,
+    evidence_dir: PathBuf,
+    starting_checkout: Digest,
+    starting_checkout_hex: String,
+    previous: Option<CandidateRef>,
+    observation: u64,
+}
+
 /// Which lane-specific evidence gates a command's run rides.
 ///
 /// Derived in one place because two paths stamp it onto a run — `submit` for a
@@ -315,6 +418,9 @@ struct PendingRun {
     nonce: String,
     command: String,
     checkout_hex: String,
+    starting_checkout: Digest,
+    physical_run: Option<Digest>,
+    release_physical_run: bool,
     diff_base_hex: Option<String>,
     seeded_hex: Option<String>,
     // The tree the checkout must carry, when the order pins one — see
@@ -412,6 +518,10 @@ struct Registry {
     // until the run leaves the registry, because the slot's checkout is what the
     // dispatch is building in and the next claimant resets it.
     slots: HashSet<usize>,
+    // A settled shared-run step can retain its slot and target while the
+    // durable reactor chooses the next serial step or attribution probe.
+    leases: HashMap<Digest, usize>,
+    recovered_checkpoints: Vec<ObservedConstructionCheckpoint>,
     // Nonces whose `Run` is owned by an in-flight cancel. The kill/wait must not
     // hold the registry lock, so this stand-in keeps the nonce and slot counted
     // until kill succeeds (release) or Drop restores the run.
@@ -429,7 +539,7 @@ impl Registry {
     // `runs` and must not count twice.
     fn occupied(&self, quarantined: &HashSet<usize>) -> usize {
         let extra = quarantined.iter().filter(|slot| !self.slots.contains(slot)).count();
-        self.runs.len() + self.starting + self.cancelling.len() + extra
+        self.runs.len() + self.starting + self.cancelling.len() + self.leases.len() + extra
     }
 
     // Claim a preferred predecessor slot when it is free, otherwise the lowest
@@ -476,6 +586,10 @@ impl Registry {
         if let Some(slot) = slot {
             self.slots.remove(&slot);
         }
+    }
+
+    fn claim_lease(&mut self, physical_run: Option<Digest>) -> Option<usize> {
+        self.leases.remove(&physical_run?)
     }
 
     fn tracks(&self, nonce: &str) -> bool {
@@ -962,8 +1076,14 @@ impl LocalExecutor {
         if registry.cancelling.contains_key(nonce) {
             return;
         }
-        let slot = registry.runs.remove(nonce).and_then(|run| run.slot);
-        registry.release_slot(slot);
+        let Some(run) = registry.runs.remove(nonce) else {
+            return;
+        };
+        if let (Some(physical_run), false, Some(slot)) = (run.lease, run.release_lease, run.slot) {
+            registry.leases.insert(physical_run, slot);
+        } else {
+            registry.release_slot(run.slot);
+        }
     }
 
     // Resolve one work order into the spawn it will become.
@@ -1066,6 +1186,9 @@ impl LocalExecutor {
             nonce,
             command: order.transformation.command.clone(),
             checkout_hex,
+            starting_checkout: order.transformation.checkout,
+            physical_run: order.physical_run,
+            release_physical_run: order.release_physical_run,
             diff_base_hex,
             seeded_hex,
             judged_tree_hex,
@@ -1120,6 +1243,25 @@ impl LocalExecutor {
         looked_up.and_then(|bytes| from_bytes(&bytes).ok()).unwrap_or_else(PipelineManifest::compiled)
     }
 
+    fn checkpoint_policy_enabled(&self, nonce: &str) -> bool {
+        let Some(messages) = self.messages.as_ref() else {
+            return false;
+        };
+        let policy = {
+            let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
+            store.lookup_order(nonce).ok().flatten().and_then(|order| {
+                let registry = from_bytes::<ConfigRegistry>(&order.configs).ok()?;
+                let address = ConfigScopes::bloom_wide(&registry).address::<CoordinationPolicy>()?;
+                let (kind, bytes, _) = store.lookup_config(address.as_bytes()).ok().flatten()?;
+                (kind == CoordinationPolicy::NAME).then(|| from_bytes::<CoordinationPolicy>(&bytes).ok()).flatten()
+            })
+        };
+        let Some(policy) = policy else {
+            return false;
+        };
+        policy.eager_integration
+    }
+
     // The slot that last built this member, when one has (ADR-0196 as amended
     // for #5425).
     //
@@ -1157,9 +1299,14 @@ impl LocalExecutor {
         priority: DispatchPriority,
         preferred: Option<usize>,
         idle_only: bool,
+        physical_run: Option<Digest>,
     ) -> Option<(usize, SlotChoice)> {
         let quarantined = quarantine::slots_on_disk(&self.base_dir);
         let mut registry = self.lock();
+        if let Some(slot) = registry.claim_lease(physical_run) {
+            registry.starting += 1;
+            return Some((slot, SlotChoice::Preferred));
+        }
         // This submit holds one entry itself. Any other preparer may be
         // required work that has not reached the waiting queue yet.
         if (idle_only && (!registry.waiting.is_empty() || registry.submitting.len() > 1))
@@ -1663,6 +1810,13 @@ impl LocalExecutor {
                         process,
                         slot: Some(slot),
                         worktree_dir: Some(worktree_dir),
+                        starting_checkout: pending.starting_checkout,
+                        starting_checkout_hex: pending.checkout_hex,
+                        checkpoint_observation: 0,
+                        last_checkpoint_unix_millis: 0,
+                        last_checkpoint: None,
+                        lease: pending.physical_run,
+                        release_lease: pending.release_physical_run,
                         evidence_dir: pending.evidence_dir,
                         subject: pending.subject,
                         gates: pending.gates,
@@ -1737,6 +1891,13 @@ impl LocalExecutor {
                 // began.
                 slot: None,
                 worktree_dir: None,
+                starting_checkout: Digest::default(),
+                starting_checkout_hex: String::new(),
+                checkpoint_observation: 0,
+                last_checkpoint_unix_millis: 0,
+                last_checkpoint: None,
+                lease: None,
+                release_lease: true,
                 evidence_dir,
                 subject,
                 gates,
@@ -1823,6 +1984,18 @@ impl LocalExecutor {
                 process: Box::new(OrphanedRun::new(nonce.clone(), &evidence_dir)),
                 slot,
                 worktree_dir: slot.and_then(|slot| self.checkout_dir(slug.as_ref(), slot).ok()),
+                starting_checkout: dispatch.transformation.checkout,
+                starting_checkout_hex: self
+                    .correspondence
+                    .resolve_backend_object(&dispatch.transformation.checkout)
+                    .ok()
+                    .flatten()
+                    .map_or_else(String::new, |object| render_object_hex(&object)),
+                checkpoint_observation: 0,
+                last_checkpoint_unix_millis: 0,
+                last_checkpoint: None,
+                lease: dispatch.physical_run,
+                release_lease: dispatch.release_physical_run,
                 evidence_dir,
                 subject: evidence_subject(&dispatch.transformation),
                 gates: LaneGates::of(&dispatch.transformation.command),
@@ -2040,6 +2213,19 @@ impl LocalExecutor {
                 None
             }
         }
+    }
+
+    // Turn one private-index checkpoint capture into the same durable
+    // correspondence pair terminal candidate capture uses. No diff or commit
+    // message is filed: this candidate is provisional preview input only.
+    fn checkpoint_candidate(&self, captured: &CapturedObjects) -> Result<CandidateRef, LocalExecutorError> {
+        let candidate = CandidateRef {
+            tree: candidate_tree_digest(&captured.tree),
+            checkout: capture_commit_digest(&captured.commit),
+        };
+        self.correspondence.record(&candidate.tree, &captured.tree)?;
+        self.correspondence.record(&candidate.checkout, &captured.commit)?;
+        Ok(candidate)
     }
 
     // File the lap's own diff against the nonce of the order that produced it
@@ -2367,6 +2553,59 @@ impl LocalExecutor {
         self.fail_closed_host_fault(handle, &run.subject, run.worktree_dir, run.gates.is_construct, cause)
     }
 
+    fn capture_bound_construction(
+        &self,
+        handle: &WorkHandle,
+        conclusion: Option<ConstructConclusion>,
+        concluded: bool,
+        worktree_dir: Option<&Path>,
+        bytes: &[u8],
+    ) -> Option<CandidateRef> {
+        let commit_message = conclusion.and_then(|_| parse_commit_message(bytes));
+        let candidate = match conclusion {
+            Some(ConstructConclusion::Candidate) => self.construct_capture(
+                worktree_dir.map(Path::to_path_buf),
+                &handle.nonce,
+                true,
+                commit_message.as_deref(),
+            ),
+            Some(ConstructConclusion::Incomplete) => self.construct_capture(
+                worktree_dir.map(Path::to_path_buf),
+                &handle.nonce,
+                false,
+                commit_message.as_deref(),
+            ),
+            Some(ConstructConclusion::Declined) | None => None,
+        };
+        if concluded
+            && candidate.is_some()
+            && let Some(message) = commit_message.as_deref()
+        {
+            self.file_commit_message(&handle.nonce, message);
+        }
+        candidate
+    }
+
+    fn contextual_observations(
+        &self,
+        handle: &WorkHandle,
+        subject: &Digest,
+        worktree_dir: Option<&Path>,
+        is_construct: bool,
+        evidence_dir: &Path,
+    ) -> Result<Option<Vec<u8>>, Vec<EvidenceRef>> {
+        contextual_observation_bundle(evidence_dir, &handle.nonce.0).map_err(|error| {
+            tracing::warn!(nonce = %handle.nonce.0, %error, "local executor rejected contextual observations");
+            self.fail_closed_host_fault(
+                handle,
+                subject,
+                worktree_dir.map(Path::to_path_buf),
+                is_construct,
+                HostFaultCause::Unparseable,
+            )
+        })
+    }
+
     fn bound_stream_evidence(
         &self,
         handle: &WorkHandle,
@@ -2380,6 +2619,7 @@ impl LocalExecutor {
             lifecycle,
             gates: LaneGates { is_construct, is_verify },
             worktree_dir,
+            evidence_dir,
             slot,
             diff_base_hex,
             ..
@@ -2438,28 +2678,13 @@ impl LocalExecutor {
         // A dead construct still captures as a member checkpoint, but only after
         // the evidence binds to this handle — a stale body cannot trigger it.
         // A declined construct captured nothing on purpose and is not a checkpoint.
-        let commit_message = is_construct.then(|| parse_commit_message(bytes)).flatten();
-        let candidate = match construct {
-            Some(ConstructConclusion::Candidate) => {
-                self.construct_capture(worktree_dir.clone(), &handle.nonce, true, commit_message.as_deref())
-            }
-            Some(ConstructConclusion::Incomplete) => {
-                self.construct_capture(worktree_dir.clone(), &handle.nonce, false, commit_message.as_deref())
-            }
-            Some(ConstructConclusion::Declined) | None => None,
-        };
+        let candidate = self.capture_bound_construction(handle, construct, concluded, worktree_dir.as_deref(), bytes);
         // File the message against the member the run's order names, while that
         // order is still outstanding — the intake consumes it a moment later, and
         // the land path has no other way back from a bloom to the lane that wrote
         // this. Only for a candidate that was actually captured, so the row and
         // the candidate arrive together and a lane that produced nothing cannot
         // leave a message behind for the next one.
-        if concluded
-            && candidate.is_some()
-            && let Some(message) = commit_message.as_deref()
-        {
-            self.file_commit_message(&handle.nonce, message);
-        }
         let passed = concluded && (!is_construct || candidate.is_some());
         // A bound authored pass or failure keeps that verdict even when the
         // child later exited nonzero or was signalled: the evidence judged the
@@ -2479,15 +2704,7 @@ impl LocalExecutor {
         let surface_request = matches!(construct, Some(ConstructConclusion::Declined))
             .then(|| self.surface_request(&handle.nonce.0, bytes))
             .flatten();
-        let verdict = if surface_request.is_some() {
-            StageVerdict::SurfaceRequested
-        } else if matches!(construct, Some(ConstructConclusion::Declined)) {
-            StageVerdict::Declined
-        } else if passed {
-            StageVerdict::VerificationPassed
-        } else {
-            StageVerdict::VerificationFailed
-        };
+        let verdict = stage_verdict(construct, passed, surface_request.is_some());
         let violating_paths = if is_verify {
             self.surface_violations(&handle.nonce.0, worktree_dir.as_deref(), diff_base_hex.as_deref())
                 .unwrap_or_default()
@@ -2511,6 +2728,16 @@ impl LocalExecutor {
                 .then(|| self.narrowing(&handle.nonce.0, worktree_dir.as_deref(), diff_base_hex.as_deref(), bytes))
                 .flatten(),
         };
+        let contextual_observations = match self.contextual_observations(
+            handle,
+            &subject,
+            worktree_dir.as_deref(),
+            is_construct,
+            &evidence_dir,
+        ) {
+            Ok(observations) => observations,
+            Err(evidence) => return evidence,
+        };
         // Capture, the containment read, and the narrowing read all finish with
         // this run's checkout still its own. Retire hands the slot — and a
         // session tree it may share — to pump, which materializes the next
@@ -2520,7 +2747,101 @@ impl LocalExecutor {
         self.retire(&handle.nonce.0);
         self.pump();
 
-        vec![judged_evidence_ref(handle, &subject, bytes, candidate, judgement)]
+        vec![judged_evidence_ref(handle, &subject, bytes, candidate, judgement, contextual_observations)]
+    }
+
+    fn observe_construction_checkpoint(
+        &self,
+        target: ConstructionCheckpointTarget,
+        now: u64,
+    ) -> Option<ObservedConstructionCheckpoint> {
+        let ConstructionCheckpointTarget {
+            nonce,
+            worktree,
+            evidence_dir,
+            starting_checkout,
+            starting_checkout_hex,
+            previous,
+            observation,
+        } = target;
+        let captured = match self.runner.capture_checkpoint(&worktree, &evidence_dir, &starting_checkout_hex) {
+            Ok(Some(captured)) => captured,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::debug!(
+                    target: "aether_chassis_bloomery::executor",
+                    nonce,
+                    %error,
+                    "local executor backend: construction checkpoint capture unavailable this tick",
+                );
+                return None;
+            }
+        };
+        let transient = transient_construction_checkpoint_ref_name(&Nonce(nonce.clone()), observation);
+        let commit_hex = render_object_hex(&captured.commit);
+        if let Err(error) = command::run(&worktree, &["update-ref", &transient, &commit_hex]) {
+            tracing::warn!(nonce, %error, "construction checkpoint transient pin failed");
+            return None;
+        }
+        let candidate = match self.checkpoint_candidate(&captured) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                let _ = command::run(&worktree, &["update-ref", "-d", &transient]);
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    nonce,
+                    %error,
+                    "local executor backend: construction checkpoint correspondence write failed",
+                );
+                return None;
+            }
+        };
+        if previous.as_ref() == Some(&candidate) {
+            let _ = command::run(&worktree, &["update-ref", "-d", &transient]);
+            return None;
+        }
+
+        let Some(identity) = self.order_identity(&nonce) else {
+            let _ = command::run(&worktree, &["update-ref", "-d", &transient]);
+            return None;
+        };
+        let (Some(bloom), Some(scope_revision)) = (Digest::from_slice(&identity.bloom), identity.scope_revision) else {
+            let _ = command::run(&worktree, &["update-ref", "-d", &transient]);
+            return None;
+        };
+        let checkpoint = ConstructionCheckpoint {
+            bloom: BloomId(bloom),
+            workpiece: WorkpieceId(identity.workpiece),
+            scope_revision,
+            nonce: aether_bloomery::construction_nonce_digest(&Nonce(nonce.clone())),
+            observation,
+            starting_checkout,
+            candidate,
+        };
+        let (transient, durable) = construction_checkpoint_promotion(&Nonce(nonce.clone()), &checkpoint);
+        if command::run(&worktree, &["update-ref", &durable, &commit_hex]).is_err()
+            || command::run(&worktree, &["update-ref", "-d", &transient]).is_err()
+        {
+            tracing::warn!(nonce, "construction checkpoint promotion failed");
+            return None;
+        }
+
+        let observation = {
+            let mut registry = self.lock();
+            let observation = {
+                let run = registry.runs.get_mut(&nonce)?;
+                if run.starting_checkout != starting_checkout || run.last_checkpoint.as_ref() == Some(&candidate) {
+                    return None;
+                }
+                run.checkpoint_observation = observation;
+                run.last_checkpoint_unix_millis = now;
+                run.last_checkpoint = Some(candidate);
+                run.checkpoint_observation
+            };
+            drop(registry);
+            observation
+        };
+        Some(ObservedConstructionCheckpoint { nonce: Nonce(nonce), observation, starting_checkout, candidate })
     }
 }
 
@@ -2639,6 +2960,7 @@ fn judged_evidence_ref(
     bytes: &[u8],
     candidate: Option<CandidateRef>,
     judgement: Judgement,
+    contextual_observations: Option<Vec<u8>>,
 ) -> EvidenceRef {
     let Judgement {
         verdict,
@@ -2685,6 +3007,7 @@ fn judged_evidence_ref(
             // only the reader writes it, and a lane that wrote none yields an
             // empty set, which is what a read with nothing to file also yields.
             retrospect_findings: parse_retrospect_findings(bytes),
+            contextual_observations,
         },
     }
 }
@@ -2762,7 +3085,9 @@ impl LocalExecutor {
         // the ceiling existed. Otherwise the dispatch waits its turn — and is acked
         // as submitted either way, so the reducer's view of it never depends on how
         // busy this host happened to be.
-        if let Some((slot, reason)) = self.reserve_slot(pending.priority, pending.preferred, idle_only) {
+        if let Some((slot, reason)) =
+            self.reserve_slot(pending.priority, pending.preferred, idle_only, pending.physical_run)
+        {
             let failed = FailedStart::of(&pending);
             if let Err(error) = self.start_reserved(pending, slot, reason) {
                 // A checkout that does not carry the order's candidate is the
@@ -2797,6 +3122,82 @@ impl ExecutorBackend for LocalExecutor {
 
     fn try_submit_idle(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, Self::Error> {
         self.submit_order(order, true)
+    }
+
+    fn release_physical_run(&self, physical_run: &Digest) -> Result<(), Self::Error> {
+        let released = {
+            let mut registry = self.lock();
+            let slot = registry.leases.remove(physical_run);
+            registry.release_slot(slot);
+            drop(registry);
+            slot.is_some()
+        };
+        if released {
+            self.pump();
+        }
+        Ok(())
+    }
+
+    fn retain_partial_head_repair(
+        &self,
+        plan: &Digest,
+        candidate: &CandidateRef,
+        allowed_paths: &[String],
+    ) -> Result<(), Self::Error> {
+        let base = self
+            .messages
+            .as_ref()
+            .ok_or_else(|| LocalExecutorError::Worktree("partial-head repair store is unavailable".to_owned()))?
+            .lock()
+            .map_err(|_| LocalExecutorError::Worktree("partial-head repair store lock was poisoned".to_owned()))?
+            .list_partial_head_repairs()
+            .map_err(|error| LocalExecutorError::Worktree(format!("partial-head repair lookup failed: {error}")))?
+            .into_iter()
+            .find_map(|row| {
+                from_bytes::<aether_bloomery::PartialHeadRepairDispatch>(&row.dispatch)
+                    .ok()
+                    .filter(|dispatch| dispatch.plan.digest() == *plan)
+                    .map(|dispatch| dispatch.plan.head.candidate.checkout)
+            })
+            .ok_or_else(|| LocalExecutorError::Worktree("partial-head repair plan is not retained".to_owned()))?;
+        let base = self
+            .correspondence
+            .resolve_backend_object(&base)?
+            .ok_or_else(|| LocalExecutorError::Worktree("partial-head repair base is not materialized".to_owned()))?;
+        let commit = self.correspondence.resolve_backend_object(&candidate.checkout)?.ok_or_else(|| {
+            LocalExecutorError::Worktree("partial-head repair checkout is not materialized".to_owned())
+        })?;
+        let tree = self
+            .correspondence
+            .resolve_backend_object(&candidate.tree)?
+            .ok_or_else(|| LocalExecutorError::Worktree("partial-head repair tree is not materialized".to_owned()))?;
+        let repository = self
+            .runner
+            .repository_root()
+            .ok_or_else(|| LocalExecutorError::Worktree("partial-head repair repository is unavailable".to_owned()))?;
+        let commit_hex = render_object_hex(&commit);
+        let actual_tree = command::run_ok(&repository, &["rev-parse", &format!("{commit_hex}^{{tree}}")])
+            .map_err(|error| LocalExecutorError::Worktree(format!("partial-head repair tree read failed: {error}")))?;
+        if actual_tree.trim() != render_object_hex(&tree) {
+            return Err(LocalExecutorError::Worktree(
+                "partial-head repair candidate tree does not match its checkout".to_owned(),
+            ));
+        }
+        let changed = command::changed_paths(&repository, &render_object_hex(&base), &commit_hex)
+            .map_err(|error| LocalExecutorError::Worktree(format!("partial-head repair diff failed: {error}")))?;
+        if changed.is_empty() {
+            return Err(LocalExecutorError::Worktree("partial-head repair candidate has an empty delta".to_owned()));
+        }
+        if let Some(path) = changed.iter().find(|path| {
+            path.is_empty() || path.len() > 4 * 1024 || path.contains('\0') || !path_in_surface(allowed_paths, path)
+        }) {
+            return Err(LocalExecutorError::Worktree(format!(
+                "partial-head repair changed invalid or out-of-surface path `{path}`"
+            )));
+        }
+        command::run(&repository, &["update-ref", &partial_head_repair_ref_name(*plan), &commit_hex])
+            .map_err(|error| LocalExecutorError::Worktree(format!("partial-head repair pin failed: {error}")))?;
+        Ok(())
     }
 
     fn has_idle_capacity(&self, _order: &WorkOrder) -> bool {
@@ -2988,7 +3389,9 @@ impl ExecutorBackend for LocalExecutor {
         let evidence_path = run.evidence_dir.join("evidence.json");
         let mut bytes = match fs::read(&evidence_path) {
             Ok(bytes) => bytes,
-            Err(read_error) => return self.unread_evidence(handle, &run, host_fault, &evidence_path, &read_error),
+            Err(read_error) => {
+                return self.unread_evidence(handle, &run, host_fault, &evidence_path, &read_error);
+            }
         };
         bytes = self.stamp_run_evidence(&evidence_path, bytes, run.reuse.as_ref(), &handle.nonce.0, &run.affinity);
         // Evidence must identify the order that produced it before any body claim
@@ -3037,6 +3440,50 @@ impl ExecutorBackend for LocalExecutor {
             })
             .collect()
     }
+
+    fn observe_construction_checkpoints(&self) -> Vec<ObservedConstructionCheckpoint> {
+        const MIN_INTERVAL_MILLIS: u64 = 30_000;
+        const MAX_CHECKPOINTS: u64 = 8;
+        let recovered = self.lock().recovered_checkpoints.pop();
+        if let Some(recovered) = recovered {
+            return vec![recovered];
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+        let live: Vec<ConstructionCheckpointTarget> = {
+            let mut registry = self.lock();
+            registry
+                .runs
+                .iter_mut()
+                .filter_map(|(nonce, run)| {
+                    if !run.gates.is_construct
+                        || run.process.poll().is_terminal()
+                        || run.starting_checkout_hex.is_empty()
+                        || run.checkpoint_observation >= MAX_CHECKPOINTS
+                        || now.saturating_sub(run.last_checkpoint_unix_millis) < MIN_INTERVAL_MILLIS
+                    {
+                        return None;
+                    }
+                    Some(ConstructionCheckpointTarget {
+                        nonce: nonce.clone(),
+                        worktree: run.worktree_dir.clone()?,
+                        evidence_dir: run.evidence_dir.clone(),
+                        starting_checkout: run.starting_checkout,
+                        starting_checkout_hex: run.starting_checkout_hex.clone(),
+                        previous: run.last_checkpoint,
+                        observation: run.checkpoint_observation.saturating_add(1),
+                    })
+                })
+                .collect()
+        };
+
+        live.into_iter()
+            .filter(|target| self.checkpoint_policy_enabled(&target.nonce))
+            .take(1)
+            .filter_map(|target| self.observe_construction_checkpoint(target, now))
+            .collect()
+    }
 }
 
 impl ReconcileLanes for LocalExecutor {
@@ -3056,6 +3503,8 @@ impl ReconcileLanes for LocalExecutor {
     fn reconcile(&self, live: &[OutstandingDispatch]) -> ReconcileReport {
         let readopted =
             live.iter().filter(|dispatch| self.readopt(dispatch)).map(|dispatch| dispatch.nonce.clone()).collect();
+
+        self.recover_transient_checkpoints(live);
 
         ReconcileReport {
             readopted,
@@ -3084,6 +3533,91 @@ impl ReconcileLanes for LocalExecutor {
     fn started_nonces(&self) -> Vec<String> {
         let registry = self.lock();
         registry.runs.keys().cloned().chain(registry.cancelling.keys().cloned()).collect()
+    }
+}
+
+impl LocalExecutor {
+    fn recover_transient_checkpoints(&self, live: &[OutstandingDispatch]) {
+        const MAX_CHECKPOINTS: u64 = 8;
+        let Some(repository) = self.runner.repository_root() else {
+            return;
+        };
+        let Ok(listing) = command::run_ok(
+            &repository,
+            &["for-each-ref", "--format=%(refname) %(objectname)", transient_construction_checkpoint_ref_prefix()],
+        ) else {
+            return;
+        };
+        let expected = live
+            .iter()
+            .flat_map(|dispatch| {
+                (1..=MAX_CHECKPOINTS).map(move |observation| {
+                    (transient_construction_checkpoint_ref_name(&dispatch.nonce, observation), (dispatch, observation))
+                })
+            })
+            .collect::<HashMap<_, _>>();
+        let mut recovered = Vec::new();
+        for line in listing.lines() {
+            let mut fields = line.split_whitespace();
+            let (Some(reference), Some(commit_hex)) = (fields.next(), fields.next()) else {
+                continue;
+            };
+            let Some((dispatch, observation)) = expected.get(reference).copied() else {
+                let _ = command::run(&repository, &["update-ref", "-d", reference]);
+                continue;
+            };
+            let Some(identity) = self.order_identity(&dispatch.nonce.0) else {
+                let _ = command::run(&repository, &["update-ref", "-d", reference]);
+                continue;
+            };
+            let (Some(bloom), Some(scope_revision)) = (Digest::from_slice(&identity.bloom), identity.scope_revision)
+            else {
+                let _ = command::run(&repository, &["update-ref", "-d", reference]);
+                continue;
+            };
+            if identity.stage != StageId::Construct {
+                let _ = command::run(&repository, &["update-ref", "-d", reference]);
+                continue;
+            }
+            let Ok(tree_hex) = command::run_ok(&repository, &["rev-parse", &format!("{commit_hex}^{{tree}}")]) else {
+                let _ = command::run(&repository, &["update-ref", "-d", reference]);
+                continue;
+            };
+            let (Some(commit), Some(tree)) = (
+                aether_bloomery::decode_hex(commit_hex).map(BackendObjectId::new),
+                aether_bloomery::decode_hex(tree_hex.trim()).map(BackendObjectId::new),
+            ) else {
+                let _ = command::run(&repository, &["update-ref", "-d", reference]);
+                continue;
+            };
+            let Ok(candidate) = self.checkpoint_candidate(&CapturedObjects { commit, tree, diff: None }) else {
+                continue;
+            };
+            let checkpoint = ConstructionCheckpoint {
+                bloom: BloomId(bloom),
+                workpiece: WorkpieceId(identity.workpiece),
+                scope_revision,
+                nonce: aether_bloomery::construction_nonce_digest(&dispatch.nonce),
+                observation,
+                starting_checkout: dispatch.transformation.checkout,
+                candidate,
+            };
+            let (_, durable) = construction_checkpoint_promotion(&dispatch.nonce, &checkpoint);
+            if command::run(&repository, &["update-ref", &durable, commit_hex]).is_err()
+                || command::run(&repository, &["update-ref", "-d", reference]).is_err()
+            {
+                continue;
+            }
+            recovered.push(ObservedConstructionCheckpoint {
+                nonce: dispatch.nonce.clone(),
+                observation,
+                starting_checkout: dispatch.transformation.checkout,
+                candidate,
+            });
+        }
+        if !recovered.is_empty() {
+            self.lock().recovered_checkpoints.extend(recovered);
+        }
     }
 }
 
@@ -3524,6 +4058,18 @@ enum ConstructConclusion {
     Incomplete,
 }
 
+const fn stage_verdict(conclusion: Option<ConstructConclusion>, passed: bool, surface_requested: bool) -> StageVerdict {
+    if surface_requested {
+        StageVerdict::SurfaceRequested
+    } else if matches!(conclusion, Some(ConstructConclusion::Declined)) {
+        StageVerdict::Declined
+    } else if passed {
+        StageVerdict::VerificationPassed
+    } else {
+        StageVerdict::VerificationFailed
+    }
+}
+
 /// Classify a construct lane's `evidence.json` byte string.
 ///
 /// A terminal `result` with `is_error == false` is the "the run concluded"
@@ -3557,11 +4103,59 @@ fn parse_claimed_subject(bytes: &[u8]) -> Option<Digest> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::{Path, PathBuf};
 
     use aether_bloomery::{RETROSPECT_READ_COMMAND, SCOPE_FILL_COMMAND};
 
-    use super::{LaneGates, usable_target_base};
+    use super::{LaneGates, contextual_observation_bundle, usable_target_base};
+
+    #[test]
+    fn contextual_observations_are_bundled_only_when_bound_to_the_order_and_gate_file() {
+        let dir = tempfile::tempdir().expect("observation fixture directory should be created");
+        assert_eq!(
+            contextual_observation_bundle(dir.path(), "nonce").expect("empty observation directory should be read"),
+            None
+        );
+        fs::write(
+            dir.path().join("verify.test.observations.json"),
+            br#"{"protocol":1,"nonce":"nonce","gate":"verify.test","invocations":[]}"#,
+        )
+        .expect("bound observation fixture should be written");
+        let bundle = contextual_observation_bundle(dir.path(), "nonce")
+            .expect("bound observation directory should be read")
+            .expect("bound observation should produce a bundle");
+        let decoded: serde_json::Value =
+            serde_json::from_slice(&bundle).expect("produced observation bundle should be valid JSON");
+        assert_eq!(decoded["protocol"], 1);
+        assert_eq!(decoded["documents"].as_array().expect("bundle should contain documents").len(), 1);
+
+        fs::write(
+            dir.path().join("verify.clippy.observations.json"),
+            br#"{"protocol":1,"nonce":"other","gate":"verify.clippy","invocations":[]}"#,
+        )
+        .expect("mismatched observation fixture should be written");
+        assert!(contextual_observation_bundle(dir.path(), "nonce").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn contextual_observations_refuse_symlinks_and_malformed_documents() {
+        use std::os::unix::fs::symlink;
+
+        let malformed = tempfile::tempdir().expect("malformed observation fixture directory should be created");
+        fs::write(malformed.path().join("verify.test.observations.json"), b"not json")
+            .expect("malformed observation fixture should be written");
+        assert!(contextual_observation_bundle(malformed.path(), "nonce").is_err());
+
+        let linked = tempfile::tempdir().expect("symlink observation fixture directory should be created");
+        let target = linked.path().join("document.json");
+        fs::write(&target, br#"{"protocol":1,"nonce":"nonce","gate":"verify.test","invocations":[]}"#)
+            .expect("symlink target observation fixture should be written");
+        symlink(&target, linked.path().join("verify.test.observations.json"))
+            .expect("observation fixture symlink should be created");
+        assert!(contextual_observation_bundle(linked.path(), "nonce").is_err());
+    }
 
     #[test]
     fn the_scope_lane_is_neither_construct_nor_verify() {

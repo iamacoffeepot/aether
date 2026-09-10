@@ -7,14 +7,14 @@ mod common;
 use aether_bloomery::reduce::CoordinationError;
 use aether_bloomery::{
     AgentProfile, BloomId, BloomRecord, BloomSpec, CandidatePreparation, CandidatePreparationPlan, CandidateRef,
-    CompositionContract, CompositionContractTemplate, CompositionInput, CompositionPlan, ConfigRegistry,
-    ConstructContext, ConstructionAdmission, ConstructionCheckpoint, ContextualAttemptDispatch,
-    ContextualInvocationTemplate, ContextualResolutionClaim, CoordinationPolicy, CoordinationState, Decision, Digest,
-    Evidence, EvidenceKind, ExecutionLimits, Fact, Harness, IntegrationHead, MemberContractPin, MemberPin,
-    MemberVerifyRequest, NetworkProfile, Nonce, Outcome, PreparedCandidate, ReasoningEffort, ResolutionProof,
-    SharedRunMode, SharedRunNode, SharedRunPlan, SharedRunRecord, Snapshot, SpendWindow, StageCatalog, StageId,
-    ToolPolicy, Transformation, VerificationContract, VerificationMode, VerificationObligation,
-    construction_nonce_digest, reduce,
+    CompositionContractTemplate, CompositionInput, CompositionPlan, ConfigRegistry, ConstructContext,
+    ConstructionAdmission, ConstructionCheckpoint, ContextualAttemptDispatch, ContextualInvocationTemplate,
+    ContextualResolutionClaim, CoordinationPolicy, CoordinationState, Decision, Digest, Evidence, EvidenceKind,
+    ExecutionLimits, Fact, GenerationMember, Harness, IntegrationHead, MemberContractPin, MemberPin,
+    MemberVerifyOutcome, MemberVerifyRequest, NetworkProfile, Nonce, Outcome, PreparedCandidate, ReasoningEffort,
+    ResolutionProof, SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunRecord, Snapshot,
+    SpendWindow, StageCatalog, StageId, ToolPolicy, Transformation, VerificationContract, VerificationMode,
+    VerificationObligation, construction_nonce_digest, reduce,
 };
 use aether_data::wire::to_vec;
 use common::{compiled_resolved, digest, draft, event, membership, step, workpiece};
@@ -81,7 +81,11 @@ fn coordination_state(spec: &BloomSpec) -> CoordinationState {
         environment: digest(31),
         host_class: digest(32),
     };
-    let members = spec.members().iter().map(|member| (member.workpiece.clone(), member.scope_revision)).collect();
+    let members = spec
+        .members()
+        .iter()
+        .map(|member| GenerationMember { workpiece: member.workpiece.clone(), scope_revision: member.scope_revision })
+        .collect();
     CoordinationState::new(
         policy,
         template,
@@ -91,7 +95,7 @@ fn coordination_state(spec: &BloomSpec) -> CoordinationState {
     )
 }
 
-fn request(bloom: BloomId, pin: MemberPin, base: CandidateRef) -> MemberVerifyRequest {
+fn request(bloom: BloomId, pin: &MemberPin, base: CandidateRef) -> MemberVerifyRequest {
     let transformation = transformation(pin.candidate, base);
     MemberVerifyRequest {
         bloom,
@@ -128,18 +132,17 @@ fn contextual_snapshot() -> (Snapshot, BloomId, CandidateRef, Vec<Digest>) {
     let base_head = state.integration.head.clone();
     let alpha = MemberPin { workpiece: workpiece("alpha"), scope_revision: digest(10), candidate: candidate(50, 51) };
     let beta = MemberPin { workpiece: workpiece("beta"), scope_revision: digest(11), candidate: candidate(52, 53) };
-    let requests = vec![request(bloom, alpha.clone(), base), request(bloom, beta.clone(), base)];
-    let contract = CompositionContract {
-        gate_set: digest(60),
-        gate_identities: vec![String::from("verify.clippy")],
-        members: requests
+    let mut requests = vec![request(bloom, &alpha, base), request(bloom, &beta, base)];
+    for request in &mut requests {
+        request.contract.environment = state.composition_contract.environment;
+        request.contract.host_class = state.composition_contract.host_class;
+    }
+    let contract = state.composition_contract.bind(
+        requests
             .iter()
             .map(|request| MemberContractPin { request: request.digest(), contract: request.contract.digest() })
             .collect(),
-        invocation: invocation_template(),
-        environment: digest(61),
-        host_class: digest(62),
-    };
+    );
     let inputs = requests.iter().map(|request| request.input.clone()).collect::<Vec<_>>();
     let composition = CompositionPlan {
         bloom,
@@ -161,18 +164,27 @@ fn contextual_snapshot() -> (Snapshot, BloomId, CandidateRef, Vec<Digest>) {
     state.runs.push(SharedRunRecord {
         plan: plan.clone(),
         node: Some(node.clone()),
-        prepared: true,
-        issued: true,
+        phase: SharedRunPhase::Terminal,
         stale: false,
-        terminal: true,
         physical_run: Some(digest(72)),
-        completed: Vec::new(),
-        unfinished: requests.iter().map(MemberVerifyRequest::digest).collect(),
+        completed: requests
+            .iter()
+            .map(|request| MemberVerifyOutcome::PassedIn {
+                request: request.digest(),
+                node: node.digest(),
+                receipt: Evidence {
+                    subject: final_root.tree,
+                    kind: EvidenceKind::VerificationResult,
+                    detail: digest(73),
+                },
+            })
+            .collect(),
+        unfinished: Vec::new(),
         latencies: Vec::new(),
     });
     for request in &requests {
         state.claims.insert(
-            request.member.workpiece.clone(),
+            request.member.workpiece.0.clone(),
             ContextualResolutionClaim {
                 member: request.member.clone(),
                 proof: ResolutionProof::InComposition {
@@ -190,7 +202,7 @@ fn contextual_snapshot() -> (Snapshot, BloomId, CandidateRef, Vec<Digest>) {
         );
     }
     let generation = state.integration.generation.digest();
-    state.integration.admitted = inputs.clone();
+    state.integration.admitted.clone_from(&inputs);
     state.integration.head = IntegrationHead {
         generation,
         node: node.digest(),
@@ -317,7 +329,39 @@ fn contextual_resolution_requires_the_exact_final_root_coverage_and_claims() {
         &compiled_resolved(),
         &SpendWindow::default(),
     );
-    assert!(matches!(accepted.outcome, Outcome::AggregateVerifyDispatched { bloom: owner, .. } if owner == bloom));
+    assert!(matches!(accepted.outcome, Outcome::AggregateVerifyReused { bloom: owner, .. } if owner == bloom));
+    assert!(!accepted.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })));
+
+    let mut held = snapshot.clone();
+    held.blooms.get_mut(&bloom).unwrap().holds.insert(digest(76));
+    let held = reduce(
+        &held,
+        &event(
+            "held-resolve",
+            Fact::Resolve { bloom, tree: final_root.tree, head: final_root.checkout, lineage: lineage.clone() },
+        ),
+        &compiled_resolved(),
+        &SpendWindow::default(),
+    );
+    assert!(matches!(held.outcome, Outcome::ResolveRejected(aether_bloomery::ResolveError::PendingDecision { .. })));
+    assert!(held.effects.iter().any(|effect| matches!(effect, Decision::RecordRefusal { .. })));
+
+    let mut at_ceiling = snapshot.clone();
+    at_ceiling.blooms.get_mut(&bloom).unwrap().aggregate_verify_rolls = u32::MAX;
+    let at_ceiling = reduce(
+        &at_ceiling,
+        &event(
+            "ceiling-resolve",
+            Fact::Resolve { bloom, tree: final_root.tree, head: final_root.checkout, lineage: lineage.clone() },
+        ),
+        &compiled_resolved(),
+        &SpendWindow::default(),
+    );
+    assert!(matches!(
+        at_ceiling.outcome,
+        Outcome::ResolveRejected(aether_bloomery::ResolveError::ReviewCeiling { .. })
+    ));
+    assert!(at_ceiling.effects.iter().any(|effect| matches!(effect, Decision::RecordRefusal { .. })));
 
     assert_not_ready(
         &snapshot,
@@ -333,9 +377,9 @@ fn contextual_resolution_requires_the_exact_final_root_coverage_and_claims() {
     *coverage.last_mut().unwrap() = duplicate;
     assert_not_ready(&wrong_coverage, bloom, final_root, lineage.clone());
 
-    let mut stale_claim = snapshot.clone();
+    let mut stale_claim = snapshot;
     let state = stale_claim.blooms.get_mut(&bloom).unwrap().coordination.as_mut().unwrap();
-    let claim = state.claims.get_mut(&workpiece("alpha")).unwrap();
+    let claim = state.claims.get_mut("alpha").unwrap();
     let ResolutionProof::InComposition { request, .. } = &mut claim.proof else {
         panic!("contextual fixture carries contextual claims");
     };
@@ -359,6 +403,7 @@ fn construction_checkpoint_requires_the_admitted_physical_nonce() {
         bloom,
         workpiece: workpiece("alpha"),
         stage: StageId::Construct,
+        attempt: 1,
         transformation: Transformation::for_member_stage(
             &binding,
             digest(10),
@@ -371,7 +416,7 @@ fn construction_checkpoint_requires_the_admitted_physical_nonce() {
         configs: spec.members()[0].configs.layered_over(spec.configs()),
         context,
     };
-    state.queued_construction.insert(workpiece("alpha"), dispatch.clone());
+    state.queued_construction.insert(String::from("alpha"), dispatch.clone());
     snapshot.blooms.get_mut(&bloom).expect("sealed bloom").coordination = Some(Box::new(state));
     let nonce = Nonce(String::from("construct/alpha/1"));
     let admission = ConstructionAdmission { nonce: construction_nonce_digest(&nonce), dispatch };

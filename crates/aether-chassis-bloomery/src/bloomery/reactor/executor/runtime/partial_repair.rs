@@ -1,11 +1,11 @@
 //! Host materialization for one exact partial-head repair attempt.
 
 use std::collections::BTreeMap;
+use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    Digest, MemberPin, PartialHeadRepairDispatch, ScopeRevision, SurfacePattern, WorkpieceId, path_in_surface,
-    surface_union,
+    Digest, MemberPin, PartialHeadRepairDispatch, ScopeRevision, SurfacePattern, WorkpieceId, surface_union,
 };
 
 use crate::store::{CommissionBackend, CommissionError};
@@ -16,13 +16,11 @@ const MAX_SURFACE_GLOBS: usize = 512;
 const MAX_SURFACE_BYTES: usize = 64 * 1024;
 const MAX_FINDINGS_BYTES: usize = 64 * 1024;
 const MAX_TASK_BYTES: usize = 128 * 1024;
-const MAX_PATH_BYTES: usize = 4 * 1024;
 
-/// Frozen instructions and the only surface a repaired delta may touch.
+/// Frozen instructions derived from the exact approved repair surface.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) struct PartialRepairTask {
     pub(super) description: String,
-    pub(super) surface: Vec<String>,
 }
 
 /// A permanent refusal to materialize or admit a paid repair attempt.
@@ -45,9 +43,6 @@ pub(super) enum PartialRepairTaskError {
     InvalidSurface { workpiece: WorkpieceId, glob: String },
     SurfaceTooLarge,
     TaskTooLarge,
-    EmptyDelta,
-    InvalidChangedPath,
-    OutOfSurface { path: String },
     Store(String),
 }
 
@@ -57,7 +52,7 @@ impl fmt::Display for PartialRepairTaskError {
     }
 }
 
-impl std::error::Error for PartialRepairTaskError {}
+impl Error for PartialRepairTaskError {}
 
 impl From<CommissionError> for PartialRepairTaskError {
     fn from(error: CommissionError) -> Self {
@@ -76,7 +71,7 @@ pub(super) fn materialize_partial_repair_task(
     validate_dispatch(dispatch, findings)?;
     let surface = derive_partial_repair_surface(store, dispatch)?;
     let description = render_task(dispatch, findings, &surface)?;
-    Ok(PartialRepairTask { description, surface })
+    Ok(PartialRepairTask { description })
 }
 
 fn extract_findings(overlaid_task: &str) -> Result<&str, PartialRepairTaskError> {
@@ -99,27 +94,6 @@ pub(super) fn derive_partial_repair_surface(
     let members = flattened_members(dispatch)?;
     let revisions = load_approved_revisions(store, &members)?;
     bounded_surface(&revisions)
-}
-
-/// Fail closed before publishing a repaired candidate outside its frozen
-/// union. Callers must pass every source and destination path of a rename or
-/// copy from the exact old-head..repaired-candidate diff.
-pub(super) fn validate_partial_repair_delta(
-    task: &PartialRepairTask,
-    changed_paths: &[String],
-) -> Result<(), PartialRepairTaskError> {
-    if changed_paths.is_empty() {
-        return Err(PartialRepairTaskError::EmptyDelta);
-    }
-    for path in changed_paths {
-        if path.is_empty() || path.len() > MAX_PATH_BYTES || path.contains('\0') {
-            return Err(PartialRepairTaskError::InvalidChangedPath);
-        }
-        if !path_in_surface(&task.surface, path) {
-            return Err(PartialRepairTaskError::OutOfSurface { path: path.clone() });
-        }
-    }
-    Ok(())
 }
 
 fn validate_dispatch(dispatch: &PartialHeadRepairDispatch, findings: &str) -> Result<(), PartialRepairTaskError> {
@@ -377,37 +351,6 @@ mod tests {
         }
     }
 
-    fn task(surface: &[&str]) -> PartialRepairTask {
-        PartialRepairTask {
-            description: "bounded task".to_owned(),
-            surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
-        }
-    }
-
-    #[test]
-    fn repaired_delta_requires_a_nonempty_change_inside_the_exact_union() {
-        let task = task(&["crates/a/**", "Cargo.lock"]);
-        validate_partial_repair_delta(&task, &["crates/a/src/lib.rs".to_owned(), "Cargo.lock".to_owned()])
-            .expect("both changed paths are inside the frozen approved union");
-
-        assert_eq!(validate_partial_repair_delta(&task, &[]), Err(PartialRepairTaskError::EmptyDelta));
-        assert_eq!(
-            validate_partial_repair_delta(&task, &["crates/b/src/lib.rs".to_owned()]),
-            Err(PartialRepairTaskError::OutOfSurface { path: "crates/b/src/lib.rs".to_owned() })
-        );
-    }
-
-    #[test]
-    fn rename_checks_both_old_and_new_names_against_the_union() {
-        let task = task(&["crates/a/**"]);
-        let renamed = ["crates/a/src/old.rs".to_owned(), "crates/b/src/new.rs".to_owned()];
-
-        assert_eq!(
-            validate_partial_repair_delta(&task, &renamed),
-            Err(PartialRepairTaskError::OutOfSurface { path: "crates/b/src/new.rs".to_owned() })
-        );
-    }
-
     #[test]
     fn task_freezes_evidence_actual_parent_and_original_member_pins() {
         let dispatch = dispatch();
@@ -429,9 +372,9 @@ mod tests {
 
     #[test]
     fn task_refuses_a_union_surface_or_findings_substitution() {
-        let mut dispatch = dispatch();
-        dispatch.plan.head.coverage.swap(0, 1);
-        assert_eq!(flattened_members(&dispatch), Err(PartialRepairTaskError::CoverageMismatch));
+        let mut mismatched = dispatch();
+        mismatched.plan.head.coverage.swap(0, 1);
+        assert_eq!(flattened_members(&mismatched), Err(PartialRepairTaskError::CoverageMismatch));
 
         let dispatch = dispatch();
         assert_eq!(validate_dispatch(&dispatch, "  "), Err(PartialRepairTaskError::MissingFindings));

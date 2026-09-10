@@ -23,11 +23,11 @@ use super::{
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
-    BaseReceipt, BaseVerdict, BloomSpec, CandidateRef, ConfigKind, ConfigResolveError, ConfigScopes, DependencyError,
-    EvidenceKind, MemberCandidate, MemberDependency, Membership, ModelOverride, OperatorProposal,
-    PIPELINE_MANIFEST_PATH, PipelineManifest, PrecheckPolicy, ResolutionClaim, ResolvedConfigs, SpendCeiling,
-    SpendWindow, StageCatalog, Transformation, Unproducible, VerifyFailureSet, VerifyGateSet, VerifyProof,
-    resolve_member_dependencies,
+    BaseReceipt, BaseVerdict, BloomSpec, CandidateRef, ConfigKind, ConfigResolveError, ConfigScopes,
+    CoordinationPolicy, DependencyError, EvidenceKind, MemberCandidate, MemberDependency, Membership, ModelOverride,
+    OperatorProposal, PIPELINE_MANIFEST_PATH, PipelineManifest, PrecheckPolicy, ResolutionClaim, ResolvedConfigs,
+    SpendCeiling, SpendWindow, StageCatalog, Transformation, Unproducible, VerifyFailureSet, VerifyGateSet,
+    VerifyProof, resolve_member_dependencies,
 };
 
 pub(super) fn reduce_seal(
@@ -113,6 +113,14 @@ pub(super) fn reduce_seal(
         Ok(policy) => policy,
         Err(error) => return Decisions::rejected(Outcome::SealRejected(error)),
     };
+    let coordination_policy =
+        match sealed_config::<CoordinationPolicy>(ConfigScopes::bloom_wide(spec.configs()), configs) {
+            Ok(Some(policy)) if !policy.is_valid() => {
+                return Decisions::rejected(Outcome::SealRejected(SealError::InvalidCoordinationPolicy));
+            }
+            Ok(policy) => policy,
+            Err(error) => return Decisions::rejected(Outcome::SealRejected(error)),
+        };
 
     let mut effects = Vec::with_capacity(spec.members().len() * 3 + 2);
     if snapshot.spend_quiesce.is_some() {
@@ -143,6 +151,12 @@ pub(super) fn reduce_seal(
         &ReadyLine { bloom_configs: spec.configs(), catalog: &catalog, base: spec.base(), base_proven: proven },
     ));
     effects.push(Decision::RecordMemberDependencies { bloom, edges: edges.to_vec() });
+    let Ok(coordination) =
+        super::coordination::initialized_effects(snapshot, spec, &catalog, &manifest, coordination_policy)
+    else {
+        return Decisions::rejected(Outcome::SealRejected(SealError::InvalidCoordinationPolicy));
+    };
+    effects.extend(coordination);
     let precheck = initialized_effects(spec, &catalog, &manifest, precheck_policy, &effects);
     effects.extend(precheck);
     Decisions { outcome: Outcome::Sealed(bloom), effects }
@@ -544,6 +558,18 @@ pub(super) fn reduce_supersede(
         Ok(policy) => policy,
         Err(error) => return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error))),
     };
+    let coordination_policy =
+        match sealed_config::<CoordinationPolicy>(ConfigScopes::bloom_wide(successor.configs()), configs) {
+            Ok(Some(policy)) if !policy.is_valid() => {
+                return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(
+                    SealError::InvalidCoordinationPolicy,
+                )));
+            }
+            Ok(policy) => policy,
+            Err(error) => {
+                return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error)));
+            }
+        };
     // Supersession is a second door into `active`, so it runs the same
     // all-or-nothing conflict scan as seal — but the predecessor's own holds are
     // released in this decision set, so only a foreign bloom's hold conflicts.
@@ -606,6 +632,14 @@ pub(super) fn reduce_supersede(
     }
     effects.push(Decision::MarkSuperseded { bloom: *predecessor, by: successor_id });
     effects.push(Decision::RecordMemberDependencies { bloom: successor_id, edges: graph });
+    let Ok(coordination) =
+        super::coordination::initialized_effects(snapshot, successor, &catalog, &manifest, coordination_policy)
+    else {
+        return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(
+            SealError::InvalidCoordinationPolicy,
+        )));
+    };
+    effects.extend(coordination);
     let precheck = initialized_effects(successor, &catalog, &manifest, precheck_policy, &effects);
     effects.extend(precheck);
     Decisions { outcome: Outcome::Superseded { predecessor: *predecessor, successor: successor_id }, effects }

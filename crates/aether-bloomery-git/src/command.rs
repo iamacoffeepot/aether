@@ -133,6 +133,39 @@ pub fn name_only_paths(repo: &Path, from: &str, to: &str) -> Result<Vec<String>,
     String::from_utf8(output.stdout).map_or(Err(GitCommandError::Encoding), |stdout| Ok(split_nul(&stdout)))
 }
 
+/// Repository-relative paths changed by the exact `base..head` range,
+/// including both names of a detected rename or copy.
+///
+/// # Errors
+/// Either object is unreadable, git exits non-zero, or its output is not
+/// UTF-8.
+pub fn changed_paths(repo: &Path, base: &str, head: &str) -> Result<Vec<String>, GitCommandError> {
+    let argv = ["diff", "--name-status", "--find-renames", "--find-copies-harder", "--no-ext-diff", "-z", base, head];
+    let output = run(repo, &argv)?;
+    if !output.status.success() {
+        return Err(failed(&argv, &output));
+    }
+    let fields = split_nul(&String::from_utf8(output.stdout).map_err(|_| GitCommandError::Encoding)?);
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while index < fields.len() {
+        let status = &fields[index];
+        index += 1;
+        let path_count = usize::from(status.starts_with('R') || status.starts_with('C')) + 1;
+        if status.is_empty() || index.saturating_add(path_count) > fields.len() {
+            return Err(GitCommandError::Failed {
+                args: argv.join(" "),
+                stderr: "git emitted a malformed name-status path list".to_owned(),
+            });
+        }
+        paths.extend(fields[index..index + path_count].iter().cloned());
+        index += path_count;
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
 /// Paths `git status --porcelain -z` names in `repo`.
 ///
 /// # Errors

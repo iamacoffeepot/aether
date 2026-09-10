@@ -59,7 +59,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use aether_bloomery::{BackendId, BloomId, Nonce, ObservedLaneWrites, WorkHandle, WorkOrder, WorkpieceId};
+use aether_bloomery::{
+    BackendId, BloomId, CandidateRef, Digest, Nonce, ObservedConstructionCheckpoint, ObservedLaneWrites, WorkHandle,
+    WorkOrder, WorkpieceId,
+};
 use aether_substrate::actor::native::{DEFAULT_MAX_IN_FLIGHT, NativeCtx};
 
 use super::CandidatePush;
@@ -92,11 +95,19 @@ pub enum AdapterCall {
     Observe(Nonce),
     /// `ExecutorPort::cancel` for a nonce — the reactor's cancellation intent.
     Cancel(Nonce),
+    /// Release one retained physical lane.
+    ReleasePhysicalRun(Digest),
+    RetainPartialHeadRepair(Digest),
     /// `ExecutorPort::observe_writes`, which takes no argument and so is one
     /// call at a time for the whole reactor.
     ObserveWrites,
+    /// `ExecutorPort::observe_construction_checkpoints`, one whole-reactor read.
+    ObserveConstructionCheckpoints,
     /// `CandidatePush::push` of one capture onto one ref (ADR-0152).
-    Publish { commit_hex: String, target_ref: String },
+    Publish {
+        commit_hex: String,
+        target_ref: String,
+    },
 }
 
 /// A call plus everything the worker needs that the key does not carry — the
@@ -115,7 +126,14 @@ enum AdapterWork {
     },
     Observe(WorkHandle),
     Cancel(WorkHandle),
+    ReleasePhysicalRun(Digest),
+    RetainPartialHeadRepair {
+        plan: Digest,
+        candidate: CandidateRef,
+        allowed_paths: Vec<String>,
+    },
     ObserveWrites,
+    ObserveConstructionCheckpoints,
     Publish {
         commit_hex: String,
         target_ref: String,
@@ -129,7 +147,13 @@ impl AdapterWork {
             Self::SubmitIdle { order, .. } => AdapterCall::SubmitIdle(order.nonce.clone()),
             Self::Observe(handle) => AdapterCall::Observe(handle.nonce.clone()),
             Self::Cancel(handle) => AdapterCall::Cancel(handle.nonce.clone()),
+            Self::ReleasePhysicalRun(run) => AdapterCall::ReleasePhysicalRun(*run),
+            Self::RetainPartialHeadRepair { plan, candidate, allowed_paths } => {
+                let _ = (candidate, allowed_paths);
+                AdapterCall::RetainPartialHeadRepair(*plan)
+            }
             Self::ObserveWrites => AdapterCall::ObserveWrites,
+            Self::ObserveConstructionCheckpoints => AdapterCall::ObserveConstructionCheckpoints,
             Self::Publish { commit_hex, target_ref } => {
                 AdapterCall::Publish { commit_hex: commit_hex.clone(), target_ref: target_ref.clone() }
             }
@@ -149,7 +173,14 @@ impl AdapterWork {
             }),
             Self::Observe(handle) => AdapterAnswer::Observe(shell.observe_run(&handle)),
             Self::Cancel(handle) => AdapterAnswer::Cancel(shell.cancel(&handle)),
+            Self::ReleasePhysicalRun(run) => AdapterAnswer::ReleasePhysicalRun(shell.release_physical_run(&run)),
+            Self::RetainPartialHeadRepair { plan, candidate, allowed_paths } => AdapterAnswer::RetainPartialHeadRepair(
+                shell.retain_partial_head_repair(&plan, &candidate, &allowed_paths),
+            ),
             Self::ObserveWrites => AdapterAnswer::ObserveWrites(shell.observe_writes()),
+            Self::ObserveConstructionCheckpoints => {
+                AdapterAnswer::ObserveConstructionCheckpoints(shell.observe_construction_checkpoints())
+            }
             Self::Publish { commit_hex, target_ref } => AdapterAnswer::Publish(pusher.push(&commit_hex, &target_ref)),
         }
     }
@@ -163,7 +194,10 @@ enum AdapterAnswer {
     SubmitIdle(Result<Option<WorkHandle>, ExecutorPortError>),
     Observe(Result<RunObservation, ExecutorPortError>),
     Cancel(Result<(), ExecutorPortError>),
+    ReleasePhysicalRun(Result<(), ExecutorPortError>),
+    RetainPartialHeadRepair(Result<(), ExecutorPortError>),
     ObserveWrites(Vec<ObservedLaneWrites>),
+    ObserveConstructionCheckpoints(Vec<ObservedConstructionCheckpoint>),
     Publish(Result<(), String>),
 }
 
@@ -495,9 +529,39 @@ impl ExecutorPort for OffloadedPort<'_> {
         }
     }
 
+    fn release_physical_run(&self, physical_run: &Digest) -> Settled<Result<(), ExecutorPortError>> {
+        match self.offload.take_or_want(AdapterWork::ReleasePhysicalRun(*physical_run)) {
+            Some(AdapterAnswer::ReleasePhysicalRun(answer)) => Settled::Answered(answer),
+            _ => Settled::InFlight,
+        }
+    }
+
+    fn retain_partial_head_repair(
+        &self,
+        plan: &Digest,
+        candidate: &CandidateRef,
+        allowed_paths: &[String],
+    ) -> Settled<Result<(), ExecutorPortError>> {
+        match self.offload.take_or_want(AdapterWork::RetainPartialHeadRepair {
+            plan: *plan,
+            candidate: *candidate,
+            allowed_paths: allowed_paths.to_vec(),
+        }) {
+            Some(AdapterAnswer::RetainPartialHeadRepair(answer)) => Settled::Answered(answer),
+            _ => Settled::InFlight,
+        }
+    }
+
     fn observe_writes(&self) -> Settled<Vec<ObservedLaneWrites>> {
         match self.offload.take_or_want(AdapterWork::ObserveWrites) {
             Some(AdapterAnswer::ObserveWrites(observed)) => Settled::Answered(observed),
+            _ => Settled::InFlight,
+        }
+    }
+
+    fn observe_construction_checkpoints(&self) -> Settled<Vec<ObservedConstructionCheckpoint>> {
+        match self.offload.take_or_want(AdapterWork::ObserveConstructionCheckpoints) {
+            Some(AdapterAnswer::ObserveConstructionCheckpoints(observed)) => Settled::Answered(observed),
             _ => Settled::InFlight,
         }
     }
@@ -528,6 +592,8 @@ mod tests {
             nonce: Nonce(nonce.to_owned()),
             instruction_bundle: None,
             prompt_manifest: None,
+            physical_run: None,
+            release_physical_run: true,
         }
     }
 

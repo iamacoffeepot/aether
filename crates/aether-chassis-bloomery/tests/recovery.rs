@@ -346,7 +346,7 @@ fn plant_issued_precheck(store: &mut SqliteStore, key: &str) -> PrecheckFixture 
         .effects
         .iter()
         .find_map(|effect| match effect {
-            Decision::RecordPrecheckState { bloom: owner, state } if *owner == bloom => state.as_deref().cloned(),
+            Decision::RecordPrecheckState { bloom: owner, state } if *owner == bloom => state.clone(),
             _ => None,
         })
         .expect("the request records its issued state");
@@ -440,10 +440,7 @@ fn plant_obsolete_idle_boundary(db: &str, deadline_unix_millis: u64) -> (String,
                 plan: plan.digest(),
                 diagnostic: Digest::from_bytes([99; 32]),
             },
-            effects: vec![Decision::RecordPrecheckState {
-                bloom: fixture.bloom,
-                state: Some(Box::new(fixture.state.clone())),
-            }],
+            effects: vec![Decision::RecordPrecheckState { bloom: fixture.bloom, state: Some(fixture.state.clone()) }],
         },
     );
 

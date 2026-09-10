@@ -5,14 +5,15 @@ use alloc::collections::{BTreeMap, BTreeSet};
 
 use super::aggregate_verify::{aggregate_verify_dispatch, reduce_aggregate_verify_completed};
 use super::attempt::stage_binding;
+use super::coordination::schedule_partial_head_repair;
 use super::verify_memo::proof_of;
 use super::{BloomRecord, BloomStatus, Decision, Decisions, Outcome, PrecheckError, Snapshot};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
-    BloomSpec, CandidateRef, Evidence, EvidenceKind, PipelineManifest, PrecheckCompletion, PrecheckDiagnostic,
-    PrecheckMember, PrecheckNode, PrecheckPlan, PrecheckPolicy, PrecheckPreparation, PrecheckResult, PrecheckState,
-    StageCatalog, Transformation, VerifyGateSet,
+    BloomSpec, CandidateRef, CoordinationState, Evidence, EvidenceKind, PipelineManifest, PrecheckCompletion,
+    PrecheckDiagnostic, PrecheckMember, PrecheckNode, PrecheckPlan, PrecheckPolicy, PrecheckPreparation,
+    PrecheckResult, PrecheckState, StageCatalog, Transformation, VerifyGateSet,
 };
 
 fn candidates_of(record: &BloomRecord) -> BTreeMap<WorkpieceId, CandidateRef> {
@@ -43,7 +44,63 @@ fn candidates_of(record: &BloomRecord) -> BTreeMap<WorkpieceId, CandidateRef> {
 
 /// Build the eligible plan from a record without cloning the snapshot.
 pub(super) fn plan_of(record: &BloomRecord, bloom: BloomId) -> Option<PrecheckPlan> {
+    if let Some(coordination) = record.coordination.as_deref().filter(|state| selected_root_policy(state)) {
+        return selected_head_plan(record, bloom, coordination);
+    }
     plan_from_candidates(record, bloom, &candidates_of(record))
+}
+
+fn selected_root_policy(state: &CoordinationState) -> bool {
+    state.policy.eager_integration || state.policy.verification == crate::VerificationMode::Contextual
+}
+
+fn selected_head_plan(record: &BloomRecord, bloom: BloomId, coordination: &CoordinationState) -> Option<PrecheckPlan> {
+    if !coordination.uses_selected_root_for_precheck() {
+        return None;
+    }
+    let head = &coordination.integration.head;
+    if head.coverage.is_empty() || head.generation != coordination.integration.generation.digest() {
+        return None;
+    }
+    Some(PrecheckPlan {
+        bloom,
+        base: head.candidate.checkout,
+        members: head
+            .coverage
+            .iter()
+            .map(|pin| PrecheckMember {
+                workpiece: pin.workpiece.clone(),
+                scope_revision: pin.scope_revision,
+                candidate: pin.candidate,
+            })
+            .collect(),
+        gate_set: VerifyGateSet::for_stage_of(StageId::AggregateVerify, &record.pipeline_manifest)?.digest(),
+    })
+}
+
+fn selected_head_node(plan: &PrecheckPlan, coordination: &CoordinationState) -> PrecheckNode {
+    // The source already materialized and checked this head. Re-folding its
+    // leaves would discard interaction repairs and could change merge order.
+    PrecheckNode {
+        plan: plan.digest(),
+        tree: coordination.integration.head.candidate.tree,
+        head: coordination.integration.head.candidate.checkout,
+        gate_set: plan.gate_set,
+    }
+}
+
+fn contextual_precheck_receipt(
+    record: &BloomRecord,
+    bloom: BloomId,
+    coordination: &CoordinationState,
+    node: &PrecheckNode,
+) -> Option<Digest> {
+    if coordination.integration.known_red == Some(coordination.integration.head.node)
+        || selected_head_node(&selected_head_plan(record, bloom, coordination)?, coordination) != *node
+    {
+        return None;
+    }
+    coordination.contextual_aggregate_proof(&coordination.integration.head).map(|receipt| receipt.detail)
 }
 
 pub(super) fn initialized_effects(
@@ -63,6 +120,9 @@ pub(super) fn initialized_effects(
     let mut candidates = BTreeMap::new();
     for effect in preceding {
         match effect {
+            Decision::RecordCoordinationState { bloom: owner, state } if *owner == bloom => {
+                record.coordination = state.clone().map(Box::new);
+            }
             Decision::RecordCandidateVehicle { bloom: owner, workpiece, vehicle } if *owner == bloom => {
                 candidates.insert(workpiece.clone(), *vehicle);
             }
@@ -77,6 +137,15 @@ pub(super) fn initialized_effects(
         }
     }
     let mut state = PrecheckState::new(policy);
+    if let Some(coordination) = record.coordination.as_deref().filter(|state| selected_root_policy(state)) {
+        state.latest_plan = selected_head_plan(&record, bloom, coordination);
+        state.prepared = state.latest_plan.as_ref().map(|plan| selected_head_node(plan, coordination));
+        let mut effects = alloc::vec![record_state(bloom, state.clone())];
+        if let Some(node) = state.prepared.as_ref().filter(|node| state.can_request(node.digest())) {
+            effects.push(run_decision(&record, bloom, node, false));
+        }
+        return effects;
+    }
     state.latest_plan = plan_from_candidates(&record, bloom, &candidates);
     let mut effects = alloc::vec![record_state(bloom, state.clone())];
     if let Some(plan) = state.latest_plan {
@@ -140,7 +209,7 @@ fn rejected(error: PrecheckError) -> Decisions {
 }
 
 fn record_state(bloom: BloomId, state: PrecheckState) -> Decision {
-    Decision::RecordPrecheckState { bloom, state: Some(Box::new(state)) }
+    Decision::RecordPrecheckState { bloom, state: Some(state) }
 }
 
 fn active_state<'a>(
@@ -176,6 +245,12 @@ pub(super) fn reduce_precheck_prepared(
     let (outcome, mut effects) = match preparation {
         PrecheckPreparation::Prepared(node) => {
             if node.plan != plan || node.gate_set != state.latest_plan.as_ref().expect("checked").gate_set {
+                return rejected(PrecheckError::InvalidPreparation);
+            }
+            if let Some(coordination) = record.coordination.as_deref().filter(|state| selected_root_policy(state))
+                && selected_head_plan(record, *bloom, coordination)
+                    .is_none_or(|plan| selected_head_node(&plan, coordination) != *node)
+            {
                 return rejected(PrecheckError::InvalidPreparation);
             }
             next.prepared = Some(node.clone());
@@ -216,6 +291,20 @@ pub(super) fn reduce_request_precheck(snapshot: &Snapshot, bloom: &BloomId, node
     }
     if state.issued.is_some() {
         return rejected(PrecheckError::NoPreparedNode);
+    }
+    if let Some(receipt) = record
+        .coordination
+        .as_deref()
+        .filter(|coordination| selected_root_policy(coordination))
+        .and_then(|coordination| contextual_precheck_receipt(record, *bloom, coordination, prepared))
+    {
+        let mut next = state.clone();
+        next.result = Some(PrecheckResult::Passed { node, evidence: receipt });
+        next.diagnostic = None;
+        return Decisions {
+            outcome: Outcome::PrecheckCompleted { bloom: *bloom, node },
+            effects: alloc::vec![record_state(*bloom, next)],
+        };
     }
     if state.remaining_runs() == 0 {
         return rejected(PrecheckError::BudgetExhausted { issued: state.issued_runs, budget: state.policy.run_budget });
@@ -286,6 +375,7 @@ pub(super) fn reduce_precheck_completed(
                 next.result = Some(PrecheckResult::Failed { node, evidence: evidence.detail });
                 next.diagnostic = Some(PrecheckDiagnostic::VerificationFailed { node, detail: evidence.detail });
             }
+            record_head_failure(record, *bloom, issued, evidence.detail, &mut effects);
         }
         PrecheckCompletion::HostFault(evidence) => {
             if let Err(error) = validate_evidence(issued, evidence, EvidenceKind::ExecutorFault) {
@@ -315,6 +405,32 @@ pub(super) fn reduce_precheck_completed(
         effects.push(Decision::QueuePrecheckPlan { bloom: *bloom, plan });
     }
     Decisions { outcome: Outcome::PrecheckCompleted { bloom: *bloom, node }, effects }
+}
+
+fn record_head_failure(
+    record: &BloomRecord,
+    bloom: BloomId,
+    issued: &PrecheckNode,
+    evidence: Digest,
+    effects: &mut Vec<Decision>,
+) {
+    let Some(coordination) = record.coordination.as_deref().filter(|state| selected_root_policy(state)) else {
+        return;
+    };
+    let Some(plan) = selected_head_plan(record, bloom, coordination) else {
+        return;
+    };
+    if selected_head_node(&plan, coordination) != *issued {
+        return;
+    }
+    let mut next = coordination.clone();
+    next.integration.known_red = Some(coordination.integration.head.node);
+    let mut repair_effects = Vec::new();
+    schedule_partial_head_repair(record, &mut next, evidence, &mut repair_effects);
+    if next != *coordination {
+        effects.push(Decision::RecordCoordinationState { bloom, state: Some(next) });
+    }
+    effects.extend(repair_effects);
 }
 
 fn validate_evidence(node: &PrecheckNode, evidence: &Evidence, kind: EvidenceKind) -> Result<(), PrecheckError> {
@@ -420,7 +536,8 @@ pub(super) fn schedule(snapshot: &Snapshot, mut decisions: Decisions) -> Decisio
                 | Decision::RecordWithdrawal { bloom, .. }
                 | Decision::RecordOperatorHold { bloom, .. }
                 | Decision::RecordOperatorRelease { bloom, .. }
-                | Decision::RecordIntegration { bloom, .. } => {
+                | Decision::RecordIntegration { bloom, .. }
+                | Decision::RecordCoordinationState { bloom, .. } => {
                     affected.insert(*bloom);
                 }
                 Decision::MarkSuperseded { bloom, .. }
@@ -460,6 +577,18 @@ fn schedule_bloom(
     observed: &[Decision],
     effects: &mut Vec<Decision>,
 ) {
+    let coordination = observed
+        .iter()
+        .rev()
+        .find_map(|effect| match effect {
+            Decision::RecordCoordinationState { bloom: owner, state } if *owner == bloom => Some(state.as_ref()),
+            _ => None,
+        })
+        .unwrap_or(record.coordination.as_deref());
+    if let Some(coordination) = coordination.filter(|state| selected_root_policy(state)) {
+        schedule_eager_head(record, bloom, state, coordination, observed, effects);
+        return;
+    }
     let settlement_owned = observed
         .iter()
         .any(|effect| matches!(effect, Decision::RecordPrecheckState { bloom: owner, .. } if *owner == bloom));
@@ -546,6 +675,81 @@ fn schedule_bloom(
     }
 }
 
+fn schedule_eager_head(
+    record: &BloomRecord,
+    bloom: BloomId,
+    state: &PrecheckState,
+    coordination: &CoordinationState,
+    observed: &[Decision],
+    effects: &mut Vec<Decision>,
+) {
+    let state = observed
+        .iter()
+        .rev()
+        .find_map(|effect| match effect {
+            Decision::RecordPrecheckState { bloom: owner, state } if *owner == bloom => Some(state.as_ref()),
+            _ => None,
+        })
+        .unwrap_or(Some(state));
+    let Some(state) = state else {
+        return;
+    };
+    if coordination.final_in_flight {
+        return;
+    }
+    let plan = selected_head_plan(record, bloom, coordination);
+    let node = plan.as_ref().map(|plan| selected_head_node(plan, coordination));
+    let mut paused = state.paused;
+    for effect in observed {
+        match effect {
+            Decision::RecordOperatorHold { bloom: owner, .. } if *owner == bloom => paused = true,
+            Decision::RecordOperatorRelease { bloom: owner, .. } if *owner == bloom => paused = false,
+            _ => {}
+        }
+    }
+    let changed = state.latest_plan != plan || state.prepared != node;
+    let reused = node.as_ref().and_then(|node| {
+        contextual_precheck_receipt(record, bloom, coordination, node)
+            .map(|receipt| PrecheckResult::Passed { node: node.digest(), evidence: receipt })
+    });
+    if !changed && state.paused == paused && reused.as_ref().is_none_or(|reused| state.result.as_ref() == Some(reused))
+    {
+        return;
+    }
+    let mut next = state.clone();
+    next.paused = paused;
+    if changed {
+        next.latest_plan = plan;
+        next.prepared = node;
+        next.result = None;
+        next.diagnostic = None;
+        next.final_join = None;
+        next.promoted = false;
+        if let Some(issued) = state.issued.as_ref() {
+            // Existing cancellation only skips a confirmed unstarted offer;
+            // a started run keeps its immutable input and retained receipt.
+            effects.push(Decision::CancelPrecheck { bloom, node: issued.digest() });
+        }
+    }
+    if let Some(reused) = reused {
+        // The contextual receipt already judged this exact aggregate subject
+        // and contract. Keep its identity without minting a parent-tree proof.
+        next.result = Some(reused);
+        next.diagnostic = None;
+    }
+    effects.push(record_state(bloom, next.clone()));
+    if let Some(node) = next.prepared.as_ref().filter(|node| next.can_request(node.digest()))
+        && !observed.iter().any(|effect| {
+            matches!(
+                effect, Decision::OfferPrecheck { bloom: owner, node: offered, .. }
+                    if *owner == bloom && offered == node
+            )
+        })
+    {
+        effects.push(run_decision(record, bloom, node, false));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::format;
@@ -554,10 +758,15 @@ mod tests {
     use aether_data::wire::to_vec;
 
     use super::*;
+    use crate::reduce::coordination;
     use crate::reduce::reduce as reduce_event;
     use crate::testing::{claim, compiled_resolved, digest, draft, event, membership, workpiece};
     use crate::values::config_address;
-    use crate::{Fact, OperatorHold, ResolvedConfigs, SpendWindow};
+    use crate::{
+        CompositionPlan, Fact, IntegrationHead, MemberContractPin, MemberVerifyOutcome, MemberVerifyRequest,
+        OperatorHold, ResolvedConfigs, SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunRecord,
+        SpendWindow, VerificationContract, VerificationObligation,
+    };
 
     fn step_with_configs(
         snapshot: &Snapshot,
@@ -597,9 +806,435 @@ mod tests {
         (snapshot, bloom, node)
     }
 
+    fn eager_fixture() -> (Snapshot, BloomId, PrecheckNode) {
+        let (bloom, mut record) = candidate_record(1, &[("one", 11, 21, 31), ("two", 12, 22, 32)]);
+        let mut snapshot = Snapshot::new(digest(1));
+        let effects = coordination::initialized_effects(
+            &snapshot,
+            &record.spec,
+            &record.stage_catalog,
+            &record.pipeline_manifest,
+            Some(crate::CoordinationPolicy {
+                verification: crate::VerificationMode::Contextual,
+                eager_integration: true,
+                max_run_members: 8,
+                max_serial_requests: 8,
+                max_attribution_probes: 32,
+                movement_budget: 3,
+                reservation_millis: 30_000,
+                host_class: "test".to_owned(),
+            }),
+        )
+        .expect("valid coordination policy");
+        let mut coordination = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                Decision::RecordCoordinationState { state: Some(state), .. } => Some(state),
+                _ => None,
+            })
+            .expect("initial state");
+        coordination.integration.head.coverage = record
+            .spec
+            .members()
+            .iter()
+            .rev()
+            .map(|member| crate::MemberPin {
+                workpiece: member.workpiece.clone(),
+                scope_revision: member.scope_revision,
+                candidate: record.vehicles[&member.workpiece],
+            })
+            .collect();
+        coordination.integration.head.candidate = CandidateRef { tree: digest(40), checkout: digest(41) };
+        coordination.integration.head.node = digest(42);
+        coordination.integration.head.plan = digest(43);
+        coordination.integration.admitted = vec![crate::CompositionInput {
+            node: coordination.integration.head.node,
+            candidate: coordination.integration.head.candidate,
+            members: coordination.integration.head.coverage.clone(),
+        }];
+        record.coordination = Some(Box::new(coordination));
+        let plan = plan_of(&record, bloom).expect("selected head has coverage");
+        let node = selected_head_node(&plan, record.coordination.as_deref().expect("coordination"));
+        let mut state = PrecheckState::new(PrecheckPolicy { run_budget: 3 });
+        state.latest_plan = Some(plan);
+        state.prepared = Some(node.clone());
+        state.issued = Some(node.clone());
+        state.issued_runs = 1;
+        record.precheck = Some(state);
+        snapshot.blooms.insert(bloom, record);
+        (snapshot, bloom, node)
+    }
+
+    fn advance_head(snapshot: &Snapshot, bloom: BloomId, tree: u8, checkout: u8) -> Decisions {
+        let mut state = snapshot.blooms[&bloom].coordination.as_deref().cloned().expect("coordination");
+        state.integration.head.candidate = CandidateRef { tree: digest(tree), checkout: digest(checkout) };
+        state.integration.head.node = digest(checkout);
+        schedule(
+            snapshot,
+            Decisions {
+                outcome: Outcome::PrecheckPrepared { bloom, node: digest(tree) },
+                effects: vec![Decision::RecordCoordinationState { bloom, state: Some(state) }],
+            },
+        )
+    }
+
+    fn contextual_requests_fixture(
+        bloom: BloomId,
+        coordination: &CoordinationState,
+        binding: &crate::StageBinding,
+    ) -> Vec<MemberVerifyRequest> {
+        let input = &coordination.integration.admitted[0];
+        let base = coordination.integration.generation.base;
+        input
+            .members
+            .iter()
+            .map(|member| {
+                let transformation = Transformation::for_member_stage(
+                    binding,
+                    member.candidate.tree,
+                    member.candidate.checkout,
+                    base.checkout,
+                );
+                let mut obligations = coordination
+                    .composition_contract
+                    .gate_identities
+                    .iter()
+                    .map(|identity| VerificationObligation::Gate { identity: identity.clone() })
+                    .collect::<Vec<_>>();
+                obligations.push(VerificationObligation::MemberDelta {
+                    scope_revision: member.scope_revision,
+                    candidate: member.candidate,
+                    diff_base: base,
+                });
+                MemberVerifyRequest {
+                    bloom,
+                    member: member.clone(),
+                    input: input.clone(),
+                    attempt: 1,
+                    context: None,
+                    contract: VerificationContract {
+                        gate_set: digest(80),
+                        obligations,
+                        diff_base: base,
+                        invocation: digest(83),
+                        environment: coordination.composition_contract.environment,
+                        host_class: coordination.composition_contract.host_class,
+                    },
+                    transformation,
+                    profile: binding.profile.clone(),
+                    configs: coordination.composition_contract.invocation.configs.clone(),
+                }
+            })
+            .collect()
+    }
+
+    fn contextual_receipt_fixture() -> (Snapshot, BloomId, PrecheckNode, Evidence) {
+        let (mut snapshot, bloom, node) = eager_fixture();
+        let record = snapshot.blooms.get_mut(&bloom).expect("bloom");
+        record.precheck.as_mut().expect("precheck").issued = None;
+        let binding = stage_binding(&record.stage_catalog, StageId::Verify);
+        let coordination = record.coordination.as_deref_mut().expect("coordination");
+        let base = coordination.integration.generation.base;
+        let requests = contextual_requests_fixture(bloom, coordination, &binding);
+        let composition = CompositionPlan {
+            bloom,
+            base: IntegrationHead {
+                generation: coordination.integration.generation.digest(),
+                node: base.tree,
+                candidate: base,
+                plan: digest(81),
+                coverage: Vec::new(),
+            },
+            inputs: coordination.integration.admitted.clone(),
+            requests: requests.clone(),
+            contract: coordination.composition_contract.bind(
+                requests
+                    .iter()
+                    .map(|request| MemberContractPin { request: request.digest(), contract: request.contract.digest() })
+                    .collect(),
+            ),
+        };
+        let shared_node = SharedRunNode {
+            plan: composition.digest(),
+            candidate: coordination.integration.head.candidate,
+            coverage: coordination.integration.head.coverage.clone(),
+        };
+        let receipt = Evidence {
+            subject: shared_node.candidate.tree,
+            kind: EvidenceKind::VerificationResult,
+            detail: digest(90),
+        };
+        let completed = requests
+            .iter()
+            .map(|request| MemberVerifyOutcome::PassedIn {
+                request: request.digest(),
+                node: shared_node.digest(),
+                receipt: receipt.clone(),
+            })
+            .collect();
+        coordination.runs.push(SharedRunRecord {
+            plan: SharedRunPlan {
+                mode: SharedRunMode::Contextual,
+                requests,
+                composition: Some(composition),
+                probe_budget: 32,
+                execution_attempt: 0,
+            },
+            node: Some(shared_node),
+            phase: SharedRunPhase::Terminal,
+            stale: false,
+            physical_run: Some(digest(82)),
+            completed,
+            unfinished: Vec::new(),
+            latencies: Vec::new(),
+        });
+        (snapshot, bloom, node, receipt)
+    }
+
+    #[test]
+    fn exact_contextual_aggregate_receipt_skips_an_extra_precheck_run() {
+        let (snapshot, bloom, node, receipt) = contextual_receipt_fixture();
+        let decisions = advance_head(&snapshot, bloom, 40, 41);
+        let state = recorded_state(&decisions.effects, bloom).expect("contextual reuse is visible");
+        assert_eq!(state.result, Some(PrecheckResult::Passed { node: node.digest(), evidence: receipt.detail }));
+        assert!(state.issued.is_none());
+        assert_eq!(state.issued_runs, 1);
+        assert!(!decisions.effects.iter().any(|effect| matches!(
+            effect,
+            Decision::OfferPrecheck { .. }
+                | Decision::DispatchPrecheck { .. }
+                | Decision::QueuePrecheckPlan { .. }
+                | Decision::RecordVerifyProof { .. }
+        )));
+
+        let delayed_offer = reduce_request_precheck(&snapshot, &bloom, node.digest());
+        let state = recorded_state(&delayed_offer.effects, bloom).expect("delayed offer reuses receipt");
+        assert!(state.issued.is_none());
+        assert_eq!(state.issued_runs, 1);
+        assert_eq!(state.result, Some(PrecheckResult::Passed { node: node.digest(), evidence: receipt.detail }));
+        assert!(!delayed_offer.effects.iter().any(|effect| matches!(effect, Decision::DispatchPrecheck { .. })));
+    }
+
+    #[test]
+    fn contextual_precheck_reuse_requires_the_exact_checkout_and_contract() {
+        let (snapshot, bloom, _, _) = contextual_receipt_fixture();
+        let changed_checkout = advance_head(&snapshot, bloom, 40, 51);
+        assert!(recorded_state(&changed_checkout.effects, bloom).expect("new head").result.is_none());
+        assert!(changed_checkout.effects.iter().any(|effect| matches!(effect, Decision::OfferPrecheck { .. })));
+
+        let mut changed_contract = snapshot;
+        let record = changed_contract.blooms.get_mut(&bloom).expect("bloom");
+        record.coordination.as_deref_mut().expect("coordination").composition_contract.invocation.image =
+            String::from("different-image");
+        let prepared = record.precheck.as_ref().expect("precheck").prepared.as_ref().expect("prepared").digest();
+        let requested = reduce_request_precheck(&changed_contract, &bloom, prepared);
+        assert!(requested.effects.iter().any(|effect| matches!(effect, Decision::DispatchPrecheck { .. })));
+    }
+
+    #[test]
+    fn contextual_receipt_does_not_override_an_established_red_head() {
+        let (mut snapshot, bloom, node, _) = contextual_receipt_fixture();
+        let record = snapshot.blooms.get_mut(&bloom).expect("bloom");
+        let coordination = record.coordination.as_deref_mut().expect("coordination");
+        coordination.integration.known_red = Some(coordination.integration.head.node);
+        assert_eq!(
+            contextual_precheck_receipt(
+                &snapshot.blooms[&bloom],
+                bloom,
+                snapshot.blooms[&bloom].coordination.as_deref().expect("coordination"),
+                &node
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn eager_precheck_uses_selected_root_and_actual_coverage_without_a_leaf_fold() {
+        let (mut snapshot, bloom, _) = eager_fixture();
+        snapshot.blooms.get_mut(&bloom).expect("bloom").precheck =
+            Some(PrecheckState::new(PrecheckPolicy { run_budget: 3 }));
+        let decisions = advance_head(&snapshot, bloom, 50, 51);
+        let state = recorded_state(&decisions.effects, bloom).expect("scheduled head");
+        let node = state.prepared.as_ref().expect("head already prepared");
+        assert_eq!((node.tree, node.head), (digest(50), digest(51)));
+        assert_eq!(
+            state
+                .latest_plan
+                .as_ref()
+                .expect("plan")
+                .members
+                .iter()
+                .map(|member| &member.workpiece)
+                .collect::<Vec<_>>(),
+            vec![&workpiece("two"), &workpiece("one")],
+        );
+        assert!(
+            decisions
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Decision::OfferPrecheck { node: offered, .. } if offered == node))
+        );
+        assert!(
+            !decisions
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Decision::QueuePrecheckPlan { .. } | Decision::DispatchPrecheck { .. }))
+        );
+    }
+
+    #[test]
+    fn deferred_contextual_precheck_waits_without_rebuilding_its_repaired_leaves() {
+        let (mut snapshot, bloom, expected) = eager_fixture();
+        let record = snapshot.blooms.get_mut(&bloom).expect("bloom");
+        record.coordination.as_deref_mut().expect("coordination").policy.eager_integration = false;
+        record.precheck = Some(PrecheckState::new(PrecheckPolicy { run_budget: 3 }));
+        assert!(plan_of(record, bloom).is_none());
+        let decisions = advance_head(&snapshot, bloom, 40, 41);
+        assert!(!decisions.effects.iter().any(|effect| matches!(
+            effect,
+            Decision::OfferPrecheck { .. } | Decision::DispatchPrecheck { .. } | Decision::QueuePrecheckPlan { .. }
+        )));
+
+        let record = snapshot.blooms.get_mut(&bloom).expect("bloom");
+        record.coordination.as_deref_mut().expect("coordination").final_in_flight = true;
+        let plan = plan_of(record, bloom).expect("final contextual fold uses selected root");
+        let selected = selected_head_node(&plan, record.coordination.as_deref().expect("coordination"));
+        assert_eq!(selected, expected);
+        assert_eq!(plan.base, digest(41));
+    }
+
+    #[test]
+    fn eager_head_changes_coalesce_while_an_issued_input_stays_immutable() {
+        let (mut snapshot, bloom, issued) = eager_fixture();
+        for (tree, checkout) in [(50, 51), (60, 61)] {
+            let decisions = advance_head(&snapshot, bloom, tree, checkout);
+            let state = recorded_state(&decisions.effects, bloom).expect("newest selected head").clone();
+            assert_eq!(state.issued.as_ref(), Some(&issued));
+            assert_eq!(state.prepared.as_ref().expect("pending head").tree, digest(tree));
+            assert!(!decisions.effects.iter().any(|effect| matches!(
+                effect,
+                Decision::OfferPrecheck { .. } | Decision::DispatchPrecheck { .. } | Decision::QueuePrecheckPlan { .. }
+            )));
+            let record = snapshot.blooms.get_mut(&bloom).expect("bloom");
+            record.precheck = Some(state);
+            record.coordination.as_deref_mut().expect("coordination").integration.head.candidate =
+                CandidateRef { tree: digest(tree), checkout: digest(checkout) };
+            record.coordination.as_deref_mut().expect("coordination").integration.head.node = digest(checkout);
+        }
+        let completion = reduce_precheck_completed(
+            &snapshot,
+            &bloom,
+            issued.digest(),
+            &PrecheckCompletion::Failed(Evidence {
+                subject: issued.tree,
+                kind: EvidenceKind::VerificationResult,
+                detail: digest(90),
+            }),
+        );
+        let state = recorded_state(&completion.effects, bloom).expect("settled old run");
+        assert!(state.issued.is_none());
+        assert!(state.result.is_none(), "a stale red cannot color the selected head");
+        assert!(
+            completion
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Decision::OfferPrecheck { node, .. } if node.tree == digest(60)))
+        );
+        assert!(!completion.effects.iter().any(|effect| matches!(effect, Decision::RecordCoordinationState { .. })));
+    }
+
+    #[test]
+    fn same_coverage_repaired_root_gets_a_fresh_precheck_node() {
+        let (mut snapshot, bloom, prior) = eager_fixture();
+        let state = snapshot.blooms.get_mut(&bloom).expect("bloom").precheck.as_mut().expect("precheck");
+        state.issued = None;
+        state.result = Some(PrecheckResult::Passed { node: prior.digest(), evidence: digest(90) });
+        let decisions = advance_head(&snapshot, bloom, 50, 51);
+        let state = recorded_state(&decisions.effects, bloom).expect("new node");
+        assert_ne!(state.latest_plan.as_ref().expect("same coverage").digest(), prior.plan);
+        assert_eq!(state.latest_plan.as_ref().expect("current root plan").base, digest(51));
+        assert_ne!(state.prepared.as_ref().expect("new node").digest(), prior.digest());
+        assert!(state.result.is_none());
+        assert!(
+            decisions
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Decision::OfferPrecheck { node, .. } if node.tree == digest(50)))
+        );
+    }
+
+    #[test]
+    fn exact_eager_red_marks_the_current_inherited_head() {
+        let (snapshot, bloom, issued) = eager_fixture();
+        let completion = reduce_precheck_completed(
+            &snapshot,
+            &bloom,
+            issued.digest(),
+            &PrecheckCompletion::Failed(Evidence {
+                subject: issued.tree,
+                kind: EvidenceKind::VerificationResult,
+                detail: digest(90),
+            }),
+        );
+        let state = completion
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                Decision::RecordCoordinationState { state: Some(state), .. } => Some(state),
+                _ => None,
+            })
+            .expect("red inherited head recorded");
+        assert_eq!(state.integration.known_red, Some(state.integration.head.node));
+        assert_eq!(state.partial_head_repair.as_ref().expect("repair scheduled").head, state.integration.head);
+        assert!(completion.effects.iter().any(|effect| matches!(effect, Decision::DispatchPartialHeadRepair { .. })));
+    }
+
+    #[test]
+    fn late_green_does_not_clear_an_independently_established_red_head() {
+        let (mut snapshot, bloom, issued) = eager_fixture();
+        let coordination =
+            snapshot.blooms.get_mut(&bloom).expect("bloom").coordination.as_deref_mut().expect("coordination");
+        coordination.integration.known_red = Some(coordination.integration.head.node);
+        let completion = reduce_precheck_completed(
+            &snapshot,
+            &bloom,
+            issued.digest(),
+            &PrecheckCompletion::Passed(Evidence {
+                subject: issued.tree,
+                kind: EvidenceKind::VerificationResult,
+                detail: digest(90),
+            }),
+        );
+        assert!(matches!(completion.outcome, Outcome::PrecheckCompleted { .. }));
+        assert!(!completion.effects.iter().any(|effect| matches!(effect, Decision::RecordCoordinationState { .. })));
+        assert_eq!(
+            snapshot.blooms[&bloom].coordination.as_deref().expect("coordination").integration.known_red,
+            Some(digest(42)),
+        );
+    }
+
+    #[test]
+    fn eager_preparation_cannot_substitute_a_rebuilt_leaf_tree() {
+        let (snapshot, bloom, mut node) = eager_fixture();
+        node.tree = digest(99);
+        let decisions = reduce_precheck_prepared(&snapshot, &bloom, node.plan, &PrecheckPreparation::Prepared(node));
+        assert_eq!(decisions.outcome, Outcome::PrecheckRejected(PrecheckError::InvalidPreparation));
+        assert!(decisions.effects.is_empty());
+    }
+
+    #[test]
+    fn eager_final_join_requires_full_coverage_and_the_exact_selected_tree() {
+        let (mut snapshot, bloom, node) = eager_fixture();
+        let record = snapshot.blooms.get_mut(&bloom).expect("bloom");
+        assert_eq!(final_join(record, bloom, node.tree, node.head), Some(node.clone()));
+        assert!(final_join(record, bloom, digest(99), node.head).is_none());
+        record.coordination.as_deref_mut().expect("coordination").integration.head.coverage.pop();
+        assert!(final_join(record, bloom, node.tree, node.head).is_none());
+    }
+
     fn recorded_state(effects: &[Decision], bloom: BloomId) -> Option<&PrecheckState> {
         effects.iter().rev().find_map(|effect| match effect {
-            Decision::RecordPrecheckState { bloom: owner, state } if *owner == bloom => state.as_deref(),
+            Decision::RecordPrecheckState { bloom: owner, state } if *owner == bloom => state.as_ref(),
             _ => None,
         })
     }

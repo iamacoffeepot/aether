@@ -2,7 +2,6 @@
 //! (it evolves the projection) or snapshot-inert (it carries an outbox row the
 //! host drains and turns into I/O) — the reducer never does I/O itself.
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
@@ -13,15 +12,18 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::ProjectedReceipt;
 use crate::values::{
-    Adjudication, AgentProfile, BaseReceipt, CandidateRef, CompositionFinding, ConfigRegistry, Evidence,
-    MemberCandidate, MemberDependency, OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease,
-    OrphanClaimReleaseCompletion, PipelineManifest, PrecheckNode, PrecheckPlan, PrecheckState, ResolutionClaim,
-    ResolvedBloom, SpendQuiesce, StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge, Withdrawal,
+    Adjudication, AgentProfile, BaseReceipt, CandidatePreparationPlan, CandidateRef, CompatibilityPreviewPlan,
+    CompositionFinding, ConfigRegistry, ContextualAttemptDispatch, CoordinationState, Evidence, IntegrationAppendPlan,
+    MemberCandidate, MemberDependency, MemberVerifyRequest, OperatorHold, OperatorProposal, OperatorRepair,
+    OrphanClaimRelease, OrphanClaimReleaseCompletion, PartialHeadRepairDispatch, PipelineManifest, PrecheckNode,
+    PrecheckPlan, PrecheckState, ResolutionClaim, ResolvedBloom, SharedRunDispatch, SharedRunPlan, SpendQuiesce,
+    StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
 /// production, the outbox/store).
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)] // aether-suppression-request: journal payloads use the closed Schema value vocabulary; runtime snapshots own heap indirection
 pub enum Decision {
     /// Claim a workpiece's active membership for a bloom.
     ClaimMembership {
@@ -938,7 +940,7 @@ pub enum Decision {
         manifest: PipelineManifest,
     },
     /// Replace the complete journal-derived pre-check state, or clear it.
-    RecordPrecheckState { bloom: BloomId, state: Option<Box<PrecheckState>> },
+    RecordPrecheckState { bloom: BloomId, state: Option<PrecheckState> },
     /// Ask the host to scratch-fold the newest immutable candidate plan.
     QueuePrecheckPlan { bloom: BloomId, plan: PrecheckPlan },
     /// Offer a prepared node for idle-only admission.
@@ -961,4 +963,31 @@ pub enum Decision {
     CancelPrecheck { bloom: BloomId, node: Digest },
     /// Promote an exact issued run joined by final resolution to required work.
     PromotePrecheck { bloom: BloomId, node: Digest },
+    /// Replace the complete journal-derived coordination state, or clear it.
+    RecordCoordinationState { bloom: BloomId, state: Option<CoordinationState> },
+    /// Advance one eager generation from its exact immutable parent.
+    DispatchIntegrationAppend { plan: IntegrationAppendPlan },
+    /// Mechanically place one authored reconcile result onto its recorded head.
+    DispatchCandidatePreparation { plan: CandidatePreparationPlan },
+    /// Offer one logical verification request to the shared-run scheduler.
+    QueueMemberVerification { request: MemberVerifyRequest },
+    /// Materialize an approved contextual composition plan in scratch source.
+    DispatchSharedRunPreparation { plan: SharedRunPlan },
+    /// Dispatch one approved physical run or warm serial lease.
+    DispatchSharedRun { dispatch: SharedRunDispatch },
+    /// Retire a physical run that has not started while preserving returned
+    /// logical outcomes.
+    CancelSharedRun { plan: Digest },
+    /// Retire one obsolete logical request without cancelling needed peers.
+    CancelMemberVerification { request: Digest },
+    /// Ask the source for a bounded provisional merge preview.
+    DispatchCompatibilityPreview { plan: CompatibilityPreviewPlan },
+    /// Dispatch one member attempt with its immutable inherited head.
+    DispatchContextualAttempt { dispatch: ContextualAttemptDispatch },
+    /// Offer one version-bound construction intent for just-in-time physical
+    /// admission. The host must obtain the matching admitted fact before
+    /// backend submission.
+    QueueConstructionAdmission { dispatch: ContextualAttemptDispatch },
+    /// Repair one exact red eager head under composition ownership.
+    DispatchPartialHeadRepair { dispatch: PartialHeadRepairDispatch },
 }

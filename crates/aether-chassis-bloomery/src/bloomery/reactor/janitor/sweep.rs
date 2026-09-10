@@ -18,8 +18,8 @@ use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::precheck::namespace as preview_namespace;
 use aether_bloomery::{
     BloomId, BloomStatus, CandidatePreparationPayload, ConstructionAdmissionPayload, Digest, IntegrationAppendPayload,
-    Nonce, PartialHeadRepairDispatch, PartialHeadRepairPayload, QueuePrecheckPlanPayload, SharedRunDispatch, Snapshot,
-    Topic, construction_nonce_digest, is_active_unlanded,
+    Nonce, PartialHeadRepairDispatch, PartialHeadRepairPayload, PartialHeadRepairPlan, QueuePrecheckPlanPayload,
+    SharedRunDispatch, Snapshot, Topic, construction_nonce_digest, is_active_unlanded,
 };
 use aether_bloomery_git::{construction_checkpoint_scope_namespace, partial_head_repair_namespace};
 use aether_bloomery_github::SourceError;
@@ -258,7 +258,7 @@ fn retained_coordination_blooms(
             retained_blooms.insert(BloomId(bloom));
         }
     }
-    for row in &shared_runs {
+    for row in shared_runs {
         if !shared_run_refs_are_live(store, row)? {
             continue;
         }
@@ -303,7 +303,7 @@ fn protected_partial_head_repairs(
             state
                 .partial_head_repair
                 .iter()
-                .map(|plan| plan.digest())
+                .map(PartialHeadRepairPlan::digest)
                 .chain((state.integration.head.plan != Digest::default()).then_some(state.integration.head.plan))
         })
         .collect::<HashSet<_>>();
@@ -376,9 +376,9 @@ fn prune_checkpoint_refs(
                 |state| {
                     state
                         .admitted_construction
-                        .get(&dispatch.workpiece)
+                        .get(&dispatch.workpiece.0)
                         .is_some_and(|admission| admission.nonce == nonce && admission.dispatch == dispatch)
-                        || state.checkpoints.get(&dispatch.workpiece).is_some_and(|checkpoint| {
+                        || state.checkpoints.get(&dispatch.workpiece.0).is_some_and(|checkpoint| {
                             checkpoint.nonce == nonce
                                 && checkpoint.scope_revision == dispatch.scope_revision
                                 && checkpoint.starting_checkout == dispatch.context.starting_head.candidate.checkout
@@ -1169,8 +1169,35 @@ mod preview_tests {
         assert!(coordination_refs_are_live(BloomStatus::Landed, true));
     }
 
-    #[test]
-    fn active_and_published_partial_head_repairs_keep_their_source_pins() {
+    fn partial_head_repair_payload(plan: &PartialHeadRepairPlan, base: CandidateRef) -> PartialHeadRepairPayload {
+        PartialHeadRepairPayload {
+            dispatch: PartialHeadRepairDispatch {
+                plan: plan.clone(),
+                transformation: Transformation {
+                    command: String::from("refine"),
+                    inputs: vec![plan.head.candidate.tree],
+                    checkout: plan.head.candidate.checkout,
+                    diff_base: Some(base.checkout),
+                    outputs: Vec::new(),
+                    image: String::from("test"),
+                    limits: ExecutionLimits { wall_clock_secs: 1 },
+                    network: NetworkProfile::None,
+                    description: None,
+                    model: None,
+                },
+                scope_revision: digest(0),
+                profile: AgentProfile {
+                    harness: Harness::Grok,
+                    model: String::from("test"),
+                    effort: ReasoningEffort::Low,
+                    tools: ToolPolicy::None,
+                },
+                configs: ConfigRegistry::default(),
+            },
+        }
+    }
+
+    fn partial_head_repair_fixture() -> (PartialHeadRepairPlan, Snapshot, SqliteStore) {
         let spec = draft(0, vec![membership("wp", 1)]).seal();
         let bloom = spec.id();
         let base = CandidateRef { tree: digest(0), checkout: digest(0) };
@@ -1211,7 +1238,7 @@ mod preview_tests {
             },
             bloom,
             base,
-            vec![(workpiece("wp"), digest(1))],
+            vec![aether_bloomery::GenerationMember { workpiece: workpiece("wp"), scope_revision: digest(1) }],
         );
         let plan = PartialHeadRepairPlan {
             bloom,
@@ -1226,34 +1253,18 @@ mod preview_tests {
         splice_bloom(&mut snapshot, &spec, BloomStatus::Sealed);
         snapshot.blooms.get_mut(&bloom).expect("bloom").coordination = Some(Box::new(state));
         let mut store = SqliteStore::open(":memory:").expect("store");
-        let payload = PartialHeadRepairPayload {
-            dispatch: PartialHeadRepairDispatch {
-                plan: plan.clone(),
-                transformation: Transformation {
-                    command: String::from("refine"),
-                    inputs: vec![plan.head.candidate.tree],
-                    checkout: plan.head.candidate.checkout,
-                    diff_base: Some(base.checkout),
-                    outputs: Vec::new(),
-                    image: String::from("test"),
-                    limits: ExecutionLimits { wall_clock_secs: 1 },
-                    network: NetworkProfile::None,
-                    description: None,
-                    model: None,
-                },
-                scope_revision: digest(0),
-                profile: AgentProfile {
-                    harness: Harness::Grok,
-                    model: String::from("test"),
-                    effort: ReasoningEffort::Low,
-                    tools: ToolPolicy::None,
-                },
-                configs: ConfigRegistry::default(),
-            },
-        };
+        let payload = partial_head_repair_payload(&plan, base);
         store.enqueue_topic(Topic::PartialHeadRepair, &to_vec(&payload).expect("payload"), None).expect("enqueue");
         let entry = store.drain_topic(Topic::PartialHeadRepair).expect("pending repair").remove(0);
         store.ack_topic(Topic::PartialHeadRepair, entry.sequence).expect("delivered repair");
+
+        (plan, snapshot, store)
+    }
+
+    #[test]
+    fn active_and_published_partial_head_repairs_keep_their_source_pins() {
+        let (plan, mut snapshot, mut store) = partial_head_repair_fixture();
+        let bloom = plan.bloom;
         let source = Pruner::default();
         let mut already = HashSet::new();
 

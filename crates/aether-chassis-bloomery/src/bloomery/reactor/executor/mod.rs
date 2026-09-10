@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use crate::bloomery::ExecutorShell;
+use crate::bloomery::{ExecutorShell, HostClass};
 // The scripted-lane seam's mail and reply kinds (#4711). Imported here, beside
 // the ZST, because `#[actor]` re-emits every handler's kinds in *this* module —
 // the same reason `DispatchTick` is re-exported below rather than left in
@@ -40,6 +40,8 @@ pub use runtime::candidate_push_at;
 pub use runtime::{CandidatePush, DispatchTick, ExecutorReactorState};
 
 pub struct ExecutorReactorSetup {
+    /// Runtime host identity compared with each sealed shared-run contract.
+    pub host_class: HostClass,
     pub executor: Option<ExecutorShell>,
     pub correspondence: Option<SharedCorrespondence>,
     pub store_path: String,
@@ -102,6 +104,13 @@ impl ExecutorReactorCapability {
         Topic::DispatchPrecheck,
         Topic::CancelPrecheck,
         Topic::PromotePrecheck,
+        Topic::SharedRun,
+        Topic::MemberVerification,
+        Topic::CancelSharedRun,
+        Topic::CancelMemberVerification,
+        Topic::ContextualDispatch,
+        Topic::ConstructionAdmission,
+        Topic::PartialHeadRepair,
     ];
 }
 
