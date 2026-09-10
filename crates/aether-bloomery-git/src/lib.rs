@@ -61,5 +61,8 @@ pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, par
 pub use replica::{GitSourceReplica, PublishedRefspec, ReplicaError, SourceReplica, published_refspecs};
 pub use roll::{DayCoverage, RollError, advance_main, cut_daily};
 pub use source::{
-    GitSource, HostSource, SourceError, candidate_ref_name, landing_branch, member_checkpoint_ref_name, to_hex,
+    GitSource, HostSource, SourceError, candidate_ref_name, construction_checkpoint_namespace,
+    construction_checkpoint_promotion, construction_checkpoint_ref_name, construction_checkpoint_scope_namespace,
+    landing_branch, member_checkpoint_ref_name, partial_head_repair_namespace, partial_head_repair_ref_name, to_hex,
+    transient_construction_checkpoint_ref_name, transient_construction_checkpoint_ref_prefix,
 };

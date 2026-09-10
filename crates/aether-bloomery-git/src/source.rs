@@ -60,8 +60,9 @@ use std::sync::Arc;
 
 use aether_bloomery::{
     BackendObjectId, BloomId, CandidateRef, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState,
-    ClaimReleaseOutcome, ContentAddressed, CorrespondenceError, Digest, IntegrateOutcome, IntegrationPosition,
-    LandOutcome, SharedCorrespondence, Snapshot, SourceBackend, SourceSnapshot, WorkpieceId, digest_of,
+    ClaimReleaseOutcome, ConstructionCheckpoint, ContentAddressed, CorrespondenceError, Digest, IntegrateOutcome,
+    IntegrationPosition, LandOutcome, Nonce, SharedCorrespondence, Snapshot, SourceBackend, SourceSnapshot,
+    WorkpieceId, digest_of, encode_hex,
 };
 use serde::Serialize;
 
@@ -115,6 +116,89 @@ impl ContentAddressed for IntegrationTreeAddress<'_> {
 #[must_use]
 pub fn candidate_ref_name(bloom: &BloomId, workpiece: &str) -> String {
     format!("refs/{}", candidate_ref(bloom, workpiece))
+}
+
+/// Enumerable prefix for checkpoint pins captured before their nonce is joined
+/// to durable bloom/workpiece context. Startup reconciliation lists only this
+/// owned prefix, so an interrupted capture can be promoted or removed without
+/// guessing bloom namespaces.
+#[must_use]
+pub const fn transient_construction_checkpoint_ref_prefix() -> &'static str {
+    "refs/heads/aether/construction-checkpoints/transient/"
+}
+
+/// Immediate pin for a checkpoint captured before its nonce is joined to the
+/// durable bloom/workpiece context. The observation makes every immutable
+/// capture distinct; promotion deletes this exact ref.
+#[must_use]
+pub fn transient_construction_checkpoint_ref_name(nonce: &Nonce, observation: u64) -> String {
+    format!("{}{}/{}", transient_construction_checkpoint_ref_prefix(), encode_hex(nonce.0.as_bytes()), observation,)
+}
+
+/// Durable pin for one version-bound checkpoint after the executor joins its
+/// nonce to the recorded order. All observations for a scope share a private
+/// namespace but retain distinct refs; terminal cleanup prunes the namespace.
+#[must_use]
+pub fn construction_checkpoint_ref_name(checkpoint: &ConstructionCheckpoint) -> String {
+    candidate_ref_name(
+        &construction_checkpoint_namespace(checkpoint),
+        &format!("{}-observation-{}", checkpoint.nonce.to_hex(), checkpoint.observation),
+    )
+}
+
+#[must_use]
+pub fn construction_checkpoint_namespace(checkpoint: &ConstructionCheckpoint) -> BloomId {
+    construction_checkpoint_scope_namespace(
+        checkpoint.bloom,
+        &checkpoint.workpiece,
+        checkpoint.scope_revision,
+        checkpoint.starting_checkout,
+        checkpoint.nonce,
+    )
+}
+
+#[must_use]
+pub fn construction_checkpoint_scope_namespace(
+    bloom: BloomId,
+    workpiece: &WorkpieceId,
+    scope_revision: Digest,
+    starting_checkout: Digest,
+    nonce: Digest,
+) -> BloomId {
+    let mut bytes = b"aether.bloomery.construction-checkpoint-scope:".to_vec();
+    bytes.extend_from_slice(bloom.0.as_bytes());
+    bytes.extend_from_slice(workpiece.0.as_bytes());
+    bytes.extend_from_slice(scope_revision.as_bytes());
+    bytes.extend_from_slice(starting_checkout.as_bytes());
+    bytes.extend_from_slice(nonce.as_bytes());
+    BloomId(Digest::of_wire_bytes(&bytes))
+}
+
+/// Exact ref move the local executor performs before admitting a checkpoint.
+/// It creates `durable` at the captured commit, then deletes `transient`.
+#[must_use]
+pub fn construction_checkpoint_promotion(nonce: &Nonce, checkpoint: &ConstructionCheckpoint) -> (String, String) {
+    (
+        transient_construction_checkpoint_ref_name(nonce, checkpoint.observation),
+        construction_checkpoint_ref_name(checkpoint),
+    )
+}
+
+/// Private namespace retaining one composition-owned partial-head repair.
+/// The plan digest binds its generation, exact parent head, admitted inputs,
+/// evidence, and attempt, so retries and displaced repairs cannot overwrite
+/// one another's captured candidate.
+#[must_use]
+pub fn partial_head_repair_namespace(plan: Digest) -> BloomId {
+    let mut bytes = b"aether.bloomery.partial-head-repair-source.v1:".to_vec();
+    bytes.extend_from_slice(plan.as_bytes());
+    BloomId(Digest::of_wire_bytes(&bytes))
+}
+
+/// Durable ref a local repair lane must create before admitting its candidate.
+#[must_use]
+pub fn partial_head_repair_ref_name(plan: Digest) -> String {
+    candidate_ref_name(&partial_head_repair_namespace(plan), "candidate")
 }
 
 /// The same ref in the `heads/…` short form the Git Data surface takes. The
@@ -488,6 +572,19 @@ impl<C: GitDataApi> GitSource<C> {
             .transpose()?
             .map(|git| git.to_hex())
             .ok_or_else(|| SourceError::UnresolvedCorrespondence(what.to_owned()))
+    }
+
+    /// Resolve an immutable candidate and require its checkout commit to carry
+    /// its named tree. The moving candidate-ref surface is deliberately absent:
+    /// callers preparing work against an earlier head must keep using the
+    /// vehicle the journal pinned even after a member publishes a newer one.
+    fn pinned_candidate_sha(&self, candidate: &CandidateRef, what: &str) -> Result<String, SourceError> {
+        let checkout = self.resolve_git_sha(&candidate.checkout, &format!("{what} checkout"))?;
+        let tree = self.resolve_git_sha(&candidate.tree, &format!("{what} tree"))?;
+        if self.client.get_commit(&checkout)?.tree != tree {
+            return Err(SourceError::Malformed(format!("{what} checkout does not contain its pinned tree")));
+        }
+        Ok(checkout)
     }
 
     // Reverse-resolve a real git object sha to the bloom digest it corresponds
@@ -1543,6 +1640,21 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
 /// prune is not a landing outcome, but the janitor needs it on the same
 /// object the rest of the source shell holds.
 pub trait HostSource: SourceBackend<Error = SourceError> {
+    /// Read the complete repository-relative path set changed by `candidate`
+    /// from its exact pinned `base`.
+    ///
+    /// Both checkout/tree pairs are validated before the delta is read. The
+    /// source adapter must also prove that `base` is an ancestor of
+    /// `candidate`; an arbitrary merge-base comparison is not sufficient.
+    ///
+    /// # Errors
+    /// Unsupported backend, unavailable or mismatched objects, a divergent
+    /// range, or an incomplete path listing.
+    fn changed_paths(&self, base: &CandidateRef, candidate: &CandidateRef) -> Result<Vec<String>, SourceError> {
+        let _ = (base, candidate);
+        Err(SourceError::Malformed("source backend does not support exact changed-path discovery".to_owned()))
+    }
+
     /// Merge an immutable candidate vehicle into an owned scratch namespace.
     /// The candidate's checkout must carry its named tree. Implementations must
     /// never resolve a moving member ref in place of that checkout.
@@ -1560,6 +1672,28 @@ pub trait HostSource: SourceBackend<Error = SourceError> {
         Err(SourceError::Malformed("source backend does not support immutable preview merges".to_owned()))
     }
 
+    /// Prepare an authored candidate against an immutable earlier head in a
+    /// private namespace. A clean result is returned as `Integrated`; a
+    /// residual collision remains the ordinary clean `Conflict` outcome.
+    ///
+    /// Implementations preserve `authored` when it already descends from
+    /// `base`, and otherwise use the same merge policy as ordinary integration.
+    /// Both checkout/tree pairs must be checked before any private ref is
+    /// written.
+    ///
+    /// # Errors
+    /// Unsupported backend, unavailable objects, mismatched candidates, or a
+    /// transport fault.
+    fn prepare_pinned(
+        &self,
+        namespace: &BloomId,
+        base: &CandidateRef,
+        authored: &CandidateRef,
+    ) -> Result<IntegrateOutcome, SourceError> {
+        let _ = (namespace, base, authored);
+        Err(SourceError::Malformed("source backend does not support pinned candidate preparation".to_owned()))
+    }
+
     /// Delete `bloom`'s candidate, integration, and checkpoint refs. Claim refs
     /// and the landing branch are spared. See [`GitSource::prune_working_refs`].
     ///
@@ -1569,19 +1703,19 @@ pub trait HostSource: SourceBackend<Error = SourceError> {
 }
 
 impl<C: GitDataApi> HostSource for GitSource<C> {
+    fn changed_paths(&self, base: &CandidateRef, candidate: &CandidateRef) -> Result<Vec<String>, SourceError> {
+        let base_sha = self.pinned_candidate_sha(base, "member delta base")?;
+        let candidate_sha = self.pinned_candidate_sha(candidate, "member delta candidate")?;
+        self.client.changed_paths(&base_sha, &candidate_sha).map_err(Into::into)
+    }
+
     fn integrate_pinned(
         &self,
         bloom: &BloomId,
         candidate: &CandidateRef,
         expected: &Checkpoint,
     ) -> Result<IntegrateOutcome, SourceError> {
-        let checkout = self.resolve_git_sha(&candidate.checkout, "pre-check candidate checkout")?;
-        let tree = self.resolve_git_sha(&candidate.tree, "pre-check candidate tree")?;
-        if self.client.get_commit(&checkout)?.tree != tree {
-            return Err(SourceError::Malformed(
-                "pre-check candidate checkout does not contain its pinned tree".to_owned(),
-            ));
-        }
+        let checkout = self.pinned_candidate_sha(candidate, "pre-check candidate")?;
         // This ref is private to the immutable plan namespace. It also gives
         // conflict evidence the exact attempted vehicle through the existing
         // merge path; the ordinary member candidate ref is never read or written.
@@ -1598,6 +1732,43 @@ impl<C: GitDataApi> HostSource for GitSource<C> {
         self.integrate_merge(bloom, &pinned, expected)
     }
 
+    fn prepare_pinned(
+        &self,
+        namespace: &BloomId,
+        base: &CandidateRef,
+        authored: &CandidateRef,
+    ) -> Result<IntegrateOutcome, SourceError> {
+        let base_sha = self.pinned_candidate_sha(base, "preparation base")?;
+        let authored_sha = self.pinned_candidate_sha(authored, "authored candidate")?;
+
+        // Keep the real author ancestry when the lane already returned a commit
+        // on H. A synthetic merge commit would preserve the tree but discard the
+        // very relationship late construction is intended to establish.
+        if self.client.is_ancestor(&base_sha, &authored_sha)? {
+            return Ok(IntegrateOutcome::Integrated { tree: authored.tree, head: authored.checkout });
+        }
+
+        let position = self.integration_checkpoint(namespace, &base.checkout)?;
+        let integration = Self::integration_ref(namespace);
+        let current = self.client.get_ref(&integration)?.ok_or_else(|| SourceError::MissingRef(integration.clone()))?;
+
+        // The merge endpoint publishes before its result receipt can be
+        // journaled. In a plan-private namespace the only valid advanced state
+        // contains both immutable inputs; recognize it by ancestry and recover
+        // the landable correspondence instead of merging a second time.
+        if position.checkpoint.tree != base.tree {
+            if !self.client.is_ancestor(&base_sha, &current.sha)?
+                || !self.client.is_ancestor(&authored_sha, &current.sha)?
+            {
+                return Ok(IntegrateOutcome::StaleCheckpoint { actual: position.checkpoint.tree });
+            }
+            let head = self.ensure_integrated_head(namespace, position.checkpoint.tree, &current.sha)?;
+            return Ok(IntegrateOutcome::Integrated { tree: position.checkpoint.tree, head });
+        }
+
+        self.integrate_pinned(namespace, authored, &position.checkpoint)
+    }
+
     fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError> {
         Self::prune_working_refs(self, bloom)
     }
@@ -1612,17 +1783,20 @@ mod tests {
 
     use aether_bloomery::testing::{digest, workpiece};
     use aether_bloomery::{
-        BackendObjectId, BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState,
-        ClaimReleaseOutcome, Correspondence as DomainCorrespondence, CorrespondenceError, Digest, IntegrateOutcome,
-        IntegrationPosition, LandOutcome, SourceBackend, WorkpieceId,
+        BackendObjectId, BloomId, CandidateRef, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState,
+        ClaimReleaseOutcome, ConstructionCheckpoint, Correspondence as DomainCorrespondence, CorrespondenceError,
+        Digest, IntegrateOutcome, IntegrationPosition, LandOutcome, Nonce, SourceBackend, WorkpieceId,
+        construction_nonce_digest,
     };
 
     use std::sync::Arc;
 
     use super::{
-        ADMISSION_REF, EMPTY_TREE, GitSource, MainlineRef, SourceError, candidate_ref_name, member_checkpoint_ref_name,
-        parse_bloom_line, parse_bloom_lineage, render_claim_message, render_claim_message_with_lineage,
-        render_tombstone_message, to_hex,
+        ADMISSION_REF, EMPTY_TREE, GitSource, MainlineRef, SourceError, candidate_ref_name,
+        construction_checkpoint_namespace, construction_checkpoint_promotion, construction_checkpoint_ref_name,
+        member_checkpoint_ref_name, parse_bloom_line, parse_bloom_lineage, partial_head_repair_namespace,
+        partial_head_repair_ref_name, render_claim_message, render_claim_message_with_lineage,
+        render_tombstone_message, to_hex, transient_construction_checkpoint_ref_prefix,
     };
 
     // Tripwire: GitSource's bound is the git-data trait alone. A GitHub-shaped
@@ -1705,7 +1879,7 @@ mod tests {
         let expected = source.integration_checkpoint(&bloom, &base).unwrap().checkpoint;
         let checkout = fake.seed_base_commit(&digest(30));
         fake.seed_git_object(&digest(31));
-        let candidate = aether_bloomery::CandidateRef { tree: digest(31), checkout };
+        let candidate = CandidateRef { tree: digest(31), checkout };
         let before = fake.list_matching_refs(&format!("heads/bloom/{}/", short_hex(&bloom.0))).unwrap();
         assert!(matches!(
             super::HostSource::integrate_pinned(&source, &bloom, &candidate, &expected),
@@ -1720,7 +1894,7 @@ mod tests {
         let source = git_source(&fake, false);
         let expected = source.integration_checkpoint(&bloom, &base).unwrap().checkpoint;
         let checkout = fake.seed_base_commit(&digest(30));
-        let candidate = aether_bloomery::CandidateRef { tree: digest(30), checkout };
+        let candidate = CandidateRef { tree: digest(30), checkout };
         let ordinary = candidate_ref_name(&bloom_id(99), "member");
         fake.seed_ref_at(&ordinary, &checkout);
         let first = super::HostSource::integrate_pinned(&source, &bloom, &candidate, &expected).unwrap();
@@ -1740,6 +1914,129 @@ mod tests {
             super::HostSource::integrate_pinned(&source, &bloom, &candidate, &Checkpoint { bloom, tree }),
             Err(SourceError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn pinned_preparation_preserves_an_authored_descendant_without_a_scratch_ref() {
+        let fake = FakeGithub::new();
+        let base_tree = digest(20);
+        let base_checkout = fake.seed_base_commit(&base_tree);
+        let base_sha = resolve_git(&fake, &base_checkout).unwrap().to_hex();
+        let authored_tree = digest(21);
+        fake.seed_git_object(&authored_tree);
+        let authored_commit = fake.create_commit("authored", &to_hex(&authored_tree), &[base_sha]).unwrap();
+        let authored_checkout = digest(22);
+        fake.seed_correspondence(&authored_checkout, &authored_commit.sha);
+        let base = CandidateRef { tree: base_tree, checkout: base_checkout };
+        let authored = CandidateRef { tree: authored_tree, checkout: authored_checkout };
+        let namespace = bloom_id(90);
+        let source = git_source(&fake, false);
+
+        assert_eq!(
+            super::HostSource::prepare_pinned(&source, &namespace, &base, &authored).unwrap(),
+            IntegrateOutcome::Integrated { tree: authored_tree, head: authored_checkout },
+        );
+        assert!(
+            fake.list_matching_refs(&format!("heads/bloom/{}/", short_hex(&namespace.0))).unwrap().is_empty(),
+            "an already-based author commit needs no synthetic vehicle or integration branch",
+        );
+    }
+
+    #[test]
+    fn pinned_preparation_replays_an_already_published_merge_exactly() {
+        let fake = FakeGithub::new();
+        let base_tree = digest(30);
+        let base_checkout = fake.seed_base_commit(&base_tree);
+        let authored_tree = digest(31);
+        let authored_checkout = fake.seed_base_commit(&authored_tree);
+        let base = CandidateRef { tree: base_tree, checkout: base_checkout };
+        let authored = CandidateRef { tree: authored_tree, checkout: authored_checkout };
+        let namespace = bloom_id(91);
+        let source = git_source(&fake, false);
+
+        let first = super::HostSource::prepare_pinned(&source, &namespace, &base, &authored).unwrap();
+        let minted = fake.create_commit_count();
+        let replayed = super::HostSource::prepare_pinned(&source, &namespace, &base, &authored).unwrap();
+
+        assert_eq!(replayed, first, "the plan-private branch is the recovery record");
+        assert_eq!(fake.create_commit_count(), minted, "recovery does not create a second merge commit");
+        let IntegrateOutcome::Integrated { tree, head } = first else {
+            panic!("unrelated clean candidates should prepare through a merge")
+        };
+        assert_ne!(tree, base_tree);
+        assert_ne!(tree, authored_tree);
+        assert!(resolve_git(&fake, &head).is_some(), "the prepared checkout remains correspondence-bound");
+    }
+
+    #[test]
+    fn pinned_preparation_reports_a_residual_conflict_without_moving_its_base() {
+        let fake = FakeGithub::new();
+        let base_tree = digest(40);
+        let base_checkout = fake.seed_base_commit(&base_tree);
+        let authored_tree = digest(41);
+        let authored_checkout = fake.seed_base_commit(&authored_tree);
+        let base = CandidateRef { tree: base_tree, checkout: base_checkout };
+        let authored = CandidateRef { tree: authored_tree, checkout: authored_checkout };
+        let namespace = bloom_id(92);
+        let integration = format!("bloom/{}/integration", short_hex(&namespace.0));
+        let pinned = format!("bloom/{}/candidate/{}", short_hex(&namespace.0), authored_checkout.to_hex(),);
+        fake.seed_merge_conflict(&integration, &pinned);
+        let source = git_source(&fake, false);
+
+        let outcome = super::HostSource::prepare_pinned(&source, &namespace, &base, &authored).unwrap();
+        assert!(matches!(outcome, IntegrateOutcome::Conflict { .. }));
+        assert_eq!(
+            source.integration_checkpoint(&namespace, &base_checkout).unwrap().checkpoint.tree,
+            base_tree,
+            "a residual conflict leaves the pinned head unchanged",
+        );
+    }
+
+    #[test]
+    fn construction_checkpoint_promotion_keeps_observations_and_admitted_nonces_distinct() {
+        let nonce = Nonce("construct/7".to_owned());
+        let checkpoint = ConstructionCheckpoint {
+            bloom: bloom_id(93),
+            workpiece: WorkpieceId("member".to_owned()),
+            scope_revision: digest(50),
+            nonce: construction_nonce_digest(&nonce),
+            observation: 1,
+            starting_checkout: digest(51),
+            candidate: CandidateRef { tree: digest(52), checkout: digest(53) },
+        };
+        let later = ConstructionCheckpoint { observation: 2, ..checkpoint.clone() };
+        let (transient, durable) = construction_checkpoint_promotion(&nonce, &checkpoint);
+
+        assert_ne!(transient, durable, "pre-join and scope-bound refs cannot collide");
+        assert_eq!(
+            transient,
+            format!("{}636f6e7374727563742f37/1", transient_construction_checkpoint_ref_prefix()),
+            "startup can enumerate a collision-free nonce and observation",
+        );
+        assert_ne!(construction_checkpoint_ref_name(&checkpoint), construction_checkpoint_ref_name(&later));
+        assert_eq!(construction_checkpoint_namespace(&checkpoint), construction_checkpoint_namespace(&later));
+        let another_nonce =
+            ConstructionCheckpoint { nonce: construction_nonce_digest(&Nonce("construct/8".to_owned())), ..checkpoint };
+        assert_ne!(
+            construction_checkpoint_ref_name(&another_nonce),
+            construction_checkpoint_ref_name(&later),
+            "a replacement run cannot overwrite an earlier run's observation ordinal",
+        );
+        assert_ne!(
+            construction_checkpoint_namespace(&another_nonce),
+            construction_checkpoint_namespace(&later),
+            "each admitted run has a separately reclaimable checkpoint namespace",
+        );
+    }
+
+    #[test]
+    fn partial_head_repair_candidates_have_plan_private_retaining_refs() {
+        let first = digest(60);
+        let second = digest(61);
+
+        assert_ne!(partial_head_repair_namespace(first), partial_head_repair_namespace(second));
+        assert_ne!(partial_head_repair_ref_name(first), partial_head_repair_ref_name(second));
+        assert!(partial_head_repair_ref_name(first).ends_with("/candidate"));
     }
 
     #[test]
