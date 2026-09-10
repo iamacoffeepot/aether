@@ -1152,10 +1152,20 @@ impl LocalExecutor {
     // handing it out. A dispatch that outranks everything waiting does start
     // inline, or the band ordering would apply only to slots that free after it
     // has already parked (#5410).
-    fn reserve_slot(&self, priority: DispatchPriority, preferred: Option<usize>) -> Option<(usize, SlotChoice)> {
+    fn reserve_slot(
+        &self,
+        priority: DispatchPriority,
+        preferred: Option<usize>,
+        idle_only: bool,
+    ) -> Option<(usize, SlotChoice)> {
         let quarantined = quarantine::slots_on_disk(&self.base_dir);
         let mut registry = self.lock();
-        if registry.waits_behind(priority) || registry.occupied(&quarantined) >= self.max_concurrent_lanes {
+        // This submit holds one entry itself. Any other preparer may be
+        // required work that has not reached the waiting queue yet.
+        if (idle_only && (!registry.waiting.is_empty() || registry.submitting.len() > 1))
+            || registry.waits_behind(priority)
+            || registry.occupied(&quarantined) >= self.max_concurrent_lanes
+        {
             return None;
         }
         registry.starting += 1;
@@ -2726,12 +2736,10 @@ fn render_object_hex(object: &BackendObjectId) -> String {
     aether_bloomery::encode_hex(object.as_bytes())
 }
 
-impl ExecutorBackend for LocalExecutor {
-    type Error = LocalExecutorError;
-
-    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+impl LocalExecutor {
+    fn submit_order(&self, order: &WorkOrder, idle_only: bool) -> Result<Option<WorkHandle>, LocalExecutorError> {
         let Some(_submit) = self.claim_submit(&order.nonce.0)? else {
-            return Ok(WorkHandle::new(order.nonce.clone()));
+            return Ok(Some(WorkHandle::new(order.nonce.clone())));
         };
         if self.kit_gate && self.spawn_program(&order.nonce.0) == LaneProgram::default() {
             let report = self
@@ -2754,7 +2762,7 @@ impl ExecutorBackend for LocalExecutor {
         // the ceiling existed. Otherwise the dispatch waits its turn — and is acked
         // as submitted either way, so the reducer's view of it never depends on how
         // busy this host happened to be.
-        if let Some((slot, reason)) = self.reserve_slot(pending.priority, pending.preferred) {
+        if let Some((slot, reason)) = self.reserve_slot(pending.priority, pending.preferred, idle_only) {
             let failed = FailedStart::of(&pending);
             if let Err(error) = self.start_reserved(pending, slot, reason) {
                 // A checkout that does not carry the order's candidate is the
@@ -2770,10 +2778,34 @@ impl ExecutorBackend for LocalExecutor {
                 }
                 self.record_failed_start(failed, &error);
             }
+        } else if idle_only {
+            return Ok(None);
         } else {
             self.enqueue(pending);
         }
+        Ok(Some(WorkHandle::new(order.nonce.clone())))
+    }
+}
+
+impl ExecutorBackend for LocalExecutor {
+    type Error = LocalExecutorError;
+
+    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+        self.submit_order(order, false)?;
         Ok(WorkHandle::new(order.nonce.clone()))
+    }
+
+    fn try_submit_idle(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, Self::Error> {
+        self.submit_order(order, true)
+    }
+
+    fn has_idle_capacity(&self, _order: &WorkOrder) -> bool {
+        // Advisory only: this runs on the reactor handler. The blocking
+        // admission worker checks persisted quarantines again at reservation.
+        let registry = self.lock();
+        registry.waiting.is_empty()
+            && registry.submitting.is_empty()
+            && registry.occupied(&HashSet::new()) < self.max_concurrent_lanes
     }
 
     // `run` is a `&mut` reborrow from the registry guard (poll mutates the child),

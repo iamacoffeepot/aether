@@ -20,9 +20,9 @@ use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BaseReceipt, BloomSpec, CandidateRef, CompositionFinding, CompositionParents, ConfigScopes,
     DispatchKey, Evidence, EvidenceKind, MemberDependency, OperatorHold, OperatorProposal, OperatorRepair,
-    OrphanClaimReleaseRecord, PipelineManifest, ResolutionClaim, ResolvedConfigs, SpendQuiesce, StageCatalog,
-    SuppressionDisposition, SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse,
-    Wedge, Withdrawal,
+    OrphanClaimReleaseRecord, PipelineManifest, PrecheckState, ResolutionClaim, ResolvedConfigs, SpendQuiesce,
+    StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof,
+    VerifyReuse, Wedge, Withdrawal,
 };
 // Only [`Snapshot::with_green_base`] names it, and that door is behind the same cfg.
 // A plain import would be an unused one on a lib-scoped build, where the fixture
@@ -731,6 +731,9 @@ pub struct BloomRecord {
     /// that predates the field.
     #[serde(default)]
     pub withdrawn: BTreeMap<WorkpieceId, Withdrawal>,
+    /// Optional journal-derived aggregate pre-check scheduler state.
+    #[serde(default)]
+    pub precheck: Option<PrecheckState>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
 }
@@ -1647,25 +1650,13 @@ impl Snapshot {
             }
             Decision::ReleaseHold { .. } | Decision::RecordReviewPark { .. } => self.apply_hold_effect(effect),
             Decision::AdvanceStage { .. } => self.apply_advance_stage(effect),
-            Decision::RecordWedge { bloom, workpiece, wedge } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    record.wedged.insert(workpiece.clone(), *wedge);
-                    // A wedged workpiece is owed nothing (#4976). It spent its
-                    // budget, and a wedge is the reducer's statement that it
-                    // stops dispatching — so a release must not hand it the lap
-                    // the hold happened to be sitting on, which would make the
-                    // brake a retry grant wearing a different name. The doors
-                    // that do hand a wedged workpiece attempts (a grant, an
-                    // operator repair) move its cursor, and that is what puts it
-                    // back in the line.
-                    record.deferred_dispatches.remove(workpiece);
-                }
-            }
+            Decision::RecordWedge { .. } => self.apply_wedge_effect(effect),
             Decision::DispatchAttempt { .. }
             | Decision::DispatchIntegration { .. }
             | Decision::DispatchSplice { .. }
             | Decision::DispatchAggregateVerify { .. }
             | Decision::DispatchAggregateReview { .. }
+            | Decision::DispatchPrecheck { .. }
             | Decision::DispatchStudy { .. }
             | Decision::DispatchLand { .. } => self.apply_dispatch_effect(effect),
             // Wholly snapshot-inert, like EmitReceipt's outbox row: a re-dispatch
@@ -1689,7 +1680,12 @@ impl Snapshot {
             | Decision::CancelDispatch { .. }
             | Decision::ReleaseMemberClaimRef { .. }
             | Decision::RecordRefusal { .. }
-            | Decision::DispatchProposal { .. } => {}
+            | Decision::DispatchProposal { .. }
+            | Decision::QueuePrecheckPlan { .. }
+            | Decision::OfferPrecheck { .. }
+            | Decision::CancelPrecheck { .. }
+            | Decision::PromotePrecheck { .. } => {}
+            Decision::RecordPrecheckState { .. } => self.apply_precheck_effect(effect),
             Decision::RecordBaseReceipt { .. } => self.apply_base_verify_effect(effect),
             Decision::RecordOrphanClaimRelease { request, target, completion } => {
                 // Opening the record and completing it write the same entry, so
@@ -1927,6 +1923,28 @@ impl Snapshot {
         }
     }
 
+    fn apply_precheck_effect(&mut self, effect: &Decision) {
+        let Decision::RecordPrecheckState { bloom, state } = effect else {
+            return;
+        };
+        if let Some(record) = self.blooms.get_mut(bloom) {
+            record.precheck = state.as_deref().cloned();
+        }
+    }
+
+    fn apply_wedge_effect(&mut self, effect: &Decision) {
+        let Decision::RecordWedge { bloom, workpiece, wedge } = effect else {
+            return;
+        };
+        if let Some(record) = self.blooms.get_mut(bloom) {
+            record.wedged.insert(workpiece.clone(), *wedge);
+            // A wedged workpiece is owed nothing (#4976). It spent its budget,
+            // so a release cannot hand it the lap the hold was sitting on.
+            // Doors that re-arm it move its cursor first.
+            record.deferred_dispatches.remove(workpiece);
+        }
+    }
+
     /// Fold a resolution claim and drop a vehicle whose tree is no longer
     /// the claim's identity (#5079).
     fn apply_claim_effect(&mut self, effect: &Decision) {
@@ -2076,6 +2094,7 @@ impl Snapshot {
             Decision::DispatchAggregateVerify { bloom, .. } => {
                 (bloom, DispatchKey::Bloom { stage: StageId::AggregateVerify })
             }
+            Decision::DispatchPrecheck { bloom, .. } => (bloom, DispatchKey::Bloom { stage: StageId::AggregateVerify }),
             Decision::DispatchAggregateReview { bloom, .. } => {
                 (bloom, DispatchKey::Bloom { stage: StageId::AggregateReview })
             }
@@ -2223,6 +2242,7 @@ impl BloomRecord {
             host_faults: BTreeMap::new(),
             vehicles: BTreeMap::new(),
             withdrawn: BTreeMap::new(),
+            precheck: None,
             superseded_by: None,
         }
     }

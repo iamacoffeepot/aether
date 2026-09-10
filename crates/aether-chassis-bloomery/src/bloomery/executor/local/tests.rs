@@ -1662,6 +1662,43 @@ impl TransformRunner for CapturingRunner {
 }
 
 #[test]
+fn idle_submission_does_not_queue_and_can_retry_the_same_nonce() {
+    let base = TempDir::new().unwrap();
+    let (exec, log) = recording_executor(&base, None, RunLifecycle::Running);
+    let exec = exec.with_max_concurrent_lanes(1);
+    let active = exec.submit(&construct_order(digest(5), "idle-active")).unwrap();
+    let speculative = construct_order(digest(6), "idle-precheck");
+
+    assert_eq!(exec.try_submit_idle(&speculative).unwrap(), None);
+    assert_eq!(exec.inspect(&WorkHandle::new(speculative.nonce.clone())).unwrap(), ExecutionStatus::Unknown);
+    exec.cancel(&active).unwrap();
+    assert_eq!(log.started().len(), 1, "freeing a slot must not start the declined request");
+
+    let handle = exec.try_submit_idle(&speculative).unwrap().expect("the same nonce can now acquire the free lane");
+    assert_eq!(exec.try_submit_idle(&speculative).unwrap(), Some(handle.clone()));
+    assert_eq!(exec.submit(&speculative).unwrap(), handle, "promotion retains the accepted physical run");
+    assert_eq!(log.started().len(), 2, "retries and promotion do not launch another process");
+}
+
+#[test]
+fn idle_submission_waits_for_required_queued_work() {
+    let base = TempDir::new().unwrap();
+    let (exec, log) = recording_executor(&base, None, RunLifecycle::Running);
+    let exec = exec.with_max_concurrent_lanes(1);
+    let active = exec.submit(&construct_order(digest(5), "idle-first")).unwrap();
+    let required = exec.submit(&construct_order(digest(6), "idle-required")).unwrap();
+    let speculative = construct_order(digest(7), "idle-last");
+
+    assert_eq!(exec.try_submit_idle(&speculative).unwrap(), None);
+    exec.cancel(&active).unwrap();
+    assert_eq!(log.started().len(), 2, "the queued required order acquires the freed lane");
+    assert_eq!(exec.try_submit_idle(&speculative).unwrap(), None);
+    exec.cancel(&required).unwrap();
+    assert!(exec.try_submit_idle(&speculative).unwrap().is_some());
+    assert_eq!(log.started().len(), 3);
+}
+
+#[test]
 fn submit_resolves_a_relative_base_to_an_absolute_evidence_dir() {
     // The child runs with `current_dir(worktree_dir)`, so a *relative* `--out`
     // resolves against the child's cwd (the scratch worktree) while `stream_evidence`

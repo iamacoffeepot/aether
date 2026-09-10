@@ -24,8 +24,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::reduce::{BloomStatus, RecordedRefusal};
 use crate::values::{
-    CandidateRef, CompositionFinding, Evidence, LandingReceipt, OperatorHold, ResolutionClaim, SpendQuiesce,
-    SurfacePathRequest, VerifyFailureSet, Wedge,
+    CandidateRef, CompositionFinding, Evidence, LandingReceipt, OperatorHold, PrecheckState, ResolutionClaim,
+    SpendQuiesce, SurfacePathRequest, VerifyFailureSet, Wedge,
 };
 
 /// The self-contained render input a reconcile pushes outward: the current
@@ -167,6 +167,11 @@ pub struct BloomView {
     /// journal. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub narrowed_compositions: Vec<NarrowedCompositionView>,
+    /// Optional aggregate pre-check state. Absent for blooms sealed without
+    /// the policy. Persisted readers use [`ViewDocument::decode_row`] to upcast
+    /// queued rows whose positional bloom elements predate this field.
+    #[serde(default)]
+    pub precheck: Option<PrecheckState>,
 }
 
 /// One narrowed composition's outward line (ADR-0210): the subject, the

@@ -52,7 +52,9 @@ pub use claims::{EvidenceClaims, NameEvidenceClaims, attempt_artifact_name};
 pub use cycle::{
     AdmitSink, CycleError, CycleReport, PendingObservation, now_unix_millis, run_intake_cycle, run_intake_cycle_now,
 };
-pub use dispatch::{DispatchError, DispatchRecord, dispatch_and_record, dispatch_nonce, record_dispatch};
+pub use dispatch::{
+    DispatchError, DispatchRecord, dispatch_and_record, dispatch_nonce, dispatch_precheck_idle, record_dispatch,
+};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

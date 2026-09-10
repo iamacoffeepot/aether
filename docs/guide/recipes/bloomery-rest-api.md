@@ -426,6 +426,45 @@ curl -fsS --connect-timeout 2 --max-time 10 "$COORDINATOR/view" | jq .
 curl -fsS --connect-timeout 2 --max-time 10 "$COORDINATOR/blooms/$bloom_id" | jq .
 ```
 
+### Optional: aggregate pre-checks
+
+An updated coordinator can use idle local prover capacity to check a composed
+set of captured candidates before the ordinary final fold. The feature is off
+unless a **future** draft seals the bloom-wide
+`aether.bloomery.precheck_policy` configuration
+([ADR-0217](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0217-coalesced-aggregate-prechecks.md)). Existing blooms
+keep their sealed policy.
+
+Author it through `POST /configs` using this body:
+
+```json
+{
+  "kind": "aether.bloomery.precheck_policy",
+  "value": { "run_budget": 1 }
+}
+```
+
+`run_budget` is a positive ceiling on speculative attempts, not a batch-size
+limit or a number of seconds to wait. Add the returned digest under that kind
+in the draft's existing `configs.entries` before seal. Preserve the other
+entries: a `configs` patch replaces the registry, including the manifest
+derived from the draft's base.
+
+With a budget of one, the first idle check may cover only the members ready
+at that moment. Later candidates then receive no second speculative run.
+A larger budget permits later coalesced plans to run when capacity becomes
+idle; it does not increase the number of members allowed in a plan.
+
+The board's bloom header shows the pre-check state and its joined or prepared head. `/view`
+includes the full `precheck` state, including issued runs, policy budget,
+joined node and diagnostic address. A speculative red is interaction
+feedback; it does not invalidate a member's standalone verification. The
+ordinary fold still establishes complete membership coverage and the landing
+head. A matching proof is reused, or a matching running pre-check is joined.
+
+Evaluate final mechanical latency and wasted speculative work before raising
+the budget. One pre-check moved earlier is still one physical run.
+
 ### Optional: authoring configuration
 
 The compiled default stage line is enough for the walkthrough above. To attest

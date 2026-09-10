@@ -72,6 +72,7 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                 blocker: snapshot.fold_refusal(&record.spec.id()).cloned(),
                 leases: lease_views(record, snapshot),
                 narrowed_compositions: narrowed_composition_views(record, snapshot),
+                precheck: record.precheck.clone(),
             }
         })
         .collect();
@@ -595,6 +596,7 @@ mod tests {
             blocker: None,
             leases: Vec::new(),
             narrowed_compositions: Vec::new(),
+            precheck: None,
         }
     }
 

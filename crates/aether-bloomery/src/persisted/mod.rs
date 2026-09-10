@@ -65,7 +65,8 @@ use crate::reduce::decisions_v1::DecisionsV1;
 use crate::reduce::{Decisions, Event};
 use crate::values::process_instructions_pre_reader::ModelProcessInstructionsPreReader;
 use crate::values::{
-    ApprovalPolicy, ModelOverride, ModelProcessInstructions, PipelineManifest, PriceTable, SpendCeiling, StageCatalog,
+    ApprovalPolicy, ModelOverride, ModelProcessInstructions, PipelineManifest, PrecheckPolicy, PriceTable,
+    SpendCeiling, StageCatalog,
 };
 
 pub use rendering::{RenderError, render_schema};
@@ -340,6 +341,16 @@ pub const DECISIONS_PRE_CROSS_CHECK_DIGEST: Digest =
 pub const DECISIONS_PRE_MANIFESTLESS_DIGEST: Digest =
     Digest::pinned("33a113561983582492aec42df044603d3e7e2462556ac8c3f9f7ee76aca1fdfc");
 
+/// The stamp on journaled event rows written before aggregate pre-checks
+/// appended their preparation, request, and completion facts.
+pub const EVENT_PRE_PRECHECK_DIGEST: Digest =
+    Digest::pinned("485537c3a579a9c3c4319ecf269fbd1202a46a9fa791da9b857e9fa5c1f1e569");
+
+/// The stamp on journaled decisions rows written before aggregate pre-checks
+/// appended their durable state and host-work vocabulary.
+pub const DECISIONS_PRE_PRECHECK_DIGEST: Digest =
+    Digest::pinned("f44f42438d47caae2833239284d63068ef8b67abef0139e305bbceb543c5d352");
+
 /// The stamp on sealed model-process instruction bundles written before
 /// ADR-0216 appended `retrospect` and `retrospect_finding_contract`.
 pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
@@ -371,6 +382,7 @@ pub fn decode_recorded_decisions(bytes: &[u8], schema: Option<&[u8]>) -> Result<
             upcast_decisions_pre_manifest,
             upcast_decisions_pre_cross_check,
             upcast_decisions_pre_manifestless,
+            upcast_decisions_pre_precheck,
         ],
     )
 }
@@ -418,6 +430,12 @@ fn upcast_decisions_pre_manifestless(bytes: &[u8]) -> Result<Decisions, WireErro
     from_bytes(bytes)
 }
 
+/// Pre-pre-check rows carry the same wire layout today's decoder reads: the
+/// new decision and outcome vocabulary was appended at the enum tails.
+fn upcast_decisions_pre_precheck(bytes: &[u8]) -> Result<Decisions, WireError> {
+    from_bytes(bytes)
+}
+
 /// Pre-#5278 rows carry the same wire layout today's decoder reads: the fold
 /// only appended `Fact::ProposeChange`, past every discriminant a row of that
 /// era could hold.
@@ -429,6 +447,12 @@ fn upcast_event_pre_propose(bytes: &[u8]) -> Result<Event, WireError> {
 /// reader slice only appended `Fact::StudyCompleted`, past every discriminant a
 /// row of that era could hold.
 fn upcast_event_pre_study(bytes: &[u8]) -> Result<Event, WireError> {
+    from_bytes(bytes)
+}
+
+/// Pre-pre-check event rows carry the same wire layout today's decoder reads:
+/// the new facts were appended past every prior discriminant.
+fn upcast_event_pre_precheck(bytes: &[u8]) -> Result<Event, WireError> {
     from_bytes(bytes)
 }
 
@@ -447,7 +471,12 @@ fn reshape_instructions_pre_reader(bytes: &[u8]) -> Result<Vec<u8>, WireError> {
 /// [`PersistedSchemaError`] when the bytes do not decode as the named shape,
 /// or when this binary has no upcast for the recorded digest.
 pub fn decode_recorded_event(bytes: &[u8], schema: Option<&[u8]>) -> Result<Event, PersistedSchemaError> {
-    decode_persisted(&EVENT, schema, bytes, &[upcast_event_pre_propose, upcast_event_pre_study])
+    decode_persisted(
+        &EVENT,
+        schema,
+        bytes,
+        &[upcast_event_pre_propose, upcast_event_pre_study, upcast_event_pre_precheck],
+    )
 }
 
 /// The [`PersistedKind`] for journaled decisions.
@@ -462,6 +491,7 @@ pub static DECISIONS: PersistedKind = PersistedKind {
         PersistedUpcast { digest: DECISIONS_PRE_MANIFEST_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_CROSS_CHECK_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_MANIFESTLESS_DIGEST, reshape: None },
+        PersistedUpcast { digest: DECISIONS_PRE_PRECHECK_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };
@@ -474,6 +504,7 @@ pub static EVENT: PersistedKind = PersistedKind {
     upcasts: &[
         PersistedUpcast { digest: EVENT_PRE_PROPOSE_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_STUDY_DIGEST, reshape: None },
+        PersistedUpcast { digest: EVENT_PRE_PRECHECK_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };
@@ -482,6 +513,15 @@ pub static EVENT: PersistedKind = PersistedKind {
 pub static APPROVAL_POLICY: PersistedKind = PersistedKind {
     name: ApprovalPolicy::NAME,
     schema: &<ApprovalPolicy as Schema>::SCHEMA,
+    bootstrap: Bootstrap::Current,
+    upcasts: &[],
+    current: OnceLock::new(),
+};
+
+/// The [`PersistedKind`] for sealed [`PrecheckPolicy`].
+pub static PRECHECK_POLICY: PersistedKind = PersistedKind {
+    name: PrecheckPolicy::NAME,
+    schema: &<PrecheckPolicy as Schema>::SCHEMA,
     bootstrap: Bootstrap::Current,
     upcasts: &[],
     current: OnceLock::new(),
@@ -561,6 +601,7 @@ pub static PERSISTED_KINDS: &[&PersistedKind] = &[
     &DECISIONS,
     &EVENT,
     &APPROVAL_POLICY,
+    &PRECHECK_POLICY,
     &MODEL_OVERRIDE,
     &MODEL_PROCESS_INSTRUCTIONS,
     &PIPELINE_MANIFEST,

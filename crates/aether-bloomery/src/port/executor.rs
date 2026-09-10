@@ -294,6 +294,37 @@ pub trait ExecutorBackend {
     /// the dispatch.
     fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error>;
 
+    /// Start only when an idle lane can be acquired without passing queued work.
+    ///
+    /// `None` leaves the order unsubmitted: it must never enter a backend queue.
+    /// The caller can then replace an obsolete speculative order before retrying.
+    /// An already accepted nonce returns its existing handle. Backends that cannot
+    /// make this admission atomically decline by default.
+    ///
+    /// # Errors
+    /// Backend-defined setup or spawn failure after admission.
+    fn try_submit_idle(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, Self::Error> {
+        let _ = order;
+        Ok(None)
+    }
+
+    /// An advisory idle-capacity observation. This must be a cheap local read;
+    /// actual admission is still atomic in `try_submit_idle`.
+    fn has_idle_capacity(&self, order: &WorkOrder) -> bool {
+        let _ = order;
+        false
+    }
+
+    /// Recover an idle submission that may already have started. Never starts
+    /// an absent order. The caller settles an outstanding submit before probing.
+    ///
+    /// # Errors
+    /// Backend-defined observation failure.
+    fn settle_idle_submission(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, Self::Error> {
+        let handle = WorkHandle::new(order.nonce.clone());
+        Ok((self.inspect(&handle)? != ExecutionStatus::Unknown).then_some(handle))
+    }
+
     /// Inspect the run's current execution state. A nonce with no yet-resolvable
     /// run is the clean [`ExecutionStatus::Unknown`], not an error.
     ///

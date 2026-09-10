@@ -73,6 +73,7 @@ use crate::bloomery::intake::{
 };
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
+use crate::bloomery::precheck::PrecheckProjection;
 use crate::bloomery::provenance::drain_refusals;
 #[cfg(any(test, feature = "testing"))]
 use crate::bloomery::study::{StudyAdmitDecision, UploadedStudyRecord, admit_study, study_evidence_event};
@@ -84,6 +85,8 @@ use crate::store::{
     CANDIDATE_HASH_OCCASION_SEAL, OrderLifecycle, OutstandingOrder, SqliteStore, StoreBackend, StoreConfigError,
     resolve_config,
 };
+
+mod precheck;
 
 mod offload;
 use offload::{AdapterCall, AdapterOffload, PendingPublish};
@@ -882,6 +885,7 @@ pub struct ExecutorReactorState {
     // (#5564): the tick asks it for an answer and it hands the call out rather
     // than making it inline.
     offload: AdapterOffload,
+    prechecks: PrecheckProjection,
 }
 
 impl ExecutorReactorState {
@@ -920,6 +924,7 @@ impl ExecutorReactorState {
             correspondence: None,
             pusher: default_candidate_push(true),
             offload: AdapterOffload::new(),
+            prechecks: PrecheckProjection::default(),
         }
     }
 
@@ -3224,6 +3229,13 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
     let (admits, publications) = if let Some(store) = state.store.as_mut() {
         let executor = state.offload.port(&shell);
         let mut admits = Vec::new();
+        let prechecks_ready = match state.prechecks.prepare_dispatch(store) {
+            Ok(ready) => ready,
+            Err(error) => {
+                tracing::warn!(%error, "pre-check projection could not refresh; speculative work waits");
+                false
+            }
+        };
 
         // Skip the drain while inside a transient-failure backoff window (#3593) —
         // paces the re-drive instead of hammering GitHub at the flat poll cadence.
@@ -3233,7 +3245,9 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
         // same worker that submitted it; inspecting here would consume the
         // order before a scenario's `upload_admitted` can land (#5564).
         let already_tracked = state.tracked.len();
-        if !skip_drain {
+        // A joined failure can dispatch composition repair on this turn.
+        // Restore its exact diagnostics before any such order is assembled.
+        if !skip_drain && prechecks_ready {
             drain_dispatch_topics(
                 &mut state.tracked,
                 &mut state.backoff,
@@ -3243,6 +3257,21 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
                 state.retrospect_reader_enabled,
                 clock.now_unix_millis,
             );
+        }
+        if !skip_drain && prechecks_ready {
+            match precheck::drain_prechecks(
+                store,
+                state.artifacts.as_mut(),
+                &executor,
+                &state.prechecks,
+                clock.now_unix_millis,
+            ) {
+                Ok((handles, pending)) => {
+                    state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, Instant::now())));
+                    admits.extend(pending);
+                }
+                Err(error) => tracing::warn!(%error, "pre-check drain failed; durable requests remain pending"),
+            }
         }
         let newly_tracked = state.tracked.split_off(already_tracked);
 
@@ -3308,6 +3337,10 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
         journal_publications(store, answered);
     }
 
+    if state.prechecks.catching_up() {
+        let _ = ctx.send_envelope_detached(state.self_mailbox, DispatchTick::ID, &DispatchTick {}.encode_into_bytes());
+    }
+
     // Last, so it sees everything every phase above asked for.
     state.offload.start_wanted(ctx, &shell, &state.pusher);
 }
@@ -3363,6 +3396,7 @@ impl NativeActor for ExecutorReactorCapability {
                 correspondence: None,
                 pusher: config.pusher,
                 offload: AdapterOffload::new(),
+                prechecks: PrecheckProjection::default(),
             });
         };
 
@@ -3445,6 +3479,7 @@ impl NativeActor for ExecutorReactorCapability {
             correspondence,
             pusher: config.pusher,
             offload: AdapterOffload::new(),
+            prechecks: PrecheckProjection::default(),
         })
     }
 

@@ -4,6 +4,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::slice::from_ref;
 
 use aether_bloomery::{
     Admit, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, LaneObservation, Nonce, PipelineManifest,
@@ -14,9 +15,10 @@ use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 use std::fmt::Write as _;
 
 use super::admission_key::AdmissionKey;
-use super::dispatch::DispatchRecord;
+use super::dispatch::{DispatchRecord, dispatch_nonce};
 use super::retrospect::file_retrospect_findings;
 use crate::bloomery::findings::{FindingsDecomposition, decompose_findings};
+use crate::bloomery::precheck::findings_key;
 use crate::bloomery::triage::{TriageVerdict, triage_note, triage_repair};
 use crate::store::{OutstandingOrder, StoreBackend};
 
@@ -678,6 +680,19 @@ fn thread_triage_note(
 /// Named beside [`base_verify_event`] and [`study_event`] rather than inlined,
 /// so the stage ladder in [`admit_uploaded`] reads as one arm per stage.
 fn aggregate_verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
+    if record.is_precheck() {
+        let completion = if upload.verdict == StageVerdict::ExecutorFault {
+            aether_bloomery::PrecheckCompletion::HostFault(evidence)
+        } else if verdict_passed(upload.verdict) {
+            aether_bloomery::PrecheckCompletion::Passed(evidence)
+        } else {
+            aether_bloomery::PrecheckCompletion::Failed(evidence)
+        };
+        return Event {
+            idempotency_key: AdmissionKey::PrecheckCompleted.of(&record.nonce.0),
+            fact: Fact::PrecheckCompleted { bloom: record.bloom, node: record.scope_revision, completion },
+        };
+    }
     Event {
         idempotency_key: AdmissionKey::AggregateVerify.of(&record.nonce.0),
         fact: Fact::AggregateVerifyCompleted { bloom: record.bloom, passed: verdict_passed(upload.verdict), evidence },
@@ -791,7 +806,8 @@ fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Ev
 /// Every refusal a claimed verdict earns by naming a stage that cannot carry
 /// it. All of them precede the consume, so a refused order stays live and an
 /// honest result on it can still land.
-fn out_of_stage_refusal(stage: StageId, upload: &UploadedEvidence) -> Option<IntakeRefusal> {
+fn out_of_stage_refusal(record: &DispatchRecord, upload: &UploadedEvidence) -> Option<IntakeRefusal> {
+    let stage = record.stage;
     // A pre-bloom scoping run (ADR-0208) carries every verdict onto its own
     // ledger rather than into a `Fact`, including an `ExecutorFault` from an
     // overdue run's termination. None of the member-stage guards below is
@@ -806,7 +822,7 @@ fn out_of_stage_refusal(stage: StageId, upload: &UploadedEvidence) -> Option<Int
     // A fault claimed against a stage with no fact to carry it is refused
     // rather than routed — see [`admits_executor_fault`] for the three that
     // have one.
-    if upload.verdict == StageVerdict::ExecutorFault && !admits_executor_fault(stage) {
+    if upload.verdict == StageVerdict::ExecutorFault && !admits_executor_fault(stage) && !record.is_precheck() {
         return Some(IntakeRefusal::ExecutorFaultOutOfStage(stage));
     }
     // ADR-0207's two decline verdicts belong to the construct family alone.
@@ -880,7 +896,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     let Some(record) = DispatchRecord::from_stored(&stored) else {
         return Ok(AdmitDecision::Refused(IntakeRefusal::CorruptOrder(upload.nonce.clone())));
     };
-    if let Some(refusal) = out_of_stage_refusal(record.stage, upload) {
+    if let Some(refusal) = out_of_stage_refusal(&record, upload) {
         return Ok(AdmitDecision::Refused(refusal));
     }
     let interned = intern_and_bind(store, &record, upload)?;
@@ -1034,6 +1050,9 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     if let Some(question) = parked_under {
         store.record_parked_question(question.as_bytes(), &stored)?;
     }
+    if record.is_precheck() {
+        retain_precheck_completion(store, &record, upload, &event)?;
+    }
     // Consume-once, only now that the admission is fully constructed. A lost race
     // to consumption between the lookup and here reads as a replay.
     if !store.consume_order(&record.nonce.0)? {
@@ -1042,6 +1061,43 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     persist_consumed(store, &record, upload, &triage, aggregate_findings.as_ref())?;
 
     Ok(AdmitDecision::Admitted(Box::new(Admission { admit, event })))
+}
+
+/// Retain completion before consuming a pre-check order. Its dispatch row can
+/// still be unacknowledged when a submitting order expires; the receipt keeps
+/// the stale issued projection from recreating that order before admission.
+/// Redelivering an acknowledged row also recovers a lost completion delivery.
+fn retain_precheck_completion(
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    upload: &UploadedEvidence,
+    event: &Event,
+) -> Result<(), IntakeError> {
+    let sequence = record
+        .nonce
+        .0
+        .strip_prefix("dispatch-")
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|sequence| dispatch_nonce(*sequence) == record.nonce)
+        .ok_or_else(|| rusqlite::Error::InvalidParameterName("pre-check order has no dispatch sequence".to_owned()))?;
+    persist_precheck_findings(store, record, upload)?;
+    store.redeliver_outbox(aether_bloomery::Topic::DispatchPrecheck.as_str(), sequence)?;
+    store.record_outbox_results(aether_bloomery::Topic::DispatchPrecheck.as_str(), sequence, from_ref(event))?;
+    Ok(())
+}
+
+fn persist_precheck_findings(
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    upload: &UploadedEvidence,
+) -> rusqlite::Result<()> {
+    if !verdict_passed(upload.verdict)
+        && upload.verdict != StageVerdict::ExecutorFault
+        && let Some(findings) = &upload.observation.findings
+    {
+        store.record_review_findings(record.bloom.0.as_bytes(), &findings_key(record.scope_revision), findings)?;
+    }
+    Ok(())
 }
 
 /// The writes a *consumed* order leaves behind — the findings channel, and the
@@ -1079,6 +1135,10 @@ fn persist_consumed(
     triage: &TriageVerdict,
     aggregate_findings: Option<&FindingsDecomposition>,
 ) -> Result<(), IntakeError> {
+    if record.is_precheck() {
+        // Its diagnostic was retained with the receipt before consumption.
+        return Ok(());
+    }
     store.clear_capture_diff(&record.nonce.0)?;
     if let TriageVerdict::Dodged(named) = triage {
         tracing::warn!(

@@ -2,6 +2,7 @@
 //! (it evolves the projection) or snapshot-inert (it carries an outbox row the
 //! host drains and turns into I/O) — the reducer never does I/O itself.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
@@ -14,8 +15,8 @@ use crate::port::ProjectedReceipt;
 use crate::values::{
     Adjudication, AgentProfile, BaseReceipt, CandidateRef, CompositionFinding, ConfigRegistry, Evidence,
     MemberCandidate, MemberDependency, OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease,
-    OrphanClaimReleaseCompletion, PipelineManifest, ResolutionClaim, ResolvedBloom, SpendQuiesce, StageCatalog,
-    Transformation, VerifyProof, VerifyReuse, Wedge, Withdrawal,
+    OrphanClaimReleaseCompletion, PipelineManifest, PrecheckNode, PrecheckPlan, PrecheckState, ResolutionClaim,
+    ResolvedBloom, SpendQuiesce, StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -936,4 +937,28 @@ pub enum Decision {
         /// spec sealed none, otherwise the sealed value.
         manifest: PipelineManifest,
     },
+    /// Replace the complete journal-derived pre-check state, or clear it.
+    RecordPrecheckState { bloom: BloomId, state: Option<Box<PrecheckState>> },
+    /// Ask the host to scratch-fold the newest immutable candidate plan.
+    QueuePrecheckPlan { bloom: BloomId, plan: PrecheckPlan },
+    /// Offer a prepared node for idle-only admission.
+    OfferPrecheck {
+        bloom: BloomId,
+        node: PrecheckNode,
+        transformation: Transformation,
+        profile: AgentProfile,
+        configs: ConfigRegistry,
+    },
+    /// Journal the physical pre-check dispatch that consumed run budget.
+    DispatchPrecheck {
+        bloom: BloomId,
+        node: PrecheckNode,
+        transformation: Transformation,
+        profile: AgentProfile,
+        configs: ConfigRegistry,
+    },
+    /// Retire an obsolete prepared or issued node before it starts when possible.
+    CancelPrecheck { bloom: BloomId, node: Digest },
+    /// Promote an exact issued run joined by final resolution to required work.
+    PromotePrecheck { bloom: BloomId, node: Digest },
 }

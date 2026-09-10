@@ -15,7 +15,8 @@ use crate::values::{
     Adjudication, AgentProfile, BaseReceipt, BaseVerdict, CandidateRef, CompositionFinding, ConfigRegistry,
     DeclaredEvidence, DeclaredLanes, DeclaredVerifiers, Disposition, Evidence, EvidenceKind, ExecutionLimits, Harness,
     LandingReceipt, LaneEntrypoint, MemberCandidate, MemberDependency, NetworkProfile, OperatorHold, OperatorProposal,
-    OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, PipelineManifest, ReasoningEffort,
+    OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, PipelineManifest, PrecheckDiagnostic,
+    PrecheckMember, PrecheckNode, PrecheckPlan, PrecheckPolicy, PrecheckResult, PrecheckState, ReasoningEffort,
     ResolutionClaim, ResolvedBloom, ResolvedModel, SpendQuiesce, StageBinding, StageCatalog, ToolPolicy,
     Transformation, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
     WithdrawalCause,
@@ -55,6 +56,86 @@ fn transformation() -> Transformation {
             effort: ReasoningEffort::High,
         }),
     }
+}
+
+fn precheck_records(bloom: BloomId) -> Vec<Decision> {
+    let plan = PrecheckPlan {
+        bloom,
+        base: digest(60),
+        members: vec![
+            PrecheckMember {
+                workpiece: WorkpieceId("alpha".into()),
+                scope_revision: digest(61),
+                candidate: CandidateRef { tree: digest(62), checkout: digest(63) },
+            },
+            PrecheckMember {
+                workpiece: WorkpieceId("beta".into()),
+                scope_revision: digest(64),
+                candidate: CandidateRef { tree: digest(65), checkout: digest(66) },
+            },
+        ],
+        gate_set: digest(67),
+    };
+    let node = PrecheckNode { plan: plan.digest(), tree: digest(68), head: digest(69), gate_set: plan.gate_set };
+    let state = |result, diagnostic| {
+        Box::new(PrecheckState {
+            policy: PrecheckPolicy { run_budget: 2 },
+            latest_plan: Some(plan.clone()),
+            prepared: Some(node.clone()),
+            issued: Some(node.clone()),
+            issued_runs: 1,
+            result: Some(result),
+            diagnostic,
+            final_join: Some(node.clone()),
+            promoted: true,
+            paused: true,
+        })
+    };
+
+    vec![
+        Decision::RecordPrecheckState {
+            bloom,
+            state: Some(state(
+                PrecheckResult::Passed { node: node.digest(), evidence: digest(70) },
+                Some(PrecheckDiagnostic::PreparationRefused { plan: plan.digest(), detail: digest(71) }),
+            )),
+        },
+        Decision::RecordPrecheckState {
+            bloom,
+            state: Some(state(
+                PrecheckResult::Failed { node: node.digest(), evidence: digest(72) },
+                Some(PrecheckDiagnostic::VerificationFailed { node: node.digest(), detail: digest(73) }),
+            )),
+        },
+        Decision::RecordPrecheckState {
+            bloom,
+            state: Some(state(
+                PrecheckResult::HostFault { node: node.digest(), evidence: digest(74) },
+                Some(PrecheckDiagnostic::HostFault { node: node.digest(), detail: digest(75) }),
+            )),
+        },
+        Decision::RecordPrecheckState {
+            bloom,
+            state: Some(state(PrecheckResult::SkippedBeforeStart { node: node.digest() }, None)),
+        },
+        Decision::QueuePrecheckPlan { bloom, plan },
+        Decision::OfferPrecheck {
+            bloom,
+            node: node.clone(),
+            transformation: transformation(),
+            profile: profile(),
+            configs: configs(),
+        },
+        Decision::DispatchPrecheck {
+            bloom,
+            node: node.clone(),
+            transformation: transformation(),
+            profile: profile(),
+            configs: configs(),
+        },
+        Decision::CancelPrecheck { bloom, node: node.digest() },
+        Decision::PromotePrecheck { bloom, node: node.digest() },
+    ]
 }
 
 fn resolution_claim(workpiece: WorkpieceId) -> ResolutionClaim {
@@ -505,6 +586,7 @@ pub fn representative() -> Decisions {
         .chain(proposal_records())
         .chain([dispatch_study(bloom)])
         .chain([Decision::RecordPipelineManifest { bloom, manifest: pipeline_manifest() }])
+        .chain(precheck_records(bloom))
         .collect(),
     }
 }

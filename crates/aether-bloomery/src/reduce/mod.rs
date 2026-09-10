@@ -43,6 +43,7 @@ mod operator;
 mod operator_hold;
 mod orphan_claim;
 mod outcome;
+mod precheck;
 mod propose;
 mod readiness;
 mod review;
@@ -64,9 +65,9 @@ pub use error::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
     AttemptCompletedError, BaseMismatch, BaseReverifyError, FoldConflictError, GrantAttemptsError, HostFaultError,
     IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
-    NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ProposalError,
-    ResolveError, SealConflict, SealError, SpliceError, StudyError, SupersedeError, SuppressionDispositionError,
-    SurfaceRequestedError, VerifyFailedError, WithdrawError,
+    NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, PrecheckError,
+    ProposalError, ResolveError, SealConflict, SealError, SpliceError, StudyError, SupersedeError,
+    SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 pub use event::{Event, Fact};
 pub use gate::{
@@ -100,6 +101,7 @@ use observe::{reduce_observe_mainline, reduce_observe_mainline_diverged};
 use operator::{reduce_operator_adjudication, reduce_operator_repair};
 use operator_hold::{reduce_operator_hold, reduce_operator_release};
 use orphan_claim::{reduce_complete_orphan_claim_release, reduce_request_orphan_claim_release};
+use precheck::{reduce_precheck_completed, reduce_precheck_prepared, reduce_request_precheck, schedule};
 use propose::reduce_propose;
 use readiness::reduce_splice_assembled;
 use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor_fault};
@@ -137,7 +139,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
     if snapshot.seen.contains(&event.idempotency_key) {
         return Decisions::rejected(Outcome::Duplicate);
     }
-    match &event.fact {
+    let decisions = match &event.fact {
         Fact::Seal(spec) => reduce_seal(snapshot, spec, configs, spend, &[]),
         Fact::Supersede { predecessor, successor } => reduce_supersede(snapshot, predecessor, successor, configs, &[]),
         Fact::GraphSeal { predecessor: None, spec, edges } => reduce_seal(snapshot, spec, configs, spend, edges),
@@ -217,6 +219,13 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         }
         Fact::ProposeChange { proposal, authorization } => reduce_propose(snapshot, proposal, authorization),
         Fact::StudyCompleted { bloom, passed, evidence } => reduce_study_completed(snapshot, bloom, *passed, evidence),
+        Fact::PrecheckPrepared { bloom, plan, preparation } => {
+            reduce_precheck_prepared(snapshot, bloom, *plan, preparation)
+        }
+        Fact::RequestPrecheck { bloom, node } => reduce_request_precheck(snapshot, bloom, *node),
+        Fact::PrecheckCompleted { bloom, node, completion } => {
+            reduce_precheck_completed(snapshot, bloom, *node, completion)
+        }
         // Retired: the journal holds grants the machinery decided before a
         // widening became an operator's decision, and those records replay
         // through their own recorded decisions (ADR-0190) rather than through
@@ -225,5 +234,6 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         Fact::SurfaceGranted { .. } => {
             Decisions::rejected(Outcome::SurfaceGrantRejected(SurfaceRequestedError::GrantRetired))
         }
-    }
+    };
+    schedule(snapshot, decisions)
 }

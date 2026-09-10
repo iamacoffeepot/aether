@@ -85,6 +85,8 @@ pub enum AdmissionKey {
     /// later real verdict on the same order for a replayed fault to collide
     /// with.
     StudyCompleted,
+    /// A speculative aggregate run or its final-fold join, accounted once.
+    PrecheckCompleted,
 }
 
 impl AdmissionKey {
@@ -92,7 +94,7 @@ impl AdmissionKey {
     /// of these is the durable statement that the dispatch reached the
     /// reducer as a verdict. [`Self::Study`] is deliberately absent: it
     /// rides the same nonce but must not satisfy the strand check.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Attempt,
         Self::Integrate,
         Self::VerifyFailed,
@@ -105,6 +107,7 @@ impl AdmissionKey {
         Self::SurfaceRequest,
         Self::Scope,
         Self::StudyCompleted,
+        Self::PrecheckCompleted,
     ];
 
     /// The key's stable prefix — the half of the key that is not the nonce.
@@ -124,6 +127,7 @@ impl AdmissionKey {
             Self::Study => "aether.bloomery.study",
             Self::Scope => "aether.bloomery.scope",
             Self::StudyCompleted => "aether.bloomery.study_completed",
+            Self::PrecheckCompleted => "aether.bloomery.precheck_completed",
         }
     }
 

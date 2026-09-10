@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BackendObjectId, BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome,
+    BackendObjectId, BloomId, CandidateRef, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome,
     CorrespondenceError, Digest, IntegrateOutcome, IntegrationPosition, LandOutcome, SharedCorrespondence, Snapshot,
     SourceSnapshot, WorkpieceId,
 };
@@ -273,6 +273,19 @@ impl SourceShell {
         expected: &Checkpoint,
     ) -> Result<IntegrateOutcome, SourceError> {
         self.backend.integrate_merge(bloom, candidate_ref, expected)
+    }
+
+    /// Merge the exact pinned candidate into an owned preview namespace.
+    ///
+    /// # Errors
+    /// Missing objects, a checkout/tree mismatch, or a source backend fault.
+    pub fn integrate_pinned(
+        &self,
+        bloom: &BloomId,
+        candidate: &CandidateRef,
+        expected: &Checkpoint,
+    ) -> Result<IntegrateOutcome, SourceError> {
+        self.backend.integrate_pinned(bloom, candidate, expected)
     }
 
     /// Adopt a candidate ref for `workpiece` into `successor`'s namespace,

@@ -748,6 +748,12 @@ pub trait StoreBackend: Send {
     /// Read undelivered outbox entries, in sequence order — scoped to `topic`
     /// when `Some`, across every topic when `None`.
     fn drain_outbox(&mut self, topic: Option<&str>) -> rusqlite::Result<Vec<OutboxEntry>>;
+    /// Whether a topic has ever been written, including acknowledged rows.
+    /// Durable feature discovery must not confuse an accepted running order
+    /// with a topic that never existed.
+    fn has_outbox_topic(&mut self, topic: &str) -> rusqlite::Result<bool> {
+        Ok(!self.drain_outbox(Some(topic))?.is_empty() || !self.delivered_outbox(topic)?.is_empty())
+    }
     /// Mark outbox entries at or below `through_sequence` delivered — scoped to
     /// `topic` when `Some`, across every topic when `None`; returns how many
     /// were newly acknowledged.
@@ -791,6 +797,11 @@ pub trait StoreBackend: Send {
     fn journal_holds_any(&mut self, keys: &[String]) -> rusqlite::Result<bool>;
     /// Read the whole journal, in sequence order — the recovery replay source.
     fn replay_journal(&mut self) -> rusqlite::Result<Vec<JournalRecord>>;
+    /// Replay recorded decisions after a projection cursor, in bounded pages.
+    /// The default serves small test backends; `SQLite` reads the sequence index.
+    fn replay_journal_after(&mut self, after: u64, limit: u32) -> rusqlite::Result<Vec<JournalRecord>> {
+        Ok(self.replay_journal()?.into_iter().filter(|row| row.sequence > after).take(limit as usize).collect())
+    }
     /// The host-clock stamp written on each journal row at admission, in
     /// sequence order. `None` is a row written before the column existed:
     /// reconstruct from other sources and say so. Never invented.
@@ -1611,6 +1622,7 @@ CREATE TABLE IF NOT EXISTS outbox (
     delivered INTEGER NOT NULL DEFAULT 0,
     payload_schema TEXT
 );
+CREATE INDEX IF NOT EXISTS outbox_by_topic_delivery ON outbox (topic, delivered, sequence);
 CREATE TABLE IF NOT EXISTS outbox_results (
     sequence     INTEGER NOT NULL,
     ordinal      INTEGER NOT NULL,
@@ -2700,6 +2712,10 @@ impl StoreBackend for SqliteStore {
         Ok(u64::try_from(self.conn.last_insert_rowid()).unwrap_or_default())
     }
 
+    fn has_outbox_topic(&mut self, topic: &str) -> rusqlite::Result<bool> {
+        self.conn.query_row("SELECT EXISTS(SELECT 1 FROM outbox WHERE topic = ?1)", [topic], |row| row.get(0))
+    }
+
     fn drain_outbox(&mut self, topic: Option<&str>) -> rusqlite::Result<Vec<OutboxEntry>> {
         // The topic predicate is appended only when scoped, so `None` keeps the
         // whole-outbox drain the recovery drill uses.
@@ -2864,12 +2880,17 @@ impl StoreBackend for SqliteStore {
     }
 
     fn replay_journal(&mut self) -> rusqlite::Result<Vec<JournalRecord>> {
+        self.replay_journal_after(0, u32::MAX)
+    }
+
+    fn replay_journal_after(&mut self, after: u64, limit: u32) -> rusqlite::Result<Vec<JournalRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT sequence, idempotency_key, event, decisions, decider, decisions_schema, recorded_unix_millis, \
              event_schema, decisions_schema_digest \
-             FROM journal ORDER BY sequence",
+             FROM journal WHERE sequence > ?1 ORDER BY sequence LIMIT ?2",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let after = i64::try_from(after).unwrap_or(i64::MAX);
+        let rows = stmt.query_map(rusqlite::params![after, i64::from(limit)], |row| {
             let sequence = u64::try_from(row.get::<_, i64>(0)?).unwrap_or_default();
             // A pre-ADR-0190 row carries no recorded decision, and re-deciding it
             // here is exactly the history rewrite the record exists to prevent —
@@ -3887,6 +3908,22 @@ mod tests {
     use rusqlite::{Connection, TransactionBehavior};
 
     use super::{SCHEMA_VERSION, SqliteStore, connect, migrate};
+
+    #[test]
+    fn current_schema_installs_the_precheck_discovery_index_on_reopen() {
+        let mut connection = connect(":memory:").expect("connection");
+        migrate(&mut connection).expect("initial schema");
+        connection.execute_batch("DROP INDEX outbox_by_topic_delivery;").expect("old current schema");
+        assert_eq!(
+            connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).expect("version"),
+            SCHEMA_VERSION
+        );
+        migrate(&mut connection).expect("reopen");
+        assert!(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'outbox_by_topic_delivery')",
+            [], |row| row.get::<_, bool>(0),
+        ).expect("index"));
+    }
 
     const LOCK_HANDOFF_BUDGET: Duration = Duration::from_secs(5);
 

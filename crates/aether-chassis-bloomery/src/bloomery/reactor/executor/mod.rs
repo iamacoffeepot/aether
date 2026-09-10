@@ -85,7 +85,9 @@ impl ExecutorReactorCapability {
     /// instruction-provenance gate refused, parked durably on the way out and
     /// admitted as a host fault on the way back in. And [`Topic::Study`]
     /// (ADR-0216): the bloom-level reader a landing decides, submitted through
-    /// the same shell under a bloom-level order record.
+    /// the same shell under a bloom-level order record. Aggregate pre-check
+    /// offers, dispatches, cancellation and promotion (ADR-0217) share
+    /// this reactor's admission and settlement cycle.
     pub const DRAINED_TOPICS: &'static [Topic] = &[
         Topic::Dispatch,
         Topic::AggregateReview,
@@ -96,6 +98,10 @@ impl ExecutorReactorCapability {
         Topic::BaseVerify,
         Topic::RefusedDispatch,
         Topic::Study,
+        Topic::OfferPrecheck,
+        Topic::DispatchPrecheck,
+        Topic::CancelPrecheck,
+        Topic::PromotePrecheck,
     ];
 }
 

@@ -12,7 +12,8 @@ use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BaseReverify, BloomSpec, CandidateRef, CompositionParents, ConfigRegistry, Evidence,
     MemberDependency, OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion,
-    ResolutionClaim, Statement, SuppressionDisposition, SurfaceRequest, VerifyFailureSet, Withdrawal,
+    PrecheckCompletion, PrecheckPreparation, ResolutionClaim, Statement, SuppressionDisposition, SurfaceRequest,
+    VerifyFailureSet, Withdrawal,
 };
 
 /// An admitted fact plus its idempotency key (ADR-0149 §The control core).
@@ -858,6 +859,12 @@ pub enum Fact {
         /// order displayed.
         evidence: Evidence,
     },
+    /// The host finished scratch-folding the current immutable candidate plan.
+    PrecheckPrepared { bloom: BloomId, plan: Digest, preparation: PrecheckPreparation },
+    /// The host observed idle capacity for the offered immutable node.
+    RequestPrecheck { bloom: BloomId, node: Digest },
+    /// One issued pre-check run reached a terminal host result.
+    PrecheckCompleted { bloom: BloomId, node: Digest, completion: PrecheckCompletion },
 }
 
 impl Fact {
