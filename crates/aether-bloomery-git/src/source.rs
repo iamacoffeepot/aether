@@ -1178,6 +1178,50 @@ impl<C: GitDataApi> GitSource<C> {
             Err(error) => Err(SourceError::Git(error)),
         }
     }
+
+    // Preserve an immutable candidate's exact checkout when the generation
+    // head is its ancestor. Contextual verification names that checkout in its
+    // proof; routing the same candidate through the generic merge path would
+    // create a semantically identical merge commit and sever that identity.
+    // The expected-tree read and ref transaction retain the same single-writer
+    // compare-and-swap discipline as `integrate_merge`.
+    fn fast_forward_pinned(
+        &self,
+        bloom: &BloomId,
+        candidate: &CandidateRef,
+        checkout: &str,
+        expected: &Checkpoint,
+    ) -> Result<Option<IntegrateOutcome>, SourceError> {
+        let integration = Self::integration_ref(bloom);
+        let current = self.client.get_ref(&integration)?.ok_or_else(|| SourceError::MissingRef(integration.clone()))?;
+        let current_tree = self.integration_tree(&current.sha)?;
+        if current_tree != expected.tree {
+            return Ok(Some(IntegrateOutcome::StaleCheckpoint { actual: current_tree }));
+        }
+        if !self.client.is_ancestor(&current.sha, checkout)? {
+            return Ok(None);
+        }
+        if current.sha == checkout {
+            return Ok(Some(IntegrateOutcome::Integrated { tree: candidate.tree, head: candidate.checkout }));
+        }
+
+        match self.client.transact_refs(&[RefTxnOp::Update {
+            name: integration.clone(),
+            sha: checkout.to_owned(),
+            expected: current.sha,
+        }]) {
+            Ok(()) => Ok(Some(IntegrateOutcome::Integrated { tree: candidate.tree, head: candidate.checkout })),
+            Err(GitDataError::RefConflict(_)) => {
+                let advanced = self.client.get_ref(&integration)?.ok_or(SourceError::MissingRef(integration))?;
+                if advanced.sha == checkout {
+                    Ok(Some(IntegrateOutcome::Integrated { tree: candidate.tree, head: candidate.checkout }))
+                } else {
+                    Ok(Some(IntegrateOutcome::StaleCheckpoint { actual: self.integration_tree(&advanced.sha)? }))
+                }
+            }
+            Err(error) => Err(SourceError::Git(error)),
+        }
+    }
 }
 
 impl<C: GitDataApi> SourceBackend for GitSource<C> {
@@ -1185,10 +1229,14 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
 
     fn snapshot(&self, base: &Digest) -> Result<SourceSnapshot, Self::Error> {
         // Forward-resolve the base head digest to its real commit, read that
-        // commit, and reverse-resolve its real tree sha back to the tree digest.
+        // commit, and name its exact tree. A mainline commit created outside
+        // Bloomery has no prior tree correspondence; minting the same typed
+        // integration-tree address used by the integration path makes that
+        // immutable source tree available without conflating it with the
+        // sealed checkout digest.
         let base_sha = self.resolve_git_sha(base, "snapshot base head digest")?;
         let commit = self.client.get_commit(&base_sha)?;
-        let tree = self.resolve_object_digest(&commit.tree, "snapshot base tree object")?;
+        let tree = self.integration_tree_digest(&commit.tree)?;
         Ok(SourceSnapshot { head: *base, tree })
     }
 
@@ -1716,6 +1764,9 @@ impl<C: GitDataApi> HostSource for GitSource<C> {
         expected: &Checkpoint,
     ) -> Result<IntegrateOutcome, SourceError> {
         let checkout = self.pinned_candidate_sha(candidate, "pre-check candidate")?;
+        if let Some(outcome) = self.fast_forward_pinned(bloom, candidate, &checkout, expected)? {
+            return Ok(outcome);
+        }
         // This ref is private to the immutable plan namespace. It also gives
         // conflict evidence the exact attempted vehicle through the existing
         // merge path; the ordinary member candidate ref is never read or written.
@@ -1893,23 +1944,46 @@ mod tests {
         let (fake, bloom, base) = seeded();
         let source = git_source(&fake, false);
         let expected = source.integration_checkpoint(&bloom, &base).unwrap().checkpoint;
-        let checkout = fake.seed_base_commit(&digest(30));
-        let candidate = CandidateRef { tree: digest(30), checkout };
+        let base_sha = resolve_git(&fake, &base).unwrap().to_hex();
+        let tree = digest(30);
+        fake.seed_fast_forward(&tree, Some(&base_sha));
+        let candidate = CandidateRef { tree, checkout: tree };
         let ordinary = candidate_ref_name(&bloom_id(99), "member");
-        fake.seed_ref_at(&ordinary, &checkout);
+        fake.seed_ref_at(&ordinary, &candidate.checkout);
+        let commits = fake.create_commit_count();
         let first = super::HostSource::integrate_pinned(&source, &bloom, &candidate, &expected).unwrap();
         let IntegrateOutcome::Integrated { tree, head } = first else {
-            panic!("expected merge")
+            panic!("expected fast-forward")
         };
+        assert_eq!(head, candidate.checkout, "append preserves the checkout the contextual proof names");
+        assert_eq!(fake.create_commit_count(), commits, "a descendant append mints no replacement merge commit");
         let moved = fake.seed_base_commit(&digest(31));
         fake.seed_ref_at(&ordinary, &moved);
         let replay =
             super::HostSource::integrate_pinned(&source, &bloom, &candidate, &Checkpoint { bloom, tree }).unwrap();
         assert_eq!(replay, IntegrateOutcome::Integrated { tree, head });
         assert_eq!(fake.ref_digest(&ordinary), Some(moved));
+        let private = super::candidate_ref(&bloom, &candidate.checkout.to_hex());
+        assert_eq!(fake.ref_digest(&private), None, "fast-forward needs no extra mutable candidate ref");
+    }
+
+    #[test]
+    fn a_divergent_pinned_preview_rejects_a_replaced_private_vehicle() {
+        let (fake, bloom, base) = seeded();
+        let source = git_source(&fake, false);
+        let expected = source.integration_checkpoint(&bloom, &base).unwrap().checkpoint;
+        let checkout = fake.seed_base_commit(&digest(32));
+        let candidate = CandidateRef { tree: digest(32), checkout };
+        let IntegrateOutcome::Integrated { tree, .. } =
+            super::HostSource::integrate_pinned(&source, &bloom, &candidate, &expected).unwrap()
+        else {
+            panic!("the divergent candidate should merge through its private vehicle")
+        };
         let private = super::candidate_ref(&bloom, &checkout.to_hex());
         assert_eq!(fake.ref_digest(&private), Some(checkout));
-        fake.seed_ref_at(&private, &moved);
+
+        let replacement = fake.seed_base_commit(&digest(33));
+        fake.seed_ref_at(&private, &replacement);
         assert!(matches!(
             super::HostSource::integrate_pinned(&source, &bloom, &candidate, &Checkpoint { bloom, tree }),
             Err(SourceError::Malformed(_))
@@ -2082,6 +2156,28 @@ mod tests {
         assert_eq!(first, second, "a base snapshots to a stable digest");
         assert_eq!(first.tree, tree);
         assert_eq!(first.head, base);
+    }
+
+    #[test]
+    fn snapshot_mints_and_replays_an_exact_tree_for_an_external_base_commit() {
+        let fake = FakeGithub::new();
+        let external_tree_sha = to_hex(&digest(70));
+        let external_commit_sha = fake.seed_commit(&external_tree_sha);
+        let base = digest(71);
+        fake.seed_correspondence(&base, &external_commit_sha);
+        let source = git_source(&fake, false);
+
+        let first = source.snapshot(&base).unwrap();
+        let second = source.snapshot(&base).unwrap();
+
+        assert_eq!(first, second, "re-reading the external commit reuses its typed tree address");
+        assert_eq!(first.head, base, "the sealed checkout identity remains unchanged");
+        assert_ne!(first.tree, base, "the commit checkout is not substituted for its tree");
+        assert_eq!(
+            resolve_git(&fake, &first.tree),
+            GitObjectId::from_hex(&external_tree_sha),
+            "the minted tree digest resolves to the commit's exact immutable tree object",
+        );
     }
 
     #[test]

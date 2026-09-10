@@ -373,6 +373,7 @@ fn actor_setups(
         executor: ExecutorReactorSetup {
             host_class: HostClass::new(coordinator.host_class.clone()),
             executor: executor.clone(),
+            source: source_configured.then(|| source.clone()),
             correspondence: executor_correspondence,
             store_path: coordinator.store_path.clone(),
             artifacts_root: coordinator.artifacts_root.clone(),

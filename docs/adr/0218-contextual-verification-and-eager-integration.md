@@ -247,6 +247,12 @@ inherited contexts and derives a fresh generation as required. A checked
 generation epoch changes even when a replacement candidate keeps the same
 scope revision; a polluted namespace cannot be reused by that replacement.
 
+When the current head is an ancestor of the input, a compare-and-swap
+fast-forward preserves the input's exact verified tree and checkout. The
+integration node still records its own generation and append plan; aggregate
+proof reuse matches the candidate, ordered coverage, and full contract rather
+than equating the integration node's address with the shared-run node's address.
+
 Contextual verification retains these actual input roots even when eager
 integration is disabled. Before final readiness, it advances only a verified
 input needed to release an unstarted dependent, then admits that dependent
@@ -267,6 +273,15 @@ admit that exact request against the current eligible head. Only the journaled
 admission may dispatch the author order. Replayed admissions retain their nonce
 and original clocks, and a stale request cannot submit an order against an old
 head. Running author orders retain their immutable inherited context.
+
+If withdrawal or replacement invalidates a contribution already present in an
+admitted Construct order's inherited head, the reducer holds the bloom and
+retains that order's context, admission nonce, and captured work. It neither
+relabels the authored checkout as based on the new head nor charges the author
+with a reconciliation failure. The operator must rescope or supersede the
+affected work before releasing the hold; release alone cannot prove that the
+removed ancestry was stripped. Automatic recovery requires a source operation
+that can replay only the exact old-head-to-candidate delta onto the new head.
 
 An exact current red pre-check schedules a bounded repair of that partial head
 under the composition workpiece. An interaction discovered during shared

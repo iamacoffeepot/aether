@@ -16,12 +16,12 @@ use std::collections::{BTreeMap, HashMap};
 
 use aether_bloomery::testing::digest;
 use aether_bloomery::{
-    Admit, AgentSelection, AggregateReviewPayload, AggregateVerifyPayload, BloomId, CandidateRef, Conclusion,
-    ConfigKind, ConfigRegistry, Digest, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness,
-    LaneObservation, ModelOverride, ModelProcessInstructions, Nonce, Observation, Provenance, ReasoningEffort,
-    RedispatchPayload, ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride, Statement,
-    TimeoutRecord, Topic, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId,
-    pin_workpiece_description, split_lane_identity,
+    Admit, AgentSelection, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, BloomId, CandidateRef,
+    Conclusion, ConfigKind, ConfigRegistry, Digest, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend,
+    Fact, Harness, LaneObservation, ModelOverride, ModelProcessInstructions, Nonce, Observation, Provenance,
+    ReasoningEffort, RedispatchPayload, ReviewPass, SharedCorrespondence, SourceSnapshot, StageCatalog, StageId,
+    StageOverride, Statement, TimeoutRecord, Topic, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle,
+    WorkOrder, WorkpieceId, pin_workpiece_description, split_lane_identity,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
@@ -35,11 +35,11 @@ use aether_substrate::mail::registry::Registry;
 
 use super::strand::readopt_stranded_dispatches;
 use super::{
-    BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState, GitCandidatePush,
-    NameEvidenceClaims, Stores, TickClock, TrackedHandle, admitted_candidate_pushes, backoff_delay, candidate_push_at,
-    default_candidate_push, dispatch_origin, drain_and_cancel, fold_drain_backoff, is_silent, is_stale,
-    journal_publications, next_backoff, observe_heartbeat, seed_dispatches, seed_tracked, select_stale_handles,
-    silence_from, timeout_verdict,
+    BACKOFF_CAP, BaseSnapshotPort, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState,
+    GitCandidatePush, NameEvidenceClaims, Stores, TickClock, TrackedHandle, admitted_candidate_pushes, backoff_delay,
+    candidate_push_at, default_candidate_push, dispatch_origin, drain_and_cancel, fold_drain_backoff, is_silent,
+    is_stale, journal_publications, next_backoff, observe_heartbeat, seed_dispatches, seed_tracked,
+    select_stale_handles, silence_from, timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -51,7 +51,7 @@ use crate::bloomery::open_scope_run;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::{CoordinatorConfig, GithubConnectionConfig};
 use crate::bloomery::{
-    ExecutorPort, ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle,
+    ExecutorPort, ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, Settled,
     UnconfiguredActionsBackend,
 };
 use crate::bloomery::{authorize_instructions, reference_instructions};
@@ -86,6 +86,24 @@ fn drain_and_dispatch_aggregate_verify(
     super::drain_and_dispatch_aggregate_verify(store, None, executor, now_unix_millis)
 }
 
+fn drain_and_dispatch_base_verify(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    source: &dyn BaseSnapshotPort,
+    now_unix_millis: u64,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    super::drain_and_dispatch_base_verify(store, None, executor, source, now_unix_millis)
+}
+
+fn enqueue_base_verify(store: &mut SqliteStore, base: Digest) -> u64 {
+    let payload = BaseVerifyPayload {
+        base,
+        transformation: Transformation::for_base_verify(&StageCatalog::binding_of(StageId::BaseVerify), base, base),
+        profile: StageCatalog::profile_of(StageId::BaseVerify),
+    };
+    store.enqueue_topic(Topic::BaseVerify, &to_vec(&payload).unwrap(), None).unwrap()
+}
+
 fn drain_and_dispatch_scope(
     store: &mut dyn StoreBackend,
     executor: &dyn ExecutorPort,
@@ -111,6 +129,23 @@ fn drain_and_redispatch(
 struct CapturingBackend {
     orders: Mutex<Vec<WorkOrder>>,
     cancelled: Mutex<Vec<String>>,
+}
+
+#[derive(Clone)]
+enum FixedBaseSnapshot {
+    Exact(SourceSnapshot),
+    Fault(String),
+    InFlight,
+}
+
+impl BaseSnapshotPort for FixedBaseSnapshot {
+    fn snapshot_base(&self, _base: &Digest) -> Settled<Result<SourceSnapshot, String>> {
+        match self {
+            Self::Exact(snapshot) => Settled::Answered(Ok(snapshot.clone())),
+            Self::Fault(error) => Settled::Answered(Err(error.clone())),
+            Self::InFlight => Settled::InFlight,
+        }
+    }
 }
 
 impl CapturingBackend {
@@ -390,6 +425,61 @@ fn enqueue_aggregate_verify(store: &mut SqliteStore, bloom: BloomId, workpiece: 
     };
     store.claim_seal(payload.bloom.as_bytes(), &[workpiece.to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateVerify, &to_vec(&payload).unwrap(), None).unwrap()
+}
+
+#[test]
+fn base_verify_records_the_exact_source_tree_and_preserves_the_sealed_checkout() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let base = digest(31);
+    let tree = digest(32);
+    let sequence = enqueue_base_verify(&mut store, base);
+    let source = FixedBaseSnapshot::Exact(SourceSnapshot { head: base, tree });
+
+    let (handles, ack_through, transient) =
+        drain_and_dispatch_base_verify(&mut store, &shell, &source, NOW_UNIX_MILLIS).unwrap();
+
+    assert_eq!(handles.len(), 1);
+    assert_eq!(ack_through, Some(sequence));
+    assert_eq!(transient, None);
+    let orders = backend.orders();
+    let order = &orders[0];
+    assert_eq!(order.transformation.inputs, [tree], "the gate observes the exact immutable source tree");
+    assert_eq!(order.transformation.checkout, base, "source resolution cannot replace the sealed checkout");
+    let stored = store.lookup_order(&order.nonce.0).unwrap().expect("the exact base order is durable before submit");
+    assert_eq!(stored.displayed_digest, tree.as_bytes());
+    let stored_transformation = from_bytes::<Transformation>(&stored.transformation).unwrap();
+    assert_eq!(stored_transformation.inputs, [tree]);
+    assert_eq!(stored_transformation.checkout, base);
+}
+
+#[test]
+fn base_verify_waits_for_source_and_retries_faults_without_recording_an_order() {
+    for source in [FixedBaseSnapshot::InFlight, FixedBaseSnapshot::Fault("source unavailable".to_owned())] {
+        let mut store = SqliteStore::open(":memory:").unwrap();
+        let backend = Arc::new(CapturingBackend::default());
+        let shell = ExecutorShell::new(Arc::clone(&backend));
+        let base = digest(33);
+        let sequence = enqueue_base_verify(&mut store, base);
+
+        let (handles, ack_through, transient) =
+            drain_and_dispatch_base_verify(&mut store, &shell, &source, NOW_UNIX_MILLIS).unwrap();
+
+        assert!(handles.is_empty());
+        assert_eq!(ack_through, None, "the source-gated outbox row remains pending");
+        if matches!(source, FixedBaseSnapshot::Fault(_)) {
+            assert_eq!(transient, Some(sequence));
+        } else {
+            assert_eq!(transient, None);
+        }
+        assert!(backend.orders().is_empty(), "no executor submission precedes an exact source snapshot");
+        assert!(store.lookup_order(&format!("dispatch-{sequence}")).unwrap().is_none());
+        let pending = store.drain_topic(Topic::BaseVerify).unwrap();
+        let payload = from_bytes::<BaseVerifyPayload>(&pending[0].payload).unwrap();
+        assert_eq!(payload.base, base);
+        assert_eq!(payload.transformation.checkout, base, "a retry retains the original sealed checkout");
+    }
 }
 
 // ADR-0153 — the aggregate-review topic drains into a bloom-level order: the
@@ -4066,7 +4156,7 @@ mod offloaded_adapter_calls {
                     None,
                 );
             }
-            offload.start_wanted(&mut ctx, &shell, &pusher);
+            offload.start_wanted(&mut ctx, &shell, None, &pusher);
             thread::sleep(Duration::from_millis(5));
         }
 
@@ -4101,7 +4191,7 @@ mod offloaded_adapter_calls {
                 assert!(matches!(port.observe(&handle), Settled::InFlight), "a first ask is always in flight");
             }
         }
-        offload.start_wanted(&mut ctx, &shell, &pusher);
+        offload.start_wanted(&mut ctx, &shell, None, &pusher);
 
         assert_eq!(offload.in_flight(), MAX_IN_FLIGHT, "the surplus asks wait for a free slot rather than a thread");
         backend.open();
@@ -4246,7 +4336,7 @@ mod offloaded_adapter_calls {
                 );
                 let _ = drain_and_cancel(&mut store, &port).unwrap();
             }
-            offload.start_wanted(&mut ctx, &shell, &pusher);
+            offload.start_wanted(&mut ctx, &shell, None, &pusher);
             thread::sleep(Duration::from_millis(5));
         }
 
@@ -4314,7 +4404,12 @@ mod offloaded_adapter_calls {
                 OrderLifecycle::Submitting,
             );
         }
-        offload.start_wanted(&mut NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE), &shell, &pusher);
+        offload.start_wanted(
+            &mut NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE),
+            &shell,
+            None,
+            &pusher,
+        );
 
         store
             .enqueue_topic(
@@ -4365,7 +4460,7 @@ mod offloaded_adapter_calls {
                 ack_through = new_ack;
                 let _ = drain_and_cancel(&mut store, &port).unwrap();
             }
-            offload.start_wanted(&mut ctx, &shell, &pusher);
+            offload.start_wanted(&mut ctx, &shell, None, &pusher);
             if backend.cancelled().contains(&parked_nonce) && store.lookup_order(&parked_nonce).unwrap().is_none() {
                 break;
             }
@@ -4417,7 +4512,12 @@ mod offloaded_adapter_calls {
                 OrderLifecycle::Submitting,
             );
         }
-        offload.start_wanted(&mut NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE), &shell, &pusher);
+        offload.start_wanted(
+            &mut NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE),
+            &shell,
+            None,
+            &pusher,
+        );
 
         store
             .commit(
@@ -4453,7 +4553,7 @@ mod offloaded_adapter_calls {
                 handles = new_handles;
                 ack_through = new_ack;
             }
-            offload.start_wanted(&mut ctx, &shell, &pusher);
+            offload.start_wanted(&mut ctx, &shell, None, &pusher);
             if backend.cancelled().contains(&parked_nonce) && store.lookup_order(&parked_nonce).unwrap().is_none() {
                 break;
             }

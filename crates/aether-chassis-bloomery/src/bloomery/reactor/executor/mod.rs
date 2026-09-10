@@ -19,14 +19,14 @@
 
 use std::sync::Arc;
 
-use crate::bloomery::{ExecutorShell, HostClass};
+use crate::bloomery::{ExecutorShell, HostClass, SourceShell};
 // The scripted-lane seam's mail and reply kinds (#4711). Imported here, beside
 // the ZST, because `#[actor]` re-emits every handler's kinds in *this* module —
 // the same reason `DispatchTick` is re-exported below rather than left in
 // `runtime`. Gated exactly as the handler is, so a production build imports
 // nothing.
 #[cfg(any(test, feature = "testing"))]
-use crate::bloomery::testing::{ScriptedEvidence, ScriptedEvidenceResult};
+use crate::bloomery::testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedMemberVerificationGate};
 use aether_actor::actor;
 use aether_bloomery::SharedCorrespondence;
 use aether_bloomery::Topic;
@@ -43,6 +43,9 @@ pub struct ExecutorReactorSetup {
     /// Runtime host identity compared with each sealed shared-run contract.
     pub host_class: HostClass,
     pub executor: Option<ExecutorShell>,
+    /// Source snapshot capability used to bind `BaseVerify` to the immutable
+    /// tree beneath its sealed checkout before any order is persisted.
+    pub source: Option<SourceShell>,
     pub correspondence: Option<SharedCorrespondence>,
     pub store_path: String,
     pub artifacts_root: Option<String>,

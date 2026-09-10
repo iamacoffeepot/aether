@@ -24,12 +24,13 @@ use aether_bloomery_github::{
 };
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, GetResult};
 use aether_chassis_bloomery::benchmark::{BenchmarkRunnerCapability, BenchmarkTick};
-use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, read_ledger};
+use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, read_ledger, release_marker, released_marker};
 use aether_chassis_bloomery::bloomery::{
     BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, DoctorReactorCapability, DoctorReport,
     DoctorTick, ExecutorReactorCapability, GithubConnectionConfig, IntegrateReactorCapability, IntegrateTick,
     JanitorReactorCapability, JanitorTick, LandReactorCapability, LandTick, NotifyConfig, ProposeReactorCapability,
-    ProposeTick, ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload, pin_instructions, reference_instructions,
+    ProposeTick, ScriptedEvidence, ScriptedEvidenceResult, ScriptedMemberVerificationGate, ScriptedUpload,
+    pin_instructions, reference_instructions,
 };
 use aether_chassis_bloomery::commission::task_text;
 use aether_chassis_bloomery::control::ObserveTick;
@@ -782,6 +783,35 @@ impl ScenarioHarness {
                 self.ledger().len(),
             );
             thread::sleep(SETTLE_POLL);
+        }
+    }
+
+    /// Release explicitly parked mock lanes together and wait until every
+    /// child has crossed its real worktree/evidence boundary.
+    ///
+    /// This does not tick the coordinator. Capture and intake remain
+    /// asynchronous after a child exits; grouping scenarios hold verification
+    /// service until every intended member has reached the durable queue.
+    ///
+    /// # Panics
+    /// A release marker could not be written, or a child did not acknowledge
+    /// release inside the scenario budget.
+    pub fn release_parked_lanes(&self, orders: &[OutstandingOrder]) {
+        let runs = Path::new(&self.worktree_base);
+        for order in orders {
+            fs::write(release_marker(runs, &order.nonce), []).expect("the parked lane release marker writes");
+        }
+
+        let deadline = Instant::now() + self.step_budget;
+        while orders.iter().any(|order| !released_marker(runs, &order.nonce).is_file()) {
+            assert!(Instant::now() < deadline, "the parked lanes did not all acknowledge release");
+            thread::sleep(POLL);
+        }
+        thread::sleep(POLL);
+
+        for order in orders {
+            fs::remove_file(release_marker(runs, &order.nonce)).expect("the parked lane release marker removes");
+            fs::remove_file(released_marker(runs, &order.nonce)).expect("the parked lane acknowledgement removes");
         }
     }
 
@@ -1579,6 +1609,21 @@ impl ScenarioHarness {
             .into_iter()
             .filter_map(|nonce| store.lookup_order(&nonce).expect("a listed nonce resolves to its order"))
             .collect()
+    }
+
+    /// Hold or release service availability for new member verification plans.
+    ///
+    /// Capture and intake continue through the real executor while the gate is
+    /// held. Scenarios can therefore queue a deterministic ready set without
+    /// relying on child exits or asynchronous Git captures finishing together.
+    /// Existing immutable plans continue to replay and complete.
+    ///
+    /// # Panics
+    /// The test-only executor handler did not acknowledge the requested gate.
+    pub fn hold_member_verification(&mut self, held: bool) {
+        let mailbox = <ExecutorReactorCapability as Addressable>::resolve(0, ());
+        let reply: ScriptedMemberVerificationGate = self.wire.call(mailbox, &ScriptedMemberVerificationGate { held });
+        assert_eq!(reply.held, held, "the verification service gate acknowledged its state");
     }
 
     /// Upload one scripted verdict against an order the coordinator dispatched.

@@ -316,6 +316,45 @@ mod tests {
     }
 
     #[test]
+    fn append_preserves_the_verified_contextual_candidate_checkout() {
+        let fake = FakeGithub::new();
+        let base_tree = digest(40);
+        let base_checkout = fake.seed_base_commit(&base_tree);
+        let base_sha = base_checkout.to_hex();
+        let composed_checkout = digest(41);
+        fake.seed_fast_forward(&composed_checkout, Some(&base_sha));
+        let composed = CandidateRef { tree: composed_checkout, checkout: composed_checkout };
+        let first = pin(&fake, 42, "first");
+        let second = pin(&fake, 43, "second");
+        let generation = digest(44);
+        let plan = IntegrationAppendPlan {
+            bloom: BloomId(digest(45)),
+            generation,
+            expected_parent: IntegrationHead {
+                generation,
+                node: digest(46),
+                candidate: CandidateRef { tree: base_tree, checkout: base_checkout },
+                plan: digest(47),
+                coverage: Vec::new(),
+            },
+            inputs: vec![CompositionInput { node: digest(48), candidate: composed, members: vec![first, second] }],
+        };
+        let source = source(&fake);
+        let commits = fake.create_commit_count();
+
+        let AppendResult::Advanced(head) = append_plan(&source, &plan) else {
+            panic!("the verified contextual node should append")
+        };
+        let AppendResult::Advanced(replayed) = append_plan(&source, &plan) else {
+            panic!("the exact contextual append should replay")
+        };
+
+        assert_eq!(head.candidate, composed, "the eager head keeps the checkout the contextual proof names");
+        assert_eq!(replayed, head, "replay derives the same integration-node identity");
+        assert_eq!(fake.create_commit_count(), commits, "a descendant append creates no replacement commit");
+    }
+
+    #[test]
     fn append_refuses_multiple_atomic_inputs_before_writing_source() {
         let fake = FakeGithub::new();
         let base_tree = digest(30);

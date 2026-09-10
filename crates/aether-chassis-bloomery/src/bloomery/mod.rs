@@ -130,7 +130,9 @@ pub use study::{
     rebuild_study_index,
 };
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
-pub use testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload, ScriptedVerdict};
+pub use testing::{
+    ScriptedEvidence, ScriptedEvidenceResult, ScriptedMemberVerificationGate, ScriptedUpload, ScriptedVerdict,
+};
 #[cfg(feature = "runtime")]
 pub use verify::{
     Attribution, AttributionError, AttributionRequest, BaseProbe, BaseRepairWorkpiece, BatchCheck, BatchFailure,

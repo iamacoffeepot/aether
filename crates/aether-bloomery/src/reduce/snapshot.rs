@@ -2334,6 +2334,37 @@ impl BloomRecord {
         identities.saturating_add(self.stage_catalog.retry_budget_of(StageId::Verify).unwrap_or(1))
     }
 
+    /// Whether `workpiece` carries a current logical resolution in this bloom.
+    ///
+    /// Legacy claims keep their existing meaning. Contextual claims count only
+    /// when their exact member version and retained proof are still current;
+    /// they remain their own proof class and are never projected as a legacy
+    /// [`ResolutionClaim`]. A withdrawn or replaced member is unresolved.
+    #[must_use]
+    pub fn has_current_member_resolution(&self, workpiece: &WorkpieceId) -> bool {
+        if self.withdrawn.contains_key(workpiece) {
+            return false;
+        }
+        let Some(member) = self.spec.members().iter().find(|member| member.workpiece == *workpiece) else {
+            return false;
+        };
+        if self
+            .claims
+            .get(workpiece)
+            .is_some_and(|claim| claim.workpiece == *workpiece && claim.scope_revision == member.scope_revision)
+        {
+            return true;
+        }
+        let Some(state) = self.coordination.as_deref() else {
+            return false;
+        };
+        state.claims.get(&workpiece.0).is_some_and(|claim| {
+            claim.member.workpiece == *workpiece
+                && claim.member.scope_revision == member.scope_revision
+                && state.has_exact_claim(&claim.member)
+        })
+    }
+
     /// The composition findings no operator adjudication has closed (#4957).
     ///
     /// The one place closure is decided, so the adjudication door and every

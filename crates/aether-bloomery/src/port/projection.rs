@@ -178,6 +178,31 @@ pub struct BloomView {
     pub coordination: Option<CoordinationState>,
 }
 
+impl BloomView {
+    /// Whether the current member has an admitted standalone or contextual
+    /// resolution. Contextual proof stays in coordination rather than the
+    /// legacy [`MemberView::resolution`] field.
+    #[must_use]
+    pub fn has_current_member_resolution(&self, workpiece: &WorkpieceId) -> bool {
+        let Some(member) =
+            self.members.iter().find(|member| member.workpiece == *workpiece && member.withdrawn.is_none())
+        else {
+            return false;
+        };
+        member
+            .resolution
+            .as_ref()
+            .is_some_and(|claim| claim.workpiece == *workpiece && claim.scope_revision == member.scope_revision)
+            || self.coordination.as_ref().is_some_and(|state| {
+                state.claims.get(&workpiece.0).is_some_and(|claim| {
+                    claim.member.workpiece == *workpiece
+                        && claim.member.scope_revision == member.scope_revision
+                        && state.has_exact_claim(&claim.member)
+                })
+            })
+    }
+}
+
 /// One narrowed composition's outward line (ADR-0210): the subject, the
 /// parents it is over, the paths the diagnostic named, the bound it runs under,
 /// and where it stands.

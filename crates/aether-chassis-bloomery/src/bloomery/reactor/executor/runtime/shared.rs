@@ -2114,15 +2114,7 @@ fn replay_completion(
     let run = Digest::from_slice(&row.run)
         .ok_or_else(|| rusqlite::Error::InvalidParameterName("shared run identity is not a digest".to_owned()))?;
     let members = store.shared_run_members(&row.run)?;
-    let outcomes = members
-        .iter()
-        .filter_map(|member| member.outcome.as_deref().and_then(|bytes| from_bytes::<MemberVerifyOutcome>(bytes).ok()))
-        .collect::<Vec<_>>();
-    let unfinished = members
-        .iter()
-        .filter(|member| !member.cancelled && member.outcome.is_none())
-        .filter_map(|member| Digest::from_slice(&member.request))
-        .collect();
+    let (outcomes, unfinished) = retained_member_completion(&members)?;
     let dispatch = from_bytes::<SharedRunDispatch>(&row.dispatch)
         .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
     let latencies = members
@@ -2151,6 +2143,27 @@ fn replay_completion(
         return Ok(Vec::new());
     }
     Ok(admit(&event).into_iter().collect())
+}
+
+fn retained_member_completion(
+    members: &[SharedRunMemberRow],
+) -> rusqlite::Result<(Vec<MemberVerifyOutcome>, Vec<Digest>)> {
+    let mut outcomes = Vec::new();
+    let mut unfinished = Vec::new();
+    for member in members {
+        if let Some(bytes) = member.outcome.as_deref() {
+            outcomes.push(
+                from_bytes(bytes).map_err(|error| {
+                    rusqlite::Error::InvalidParameterName(format!("shared member outcome: {error}"))
+                })?,
+            );
+        } else {
+            unfinished.push(Digest::from_slice(&member.request).ok_or_else(|| {
+                rusqlite::Error::InvalidParameterName("shared member request identity is not a digest".to_owned())
+            })?);
+        }
+    }
+    Ok((outcomes, unfinished))
 }
 
 fn add_cost(total: &mut StudyCost, value: StudyCost) {
@@ -2291,7 +2304,9 @@ pub(super) fn drive_shared_runs(
             && refuse_invalid_shared_inputs(store, &row, &dispatch, host_class, now_unix_millis)?
         {
             let current = store.lookup_shared_run(&row.run)?.unwrap_or(row);
-            release_terminal_physical_run(executor, &current)?;
+            if !current.charged {
+                release_terminal_physical_run(executor, &current)?;
+            }
             charge_physical_run(store, artifacts.as_deref_mut(), &current, &dispatch)?;
             admits.extend(replay_completion(store, &current, executor)?);
             continue;
@@ -2299,7 +2314,9 @@ pub(super) fn drive_shared_runs(
         if row.lifecycle == SharedRunLifecycle::Completing
             && store.shared_run_steps(&row.run)?.iter().all(|step| step.receipt.is_some())
         {
-            release_terminal_physical_run(executor, &row)?;
+            if !row.charged {
+                release_terminal_physical_run(executor, &row)?;
+            }
             charge_physical_run(store, artifacts.as_deref_mut(), &row, &dispatch)?;
         }
         for step in store.shared_run_steps(&row.run)?.into_iter().filter(|step| step.receipt.is_none()) {
@@ -2315,7 +2332,9 @@ pub(super) fn drive_shared_runs(
         if current.lifecycle == SharedRunLifecycle::Completing
             && store.shared_run_steps(&current.run)?.iter().all(|step| step.receipt.is_some())
         {
-            release_terminal_physical_run(executor, &current)?;
+            if !current.charged {
+                release_terminal_physical_run(executor, &current)?;
+            }
             charge_physical_run(store, artifacts.as_deref_mut(), &current, &dispatch)?;
         }
         if !matches!(current.lifecycle, SharedRunLifecycle::Ready | SharedRunLifecycle::Running) {
@@ -2813,6 +2832,43 @@ mod tests {
         let pending = step(Digest::of_wire_bytes(b"pending"), 2, false);
 
         assert_eq!(pending_prepared_step(&[completed, pending]).map(|step| step.ordinal), Some(2));
+    }
+
+    #[test]
+    fn completion_replay_decodes_wire_outcomes_and_accounts_cancelled_members() {
+        let completed = Digest::of_wire_bytes(b"completed-request");
+        let cancelled = Digest::of_wire_bytes(b"cancelled-request");
+        let outcome = MemberVerifyOutcome::Pending {
+            request: completed,
+            observation: Digest::of_wire_bytes(b"retained-observation"),
+        };
+        let members = vec![
+            SharedRunMemberRow {
+                run: Digest::default().as_bytes().to_vec(),
+                request: completed.as_bytes().to_vec(),
+                ordinal: 0,
+                queued_unix_millis: 1,
+                deadline_unix_millis: 2,
+                cancelled: false,
+                outcome: Some(to_vec(&outcome).expect("member outcome encodes")),
+                latency_millis: Some(1),
+            },
+            SharedRunMemberRow {
+                run: Digest::default().as_bytes().to_vec(),
+                request: cancelled.as_bytes().to_vec(),
+                ordinal: 1,
+                queued_unix_millis: 1,
+                deadline_unix_millis: 2,
+                cancelled: true,
+                outcome: None,
+                latency_millis: None,
+            },
+        ];
+
+        let (outcomes, unfinished) = retained_member_completion(&members).expect("completion state replays");
+
+        assert_eq!(outcomes, vec![outcome]);
+        assert_eq!(unfinished, vec![cancelled], "withdrawal still accounts for the original run request");
     }
 
     #[test]

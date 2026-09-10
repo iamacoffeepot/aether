@@ -48,8 +48,8 @@ use aether_bloomery::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, BloomId,
     CancelDispatchPayload, CandidateRef, ConfigRegistry, ConfigScopes, ContextualAttemptDispatch, Digest,
     DispatchPayload, Event, ExecutionStatus, Fact, LaneObservation, MemberPin, ModelOverride, Nonce, RedispatchPayload,
-    ReviewPass, SharedCorrespondence, StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailureSet, WorkHandle,
-    WorkpieceId, normalize_write_paths, pin_workpiece_description,
+    ReviewPass, SharedCorrespondence, SourceSnapshot, StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailureSet,
+    WorkHandle, WorkpieceId, normalize_write_paths, pin_workpiece_description,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_github::{GitObjectId, candidate_ref_name, member_checkpoint_ref_name, short_hex};
@@ -78,8 +78,10 @@ use crate::bloomery::provenance::drain_refusals;
 #[cfg(any(test, feature = "testing"))]
 use crate::bloomery::study::{StudyAdmitDecision, UploadedStudyRecord, admit_study, study_evidence_event};
 #[cfg(any(test, feature = "testing"))]
-use crate::bloomery::testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload};
-use crate::bloomery::{CoordinatorConfig, ExecutorReactorSetup, HostClass};
+use crate::bloomery::testing::{
+    ScriptedEvidence, ScriptedEvidenceResult, ScriptedMemberVerificationGate, ScriptedUpload,
+};
+use crate::bloomery::{CoordinatorConfig, ExecutorReactorSetup, HostClass, SourceShell};
 use crate::control::ControlCore;
 use crate::store::{
     CANDIDATE_HASH_OCCASION_SEAL, OrderLifecycle, OutstandingOrder, SqliteStore, StoreBackend, StoreConfigError,
@@ -89,7 +91,7 @@ use crate::store::{
 mod precheck;
 
 mod offload;
-use offload::{AdapterCall, AdapterOffload, PendingPublish};
+use offload::{AdapterCall, AdapterOffload, OffloadedPort, PendingPublish};
 
 mod scope;
 use scope::drain_and_dispatch_scope;
@@ -99,6 +101,21 @@ use shared::{
     drain_construction_admissions, drain_contextual_dispatches, drain_shared_cancellations, drain_shared_dispatches,
     drive_partial_head_repairs, drive_shared_runs, observe_construction_checkpoints,
 };
+
+trait BaseSnapshotPort {
+    fn snapshot_base(&self, base: &Digest) -> Settled<Result<SourceSnapshot, String>>;
+}
+
+impl BaseSnapshotPort for OffloadedPort<'_> {
+    fn snapshot_base(&self, base: &Digest) -> Settled<Result<SourceSnapshot, String>> {
+        OffloadedPort::snapshot_base(self, base)
+    }
+}
+
+struct DispatchPorts<'a> {
+    executor: &'a dyn ExecutorPort,
+    base_source: &'a dyn BaseSnapshotPort,
+}
 
 mod scheduler;
 use scheduler::{MemberVerificationScheduler, drain_member_verifications};
@@ -628,10 +645,11 @@ fn drain_dispatch_topics(
     backoff: &mut Option<BackoffCursor>,
     store: &mut dyn StoreBackend,
     mut artifacts: Option<&mut ArtifactsCapabilityState>,
-    executor: &dyn ExecutorPort,
+    ports: &DispatchPorts<'_>,
     reader_enabled: bool,
     now_unix_millis: u64,
 ) {
+    let executor = ports.executor;
     // Drain + submit the newly-decided dispatches, acking the submitted prefix.
     let dispatched = drain_and_dispatch(store, artifacts.as_deref_mut(), executor, now_unix_millis);
     fold_submitted_drain(tracked, backoff, store, Topic::Dispatch, "dispatch", dispatched);
@@ -644,7 +662,8 @@ fn drain_dispatch_topics(
     // the mechanical gate the fold passes before its critic dispatches.
     let verifies = drain_and_dispatch_aggregate_verify(store, artifacts.as_deref_mut(), executor, now_unix_millis);
     fold_submitted_drain(tracked, backoff, store, Topic::AggregateVerify, "aggregate-verify", verifies);
-    let bases = drain_and_dispatch_base_verify(store, artifacts.as_deref_mut(), executor, now_unix_millis);
+    let bases =
+        drain_and_dispatch_base_verify(store, artifacts.as_deref_mut(), executor, ports.base_source, now_unix_millis);
     fold_submitted_drain(tracked, backoff, store, Topic::BaseVerify, "base-verify", bases);
     // Drain + submit the pre-bloom scoping runs (ADR-0208) the same
     // way. Its handles ride the same intake cycle and a transient
@@ -870,6 +889,7 @@ fn select_stale_handles(
 /// `tracked` accumulates the dispatched handles the pull side inspects each tick.
 pub struct ExecutorReactorState {
     executor: Option<ExecutorShell>,
+    source: Option<SourceShell>,
     store: Option<SqliteStore>,
     // Where an admitted attempt's study record is put (#4679); `None` when the
     // content store would not open, which disables the study lane without
@@ -930,6 +950,7 @@ impl ExecutorReactorState {
     ) -> Self {
         Self {
             executor,
+            source: None,
             store,
             artifacts: None,
             claims: NameEvidenceClaims,
@@ -957,6 +978,13 @@ impl ExecutorReactorState {
     #[must_use]
     pub fn with_pusher(mut self, pusher: Arc<dyn CandidatePush>) -> Self {
         self.pusher = pusher;
+        self
+    }
+
+    /// Substitute the immutable source snapshot seam for `BaseVerify` fixtures.
+    #[must_use]
+    pub fn with_source(mut self, source: SourceShell) -> Self {
+        self.source = Some(source);
         self
     }
 }
@@ -2286,6 +2314,7 @@ fn drain_and_dispatch_base_verify(
     store: &mut dyn StoreBackend,
     mut artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
+    base_source: &dyn BaseSnapshotPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
     let entries = store.drain_topic(Topic::BaseVerify)?;
@@ -2304,8 +2333,47 @@ fn drain_and_dispatch_base_verify(
         if !transformation_has_subject(&payload.transformation.inputs, entry.sequence, "base-verify") {
             break;
         }
+        if payload.transformation.checkout != payload.base {
+            tracing::error!(
+                target: "aether_chassis_bloomery::executor",
+                sequence = entry.sequence,
+                base = %payload.base,
+                checkout = %payload.transformation.checkout,
+                "base-verify payload changed its sealed checkout; stopping the ack prefix",
+            );
+            break;
+        }
 
-        let displayed = payload.transformation.inputs[0];
+        let snapshot = match base_source.snapshot_base(&payload.base) {
+            Settled::Answered(Ok(snapshot)) if snapshot.head == payload.base => snapshot,
+            Settled::Answered(Ok(snapshot)) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    sequence = entry.sequence,
+                    expected = %payload.base,
+                    observed = %snapshot.head,
+                    "base source returned a snapshot for another checkout; retaining the sealed dispatch for retry",
+                );
+                transient_failure = Some(entry.sequence);
+                break;
+            }
+            Settled::Answered(Err(error)) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    sequence = entry.sequence,
+                    base = %payload.base,
+                    %error,
+                    "base source snapshot failed; retaining the sealed dispatch for retry",
+                );
+                transient_failure = Some(entry.sequence);
+                break;
+            }
+            Settled::InFlight => break,
+        };
+
+        let displayed = snapshot.tree;
+        let mut transformation = payload.transformation;
+        transformation.inputs[0] = displayed;
         let record = DispatchRecord {
             nonce: dispatch_nonce(entry.sequence),
             // The base axis is the `base` the transformation checks out; this
@@ -2317,7 +2385,7 @@ fn drain_and_dispatch_base_verify(
             candidate: displayed,
             displayed_digest: displayed,
             stage: StageId::BaseVerify,
-            transformation: payload.transformation,
+            transformation,
             configs: ConfigRegistry::default(),
             instruction_bundle: None,
             prompt_manifest: None,
@@ -3316,7 +3384,7 @@ fn drain_coordinated_topics(
             }
         }
     }
-    match drain_member_verifications(scheduler, store, now_unix_millis) {
+    match drain_member_verifications(scheduler, store, executor, now_unix_millis) {
         Ok(pending) => admits.extend(pending),
         Err(error) => {
             tracing::warn!(%error, "member-verification scheduler failed; durable requests remain pending");
@@ -3385,6 +3453,7 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
     let claims = state.claims;
     let control_mailbox = state.control_mailbox;
     let correspondence = state.correspondence.clone();
+    let source = state.source.clone();
 
     // Turn-start clock: every order this turn records takes its deadline from
     // it, and lease observations use the same instant. Absolute deadlines
@@ -3423,7 +3492,7 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
                 &mut state.backoff,
                 store,
                 state.artifacts.as_mut(),
-                &executor,
+                &DispatchPorts { executor: &executor, base_source: &executor },
                 state.retrospect_reader_enabled,
                 clock.now_unix_millis,
             );
@@ -3510,7 +3579,7 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
     }
 
     // Last, so it sees everything every phase above asked for.
-    state.offload.start_wanted(ctx, &shell, &state.pusher);
+    state.offload.start_wanted(ctx, &shell, source.as_ref(), &state.pusher);
 }
 
 #[runtime]
@@ -3549,6 +3618,7 @@ impl NativeActor for ExecutorReactorCapability {
             );
             return Ok(ExecutorReactorState {
                 executor: None,
+                source: None,
                 store: None,
                 claims: NameEvidenceClaims,
                 tracked: Vec::new(),
@@ -3634,6 +3704,7 @@ impl NativeActor for ExecutorReactorCapability {
         let correspondence = config.correspondence;
         Ok(ExecutorReactorState {
             executor: Some(executor),
+            source: config.source,
             store: Some(store),
             artifacts: open_artifacts(config.artifacts_root.as_deref()),
             claims: NameEvidenceClaims,
@@ -3745,6 +3816,19 @@ impl NativeActor for ExecutorReactorCapability {
             let _ = ctx.send_envelope_tracked(control_mailbox, Admit::ID, &admit.encode_into_bytes());
         }
         result
+    }
+
+    /// Hold or release creation of new shared member-verification proposals.
+    /// Existing proposals remain replayable while the fixture gate is held.
+    #[cfg(any(test, feature = "testing"))]
+    #[handler::single]
+    fn on_scripted_member_verification_gate(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: ScriptedMemberVerificationGate,
+    ) -> ScriptedMemberVerificationGate {
+        state.member_verifications.set_proposals_held(mail.held);
+        mail
     }
 
     /// Control's reply to a fire-and-forget admit. Ok is a no-op; Err is the

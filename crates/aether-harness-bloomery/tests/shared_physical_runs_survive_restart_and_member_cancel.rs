@@ -4,14 +4,19 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::fs;
+use std::path::Path;
+use std::slice::from_ref;
+
 use aether_bloomery::{
-    CoordinationPolicy, MemberVerifyOutcome, ResolutionProof, ResolvedConfigs, SharedRunDispatch, SharedRunMode,
-    SharedRunPhase, Snapshot, StageId, VerificationMode, WorkpieceId, decode_recorded_decisions, decode_recorded_event,
+    BloomStatus, CommissionStatus, CoordinationPolicy, Digest, FakeKeyProvider, KeyId, MemberVerifyOutcome,
+    ResolutionProof, ResolvedConfigs, SharedRunDispatch, SharedRunMode, SharedRunPhase, Snapshot, StageId,
+    VerificationMode, WorkpieceId, decode_recorded_decisions, decode_recorded_event, signed_approval,
 };
-use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneScript};
-use aether_chassis_bloomery::store::{SharedRunLifecycle, StoreBackend};
+use aether_chassis_bloomery::bloomery::mock_lane::{CANDIDATE_FILE, LaneMode, LaneScript};
+use aether_chassis_bloomery::store::{CommissionBackend, SharedRunLifecycle, SharedRunRow, StoreBackend};
 use aether_data::wire::from_bytes;
-use aether_harness_bloomery::{HarnessBuilder, HarnessRoots, OperatorMove, Repo};
+use aether_harness_bloomery::{HarnessBuilder, HarnessRoots, OperatorMove, Repo, ScenarioHarness};
 
 const FIRST: &str = "wp-a";
 const SECOND: &str = "wp-b";
@@ -42,6 +47,16 @@ fn contextual_policy() -> CoordinationPolicy {
     }
 }
 
+fn approve_scopes(harness: &ScenarioHarness, scope_revisions: &[Digest]) {
+    let mut store = harness.commission_store();
+    for scope_revision in scope_revisions {
+        let approval = signed_approval(KeyId(String::from("shared-run harness")), &[0x0A; 32], *scope_revision);
+        store
+            .insert_approval(&approval, &FakeKeyProvider)
+            .expect("the original member scope retains its signed approval");
+    }
+}
+
 fn replay_snapshot(store: &mut dyn StoreBackend) -> Snapshot {
     store.replay_journal().expect("the coordinator journal replays").into_iter().fold(
         Snapshot::default(),
@@ -55,11 +70,100 @@ fn replay_snapshot(store: &mut dyn StoreBackend) -> Snapshot {
     )
 }
 
+fn complete_joint_constructions(harness: &mut ScenarioHarness) {
+    harness.hold_member_verification(true);
+    harness.pump_until("both members receive their parked Construct orders", |harness| {
+        let orders = harness.orders();
+        assert!(orders.len() <= 2, "only the two sealed members can be dispatched: {orders:?}");
+        orders.len() == 2
+    });
+    let constructs = harness.orders();
+    assert!(
+        constructs
+            .iter()
+            .all(|order| from_bytes::<StageId>(&order.stage).is_ok_and(|stage| stage == StageId::Construct)),
+        "the barrier holds exactly the two Construct orders: {constructs:?}"
+    );
+    assert!(
+        [FIRST, SECOND].iter().all(|workpiece| constructs.iter().any(|order| order.workpiece == *workpiece)),
+        "the barrier holds both sealed members: {constructs:?}"
+    );
+
+    harness.pump_until("both parked Construct children reached their real worktrees", |harness| {
+        let runs = harness.ledger();
+        constructs.iter().all(|order| runs.iter().any(|run| run.nonce == order.nonce))
+    });
+    let runs = harness.ledger();
+    for (workpiece, path) in
+        [(FIRST, "crates/example-a/src/contextual.rs"), (SECOND, "crates/example-b/src/contextual.rs")]
+    {
+        let order = constructs
+            .iter()
+            .find(|order| order.workpiece == workpiece)
+            .expect("the jointly admitted member has a Construct order");
+        let worktree = runs
+            .iter()
+            .find(|run| run.nonce == order.nonce)
+            .and_then(|run| run.worktree.as_deref())
+            .map(Path::new)
+            .expect("the parked local Construct recorded its real worktree");
+        fs::remove_file(worktree.join(CANDIDATE_FILE)).expect("the mock's generic candidate is removed");
+        fs::write(worktree.join(path), format!("pub const MEMBER: &str = \"{workpiece}\";\n"))
+            .expect("the parked Construct writes its own approved surface");
+    }
+
+    for (index, workpiece) in [FIRST, SECOND].iter().enumerate() {
+        let order = constructs.iter().find(|order| order.workpiece == *workpiece).expect("member Construct order");
+        harness.release_parked_lanes(from_ref(order));
+        harness.pump_until("the captured candidate queues while verification service is held", |harness| {
+            let mut store = harness.commission_store();
+            assert!(store.list_shared_runs().expect("shared runs read while service is held").is_empty());
+            store.queued_member_verifications().expect("logical verification requests read").len() == index + 1
+        });
+    }
+    harness.hold_member_verification(false);
+}
+
+fn completed_contextual_run(store: &mut dyn StoreBackend) -> (SharedRunRow, SharedRunDispatch) {
+    let decoded = store
+        .list_shared_runs()
+        .expect("shared runs read after contextual completion")
+        .into_iter()
+        .map(|run| {
+            let dispatch = from_bytes::<SharedRunDispatch>(&run.dispatch).expect("the retained dispatch decodes");
+            (run, dispatch)
+        })
+        .collect::<Vec<_>>();
+    let summary = decoded
+        .iter()
+        .map(|(run, dispatch)| {
+            format!(
+                "{:?}/{:?} members={:?} charged={}",
+                run.lifecycle,
+                dispatch.plan.mode,
+                dispatch.plan.requests.iter().map(|request| &request.member.workpiece.0).collect::<Vec<_>>(),
+                run.charged,
+            )
+        })
+        .collect::<Vec<_>>();
+    decoded
+        .into_iter()
+        .find(|(run, dispatch)| {
+            run.lifecycle == SharedRunLifecycle::Completed
+                && dispatch.plan.mode == SharedRunMode::Contextual
+                && dispatch.plan.requests.iter().map(|request| request.member.workpiece.0.as_str()).eq([FIRST, SECOND])
+        })
+        .unwrap_or_else(|| panic!("A and B need one completed contextual physical run; observed {summary:?}"))
+}
+
 #[test]
 fn a_partial_shared_run_restarts_from_its_first_missing_receipt() {
     let roots = HarnessRoots::create();
-    let authority = Repo::with_example_project();
-    let script = LaneScript::all_passing().then_for(SECOND, StageId::Verify, LaneMode::NeverExits);
+    let authority = Repo::with_formatted_example_project();
+    let script = LaneScript::all_passing()
+        .then_for(FIRST, StageId::Construct, LaneMode::NeverExits)
+        .then_for(SECOND, StageId::Construct, LaneMode::NeverExits)
+        .then_for(SECOND, StageId::Verify, LaneMode::NeverExits);
     let (bloom, first_verify_runs) = {
         let mut harness = HarnessBuilder::local_authority(&authority)
             .roots(&roots)
@@ -68,7 +172,9 @@ fn a_partial_shared_run_restarts_from_its_first_missing_receipt() {
             .start("partial-shared-run-before-restart");
         let first = harness.author_scope_revision(FIRST, &["crates/example-a/**"]);
         let second = harness.author_scope_revision(SECOND, &["crates/example-b/**"]);
+        approve_scopes(&harness, &[first, second]);
         let bloom = harness.seal_members(&[(FIRST, first), (SECOND, second)]);
+        complete_joint_constructions(&mut harness);
 
         harness.pump_until("the second serial member starts after the first receipt", |harness| {
             harness
@@ -117,15 +223,20 @@ fn a_partial_shared_run_restarts_from_its_first_missing_receipt() {
 
 #[test]
 fn cancelling_one_live_serial_member_preserves_its_completed_sibling() {
-    let authority = Repo::with_example_project();
-    let script = LaneScript::all_passing().then_for(SECOND, StageId::Verify, LaneMode::NeverExits);
+    let authority = Repo::with_formatted_example_project();
+    let script = LaneScript::all_passing()
+        .then_for(FIRST, StageId::Construct, LaneMode::NeverExits)
+        .then_for(SECOND, StageId::Construct, LaneMode::NeverExits)
+        .then_for(SECOND, StageId::Verify, LaneMode::NeverExits);
     let mut harness = HarnessBuilder::local_authority(&authority)
         .coordination(warm_serial_policy())
         .script(&script)
         .start("cancel-one-shared-member");
     let first = harness.author_scope_revision(FIRST, &["crates/example-a/**"]);
     let second = harness.author_scope_revision(SECOND, &["crates/example-b/**"]);
+    approve_scopes(&harness, &[first, second]);
     let bloom = harness.seal_members(&[(FIRST, first), (SECOND, second)]);
+    complete_joint_constructions(&mut harness);
 
     harness.pump_until("the second serial member starts", |harness| {
         harness
@@ -214,46 +325,35 @@ fn cancelling_one_live_serial_member_preserves_its_completed_sibling() {
 
 #[test]
 fn contextual_shared_run_resolves_the_full_root_without_standalone_proofs() {
-    let authority = Repo::with_example_project();
+    let authority = Repo::with_formatted_example_project();
+    let script = LaneScript::all_passing().then_for(FIRST, StageId::Construct, LaneMode::NeverExits).then_for(
+        SECOND,
+        StageId::Construct,
+        LaneMode::NeverExits,
+    );
     let mut harness = HarnessBuilder::local_authority(&authority)
         .coordination(contextual_policy())
-        .script(&LaneScript::all_passing())
+        .script(&script)
         .start("contextual-shared-run");
     let first = harness.author_scope_revision(FIRST, &["crates/example-a/**"]);
     let second = harness.author_scope_revision(SECOND, &["crates/example-b/**"]);
+    approve_scopes(&harness, &[first, second]);
     let bloom = harness.seal_members(&[(FIRST, first), (SECOND, second)]);
+    complete_joint_constructions(&mut harness);
 
-    harness.pump_until("the contextual node becomes the resolved full root", |harness| {
+    harness.pump_until("the contextual bloom resolves its complete integration root", |harness| {
         let snapshot = replay_snapshot(&mut harness.commission_store());
-        snapshot.blooms.get(&bloom).is_some_and(|record| {
-            let Some(state) = record.coordination.as_ref() else {
-                return false;
-            };
-            state.integration.head.coverage.len() == 2
-                && state.claims.len() == 2
-                && state.contextual_aggregate_proof(&state.integration.head).is_some()
-                && record.integration.as_ref().is_some_and(|root| {
-                    root.tree == state.integration.head.candidate.tree
-                        && root.head == state.integration.head.candidate.checkout
-                })
-        })
+        snapshot.blooms.get(&bloom).is_some_and(|record| record.resolved_head.is_some())
+            && harness
+                .commission_store()
+                .list_shared_runs()
+                .expect("physical release acknowledgements remain readable")
+                .iter()
+                .all(|run| run.lifecycle == SharedRunLifecycle::Completed)
     });
 
     let mut store = harness.commission_store();
-    let (physical, dispatch) = store
-        .list_shared_runs()
-        .expect("shared runs read after contextual completion")
-        .into_iter()
-        .find_map(|run| {
-            let dispatch = from_bytes::<SharedRunDispatch>(&run.dispatch).ok()?;
-            let members =
-                dispatch.plan.requests.iter().map(|request| request.member.workpiece.0.as_str()).collect::<Vec<_>>();
-            (run.lifecycle == SharedRunLifecycle::Completed
-                && dispatch.plan.mode == SharedRunMode::Contextual
-                && members == [FIRST, SECOND])
-            .then_some((run, dispatch))
-        })
-        .expect("A and B execute together in one completed contextual physical run");
+    let (physical, dispatch) = completed_contextual_run(&mut store);
     let steps = store.shared_run_steps(&physical.run).expect("contextual physical steps read");
     assert!(!steps.is_empty(), "the contextual physical run records its execution step");
     assert!(steps.iter().all(|step| step.receipt.is_some()), "every contextual execution step has settled");
@@ -261,6 +361,10 @@ fn contextual_shared_run_resolves_the_full_root_without_standalone_proofs() {
     let snapshot = replay_snapshot(&mut store);
     let record = snapshot.blooms.get(&bloom).expect("the contextual bloom remains projected");
     let state = record.coordination.as_ref().expect("the contextual coordination state remains projected");
+    assert_eq!(record.resolved_tree, Some(state.integration.head.candidate.tree));
+    assert_eq!(record.resolved_head, Some(state.integration.head.candidate.checkout));
+    assert_eq!(state.integration.head.coverage.len(), 2);
+    assert_eq!(state.claims.len(), 2);
     let run = state.run(dispatch.plan.digest()).expect("the executed contextual plan remains projected");
     assert_eq!(run.phase, SharedRunPhase::Terminal, "the contextual logical run reached its terminal phase");
     assert!(run.physical_run.is_some(), "the logical run retains its real physical-run identity");
@@ -270,11 +374,30 @@ fn contextual_shared_run_resolves_the_full_root_without_standalone_proofs() {
     );
     let node = run.node.as_ref().expect("the contextual run retains its immutable prepared node");
     assert_eq!(node.plan, dispatch.plan.digest(), "the node is bound to the exact dispatched shared plan");
-    assert_eq!(state.integration.head.node, node.digest(), "the selected full root is the executed contextual node");
-    assert_eq!(state.integration.head.candidate, node.candidate, "the selected full root retains the prepared tree");
+    assert_eq!(
+        state.integration.head.candidate, node.candidate,
+        "the selected full root retains the exact verified tree and checkout"
+    );
     assert_eq!(state.integration.head.coverage, node.coverage, "the selected full root retains exact member coverage");
+    assert!(
+        state.contextual_aggregate_proof(&state.integration.head).is_some(),
+        "the exact selected root reuses its contextual verification receipt"
+    );
+    assert_eq!(
+        harness.ledger().iter().filter(|run| run.stage == Some(StageId::AggregateVerify)).count(),
+        1,
+        "final resolution reuses the shared full-suite run instead of dispatching a second suite"
+    );
+    harness.await_landing(bloom, BloomStatus::Landed);
 
     for workpiece in [FIRST, SECOND] {
+        let workpiece_id = WorkpieceId(workpiece.to_owned());
+        assert!(harness.bloom(bloom).has_current_member_resolution(&workpiece_id));
+        assert_eq!(
+            store.load(&workpiece_id).expect("the commission loads").expect("the member has a commission").head.status,
+            CommissionStatus::Landed,
+            "landing closes {workpiece}'s contextual commission"
+        );
         let claim =
             state.claims.get(workpiece).unwrap_or_else(|| panic!("{workpiece} retains a contextual resolution claim"));
         let ResolutionProof::InComposition { node: proof_node, plan, request, .. } = &claim.proof else {

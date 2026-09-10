@@ -7,11 +7,12 @@ use std::{
 
 use aether_bloomery::{
     Admit, BloomId, CompatibilityPreview, CompositionPlan, CoordinationState, Decision, Digest, Event, Fact,
-    IdempotencyKey, MemberContractPin, MemberVerificationPayload, SharedRunMode, SharedRunPlan, Topic,
-    VerificationMode, decode_recorded_decisions,
+    IdempotencyKey, MemberContractPin, MemberVerificationPayload, Nonce, SharedRunMode, SharedRunPlan, Topic,
+    VerificationMode, WorkOrder, decode_recorded_decisions,
 };
 use aether_data::wire::{from_bytes, to_vec};
 
+use crate::bloomery::executor::ExecutorPort;
 use crate::bloomery::outbox::{OutboxResultDelivery, TopicOutbox};
 use crate::store::{QueuedMemberVerificationRow, StoreBackend};
 
@@ -23,9 +24,16 @@ const MAX_STALE_RETIREMENTS_PER_TURN: usize = 256;
 pub(super) struct MemberVerificationScheduler {
     cursor: u64,
     states: BTreeMap<BloomId, CoordinationState>,
+    #[cfg(any(test, feature = "testing"))]
+    proposals_held: bool,
 }
 
 impl MemberVerificationScheduler {
+    #[cfg(any(test, feature = "testing"))]
+    pub(super) fn set_proposals_held(&mut self, held: bool) {
+        self.proposals_held = held;
+    }
+
     pub(super) fn refresh(&mut self, store: &mut dyn StoreBackend) -> rusqlite::Result<bool> {
         for _ in 0..MAX_PAGES_PER_TURN {
             let rows = store.replay_journal_after(self.cursor, JOURNAL_PAGE_ROWS)?;
@@ -64,6 +72,21 @@ impl MemberVerificationScheduler {
             .and_then(|state| state.admitted_construction.get(&dispatch.workpiece.0))
             .is_some_and(|admission| admission.nonce == nonce && admission.dispatch == *dispatch)
     }
+}
+
+fn proposal_capacity_order(plan: &SharedRunPlan) -> Option<WorkOrder> {
+    let transformation = match &plan.composition {
+        Some(composition) => composition.contract.invocation.instantiate(composition.base.candidate),
+        None => plan.requests.first()?.transformation.clone(),
+    };
+    Some(WorkOrder {
+        transformation,
+        nonce: Nonce(format!("shared-capacity:{}", plan.digest().to_hex())),
+        instruction_bundle: None,
+        prompt_manifest: None,
+        physical_run: Some(plan.digest()),
+        release_physical_run: false,
+    })
 }
 
 fn build_plan(state: &CoordinationState, requests: Vec<aether_bloomery::MemberVerifyRequest>) -> SharedRunPlan {
@@ -348,6 +371,7 @@ fn replay_proposal(
 pub(super) fn drain_member_verifications(
     scheduler: &mut MemberVerificationScheduler,
     store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<Vec<Admit>> {
     if !scheduler.refresh(store)? {
@@ -417,6 +441,16 @@ pub(super) fn drain_member_verifications(
     let rows = indices.iter().map(|index| &queued[*index]).collect::<Vec<_>>();
     let selected = rows.iter().filter_map(|row| current_request(state, row)).collect::<Vec<_>>();
     let plan = build_plan(state, selected);
+    let Some(capacity_order) = proposal_capacity_order(&plan) else {
+        return Ok(Vec::new());
+    };
+    #[cfg(any(test, feature = "testing"))]
+    if scheduler.proposals_held {
+        return Ok(Vec::new());
+    }
+    if !executor.has_idle_capacity(&capacity_order) {
+        return Ok(Vec::new());
+    }
     let event = Event {
         idempotency_key: IdempotencyKey(format!("aether.bloomery.propose_shared_run:{}", plan.digest().to_hex())),
         fact: Fact::ProposeSharedRun { bloom: first_payload.request.bloom, plan },
@@ -796,6 +830,51 @@ mod tests {
     }
 
     #[test]
+    fn busy_verification_capacity_retains_ready_rows_until_they_can_coalesce() {
+        let (mut state, queued_rows) = fixture();
+        state.policy.verification = VerificationMode::WarmSerial;
+        let bloom = state.integration.generation.bloom;
+        let expected = vec![state.requests[0].digest(), state.requests[1].digest()];
+        let mut scheduler = MemberVerificationScheduler::default();
+        scheduler.states.insert(bloom, state);
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        store.enqueue_topic(Topic::MemberVerification, &queued_rows[0].payload, None).expect("enqueue oldest request");
+        let capacity = CapacityPort(Cell::new(false));
+
+        assert!(
+            drain_member_verifications(&mut scheduler, &mut store, &capacity, 9_000)
+                .expect("busy scheduler")
+                .is_empty()
+        );
+        let oldest =
+            store.queued_member_verification(&queued_rows[0].request).expect("oldest lookup").expect("oldest retained");
+        assert_eq!(oldest.queued_unix_millis, 9_000);
+        assert_eq!(oldest.deadline_unix_millis, 69_000);
+        assert!(oldest.proposal.is_none());
+
+        store.enqueue_topic(Topic::MemberVerification, &queued_rows[1].payload, None).expect("enqueue second request");
+        capacity.0.set(true);
+        let admits =
+            drain_member_verifications(&mut scheduler, &mut store, &capacity, 10_000).expect("released scheduler");
+        assert_eq!(admits.len(), 1);
+        let event = from_bytes::<Event>(&admits[0].event).expect("proposal event");
+        let Fact::ProposeSharedRun { plan, .. } = event.fact else {
+            panic!("expected shared run proposal");
+        };
+        assert_eq!(plan.mode, SharedRunMode::WarmSerial);
+        assert_eq!(plan.requests.iter().map(MemberVerifyRequest::digest).collect::<Vec<_>>(), expected);
+        for (row, (queued_unix_millis, deadline_unix_millis)) in
+            queued_rows[..2].iter().zip([(9_000, 69_000), (10_000, 70_000)])
+        {
+            let retained =
+                store.queued_member_verification(&row.request).expect("request lookup").expect("request retained");
+            assert_eq!(retained.queued_unix_millis, queued_unix_millis);
+            assert_eq!(retained.deadline_unix_millis, deadline_unix_millis);
+            assert!(retained.proposal.is_some());
+        }
+    }
+
+    #[test]
     fn only_an_exact_retained_conflict_splits_the_next_contextual_batch() {
         let (mut state, _) = fixture();
         state.policy.max_run_members = 3;
@@ -848,7 +927,7 @@ mod tests {
 
     #[test]
     fn retained_proposal_survives_later_arrival_and_head_change() {
-        let (mut state, queued_rows) = fixture();
+        let (mut state, mut queued_rows) = fixture();
         let bloom = state.integration.generation.bloom;
         let selected = vec![state.requests[0].clone(), state.requests[2].clone()];
         let plan = build_plan(&state, selected);
@@ -858,7 +937,9 @@ mod tests {
         };
         let proposal = to_vec(&event).expect("proposal bytes");
         let mut store = SqliteStore::open(":memory:").expect("store");
-        for row in &queued_rows {
+        for row in &mut queued_rows {
+            row.sequence =
+                store.enqueue_topic(Topic::MemberVerification, &row.payload, None).expect("enqueue retained request");
             assert_eq!(store.record_queued_member_verification(row).expect("queue request"), RecordOutcome::Recorded);
         }
         store
@@ -880,7 +961,19 @@ mod tests {
             },
             candidate(1),
         );
-        store.record_queued_member_verification(&queued(&later, 4)).expect("later arrival");
+        let later_payload = to_vec(&MemberVerificationPayload { request: later.clone() }).expect("later payload");
+        let later_sequence =
+            store.enqueue_topic(Topic::MemberVerification, &later_payload, None).expect("enqueue later arrival");
+        store.record_queued_member_verification(&queued(&later, later_sequence)).expect("later arrival");
+
+        let mut scheduler = MemberVerificationScheduler::default();
+        scheduler.states.insert(bloom, state);
+        scheduler.set_proposals_held(true);
+        let capacity = CapacityPort(Cell::new(false));
+        let admits = drain_member_verifications(&mut scheduler, &mut store, &capacity, 20_000)
+            .expect("retained proposal replay while gated and busy");
+        assert_eq!(admits.len(), 1);
+        assert_eq!(proposal_event(&admits[0].event).expect("replayed event"), event);
 
         let retained = store.queued_member_verifications().expect("retained queue");
         assert_eq!(retained[0].proposal.as_deref(), Some(proposal.as_slice()));

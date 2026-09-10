@@ -992,6 +992,51 @@ impl CoordinationState {
         self.preparations.iter().find(|plan| plan.digest() == id)
     }
 
+    /// Whether `pin` carries an exact admitted proof in this coordination
+    /// state. Contextual receipts remain bound to their physical node and
+    /// complete contract; they never impersonate standalone tree proofs.
+    #[must_use]
+    pub fn has_exact_claim(&self, pin: &MemberPin) -> bool {
+        let Some(claim) = self.claims.get(&pin.workpiece.0).filter(|claim| claim.member == *pin) else {
+            return false;
+        };
+        match &claim.proof {
+            ResolutionProof::Standalone(proof) => {
+                proof.stage == crate::StageId::Verify
+                    && proof.verified().tree == pin.candidate.tree
+                    && proof.evidence.kind == crate::EvidenceKind::VerificationResult
+                    && proof.evidence.validates(&pin.candidate.tree)
+            }
+            ResolutionProof::InComposition { node, receipt, plan, request, contract } => {
+                let Some(run) = self.run(*plan) else {
+                    return false;
+                };
+                let (Some(recorded_node), Some(composition)) = (run.node.as_ref(), run.plan.composition.as_ref())
+                else {
+                    return false;
+                };
+                run.plan.digest() == *plan
+                    && recorded_node.digest() == *node
+                    && composition.contract.digest() == *contract
+                    && composition.contract.members.iter().any(|member| member.request == *request)
+                    && run
+                        .plan
+                        .requests
+                        .iter()
+                        .any(|candidate| candidate.digest() == *request && candidate.member == *pin)
+                    && run.completed.iter().any(|outcome| {
+                        matches!(outcome, MemberVerifyOutcome::PassedIn {
+                            request: recorded_request,
+                            node: recorded_node,
+                            receipt: recorded_receipt,
+                        } if recorded_request == request && recorded_node == node && recorded_receipt == receipt)
+                    })
+                    && receipt.kind == crate::EvidenceKind::VerificationResult
+                    && receipt.validates(&recorded_node.candidate.tree)
+            }
+        }
+    }
+
     /// Whether integration/pre-check selection is owned by the exact
     /// journaled head. Contextual policies use that root during their deferred
     /// final fold even when continuous eager advancement is disabled.
