@@ -387,8 +387,6 @@ impl TransformRunner for ProcessTransformRunner {
             git_with_private_index(worktree_dir, &index, &["read-tree", starting_checkout])?;
             git_with_private_index(worktree_dir, &index, &["add", "--all"])?;
             let tree_hex = git_with_private_index(worktree_dir, &index, &["write-tree"])?;
-            #[allow(clippy::literal_string_with_formatting_args)]
-            // aether-suppression-request: git revspec, not a format
             let starting_tree = git_in(worktree_dir, &["rev-parse", &format!("{starting_checkout}^{{tree}}")])?;
             if tree_hex.trim() == starting_tree.trim() {
                 return Ok(None);

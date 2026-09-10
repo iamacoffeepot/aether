@@ -447,7 +447,7 @@ mod tests {
     fn stored_scope(store: &mut SqliteStore, workpiece: &str, surface: &[&str], approved: bool) -> Digest {
         let id = WorkpieceId(workpiece.to_owned());
         let intent = Statement {
-            words: b"test intent".to_vec(),
+            words: format!("test intent for {workpiece}").into_bytes(),
             provenance: Provenance::ObservationAttestation(Observation { source: "test".to_owned() }),
             parents: Vec::new(),
         };

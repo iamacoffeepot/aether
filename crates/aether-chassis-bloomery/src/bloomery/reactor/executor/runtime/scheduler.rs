@@ -766,10 +766,11 @@ mod tests {
 
     #[test]
     fn incompatible_aggregate_contract_falls_back_to_one_standalone_request() {
-        let (mut state, queued) = fixture();
+        let (mut state, mut queued_rows) = fixture();
         state.requests[0].contract.environment = digest(90);
+        queued_rows[0] = queued(&state.requests[0], queued_rows[0].sequence);
 
-        let selected = SealedPolicySelection.select(&state, &queued);
+        let selected = SealedPolicySelection.select(&state, &queued_rows);
         let plan = build_plan(&state, vec![state.requests[0].clone()]);
 
         assert_eq!(selected, vec![0]);
@@ -779,12 +780,14 @@ mod tests {
 
     #[test]
     fn warm_serial_keeps_mixed_member_invocations_in_one_bounded_lease() {
-        let (mut state, queued) = fixture();
+        let (mut state, mut queued_rows) = fixture();
         state.policy.verification = VerificationMode::WarmSerial;
         state.requests[0].contract.environment = digest(90);
         state.requests[1].profile.model = "different-member-profile".to_owned();
+        queued_rows[0] = queued(&state.requests[0], queued_rows[0].sequence);
+        queued_rows[1] = queued(&state.requests[1], queued_rows[1].sequence);
 
-        let selected = SealedPolicySelection.select(&state, &queued);
+        let selected = SealedPolicySelection.select(&state, &queued_rows);
         let plan = build_plan(&state, vec![state.requests[0].clone(), state.requests[1].clone()]);
 
         assert_eq!(selected, vec![0, 1]);

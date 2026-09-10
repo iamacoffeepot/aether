@@ -1679,7 +1679,7 @@ fn a_v11_store_gains_an_empty_scope_verify_ledger() {
         .query_row("SELECT count(*) FROM scope_verify_reports", [], |row| row.get(0))
         .expect("the ledger exists after migration");
     assert_eq!(reports, 0, "migration invents no reports");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 22);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 24);
 }
 
 #[test]
@@ -1711,7 +1711,7 @@ fn a_v15_store_gains_an_empty_candidate_hash_journal() {
         .query_row("SELECT count(*) FROM candidate_hash", [], |row| row.get(0))
         .expect("the journal exists after migration");
     assert_eq!(hashes, 0, "migration invents no hashes");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 22);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 24);
 }
 
 #[test]
@@ -1769,7 +1769,7 @@ fn a_v20_store_gains_an_unpinned_scope_run_column() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v20 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 22);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 24);
 
     let rows = store.list_scope_runs("wp-v20").unwrap();
     assert_eq!(rows.len(), 1);
@@ -1854,7 +1854,7 @@ fn a_v21_store_gains_a_nullable_prompt_manifest_column() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v21 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 22);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 24);
     let found = store.lookup_order("n-v21").unwrap().expect("the pre-column row survives");
     assert!(found.prompt_manifest.is_none(), "migration invents no retained manifest");
 }
@@ -1925,7 +1925,7 @@ mod schema_digest_migration {
         drop(conn);
 
         let mut store = SqliteStore::open(&path).expect("a v16 store migrates");
-        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 22);
+        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 24);
         let journal = store.replay_journal().unwrap();
         assert_eq!(journal.len(), 2);
         let v2 = journal.iter().find(|row| row.idempotency_key == "v2").unwrap();
@@ -2073,7 +2073,7 @@ fn a_null_stamped_outbox_row_still_decodes_positionally_after_migration() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v17 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 22);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 24);
     let entries = store.drain_outbox(Some(Topic::ViewDocument.as_str())).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].payload_schema, None, "migration invents no stamp");
@@ -2317,7 +2317,7 @@ mod outbox_results {
         drop(conn);
 
         let mut store = SqliteStore::open(&path).expect("a v18 store migrates");
-        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 22);
+        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 24);
         let journal = store.replay_journal().unwrap();
         assert_eq!(journal.len(), 1);
         assert_eq!(journal[0].idempotency_key, "v18-journal");
