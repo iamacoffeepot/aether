@@ -24,7 +24,16 @@ use super::{DIGEST, digest_from_hex};
 
 /// Decode a request body, accepting either digest form.
 pub fn from_slice<T: DeserializeOwned>(body: &[u8]) -> Result<T, serde_json::Error> {
-    T::deserialize(HexDigests(serde_json::from_slice(body)?))
+    from_value(serde_json::from_slice(body)?)
+}
+
+/// Decode an already-parsed body, accepting either digest form.
+///
+/// The same codec as [`from_slice`], entered one step later — for a reader that
+/// already holds the `Value` because it has to decide what the document is
+/// before it knows which type to decode it into.
+pub fn from_value<T: DeserializeOwned>(value: Value) -> Result<T, serde_json::Error> {
+    T::deserialize(HexDigests(value))
 }
 
 /// A deserializer over one already-parsed JSON value that resolves a hex string
@@ -236,7 +245,7 @@ mod tests {
     use serde_json::json;
 
     use super::from_slice;
-    use crate::api::runtime::hex::to_vec;
+    use crate::to_vec;
 
     /// A member whose digest-typed fields — `scope_revision` and the approval's
     /// `subject` / `detail` — each carry a distinguishable value.

@@ -158,6 +158,7 @@ name = "aether-bloomery-console"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-bloomery",
+ "aether-bloomery-rest",
  "anyhow",
  "clap",
  "crossterm",
@@ -191,6 +192,16 @@ dependencies = [
  "sha2",
  "tempfile",
  "tracing",
+]
+
+[[package]]
+name = "aether-bloomery-rest"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-bloomery",
+ "aether-data",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -229,6 +240,7 @@ dependencies = [
  "aether-bloomery",
  "aether-bloomery-git",
  "aether-bloomery-github",
+ "aether-bloomery-rest",
  "aether-chassis-bloomery",
  "aether-codec",
  "aether-component",
@@ -8002,6 +8014,7 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-bloomery",
  "aether-bloomery-git",
+ "aether-bloomery-rest",
  "aether-chassis",
  "aether-data",
  "anyhow",

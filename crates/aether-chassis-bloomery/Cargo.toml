@@ -48,6 +48,7 @@ correspondence = ["dep:rusqlite"]
 runtime = [
     "correspondence",
     "dep:aether-bloomery-git",
+    "dep:aether-bloomery-rest",
     "dep:aether-substrate",
     "dep:aether-http",
     "dep:aether-component",
@@ -92,6 +93,10 @@ aether-bloomery = { path = "../aether-bloomery", default-features = false }
 # Public git spawn layer (unified name-only / porcelain flags). Native only:
 # the marker build never shells out. Gated with the rest of the host.
 aether-bloomery-git = { path = "../aether-bloomery-git", optional = true }
+# The REST edge's hex codec — the one copy the control API, `xtask bloom`, and
+# the terminal console all render and parse digests through. Runtime-only: the
+# whole `api` module is gated, and the marker build has no REST edge.
+aether-bloomery-rest = { path = "../aether-bloomery-rest", optional = true }
 serde = { workspace = true, features = ["derive", "alloc"] }
 # Host bootstrap of the fallback approval policy (`approval-policy.toml`).
 toml = { workspace = true }
