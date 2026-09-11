@@ -248,14 +248,37 @@ fn affected_closure(record: &BloomRecord, state: &CoordinationState, changed: &W
     }
 }
 
+/// Whether the invalidated closure could re-enter through the current head's
+/// own ancestry — the only reason ADR-0218 abandons a head and derives a fresh
+/// generation. A contribution that was merged into the head (or into an
+/// admitted input) pollutes the generation namespace, so that namespace is
+/// left behind. A contribution that never reached the head — a collider that
+/// was ejected to Reconcile — pollutes nothing, and resetting the head there
+/// would throw away the survivors' coverage and re-pin the collider onto the
+/// base it already failed to merge past.
+///
+/// A withdrawal drops the member from `generation.members` before invalidating
+/// it, so the head's pinned generation is already stale; that head cannot be
+/// appended onto and is abandoned too.
+fn ejects_from_head(state: &CoordinationState, affected: &BTreeSet<WorkpieceId>) -> bool {
+    state.integration.head.generation != state.integration.generation.digest()
+        || state
+            .integration
+            .head
+            .coverage
+            .iter()
+            .chain(state.integration.admitted.iter().flat_map(|input| &input.members))
+            .any(|pin| affected.contains(&pin.workpiece))
+}
+
 fn invalidate_member_version(
     record: &BloomRecord,
     state: &mut CoordinationState,
     changed: &WorkpieceId,
     effects: &mut Vec<Decision>,
 ) -> Result<(), CoordinationError> {
-    let next_epoch = state.integration.generation.epoch.checked_add(1).ok_or(CoordinationError::InvalidPlan)?;
     let affected = affected_closure(record, state, changed);
+    let ejected_from_head = ejects_from_head(state, &affected);
     let survives = |workpiece: &String| !affected.iter().any(|member| workpiece == workpiece_key(member));
 
     hold_invalidated_inherited_construction(record, state, &affected, effects);
@@ -301,8 +324,24 @@ fn invalidate_member_version(
     state.admitted_construction.retain(|workpiece, _| survives(workpiece));
     state.preview_plans.clear();
     state.previews.clear();
-    state.partial_head_repair = None;
+    state.integration.queued.retain(|input| input.members.iter().all(|pin| !affected.contains(&pin.workpiece)));
+    state.final_in_flight = false;
+    state.final_dispatched = false;
 
+    if !ejected_from_head {
+        // The head keeps the coverage, generation namespace, and reservation it
+        // earned; only an append already carrying an invalidated version is
+        // abandoned. The member's own context is re-pinned to this head by the
+        // caller, so its repair merges onto what it must actually place on.
+        if state.integration.in_flight.as_ref().is_some_and(|plan| {
+            plan.inputs.iter().flat_map(|input| &input.members).any(|pin| affected.contains(&pin.workpiece))
+        }) {
+            state.integration.in_flight = None;
+        }
+        return Ok(());
+    }
+
+    let next_epoch = state.integration.generation.epoch.checked_add(1).ok_or(CoordinationError::InvalidPlan)?;
     let retained = state
         .integration
         .admitted
@@ -312,6 +351,7 @@ fn invalidate_member_version(
         .cloned()
         .collect::<Vec<_>>();
 
+    state.partial_head_repair = None;
     state.integration.generation.epoch = next_epoch;
     let generation = state.integration.generation.digest();
     state.integration.head = IntegrationHead {
@@ -333,8 +373,6 @@ fn invalidate_member_version(
     state.integration.unproved_repair = None;
     state.integration.reservation = None;
     state.integration.movement_count = 0;
-    state.final_in_flight = false;
-    state.final_dispatched = false;
     Ok(())
 }
 
@@ -480,13 +518,14 @@ fn queue_context_dispatch(
 ) {
     let member = record.spec.members().iter().find(|member| member.workpiece == *workpiece).expect("sealed member");
     let binding = stage_binding(&record.stage_catalog, progress.stage);
+    // ADR-0189 §3: a lap dispatched by a fold conflict stands on the folded
+    // checkpoint, not on the candidate that collided with it. The member's own
+    // candidate is the subject the lap reproduces on top of that head; checking
+    // it out instead would author the repair against the very tree that would
+    // not place, and the preparation onto the head would conflict again.
     let subject = progress.candidate.map_or(member.scope_revision, |candidate| candidate.tree);
-    let transformation = Transformation::for_member_stage(
-        &binding,
-        subject,
-        progress.candidate.map_or(context.starting_head.candidate.checkout, |candidate| candidate.checkout),
-        context.starting_head.candidate.checkout,
-    );
+    let checkout = context.starting_head.candidate.checkout;
+    let transformation = Transformation::for_member_stage(&binding, subject, checkout, checkout);
     let dispatch = ContextualAttemptDispatch {
         bloom,
         workpiece: workpiece.clone(),
@@ -987,6 +1026,11 @@ pub(super) fn reduce_integration_conflicted(snapshot: &Snapshot, conflict: Integ
     }
     let mut next = state.clone();
     next.integration.in_flight = None;
+    // The ejected version leaves the queue with the member: re-offering the
+    // exact input that would not place reproduces this collision on the next
+    // scheduling pass. Its repair re-enters as a fresh input once the prepared
+    // candidate is verified.
+    next.integration.queued.retain(|queued| queued.digest() != input.digest());
     next.integration.movement_count = next.integration.movement_count.saturating_add(1);
     next.diagnostics.push(CoordinationDiagnostic {
         subject: input.digest(),
@@ -1009,7 +1053,12 @@ pub(super) fn reduce_integration_conflicted(snapshot: &Snapshot, conflict: Integ
             candidate: Some(pin.candidate),
             repair_rolls: old.map_or(0, |progress| progress.repair_rolls),
             seen_verify_failures: old.map_or(VerifyFailureSet::EMPTY, |progress| progress.seen_verify_failures),
-            fold_checkpoint: Some(expected_parent),
+            // The commit the lap stands on, exactly as the legacy fold conflict
+            // records it: every consumer of this marker — the retry and fault
+            // redispatch paths in `reduce::attempt`, `member_construct_base` —
+            // reads it as a checkout, so the integration node's address cannot
+            // stand in for it.
+            fold_checkpoint: Some(expected.expected_parent.candidate.checkout),
             fold_conflict_evidence: Some(evidence.detail),
             reconcile_assembles_base: false,
         };
@@ -1184,7 +1233,7 @@ pub(super) fn reduce_candidate_prepared(
                 let progress = StageProgress {
                     stage: StageId::Reconcile,
                     attempts: attempt,
-                    fold_checkpoint: Some(expected.context.starting_head.node),
+                    fold_checkpoint: Some(expected.context.starting_head.candidate.checkout),
                     fold_conflict_evidence: Some(evidence.detail),
                     ..cursor
                 };
@@ -2945,7 +2994,10 @@ fn apply_member_invalidations(snapshot: &Snapshot, decisions: &mut Decisions) ->
             }
             invalidate_member_version(record, &mut state, &workpiece, &mut appended)?;
         }
-        if let Some(retired) = retired_partial {
+        // Only a head the invalidation actually abandoned retires its repair;
+        // a member-scoped ejection leaves the head, and therefore its in-flight
+        // repair of that head, standing.
+        if let Some(retired) = retired_partial.filter(|_| state.partial_head_repair.is_none()) {
             decisions.effects.retain(|effect| {
                 !matches!(effect, Decision::DispatchPartialHeadRepair { dispatch } if dispatch.plan.digest() == retired)
             });
@@ -3650,9 +3702,27 @@ mod tests {
         }));
     }
 
+    /// Put `input` on the head as the only covered contribution.
+    fn advanced_head(state: &mut CoordinationState, input: &CompositionInput) {
+        state.integration.head = IntegrationHead {
+            generation: state.integration.generation.digest(),
+            node: digest(90),
+            candidate: input.candidate,
+            plan: digest(91),
+            coverage: input.members.clone(),
+        };
+        state.integration.admitted = alloc::vec![input.clone()];
+    }
+
     #[test]
     fn same_scope_candidate_replacement_advances_the_generation_epoch() {
         let (record, mut state) = fixture();
+        // The replaced member is on the head, so its removal abandons the head
+        // and the namespace its contribution was merged in. Its scope revision
+        // is unchanged, which leaves the epoch as the only field that can
+        // distinguish the fresh generation from the polluted one.
+        let covered = queued_input("alpha", 10, 40);
+        advanced_head(&mut state, &covered);
         let before = state.integration.generation.digest();
         let members = state.integration.generation.members.clone();
         let base = state.integration.generation.base;
@@ -3672,6 +3742,66 @@ mod tests {
         assert_eq!(state.integration.generation.epoch, 1);
         assert_ne!(state.integration.generation.digest(), before);
         assert!(state.partial_head_repair.is_none());
+    }
+
+    /// A collider's repair is not an ejection from the head: its version was
+    /// never merged there, so nothing can re-enter through ancestry and the
+    /// head it must place on has to survive its own reconcile lap. A rule that
+    /// reset the head here would re-pin the collider to the generation base,
+    /// prepare its repair against that base, and collide on the same lines
+    /// again — the Reconcile/Verify/conflict loop this test names.
+    #[test]
+    fn reconciling_a_collider_keeps_the_survivor_head_its_repair_must_merge_onto() {
+        let (mut record, mut state) = fixture();
+        let survivor = queued_input("alpha", 10, 40);
+        advanced_head(&mut state, &survivor);
+        let generation = state.integration.generation.digest();
+        let head = state.integration.head.clone();
+        let reservation = StableHeadReservation {
+            owner: WorkpieceId(String::from("beta")),
+            generation,
+            node: head.node,
+            movement_count: state.policy.movement_budget,
+            deadline_unix_millis: 1_000,
+            hold: digest(92),
+        };
+        state.integration.reservation = Some(reservation.clone());
+        state.integration.movement_count = state.policy.movement_budget;
+        state.claims.insert(
+            String::from("alpha"),
+            ContextualResolutionClaim {
+                member: survivor.members[0].clone(),
+                proof: ResolutionProof::Standalone(VerifyProof {
+                    stage: StageId::Verify,
+                    gate_set: Digest::default(),
+                    evidence: Evidence {
+                        subject: survivor.candidate.tree,
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(93),
+                    },
+                }),
+            },
+        );
+        state.integration.queued = alloc::vec![queued_input("beta", 11, 30)];
+        let requests = current_requests(&mut record, &state);
+        state.requests.clone_from(&requests);
+
+        let mut effects = Vec::new();
+        invalidate_member_version(&record, &mut state, &WorkpieceId(String::from("beta")), &mut effects)
+            .expect("a collider's repair supersedes only its own contribution");
+
+        assert_eq!(state.integration.generation.digest(), generation, "the collider polluted no namespace");
+        assert_eq!(state.integration.head, head, "the survivor's coverage outlives its sibling's collision");
+        assert_eq!(state.integration.admitted, alloc::vec![survivor]);
+        assert_eq!(state.integration.reservation, Some(reservation), "the reservation pins the head through repair");
+        assert!(state.claims.contains_key("alpha"), "the survivor's verified claim is untouched");
+        assert!(!state.claims.contains_key("beta"));
+        assert!(state.integration.queued.is_empty(), "the superseded contribution leaves the queue");
+        assert_eq!(
+            state.requests.iter().map(|request| request.member.workpiece.0.as_str()).collect::<Vec<_>>(),
+            alloc::vec!["alpha"],
+            "only the repaired member's own request is withdrawn",
+        );
     }
 
     #[test]
@@ -4638,6 +4768,10 @@ mod tests {
         assert_eq!(next.integration.head, head);
         assert!(next.integration.in_flight.is_none());
         assert!(next.integration.queued.iter().any(|queued| queued.digest() == peer.digest()));
+        assert!(
+            !next.integration.queued.iter().any(|queued| queued.digest() == colliding.digest()),
+            "the input that would not place is withdrawn rather than re-offered onto the same head",
+        );
         let reconciled = decisions
             .effects
             .iter()
@@ -4651,8 +4785,17 @@ mod tests {
             [(workpiece, progress)]
                 if **workpiece == colliding.members[0].workpiece
                     && progress.stage == StageId::Reconcile
-                    && progress.fold_checkpoint == Some(head.node)
+                    && progress.fold_checkpoint == Some(head.candidate.checkout)
         ));
+        assert!(
+            decisions.effects.iter().any(|effect| {
+                matches!(effect, Decision::DispatchContextualAttempt { dispatch }
+                if dispatch.stage == StageId::Reconcile
+                    && dispatch.transformation.checkout == head.candidate.checkout
+                    && dispatch.transformation.inputs.as_slice() == from_ref(&colliding.candidate.tree))
+            }),
+            "the lap stands on the folded head and carries its own candidate as the subject"
+        );
         assert!(next.integration.reservation.as_ref().is_some_and(|reservation| {
             reservation.owner == colliding.members[0].workpiece && reservation.node == head.node
         }));

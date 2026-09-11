@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use std::slice::from_ref;
 
 use aether_bloomery::{
-    BloomId, BloomStatus, CoordinationPolicy, CoordinationState, Digest, Fact, FakeKeyProvider, KeyId, MemberPin,
-    ResolvedConfigs, Snapshot, StageId, Transformation, VerificationMode, decode_recorded_decisions,
+    BloomId, BloomStatus, CoordinationPolicy, CoordinationState, Digest, Fact, FakeKeyProvider, IntegrationHead, KeyId,
+    MemberPin, ResolvedConfigs, Snapshot, StageId, Transformation, VerificationMode, decode_recorded_decisions,
     decode_recorded_event, signed_approval,
 };
 use aether_chassis_bloomery::bloomery::mock_lane::{CANDIDATE_FILE, LaneMode, LaneScript};
@@ -82,8 +82,12 @@ fn coordination(harness: &ScenarioHarness, bloom: BloomId) -> CoordinationState 
     *record.coordination.clone().expect("an eager bloom carries coordination state")
 }
 
+fn head(harness: &ScenarioHarness, bloom: BloomId) -> IntegrationHead {
+    coordination(harness, bloom).integration.head
+}
+
 fn head_coverage(harness: &ScenarioHarness, bloom: BloomId) -> Vec<MemberPin> {
-    coordination(harness, bloom).integration.head.coverage
+    head(harness, bloom).coverage
 }
 
 fn covers(coverage: &[MemberPin], workpiece: &str) -> bool {
@@ -301,7 +305,8 @@ fn an_eager_append_collision_sends_back_only_the_collider() {
     harness.pump_until("the eager head advances over the member that finished first", |harness| {
         covers(&head_coverage(harness, bloom), &leading.workpiece)
     });
-    let partial = head_coverage(&harness, bloom);
+    let survivor_head = head(&harness, bloom);
+    let partial = survivor_head.coverage.clone();
 
     let following = parked_author_lane(&mut harness, StageId::Construct);
     assert_eq!(following.workpiece, colliding, "the sibling's author order follows its parked predecessor");
@@ -338,8 +343,8 @@ fn an_eager_append_collision_sends_back_only_the_collider() {
     );
 
     // The ejected member's lap is seeded from the candidate its own lane
-    // produced and carries the collision diagnostic, and its result is prepared
-    // against the head it inherited before it may be verified again.
+    // produced, stands on the head it collided with, and carries the collision
+    // diagnostic.
     let reconcile = parked_author_lane(&mut harness, StageId::Reconcile);
     assert_eq!(reconcile.workpiece, colliding);
     let transformation: Transformation =
@@ -347,6 +352,10 @@ fn an_eager_append_collision_sends_back_only_the_collider() {
     assert_eq!(
         transformation.inputs[0], collided[0][0].candidate.tree,
         "the lap is seeded from the candidate the ejected member's own lane produced",
+    );
+    assert_eq!(
+        transformation.checkout, survivor_head.candidate.checkout,
+        "the lap's working tree is the folded head, not the candidate that would not place",
     );
     assert!(
         transformation.description.is_some_and(|order| order.contains(SHARED)),
@@ -356,10 +365,6 @@ fn an_eager_append_collision_sends_back_only_the_collider() {
     author(&harness, &reconcile, SHARED, "pub fn shared() -> u8 {\n    33\n}\n");
     harness.release_parked_lanes(from_ref(&reconcile));
 
-    // Scope note: this scenario ends at the ejected member's return to
-    // verification. Carrying it back onto the head is deliberately not asserted
-    // here, because the coordinator does not currently get there — see the
-    // finding filed with this scenario.
     harness.pump_until("the reconciled candidate is prepared and re-queued for verification", |harness| {
         let state = coordination(harness, bloom);
         state.prepared.contains_key(colliding.as_str())
@@ -369,4 +374,47 @@ fn an_eager_append_collision_sends_back_only_the_collider() {
         claimed(&harness, bloom, &leading.workpiece),
         "the surviving member's verified claim outlives its sibling's reconcile lap",
     );
+    let prepared = coordination(&harness, bloom).prepared.remove(colliding.as_str()).expect("the prepared candidate");
+    assert_eq!(
+        prepared.diff_base, survivor_head.candidate,
+        "preparation merges the repair onto the advanced head, never back onto the generation base",
+    );
+    assert_eq!(prepared.context.starting_head, survivor_head, "the repair is pinned to the head that survived");
+
+    // The prepared candidate already carries the survivor's tree, so its append
+    // places on the very head the collision refused.
+    harness.pump_until("the repaired contribution joins the head the survivor already holds", |harness| {
+        let coverage = head_coverage(harness, bloom);
+        covers(&coverage, FIRST) && covers(&coverage, SECOND)
+    });
+    let advanced = advances(&harness, bloom);
+    assert_eq!(advanced.len(), 2, "the repaired member appends onto the partial head: {advanced:?}");
+    assert_eq!(advanced[0], partial, "the survivor's advance is retained exactly, not rebuilt");
+    assert_eq!(
+        collisions(&harness, bloom).len(),
+        1,
+        "the repair places rather than colliding again on the head it was prepared against",
+    );
+
+    harness.pump_until("the bloom resolves the root the repaired head selected", |harness| {
+        replay_snapshot(&mut harness.commission_store())
+            .blooms
+            .get(&bloom)
+            .is_some_and(|record| record.resolved_head.is_some())
+    });
+    let snapshot = replay_snapshot(&mut harness.commission_store());
+    let record = snapshot.blooms.get(&bloom).expect("the eager bloom remains projected");
+    let state = record.coordination.as_ref().expect("the eager coordination state remains projected");
+    assert_eq!(
+        record.resolved_head,
+        Some(state.integration.head.candidate.checkout),
+        "resolution adopts the head the repair rejoined rather than re-folding the leaves",
+    );
+    assert_eq!(
+        harness.ledger().iter().filter(|run| run.stage == Some(StageId::AggregateVerify)).count(),
+        1,
+        "the root the collision-free head selected is verified once",
+    );
+
+    harness.await_landing(bloom, BloomStatus::Landed);
 }
