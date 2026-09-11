@@ -268,6 +268,40 @@ impl ScenarioHarness {
         self.wire.calibration()
     }
 
+    /// Open a second, non-claiming connection to the store the live
+    /// coordinator writes, waiting out a write lock it holds rather than
+    /// failing on one.
+    ///
+    /// Every harness read and fixture write goes through a connection beside
+    /// the coordinator's own, and WAL is single-writer: a coordinator write
+    /// transaction blocks this connection — its migration pass included, which
+    /// is why the wait has to be set at open and not after — for as long as
+    /// that transaction runs. The store's default five-second wait is shorter
+    /// than the coordinator takes under a loaded scenario suite, and an
+    /// observer that gives up there reports `database is locked` in place of
+    /// the assertion the scenario came to make. Waiting the step budget
+    /// instead costs the scenario nothing it was not already spending: a step
+    /// that never completes still fails on its own budget, naming what it was
+    /// waiting for.
+    ///
+    /// # Panics
+    /// The store could not be opened inside the step budget.
+    #[track_caller]
+    fn open_store(&self) -> SqliteStore {
+        SqliteStore::open_with_busy_timeout(&self.store_path, self.step_budget).expect("the coordinator's store opens")
+    }
+
+    /// [`open_store`](Self::open_store) for the correspondence over the same
+    /// file, which a booting coordinator writes while the harness polls it.
+    ///
+    /// # Panics
+    /// The correspondence could not be opened inside the step budget.
+    #[track_caller]
+    fn open_correspondence(&self) -> SqliteCorrespondence {
+        SqliteCorrespondence::open_with_busy_timeout(&self.store_path, self.step_budget)
+            .expect("the correspondence store opens")
+    }
+
     /// The class the coordinator's journal records on disk (ADR-0184) — read
     /// through a second, non-claiming connection, the way `--check-store` and
     /// any other operator read does.
@@ -276,10 +310,7 @@ impl ScenarioHarness {
     /// The journal could not be opened or its class stamp did not read.
     #[must_use]
     pub fn journal_class(&self) -> StoreClass {
-        SqliteStore::open(&self.store_path)
-            .expect("the journal opens")
-            .journal_class()
-            .expect("the journal records a class")
+        self.open_store().journal_class().expect("the journal records a class")
     }
 
     /// One bloom's view.
@@ -441,7 +472,7 @@ impl ScenarioHarness {
     /// first revision could not be written.
     #[must_use]
     pub fn author_scope_revision(&self, workpiece: &str, surface: &[&str]) -> Digest {
-        let mut store = SqliteStore::open(&self.store_path).expect("the commission store opens for writing");
+        let mut store = self.open_store();
         let workpiece = WorkpieceId(workpiece.to_owned());
         let intent = Statement {
             words: format!("scope {}", workpiece.0).into_bytes(),
@@ -482,10 +513,7 @@ impl ScenarioHarness {
     /// The commission store could not be opened or read.
     #[must_use]
     pub fn scope_revision(&self, digest: Digest) -> Option<ScopeRevision> {
-        SqliteStore::open(&self.store_path)
-            .expect("the commission store opens for reading")
-            .load_revision(digest)
-            .expect("the commission store reads")
+        self.open_store().load_revision(digest).expect("the commission store reads")
     }
 
     /// A second handle on the commission store this coordinator writes.
@@ -503,7 +531,7 @@ impl ScenarioHarness {
     /// The commission store could not be opened.
     #[must_use]
     pub fn commission_store(&self) -> SqliteStore {
-        SqliteStore::open(&self.store_path).expect("the commission store opens")
+        self.open_store()
     }
 
     /// Seal a single-member bloom on the observed mainline and return its id.
@@ -663,7 +691,7 @@ impl ScenarioHarness {
     /// # Panics
     /// The store could not be opened, or a row could not be written.
     pub(super) fn persist_work_orders(&self, spec: &BloomSpec) {
-        let mut store = SqliteStore::open(&self.store_path).expect("the store opens for writing");
+        let mut store = self.open_store();
         for member in spec.members() {
             let Ok(Some(revision)) = store.load_revision(member.scope_revision) else {
                 continue;
@@ -688,7 +716,7 @@ impl ScenarioHarness {
     /// not be written.
     #[must_use]
     pub fn approve_widened_revision(&self, widened: &ScopeRevision) -> Digest {
-        let mut store = SqliteStore::open(&self.store_path).expect("the commission store opens for writing");
+        let mut store = self.open_store();
         let revision = store.write_revision(widened, &RevisionEvidence::default()).expect("the successor writes");
         store
             .insert_approval(
@@ -861,10 +889,7 @@ impl ScenarioHarness {
     /// The store could not be opened or read.
     #[must_use]
     pub fn outstanding(&self) -> Vec<String> {
-        SqliteStore::open(&self.store_path)
-            .expect("the coordinator's journal opens for reading")
-            .list_order_nonces()
-            .expect("the outstanding-order registry reads")
+        self.open_store().list_order_nonces().expect("the outstanding-order registry reads")
     }
 
     /// Poll until `want` holds of the (single) bloom, checking both liveness
@@ -991,8 +1016,8 @@ impl ScenarioHarness {
     fn wait_for_genesis_correspondence(&self) {
         let deadline = Instant::now() + BOOT_BUDGET;
         loop {
-            let bound = SqliteCorrespondence::open(&self.store_path)
-                .expect("the correspondence store opens")
+            let bound = self
+                .open_correspondence()
                 .resolve_backend_object(&Snapshot::GENESIS_MAINLINE)
                 .expect("the correspondence store reads")
                 .is_some();
@@ -1325,8 +1350,7 @@ impl ScenarioHarness {
     /// # Panics
     /// The journal could not be opened or the description could not be written.
     pub fn record_description(&self, bloom: BloomId, workpiece: &str, description: &str) {
-        SqliteStore::open(&self.store_path)
-            .expect("the coordinator's journal opens for writing")
+        self.open_store()
             .record_dispatch_description(bloom.0.as_bytes(), workpiece, description)
             .expect("the work-order description persists");
     }
@@ -1622,7 +1646,7 @@ impl ScenarioHarness {
     /// The journal could not be opened or an outstanding nonce did not resolve.
     #[must_use]
     pub fn orders(&self) -> Vec<OutstandingOrder> {
-        let mut store = SqliteStore::open(&self.store_path).expect("the coordinator's journal opens for reading");
+        let mut store = self.open_store();
         store
             .list_outstanding_nonces()
             .expect("the outstanding-order registry reads")
@@ -1691,10 +1715,7 @@ impl ScenarioHarness {
     /// The journal could not be opened or the study index could not be read.
     #[must_use]
     pub fn study_index_row(&self, bloom: BloomId, attempt: Digest) -> Option<String> {
-        SqliteStore::open(&self.store_path)
-            .expect("the coordinator's journal opens for reading")
-            .lookup_study(bloom.0.as_bytes(), attempt.as_bytes())
-            .expect("the study index reads")
+        self.open_store().lookup_study(bloom.0.as_bytes(), attempt.as_bytes()).expect("the study index reads")
     }
 
     /// Every reader verdict `bloom`'s journal recorded (ADR-0216), in journal
@@ -1710,8 +1731,7 @@ impl ScenarioHarness {
     /// The journal could not be opened or read.
     #[must_use]
     pub fn study_verdicts(&self, bloom: BloomId) -> Vec<bool> {
-        SqliteStore::open(&self.store_path)
-            .expect("the coordinator's journal opens for reading")
+        self.open_store()
             .replay_journal()
             .expect("the journal replays")
             .iter()
