@@ -1020,12 +1020,16 @@ pub trait StoreBackend: Send {
     /// know what an operator said — a pre-ADR-0190 row would turn a landing into
     /// a hard failure over a proposal-body sentence.
     fn list_events(&mut self) -> rusqlite::Result<Vec<Vec<u8>>>;
-    /// Append discriminated proof facts (ADR-0200). Insert-only: a later
-    /// write never updates or deletes an earlier row, and a stale closure
-    /// key is left in place. The caller is the verify path after flake
-    /// discrimination — this method does not judge whether a result earned
-    /// a row.
-    fn append_proof_facts(&mut self, facts: &[ProofFactWrite<'_>]) -> rusqlite::Result<()>;
+    /// Append discriminated proof facts (ADR-0200), returning how many rows
+    /// the ledger gained. Insert-only: a later write never updates or deletes
+    /// an earlier row, and a stale closure key is left in place. The caller is
+    /// the verify path after flake discrimination — this method does not judge
+    /// whether a result earned a row. A fact whose identity
+    /// (`closure_key`, `test_id`, `result`, `host_class`, `producing_dispatch`)
+    /// the table already holds is dropped rather than appended a second time:
+    /// consultation reads the newest sequence per gate, so re-appending a
+    /// retained older result would re-date it past what replaced it.
+    fn append_proof_facts(&mut self, facts: &[ProofFactWrite<'_>]) -> rusqlite::Result<usize>;
     /// Every proof-fact row, in append order — the test oracle and the
     /// consultation read a later slice will key.
     fn list_proof_facts(&mut self) -> rusqlite::Result<Vec<ProofFactRow>>;
@@ -1418,7 +1422,21 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
 /// `22` is the assembled prompt-manifest digest on each order row (ADR-0214):
 /// `prompt_manifest`, nullable. A pre-column row names no retained manifest;
 /// the lane still consumes the bundle from the sealed pin.
-const SCHEMA_VERSION: i64 = 24;
+///
+/// `23` and `24` are the durable shared-run projection (ADR-0218): the
+/// `shared_runs` / `shared_run_members` / `shared_run_steps` tables, the
+/// contextual dispatch and member-verification queues, the run-cancellation
+/// tombstones, the partial-head-repair ledger, and the construction-admission
+/// table. Created empty — a store written before grouped verification holds no
+/// physical run to invent, and the journal replays the coordination facts.
+///
+/// `25` is the proof-fact identity index: one row per
+/// `(closure_key, test_id, result, host_class, producing_dispatch)`, so a
+/// replayed recording of a fact the ledger already holds cannot append a second
+/// copy and re-date an older result past a newer one. Rows that already
+/// duplicate an identity are collapsed onto their earliest sequence — the
+/// duplicates carry no information the retained row does not.
+const SCHEMA_VERSION: i64 = 25;
 
 /// Historical TEXT stamp written beside v2 decisions rows before the digest
 /// column existed. Kept only so migration 17 can map it onto the v2 digest.
@@ -1613,12 +1631,12 @@ fn migrate_schema(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()>
     }
 
     add_prompt_manifest_column(migration)?;
+
+    // Versions 23 and 24 (ADR-0218): the durable shared-run projection. Created
+    // empty; the journal holds the coordination facts a physical run is about.
     migration.execute_batch(SHARED_RUN_TABLES)?;
-    if !has_column(migration, "shared_run_members", "queued_unix_millis")? {
-        migration.execute_batch(
-            "ALTER TABLE shared_run_members ADD COLUMN queued_unix_millis INTEGER NOT NULL DEFAULT 0;",
-        )?;
-    }
+
+    migrate_proof_fact_identity(migration)?;
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
@@ -1643,6 +1661,25 @@ fn migrate_deadline_columns(migration: &rusqlite::Transaction<'_>) -> rusqlite::
         migration.execute_batch(&add_deadline_column(table))?;
     }
     Ok(())
+}
+
+/// Schema v25: one proof-fact row per recorded identity.
+///
+/// The ledger stays append-only — nothing rewrites a retained result — but a
+/// replay that re-derives a fact the table already holds must not append a
+/// second copy: the newest sequence per gate is what reuse consults, so a
+/// re-appended older green would supersede the red that replaced it. Existing
+/// duplicates are collapsed onto their earliest sequence before the index is
+/// installed; they are byte-identical to the row that survives, so the collapse
+/// drops no observation.
+fn migrate_proof_fact_identity(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    migration.execute_batch(
+        "DELETE FROM proof_facts WHERE sequence NOT IN (\
+             SELECT MIN(sequence) FROM proof_facts \
+             GROUP BY closure_key, test_id, result, host_class, producing_dispatch\
+         );",
+    )?;
+    migration.execute_batch(PROOF_FACTS_IDENTITY_INDEX)
 }
 
 /// Schema v22 (ADR-0214): assembled prompt-manifest digest on each order row.
@@ -2009,6 +2046,13 @@ CREATE TABLE IF NOT EXISTS proof_facts (
     producing_dispatch  TEXT NOT NULL,
     producing_bloom     BLOB NOT NULL
 );
+";
+
+/// One row per recorded fact identity. The producing bloom is an attribute of
+/// the producing dispatch, so it is not part of the key.
+const PROOF_FACTS_IDENTITY_INDEX: &str = "\
+CREATE UNIQUE INDEX IF NOT EXISTS proof_facts_identity \
+    ON proof_facts (closure_key, test_id, result, host_class, producing_dispatch);
 ";
 
 /// The ADR-0211 candidate-hash journal. Append-only; sequence is the primary
@@ -2412,21 +2456,26 @@ impl StoreBackend for SqliteStore {
             ));
         }
         let transaction = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // The queue time is the logical request's, so latency spans every
+        // physical attempt; the deadline belongs to *this* attempt. Carrying an
+        // earlier attempt's deadline forward would hand a retry a wall clock
+        // that has already run out (#5903).
         let member_timings = members
             .iter()
             .map(|member| {
                 transaction
                     .query_row(
-                        "SELECT queued_unix_millis, deadline_unix_millis FROM shared_run_members \
+                        "SELECT queued_unix_millis FROM shared_run_members \
                          WHERE request = ?1 ORDER BY queued_unix_millis, rowid LIMIT 1",
                         rusqlite::params![&member.request],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                        |row| row.get::<_, i64>(0),
                     )
                     .optional()
-                    .map(|timing| {
-                        timing.unwrap_or_else(|| {
-                            (recorded_column(member.queued_unix_millis), recorded_column(member.deadline_unix_millis))
-                        })
+                    .map(|queued| {
+                        (
+                            queued.unwrap_or_else(|| recorded_column(member.queued_unix_millis)),
+                            recorded_column(member.deadline_unix_millis),
+                        )
                     })
             })
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2680,10 +2729,17 @@ impl StoreBackend for SqliteStore {
             ));
         }
         if scheduled && sequence != row.sequence {
+            // A re-queue is a fresh physical attempt: its wall clock starts now.
+            // `queued_unix_millis` stays pinned at the logical request's first
+            // enqueue, so latency still spans every attempt (#5903).
             self.conn.execute(
                 "UPDATE shared_member_verification_queue \
-                 SET sequence = ?2, scheduled = 0, proposal = NULL WHERE request = ?1",
-                rusqlite::params![&row.request, i64::try_from(row.sequence).unwrap_or(i64::MAX)],
+                 SET sequence = ?2, deadline_unix_millis = ?3, scheduled = 0, proposal = NULL WHERE request = ?1",
+                rusqlite::params![
+                    &row.request,
+                    i64::try_from(row.sequence).unwrap_or(i64::MAX),
+                    recorded_column(row.deadline_unix_millis),
+                ],
             )?;
             Ok(RecordOutcome::Recorded)
         } else {
@@ -3930,19 +3986,20 @@ impl StoreBackend for SqliteStore {
         rows.collect()
     }
 
-    fn append_proof_facts(&mut self, facts: &[ProofFactWrite<'_>]) -> rusqlite::Result<()> {
+    fn append_proof_facts(&mut self, facts: &[ProofFactWrite<'_>]) -> rusqlite::Result<usize> {
         if facts.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         let tx = self.conn.transaction()?;
+        let mut appended = 0;
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO proof_facts \
+                "INSERT OR IGNORE INTO proof_facts \
                  (closure_key, test_id, result, host_class, producing_dispatch, producing_bloom) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
             for fact in facts {
-                stmt.execute(rusqlite::params![
+                appended += stmt.execute(rusqlite::params![
                     fact.closure_key,
                     fact.test_id,
                     fact.result,
@@ -3952,7 +4009,8 @@ impl StoreBackend for SqliteStore {
                 ])?;
             }
         }
-        tx.commit()
+        tx.commit()?;
+        Ok(appended)
     }
 
     fn list_proof_facts(&mut self) -> rusqlite::Result<Vec<ProofFactRow>> {

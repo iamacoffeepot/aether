@@ -146,11 +146,14 @@ pub fn discriminate(first: &RunnerReport, second: &RunnerReport) -> Discriminate
     DiscriminatedFacts { facts }
 }
 
-/// Record already-discriminated facts from the verify path.
+/// Record already-discriminated facts from the verify path, returning how many
+/// rows the ledger gained.
 ///
 /// Member verify stamps its one closure key. Aggregate verify stamps every
 /// member key it proves, so each member's address holds the same fact.
-/// Nothing here accepts a [`RunnerReport`].
+/// Nothing here accepts a [`RunnerReport`]. A fact the ledger already holds
+/// under the same producing dispatch is not appended again, so a replayed
+/// recording reports nothing written rather than re-dating a retained result.
 ///
 /// # Errors
 /// The store write failed.
@@ -184,9 +187,7 @@ pub fn record_proof_facts(
             })
         })
         .collect();
-    let written = writes.len();
-    store.append_proof_facts(&writes)?;
-    Ok(written)
+    store.append_proof_facts(&writes)
 }
 
 #[cfg(all(test, feature = "runtime"))]

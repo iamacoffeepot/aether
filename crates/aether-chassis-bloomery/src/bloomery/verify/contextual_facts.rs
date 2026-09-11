@@ -81,31 +81,13 @@ impl ContentAddressed for HostInvocation<'_> {
     const DOMAIN: &'static str = "aether.bloomery.contextual_host_invocation.v1";
 }
 
-/// Decode a verifier's additive observation artifact after the host has bound
-/// its file to an actual physical invocation. Old candidate CLIs may omit this
-/// artifact; their ordinary gate receipt remains usable, but supplies no new
-/// per-test ledger facts.
+/// Decode one gate's document out of a verifier's additive observation
+/// artifact, after the host has bound its file to an actual physical
+/// invocation. Old candidate CLIs may omit this artifact; their ordinary gate
+/// receipt remains usable, but supplies no new per-test ledger facts.
 ///
 /// Baseline probes inside an umbrella are excluded because they ran another
 /// tree. Their own source identity must be admitted separately.
-///
-/// # Errors
-/// The artifact is oversized, malformed, unsupported, or names another order.
-pub fn contextual_reports(
-    bytes: &[u8],
-    expected_nonce: &str,
-    expected_gate: &str,
-    node: &SharedRunNode,
-    contract: &CompositionContract,
-) -> Result<Vec<ContextualRunnerReport>, ContextualFactError> {
-    if bytes.len() > 8 * 1024 * 1024 {
-        return Err(ContextualFactError::InvalidArtifact);
-    }
-    let document: ObservationDocument =
-        serde_json::from_slice(bytes).map_err(|_| ContextualFactError::InvalidArtifact)?;
-    reports_for_document(document, expected_nonce, expected_gate, node, contract)
-}
-
 fn reports_for_document(
     document: ObservationDocument,
     expected_nonce: &str,
@@ -587,6 +569,45 @@ mod tests {
     }
 
     #[test]
+    fn a_replayed_recording_cannot_re_date_the_green_a_red_already_superseded() {
+        // The restart path re-derives facts from retained receipts, so the same
+        // pair is offered to the ledger more than once. Reuse consults the
+        // newest sequence per gate: appending a second copy of the older green
+        // would put it past the red that replaced it and hand out a proof for a
+        // context that is currently failing.
+        let mut store = SqliteStore::open(":memory:").expect("valid contextual fixture");
+        let (node, contract) = inputs();
+        record_gate(&mut store, &node, &contract, "verify.test", 10, ProofResult::Green, "first-run");
+        record_gate(&mut store, &node, &contract, "verify.test", 20, ProofResult::Red, "second-run");
+        let after_red = store.list_proof_facts().expect("proof facts read");
+
+        let replayed = gate_report(&node, &contract, "verify.test", 10, ProofResult::Green);
+        let replayed_peer = gate_report(&node, &contract, "verify.test", 11, ProofResult::Green);
+        assert_eq!(
+            record_contextual_facts(
+                &mut store,
+                &node,
+                &contract,
+                [&replayed, &replayed_peer],
+                &HostClass::new("fleet"),
+                "first-run",
+                &[10; 32],
+            )
+            .expect("the replay is accepted, not refused"),
+            0,
+            "a fact the ledger already holds is not appended again",
+        );
+
+        assert_eq!(store.list_proof_facts().expect("proof facts read"), after_red);
+        assert!(
+            reuse_contextual_proof(&mut store, &node, &contract, &HostClass::new("fleet"))
+                .expect("proof lookup")
+                .is_none(),
+            "the newer red still stands after the replay",
+        );
+    }
+
+    #[test]
     fn proof_reuse_does_not_cross_node_contract_or_host_class() {
         let mut store = SqliteStore::open(":memory:").expect("valid contextual fixture");
         let (node, contract) = inputs();
@@ -731,6 +752,11 @@ mod tests {
         assert!(store.list_proof_facts().expect("valid contextual fixture").is_empty());
     }
 
+    fn bundle(document: &serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({ "protocol": 1, "documents": [document] }))
+            .expect("valid contextual fixture")
+    }
+
     #[test]
     fn baseline_and_unknown_observations_do_not_become_candidate_facts() {
         let (node, contract) = inputs();
@@ -741,26 +767,11 @@ mod tests {
                 {"invocation": digest(12), "at": "inherited-head", "outcomes": {"base_only": "passed"}}
             ]
         });
-        let reports = contextual_reports(
-            &serde_json::to_vec(&artifact).expect("valid contextual fixture"),
-            "physical-step",
-            "verify.test",
-            &node,
-            &contract,
-        )
-        .expect("valid contextual fixture");
+        let reports =
+            contextual_bundle_reports(&bundle(&artifact), "physical-step", &node, &contract).expect("bound artifact");
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].report.outcomes().collect::<Vec<_>>(), [("gate:verify.test", ProofResult::Green)]);
-        assert!(
-            contextual_reports(
-                &serde_json::to_vec(&artifact).expect("valid contextual fixture"),
-                "another-step",
-                "verify.test",
-                &node,
-                &contract
-            )
-            .is_err()
-        );
+        assert!(contextual_bundle_reports(&bundle(&artifact), "another-step", &node, &contract).is_err());
     }
 
     #[test]
@@ -773,14 +784,8 @@ mod tests {
                 {"invocation": digest(12), "at": null, "outcomes": {"gate:verify.test": "passed"}}
             ]
         });
-        let first = contextual_reports(
-            &serde_json::to_vec(&artifact).expect("valid contextual fixture"),
-            "first-step",
-            "verify.test",
-            &node,
-            &contract,
-        )
-        .expect("valid contextual fixture");
+        let first =
+            contextual_bundle_reports(&bundle(&artifact), "first-step", &node, &contract).expect("bound artifact");
         assert_eq!(first.len(), 1);
         let mut store = SqliteStore::open(":memory:").expect("valid contextual fixture");
         assert!(matches!(
@@ -800,14 +805,8 @@ mod tests {
         // Only a separately issued physical nonce can supply the second
         // report. The candidate's internal ids can even be identical.
         artifact["nonce"] = "second-step".into();
-        let second = contextual_reports(
-            &serde_json::to_vec(&artifact).expect("valid contextual fixture"),
-            "second-step",
-            "verify.test",
-            &node,
-            &contract,
-        )
-        .expect("valid contextual fixture");
+        let second =
+            contextual_bundle_reports(&bundle(&artifact), "second-step", &node, &contract).expect("bound artifact");
         assert_ne!(first[0].invocation, second[0].invocation);
         assert_eq!(
             record_contextual_facts(
@@ -836,15 +835,7 @@ mod tests {
             ]
         });
         assert!(
-            contextual_reports(
-                &serde_json::to_vec(&artifact).expect("valid contextual fixture"),
-                "step",
-                "verify.test",
-                &node,
-                &contract,
-            )
-            .expect("valid contextual fixture")
-            .is_empty()
+            contextual_bundle_reports(&bundle(&artifact), "step", &node, &contract).expect("bound artifact").is_empty()
         );
     }
 

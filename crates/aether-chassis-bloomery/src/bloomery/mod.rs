@@ -145,8 +145,8 @@ pub use verify::{
 #[cfg(feature = "runtime")]
 pub use verify::{
     ContextualFactError, ContextualProofFactReuse, ContextualProofReuse, ContextualRunnerReport,
-    contextual_bundle_reports, contextual_fact_key, contextual_reports, observed_probe_verdict,
-    record_contextual_facts, reuse_contextual_proof,
+    contextual_bundle_reports, contextual_fact_key, observed_probe_verdict, record_contextual_facts,
+    reuse_contextual_proof,
 };
 
 pub use verify::{

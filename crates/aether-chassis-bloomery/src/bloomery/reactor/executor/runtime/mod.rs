@@ -980,13 +980,6 @@ impl ExecutorReactorState {
         self.pusher = pusher;
         self
     }
-
-    /// Substitute the immutable source snapshot seam for `BaseVerify` fixtures.
-    #[must_use]
-    pub fn with_source(mut self, source: SourceShell) -> Self {
-        self.source = Some(source);
-        self
-    }
 }
 
 /// Collect admitted attempt results so the handler can forward each to the control

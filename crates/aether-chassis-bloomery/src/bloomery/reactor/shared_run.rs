@@ -51,6 +51,10 @@ pub enum SharedStepDescriptor {
 }
 
 /// Trusted, restartable result of one actual executor invocation.
+///
+/// Every optional field defaults on decode: a receipt is a durable row a later
+/// build has to read back, and a field this build added must not make every
+/// row written before it undecodable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedStepReceipt {
     pub invocation: Digest,
@@ -58,12 +62,17 @@ pub struct SharedStepReceipt {
     #[serde(with = "StageVerdictDef")]
     pub verdict: StageVerdict,
     pub failed_verifiers: VerifyFailureSet,
+    #[serde(default)]
     pub failed_verifier_names: Vec<String>,
     #[serde(default)]
     pub findings: Option<String>,
+    #[serde(default)]
     pub cost: Option<StudyCost>,
+    #[serde(default)]
     pub calls: Option<Vec<StudyCall>>,
+    #[serde(default)]
     pub contextual_observations: Option<Vec<u8>>,
+    #[serde(default)]
     pub probe_verdict: Option<ProbeVerdict>,
 }
 

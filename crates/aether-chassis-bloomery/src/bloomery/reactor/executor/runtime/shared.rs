@@ -8,11 +8,12 @@ use std::{
 use aether_bloomery::{
     Admit, BloomId, CompositionInput, ConfigScopes, ConstructionAdmission, ConstructionAdmissionPayload,
     ConstructionCheckpoint, ContextualDispatchPayload, CoordinationCancelPayload, Digest, DispatchPayload, Event,
-    Evidence, EvidenceKind, ExecutionStatus, Fact, FailureScope, IdempotencyKey, MemberPin, MemberVerifyLatency,
-    MemberVerifyOutcome, ModelOverride, Nonce, PartialHeadRepairCompletion, PartialHeadRepairDispatch,
-    PartialHeadRepairPayload, SharedRunCompletion, SharedRunDispatch, SharedRunDispatchPayload, SharedRunExecution,
-    SharedRunMode, StageId, StageVerdict, StudyCall, StudyCost, Topic, VerificationObligation, VerifyFailureSet,
-    VerifyProof, WorkHandle, WorkpieceId, construction_nonce_digest,
+    Evidence, EvidenceKind, ExecutionStatus, Fact, FailureScope, IdempotencyKey, MAX_VERIFIER_IDENTITIES, MemberPin,
+    MemberVerifyLatency, MemberVerifyOutcome, ModelOverride, Nonce, PartialHeadRepairCompletion,
+    PartialHeadRepairDispatch, PartialHeadRepairPayload, SharedRunCompletion, SharedRunDispatch,
+    SharedRunDispatchPayload, SharedRunExecution, SharedRunMode, StageId, StageVerdict, StudyCall, StudyCost, Topic,
+    VerificationObligation, VerifyFailure, VerifyFailureSet, VerifyProof, WorkHandle, WorkpieceId,
+    construction_nonce_digest,
 };
 use aether_data::wire::{from_bytes, to_vec};
 
@@ -397,12 +398,18 @@ pub(super) fn drain_construction_admissions(
     let nonce = super::dispatch_nonce(entry.sequence);
     let dispatch_digest = payload.dispatch.digest();
     if let Some(retained) = store.construction_admission(dispatch_digest.as_bytes())? {
-        if retained.nonce != nonce.0 {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "construction admission replay changed its physical nonce".to_owned(),
-            ));
-        }
-        if retained.retired {
+        if retained.retired || retained.nonce != nonce.0 {
+            // The admitted nonce is the one the journal already carries, so a
+            // topic row naming a different one is superseded, not authoritative.
+            // Acknowledging it retires the row; refusing the pass would leave
+            // the entry un-acked and wedge the whole topic behind it (#5903).
+            if retained.nonce != nonce.0 {
+                tracing::warn!(
+                    retained = %retained.nonce,
+                    replayed = %nonce.0,
+                    "construction admission replay names another physical nonce; the retained admission stands"
+                );
+            }
             store.ack_topic(Topic::ConstructionAdmission, entry.sequence)?;
             return Ok(admits);
         }
@@ -1207,7 +1214,10 @@ fn complete_observed_step(
         tracing::warn!(nonce = %step.nonce, "shared-run evidence named a different subject");
         return Ok(false);
     }
-    let descriptor = decode_host::<SharedStepDescriptor>(&step.descriptor)?;
+    let Ok(descriptor) = decode_host::<SharedStepDescriptor>(&step.descriptor) else {
+        tracing::warn!(nonce = %step.nonce, "shared-run step descriptor does not decode; the step is left open");
+        return Ok(false);
+    };
     let contextual_observations = upload.observation.contextual_observations;
     let probe_verdict = match (&descriptor, contextual_observations.as_deref()) {
         (SharedStepDescriptor::Probe(request), Some(bytes)) => {
@@ -1651,13 +1661,16 @@ fn retained_probe_receipts(
 ) -> rusqlite::Result<Vec<BatchProbeReceipt>> {
     let mut receipts = Vec::new();
     for step in store.shared_run_steps(&row.run)? {
-        let SharedStepDescriptor::Probe(preparation) = decode_host(&step.descriptor)? else {
+        let Ok(SharedStepDescriptor::Probe(preparation)) = decode_host(&step.descriptor) else {
             continue;
         };
         let Some(bytes) = step.receipt.as_deref() else {
             continue;
         };
-        let receipt = decode_host::<SharedStepReceipt>(bytes)?;
+        let Ok(receipt) = decode_host::<SharedStepReceipt>(bytes) else {
+            tracing::warn!(nonce = %step.nonce, "probe receipt does not decode; it supplies no attribution evidence");
+            continue;
+        };
         receipts.push(BatchProbeReceipt {
             request: preparation.probe,
             invocation: receipt.invocation,
@@ -1800,11 +1813,36 @@ fn selected_failure<'a>(failures: &'a [BatchFailure], member: &WorkpieceId) -> O
         })
 }
 
+/// One gate identity as a position in `failures`' vocabulary: the compiled
+/// identity of that name, or the lowest declared position this set has not
+/// already spent — the same arrival interning a decoded row takes.
+fn interned_gate(failures: VerifyFailureSet, gate: &str) -> Option<VerifyFailure> {
+    VerifyFailure::from_name(gate).or_else(|| {
+        (0..u8::try_from(MAX_VERIFIER_IDENTITIES).unwrap_or(u8::MAX))
+            .find_map(|position| VerifyFailure::declared(position, gate).filter(|failure| !failures.contains(*failure)))
+    })
+}
+
+/// Every gate identity this run failed: the executor's own verifier set plus
+/// the gates only the observation artifact declared red.
+///
+/// The two sources are separate — [`declared_failed_checks`] already accepts
+/// either — so a member failure has to carry their union. The reducer refuses
+/// a `Failed` outcome whose failure set is empty, so an artifact-only red would
+/// otherwise settle as invalid evidence and stall the whole completion (#5903).
+fn contextual_failures(receipt: &SharedStepReceipt, checks: &[BatchCheck]) -> VerifyFailureSet {
+    checks.iter().fold(receipt.failed_verifiers, |failures, check| {
+        interned_gate(failures, check.gate()).map_or(failures, |failure| failures.union(VerifyFailureSet::one(failure)))
+    })
+}
+
 fn contextual_outcomes(
     dispatch: &SharedRunDispatch,
     report: &BatchReport,
     receipt: &SharedStepReceipt,
+    checks: &[BatchCheck],
 ) -> Vec<MemberVerifyOutcome> {
+    let failures = contextual_failures(receipt, checks);
     let mut outcomes = Vec::new();
     let node = match &dispatch.execution {
         SharedRunExecution::Contextual { node, .. } => node.digest(),
@@ -1820,7 +1858,7 @@ fn contextual_outcomes(
                     members: vec![request.member.clone()],
                     evidence: evidence.first().copied().unwrap_or(receipt.evidence.detail),
                 },
-                failures: receipt.failed_verifiers,
+                failures,
                 evidence: scoped_evidence(
                     &receipt.evidence,
                     evidence.first().copied().unwrap_or(receipt.evidence.detail),
@@ -1838,7 +1876,7 @@ fn contextual_outcomes(
                         .collect(),
                     evidence: evidence.first().copied().unwrap_or(receipt.evidence.detail),
                 },
-                failures: receipt.failed_verifiers,
+                failures,
                 evidence: scoped_evidence(
                     &receipt.evidence,
                     evidence.first().copied().unwrap_or(receipt.evidence.detail),
@@ -1862,7 +1900,7 @@ fn contextual_outcomes(
                         .unwrap_or_else(Digest::default),
                     evidence: evidence.first().copied().unwrap_or(receipt.evidence.detail),
                 },
-                failures: receipt.failed_verifiers,
+                failures,
                 evidence: scoped_evidence(
                     &receipt.evidence,
                     evidence.first().copied().unwrap_or(receipt.evidence.detail),
@@ -1929,7 +1967,10 @@ fn contextual_terminal_outcomes(
     }) else {
         return Ok(None);
     };
-    let receipt = decode_host::<SharedStepReceipt>(step.receipt.as_deref().unwrap_or_default())?;
+    let Ok(receipt) = decode_host::<SharedStepReceipt>(step.receipt.as_deref().unwrap_or_default()) else {
+        tracing::warn!(nonce = %step.nonce, "contextual receipt does not decode; the run holds rather than settles");
+        return Ok(None);
+    };
     let checks = declared_failed_checks(dispatch, &receipt, &step.nonce);
     if contextual_run_passed(receipt.verdict, &checks) {
         return Ok(Some(
@@ -1976,7 +2017,7 @@ fn contextual_terminal_outcomes(
                 store.update_shared_run(&row.run, SharedRunLifecycle::Running, next.ordinal)?;
                 None
             }
-            BatchProgress::Complete(report) => Some(contextual_outcomes(dispatch, &report, &receipt)),
+            BatchProgress::Complete(report) => Some(contextual_outcomes(dispatch, &report, &receipt, &checks)),
             BatchProgress::Invalid(reason) => {
                 let observation = Digest::of_wire_bytes(reason.as_bytes());
                 Some(pending_contextual_outcomes(dispatch, observation))
@@ -2280,25 +2321,33 @@ pub(super) fn drive_shared_runs(
         if row.lifecycle == SharedRunLifecycle::Preparing {
             continue;
         }
-        let dispatch = from_bytes::<SharedRunDispatch>(&row.dispatch)
-            .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
+        let Ok(dispatch) = from_bytes::<SharedRunDispatch>(&row.dispatch) else {
+            tracing::warn!(nonce = %row.nonce, "shared-run dispatch does not decode; its siblings still drive");
+            continue;
+        };
+        // A receipted step whose order is still outstanding is one whose
+        // completion pass did not finish: the receipt is durable, its
+        // projections are not. Replaying them is restart recovery, not routine
+        // work — consuming the order closes the step, so a later tick neither
+        // re-projects findings nor re-derives facts against the whole retained
+        // run history, where a re-appended older green would supersede the red
+        // that replaced it (#5903).
         for step in store.shared_run_steps(&row.run)?.into_iter().filter(|step| step.receipt.is_some()) {
+            if store.lookup_order(&step.nonce)?.is_none() {
+                continue;
+            }
             if let Some(receipt) =
                 step.receipt.as_deref().and_then(|bytes| decode_host::<SharedStepReceipt>(bytes).ok())
             {
                 project_shared_findings(store, &dispatch, &receipt)?;
+                if matches!(
+                    decode_host::<SharedStepDescriptor>(&step.descriptor),
+                    Ok(SharedStepDescriptor::ContextualFull { .. })
+                ) {
+                    record_independent_contextual_facts(store, &dispatch, &step, &receipt, host_class)?;
+                }
             }
-            if matches!(
-                decode_host::<SharedStepDescriptor>(&step.descriptor),
-                Ok(SharedStepDescriptor::ContextualFull { .. })
-            ) && let Some(receipt) =
-                step.receipt.as_deref().and_then(|bytes| decode_host::<SharedStepReceipt>(bytes).ok())
-            {
-                record_independent_contextual_facts(store, &dispatch, &step, &receipt, host_class)?;
-            }
-            if store.lookup_order(&step.nonce)?.is_some() {
-                store.consume_order(&step.nonce)?;
-            }
+            store.consume_order(&step.nonce)?;
         }
         if matches!(row.lifecycle, SharedRunLifecycle::Ready | SharedRunLifecycle::Running)
             && refuse_invalid_shared_inputs(store, &row, &dispatch, host_class, now_unix_millis)?
@@ -3104,6 +3153,102 @@ mod tests {
         assert!(contextual_receipt_matches_node(&receipt, &node));
         receipt.evidence.subject = Digest::of_wire_bytes(b"another-tree");
         assert!(!contextual_receipt_matches_node(&receipt, &node));
+    }
+
+    #[test]
+    fn an_artifact_only_gate_failure_still_names_a_failing_verifier() {
+        // The executor's own verifier set and the observation artifact are two
+        // sources for the same question. A run whose gate only failed in the
+        // artifact would otherwise produce `Failed { failures: empty }`, which
+        // the reducer refuses as invalid evidence for the whole completion —
+        // the run then never settles at all.
+        let dispatch = reducer_shaped_contextual_dispatch();
+        let member = dispatch.plan.requests[0].member.workpiece.clone();
+        let detail = Digest::of_wire_bytes(b"artifact evidence");
+        let receipt = SharedStepReceipt {
+            invocation: Digest::of_wire_bytes(b"invocation"),
+            evidence: Evidence {
+                subject: Digest::of_wire_bytes(b"composed tree"),
+                kind: EvidenceKind::VerificationResult,
+                detail,
+            },
+            verdict: StageVerdict::VerificationFailed,
+            failed_verifiers: VerifyFailureSet::default(),
+            failed_verifier_names: Vec::new(),
+            findings: None,
+            cost: None,
+            calls: None,
+            contextual_observations: None,
+            probe_verdict: None,
+        };
+        let failed = |gate: &str| {
+            let check = BatchCheck::Gate { id: gate.to_owned() };
+            let report = BatchReport {
+                failures: vec![BatchFailure::Attributed {
+                    member: member.clone(),
+                    check: check.clone(),
+                    evidence: vec![detail],
+                }],
+                ejected: Vec::new(),
+                survivors: Vec::new(),
+            };
+            match contextual_outcomes(&dispatch, &report, &receipt, from_ref(&check)).remove(0) {
+                MemberVerifyOutcome::Failed { failures, .. } => failures,
+                other => panic!("an attributed batch failure is a member failure, not {other:?}"),
+            }
+        };
+
+        assert!(failed("verify.test").contains(VerifyFailure::Test));
+        assert!(!failed("verify.novel").is_empty(), "a declared gate takes a position past the compiled vocabulary");
+    }
+
+    #[test]
+    fn an_undecodable_dispatch_blob_does_not_stall_its_siblings() {
+        // Every open run is driven in one pass, so refusing the pass over one
+        // unreadable row stops every other run on every tick — permanently,
+        // since nothing deletes the row.
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        let unreadable = SharedRunRow {
+            run: Digest::of_wire_bytes(b"unreadable-run").as_bytes().to_vec(),
+            nonce: "unreadable".to_owned(),
+            dispatch: b"not a shared-run dispatch".to_vec(),
+            lifecycle: SharedRunLifecycle::Ready,
+            next_ordinal: 0,
+            deadline_unix_millis: 10_000,
+            charged: false,
+            physical_cost: None,
+        };
+        store.record_shared_run(&unreadable, &[]).expect("unreadable run");
+
+        let dispatch = reducer_shaped_contextual_dispatch();
+        let sibling = SharedRunRow {
+            run: Digest::of_wire_bytes(b"sibling-run").as_bytes().to_vec(),
+            nonce: "dispatch-1".to_owned(),
+            dispatch: to_vec(&dispatch).expect("dispatch wire"),
+            lifecycle: SharedRunLifecycle::Ready,
+            next_ordinal: 0,
+            deadline_unix_millis: 10_000,
+            charged: false,
+            physical_cost: None,
+        };
+        let participant = SharedRunMemberRow {
+            run: sibling.run.clone(),
+            request: dispatch.plan.requests[0].digest().as_bytes().to_vec(),
+            ordinal: 0,
+            queued_unix_millis: 0,
+            deadline_unix_millis: 10_000,
+            cancelled: false,
+            outcome: None,
+            latency_millis: None,
+        };
+        store.record_shared_run(&sibling, from_ref(&participant)).expect("sibling run");
+
+        let executor = ReleasePort { releases: Cell::new(0) };
+        drive_shared_runs(&mut store, None, &executor, NameEvidenceClaims, &HostClass::new("fleet"), 1_000)
+            .expect("one unreadable row cannot fail the pass");
+
+        let members = store.shared_run_members(&sibling.run).expect("sibling membership");
+        assert!(members[0].outcome.is_some(), "the sibling run still drove to a member outcome");
     }
 
     #[test]

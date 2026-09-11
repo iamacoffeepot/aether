@@ -3,7 +3,8 @@
 use std::slice::from_ref;
 
 use super::{
-    RecordOutcome, SharedRunLifecycle, SharedRunMemberRow, SharedRunRow, SharedRunStepRow, SqliteStore, StoreBackend,
+    QueuedMemberVerificationRow, RecordOutcome, SharedRunLifecycle, SharedRunMemberRow, SharedRunRow, SharedRunStepRow,
+    SqliteStore, StoreBackend,
 };
 
 fn run(seed: u8) -> SharedRunRow {
@@ -107,7 +108,7 @@ fn immutable_run_and_step_ids_refuse_changed_payloads() {
 }
 
 #[test]
-fn regrouping_preserves_original_clocks_and_keeps_results_on_their_physical_run() {
+fn regrouping_preserves_the_queue_time_and_gives_the_new_attempt_its_own_deadline() {
     let mut store = SqliteStore::open(":memory:").expect("store");
     let first = run(1);
     let second = run(2);
@@ -117,10 +118,16 @@ fn regrouping_preserves_original_clocks_and_keeps_results_on_their_physical_run(
     let mut regrouped = member(&second, 21, 0);
     regrouped.queued_unix_millis = 9_000;
     regrouped.deadline_unix_millis = 19_000;
-    store.record_shared_run(&second, &[regrouped]).expect("same logical request can regroup");
+    store.record_shared_run(&second, &[regrouped.clone()]).expect("same logical request can regroup");
     let retained = store.shared_run_members(&second.run).expect("second association");
-    assert_eq!(retained[0].queued_unix_millis, original.queued_unix_millis);
-    assert_eq!(retained[0].deadline_unix_millis, original.deadline_unix_millis);
+    assert_eq!(
+        retained[0].queued_unix_millis, original.queued_unix_millis,
+        "latency still spans from the logical request's first enqueue"
+    );
+    assert_eq!(
+        retained[0].deadline_unix_millis, regrouped.deadline_unix_millis,
+        "the regrouped attempt runs against its own wall clock, not the spent one"
+    );
     assert!(
         store
             .record_shared_run_member_outcome(&second.run, &original.request, &[51], 9_500)
@@ -150,6 +157,38 @@ fn logical_cancellation_preserves_completed_results_and_other_members() {
     let second_members = store.shared_run_members(&second.run).expect("second members");
     assert!(second_members[0].cancelled);
     assert!(!second_members[1].cancelled);
+}
+
+#[test]
+fn a_re_queued_request_runs_against_a_fresh_deadline() {
+    // A retry re-queues the identical request digest, so every attempt after
+    // the first would inherit the first attempt's wall clock: selection skips
+    // it, submission mints an expired executor fault, and a passed member is
+    // rewritten back to pending — all before the retry has run at all.
+    let mut store = SqliteStore::open(":memory:").expect("store");
+    let first = QueuedMemberVerificationRow {
+        request: vec![7; 32],
+        sequence: 1,
+        payload: vec![11, 12, 13],
+        queued_unix_millis: 1_000,
+        deadline_unix_millis: 61_000,
+        scheduled: false,
+        proposal: None,
+    };
+    assert_eq!(store.record_queued_member_verification(&first).expect("first enqueue"), RecordOutcome::Recorded);
+    store.mark_queued_member_verifications_scheduled(from_ref(&first.request)).expect("first attempt selected");
+
+    let retry = QueuedMemberVerificationRow {
+        sequence: 4,
+        queued_unix_millis: 55_000,
+        deadline_unix_millis: 115_000,
+        ..first.clone()
+    };
+    assert_eq!(store.record_queued_member_verification(&retry).expect("re-queue"), RecordOutcome::Recorded);
+
+    let retained = store.queued_member_verification(&first.request).expect("lookup").expect("row");
+    assert_eq!(retained.deadline_unix_millis, retry.deadline_unix_millis);
+    assert_eq!(retained.queued_unix_millis, first.queued_unix_millis, "latency is still measured from first arrival");
 }
 
 #[test]

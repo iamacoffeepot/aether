@@ -15,8 +15,6 @@
 //! [`apply_containment`] fails a member Verify whose candidate edited a path
 //! no declared-surface glob covers.
 
-use aether_bloomery::digest::{ContentAddressed, digest_of};
-
 #[cfg(feature = "runtime")]
 mod attribution;
 #[cfg(feature = "runtime")]
@@ -48,8 +46,8 @@ pub use containment::{
 #[cfg(feature = "runtime")]
 pub use contextual_facts::{
     ContextualFactError, ContextualProofFactReuse, ContextualProofReuse, ContextualRunnerReport,
-    contextual_bundle_reports, contextual_fact_key, contextual_reports, observed_probe_verdict,
-    record_contextual_facts, reuse_contextual_proof,
+    contextual_bundle_reports, contextual_fact_key, observed_probe_verdict, record_contextual_facts,
+    reuse_contextual_proof,
 };
 #[cfg(feature = "runtime")]
 pub use facts::record_proof_facts;
@@ -73,10 +71,6 @@ pub use sweep::{
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct HostClass(String);
 
-impl ContentAddressed for HostClass {
-    const DOMAIN: &'static str = "aether.bloomery.host_class.v1";
-}
-
 impl HostClass {
     /// Wrap a coordinator-supplied host class string.
     #[must_use]
@@ -91,9 +85,13 @@ impl HostClass {
     }
 
     /// Exact opaque name bound into a contextual verification contract.
+    ///
+    /// The reducer seals a contract's `host_class` with the same function, and
+    /// the two digests are compared before a fact is recorded or reused — so
+    /// this is that one addressing, never a second declaration of it.
     #[must_use]
     pub fn digest(&self) -> aether_bloomery::Digest {
-        digest_of(self)
+        aether_bloomery::host_class_digest(&self.0)
     }
 }
 
