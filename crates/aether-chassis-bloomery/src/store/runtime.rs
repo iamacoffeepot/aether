@@ -1158,7 +1158,7 @@ impl SqliteStore {
     }
 
     /// [`open`](Self::open), waiting `busy_timeout` for a write lock another
-    /// connection holds instead of the default [`DEFAULT_BUSY_TIMEOUT`].
+    /// connection holds instead of the default five seconds.
     ///
     /// For an observer beside a live coordinator — a scenario harness, an
     /// operator read — whose own deadline is longer than the default and whose
@@ -1294,7 +1294,7 @@ impl Drop for SqliteStore {
 /// dispatch reactor opens its own to drive the intake registry, #3505) waits
 /// rather than failing fast; WAL is still single-writer, so the timeout is what
 /// serializes the rare concurrent write instead of losing one of them.
-pub const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A connection to `path` under the store's pragmas, before any schema exists.
 fn connect(path: &str) -> rusqlite::Result<Connection> {

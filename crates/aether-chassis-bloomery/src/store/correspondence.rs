@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS backend_correspondence (
 /// How long a correspondence connection waits for the WAL write lock before it
 /// gives up with `SQLITE_BUSY` — the store's own default, restated here because
 /// the two modules are independently featured.
-pub const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A `SQLite`-backed [`Correspondence`] over the store file. Holds its connection
 /// behind a `Mutex` so the trait's `&self` methods (the source/executor backends
@@ -59,7 +59,7 @@ impl SqliteCorrespondence {
     }
 
     /// [`open`](Self::open), waiting `busy_timeout` for a write lock another
-    /// connection holds instead of the default [`DEFAULT_BUSY_TIMEOUT`].
+    /// connection holds instead of the default five seconds.
     ///
     /// The knob `SqliteStore::open_with_busy_timeout` carries, for the same
     /// reason and over the same file: an observer beside a live coordinator
