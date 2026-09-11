@@ -84,31 +84,65 @@ impl MemberVerificationScheduler {
     /// window makes a live admission read as superseded. Acting on that answer
     /// retires the member's only queued construct permanently — the coordination
     /// state already names it admitted, so nothing re-queues it and the member
-    /// never dispatches (#5903). Re-reading the journal here is what makes a
-    /// `false` mean superseded rather than not-yet-seen.
-    ///
-    /// `None` is the projection still paging through a long journal: it cannot
-    /// answer on this turn and the caller must leave the work pending and re-ask.
+    /// never dispatches (#5903).
     pub(super) fn confirm_construction_admission(
         &mut self,
         store: &mut dyn StoreBackend,
         dispatch: &aether_bloomery::ContextualAttemptDispatch,
         nonce: Digest,
     ) -> rusqlite::Result<Option<bool>> {
-        if self.retains_construction_admission(dispatch, nonce) {
-            return Ok(Some(true));
-        }
-        let caught_up = self.refresh(store)?;
-        if self.retains_construction_admission(dispatch, nonce) {
-            return Ok(Some(true));
-        }
-        Ok(caught_up.then_some(false))
+        self.confirm(store, |scheduler| scheduler.retains_construction_admission(dispatch, nonce))
     }
 
     /// Whether the projection carries `bloom` and still names `row`'s request
     /// the current one to verify.
     fn holds_current_request(&self, bloom: BloomId, row: &QueuedMemberVerificationRow) -> bool {
         self.states.get(&bloom).is_some_and(|state| current_request(state, row).is_some())
+    }
+
+    /// Whether coordination still names `row`'s request the current one to
+    /// verify, answered from a journal read no older than the caller's own.
+    ///
+    /// The same window as
+    /// [`confirm_construction_admission`](Self::confirm_construction_admission),
+    /// over the durable verification queue: the request and the
+    /// `RecordCoordinationState` naming it current are committed together, so a
+    /// commit landing after this turn's refresh makes a live request read as
+    /// superseded. Retiring on that answer marks the queue row scheduled and
+    /// acks its outbox entry, which is terminal — the request is gone and
+    /// nothing re-queues it.
+    pub(super) fn confirm_current_request(
+        &mut self,
+        store: &mut dyn StoreBackend,
+        bloom: BloomId,
+        row: &QueuedMemberVerificationRow,
+    ) -> rusqlite::Result<Option<bool>> {
+        self.confirm(store, |scheduler| scheduler.holds_current_request(bloom, row))
+    }
+
+    /// Re-ask `retained` against a freshly replayed journal once the projection
+    /// has said no.
+    ///
+    /// A miss against the projection this turn refreshed is a hypothesis, not a
+    /// verdict: that projection is one read behind the durable rows the caller
+    /// has already seen. Replaying before believing it is what makes a `false`
+    /// mean superseded rather than not-yet-seen.
+    ///
+    /// `None` is the projection still paging through a long journal: it cannot
+    /// answer on this turn and the caller must leave the work pending and re-ask.
+    fn confirm(
+        &mut self,
+        store: &mut dyn StoreBackend,
+        retained: impl Fn(&Self) -> bool,
+    ) -> rusqlite::Result<Option<bool>> {
+        if retained(self) {
+            return Ok(Some(true));
+        }
+        let caught_up = self.refresh(store)?;
+        if retained(self) {
+            return Ok(Some(true));
+        }
+        Ok(caught_up.then_some(false))
     }
 }
 
@@ -412,9 +446,6 @@ pub(super) fn drain_member_verifications(
     executor: &dyn ExecutorPort,
     now_unix_millis: u64,
 ) -> rusqlite::Result<Vec<Admit>> {
-    if !scheduler.refresh(store)? {
-        return Ok(Vec::new());
-    }
     for entry in store.drain_topic(Topic::MemberVerification)? {
         let Ok(payload) = from_bytes::<MemberVerificationPayload>(&entry.payload) else {
             break;
@@ -447,8 +478,12 @@ pub(super) fn drain_member_verifications(
         }
         let first_payload = from_bytes::<MemberVerificationPayload>(&first.payload)
             .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
-        if scheduler.holds_current_request(first_payload.request.bloom, first) {
-            break first;
+        match scheduler.confirm_current_request(store, first_payload.request.bloom, first)? {
+            Some(true) => break first,
+            // The projection cannot answer this turn, and the queue row is
+            // durable: leave it un-acked rather than retire a live request.
+            None => return Ok(Vec::new()),
+            Some(false) => {}
         }
         store.mark_queued_member_verifications_scheduled(from_ref(&first.request))?;
         store.ack_topic(Topic::MemberVerification, first.sequence)?;
@@ -987,6 +1022,58 @@ mod tests {
             assert_eq!(retained.deadline_unix_millis, deadline_unix_millis);
             assert!(retained.proposal.is_some());
         }
+    }
+
+    /// The verification-queue twin of
+    /// `an_admission_journaled_after_the_projection_refreshed_is_not_retired`.
+    ///
+    /// The plausible bug: the drain judges a queued request's retention from the
+    /// coordination projection this turn refreshed, which is one journal read
+    /// older than the durable rows it then reads. The request and the
+    /// `RecordCoordinationState` naming it current commit together, so a commit
+    /// landing inside that window makes a live request read as superseded — and
+    /// retiring it marks the queue row scheduled and acks its outbox entry, so
+    /// the member's only verification is gone with nothing to re-queue it. The
+    /// journal here holds the coordination row while the scheduler has replayed
+    /// nothing, which is exactly the state that window produces.
+    #[test]
+    fn a_request_journaled_after_the_projection_refreshed_is_not_retired() {
+        let (state, queued_rows) = fixture();
+        let bloom = state.integration.generation.bloom;
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        let decisions = to_vec(&aether_bloomery::Decisions {
+            outcome: aether_bloomery::Outcome::MainlineUnchanged(digest(9)),
+            effects: vec![Decision::RecordCoordinationState { bloom, state: Some(Box::new(state)) }],
+        })
+        .expect("decisions");
+        store
+            .append_event(&JournalWrite {
+                idempotency_key: "aether.bloomery.request_member_verification:test",
+                event: &to_vec(&Event {
+                    idempotency_key: IdempotencyKey("aether.bloomery.request_member_verification:test".to_owned()),
+                    fact: Fact::ObserveMainline { head: digest(9) },
+                })
+                .expect("event"),
+                decisions: &decisions,
+                decider: "test",
+            })
+            .expect("the request's coordination row is journaled");
+        store.enqueue_topic(Topic::MemberVerification, &queued_rows[0].payload, None).expect("enqueue oldest request");
+
+        // Unrefreshed on purpose: the projection is behind the journal row the
+        // drain is about to read, the way a mid-turn commit leaves it.
+        let mut scheduler = MemberVerificationScheduler::default();
+        let capacity = CapacityPort(Cell::new(true));
+        assert!(
+            drain_member_verifications(&mut scheduler, &mut store, &capacity, 9_000).expect("live request").is_empty()
+        );
+
+        let retained = store.queued_member_verification(&queued_rows[0].request).expect("lookup").expect("request row");
+        assert!(!retained.scheduled, "a request the journal still holds must survive the drain");
+        assert!(
+            !store.drain_topic(Topic::MemberVerification).expect("topic replay").is_empty(),
+            "an unretired request leaves its durable outbox entry un-acked"
+        );
     }
 
     #[test]
