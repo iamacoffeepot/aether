@@ -388,6 +388,31 @@ fn contextual_resolution_requires_the_exact_final_root_coverage_and_claims() {
 }
 
 #[test]
+fn a_contextual_aggregate_proof_needs_the_whole_settled_run_it_names() {
+    let (snapshot, bloom, _, _) = contextual_snapshot();
+    let settled = snapshot.blooms[&bloom].coordination.as_deref().unwrap().clone();
+    let head = settled.integration.head.clone();
+    assert!(settled.contextual_aggregate_proof(&head).is_some());
+
+    let mut displaced = settled.clone();
+    displaced.runs[0].stale = true;
+    assert!(displaced.contextual_aggregate_proof(&head).is_none());
+
+    let mut unreached = settled.clone();
+    let pending = unreached.runs[0].plan.requests[0].digest();
+    unreached.runs[0].unfinished.push(pending);
+    assert!(unreached.contextual_aggregate_proof(&head).is_none());
+
+    let mut drifted = settled.clone();
+    drifted.runs[0].plan.composition.as_mut().unwrap().contract.gate_set = digest(99);
+    assert!(drifted.contextual_aggregate_proof(&head).is_none());
+
+    let mut truncated = settled;
+    truncated.runs[0].completed.pop();
+    assert!(truncated.contextual_aggregate_proof(&head).is_none());
+}
+
+#[test]
 fn construction_checkpoint_requires_the_admitted_physical_nonce() {
     let spec = draft(1, vec![membership("alpha", 10)]).seal();
     let bloom = spec.id();

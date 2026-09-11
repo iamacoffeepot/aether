@@ -141,7 +141,7 @@ impl CompositionInput {
     }
 }
 
-/// Membership and base identity of one eager-integration generation.
+/// One member's pinned revision inside an eager-integration generation.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct GenerationMember {
     pub workpiece: WorkpieceId,
@@ -890,6 +890,11 @@ pub struct EagerIntegrationState {
     pub admitted: Vec<CompositionInput>,
     pub in_flight: Option<IntegrationAppendPlan>,
     pub known_red: Option<Digest>,
+    /// The exact node an accepted partial-head repair produced. It is red until
+    /// its own aggregate proof arrives, and that proof is the only pre-check
+    /// green that may clear `known_red`: a verdict established anywhere else
+    /// stays red until repair and promotion clear it (ADR-0218).
+    pub unproved_repair: Option<Digest>,
     pub reservation: Option<StableHeadReservation>,
     /// Head moves in the current repair episode.
     pub movement_count: u32,
@@ -954,6 +959,7 @@ impl CoordinationState {
                 admitted: Vec::new(),
                 in_flight: None,
                 known_red: None,
+                unproved_repair: None,
                 reservation: None,
                 movement_count: 0,
             },
@@ -1112,12 +1118,5 @@ impl CoordinationState {
                 _ => unreachable!("validated contextual completion"),
             })
         })
-    }
-
-    /// Whether [`Self::contextual_aggregate_proof`] retains exact authority for
-    /// this selected root.
-    #[must_use]
-    pub fn has_contextual_aggregate_proof(&self, head: &IntegrationHead) -> bool {
-        self.contextual_aggregate_proof(head).is_some()
     }
 }

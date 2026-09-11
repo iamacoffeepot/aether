@@ -215,13 +215,9 @@ fn gates_for_manifest(manifest: &PipelineManifest, command: &str) -> Vec<String>
     manifest.verifiers.runs.get(command).cloned().unwrap_or_default()
 }
 
-fn invalidate_member_version(
-    record: &BloomRecord,
-    state: &mut CoordinationState,
-    changed: &WorkpieceId,
-    effects: &mut Vec<Decision>,
-) -> Result<(), CoordinationError> {
-    let next_epoch = state.integration.generation.epoch.checked_add(1).ok_or(CoordinationError::InvalidPlan)?;
+/// The blast radius of `changed` — every member that reaches it through a
+/// dependency edge or through a coverage set it shares, taken to a fixpoint.
+fn affected_closure(record: &BloomRecord, state: &CoordinationState, changed: &WorkpieceId) -> BTreeSet<WorkpieceId> {
     let mut affected = BTreeSet::from([changed.clone()]);
     loop {
         let before = affected.len();
@@ -230,15 +226,38 @@ fn invalidate_member_version(
                 affected.insert(edge.member.clone());
             }
         }
-        for input in state.integration.admitted.iter().chain(&state.integration.queued) {
+
+        // A live request's input carries the context head's whole coverage, so
+        // an ejected peer reaches the fixpoint through it as surely as through
+        // an admitted or queued contribution.
+        for input in state
+            .integration
+            .admitted
+            .iter()
+            .chain(&state.integration.queued)
+            .chain(state.requests.iter().map(|request| &request.input))
+        {
             if input.members.iter().any(|pin| affected.contains(&pin.workpiece)) {
                 affected.extend(input.members.iter().map(|pin| pin.workpiece.clone()));
             }
         }
+
         if affected.len() == before {
-            break;
+            return affected;
         }
     }
+}
+
+fn invalidate_member_version(
+    record: &BloomRecord,
+    state: &mut CoordinationState,
+    changed: &WorkpieceId,
+    effects: &mut Vec<Decision>,
+) -> Result<(), CoordinationError> {
+    let next_epoch = state.integration.generation.epoch.checked_add(1).ok_or(CoordinationError::InvalidPlan)?;
+    let affected = affected_closure(record, state, changed);
+    let survives = |workpiece: &String| !affected.iter().any(|member| workpiece == workpiece_key(member));
+
     hold_invalidated_inherited_construction(record, state, &affected, effects);
     for run in state.runs.iter_mut().filter(|run| {
         !run.is_terminal() && run.plan.requests.iter().any(|request| affected.contains(&request.member.workpiece))
@@ -246,6 +265,7 @@ fn invalidate_member_version(
         run.stale = true;
         effects.push(Decision::CancelSharedRun { plan: run.plan.digest() });
     }
+
     let invalidated_requests = state
         .requests
         .iter()
@@ -257,6 +277,7 @@ fn invalidate_member_version(
         group.requests.retain(|request| !invalidated_requests.contains(request));
     }
     state.survivor_groups.retain(|group| !group.requests.is_empty());
+
     let valid_contextual_nodes = state
         .runs
         .iter()
@@ -265,22 +286,19 @@ fn invalidate_member_version(
         .map(SharedRunNode::digest)
         .collect::<BTreeSet<_>>();
     state.claims.retain(|workpiece, claim| {
-        !affected.iter().any(|affected| workpiece == workpiece_key(affected))
+        survives(workpiece)
             && match &claim.proof {
                 ResolutionProof::Standalone(_) => true,
                 ResolutionProof::InComposition { node, .. } => valid_contextual_nodes.contains(node),
             }
     });
-    state.prepared.retain(|workpiece, _| !affected.iter().any(|affected| workpiece == workpiece_key(affected)));
+
+    state.prepared.retain(|workpiece, _| survives(workpiece));
     state.preparations.retain(|plan| !affected.contains(&plan.workpiece));
-    state.contexts.retain(|workpiece, _| !affected.iter().any(|affected| workpiece == workpiece_key(affected)));
-    state.checkpoints.retain(|workpiece, _| !affected.iter().any(|affected| workpiece == workpiece_key(affected)));
-    state
-        .queued_construction
-        .retain(|workpiece, _| !affected.iter().any(|affected| workpiece == workpiece_key(affected)));
-    state
-        .admitted_construction
-        .retain(|workpiece, _| !affected.iter().any(|affected| workpiece == workpiece_key(affected)));
+    state.contexts.retain(|workpiece, _| survives(workpiece));
+    state.checkpoints.retain(|workpiece, _| survives(workpiece));
+    state.queued_construction.retain(|workpiece, _| survives(workpiece));
+    state.admitted_construction.retain(|workpiece, _| survives(workpiece));
     state.preview_plans.clear();
     state.previews.clear();
     state.partial_head_repair = None;
@@ -293,6 +311,7 @@ fn invalidate_member_version(
         .filter(|input| input.members.iter().all(|pin| !affected.contains(&pin.workpiece)))
         .cloned()
         .collect::<Vec<_>>();
+
     state.integration.generation.epoch = next_epoch;
     let generation = state.integration.generation.digest();
     state.integration.head = IntegrationHead {
@@ -311,6 +330,7 @@ fn invalidate_member_version(
     state.integration.admitted.clear();
     state.integration.in_flight = None;
     state.integration.known_red = None;
+    state.integration.unproved_repair = None;
     state.integration.reservation = None;
     state.integration.movement_count = 0;
     state.final_in_flight = false;
@@ -564,6 +584,11 @@ fn retire_displaced_head_work(record: &BloomRecord, state: &mut CoordinationStat
 }
 
 fn refresh_unadmitted_construction(record: &BloomRecord, state: &mut CoordinationState, effects: &mut Vec<Decision>) {
+    if state.integration.known_red == Some(state.integration.head.node) {
+        // A red head blocks new inheritance, so re-pinning a queued order onto
+        // it would hand an author unproven context (ADR-0218).
+        return;
+    }
     let pending = state.queued_construction.clone();
     for (workpiece, mut dispatch) in pending {
         if state.admitted_construction.contains_key(workpiece.as_str())
@@ -610,6 +635,30 @@ pub(super) fn schedule_partial_head_repair(
         attempt: state.partial_head_repair_attempts,
     };
     dispatch_partial_head_repair(record, state, plan, effects);
+}
+
+/// Promote the red head an accepted partial-head repair produced, once that
+/// exact head carries its own aggregate proof, and resume the work the red
+/// verdict suspended. A verdict established anywhere else is left alone: a
+/// passing pre-check never clears a separately established red (ADR-0218).
+pub(super) fn promote_proved_repair(
+    record: &BloomRecord,
+    state: &mut CoordinationState,
+    node: Digest,
+    effects: &mut Vec<Decision>,
+) {
+    if state.integration.head.node != node
+        || state.integration.known_red != Some(node)
+        || state.integration.unproved_repair != Some(node)
+    {
+        return;
+    }
+    state.integration.known_red = None;
+    state.integration.unproved_repair = None;
+
+    release_ready_dependents(record, state, effects);
+    schedule_append(record, state, effects);
+    finalize_selected_root(record, state, effects);
 }
 
 fn dispatch_partial_head_repair(
@@ -745,8 +794,10 @@ fn apply_repaired_partial_head(
         state.integration.queued.clear();
         state.integration.in_flight = None;
         state.integration.known_red = Some(candidate.tree);
+        state.integration.unproved_repair = Some(candidate.tree);
         state.integration.reservation = None;
         state.integration.movement_count = 0;
+        state.partial_head_repair_attempts = 0;
         state.final_dispatched = false;
         state.claims.clear();
     }
@@ -878,6 +929,7 @@ pub(super) fn reduce_integration_advanced(
     next.final_dispatched = false;
     next.integration.in_flight = None;
     next.integration.known_red = None;
+    next.integration.unproved_repair = None;
     next.integration.queued.retain(|queued| queued.digest() != input.digest());
     if !next.integration.admitted.iter().any(|admitted| admitted.digest() == input.digest()) {
         next.integration.admitted.push(input.clone());
@@ -1124,7 +1176,9 @@ pub(super) fn reduce_candidate_prepared(
                 },
             });
             effects.push(Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() });
-            let cursor = record.progress.get(&expected.workpiece).copied().expect("validated preparation cursor");
+            let Some(cursor) = record.progress.get(&expected.workpiece).copied() else {
+                return rejected(CoordinationError::NotReady);
+            };
             let attempt = cursor.attempts.saturating_add(1);
             if attempt <= record.stage_catalog.retry_budget_of(StageId::Reconcile).unwrap_or(1) {
                 let progress = StageProgress {
@@ -1441,13 +1495,13 @@ pub(super) fn reduce_shared_run_started(
     }
     let mut next = state.clone();
     let run = &mut next.runs[index];
-    if !run.is_ready() || run.physical_run.is_some() || run.unfinished.is_empty() {
-        return rejected(CoordinationError::AlreadyIssued);
-    }
     if let Some(expected) = run.physical_run
         && expected != physical_run
     {
         return rejected(CoordinationError::RunMismatch { expected, got: physical_run });
+    }
+    if !run.is_ready() || run.physical_run.is_some() || run.unfinished.is_empty() {
+        return rejected(CoordinationError::AlreadyIssued);
     }
     run.phase = SharedRunPhase::Running;
     run.physical_run = Some(physical_run);
@@ -1484,7 +1538,10 @@ fn valid_failure_scope(run: &SharedRunRecord, scope: &FailureScope, evidence: &E
             evidence
         }
         FailureScope::Interaction { members, evidence } => {
-            if members.len() < 2 || !scope_members_are_planned(run, members) {
+            // Interaction is a claim about one physical composition node: its
+            // repair and its polluted-survivor group both address that node, so
+            // a run without one cannot carry the scope at all.
+            if members.len() < 2 || run.node.is_none() || !scope_members_are_planned(run, members) {
                 return false;
             }
             evidence
@@ -2196,12 +2253,15 @@ fn retain_contextual_success(state: &mut CoordinationState, run: &SharedRunRecor
     {
         return;
     }
-    let node = run.node.as_ref().expect("contextual completion has node");
+    let Some(node) = run.node.as_ref() else {
+        return;
+    };
     if state.integration.known_red == Some(state.integration.head.node)
         && node.candidate == state.integration.head.candidate
         && node.coverage == state.integration.head.coverage
     {
         state.integration.known_red = None;
+        state.integration.unproved_repair = None;
     }
     queue_input(
         state,
@@ -2225,10 +2285,10 @@ fn retain_survivors_and_schedule_repair(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if !survivors.is_empty() {
+    if let Some(node) = run.node.as_ref().filter(|_| !survivors.is_empty()) {
         state.survivor_groups.push(SurvivorGroup {
             source_plan: run.plan.digest(),
-            source_node: run.node.as_ref().expect("survivors require contextual node").digest(),
+            source_node: node.digest(),
             requests: survivors,
         });
     }
@@ -2239,13 +2299,13 @@ fn retain_survivors_and_schedule_repair(
         .filter(|request| polluted.contains(&request.member.workpiece))
         .map(MemberVerifyRequest::digest)
         .collect::<Vec<_>>();
-    if !polluted_requests.is_empty() {
+    if let Some(node) = run.node.as_ref().filter(|_| !polluted_requests.is_empty()) {
         for request in run.plan.requests.iter().filter(|request| polluted.contains(&request.member.workpiece)) {
             effects.push(Decision::QueueMemberVerification { request: request.clone() });
         }
         state.survivor_groups.push(SurvivorGroup {
             source_plan: run.plan.digest(),
-            source_node: run.node.as_ref().expect("contextual interaction has node").digest(),
+            source_node: node.digest(),
             requests: polluted_requests,
         });
         return;
@@ -2462,6 +2522,11 @@ pub(super) fn reduce_request_construction_admission(
     let Some(queued) = state.queued_construction.get(workpiece_key(workpiece)) else {
         return rejected(CoordinationError::NotReady);
     };
+    if state.integration.known_red == Some(state.integration.head.node) {
+        // Every other head-pinning seam refuses while the selected head is red;
+        // admitting here would dispatch an author order onto unproven context.
+        return rejected(CoordinationError::NotReady);
+    }
     if queued != &admission.dispatch
         || admission.dispatch.stage != StageId::Construct
         || admission.dispatch.context.starting_head != state.integration.head
@@ -2966,9 +3031,9 @@ mod tests {
         }
     }
 
-    fn active_contextual_run() -> (Snapshot, BloomId, SharedRunPlan, SharedRunNode) {
-        let (mut record, mut state) = fixture();
-        let bloom = record.spec.id();
+    /// Put every sealed member at Verify on its own captured candidate and
+    /// return the exact requests that dispatch would mint for them.
+    fn current_requests(record: &mut BloomRecord, state: &CoordinationState) -> Vec<MemberVerifyRequest> {
         let members = record.spec.members().to_vec();
         let mut requests = Vec::new();
         for (index, member) in members.iter().enumerate() {
@@ -2991,8 +3056,8 @@ mod tests {
             requests.push(
                 request_for_dispatch(
                     &Snapshot::new(record.spec.base()),
-                    &record,
-                    &state,
+                    record,
+                    state,
                     VerifyDispatch {
                         workpiece: &member.workpiece,
                         transformation: &transformation,
@@ -3004,6 +3069,13 @@ mod tests {
                 .expect("current request"),
             );
         }
+        requests
+    }
+
+    fn active_contextual_run() -> (Snapshot, BloomId, SharedRunPlan, SharedRunNode) {
+        let (mut record, mut state) = fixture();
+        let bloom = record.spec.id();
+        let requests = current_requests(&mut record, &state);
         state.requests.clone_from(&requests);
         let composition = CompositionPlan {
             bloom,
@@ -4338,6 +4410,418 @@ mod tests {
         let verified = install_recorded_state(&mut snapshot, bloom, &completed);
         assert_eq!(verified.integration.known_red, None);
         assert!(verified.contextual_aggregate_proof(&verified.integration.head).is_some());
+    }
+
+    fn active_serial_run() -> (Snapshot, BloomId, SharedRunPlan) {
+        let (mut record, mut state) = fixture();
+        let bloom = record.spec.id();
+        let requests = current_requests(&mut record, &state);
+        state.requests.clone_from(&requests);
+        let plan = SharedRunPlan {
+            mode: SharedRunMode::WarmSerial,
+            requests,
+            composition: None,
+            probe_budget: 0,
+            execution_attempt: 0,
+        };
+        state.runs.push(SharedRunRecord {
+            plan: plan.clone(),
+            node: None,
+            phase: SharedRunPhase::Running,
+            stale: false,
+            physical_run: Some(digest(62)),
+            completed: Vec::new(),
+            unfinished: plan.requests.iter().map(MemberVerifyRequest::digest).collect(),
+            latencies: Vec::new(),
+        });
+        record.coordination = Some(Box::new(state));
+        let mut snapshot = Snapshot::new(record.spec.base());
+        snapshot.blooms.insert(bloom, record);
+        (snapshot, bloom, plan)
+    }
+
+    fn recorded(decisions: &Decisions) -> &CoordinationState {
+        decisions
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                Decision::RecordCoordinationState { state: Some(state), .. } => Some(state),
+                _ => None,
+            })
+            .expect("the decision records coordination state")
+    }
+
+    fn queued_input(workpiece: &str, scope: u8, tree: u8) -> CompositionInput {
+        let member = pin(workpiece, scope, tree);
+        CompositionInput { node: digest(tree), candidate: member.candidate, members: alloc::vec![member] }
+    }
+
+    fn in_flight_snapshot(record: BloomRecord, state: CoordinationState) -> (Snapshot, BloomId) {
+        let bloom = record.spec.id();
+        let mut record = record;
+        record.coordination = Some(Box::new(state));
+        let mut snapshot = Snapshot::new(record.spec.base());
+        snapshot.blooms.insert(bloom, record);
+        (snapshot, bloom)
+    }
+
+    #[test]
+    fn a_nodeless_run_cannot_report_an_interaction_failure() {
+        let (snapshot, bloom, plan) = active_serial_run();
+        let outcomes = alloc::vec![
+            MemberVerifyOutcome::Failed {
+                request: plan.requests[0].digest(),
+                scope: FailureScope::Attributed {
+                    members: alloc::vec![plan.requests[0].member.clone()],
+                    evidence: digest(84),
+                },
+                failures: once(crate::VerifyFailure::Test).collect(),
+                evidence: Evidence {
+                    subject: plan.requests[0].member.candidate.tree,
+                    kind: EvidenceKind::VerificationResult,
+                    detail: digest(84),
+                },
+            },
+            MemberVerifyOutcome::Failed {
+                request: plan.requests[1].digest(),
+                scope: FailureScope::Interaction {
+                    members: plan.requests.iter().map(|request| request.member.clone()).collect(),
+                    evidence: digest(85),
+                },
+                failures: once(crate::VerifyFailure::Test).collect(),
+                evidence: Evidence {
+                    subject: plan.requests[1].member.candidate.tree,
+                    kind: EvidenceKind::VerificationResult,
+                    detail: digest(85),
+                },
+            },
+        ];
+        let completion = SharedRunCompletion {
+            plan: plan.digest(),
+            run: digest(62),
+            outcomes,
+            unfinished: Vec::new(),
+            latencies: plan
+                .requests
+                .iter()
+                .map(|request| MemberVerifyLatency {
+                    request: request.digest(),
+                    member: request.member.clone(),
+                    latency_millis: 10,
+                })
+                .collect(),
+        };
+
+        let decisions = reduce_shared_run_completed(&snapshot, &bloom, &completion);
+
+        assert_eq!(decisions.outcome, Outcome::CoordinationRejected(CoordinationError::InvalidEvidenceKind));
+        assert!(decisions.effects.is_empty());
+    }
+
+    #[test]
+    fn a_red_head_admits_no_new_construction_order() {
+        let (mut record, mut state) = fixture();
+        let workpiece = WorkpieceId(String::from("alpha"));
+        record.progress.insert(
+            workpiece.clone(),
+            StageProgress {
+                stage: StageId::Construct,
+                attempts: 1,
+                candidate: None,
+                repair_rolls: 0,
+                seen_verify_failures: VerifyFailureSet::EMPTY,
+                fold_checkpoint: None,
+                fold_conflict_evidence: None,
+                reconcile_assembles_base: false,
+            },
+        );
+        let context = ConstructContext {
+            bloom_base: state.integration.generation.base,
+            starting_head: state.integration.head.clone(),
+        };
+        let dispatch = ContextualAttemptDispatch {
+            bloom: record.spec.id(),
+            workpiece: workpiece.clone(),
+            stage: StageId::Construct,
+            attempt: 1,
+            transformation: Transformation::for_member_stage(
+                &stage_binding(&record.stage_catalog, StageId::Construct),
+                digest(10),
+                context.starting_head.candidate.checkout,
+                record.spec.base(),
+            ),
+            scope_revision: digest(10),
+            candidate: None,
+            profile: crate::AgentProfile {
+                harness: Harness::Codex,
+                model: String::from("test"),
+                effort: ReasoningEffort::Low,
+                tools: ToolPolicy::None,
+            },
+            configs: ConfigRegistry::default(),
+            context,
+        };
+        state.queued_construction.insert(workpiece.0, dispatch.clone());
+        state.integration.head.node = digest(61);
+        state.integration.known_red = Some(state.integration.head.node);
+
+        let mut refreshed = Vec::new();
+        refresh_unadmitted_construction(&record, &mut state.clone(), &mut refreshed);
+        assert!(refreshed.is_empty(), "a red head cannot re-pin a queued construction onto itself");
+
+        let (snapshot, _) = in_flight_snapshot(record, state);
+        let admission = ConstructionAdmission { nonce: digest(60), dispatch };
+        assert_eq!(
+            reduce_request_construction_admission(&snapshot, &admission).outcome,
+            Outcome::CoordinationRejected(CoordinationError::NotReady),
+        );
+    }
+
+    #[test]
+    fn invalidating_a_peer_ejects_a_request_whose_input_inherited_it() {
+        let (mut record, mut state) = fixture();
+        let mut requests = current_requests(&mut record, &state);
+        let ejected = requests[0].member.clone();
+        requests[1].input.members.insert(0, ejected.clone());
+        state.requests.clone_from(&requests);
+
+        let mut effects = Vec::new();
+        invalidate_member_version(&record, &mut state, &ejected.workpiece, &mut effects).expect("replacement");
+
+        assert!(state.requests.is_empty(), "an input carrying the ejected pin cannot outlive it");
+    }
+
+    #[test]
+    fn an_append_conflict_reconciles_only_its_own_members_and_holds_the_head() {
+        let (record, mut state) = fixture();
+        let colliding = queued_input("alpha", 10, 40);
+        let peer = queued_input("beta", 11, 30);
+        state.integration.queued = alloc::vec![colliding.clone(), peer.clone()];
+        state.integration.movement_count = state.policy.movement_budget - 1;
+        let mut effects = Vec::new();
+        schedule_append(&record, &mut state, &mut effects);
+        let plan = state.integration.in_flight.clone().expect("first ready input appends");
+        let head = state.integration.head.clone();
+        let (snapshot, bloom) = in_flight_snapshot(record, state);
+        let evidence =
+            Evidence { subject: colliding.candidate.tree, kind: EvidenceKind::FoldConflict, detail: digest(55) };
+
+        let decisions = reduce_integration_conflicted(
+            &snapshot,
+            IntegrationConflict {
+                bloom: &bloom,
+                plan: plan.digest(),
+                generation: plan.generation,
+                expected_parent: head.node,
+                input: &colliding,
+                at: colliding.candidate,
+                evidence: &evidence,
+                observed_at_unix_millis: 10,
+            },
+        );
+
+        let next = recorded(&decisions);
+        assert_eq!(next.integration.head, head);
+        assert!(next.integration.in_flight.is_none());
+        assert!(next.integration.queued.iter().any(|queued| queued.digest() == peer.digest()));
+        let reconciled = decisions
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::AdvanceStage { workpiece, progress, .. } => Some((workpiece, *progress)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            reconciled.as_slice(),
+            [(workpiece, progress)]
+                if **workpiece == colliding.members[0].workpiece
+                    && progress.stage == StageId::Reconcile
+                    && progress.fold_checkpoint == Some(head.node)
+        ));
+        assert!(next.integration.reservation.as_ref().is_some_and(|reservation| {
+            reservation.owner == colliding.members[0].workpiece && reservation.node == head.node
+        }));
+    }
+
+    #[test]
+    fn a_refused_append_clears_the_flight_without_moving_the_head() {
+        let (record, mut state) = fixture();
+        let input = queued_input("alpha", 10, 40);
+        state.integration.queued = alloc::vec![input];
+        let mut effects = Vec::new();
+        schedule_append(&record, &mut state, &mut effects);
+        let plan = state.integration.in_flight.clone().expect("ready input appends");
+        let head = state.integration.head.clone();
+        let queued = state.integration.queued.clone();
+        let (snapshot, bloom) = in_flight_snapshot(record, state);
+
+        let decisions =
+            reduce_integration_refused(&snapshot, &bloom, plan.digest(), plan.generation, head.node, digest(56));
+
+        let next = recorded(&decisions);
+        assert_eq!(next.integration.head, head);
+        assert_eq!(next.integration.queued, queued);
+        assert!(next.integration.in_flight.is_none());
+        assert!(
+            next.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.scope == FailureScope::Unattributed { evidence: digest(56) })
+        );
+        assert!(!decisions.effects.iter().any(|effect| matches!(effect, Decision::DispatchIntegrationAppend { .. })));
+    }
+
+    #[test]
+    fn a_reservation_expires_only_at_its_own_deadline_and_then_resumes_appends() {
+        let (record, mut state) = fixture();
+        let peer = queued_input("beta", 11, 30);
+        state.integration.queued = alloc::vec![peer.clone(), queued_input("alpha", 10, 40)];
+        let reservation = StableHeadReservation {
+            owner: WorkpieceId(String::from("alpha")),
+            generation: state.integration.generation.digest(),
+            node: state.integration.head.node,
+            movement_count: state.policy.movement_budget,
+            deadline_unix_millis: 1_000,
+            hold: digest(50),
+        };
+        state.integration.reservation = Some(reservation.clone());
+        state.integration.movement_count = state.policy.movement_budget;
+        let (snapshot, bloom) = in_flight_snapshot(record, state);
+
+        let mismatched = StableHeadReservation { movement_count: 99, ..reservation.clone() };
+        assert_eq!(
+            reduce_reservation_expired(&snapshot, &bloom, &mismatched, 1_000).outcome,
+            Outcome::CoordinationRejected(CoordinationError::ReservationMismatch),
+        );
+        assert_eq!(
+            reduce_reservation_expired(&snapshot, &bloom, &reservation, 999).outcome,
+            Outcome::CoordinationRejected(CoordinationError::ReservationNotExpired),
+        );
+
+        let decisions = reduce_reservation_expired(&snapshot, &bloom, &reservation, 1_000);
+
+        let next = recorded(&decisions);
+        assert!(next.integration.reservation.is_none());
+        assert_eq!(next.integration.movement_count, 0);
+        assert!(decisions.effects.iter().any(|effect| {
+            matches!(effect, Decision::DispatchIntegrationAppend { plan } if plan.inputs.as_slice() == from_ref(&peer))
+        }));
+    }
+
+    #[test]
+    fn a_compatibility_preview_settles_against_its_exact_checkpoint_versions() {
+        let (record, mut state) = fixture();
+        let bloom = record.spec.id();
+        let checkpoint = ConstructionCheckpoint {
+            bloom,
+            workpiece: WorkpieceId(String::from("alpha")),
+            scope_revision: digest(10),
+            nonce: digest(74),
+            observation: 1,
+            starting_checkout: state.integration.head.candidate.checkout,
+            candidate: CandidateRef { tree: digest(76), checkout: digest(77) },
+        };
+        state.checkpoints.insert(checkpoint.workpiece.0.clone(), checkpoint.clone());
+        let plan = CompatibilityPreviewPlan {
+            bloom,
+            generation: state.integration.generation.digest(),
+            base: state.integration.head.candidate,
+            checkpoints: alloc::vec![checkpoint.clone()],
+        };
+        state.preview_plans.push(plan.clone());
+        let (snapshot, _) = in_flight_snapshot(record, state);
+        let result = CompatibilityPreview::Clean { tree: digest(78) };
+
+        let decisions = reduce_compatibility_previewed(&snapshot, &bloom, plan.digest(), &result);
+
+        assert_eq!(
+            recorded(&decisions).previews,
+            alloc::vec![CompatibilityPreviewRecord { plan: plan.digest(), result: result.clone() }]
+        );
+
+        let mut superseded = snapshot;
+        superseded
+            .blooms
+            .get_mut(&bloom)
+            .expect("record")
+            .coordination
+            .as_deref_mut()
+            .expect("coordination")
+            .checkpoints
+            .insert(checkpoint.workpiece.0.clone(), ConstructionCheckpoint { observation: 2, ..checkpoint });
+        assert_eq!(
+            reduce_compatibility_previewed(&superseded, &bloom, plan.digest(), &result).outcome,
+            Outcome::CoordinationRejected(CoordinationError::InvalidPlan),
+        );
+    }
+
+    #[test]
+    fn a_conflicted_preparation_returns_to_reconcile_and_wedges_past_its_budget() {
+        let (mut record, mut state) = fixture();
+        let bloom = record.spec.id();
+        let workpiece = WorkpieceId(String::from("alpha"));
+        let authored = CandidateRef { tree: digest(40), checkout: digest(41) };
+        let plan = CandidatePreparationPlan {
+            bloom,
+            workpiece: workpiece.clone(),
+            scope_revision: digest(10),
+            authored,
+            context: ConstructContext {
+                bloom_base: state.integration.generation.base,
+                starting_head: state.integration.head.clone(),
+            },
+        };
+        state.preparations.push(plan.clone());
+        let budget = record.stage_catalog.retry_budget_of(StageId::Reconcile).expect("reconcile budget");
+        record.progress.insert(
+            workpiece.clone(),
+            StageProgress {
+                stage: StageId::Reconcile,
+                attempts: 1,
+                candidate: Some(authored),
+                repair_rolls: 0,
+                seen_verify_failures: VerifyFailureSet::EMPTY,
+                fold_checkpoint: None,
+                fold_conflict_evidence: None,
+                reconcile_assembles_base: false,
+            },
+        );
+        let (mut snapshot, _) = in_flight_snapshot(record, state);
+        let evidence = Evidence {
+            subject: plan.context.starting_head.candidate.tree,
+            kind: EvidenceKind::FoldConflict,
+            detail: digest(57),
+        };
+        let conflict = CandidatePreparation::Conflict { evidence };
+
+        let decisions = reduce_candidate_prepared(&snapshot, &bloom, plan.digest(), &conflict);
+
+        assert!(recorded(&decisions).claims.is_empty());
+        assert!(decisions.effects.iter().any(|effect| {
+            matches!(effect, Decision::DispatchContextualAttempt { dispatch }
+                if dispatch.stage == StageId::Reconcile
+                    && dispatch.context.starting_head == plan.context.starting_head)
+        }));
+        assert!(!decisions.effects.iter().any(|effect| {
+            matches!(effect, Decision::QueueMemberVerification { .. } | Decision::RecordWedge { .. })
+        }));
+
+        snapshot
+            .blooms
+            .get_mut(&bloom)
+            .expect("record")
+            .progress
+            .get_mut(&workpiece)
+            .expect("reconcile cursor")
+            .attempts = budget;
+        let exhausted = reduce_candidate_prepared(&snapshot, &bloom, plan.digest(), &conflict);
+        assert!(exhausted.effects.iter().any(|effect| {
+            matches!(effect, Decision::RecordWedge { wedge, .. } if wedge.stage == StageId::Reconcile)
+        }));
+        assert!(
+            !exhausted.effects.iter().any(|effect| matches!(effect, Decision::DispatchContextualAttempt { .. })),
+            "an exhausted reconcile budget dispatches no further author order",
+        );
     }
 
     #[test]

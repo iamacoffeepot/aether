@@ -5,7 +5,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 
 use super::aggregate_verify::{aggregate_verify_dispatch, reduce_aggregate_verify_completed};
 use super::attempt::stage_binding;
-use super::coordination::schedule_partial_head_repair;
+use super::coordination::{promote_proved_repair, schedule_partial_head_repair};
 use super::verify_memo::proof_of;
 use super::{BloomRecord, BloomStatus, Decision, Decisions, Outcome, PrecheckError, Snapshot};
 use crate::digest::Digest;
@@ -365,6 +365,7 @@ pub(super) fn reduce_precheck_completed(
                 next.result = Some(PrecheckResult::Passed { node, evidence: evidence.detail });
                 next.diagnostic = None;
             }
+            record_head_promotion(record, *bloom, issued, &mut effects);
         }
         PrecheckCompletion::Failed(evidence) => {
             if let Err(error) = validate_evidence(issued, evidence, EvidenceKind::VerificationResult) {
@@ -431,6 +432,28 @@ fn record_head_failure(
         effects.push(Decision::RecordCoordinationState { bloom, state: Some(next) });
     }
     effects.extend(repair_effects);
+}
+
+/// The mirror of [`record_head_failure`] for the one red verdict a pre-check
+/// green may lift: the repair that produced this exact head owes an aggregate
+/// proof, and this run is it. Every other red stays (ADR-0218).
+fn record_head_promotion(record: &BloomRecord, bloom: BloomId, issued: &PrecheckNode, effects: &mut Vec<Decision>) {
+    let Some(coordination) = record.coordination.as_deref().filter(|state| selected_root_policy(state)) else {
+        return;
+    };
+    let Some(plan) = selected_head_plan(record, bloom, coordination) else {
+        return;
+    };
+    if selected_head_node(&plan, coordination) != *issued {
+        return;
+    }
+    let mut next = coordination.clone();
+    let mut promoted = Vec::new();
+    promote_proved_repair(record, &mut next, coordination.integration.head.node, &mut promoted);
+    if next != *coordination {
+        effects.push(Decision::RecordCoordinationState { bloom, state: Some(next) });
+    }
+    effects.extend(promoted);
 }
 
 fn validate_evidence(node: &PrecheckNode, evidence: &Evidence, kind: EvidenceKind) -> Result<(), PrecheckError> {
@@ -1211,6 +1234,52 @@ mod tests {
             snapshot.blooms[&bloom].coordination.as_deref().expect("coordination").integration.known_red,
             Some(digest(42)),
         );
+    }
+
+    #[test]
+    fn a_repaired_red_head_resumes_on_its_own_aggregate_proof() {
+        let (mut snapshot, bloom, issued) = eager_fixture();
+        let record = snapshot.blooms.get_mut(&bloom).expect("bloom");
+        let scope_revision = record.spec.members()[0].scope_revision;
+        let replacement = crate::MemberPin {
+            workpiece: record.spec.members()[0].workpiece.clone(),
+            scope_revision,
+            candidate: CandidateRef { tree: digest(60), checkout: digest(61) },
+        };
+        let coordination = record.coordination.as_deref_mut().expect("coordination");
+        // Standalone verification mints no contextual receipt, so this pre-check
+        // is the only proof the repaired head can ever get.
+        coordination.policy.verification = crate::VerificationMode::Standalone;
+        coordination.integration.known_red = Some(coordination.integration.head.node);
+        coordination.integration.unproved_repair = Some(coordination.integration.head.node);
+        coordination.integration.queued = vec![crate::CompositionInput {
+            node: replacement.candidate.tree,
+            candidate: replacement.candidate,
+            members: vec![replacement],
+        }];
+
+        let completion = reduce_precheck_completed(
+            &snapshot,
+            &bloom,
+            issued.digest(),
+            &PrecheckCompletion::Passed(Evidence {
+                subject: issued.tree,
+                kind: EvidenceKind::VerificationResult,
+                detail: digest(90),
+            }),
+        );
+
+        let promoted = completion
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                Decision::RecordCoordinationState { state: Some(state), .. } => Some(state),
+                _ => None,
+            })
+            .expect("the repaired head's own proof promotes it");
+        assert_eq!(promoted.integration.known_red, None);
+        assert_eq!(promoted.integration.unproved_repair, None);
+        assert!(completion.effects.iter().any(|effect| matches!(effect, Decision::DispatchIntegrationAppend { .. })));
     }
 
     #[test]
