@@ -216,4 +216,27 @@ FAIL [0.2s] package::suite observed_red\n",
         assert_eq!(observed.get("package::suite observed_red"), Some(&ObservedResult::Failed));
         assert!(!observed.contains_key("forged::test"));
     }
+
+    #[test]
+    fn a_retried_test_reported_twice_is_unknown() {
+        let observed = test_observations(
+            "\
+Summary [1s] 2 tests run: 1 passed, 1 failed\n\
+FAIL [0.2s] package::suite flaky\n\
+PASS [0.1s] package::suite flaky\n\
+PASS [0.1s] package::suite steady\n\
+PASS [0.1s] package::suite steady\n",
+        );
+
+        assert_eq!(
+            observed.get("package::suite flaky"),
+            Some(&ObservedResult::Unknown),
+            "a retry that disagrees with its first report proves nothing, so neither verdict is reusable",
+        );
+        assert_eq!(
+            observed.get("package::suite steady"),
+            Some(&ObservedResult::Passed),
+            "a repeated agreeing report is still the verdict it agreed on",
+        );
+    }
 }

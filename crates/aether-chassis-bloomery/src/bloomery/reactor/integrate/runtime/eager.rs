@@ -246,12 +246,24 @@ mod tests {
 
     use aether_bloomery::testing::digest;
     use aether_bloomery::{IntegrationAppendPlan, IntegrationHead, WorkpieceId};
-    use aether_bloomery_github::{GitSource, MainlineRef, fixture::FakeGithub};
+    use aether_bloomery_github::{GitSource, MainlineRef, fixture::FakeGithub, short_hex};
 
     use super::*;
 
     fn source(fake: &FakeGithub) -> SourceShell {
         SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake.clone()), false, MainlineRef::default())))
+    }
+
+    // The generation namespace's own integration branch, in the bare form the
+    // fake keys its armed merges and seeded refs by.
+    fn integration_branch(generation: Digest) -> String {
+        format!("bloom/{}/integration", short_hex(&generation_namespace(generation).0))
+    }
+
+    // The private vehicle ref one pinned candidate is merged from — named by
+    // the candidate's checkout, never by a member's moving candidate ref.
+    fn vehicle_branch(generation: Digest, candidate: &CandidateRef) -> String {
+        format!("bloom/{}/candidate/{}", short_hex(&generation_namespace(generation).0), candidate.checkout.to_hex())
     }
 
     fn pin(fake: &FakeGithub, seed: u8, workpiece: &str) -> MemberPin {
@@ -409,5 +421,118 @@ mod tests {
         };
 
         assert!(matches!(append_plan(&source(&fake), &plan), AppendResult::Refused(_)));
+    }
+
+    #[test]
+    fn a_collision_names_the_offered_input_and_the_head_it_would_not_place_on() {
+        let fake = FakeGithub::new();
+        let base_tree = digest(60);
+        let base = CandidateRef { tree: base_tree, checkout: fake.seed_base_commit(&base_tree) };
+        let first = pin(&fake, 61, "first");
+        let second = pin(&fake, 62, "second");
+        let generation = digest(63);
+        let bloom = BloomId(digest(64));
+        let first_plan = IntegrationAppendPlan {
+            bloom,
+            generation,
+            expected_parent: IntegrationHead {
+                generation,
+                node: digest(65),
+                candidate: base,
+                plan: digest(66),
+                coverage: Vec::new(),
+            },
+            inputs: vec![CompositionInput { node: digest(67), candidate: first.candidate, members: vec![first] }],
+        };
+        let source = source(&fake);
+
+        let AppendResult::Advanced(head) = append_plan(&source, &first_plan) else {
+            panic!("the first pinned candidate should append")
+        };
+        let placed = head.candidate;
+        fake.seed_merge_conflict_paths(
+            &integration_branch(generation),
+            &vehicle_branch(generation, &second.candidate),
+            vec!["crates/overlap.rs".to_owned()],
+        );
+        let offered = CompositionInput { node: digest(68), candidate: second.candidate, members: vec![second] };
+        let second_plan =
+            IntegrationAppendPlan { bloom, generation, expected_parent: head, inputs: vec![offered.clone()] };
+
+        let AppendResult::Conflicted { input, at, evidence, diagnostic } = append_plan(&source, &second_plan) else {
+            panic!("a collision against the admitted head is a conflict, not a refusal")
+        };
+
+        assert_eq!(input, offered, "the conflict names the offered composition, which is what reconciles");
+        assert_eq!(at, placed, "the collision is reported against the head the input could not be placed on");
+        assert_eq!(evidence.kind, EvidenceKind::FoldConflict);
+        assert_eq!(evidence.subject, placed.tree, "evidence binds to the exact tree that was collided with");
+        assert_eq!(
+            evidence.detail,
+            Digest::of_wire_bytes(diagnostic.as_bytes()),
+            "the evidence detail addresses the diagnostic the overlay renders",
+        );
+        assert!(diagnostic.contains("crates/overlap.rs"), "the colliding path reaches the diagnostic");
+        assert!(diagnostic.contains(&offered.node.to_hex()), "the diagnostic names the composition that collided");
+    }
+
+    #[test]
+    fn an_append_onto_a_diverged_generation_branch_is_stale() {
+        let fake = FakeGithub::new();
+        let base_tree = digest(70);
+        let base = CandidateRef { tree: base_tree, checkout: fake.seed_base_commit(&base_tree) };
+        let member = pin(&fake, 71, "member");
+        let generation = digest(72);
+        let diverged_tree = digest(73);
+        let diverged = fake.seed_base_commit(&diverged_tree);
+        fake.seed_ref(&format!("heads/{}", integration_branch(generation)), &diverged.to_hex());
+        let plan = IntegrationAppendPlan {
+            bloom: BloomId(digest(74)),
+            generation,
+            expected_parent: IntegrationHead {
+                generation,
+                node: digest(75),
+                candidate: base,
+                plan: digest(76),
+                coverage: Vec::new(),
+            },
+            inputs: vec![CompositionInput { node: digest(77), candidate: member.candidate, members: vec![member] }],
+        };
+        let commits = fake.create_commit_count();
+
+        let AppendResult::Stale(actual) = append_plan(&source(&fake), &plan) else {
+            panic!("a generation branch that is not a descendant of the expected parent is stale")
+        };
+
+        assert_eq!(actual, diverged_tree, "the stale report carries the tree the branch actually stands on");
+        assert_eq!(fake.create_commit_count(), commits, "a stale plan writes no merge commit");
+    }
+
+    #[test]
+    fn a_bootstrap_fault_stops_the_append_instead_of_deciding_it() {
+        let fake = FakeGithub::new();
+        let base_tree = digest(80);
+        let base = CandidateRef { tree: base_tree, checkout: fake.seed_base_commit(&base_tree) };
+        let member = pin(&fake, 81, "member");
+        let generation = digest(82);
+        let plan = IntegrationAppendPlan {
+            bloom: BloomId(digest(83)),
+            generation,
+            expected_parent: IntegrationHead {
+                generation,
+                node: digest(84),
+                candidate: base,
+                plan: digest(85),
+                coverage: Vec::new(),
+            },
+            inputs: vec![CompositionInput { node: digest(86), candidate: member.candidate, members: vec![member] }],
+        };
+        fake.fail_next_get_ref("namespace read timed out");
+
+        let AppendResult::Stopped(reason) = append_plan(&source(&fake), &plan) else {
+            panic!("a transport fault is retryable, never a recorded refusal or a stale decision")
+        };
+
+        assert!(reason.contains("eager integration bootstrap failed"), "the stop names the phase that faulted");
     }
 }
