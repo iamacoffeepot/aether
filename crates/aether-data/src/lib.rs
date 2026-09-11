@@ -307,6 +307,7 @@ pub trait Schema {
 }
 
 mod schema_impls {
+    use alloc::boxed::Box;
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -376,6 +377,28 @@ mod schema_impls {
         const SCHEMA: SchemaType = SchemaType::Option(SchemaCell::Static(&T::SCHEMA));
         const LABEL: Option<&'static str> = None;
         const LABEL_NODE: LabelNode = LabelNode::Option(LabelCell::Static(&T::LABEL_NODE));
+    }
+
+    /// `Box<T>` is a representation wrapper *around* `T`, not a schema type:
+    /// it contributes no node of its own and delegates every associated
+    /// constant to the inner type. Boxing a field to keep a large variant off
+    /// an enum's stack representation is therefore invisible end to end — the
+    /// schema digest (`canonical::kind_id_from_parts`), the serde form, and
+    /// the `wire` bytes are identical to the unboxed spelling, so the change
+    /// needs no upcast epoch. `WireEncode` / `WireDecode` for `Box<T>` already
+    /// delegate the same way (`wire::leaf`).
+    ///
+    /// One documented edge: `#[derive(Schema)]` pattern-matches the literal
+    /// field spelling `Vec<u8>` to emit `SchemaType::Bytes` (see the `Vec<T>`
+    /// impl above), and that match is syntactic. A field written
+    /// `Box<Vec<u8>>` does not match, so it falls through to this impl and
+    /// lands as `Vec(Scalar(U8))` — a different schema from the unboxed
+    /// `Vec<u8>` field next to it. Nothing boxes a byte buffer today; boxing
+    /// an already-heap-allocated `Vec` buys nothing.
+    impl<T: Schema + 'static> Schema for Box<T> {
+        const SCHEMA: SchemaType = T::SCHEMA;
+        const LABEL: Option<&'static str> = T::LABEL;
+        const LABEL_NODE: LabelNode = T::LABEL_NODE;
     }
 
     impl<T: Schema + 'static, const N: usize> Schema for [T; N] {
