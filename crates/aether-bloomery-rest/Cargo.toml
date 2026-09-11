@@ -1,0 +1,29 @@
+[package]
+name = "aether-bloomery-rest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# The digest vocabulary the codec spells: `Digest`, its newtype-struct name,
+# `Digest::from_hex`, and `encode_hex`. `default-features = false` links only
+# the rlib core, never the guest-SDK `runtime` feature (issue #3497).
+aether-bloomery = { path = "../aether-bloomery", default-features = false }
+# Both halves are `serde` adapters — a `Serializer` and a `Deserializer` that
+# wrap the ones they are handed — rather than rewrites of rendered JSON.
+serde = { workspace = true, features = ["std"] }
+# The JSON the edge speaks: the serializer renders through `serde_json`, and
+# the deserializer walks an already-parsed `Value`.
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# The canonical wire encoding hex has to resolve to. The round-trip tripwire
+# hashes a decoded workpiece's wire bytes against a pinned digest, so a hex path
+# that produced anything but the 32 bytes it names fails there.
+aether-data = { path = "../aether-data" }
+# The codec is derive-free; its fixtures are not.
+serde = { workspace = true, features = ["derive", "std"] }
+
+[lints]
+workspace = true
