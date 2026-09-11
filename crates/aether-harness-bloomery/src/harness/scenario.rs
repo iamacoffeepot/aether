@@ -701,6 +701,18 @@ impl ScenarioHarness {
 
     /// Pass a queued `verify.base` so a scenario that is not about base
     /// admission sees construct orders the way it did before the gate.
+    ///
+    /// The base gate is dispatched to a real lane child, whose evidence the
+    /// executor admits off its own adapter-settlement wake rather than only on
+    /// the ticks this loop issues. The order read here can therefore be spent
+    /// by that real admission before the scripted verdict lands — an
+    /// `UnknownNonce` refusal means the gate was answered for real, which is
+    /// the outcome this helper wanted, so it returns rather than failing the
+    /// scenario on a verdict it no longer needed to script.
+    ///
+    /// # Panics
+    /// The scripted verdict was refused for any reason other than the order
+    /// having already been answered.
     fn pass_outstanding_base_verify(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -710,7 +722,11 @@ impl ScenarioHarness {
                 .iter()
                 .find(|order| from_bytes::<StageId>(&order.stage).is_ok_and(|stage| stage == StageId::BaseVerify))
             {
-                self.upload_admitted(&passed(order));
+                match self.upload(&passed(order)) {
+                    ScriptedEvidenceResult::Admitted { .. } => {}
+                    ScriptedEvidenceResult::Refused { refusal } if refusal.starts_with("UnknownNonce") => {}
+                    other => panic!("the scripted base verdict was not admitted: {other:?}"),
+                }
                 return;
             }
             if !orders.is_empty() {
