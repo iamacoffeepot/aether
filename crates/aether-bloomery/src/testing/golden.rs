@@ -84,17 +84,19 @@ fn precheck_records(bloom: BloomId) -> Vec<Decision> {
         gate_set: digest(67),
     };
     let node = PrecheckNode { plan: plan.digest(), tree: digest(68), head: digest(69), gate_set: plan.gate_set };
-    let state = |result, diagnostic| PrecheckState {
-        policy: PrecheckPolicy { run_budget: 2 },
-        latest_plan: Some(plan.clone()),
-        prepared: Some(node.clone()),
-        issued: Some(node.clone()),
-        issued_runs: 1,
-        result: Some(result),
-        diagnostic,
-        final_join: Some(node.clone()),
-        promoted: true,
-        paused: true,
+    let state = |result, diagnostic| {
+        Box::new(PrecheckState {
+            policy: PrecheckPolicy { run_budget: 2 },
+            latest_plan: Some(plan.clone()),
+            prepared: Some(node.clone()),
+            issued: Some(node.clone()),
+            issued_runs: 1,
+            result: Some(result),
+            diagnostic,
+            final_join: Some(node.clone()),
+            promoted: true,
+            paused: true,
+        })
     };
 
     vec![
@@ -486,7 +488,7 @@ fn populate_coordination_observations(fixture: &mut CoordinationGolden) {
 
 fn coordination_decisions(fixture: CoordinationGolden) -> Vec<Decision> {
     vec![
-        Decision::RecordCoordinationState { bloom: fixture.bloom, state: Some(fixture.state) },
+        Decision::RecordCoordinationState { bloom: fixture.bloom, state: Some(Box::new(fixture.state)) },
         Decision::DispatchIntegrationAppend { plan: fixture.append },
         Decision::DispatchCandidatePreparation {
             plan: CandidatePreparationPlan {
@@ -497,7 +499,7 @@ fn coordination_decisions(fixture: CoordinationGolden) -> Vec<Decision> {
                 context: fixture.context,
             },
         },
-        Decision::QueueMemberVerification { request: fixture.request.clone() },
+        Decision::QueueMemberVerification { request: Box::new(fixture.request.clone()) },
         Decision::DispatchSharedRunPreparation { plan: fixture.run.clone() },
         Decision::DispatchSharedRun {
             dispatch: SharedRunDispatch { plan: fixture.run.clone(), execution: SharedRunExecution::Serial },
@@ -506,8 +508,8 @@ fn coordination_decisions(fixture: CoordinationGolden) -> Vec<Decision> {
             dispatch: SharedRunDispatch {
                 plan: fixture.run.clone(),
                 execution: SharedRunExecution::Contextual {
-                    node: fixture.node,
-                    transformation: transformation(),
+                    node: Box::new(fixture.node),
+                    transformation: Box::new(transformation()),
                     profile: profile(),
                     configs: configs(),
                 },

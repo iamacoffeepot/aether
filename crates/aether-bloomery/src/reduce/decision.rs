@@ -2,6 +2,7 @@
 //! (it evolves the projection) or snapshot-inert (it carries an outbox row the
 //! host drains and turns into I/O) — the reducer never does I/O itself.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
@@ -23,7 +24,6 @@ use crate::values::{
 /// The ordered effects a decision applies to the projection (and, in
 /// production, the outbox/store).
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[allow(clippy::large_enum_variant)] // aether-suppression-request: journal payloads use the closed Schema value vocabulary; runtime snapshots own heap indirection
 pub enum Decision {
     /// Claim a workpiece's active membership for a bloom.
     ClaimMembership {
@@ -940,7 +940,7 @@ pub enum Decision {
         manifest: PipelineManifest,
     },
     /// Replace the complete journal-derived pre-check state, or clear it.
-    RecordPrecheckState { bloom: BloomId, state: Option<PrecheckState> },
+    RecordPrecheckState { bloom: BloomId, state: Option<Box<PrecheckState>> },
     /// Ask the host to scratch-fold the newest immutable candidate plan.
     QueuePrecheckPlan { bloom: BloomId, plan: PrecheckPlan },
     /// Offer a prepared node for idle-only admission.
@@ -964,13 +964,13 @@ pub enum Decision {
     /// Promote an exact issued run joined by final resolution to required work.
     PromotePrecheck { bloom: BloomId, node: Digest },
     /// Replace the complete journal-derived coordination state, or clear it.
-    RecordCoordinationState { bloom: BloomId, state: Option<CoordinationState> },
+    RecordCoordinationState { bloom: BloomId, state: Option<Box<CoordinationState>> },
     /// Advance one eager generation from its exact immutable parent.
     DispatchIntegrationAppend { plan: IntegrationAppendPlan },
     /// Mechanically place one authored reconcile result onto its recorded head.
     DispatchCandidatePreparation { plan: CandidatePreparationPlan },
     /// Offer one logical verification request to the shared-run scheduler.
-    QueueMemberVerification { request: MemberVerifyRequest },
+    QueueMemberVerification { request: Box<MemberVerifyRequest> },
     /// Materialize an approved contextual composition plan in scratch source.
     DispatchSharedRunPreparation { plan: SharedRunPlan },
     /// Dispatch one approved physical run or warm serial lease.

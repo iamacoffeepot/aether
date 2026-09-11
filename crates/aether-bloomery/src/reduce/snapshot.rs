@@ -1642,7 +1642,7 @@ impl Snapshot {
         if let Decision::RecordCoordinationState { bloom, state } = effect
             && let Some(record) = self.blooms.get_mut(bloom)
         {
-            record.coordination = state.clone().map(Box::new);
+            record.coordination.clone_from(state);
         }
     }
 
@@ -1966,7 +1966,7 @@ impl Snapshot {
             return;
         };
         if let Some(record) = self.blooms.get_mut(bloom) {
-            record.precheck.clone_from(state);
+            record.precheck = state.as_deref().cloned();
         }
     }
 

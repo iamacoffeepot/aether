@@ -121,7 +121,7 @@ pub(super) fn initialized_effects(
     for effect in preceding {
         match effect {
             Decision::RecordCoordinationState { bloom: owner, state } if *owner == bloom => {
-                record.coordination = state.clone().map(Box::new);
+                record.coordination.clone_from(state);
             }
             Decision::RecordCandidateVehicle { bloom: owner, workpiece, vehicle } if *owner == bloom => {
                 candidates.insert(workpiece.clone(), *vehicle);
@@ -209,7 +209,7 @@ fn rejected(error: PrecheckError) -> Decisions {
 }
 
 fn record_state(bloom: BloomId, state: PrecheckState) -> Decision {
-    Decision::RecordPrecheckState { bloom, state: Some(state) }
+    Decision::RecordPrecheckState { bloom, state: Some(Box::new(state)) }
 }
 
 fn active_state<'a>(
@@ -429,7 +429,7 @@ fn record_head_failure(
     let mut repair_effects = Vec::new();
     schedule_partial_head_repair(record, &mut next, evidence, &mut repair_effects);
     if next != *coordination {
-        effects.push(Decision::RecordCoordinationState { bloom, state: Some(next) });
+        effects.push(Decision::RecordCoordinationState { bloom, state: Some(Box::new(next)) });
     }
     effects.extend(repair_effects);
 }
@@ -451,7 +451,7 @@ fn record_head_promotion(record: &BloomRecord, bloom: BloomId, issued: &Precheck
     let mut promoted = Vec::new();
     promote_proved_repair(record, &mut next, coordination.integration.head.node, &mut promoted);
     if next != *coordination {
-        effects.push(Decision::RecordCoordinationState { bloom, state: Some(next) });
+        effects.push(Decision::RecordCoordinationState { bloom, state: Some(Box::new(next)) });
     }
     effects.extend(promoted);
 }
@@ -604,7 +604,7 @@ fn schedule_bloom(
         .iter()
         .rev()
         .find_map(|effect| match effect {
-            Decision::RecordCoordinationState { bloom: owner, state } if *owner == bloom => Some(state.as_ref()),
+            Decision::RecordCoordinationState { bloom: owner, state } if *owner == bloom => Some(state.as_deref()),
             _ => None,
         })
         .unwrap_or(record.coordination.as_deref());
@@ -710,7 +710,7 @@ fn schedule_eager_head(
         .iter()
         .rev()
         .find_map(|effect| match effect {
-            Decision::RecordPrecheckState { bloom: owner, state } if *owner == bloom => Some(state.as_ref()),
+            Decision::RecordPrecheckState { bloom: owner, state } if *owner == bloom => Some(state.as_deref()),
             _ => None,
         })
         .unwrap_or(Some(state));
@@ -875,7 +875,7 @@ mod tests {
             candidate: coordination.integration.head.candidate,
             members: coordination.integration.head.coverage.clone(),
         }];
-        record.coordination = Some(Box::new(coordination));
+        record.coordination = Some(coordination);
         let plan = plan_of(&record, bloom).expect("selected head has coverage");
         let node = selected_head_node(&plan, record.coordination.as_deref().expect("coordination"));
         let mut state = PrecheckState::new(PrecheckPolicy { run_budget: 3 });
@@ -896,7 +896,7 @@ mod tests {
             snapshot,
             Decisions {
                 outcome: Outcome::PrecheckPrepared { bloom, node: digest(tree) },
-                effects: vec![Decision::RecordCoordinationState { bloom, state: Some(state) }],
+                effects: vec![Decision::RecordCoordinationState { bloom, state: Some(Box::new(state)) }],
             },
         )
     }
@@ -1303,7 +1303,7 @@ mod tests {
 
     fn recorded_state(effects: &[Decision], bloom: BloomId) -> Option<&PrecheckState> {
         effects.iter().rev().find_map(|effect| match effect {
-            Decision::RecordPrecheckState { bloom: owner, state } if *owner == bloom => state.as_ref(),
+            Decision::RecordPrecheckState { bloom: owner, state } if *owner == bloom => state.as_deref(),
             _ => None,
         })
     }

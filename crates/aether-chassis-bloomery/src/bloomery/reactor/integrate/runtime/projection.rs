@@ -40,7 +40,7 @@ impl CoordinationProjection {
                         }
                         Decision::RecordCoordinationState { bloom, state } => {
                             if let Some(state) = state {
-                                self.states.insert(bloom, state);
+                                self.states.insert(bloom, *state);
                             } else {
                                 self.states.remove(&bloom);
                                 self.candidate_plans.retain(|(owner, _), _| *owner != bloom);

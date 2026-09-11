@@ -890,7 +890,7 @@ fn prepared_contextual(dispatch: &SharedRunDispatch) -> Option<PreparedSharedPro
     Some(PreparedSharedProbe {
         request: dispatch.plan.digest(),
         candidate: node.candidate,
-        transformation: transformation.clone(),
+        transformation: (**transformation).clone(),
         profile: profile.clone(),
         configs: configs.clone(),
     })
@@ -1430,7 +1430,7 @@ fn contextual_contract_valid(dispatch: &SharedRunDispatch) -> bool {
     };
     composition.requests == dispatch.plan.requests
         && node.plan == dispatch.plan.digest()
-        && transformation == &expected
+        && **transformation == expected
         && profile == &template.profile
         && configs == &template.configs
         && composition.contract.members.len() == dispatch.plan.requests.len()
@@ -1760,7 +1760,7 @@ fn probe_materialization(
         probe,
         base,
         inputs,
-        transformation: transformation.clone(),
+        transformation: (**transformation).clone(),
         profile: profile.clone(),
         configs: configs.clone(),
     };
@@ -2754,8 +2754,8 @@ mod tests {
         let node = SharedRunNode { plan: plan.digest(), candidate: member.candidate, coverage: vec![member] };
         SharedRunDispatch {
             execution: SharedRunExecution::Contextual {
-                transformation: template.instantiate(node.candidate),
-                node,
+                transformation: Box::new(template.instantiate(node.candidate)),
+                node: Box::new(node),
                 profile,
                 configs,
             },

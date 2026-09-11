@@ -1,5 +1,6 @@
 //! Durable vocabulary for shared member verification and eager integration.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -375,9 +376,8 @@ pub struct CompatibilityPreviewRecord {
 
 /// Result of one immutable candidate preparation request.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[allow(clippy::large_enum_variant)] // aether-suppression-request: the journal retains the exact prepared candidate as a derived wire value, including its inherited context
 pub enum CandidatePreparation {
-    Prepared(PreparedCandidate),
+    Prepared(Box<PreparedCandidate>),
     Conflict { evidence: Evidence },
     Refused { detail: Digest },
 }
@@ -700,12 +700,16 @@ pub enum SharedRunPreparation {
 
 /// Exact executor input of one reducer-approved physical run.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[allow(clippy::large_enum_variant)] // aether-suppression-request: the immutable journal dispatch retains plain node and invocation values within the supported Schema vocabulary
 pub enum SharedRunExecution {
     /// Execute each request's own transformation serially in one retained slot.
     Serial,
     /// Execute the combined gate once over the immutable contextual node.
-    Contextual { node: SharedRunNode, transformation: Transformation, profile: AgentProfile, configs: ConfigRegistry },
+    Contextual {
+        node: Box<SharedRunNode>,
+        transformation: Box<Transformation>,
+        profile: AgentProfile,
+        configs: ConfigRegistry,
+    },
 }
 
 /// Snapshot-inert payload retained by the physical-run outbox row.

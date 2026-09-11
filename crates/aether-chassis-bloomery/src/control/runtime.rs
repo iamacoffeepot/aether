@@ -1882,7 +1882,7 @@ fn coordination_outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>
             Some(to_vec(&CompatibilityPreviewPayload { plan: plan.clone() })?)
         }
         Decision::QueueMemberVerification { request } => {
-            Some(to_vec(&MemberVerificationPayload { request: request.clone() })?)
+            Some(to_vec(&MemberVerificationPayload { request: (**request).clone() })?)
         }
         Decision::DispatchSharedRunPreparation { plan } => Some(to_vec(&SharedRunPlanPayload { plan: plan.clone() })?),
         Decision::DispatchSharedRun { dispatch } => {

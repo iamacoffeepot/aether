@@ -55,7 +55,7 @@ fn accepted(bloom: BloomId, subject: Digest, effects: Vec<Decision>) -> Decision
 }
 
 fn record_state(bloom: BloomId, state: CoordinationState) -> Decision {
-    Decision::RecordCoordinationState { bloom, state: Some(state) }
+    Decision::RecordCoordinationState { bloom, state: Some(Box::new(state)) }
 }
 
 fn hold_coordination(bloom: BloomId, reason: String, effects: &mut Vec<Decision>) {
@@ -844,7 +844,7 @@ fn apply_repaired_partial_head(
         if repaired.members.contains(&request.member) {
             state.claims.remove(workpiece_key(&request.member.workpiece));
             request.input = repaired.clone();
-            effects.push(Decision::QueueMemberVerification { request: request.clone() });
+            effects.push(Decision::QueueMemberVerification { request: Box::new(request.clone()) });
         }
     }
     if repairs_selected_head {
@@ -1177,7 +1177,7 @@ fn apply_prepared_candidate(
         state.requests.push(request.clone());
     }
     effects.push(Decision::AdvanceStage { bloom: expected.bloom, workpiece: member.workpiece.clone(), progress });
-    effects.push(Decision::QueueMemberVerification { request });
+    effects.push(Decision::QueueMemberVerification { request: Box::new(request) });
     Ok(())
 }
 
@@ -1503,8 +1503,8 @@ pub(super) fn reduce_shared_run_prepared(
                 dispatch: SharedRunDispatch {
                     plan: run.plan.clone(),
                     execution: SharedRunExecution::Contextual {
-                        node: node.clone(),
-                        transformation,
+                        node: Box::new(node.clone()),
+                        transformation: Box::new(transformation),
                         profile: composition.contract.invocation.profile.clone(),
                         configs: composition.contract.invocation.configs.clone(),
                     },
@@ -2112,7 +2112,7 @@ fn queue_run_retry(
             effects,
         );
     } else {
-        effects.push(Decision::QueueMemberVerification { request: request.clone() });
+        effects.push(Decision::QueueMemberVerification { request: Box::new(request.clone()) });
     }
 }
 
@@ -2130,7 +2130,7 @@ fn apply_shared_host_fault(
     };
     let retry_budget = stage_binding(&context.record.stage_catalog, retry_stage).retry_budget;
     if context.run.plan.execution_attempt.saturating_add(1) < retry_budget {
-        effects.push(Decision::QueueMemberVerification { request: request.clone() });
+        effects.push(Decision::QueueMemberVerification { request: Box::new(request.clone()) });
         return;
     }
     state.diagnostics.push(CoordinationDiagnostic {
@@ -2215,7 +2215,7 @@ fn apply_run_outcome(
             apply_shared_host_fault(context, state, request, evidence, effects);
         }
         MemberVerifyOutcome::Survived { .. } => {
-            effects.push(Decision::QueueMemberVerification { request: request.clone() });
+            effects.push(Decision::QueueMemberVerification { request: Box::new(request.clone()) });
         }
         MemberVerifyOutcome::Pending { .. } => queue_run_retry(state, context.run, request, effects),
     }
@@ -2350,7 +2350,7 @@ fn retain_survivors_and_schedule_repair(
         .collect::<Vec<_>>();
     if let Some(node) = run.node.as_ref().filter(|_| !polluted_requests.is_empty()) {
         for request in run.plan.requests.iter().filter(|request| polluted.contains(&request.member.workpiece)) {
-            effects.push(Decision::QueueMemberVerification { request: request.clone() });
+            effects.push(Decision::QueueMemberVerification { request: Box::new(request.clone()) });
         }
         state.survivor_groups.push(SurvivorGroup {
             source_plan: run.plan.digest(),
@@ -2413,7 +2413,7 @@ pub(super) fn reduce_shared_run_completed(
                 continue;
             }
             if run_snapshot.plan.mode == SharedRunMode::Contextual {
-                effects.push(Decision::QueueMemberVerification { request: request.clone() });
+                effects.push(Decision::QueueMemberVerification { request: Box::new(request.clone()) });
                 continue;
             }
             match completion.outcomes.iter().find(|outcome| outcome.request() == request.digest()) {
@@ -2797,7 +2797,7 @@ fn replace_verify_dispatch(
     ) && !state.requests.iter().any(|current| current.digest() == request.digest())
     {
         state.requests.push(request.clone());
-        output.push(Decision::QueueMemberVerification { request });
+        output.push(Decision::QueueMemberVerification { request: Box::new(request) });
     } else {
         output.push(effect);
     }
@@ -2904,7 +2904,7 @@ fn replace_verify_dispatches(snapshot: &Snapshot, decisions: &mut Decisions) -> 
     let mut states = original
         .iter()
         .filter_map(|effect| match effect {
-            Decision::RecordCoordinationState { bloom, state: Some(state) } => Some((*bloom, state.clone())),
+            Decision::RecordCoordinationState { bloom, state: Some(state) } => Some((*bloom, (**state).clone())),
             _ => None,
         })
         .collect::<BTreeMap<BloomId, CoordinationState>>();
@@ -2981,7 +2981,7 @@ fn apply_member_invalidations(snapshot: &Snapshot, decisions: &mut Decisions) ->
             matches!(effect, Decision::RecordCoordinationState { bloom: owner, state: Some(_)} if *owner == bloom)
         });
         let mut state = match position.map(|position| decisions.effects.remove(position)) {
-            Some(Decision::RecordCoordinationState { state: Some(state), .. }) => state,
+            Some(Decision::RecordCoordinationState { state: Some(state), .. }) => *state,
             _ => match record.coordination.as_deref() {
                 Some(state) => state.clone(),
                 None => continue,
@@ -3082,7 +3082,7 @@ mod tests {
         .expect("valid policy")
         .into_iter()
         .find_map(|effect| match effect {
-            Decision::RecordCoordinationState { state: Some(state), .. } => Some(state),
+            Decision::RecordCoordinationState { state: Some(state), .. } => Some(*state),
             _ => None,
         })
         .expect("coordination state");
@@ -3263,7 +3263,7 @@ mod tests {
 
     fn install_recorded_state(snapshot: &mut Snapshot, bloom: BloomId, decisions: &Decisions) -> CoordinationState {
         let state = decisions.effects.iter().find_map(|effect| match effect {
-            Decision::RecordCoordinationState { state: Some(state), .. } => Some(state.clone()),
+            Decision::RecordCoordinationState { state: Some(state), .. } => Some((**state).clone()),
             _ => None,
         });
         let state = state.expect("decision records coordination state");
@@ -3916,7 +3916,7 @@ mod tests {
         };
         let decisions = reduce_shared_run_completed(&snapshot, &bloom, &completion);
         let state = decisions.effects.iter().find_map(|effect| match effect {
-            Decision::RecordCoordinationState { state: Some(state), .. } => Some(state),
+            Decision::RecordCoordinationState { state: Some(state), .. } => Some(state.as_ref()),
             _ => None,
         });
         let state = state.expect("completion records state");

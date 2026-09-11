@@ -302,12 +302,12 @@ fn candidate_preparation_rejects_a_stale_same_scope_candidate_after_replacement(
             Fact::CandidatePrepared {
                 bloom,
                 plan: plan.digest(),
-                preparation: CandidatePreparation::Prepared(PreparedCandidate {
+                preparation: CandidatePreparation::Prepared(Box::new(PreparedCandidate {
                     authored,
                     candidate: candidate(24, 25),
                     context,
                     diff_base: candidate(1, 1),
-                }),
+                })),
             },
         ),
         &compiled_resolved(),

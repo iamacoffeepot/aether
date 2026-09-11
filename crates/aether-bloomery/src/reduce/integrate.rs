@@ -294,7 +294,7 @@ pub(super) fn folded(
         state.promoted = true;
         let mut effects = alloc::vec![
             hold,
-            Decision::RecordPrecheckState { bloom, state: Some(state) },
+            Decision::RecordPrecheckState { bloom, state: Some(Box::new(state)) },
             Decision::PromotePrecheck { bloom, node: node_digest },
         ];
         effects.extend(aggregate_review_dispatch(record, bloom, tree, head));

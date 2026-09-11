@@ -182,12 +182,12 @@ pub(super) fn prepare_candidate(source: &SourceShell, plan: &CandidatePreparatio
     let base = &plan.context.starting_head.candidate;
     match source.prepare_pinned(&namespace, base, &plan.authored) {
         Ok(IntegrateOutcome::Integrated { tree, head }) => {
-            CandidatePreparationResult::Completed(CandidatePreparation::Prepared(PreparedCandidate {
+            CandidatePreparationResult::Completed(CandidatePreparation::Prepared(Box::new(PreparedCandidate {
                 authored: plan.authored,
                 candidate: CandidateRef { tree, checkout: head },
                 context: plan.context.clone(),
                 diff_base: *base,
-            }))
+            })))
         }
         Ok(IntegrateOutcome::Conflict { at, paths, diff, .. }) => {
             let diagnostic = preparation_conflict_diagnostic(plan, &paths, &diff);
