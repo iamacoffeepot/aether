@@ -714,7 +714,11 @@ impl ScenarioHarness {
     /// The scripted verdict was refused for any reason other than the order
     /// having already been answered.
     fn pass_outstanding_base_verify(&mut self) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // The order arrives behind an offloaded base-snapshot round trip, so a
+        // fixed few-second wait gives up on a loaded runner before it appears
+        // and the bloom then dispatches nothing; the step budget is the wait
+        // every other harness poll already tolerates.
+        let deadline = Instant::now() + self.step_budget;
         loop {
             self.dispatch_tick();
             let orders = self.orders();
