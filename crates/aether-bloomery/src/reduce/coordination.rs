@@ -2823,6 +2823,16 @@ fn adopt_verified_bases(snapshot: &Snapshot, effects: &[Decision], states: &mut 
     }
 }
 
+/// Whether `workpiece` is reconciling under an inherited context, so its
+/// captured candidate owes a preparation onto the current head before any
+/// verification of it can be dispatched (ADR-0218).
+fn awaits_candidate_preparation(snapshot: &Snapshot, bloom: BloomId, workpiece: &WorkpieceId) -> bool {
+    snapshot.blooms.get(&bloom).is_some_and(|record| {
+        record.coordination.as_deref().is_some_and(|state| state.contexts.contains_key(workpiece_key(workpiece)))
+            && record.progress.get(workpiece).is_some_and(|progress| progress.stage == StageId::Reconcile)
+    })
+}
+
 fn replace_verify_dispatches(snapshot: &Snapshot, decisions: &mut Decisions) -> Result<(), CoordinationError> {
     let original = take(&mut decisions.effects);
     let mut output = Vec::with_capacity(original.len());
@@ -2856,18 +2866,22 @@ fn replace_verify_dispatches(snapshot: &Snapshot, decisions: &mut Decisions) -> 
             effect @ Decision::DispatchAttempt { stage: StageId::Construct, .. } => {
                 replace_construct_dispatch(snapshot, &advances, &mut states, effect, &mut output);
             }
-            Decision::AdvanceStage { bloom, ref workpiece, .. }
+            Decision::AdvanceStage { bloom, workpiece, progress }
                 if verify_dispatches.contains(&(bloom, workpiece.clone()))
-                    && snapshot.blooms.get(&bloom).and_then(|record| record.coordination.as_deref()).is_some_and(
-                        |state| {
-                            state.contexts.contains_key(workpiece_key(workpiece))
-                                && snapshot
-                                    .blooms
-                                    .get(&bloom)
-                                    .and_then(|record| record.progress.get(workpiece))
-                                    .is_some_and(|progress| progress.stage == StageId::Reconcile)
-                        },
-                    ) => {}
+                    && awaits_candidate_preparation(snapshot, bloom, &workpiece) =>
+            {
+                // The reconcile lane's candidate is authored against the head it
+                // was sent back from, so it has to be prepared onto the current
+                // head before it can be verified. The member therefore stays at
+                // Reconcile and carries the authored candidate the preparation
+                // plan names — which is what both `apply_prepared_candidate` and
+                // `retire_displaced_head_work` match the plan against.
+                output.push(Decision::AdvanceStage {
+                    bloom,
+                    workpiece,
+                    progress: StageProgress { stage: StageId::Reconcile, ..progress },
+                });
+            }
             effect @ Decision::DispatchAttempt { stage: StageId::Verify, .. } => {
                 replace_verify_dispatch(snapshot, &advances, &mut states, effect, &mut output)?;
             }
