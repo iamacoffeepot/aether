@@ -1154,7 +1154,24 @@ impl SqliteStore {
     /// coordinator generation that owns the journal opens it with
     /// [`open_as_holder`](Self::open_as_holder).
     pub fn open(path: &str) -> rusqlite::Result<Self> {
-        let mut conn = connect(path)?;
+        Self::open_with_busy_timeout(path, DEFAULT_BUSY_TIMEOUT)
+    }
+
+    /// [`open`](Self::open), waiting `busy_timeout` for a write lock another
+    /// connection holds instead of the default five seconds.
+    ///
+    /// For an observer beside a live coordinator — a scenario harness, an
+    /// operator read — whose own deadline is longer than the default and whose
+    /// failure mode is worse: it reports a `SQLITE_BUSY` where waiting for the
+    /// coordinator's write transaction to commit would have answered. The
+    /// timeout is applied before the migrations, because the migration
+    /// transaction is itself a write and so is the first thing an open can
+    /// lose the lock race to.
+    ///
+    /// # Errors
+    /// The connection could not be opened or the migration failed.
+    pub fn open_with_busy_timeout(path: &str, busy_timeout: Duration) -> rusqlite::Result<Self> {
+        let mut conn = connect_with_busy_timeout(path, busy_timeout)?;
         migrate(&mut conn)?;
         Ok(Self { conn, holds_journal: false })
     }
@@ -1272,8 +1289,20 @@ impl Drop for SqliteStore {
     }
 }
 
+/// How long a store connection waits for the WAL write lock before it gives up
+/// with `SQLITE_BUSY`. A second connection to the same file (the executor
+/// dispatch reactor opens its own to drive the intake registry, #3505) waits
+/// rather than failing fast; WAL is still single-writer, so the timeout is what
+/// serializes the rare concurrent write instead of losing one of them.
+const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A connection to `path` under the store's pragmas, before any schema exists.
 fn connect(path: &str) -> rusqlite::Result<Connection> {
+    connect_with_busy_timeout(path, DEFAULT_BUSY_TIMEOUT)
+}
+
+/// [`connect`], with the busy timeout named rather than defaulted.
+fn connect_with_busy_timeout(path: &str, busy_timeout: Duration) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     // WAL gives a durable single-writer / many-reader journal; a `:memory:`
     // database silently ignores the pragma (it has one connection anyway).
@@ -1281,11 +1310,7 @@ fn connect(path: &str) -> rusqlite::Result<Connection> {
     // committed transaction survives an application crash (`kill -9`).
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
-    // A busy timeout so a second connection to the same file (the executor
-    // dispatch reactor opens its own to drive the intake registry, #3505) waits
-    // for the WAL write lock rather than failing fast with SQLITE_BUSY; WAL is
-    // still single-writer, so the timeout serializes the rare concurrent write.
-    conn.busy_timeout(Duration::from_secs(5))?;
+    conn.busy_timeout(busy_timeout)?;
     Ok(conn)
 }
 
