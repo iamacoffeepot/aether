@@ -13,6 +13,15 @@ Two properties of the existing vocabulary make the addition small. `StageId` is 
 
 ## Decision
 
+For blooms sealing `CoordinationPolicy`, [ADR-0218](0218-contextual-verification-and-eager-integration.md)
+amends the deferred-fold and verification rules below. Current claims advance
+an immutable eager head in recorded actual order; late constructors may inherit
+that head with explicit provenance. A returned Reconcile candidate is merged
+onto its recorded head before Verify, and movement retries have a separate
+bounded reservation. Reconcile and Refine resume their own author session.
+The original rules remain the behavior of blooms without that policy. Eager
+integration does not change atomic membership or authorize early landing.
+
 Cross-member fold conflicts become journaled facts that dispatch a **`Reconcile`** stage — a first-class member of the stage vocabulary, symmetric with its siblings.
 
 1. **The conflict is a fact.** The integrate reactor stops refusing in prose: it admits `FoldConflict { bloom, workpiece, checkpoint, evidence }`, where `checkpoint` names the folded tree the candidate collided with and `evidence` carries the conflicting paths. Replay reproduces the state; the reactor holds nothing the journal does not.

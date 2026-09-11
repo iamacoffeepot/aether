@@ -291,6 +291,15 @@ fn bloom_lines(view: &ViewDocument, store: &Store, id: DigestHex) -> Vec<Line> {
         });
     }
     push_alert_section(&mut lines, bloom);
+    if let Some(coordination) = &bloom.coordination {
+        for (index, text) in coordination
+            .detail_lines(bloom.members.iter().filter(|member| member.withdrawn.is_none()).count())
+            .into_iter()
+            .enumerate()
+        {
+            lines.push(label(RowKey::Other(400 + u16::try_from(index).unwrap_or(99)), text));
+        }
+    }
     if let Some(composition) = &bloom.composition {
         push_composition_section(&mut lines, composition);
     }
@@ -432,6 +441,19 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
         openable: false,
     }];
     lines.push(label(RowKey::Other(0), format!("state  {}", member_status_state(member))));
+    if let Some(coordination) = &bloom.coordination {
+        lines.push(label(RowKey::Other(400), coordination.member_summary(member)));
+        if let Some((run, millis)) = coordination.member_latency(member) {
+            lines.push(label(RowKey::Other(403), format!("verification latency  {millis} ms")));
+            if let Some(run) = run {
+                lines.push(label(RowKey::Other(404), format!("shared physical run  {}", run.prefix())));
+            }
+        }
+        if let Some(context) = coordination.contexts.get(&member.workpiece) {
+            lines.push(reference_line(RowKey::Other(401), "sealed base", context.bloom_base.checkout));
+            lines.push(reference_line(RowKey::Other(402), "inherited head", context.starting_head.candidate.checkout));
+        }
+    }
     if let Some(blocked) = member.blocked_by.as_deref().filter(|name| !name.is_empty()) {
         lines.push(Line {
             key: RowKey::BlockedBy,

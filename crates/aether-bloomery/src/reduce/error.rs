@@ -215,6 +215,8 @@ pub enum SealError {
     },
     /// A present pre-check policy must allow at least one bounded run.
     InvalidPrecheckPolicy,
+    /// A present coordination policy has an empty identity or zero bound.
+    InvalidCoordinationPolicy,
 }
 
 /// Why a supersession was refused.
@@ -907,4 +909,24 @@ pub enum PrecheckError {
     SubjectMismatch { expected: Digest, got: Digest },
     GateMismatch { expected: Digest, got: Digest },
     InvalidEvidenceKind,
+}
+
+/// Why a shared-verification or eager-integration fact was refused.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum CoordinationError {
+    UnknownOrInactiveBloom,
+    Disabled,
+    InvalidPolicy,
+    InvalidPlan,
+    PlanMismatch { expected: Digest, got: Digest },
+    GenerationMismatch { expected: Digest, got: Digest },
+    MemberVersionMismatch { workpiece: WorkpieceId },
+    RequestMismatch { request: Digest },
+    RunMismatch { expected: Digest, got: Digest },
+    AlreadyIssued,
+    OnHold,
+    NotReady,
+    InvalidEvidenceKind,
+    ReservationMismatch,
+    ReservationNotExpired,
 }

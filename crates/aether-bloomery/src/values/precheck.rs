@@ -31,9 +31,12 @@ pub struct PrecheckMember {
 pub struct PrecheckPlan {
     /// The sealed bloom this preview belongs to.
     pub bloom: BloomId,
-    /// The immutable bloom base used by the scratch fold and aggregate gate.
+    /// The immutable scratch-fold base for legacy plans, or the already
+    /// materialized selected head's checkout for eager plans. The aggregate
+    /// invocation independently retains the sealed bloom base as its diff base.
     pub base: Digest,
-    /// Eligible candidates in sealed membership order.
+    /// Eligible candidates in sealed membership order for a legacy fold, or
+    /// the selected eager head's actual member coverage order.
     pub members: Vec<PrecheckMember>,
     /// The sealed aggregate-verify gate-set identity.
     pub gate_set: Digest,

@@ -95,6 +95,8 @@ impl DispatchRecord {
             nonce: self.nonce.clone(),
             instruction_bundle: self.instruction_bundle.clone(),
             prompt_manifest: self.prompt_manifest,
+            physical_run: None,
+            release_physical_run: true,
         }
     }
 
@@ -211,7 +213,9 @@ impl fmt::Display for DispatchError {
         match self {
             Self::Submit(error) => write!(f, "work-order submit failed: {error}"),
             Self::Store(error) => write!(f, "dispatch-record write failed: {error}"),
-            Self::Provenance(refusal) => write!(f, "instruction provenance refused the dispatch: {refusal}"),
+            Self::Provenance(refusal) => {
+                write!(f, "instruction provenance refused the dispatch: {refusal}")
+            }
         }
     }
 }
@@ -332,6 +336,95 @@ pub fn dispatch_and_record(
             // Nothing reached the worker lane, so the row describes a dispatch
             // that does not exist; drop it rather than leave the deadline sweep
             // to expire an order no run was ever started for.
+            let _ = store.consume_order(&record.nonce.0);
+            Err(DispatchError::Submit(error))
+        }
+    }
+}
+
+/// Record a fully authorized order and accept it only when the backend can
+/// reserve an idle lane immediately. This is the second phase of contextual
+/// construction admission: the reducer has already journaled the exact nonce
+/// and starting-head dispatch, so a busy answer must leave no queued backend
+/// work behind. `deadline_unix_millis` comes from that retained admission and
+/// remains unchanged across a busy answer and later retry.
+pub fn dispatch_and_record_idle(
+    port: &dyn ExecutorPort,
+    store: &mut dyn StoreBackend,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
+    record: &DispatchRecord,
+    deadline_unix_millis: u64,
+) -> Result<Settled<Option<WorkHandle>>, DispatchError> {
+    let mut record = record.clone();
+    if gated(&record.transformation.command) {
+        match admit_model_dispatch(store, &record) {
+            Err(refusal) => {
+                journal_refusal(store, &record, &refusal);
+                return Err(DispatchError::Provenance(refusal));
+            }
+            Ok(admitted) => {
+                record.prompt_manifest = retain_prompt_manifest(artifacts, &record, &admitted);
+                record.instruction_bundle = Some(admitted.bundle_bytes);
+            }
+        }
+    }
+    store.record_order(&record.to_stored(deadline_unix_millis)).map_err(DispatchError::Store)?;
+    match port.try_submit_idle(&record.to_order()) {
+        Settled::InFlight => Ok(Settled::InFlight),
+        Settled::Answered(Ok(Some(handle))) => {
+            store.mark_order_submitted(&record.nonce.0).map_err(DispatchError::Store)?;
+            Ok(Settled::Answered(Some(handle)))
+        }
+        Settled::Answered(Ok(None)) => {
+            store.consume_order(&record.nonce.0).map_err(DispatchError::Store)?;
+            Ok(Settled::Answered(None))
+        }
+        Settled::Answered(Err(error)) => {
+            let _ = store.consume_order(&record.nonce.0);
+            Err(DispatchError::Submit(error))
+        }
+    }
+}
+
+/// Record and submit one step of a durable shared physical run.
+///
+/// The ordinary dispatch context remains the nonce trust boundary, while the
+/// order's physical identity tells a local executor which slot and target to
+/// retain between serial steps. The caller records the shared step first, so a
+/// restart can recover this association before the executor sees the order.
+pub fn dispatch_shared_and_record(
+    port: &dyn ExecutorPort,
+    store: &mut dyn StoreBackend,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
+    record: &DispatchRecord,
+    physical_run: Digest,
+    release_physical_run: bool,
+    deadline_unix_millis: u64,
+) -> Result<Settled<WorkHandle>, DispatchError> {
+    let mut record = record.clone();
+    if gated(&record.transformation.command) {
+        match admit_model_dispatch(store, &record) {
+            Err(refusal) => {
+                journal_refusal(store, &record, &refusal);
+                return Err(DispatchError::Provenance(refusal));
+            }
+            Ok(admitted) => {
+                record.prompt_manifest = retain_prompt_manifest(artifacts, &record, &admitted);
+                record.instruction_bundle = Some(admitted.bundle_bytes);
+            }
+        }
+    }
+    store.record_order(&record.to_stored(deadline_unix_millis)).map_err(DispatchError::Store)?;
+    let mut order = record.to_order();
+    order.physical_run = Some(physical_run);
+    order.release_physical_run = release_physical_run;
+    match port.submit(&order) {
+        Settled::InFlight => Ok(Settled::InFlight),
+        Settled::Answered(Ok(handle)) => {
+            store.mark_order_submitted(&record.nonce.0).map_err(DispatchError::Store)?;
+            Ok(Settled::Answered(handle))
+        }
+        Settled::Answered(Err(error)) => {
             let _ = store.consume_order(&record.nonce.0);
             Err(DispatchError::Submit(error))
         }

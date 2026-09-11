@@ -25,8 +25,8 @@ use super::projection::{
 };
 use crate::ids::WorkpieceId;
 use crate::reduce::RecordedRefusal;
-use crate::values::OperatorHold;
 use crate::values::SpendQuiesce;
+use crate::values::{OperatorHold, PrecheckState};
 use crate::{BaseAlertView, BloomId, BloomStatus, Digest, ViewDocument};
 use serde::Deserialize;
 
@@ -265,6 +265,7 @@ impl From<BloomViewPrePrecheck> for BloomView {
             leases: prior.leases,
             narrowed_compositions: prior.narrowed_compositions,
             precheck: None,
+            coordination: None,
         }
     }
 }
@@ -281,15 +282,81 @@ impl From<ViewDocumentPrePrecheck> for ViewDocument {
     }
 }
 
+// The exact bloom element written by 7e623b642dc0d5040eec704ce78853132045c891.
+// Keep this shape separate: adding a defaulted field inside Vec<BloomView>
+// does not give positional rows an additive encoding window.
+#[derive(aether_data::Storage, Clone, Serialize, Deserialize)]
+#[kind(name = "aether.bloomery.view_document")]
+struct ViewDocumentPreCoordination {
+    mainline: Digest,
+    observed: Digest,
+    spend_quiesce: Option<SpendQuiesce>,
+    blooms: Vec<BloomViewPreCoordination>,
+    base_alert: Option<BaseAlertView>,
+}
+
+#[derive(aether_data::Schema, Clone, Serialize, Deserialize)]
+struct BloomViewPreCoordination {
+    id: BloomId,
+    status: BloomStatus,
+    superseded_by: Option<BloomId>,
+    members: Vec<MemberView>,
+    landing_blocked: Option<LandingBlock>,
+    executor_fault: Option<ExecutorFaultView>,
+    review_park: Option<ReviewParkView>,
+    composition: Option<CompositionView>,
+    operator_hold: Option<OperatorHold>,
+    blocker: Option<RecordedRefusal>,
+    leases: Vec<LeaseView>,
+    narrowed_compositions: Vec<NarrowedCompositionView>,
+    precheck: Option<PrecheckState>,
+}
+
+impl From<BloomViewPreCoordination> for BloomView {
+    fn from(prior: BloomViewPreCoordination) -> Self {
+        Self {
+            id: prior.id,
+            status: prior.status,
+            superseded_by: prior.superseded_by,
+            members: prior.members,
+            landing_blocked: prior.landing_blocked,
+            executor_fault: prior.executor_fault,
+            review_park: prior.review_park,
+            composition: prior.composition,
+            operator_hold: prior.operator_hold,
+            blocker: prior.blocker,
+            leases: prior.leases,
+            narrowed_compositions: prior.narrowed_compositions,
+            precheck: prior.precheck,
+            coordination: None,
+        }
+    }
+}
+
+impl From<ViewDocumentPreCoordination> for ViewDocument {
+    fn from(prior: ViewDocumentPreCoordination) -> Self {
+        Self {
+            mainline: prior.mainline,
+            observed: prior.observed,
+            spend_quiesce: prior.spend_quiesce,
+            blooms: prior.blooms.into_iter().map(BloomView::from).collect(),
+            base_alert: prior.base_alert,
+        }
+    }
+}
+
 impl ViewDocument {
-    /// Decode a current or pre-precheck view outbox row, preserving its blooms.
-    /// Both the prior storage form and its positional predecessor are supported.
+    /// Decode current, pre-coordination, or pre-precheck view outbox rows,
+    /// preserving their blooms in both storage and positional forms.
     ///
     /// # Errors
     /// Returns the current decoder's refusal if neither supported shape decodes.
     pub fn decode_row(bytes: &[u8], schema: Option<&str>) -> Result<Self, RowSchemaError> {
         decode_row(bytes, schema).or_else(|current_error| {
-            decode_row::<ViewDocumentPrePrecheck>(bytes, schema).map(Self::from).map_err(|_| current_error)
+            decode_row::<ViewDocumentPreCoordination>(bytes, schema)
+                .map(Self::from)
+                .or_else(|_| decode_row::<ViewDocumentPrePrecheck>(bytes, schema).map(Self::from))
+                .map_err(|_| current_error)
         })
     }
 }

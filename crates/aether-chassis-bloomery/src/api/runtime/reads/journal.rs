@@ -101,6 +101,8 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
         Fact::GraphSeal { predecessor, spec, .. } => {
             predecessor.map_or_else(|| vec![spec.id()], |predecessor| vec![predecessor, spec.id()])
         }
+        Fact::ConstructionCheckpointObserved { checkpoint } => vec![checkpoint.bloom],
+        Fact::RequestConstructionAdmission { admission } => vec![admission.dispatch.bloom],
         Fact::Integrate { bloom, .. }
         | Fact::AdmitEvidence { bloom, .. }
         | Fact::Resolve { bloom, .. }
@@ -112,6 +114,17 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
         | Fact::PrecheckPrepared { bloom, .. }
         | Fact::RequestPrecheck { bloom, .. }
         | Fact::PrecheckCompleted { bloom, .. }
+        | Fact::IntegrationAdvanced { bloom, .. }
+        | Fact::IntegrationAppendConflicted { bloom, .. }
+        | Fact::IntegrationAppendRefused { bloom, .. }
+        | Fact::CandidatePrepared { bloom, .. }
+        | Fact::ProposeSharedRun { bloom, .. }
+        | Fact::SharedRunPrepared { bloom, .. }
+        | Fact::SharedRunStarted { bloom, .. }
+        | Fact::SharedRunCompleted { bloom, .. }
+        | Fact::StableHeadReservationExpired { bloom, .. }
+        | Fact::CompatibilityPreviewed { bloom, .. }
+        | Fact::PartialHeadRepairCompleted { bloom, .. }
         | Fact::LandingRejected { bloom, .. }
         | Fact::GrantAttempts { bloom, .. }
         | Fact::VerifyFailed { bloom, .. }

@@ -228,7 +228,7 @@ impl Board {
             BoardLane::Live => "BLOOM / MEMBER",
             BoardLane::History => "HISTORY (landed · superseded)",
         };
-        let header = Row::new([title, "STATE", "STAGE / PRECHECK", "AGE"])
+        let header = Row::new([title, "STATE", "STAGE / HEAD / PRECHECK", "AGE / VERIFY"])
             .style(palette::body().add_modifier(Modifier::BOLD).patch(muted));
         let table_rows = rows.iter().map(|row| match row {
             BoardRow::Bloom(bloom) => Row::new([
@@ -248,7 +248,7 @@ impl Board {
         });
         let table = Table::new(
             table_rows,
-            [Constraint::Min(14), Constraint::Length(10), Constraint::Length(16), Constraint::Length(8)],
+            [Constraint::Min(14), Constraint::Length(10), Constraint::Length(34), Constraint::Length(12)],
         )
         .style(palette::body())
         .header(header)
@@ -288,7 +288,11 @@ fn rows_of(view: &ViewDocument, lane: BoardLane, dispatches: &[MetricDispatch]) 
     let mut rows = Vec::new();
     for bloom in blooms {
         let members: Vec<&MemberView> = match lane {
-            BoardLane::Live => bloom.members.iter().filter(|member| MemberState::of(member).walks()).collect(),
+            BoardLane::Live => bloom
+                .members
+                .iter()
+                .filter(|member| bloom.coordination.is_some() || MemberState::of(member).walks())
+                .collect(),
             BoardLane::History => bloom.members.iter().collect(),
         };
         if lane == BoardLane::Live && members.is_empty() {
@@ -305,11 +309,27 @@ fn rows_of(view: &ViewDocument, lane: BoardLane, dispatches: &[MetricDispatch]) 
             id_prefix: bloom.id.prefix(),
             status,
             member_count: bloom.members.len(),
-            precheck: bloom.precheck.as_ref().map_or_else(String::new, PrecheckView::summary),
+            precheck: bloom.coordination.as_ref().map_or_else(
+                || bloom.precheck.as_ref().map_or_else(String::new, PrecheckView::summary),
+                |state| {
+                    format!(
+                        "{} · {}",
+                        state.summary(bloom.members.iter().filter(|member| member.withdrawn.is_none()).count()),
+                        state.precheck_status(bloom.precheck.as_ref())
+                    )
+                },
+            ),
             age: elapsed_of(dispatches, bloom.id, None),
         }));
         for member in members {
-            rows.push(BoardRow::Member(member_row(bloom.id, member, dispatches)));
+            let mut row = member_row(bloom.id, member, dispatches);
+            if let Some(state) = &bloom.coordination {
+                row.stage = format!("{} · {}", row.stage, state.member_summary(member));
+                if let Some((_, millis)) = state.member_latency(member) {
+                    row.age = format!("{} verify", format_duration(millis));
+                }
+            }
+            rows.push(BoardRow::Member(row));
         }
     }
     rows

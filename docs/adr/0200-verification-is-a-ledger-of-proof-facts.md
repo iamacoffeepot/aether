@@ -43,6 +43,20 @@ A failure at any gate resolves against the ledger three ways:
 
 ### The batch gate
 
+**Amended by [ADR-0218](0218-contextual-verification-and-eager-integration.md):**
+the original batch paragraph below describes the earlier direction, not the
+proof contract of the contextual implementation. A composed pass belongs to
+the exact node and complete execution contract; it never creates standalone
+parent facts. The existing ledger accepts only independently discriminated
+observations under that contextual input address. Running plans are immutable
+and new arrivals join the next run; no young-build restart policy applies.
+Attribution is set-valued and evidence-backed: path ownership is a suspect,
+both failing halves are investigated, interactions remain group-owned, and
+unreached or missing probe results remain unknown. Physical cost is charged
+once to the bloom. The gate ladder, sweep, and day-roll directions elsewhere
+in this ADR are not authority to bypass the current atomic Resolve or final
+aggregate gate.
+
 Disjoint-surface members compose eagerly, and one build gate over the composition proves everyone: the batch run is a fact producer, emitting facts for every member's closure key from a single build. "Member done" means its facts are green — batch membership is an execution-level detail, never a semantic one, so a member neither waits for nor answers for its batchmates beyond sharing the build.
 
 Accumulation is adaptive: verification starts when work exists, and a young build restarts when substantially more work arrives — eight members finish and the gate starts; twenty-four more finish moments later and the gate restarts over thirty-two rather than running twice. The restart threshold preempts only young builds or large additions.

@@ -73,6 +73,7 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                 leases: lease_views(record, snapshot),
                 narrowed_compositions: narrowed_composition_views(record, snapshot),
                 precheck: record.precheck.clone(),
+                coordination: record.coordination.as_deref().cloned(),
             }
         })
         .collect();
@@ -597,6 +598,7 @@ mod tests {
             leases: Vec::new(),
             narrowed_compositions: Vec::new(),
             precheck: None,
+            coordination: None,
         }
     }
 

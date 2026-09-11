@@ -218,6 +218,13 @@ impl GitDataApi for LocalGitData {
         command::read_commit(&self.repo, sha)
     }
 
+    fn changed_paths(&self, base: &str, head: &str) -> Result<Vec<String>, GitDataError> {
+        if !command::is_ancestor(&self.repo, base, head)? {
+            return Err(GitDataError::Command(format!("changed-path base {base} is not an ancestor of {head}")));
+        }
+        command::changed_paths(&self.repo, base, head).map_err(Into::into)
+    }
+
     fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GitDataError> {
         let sha = command::commit_tree(&self.repo, message, tree, parents)?;
         Ok(GitCommit { sha, tree: tree.to_owned(), message: message.to_owned() })

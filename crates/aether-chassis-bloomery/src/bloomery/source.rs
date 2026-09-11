@@ -288,6 +288,35 @@ impl SourceShell {
         self.backend.integrate_pinned(bloom, candidate, expected)
     }
 
+    /// Prepare `authored` against the immutable `base` in a private namespace,
+    /// preserving the authored checkout when it already descends from the base
+    /// and otherwise applying the repository's real merge policy.
+    ///
+    /// # Errors
+    /// Either pinned checkout does not carry its named tree, the source objects
+    /// are unavailable, or the repository operation faulted. A residual merge
+    /// conflict remains a clean [`IntegrateOutcome::Conflict`] result.
+    pub fn prepare_pinned(
+        &self,
+        namespace: &BloomId,
+        base: &CandidateRef,
+        authored: &CandidateRef,
+    ) -> Result<IntegrateOutcome, SourceError> {
+        self.backend.prepare_pinned(namespace, base, authored)
+    }
+
+    /// Read the complete paths changed by `candidate` from its exact
+    /// pinned `base`, after validating both immutable checkout/tree
+    /// pairs.
+    ///
+    /// # Errors
+    /// The objects or delta are unavailable, either tree pin is wrong, the
+    /// candidate does not descend from the base, or the provider could
+    /// not prove that its file list was complete.
+    pub fn changed_paths(&self, base: &CandidateRef, candidate: &CandidateRef) -> Result<Vec<String>, SourceError> {
+        self.backend.changed_paths(base, candidate)
+    }
+
     /// Adopt a candidate ref for `workpiece` into `successor`'s namespace,
     /// walking the supersession chain from `predecessor` until the ref is found
     /// or the chain is exhausted, so a bloom that inherited the claim can fold

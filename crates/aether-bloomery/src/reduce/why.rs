@@ -121,7 +121,7 @@ fn member_state(
     bloom: BloomId,
     workpiece: &WorkpieceId,
 ) -> (WhyState, String) {
-    if record.claims.contains_key(workpiece) {
+    if record.has_current_member_resolution(workpiece) {
         return (WhyState::Done, "integrated; its resolution claim is recorded".to_owned());
     }
     if let Some(withdrawal) = record.withdrawn.get(workpiece) {

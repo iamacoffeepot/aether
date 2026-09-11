@@ -39,19 +39,22 @@ use aether_substrate::mail::mailer::Mailer;
 
 use aether_bloomery::control::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, CancelDispatchPayload,
-    ClaimResult, ClaimSeal, Commit, CommitResult, CompleteReleaseResult, DispatchPayload, EnumerateClaims,
-    EnumerateClaimsResult, HealOp, IntegratePayload, LandPayload, LoadConfigs, LoadConfigsResult,
-    MemberClaimReleasePayload, MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView, ObserveMainline,
-    ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, PrecheckNodePayload, PrecheckPayload,
+    CandidatePreparationPayload, ClaimResult, ClaimSeal, Commit, CommitResult, CompatibilityPreviewPayload,
+    CompleteReleaseResult, ConstructionAdmissionPayload, ContextualDispatchPayload, CoordinationCancelPayload,
+    DispatchPayload, EnumerateClaims, EnumerateClaimsResult, HealOp, IntegratePayload, IntegrationAppendPayload,
+    LandPayload, LoadConfigs, LoadConfigsResult, MemberClaimReleasePayload, MemberVerificationPayload,
+    MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView, ObserveMainline, ObserveMainlineResult,
+    OrphanClaimReleasePayload, OutboxPayload, PartialHeadRepairPayload, PrecheckNodePayload, PrecheckPayload,
     ProposalPayload, Query, QueryResult, QuerySelector, QueuePrecheckPlanPayload, ReconcileOp, RedispatchPayload,
-    ReplayJournal, ReplayJournalResult, ReviewPass, SpendQuery, SpendQueryResult, SplicePayload, StudyPayload, Topic,
-    TransferSeal, held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_seal_mail,
-    seal_claim_mail, transfer_seal_mail,
+    ReplayJournal, ReplayJournalResult, ReviewPass, SharedRunDispatchPayload, SharedRunPlanPayload, SpendQuery,
+    SpendQueryResult, SplicePayload, StudyPayload, Topic, TransferSeal, held_to_seal_error, held_to_supersede_error,
+    plan_heals, reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
 };
 use aether_bloomery::{
-    BloomId, BloomStatus, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, DAYS_CAP, Decision,
-    Decisions, Digest, Event, EvidenceKind, Fact, IdempotencyKey, METRICS_DEFAULT_LIMIT, METRICS_MAX_LIMIT,
-    MetricsLedger, OperatorRepairError, Outcome, Question, ResolvedConfigs, Snapshot, SpendWindow, StoreClass,
+    BloomId, BloomStatus, CalibrationDocument, CalibrationLedger, CandidatePreparationPlan, ClaimRefKind,
+    ClaimRefState, CompatibilityPreviewPlan, CompositionPlan, ContextualAttemptDispatch, DAYS_CAP, Decision, Decisions,
+    Digest, Event, EvidenceKind, Fact, IdempotencyKey, METRICS_DEFAULT_LIMIT, METRICS_MAX_LIMIT, MetricsLedger,
+    OperatorRepairError, Outcome, Question, ResolvedConfigs, SharedRunPlan, Snapshot, SpendWindow, StoreClass,
     StudyRecord, Unproducible, ViewDocument, decode_recorded_decisions, decode_recorded_event, encode_row, grade,
     is_active_unlanded, measure, reduce, view_of, why_of, window_label,
 };
@@ -1415,6 +1418,17 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::AggregateReviewCompleted { bloom, .. }
         | Fact::AggregateVerifyCompleted { bloom, .. }
         | Fact::PrecheckPrepared { bloom, .. }
+        | Fact::IntegrationAdvanced { bloom, .. }
+        | Fact::IntegrationAppendConflicted { bloom, .. }
+        | Fact::IntegrationAppendRefused { bloom, .. }
+        | Fact::CandidatePrepared { bloom, .. }
+        | Fact::ProposeSharedRun { bloom, .. }
+        | Fact::SharedRunPrepared { bloom, .. }
+        | Fact::SharedRunStarted { bloom, .. }
+        | Fact::SharedRunCompleted { bloom, .. }
+        | Fact::CompatibilityPreviewed { bloom, .. }
+        | Fact::PartialHeadRepairCompleted { bloom, .. }
+        | Fact::StableHeadReservationExpired { bloom, .. }
         | Fact::RequestPrecheck { bloom, .. }
         | Fact::PrecheckCompleted { bloom, .. }
         | Fact::LandingRejected { bloom, .. }
@@ -1439,6 +1453,8 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::CompositionNarrowed { bloom, .. }
         | Fact::SurfaceGranted { bloom, .. }
         | Fact::StudyCompleted { bloom, .. } => Some(*bloom),
+        Fact::ConstructionCheckpointObserved { checkpoint } => Some(checkpoint.bloom),
+        Fact::RequestConstructionAdmission { admission } => Some(admission.dispatch.bloom),
         Fact::ObserveMainline { .. }
         | Fact::ObserveMainlineDiverged { .. }
         | Fact::RequestOrphanClaimRelease { .. }
@@ -1494,6 +1510,10 @@ fn touched_blooms(event: &Event, decisions: &Decisions) -> BTreeSet<BloomId> {
 }
 
 fn collect_decision_blooms(effect: &Decision, into: &mut BTreeSet<BloomId>) {
+    if let Some(bloom) = coordination_decision_bloom(effect) {
+        into.insert(bloom);
+        return;
+    }
     match effect {
         Decision::ClaimMembership { bloom, .. }
         | Decision::ReleaseMembership { bloom, .. }
@@ -1570,7 +1590,38 @@ fn collect_decision_blooms(effect: &Decision, into: &mut BTreeSet<BloomId>) {
         | Decision::DispatchBaseVerify { .. }
         | Decision::QueueProposal { .. }
         | Decision::DequeueProposal { .. }
-        | Decision::DispatchProposal { .. } => {}
+        | Decision::DispatchProposal { .. }
+        | Decision::CancelSharedRun { .. }
+        | Decision::CancelMemberVerification { .. }
+        | Decision::RecordCoordinationState { .. }
+        | Decision::DispatchContextualAttempt { .. }
+        | Decision::QueueConstructionAdmission { .. }
+        | Decision::DispatchCompatibilityPreview { .. }
+        | Decision::DispatchCandidatePreparation { .. }
+        | Decision::DispatchSharedRunPreparation { .. }
+        | Decision::DispatchIntegrationAppend { .. }
+        | Decision::QueueMemberVerification { .. }
+        | Decision::DispatchPartialHeadRepair { .. }
+        | Decision::DispatchSharedRun { .. } => {}
+    }
+}
+
+fn coordination_decision_bloom(effect: &Decision) -> Option<BloomId> {
+    match effect {
+        Decision::RecordCoordinationState { bloom, .. }
+        | Decision::DispatchContextualAttempt { dispatch: ContextualAttemptDispatch { bloom, .. } }
+        | Decision::QueueConstructionAdmission { dispatch: ContextualAttemptDispatch { bloom, .. } }
+        | Decision::DispatchCompatibilityPreview { plan: CompatibilityPreviewPlan { bloom, .. } }
+        | Decision::DispatchCandidatePreparation { plan: CandidatePreparationPlan { bloom, .. } }
+        | Decision::DispatchSharedRunPreparation {
+            plan: SharedRunPlan { composition: Some(CompositionPlan { bloom, .. }), .. },
+        } => Some(*bloom),
+        Decision::DispatchIntegrationAppend { plan } => Some(plan.bloom),
+        Decision::QueueMemberVerification { request } => Some(request.bloom),
+        Decision::DispatchPartialHeadRepair { dispatch } => Some(dispatch.plan.bloom),
+        Decision::DispatchSharedRun { dispatch } => dispatch.plan.requests.first().map(|request| request.bloom),
+        Decision::DispatchSharedRunPreparation { plan } => plan.requests.first().map(|request| request.bloom),
+        _ => None,
     }
 }
 
@@ -1695,55 +1746,35 @@ fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError>
         // payload without them cannot reach the objects it belongs on after
         // a restart drains it (ADR-0149 §The receipt carries its members).
         Decision::EmitReceipt(projected) => Some(to_vec(projected)?),
-        Decision::RedispatchStage { bloom, question, answer, words } => Some(to_vec(&RedispatchPayload {
-            bloom: bloom.0,
-            question: *question,
-            answer: *answer,
-            words: words.clone(),
-        })?),
+        Decision::RedispatchStage { .. }
+        | Decision::DispatchLand { .. }
+        | Decision::DispatchAggregateVerify { .. }
+        | Decision::DispatchOrphanClaimRelease { .. }
+        | Decision::DispatchBaseVerify { .. }
+        | Decision::DispatchProposal { .. }
+        | Decision::CancelDispatch { .. }
+        | Decision::ReleaseMemberClaimRef { .. } => direct_outbox_payload_bytes(effect)?,
         Decision::DispatchAttempt { .. } => dispatch_attempt_outbox(effect)?,
-        Decision::DispatchLand { bloom, expected_base, new_head } => {
-            let payload = LandPayload { bloom: bloom.0, expected_base: *expected_base, new_head: *new_head };
-            Some(to_vec(&payload)?)
-        }
         Decision::DispatchIntegration { .. } => integration_outbox(effect)?,
+        Decision::DispatchIntegrationAppend { .. }
+        | Decision::DispatchCandidatePreparation { .. }
+        | Decision::DispatchContextualAttempt { .. }
+        | Decision::QueueConstructionAdmission { .. }
+        | Decision::DispatchPartialHeadRepair { .. }
+        | Decision::DispatchCompatibilityPreview { .. }
+        | Decision::QueueMemberVerification { .. }
+        | Decision::DispatchSharedRunPreparation { .. }
+        | Decision::DispatchSharedRun { .. }
+        | Decision::CancelSharedRun { .. }
+        | Decision::CancelMemberVerification { .. } => coordination_outbox_payload_bytes(effect)?,
         Decision::DispatchSplice { .. } => splice_outbox(effect)?,
         Decision::DispatchAggregateReview { .. } => aggregate_review_outbox(effect)?,
-        Decision::DispatchAggregateVerify { bloom, transformation, profile, roll: _ } => {
-            let payload = AggregateVerifyPayload {
-                profile: profile.clone(),
-                bloom: bloom.0,
-                transformation: transformation.clone(),
-            };
-            Some(to_vec(&payload)?)
-        }
         Decision::QueuePrecheckPlan { .. }
         | Decision::OfferPrecheck { .. }
         | Decision::DispatchPrecheck { .. }
         | Decision::CancelPrecheck { .. }
         | Decision::PromotePrecheck { .. } => precheck_outbox(effect)?,
-        Decision::DispatchOrphanClaimRelease { request, target } => {
-            let payload = OrphanClaimReleasePayload { request: *request, target: target.clone() };
-            Some(to_vec(&payload)?)
-        }
-        Decision::DispatchBaseVerify { base, transformation, profile } => {
-            let payload =
-                BaseVerifyPayload { base: *base, transformation: transformation.clone(), profile: profile.clone() };
-            Some(to_vec(&payload)?)
-        }
-        Decision::DispatchProposal { proposal, base } => {
-            let payload = ProposalPayload { proposal: proposal.clone(), base: *base };
-            Some(to_vec(&payload)?)
-        }
         Decision::DispatchStudy { .. } => study_outbox(effect)?,
-        Decision::CancelDispatch { bloom, workpiece } => {
-            let payload = CancelDispatchPayload { bloom: bloom.0, workpiece: workpiece.clone() };
-            Some(to_vec(&payload)?)
-        }
-        Decision::ReleaseMemberClaimRef { bloom, workpiece } => {
-            let payload = MemberClaimReleasePayload { bloom: bloom.0, workpiece: workpiece.clone() };
-            Some(to_vec(&payload)?)
-        }
         Decision::ClaimMembership { .. }
         | Decision::ReleaseMembership { .. }
         | Decision::RecordBaseReceipt { .. }
@@ -1787,8 +1818,81 @@ fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError>
         | Decision::RecordAggregateGatePass { .. }
         | Decision::RecordRefusal { .. }
         | Decision::RecordPrecheckState { .. }
+        | Decision::RecordCoordinationState { .. }
         | Decision::QueueProposal { .. }
         | Decision::DequeueProposal { .. } => None,
+    })
+}
+
+fn direct_outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError> {
+    Ok(match effect {
+        Decision::RedispatchStage { bloom, question, answer, words } => Some(to_vec(&RedispatchPayload {
+            bloom: bloom.0,
+            question: *question,
+            answer: *answer,
+            words: words.clone(),
+        })?),
+        Decision::DispatchLand { bloom, expected_base, new_head } => {
+            Some(to_vec(&LandPayload { bloom: bloom.0, expected_base: *expected_base, new_head: *new_head })?)
+        }
+        Decision::DispatchAggregateVerify { bloom, transformation, profile, roll: _ } => {
+            Some(to_vec(&AggregateVerifyPayload {
+                profile: profile.clone(),
+                bloom: bloom.0,
+                transformation: transformation.clone(),
+            })?)
+        }
+        Decision::DispatchOrphanClaimRelease { request, target } => {
+            Some(to_vec(&OrphanClaimReleasePayload { request: *request, target: target.clone() })?)
+        }
+        Decision::DispatchBaseVerify { base, transformation, profile } => Some(to_vec(&BaseVerifyPayload {
+            base: *base,
+            transformation: transformation.clone(),
+            profile: profile.clone(),
+        })?),
+        Decision::DispatchProposal { proposal, base } => {
+            Some(to_vec(&ProposalPayload { proposal: proposal.clone(), base: *base })?)
+        }
+        Decision::CancelDispatch { bloom, workpiece } => {
+            Some(to_vec(&CancelDispatchPayload { bloom: bloom.0, workpiece: workpiece.clone() })?)
+        }
+        Decision::ReleaseMemberClaimRef { bloom, workpiece } => {
+            Some(to_vec(&MemberClaimReleasePayload { bloom: bloom.0, workpiece: workpiece.clone() })?)
+        }
+        _ => None,
+    })
+}
+
+fn coordination_outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError> {
+    Ok(match effect {
+        Decision::DispatchIntegrationAppend { plan } => Some(to_vec(&IntegrationAppendPayload { plan: plan.clone() })?),
+        Decision::DispatchCandidatePreparation { plan } => {
+            Some(to_vec(&CandidatePreparationPayload { plan: plan.clone() })?)
+        }
+        Decision::DispatchContextualAttempt { dispatch } => {
+            Some(to_vec(&ContextualDispatchPayload { dispatch: dispatch.clone() })?)
+        }
+        Decision::QueueConstructionAdmission { dispatch } => {
+            Some(to_vec(&ConstructionAdmissionPayload { dispatch: dispatch.clone() })?)
+        }
+        Decision::DispatchPartialHeadRepair { dispatch } => {
+            Some(to_vec(&PartialHeadRepairPayload { dispatch: dispatch.clone() })?)
+        }
+        Decision::DispatchCompatibilityPreview { plan } => {
+            Some(to_vec(&CompatibilityPreviewPayload { plan: plan.clone() })?)
+        }
+        Decision::QueueMemberVerification { request } => {
+            Some(to_vec(&MemberVerificationPayload { request: (**request).clone() })?)
+        }
+        Decision::DispatchSharedRunPreparation { plan } => Some(to_vec(&SharedRunPlanPayload { plan: plan.clone() })?),
+        Decision::DispatchSharedRun { dispatch } => {
+            Some(to_vec(&SharedRunDispatchPayload { dispatch: dispatch.clone() })?)
+        }
+        Decision::CancelSharedRun { plan } => Some(to_vec(&CoordinationCancelPayload { subject: *plan })?),
+        Decision::CancelMemberVerification { request } => {
+            Some(to_vec(&CoordinationCancelPayload { subject: *request })?)
+        }
+        _ => None,
     })
 }
 
@@ -2444,6 +2548,67 @@ mod tests {
             }
         }
         sends
+    }
+
+    #[test]
+    fn shared_results_wait_for_their_bloom_commit_while_other_blooms_can_progress() {
+        let (mailer, rx) = test_mailer_and_rx();
+        let mailbox = MailboxId(0);
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), mailbox));
+        let mut control = ControlCoreState::inert(mailer);
+        control.configs = compiled_resolved();
+        let bloom = BloomId(digest(1));
+        let events = [
+            Event {
+                idempotency_key: IdempotencyKey("shared-start".to_owned()),
+                fact: Fact::SharedRunStarted { bloom, plan: digest(2), run: digest(3) },
+            },
+            Event {
+                idempotency_key: IdempotencyKey("shared-complete".to_owned()),
+                fact: Fact::SharedRunCompleted {
+                    bloom,
+                    completion: aether_bloomery::SharedRunCompletion {
+                        plan: digest(2),
+                        run: digest(3),
+                        outcomes: Vec::new(),
+                        unfinished: Vec::new(),
+                        latencies: Vec::new(),
+                    },
+                },
+            },
+            Event {
+                idempotency_key: IdempotencyKey("other-preview".to_owned()),
+                fact: Fact::CompatibilityPreviewed {
+                    bloom: BloomId(digest(4)),
+                    plan: digest(5),
+                    result: aether_bloomery::CompatibilityPreview::Refused { detail: digest(6) },
+                },
+            },
+        ];
+        for event in events {
+            let mut ctx = manual_dispatch_ctx::<ControlCore>(&binding, Source::NONE, mailbox);
+            assert!(
+                ControlCore::dispatch(
+                    &mut control,
+                    &mut ctx,
+                    Admit::ID,
+                    &Admit { event: to_vec(&event).expect("event encodes") }.encode_into_bytes(),
+                )
+                .is_some()
+            );
+        }
+        let commits = unresolved_sends(&rx)
+            .into_iter()
+            .filter_map(|(kind, _, payload)| {
+                (kind == Commit::ID)
+                    .then(|| from_bytes::<Commit>(&payload).expect("store commit decodes").idempotency_key)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            commits,
+            vec!["shared-start", "other-preview"],
+            "completion must wait for its Started commit to apply"
+        );
     }
 
     #[test]

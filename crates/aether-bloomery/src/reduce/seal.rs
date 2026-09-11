@@ -23,11 +23,11 @@ use super::{
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
-    BaseReceipt, BaseVerdict, BloomSpec, CandidateRef, ConfigKind, ConfigResolveError, ConfigScopes, DependencyError,
-    EvidenceKind, MemberCandidate, MemberDependency, Membership, ModelOverride, OperatorProposal,
-    PIPELINE_MANIFEST_PATH, PipelineManifest, PrecheckPolicy, ResolutionClaim, ResolvedConfigs, SpendCeiling,
-    SpendWindow, StageCatalog, Transformation, Unproducible, VerifyFailureSet, VerifyGateSet, VerifyProof,
-    resolve_member_dependencies,
+    BaseReceipt, BaseVerdict, BloomSpec, CandidateRef, ConfigKind, ConfigResolveError, ConfigScopes,
+    CoordinationPolicy, DependencyError, EvidenceKind, MemberCandidate, MemberDependency, Membership, ModelOverride,
+    OperatorProposal, PIPELINE_MANIFEST_PATH, PipelineManifest, PrecheckPolicy, ResolutionClaim, ResolvedConfigs,
+    SpendCeiling, SpendWindow, StageCatalog, Transformation, Unproducible, VerifyFailureSet, VerifyGateSet,
+    VerifyProof, resolve_member_dependencies,
 };
 
 pub(super) fn reduce_seal(
@@ -113,6 +113,14 @@ pub(super) fn reduce_seal(
         Ok(policy) => policy,
         Err(error) => return Decisions::rejected(Outcome::SealRejected(error)),
     };
+    let coordination_policy =
+        match sealed_config::<CoordinationPolicy>(ConfigScopes::bloom_wide(spec.configs()), configs) {
+            Ok(Some(policy)) if !policy.is_valid() => {
+                return Decisions::rejected(Outcome::SealRejected(SealError::InvalidCoordinationPolicy));
+            }
+            Ok(policy) => policy,
+            Err(error) => return Decisions::rejected(Outcome::SealRejected(error)),
+        };
 
     let mut effects = Vec::with_capacity(spec.members().len() * 3 + 2);
     if snapshot.spend_quiesce.is_some() {
@@ -132,9 +140,15 @@ pub(super) fn reduce_seal(
     }
     // Record the catalog and the lane vocabulary admission resolved so the fold
     // reads the record, not a later binary's compiled copies (#4944, ADR-0215).
-    effects.push(Decision::RecordStageCatalog { bloom, catalog: catalog.clone() });
-    effects.push(Decision::RecordPipelineManifest { bloom, manifest: manifest.clone() });
-    let proven = enqueue_base_verify_if_needed(snapshot, spec.base(), &catalog, &manifest, &mut effects);
+    record_admitted_line(bloom, &catalog, &manifest, &mut effects);
+    let proven = enqueue_base_verify_if_needed(
+        snapshot,
+        spec.base(),
+        &catalog,
+        &manifest,
+        coordination_policy.is_some(),
+        &mut effects,
+    );
     effects.extend(ready_entries(
         bloom,
         spec.members(),
@@ -143,6 +157,12 @@ pub(super) fn reduce_seal(
         &ReadyLine { bloom_configs: spec.configs(), catalog: &catalog, base: spec.base(), base_proven: proven },
     ));
     effects.push(Decision::RecordMemberDependencies { bloom, edges: edges.to_vec() });
+    let Ok(coordination) =
+        super::coordination::initialized_effects(snapshot, spec, &catalog, &manifest, coordination_policy)
+    else {
+        return Decisions::rejected(Outcome::SealRejected(SealError::InvalidCoordinationPolicy));
+    };
+    effects.extend(coordination);
     let precheck = initialized_effects(spec, &catalog, &manifest, precheck_policy, &effects);
     effects.extend(precheck);
     Decisions { outcome: Outcome::Sealed(bloom), effects }
@@ -190,19 +210,24 @@ fn seal_proposal(
 /// (pending or terminal) is already on record — the `orphan_releases`
 /// short-circuit this copies. Returns whether the base is already green, which
 /// is what ready entry dispatches consult.
+/// Coordinated blooms refresh an old green checkout-as-tree receipt once;
+/// their immutable contexts require the exact tree a new host receipt binds.
 fn enqueue_base_verify_if_needed(
     snapshot: &Snapshot,
     base: Digest,
     catalog: &StageCatalog,
     manifest: &PipelineManifest,
+    require_exact_tree: bool,
     effects: &mut Vec<Decision>,
 ) -> bool {
     let gate_set = VerifyGateSet::base_of(manifest).digest();
-    if snapshot.base_receipt_under(base, gate_set).is_some_and(BaseReceipt::is_green) {
-        return true;
-    }
-    if snapshot.base_receipt_under(base, gate_set).is_some() {
-        return false;
+    if let Some(receipt) = snapshot.base_receipt_under(base, gate_set) {
+        if !receipt.is_green() {
+            return false;
+        }
+        if !require_exact_tree || receipt.tree != receipt.base {
+            return true;
+        }
     }
     let binding = stage_binding(catalog, StageId::BaseVerify);
     effects.push(Decision::RecordBaseReceipt {
@@ -214,6 +239,16 @@ fn enqueue_base_verify_if_needed(
         profile: binding.profile,
     });
     false
+}
+
+fn record_admitted_line(
+    bloom: BloomId,
+    catalog: &StageCatalog,
+    manifest: &PipelineManifest,
+    effects: &mut Vec<Decision>,
+) {
+    effects.push(Decision::RecordStageCatalog { bloom, catalog: catalog.clone() });
+    effects.push(Decision::RecordPipelineManifest { bloom, manifest: manifest.clone() });
 }
 
 /// Record a cross-member declared-surface overlap the seal door observed
@@ -544,6 +579,18 @@ pub(super) fn reduce_supersede(
         Ok(policy) => policy,
         Err(error) => return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error))),
     };
+    let coordination_policy =
+        match sealed_config::<CoordinationPolicy>(ConfigScopes::bloom_wide(successor.configs()), configs) {
+            Ok(Some(policy)) if !policy.is_valid() => {
+                return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(
+                    SealError::InvalidCoordinationPolicy,
+                )));
+            }
+            Ok(policy) => policy,
+            Err(error) => {
+                return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error)));
+            }
+        };
     // Supersession is a second door into `active`, so it runs the same
     // all-or-nothing conflict scan as seal — but the predecessor's own holds are
     // released in this decision set, so only a foreign bloom's hold conflicts.
@@ -589,9 +636,15 @@ pub(super) fn reduce_supersede(
     for member in successor.members() {
         effects.push(Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom: successor_id });
     }
-    effects.push(Decision::RecordStageCatalog { bloom: successor_id, catalog: catalog.clone() });
-    effects.push(Decision::RecordPipelineManifest { bloom: successor_id, manifest: manifest.clone() });
-    let proven = enqueue_base_verify_if_needed(snapshot, successor.base(), &catalog, &manifest, &mut effects);
+    record_admitted_line(successor_id, &catalog, &manifest, &mut effects);
+    let proven = enqueue_base_verify_if_needed(
+        snapshot,
+        successor.base(),
+        &catalog,
+        &manifest,
+        coordination_policy.is_some(),
+        &mut effects,
+    );
     // An edgeless supersede of a graph bloom keeps the remaining subgraph —
     // dropping a wedged member must not also drop the edges among the
     // members that stay. Explicit door-resolved edges still win.
@@ -606,6 +659,14 @@ pub(super) fn reduce_supersede(
     }
     effects.push(Decision::MarkSuperseded { bloom: *predecessor, by: successor_id });
     effects.push(Decision::RecordMemberDependencies { bloom: successor_id, edges: graph });
+    let Ok(coordination) =
+        super::coordination::initialized_effects(snapshot, successor, &catalog, &manifest, coordination_policy)
+    else {
+        return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(
+            SealError::InvalidCoordinationPolicy,
+        )));
+    };
+    effects.extend(coordination);
     let precheck = initialized_effects(successor, &catalog, &manifest, precheck_policy, &effects);
     effects.extend(precheck);
     Decisions { outcome: Outcome::Superseded { predecessor: *predecessor, successor: successor_id }, effects }
@@ -894,9 +955,10 @@ mod tests {
         BloomStatus, Decision, Decisions, Event, Fact, Outcome, Snapshot, decode_recorded_decisions, reduce,
     };
     use crate::values::{
-        BaseReceipt, BaseVerdict, BloomDraft, BloomSpec, CandidateRef, ConfigKind, ConfigRegistry, Evidence,
-        EvidenceKind, Forecast, MemberDependency, Membership, OperatorProposal, PIPELINE_MANIFEST_PATH,
-        ResolutionClaim, ResolvedConfigs, SpendCeiling, SpendQuiesce, SpendWindow, Unproducible, VerifyGateSet,
+        BaseReceipt, BaseVerdict, BloomDraft, BloomSpec, CandidateRef, ConfigKind, ConfigRegistry, CoordinationPolicy,
+        Evidence, EvidenceKind, Forecast, MemberDependency, Membership, OperatorProposal, PIPELINE_MANIFEST_PATH,
+        ResolutionClaim, ResolvedConfigs, SpendCeiling, SpendQuiesce, SpendWindow, Unproducible, VerificationMode,
+        VerifyFailureSet, VerifyGateSet,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -1924,6 +1986,67 @@ mod tests {
         let bloom = after.blooms.get(&spec.id()).expect("sealed");
         assert!(!bloom.base_proven);
         assert!(bloom.progress.contains_key(&wp("wp-a")), "the cursor is still seeded");
+    }
+
+    #[test]
+    fn coordinated_seals_refresh_a_legacy_base_receipt_once_before_construct() {
+        let policy = CoordinationPolicy {
+            verification: VerificationMode::WarmSerial,
+            eager_integration: true,
+            max_run_members: 4,
+            max_serial_requests: 4,
+            max_attribution_probes: 0,
+            movement_budget: 1,
+            reservation_millis: 1_000,
+            host_class: String::from("test"),
+        };
+        let mut configs = compiled_resolved();
+        configs.insert(policy.address(), CoordinationPolicy::NAME, to_vec(&policy).expect("policy encodes"), None);
+        let mut first = draft(1);
+        first.configs.insert::<CoordinationPolicy>(policy.address());
+        let first = first.seal();
+        let seal = event("coordinated-seal", Fact::Seal(first.clone()));
+        let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
+        let decisions = reduce(&snapshot, &seal, &configs, &SpendWindow::default());
+        assert_eq!(decisions.outcome, Outcome::Sealed(first.id()));
+        assert_eq!(
+            decisions.effects.iter().filter(|effect| matches!(effect, Decision::DispatchBaseVerify { .. })).count(),
+            1,
+        );
+        assert!(!decisions.effects.iter().any(|effect| matches!(effect, Decision::QueueConstructionAdmission { .. })));
+        let snapshot = snapshot.apply(&seal, &decisions, &configs);
+
+        let completion = event(
+            "exact-base",
+            Fact::BaseVerifyCompleted {
+                base: digest(0),
+                tree: digest(90),
+                passed: true,
+                evidence: Evidence { subject: digest(90), kind: EvidenceKind::VerificationResult, detail: digest(91) },
+                failed: VerifyFailureSet::EMPTY,
+            },
+        );
+        let decisions = reduce(&snapshot, &completion, &configs, &SpendWindow::default());
+        assert!(decisions.effects.iter().any(|effect| {
+            matches!(effect, Decision::QueueConstructionAdmission { dispatch }
+                if dispatch.context.bloom_base == CandidateRef { tree: digest(90), checkout: digest(0) })
+        }));
+        let mut snapshot = snapshot.apply(&completion, &decisions, &configs);
+        snapshot.blooms.get_mut(&first.id()).expect("first bloom").status = BloomStatus::Withdrawn;
+
+        let mut second = draft(2);
+        second.proposals = vec![membership("another", 2)];
+        second.configs.insert::<CoordinationPolicy>(policy.address());
+        let second = second.seal();
+        let decisions = reduce(
+            &snapshot,
+            &event("second-coordinated-seal", Fact::Seal(second.clone())),
+            &configs,
+            &SpendWindow::default(),
+        );
+        assert_eq!(decisions.outcome, Outcome::Sealed(second.id()));
+        assert!(!decisions.effects.iter().any(|effect| matches!(effect, Decision::DispatchBaseVerify { .. })));
+        assert!(decisions.effects.iter().any(|effect| matches!(effect, Decision::QueueConstructionAdmission { .. })));
     }
 
     #[test]

@@ -45,6 +45,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use aether_bloomery::CoordinationPolicy;
 use aether_chassis_bloomery::bloomery::mock_lane::LaneScript;
 
 use roots::FixtureRoots;
@@ -166,6 +167,7 @@ pub struct HarnessBuilder {
     socket_read_timeout: Option<Duration>,
     step_budget: Duration,
     authorize_instructions: InstructionAuthorization,
+    coordination_policy: Option<CoordinationPolicy>,
 }
 
 impl HarnessBuilder {
@@ -193,6 +195,7 @@ impl HarnessBuilder {
             socket_read_timeout: Some(SOCKET_READ_TIMEOUT),
             step_budget: Duration::from_secs(20),
             authorize_instructions: InstructionAuthorization::Unique,
+            coordination_policy: None,
         }
     }
 
@@ -220,6 +223,7 @@ impl HarnessBuilder {
             socket_read_timeout: None,
             step_budget: Duration::from_mins(2),
             authorize_instructions: InstructionAuthorization::Unique,
+            coordination_policy: None,
         }
     }
 
@@ -249,6 +253,7 @@ impl HarnessBuilder {
             socket_read_timeout: Some(SOCKET_READ_TIMEOUT),
             step_budget: Duration::from_secs(30),
             authorize_instructions: InstructionAuthorization::Unique,
+            coordination_policy: None,
         }
     }
 
@@ -340,6 +345,22 @@ impl HarnessBuilder {
     pub fn script(mut self, script: &LaneScript) -> Self {
         self.script = Some(script.clone());
         self
+    }
+
+    /// Seal the opt-in coordination policy and configure this host as the
+    /// policy's exact execution class.
+    ///
+    /// # Panics
+    /// The policy has invalid resource bounds or a missing host class.
+    #[must_use]
+    pub fn coordination(mut self, policy: CoordinationPolicy) -> Self {
+        assert!(policy.is_valid(), "the harness coordination policy must be valid");
+        self.coordination_policy = Some(policy);
+        self
+    }
+
+    fn host_class(&self) -> &str {
+        self.coordination_policy.as_ref().map_or("", |policy| policy.host_class.as_str())
     }
 
     /// Boot without authorizing a model-process instruction bundle (ADR-0214).

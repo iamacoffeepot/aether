@@ -69,6 +69,7 @@ fn forked_lane_settings_reach_the_production_resolver() {
         heartbeat_silence_secs: None,
         authorized_instructions: "",
         retrospect_reader_enabled: false,
+        host_class: "harness-fleet",
     };
     let exe = env::current_exe().expect("the test executable");
     let test_thread = thread::current();
@@ -85,7 +86,7 @@ fn forked_lane_settings_reach_the_production_resolver() {
     let body = fs::read_to_string(report.path()).expect("the child wrote a resolve report");
     assert_eq!(
         body,
-        format!("poll={QUIET_POLL_SECS}\ncas_land=false\n"),
+        format!("poll={QUIET_POLL_SECS}\ncas_land=false\nhost_class=harness-fleet\n"),
         "BloomeryEnv::from_env must consume the helper env, not the derive defaults",
     );
 }
@@ -100,7 +101,10 @@ fn write_resolve_report_if_child() -> bool {
     let resolved = BloomeryEnv::from_env().expect("helper env resolves through BloomeryEnv::from_env");
     fs::write(
         &path,
-        format!("poll={}\ncas_land={}\n", resolved.coordinator.poll_interval_secs, resolved.github.cas_land_enabled),
+        format!(
+            "poll={}\ncas_land={}\nhost_class={}\n",
+            resolved.coordinator.poll_interval_secs, resolved.github.cas_land_enabled, resolved.coordinator.host_class,
+        ),
     )
     .expect("the resolve report writes");
     true

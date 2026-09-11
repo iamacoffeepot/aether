@@ -24,6 +24,7 @@ mod attempt;
 mod base_verify;
 mod boundary;
 mod composition;
+mod coordination;
 mod decision;
 pub(crate) mod decisions_v1;
 mod error;
@@ -63,8 +64,8 @@ pub use crate::persisted::decode_recorded_decisions;
 pub use decision::Decision;
 pub use error::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
-    AttemptCompletedError, BaseMismatch, BaseReverifyError, FoldConflictError, GrantAttemptsError, HostFaultError,
-    IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
+    AttemptCompletedError, BaseMismatch, BaseReverifyError, CoordinationError, FoldConflictError, GrantAttemptsError,
+    HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
     NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, PrecheckError,
     ProposalError, ResolveError, SealConflict, SealError, SpliceError, StudyError, SupersedeError,
     SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
@@ -88,6 +89,12 @@ use crate::values::{ResolvedConfigs, SpendWindow};
 use aggregate_verify::reduce_aggregate_verify_completed;
 use attempt::{reduce_attempt_completed, reduce_member_executor_fault};
 use base_verify::{reduce_base_reverify, reduce_base_verify_completed};
+use coordination::{
+    IntegrationConflict, reduce_candidate_prepared, reduce_checkpoint_observed, reduce_compatibility_previewed,
+    reduce_integration_advanced, reduce_integration_conflicted, reduce_integration_refused,
+    reduce_partial_head_repaired, reduce_propose_shared_run, reduce_request_construction_admission,
+    reduce_reservation_expired, reduce_shared_run_completed, reduce_shared_run_prepared, reduce_shared_run_started,
+};
 use evidence::{reduce_admit_evidence, reduce_adopt_answer};
 use fold_conflict::reduce_fold_conflict;
 use fold_refusal::reduce_fold_refused;
@@ -101,7 +108,9 @@ use observe::{reduce_observe_mainline, reduce_observe_mainline_diverged};
 use operator::{reduce_operator_adjudication, reduce_operator_repair};
 use operator_hold::{reduce_operator_hold, reduce_operator_release};
 use orphan_claim::{reduce_complete_orphan_claim_release, reduce_request_orphan_claim_release};
-use precheck::{reduce_precheck_completed, reduce_precheck_prepared, reduce_request_precheck, schedule};
+use precheck::{
+    reduce_precheck_completed, reduce_precheck_prepared, reduce_request_precheck, schedule as schedule_precheck,
+};
 use propose::reduce_propose;
 use readiness::reduce_splice_assembled;
 use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor_fault};
@@ -111,6 +120,101 @@ use suppression::reduce_suppression_disposition;
 use surface_request::reduce_surface_requested;
 use verify::{reduce_resume_host_fault, reduce_verify_failed, reduce_verify_host_fault};
 use withdraw::reduce_withdraw;
+
+fn reduce_coordination_fact(snapshot: &Snapshot, fact: &Fact) -> Decisions {
+    match fact {
+        Fact::IntegrationAdvanced { bloom, plan, head } => reduce_integration_advanced(snapshot, bloom, *plan, head),
+        Fact::IntegrationAppendConflicted {
+            bloom,
+            plan,
+            generation,
+            expected_parent,
+            input,
+            at,
+            evidence,
+            observed_at_unix_millis,
+        } => reduce_integration_conflicted(
+            snapshot,
+            IntegrationConflict {
+                bloom,
+                plan: *plan,
+                generation: *generation,
+                expected_parent: *expected_parent,
+                input,
+                at: *at,
+                evidence,
+                observed_at_unix_millis: *observed_at_unix_millis,
+            },
+        ),
+        Fact::IntegrationAppendRefused { bloom, plan, generation, expected_parent, detail } => {
+            reduce_integration_refused(snapshot, bloom, *plan, *generation, *expected_parent, *detail)
+        }
+        Fact::CandidatePrepared { bloom, plan, preparation } => {
+            reduce_candidate_prepared(snapshot, bloom, *plan, preparation)
+        }
+        Fact::ProposeSharedRun { bloom, plan } => reduce_propose_shared_run(snapshot, bloom, plan),
+        Fact::SharedRunPrepared { bloom, plan, preparation } => {
+            reduce_shared_run_prepared(snapshot, bloom, *plan, preparation)
+        }
+        Fact::SharedRunStarted { bloom, plan, run } => reduce_shared_run_started(snapshot, bloom, *plan, *run),
+        Fact::SharedRunCompleted { bloom, completion } => reduce_shared_run_completed(snapshot, bloom, completion),
+        Fact::StableHeadReservationExpired { bloom, reservation, observed_at_unix_millis } => {
+            reduce_reservation_expired(snapshot, bloom, reservation, *observed_at_unix_millis)
+        }
+        Fact::ConstructionCheckpointObserved { checkpoint } => reduce_checkpoint_observed(snapshot, checkpoint),
+        Fact::RequestConstructionAdmission { admission } => reduce_request_construction_admission(snapshot, admission),
+        Fact::CompatibilityPreviewed { bloom, plan, result } => {
+            reduce_compatibility_previewed(snapshot, bloom, *plan, result)
+        }
+        Fact::PartialHeadRepairCompleted { bloom, plan, completion } => {
+            reduce_partial_head_repaired(snapshot, bloom, *plan, completion)
+        }
+        _ => unreachable!("only coordination facts are routed through this reducer"),
+    }
+}
+
+fn reduce_completion_fact(snapshot: &Snapshot, fact: &Fact) -> Decisions {
+    match fact {
+        Fact::AttemptCompleted { bloom, workpiece, stage, passed, evidence, candidate } => {
+            reduce_attempt_completed(snapshot, bloom, workpiece, *stage, *passed, evidence, *candidate)
+        }
+        Fact::AggregateReviewCompleted { bloom, passed, evidence, implicated } => {
+            reduce_aggregate_review_completed(snapshot, bloom, *passed, evidence, implicated)
+        }
+        Fact::AggregateVerifyCompleted { bloom, passed, evidence } => {
+            reduce_aggregate_verify_completed(snapshot, bloom, *passed, evidence)
+        }
+        Fact::LandingRejected { bloom, evidence } => reduce_landing_rejected(snapshot, bloom, evidence),
+        Fact::VerifyFailed { bloom, workpiece, evidence, failed_verifiers }
+        | Fact::ContainmentRefused { bloom, workpiece, evidence, failed_verifiers, violating_paths: _ } => {
+            reduce_verify_failed(snapshot, bloom, workpiece, evidence, *failed_verifiers)
+        }
+        Fact::AggregateReviewExecutorFault { bloom, evidence } => {
+            reduce_aggregate_review_executor_fault(snapshot, bloom, evidence)
+        }
+        Fact::FoldConflict { bloom, workpiece, checkpoint, head, evidence } => {
+            reduce_fold_conflict(snapshot, bloom, workpiece, *checkpoint, *head, evidence)
+        }
+        Fact::VerifyHostFault { bloom, workpiece, evidence, findings } => {
+            reduce_verify_host_fault(snapshot, bloom, workpiece, evidence, findings)
+        }
+        Fact::MemberExecutorFault { bloom, workpiece, stage, evidence } => {
+            reduce_member_executor_fault(snapshot, bloom, workpiece, *stage, evidence)
+        }
+        Fact::FoldRefused { bloom, refusal } => reduce_fold_refused(snapshot, bloom, refusal),
+        Fact::BaseVerifyCompleted { base, tree, passed, evidence, failed } => {
+            reduce_base_verify_completed(snapshot, *base, *tree, *passed, evidence, *failed)
+        }
+        Fact::CompositionNarrowed { bloom, verified, tree, head, evidence, attribution } => {
+            reduce_composition_narrowed(snapshot, bloom, verified, *tree, *head, evidence, attribution)
+        }
+        Fact::StudyCompleted { bloom, passed, evidence } => reduce_study_completed(snapshot, bloom, *passed, evidence),
+        Fact::PrecheckCompleted { bloom, node, completion } => {
+            reduce_precheck_completed(snapshot, bloom, *node, completion)
+        }
+        _ => unreachable!("only completion facts are routed through this reducer"),
+    }
+}
 
 /// Reduce one event against a snapshot into decisions. Pure: reads the
 /// snapshot, returns decisions, mutates nothing (ADR-0149 §The control core).
@@ -149,38 +253,33 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         Fact::Integrate { bloom, claim } => reduce_integrate(snapshot, bloom, claim),
         Fact::AdmitEvidence { bloom, evidence } => reduce_admit_evidence(snapshot, bloom, evidence),
         Fact::AdoptAnswer { bloom, answer } => reduce_adopt_answer(snapshot, bloom, answer),
-        Fact::AttemptCompleted { bloom, workpiece, stage, passed, evidence, candidate } => {
-            reduce_attempt_completed(snapshot, bloom, workpiece, *stage, *passed, evidence, *candidate)
-        }
+        fact @ (Fact::AttemptCompleted { .. }
+        | Fact::AggregateReviewCompleted { .. }
+        | Fact::AggregateVerifyCompleted { .. }
+        | Fact::LandingRejected { .. }
+        | Fact::VerifyFailed { .. }
+        | Fact::ContainmentRefused { .. }
+        | Fact::AggregateReviewExecutorFault { .. }
+        | Fact::FoldConflict { .. }
+        | Fact::VerifyHostFault { .. }
+        | Fact::MemberExecutorFault { .. }
+        | Fact::FoldRefused { .. }
+        | Fact::BaseVerifyCompleted { .. }
+        | Fact::CompositionNarrowed { .. }
+        | Fact::StudyCompleted { .. }
+        | Fact::PrecheckCompleted { .. }) => reduce_completion_fact(snapshot, fact),
         Fact::Resolve { bloom, tree, head, lineage } => reduce_resolve(snapshot, bloom, tree, head, lineage),
-        Fact::AggregateReviewCompleted { bloom, passed, evidence, implicated } => {
-            reduce_aggregate_review_completed(snapshot, bloom, *passed, evidence, implicated)
-        }
-        Fact::AggregateVerifyCompleted { bloom, passed, evidence } => {
-            reduce_aggregate_verify_completed(snapshot, bloom, *passed, evidence)
-        }
-        Fact::LandingRejected { bloom, evidence } => reduce_landing_rejected(snapshot, bloom, evidence),
         Fact::Land { bloom, new_head } => reduce_land(snapshot, bloom, new_head),
         Fact::ObserveMainline { head } => reduce_observe_mainline(snapshot, head),
         Fact::ObserveMainlineDiverged { head } => reduce_observe_mainline_diverged(snapshot, head),
         Fact::GrantAttempts { bloom, workpiece, stage, attempts } => {
             reduce_grant_attempts(snapshot, bloom, workpiece, *stage, *attempts)
         }
-        Fact::VerifyFailed { bloom, workpiece, evidence, failed_verifiers }
-        | Fact::ContainmentRefused { bloom, workpiece, evidence, failed_verifiers, violating_paths: _ } => {
-            reduce_verify_failed(snapshot, bloom, workpiece, evidence, *failed_verifiers)
-        }
         Fact::RequestOrphanClaimRelease { request, authorization } => {
             reduce_request_orphan_claim_release(snapshot, request, authorization)
         }
         Fact::CompleteOrphanClaimRelease { request, completion } => {
             reduce_complete_orphan_claim_release(snapshot, request, *completion)
-        }
-        Fact::AggregateReviewExecutorFault { bloom, evidence } => {
-            reduce_aggregate_review_executor_fault(snapshot, bloom, evidence)
-        }
-        Fact::FoldConflict { bloom, workpiece, checkpoint, head, evidence } => {
-            reduce_fold_conflict(snapshot, bloom, workpiece, *checkpoint, *head, evidence)
         }
         Fact::OperatorAdjudication { bloom, adjudication } => {
             reduce_operator_adjudication(snapshot, bloom, adjudication)
@@ -189,17 +288,10 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         Fact::OperatorHold { bloom, hold } => reduce_operator_hold(snapshot, bloom, hold),
         Fact::OperatorRelease { bloom, release } => reduce_operator_release(snapshot, bloom, release),
         Fact::SurfaceOverlap { members, intersection } => reduce_surface_overlap(members, intersection),
-        Fact::VerifyHostFault { bloom, workpiece, evidence, findings } => {
-            reduce_verify_host_fault(snapshot, bloom, workpiece, evidence, findings)
-        }
         Fact::ResumeHostFault { bloom, workpiece } => reduce_resume_host_fault(snapshot, bloom, workpiece),
         Fact::SpliceAssembled { bloom, workpiece, tree, head } => {
             reduce_splice_assembled(snapshot, bloom, workpiece, *tree, *head)
         }
-        Fact::MemberExecutorFault { bloom, workpiece, stage, evidence } => {
-            reduce_member_executor_fault(snapshot, bloom, workpiece, *stage, evidence)
-        }
-        Fact::FoldRefused { bloom, refusal } => reduce_fold_refused(snapshot, bloom, refusal),
         Fact::SurfaceRequested { bloom, workpiece, stage, evidence, request } => {
             reduce_surface_requested(snapshot, bloom, workpiece, *stage, evidence, request)
         }
@@ -210,22 +302,25 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         Fact::SuppressionDisposition { bloom, workpiece, disposition } => {
             reduce_suppression_disposition(snapshot, bloom, workpiece, disposition)
         }
-        Fact::BaseVerifyCompleted { base, tree, passed, evidence, failed } => {
-            reduce_base_verify_completed(snapshot, *base, *tree, *passed, evidence, *failed)
-        }
         Fact::BaseReverify(reverify) => reduce_base_reverify(snapshot, reverify),
-        Fact::CompositionNarrowed { bloom, verified, tree, head, evidence, attribution } => {
-            reduce_composition_narrowed(snapshot, bloom, verified, *tree, *head, evidence, attribution)
-        }
         Fact::ProposeChange { proposal, authorization } => reduce_propose(snapshot, proposal, authorization),
-        Fact::StudyCompleted { bloom, passed, evidence } => reduce_study_completed(snapshot, bloom, *passed, evidence),
         Fact::PrecheckPrepared { bloom, plan, preparation } => {
             reduce_precheck_prepared(snapshot, bloom, *plan, preparation)
         }
         Fact::RequestPrecheck { bloom, node } => reduce_request_precheck(snapshot, bloom, *node),
-        Fact::PrecheckCompleted { bloom, node, completion } => {
-            reduce_precheck_completed(snapshot, bloom, *node, completion)
-        }
+        fact @ (Fact::IntegrationAdvanced { .. }
+        | Fact::IntegrationAppendConflicted { .. }
+        | Fact::IntegrationAppendRefused { .. }
+        | Fact::CandidatePrepared { .. }
+        | Fact::ProposeSharedRun { .. }
+        | Fact::SharedRunPrepared { .. }
+        | Fact::SharedRunStarted { .. }
+        | Fact::SharedRunCompleted { .. }
+        | Fact::StableHeadReservationExpired { .. }
+        | Fact::ConstructionCheckpointObserved { .. }
+        | Fact::RequestConstructionAdmission { .. }
+        | Fact::CompatibilityPreviewed { .. }
+        | Fact::PartialHeadRepairCompleted { .. }) => reduce_coordination_fact(snapshot, fact),
         // Retired: the journal holds grants the machinery decided before a
         // widening became an operator's decision, and those records replay
         // through their own recorded decisions (ADR-0190) rather than through
@@ -235,5 +330,5 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
             Decisions::rejected(Outcome::SurfaceGrantRejected(SurfaceRequestedError::GrantRetired))
         }
     };
-    schedule(snapshot, decisions)
+    schedule_precheck(snapshot, coordination::schedule(snapshot, decisions))
 }

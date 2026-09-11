@@ -24,8 +24,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::reduce::{BloomStatus, RecordedRefusal};
 use crate::values::{
-    CandidateRef, CompositionFinding, Evidence, LandingReceipt, OperatorHold, PrecheckState, ResolutionClaim,
-    SpendQuiesce, SurfacePathRequest, VerifyFailureSet, Wedge,
+    CandidateRef, CompositionFinding, CoordinationState, Evidence, LandingReceipt, OperatorHold, PrecheckState,
+    ResolutionClaim, SpendQuiesce, SurfacePathRequest, VerifyFailureSet, Wedge,
 };
 
 /// The self-contained render input a reconcile pushes outward: the current
@@ -172,6 +172,35 @@ pub struct BloomView {
     /// queued rows whose positional bloom elements predate this field.
     #[serde(default)]
     pub precheck: Option<PrecheckState>,
+    /// Optional eager-head and shared-run state. Member contexts, reservations,
+    /// proof freshness, and physical-run identity are derived from here.
+    #[serde(default)]
+    pub coordination: Option<CoordinationState>,
+}
+
+impl BloomView {
+    /// Whether the current member has an admitted standalone or contextual
+    /// resolution. Contextual proof stays in coordination rather than the
+    /// legacy [`MemberView::resolution`] field.
+    #[must_use]
+    pub fn has_current_member_resolution(&self, workpiece: &WorkpieceId) -> bool {
+        let Some(member) =
+            self.members.iter().find(|member| member.workpiece == *workpiece && member.withdrawn.is_none())
+        else {
+            return false;
+        };
+        member
+            .resolution
+            .as_ref()
+            .is_some_and(|claim| claim.workpiece == *workpiece && claim.scope_revision == member.scope_revision)
+            || self.coordination.as_ref().is_some_and(|state| {
+                state.claims.get(&workpiece.0).is_some_and(|claim| {
+                    claim.member.workpiece == *workpiece
+                        && claim.member.scope_revision == member.scope_revision
+                        && state.has_exact_claim(&claim.member)
+                })
+            })
+    }
 }
 
 /// One narrowed composition's outward line (ADR-0210): the subject, the

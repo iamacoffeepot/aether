@@ -7,7 +7,9 @@
 //! `pre-study-decisions.bin` is the same thing one shape later: the complete
 //! representative row as of `7ed0db5b…`, the shape every decisions row written
 //! before the ADR-0216 reader bore. The `pre-precheck-*` pair preserves the last
-//! decisions and event rows from before aggregate pre-check vocabulary existed.
+//! decisions and event rows from before aggregate pre-check vocabulary existed,
+//! and the `pre-coordination-*` pair the last rows from before shared
+//! verification and eager integration.
 //! There is no regen command for any of them: the bytes are history. Each
 //! pinned upcast decodes as the current shape
 //! because everything since is a tail-appended enum variant, so when one of
@@ -16,8 +18,9 @@
 //! never new bytes here.
 
 use aether_bloomery::persisted::{
-    DECISIONS_PRE_PRECHECK_DIGEST, DECISIONS_PRE_PROPOSE_DIGEST, DECISIONS_PRE_STUDY_DIGEST, EVENT_PRE_PRECHECK_DIGEST,
-    EVENT_PRE_PROPOSE_DIGEST, EVENT_PRE_STUDY_DIGEST, decode_recorded_decisions, decode_recorded_event,
+    DECISIONS_PRE_COORDINATION_DIGEST, DECISIONS_PRE_PRECHECK_DIGEST, DECISIONS_PRE_PROPOSE_DIGEST,
+    DECISIONS_PRE_STUDY_DIGEST, EVENT_PRE_COORDINATION_DIGEST, EVENT_PRE_PRECHECK_DIGEST, EVENT_PRE_PROPOSE_DIGEST,
+    EVENT_PRE_STUDY_DIGEST, decode_recorded_decisions, decode_recorded_event,
 };
 use aether_bloomery::testing::{containment_refused_event, surface_overlap_event};
 
@@ -26,6 +29,8 @@ const PRE_PROPOSE_EVENT: &[u8] = include_bytes!("fixtures/pre-propose-event.bin"
 const PRE_STUDY_DECISIONS: &[u8] = include_bytes!("fixtures/pre-study-decisions.bin");
 const PRE_PRECHECK_DECISIONS: &[u8] = include_bytes!("fixtures/pre-precheck-decisions.bin");
 const PRE_PRECHECK_EVENT: &[u8] = include_bytes!("fixtures/pre-precheck-event.bin");
+const PRE_COORDINATION_DECISIONS: &[u8] = include_bytes!("fixtures/pre-coordination-decisions.bin");
+const PRE_COORDINATION_EVENT: &[u8] = include_bytes!("fixtures/pre-coordination-event.bin");
 
 #[test]
 fn a_pre_propose_decisions_row_decodes_through_its_pinned_upcast() {
@@ -76,5 +81,20 @@ fn a_pre_precheck_decisions_row_decodes_through_its_pinned_upcast() {
 fn a_pre_precheck_event_row_decodes_through_its_pinned_upcast() {
     let decoded = decode_recorded_event(PRE_PRECHECK_EVENT, Some(EVENT_PRE_PRECHECK_DIGEST.as_bytes()))
         .expect("a row stamped 485537c3… decodes through the pre-pre-check upcast");
+    assert_eq!(decoded, containment_refused_event());
+}
+
+#[test]
+fn a_pre_coordination_decisions_row_decodes_through_its_pinned_upcast() {
+    let decoded =
+        decode_recorded_decisions(PRE_COORDINATION_DECISIONS, Some(DECISIONS_PRE_COORDINATION_DIGEST.as_bytes()))
+            .expect("a row stamped cd1234d2… decodes through the pre-coordination upcast");
+    assert!(!decoded.effects.is_empty(), "the pre-coordination row retains its complete historical vocabulary");
+}
+
+#[test]
+fn a_pre_coordination_event_row_decodes_through_its_pinned_upcast() {
+    let decoded = decode_recorded_event(PRE_COORDINATION_EVENT, Some(EVENT_PRE_COORDINATION_DIGEST.as_bytes()))
+        .expect("a row stamped 55af52a6… decodes through the pre-coordination upcast");
     assert_eq!(decoded, containment_refused_event());
 }

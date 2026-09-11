@@ -13,7 +13,7 @@ use crate::store::{ProofFactWrite, StoreBackend};
 
 /// The result a proof fact records. Append-only: a new spelling goes on the
 /// end, never a rename or reorder of these two.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ProofResult {
     /// The test passed in both discriminated runs.
     Green,
@@ -45,7 +45,7 @@ impl ProofResult {
 
 /// Per-test outcomes from one runner invocation. Not a fact — a single run
 /// can be a flake.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RunnerReport {
     outcomes: BTreeMap<String, ProofResult>,
 }
@@ -61,6 +61,13 @@ impl RunnerReport {
     /// overwrites — one run has one result per test.
     pub fn insert(&mut self, test_id: impl Into<String>, result: ProofResult) {
         self.outcomes.insert(test_id.into(), result);
+    }
+}
+
+impl RunnerReport {
+    /// Only explicitly observed outcomes; absent tests remain unknown.
+    pub fn outcomes(&self) -> impl Iterator<Item = (&str, ProofResult)> {
+        self.outcomes.iter().map(|(test, result)| (test.as_str(), *result))
     }
 }
 
@@ -118,6 +125,9 @@ pub enum ProofSource<'a> {
         /// The post-land closure key the unknown fact was addressed by.
         closure: ClosureKey,
     },
+    /// One exact composed input and full execution contract. Never fan this
+    /// source out to the standalone closure keys of its parent members.
+    Contextual { input: ClosureKey },
 }
 
 /// Keep only tests that appear in both reports with the same result.
@@ -136,11 +146,14 @@ pub fn discriminate(first: &RunnerReport, second: &RunnerReport) -> Discriminate
     DiscriminatedFacts { facts }
 }
 
-/// Record already-discriminated facts from the verify path.
+/// Record already-discriminated facts from the verify path, returning how many
+/// rows the ledger gained.
 ///
 /// Member verify stamps its one closure key. Aggregate verify stamps every
 /// member key it proves, so each member's address holds the same fact.
-/// Nothing here accepts a [`RunnerReport`].
+/// Nothing here accepts a [`RunnerReport`]. A fact the ledger already holds
+/// under the same producing dispatch is not appended again, so a replayed
+/// recording reports nothing written rather than re-dating a retained result.
 ///
 /// # Errors
 /// The store write failed.
@@ -156,7 +169,9 @@ pub fn record_proof_facts(
     use std::slice::from_ref;
 
     let closures: &[ClosureKey] = match source {
-        ProofSource::Member { closure } | ProofSource::Sweep { closure } => from_ref(closure),
+        ProofSource::Member { closure }
+        | ProofSource::Sweep { closure }
+        | ProofSource::Contextual { input: closure } => from_ref(closure),
         ProofSource::Aggregate { closures } => closures,
     };
     let writes: Vec<ProofFactWrite<'_>> = closures
@@ -172,9 +187,7 @@ pub fn record_proof_facts(
             })
         })
         .collect();
-    let written = writes.len();
-    store.append_proof_facts(&writes)?;
-    Ok(written)
+    store.append_proof_facts(&writes)
 }
 
 #[cfg(all(test, feature = "runtime"))]

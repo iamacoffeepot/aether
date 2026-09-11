@@ -24,6 +24,16 @@ A second defect fell out of the same shape. Once the coordinator dispatches a re
 
 ## Decision
 
+[ADR-0218](0218-contextual-verification-and-eager-integration.md) extends
+this contract to eagerly composed verification groups. Parent pins and their
+inherited coverage are immutable; ejection creates a fresh survivor node.
+A partial composition repair remains its own explicit contribution, which
+later appends must preserve instead of rebuilding the unrepaired leaf refs.
+Its laps resume its own parent-bound session. Contextual receipts replace
+the assumption that every parent necessarily has standalone Verify evidence;
+they name the exact node and contract that was checked, without widening any
+ordinary member's approved delta.
+
 **There is one way candidates are merged: a composition over a parent set. The arity is what varies.**
 
 The bloom's fold is the composition whose parents are every live member. A repair of two colliding candidates is the composition whose parents are those two. Same record, same journal facts, same lane shape, same bound rule, same session rule, same inputs. Nothing about a narrower composition is a second mechanism; it is the same mechanism, narrower.

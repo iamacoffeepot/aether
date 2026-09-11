@@ -12,14 +12,21 @@ use crate::reduce::{
     Decision, Decisions, Event, Fact, FoldedIntegration, Outcome, RecordedRead, RecordedRefusal, StageProgress,
 };
 use crate::values::{
-    Adjudication, AgentProfile, BaseReceipt, BaseVerdict, CandidateRef, CompositionFinding, ConfigRegistry,
-    DeclaredEvidence, DeclaredLanes, DeclaredVerifiers, Disposition, Evidence, EvidenceKind, ExecutionLimits, Harness,
-    LandingReceipt, LaneEntrypoint, MemberCandidate, MemberDependency, NetworkProfile, OperatorHold, OperatorProposal,
-    OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, PipelineManifest, PrecheckDiagnostic,
-    PrecheckMember, PrecheckNode, PrecheckPlan, PrecheckPolicy, PrecheckResult, PrecheckState, ReasoningEffort,
-    ResolutionClaim, ResolvedBloom, ResolvedModel, SpendQuiesce, StageBinding, StageCatalog, ToolPolicy,
-    Transformation, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
-    WithdrawalCause,
+    Adjudication, AgentProfile, BaseReceipt, BaseVerdict, CandidatePreparationPlan, CandidateRef, CompatibilityPreview,
+    CompatibilityPreviewPlan, CompatibilityPreviewRecord, CompositionContractTemplate, CompositionFinding,
+    CompositionInput, CompositionPlan, ConfigRegistry, ConstructContext, ConstructionAdmission, ConstructionCheckpoint,
+    ContextualAttemptDispatch, ContextualInvocationTemplate, ContextualResolutionClaim, CoordinationDiagnostic,
+    CoordinationPolicy, CoordinationState, DeclaredEvidence, DeclaredLanes, DeclaredVerifiers, Disposition, Evidence,
+    EvidenceKind, ExecutionLimits, FailureScope, GenerationMember, Harness, LandingReceipt, LaneEntrypoint,
+    MemberCandidate, MemberContractPin, MemberDependency, MemberPin, MemberVerifyLatency, MemberVerifyOutcome,
+    MemberVerifyRequest, NetworkProfile, OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease,
+    OrphanClaimReleaseCompletion, PartialHeadRepairDispatch, PartialHeadRepairPlan, PipelineManifest,
+    PrecheckDiagnostic, PrecheckMember, PrecheckNode, PrecheckPlan, PrecheckPolicy, PrecheckResult, PrecheckState,
+    PreparedCandidate, ReasoningEffort, ResolutionClaim, ResolutionProof, ResolvedBloom, ResolvedModel,
+    SharedRunDispatch, SharedRunExecution, SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan,
+    SharedRunRecord, SpendQuiesce, StableHeadReservation, StageBinding, StageCatalog, SurvivorGroup, ToolPolicy,
+    Transformation, VerificationContract, VerificationMode, VerificationObligation, VerifyFailure, VerifyFailureSet,
+    VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal, WithdrawalCause,
 };
 
 use super::digest;
@@ -136,6 +143,407 @@ fn precheck_records(bloom: BloomId) -> Vec<Decision> {
         Decision::CancelPrecheck { bloom, node: node.digest() },
         Decision::PromotePrecheck { bloom, node: node.digest() },
     ]
+}
+
+struct CoordinationGolden {
+    bloom: BloomId,
+    base: CandidateRef,
+    candidate: CandidateRef,
+    state: CoordinationState,
+    request: MemberVerifyRequest,
+    run: SharedRunPlan,
+    node: SharedRunNode,
+    context: ConstructContext,
+    contextual: ContextualAttemptDispatch,
+    checkpoint: ConstructionCheckpoint,
+    append: crate::IntegrationAppendPlan,
+    partial: PartialHeadRepairPlan,
+    verification: Evidence,
+}
+
+fn coordination_state(
+    bloom: BloomId,
+    workpiece: &WorkpieceId,
+    base: CandidateRef,
+) -> (CoordinationState, CompositionContractTemplate) {
+    let policy = CoordinationPolicy {
+        verification: VerificationMode::Contextual,
+        eager_integration: true,
+        max_run_members: 4,
+        max_serial_requests: 3,
+        max_attribution_probes: 2,
+        movement_budget: 2,
+        reservation_millis: 30_000,
+        host_class: "fixture".into(),
+    };
+    let template = CompositionContractTemplate {
+        gate_set: digest(85),
+        gate_identities: vec!["cargo-test".into()],
+        invocation: ContextualInvocationTemplate {
+            command: "verify.check".into(),
+            extra_inputs: vec![digest(84)],
+            diff_base: Some(base.checkout),
+            outputs: vec!["verdict".into()],
+            image: "iama/verify:1".into(),
+            limits: ExecutionLimits { wall_clock_secs: 900 },
+            network: NetworkProfile::None,
+            description: None,
+            model: None,
+            profile: profile(),
+            configs: configs(),
+        },
+        environment: digest(86),
+        host_class: digest(87),
+    };
+    let state = CoordinationState::new(
+        policy,
+        template.clone(),
+        bloom,
+        base,
+        vec![GenerationMember { workpiece: workpiece.clone(), scope_revision: digest(88) }],
+    );
+    (state, template)
+}
+
+fn coordination_fixture(bloom: BloomId) -> CoordinationGolden {
+    let workpiece = WorkpieceId("alpha".into());
+    let base = CandidateRef { tree: digest(80), checkout: digest(81) };
+    let candidate = CandidateRef { tree: digest(82), checkout: digest(83) };
+    let (state, template) = coordination_state(bloom, &workpiece, base);
+    let pin = MemberPin { workpiece: workpiece.clone(), scope_revision: digest(88), candidate };
+    let input = CompositionInput { node: digest(89), candidate, members: vec![pin.clone()] };
+    let context = ConstructContext { bloom_base: base, starting_head: state.integration.head.clone() };
+    let contract = VerificationContract {
+        gate_set: digest(90),
+        obligations: vec![
+            VerificationObligation::Gate { identity: "cargo-test".into() },
+            VerificationObligation::MemberDelta { scope_revision: pin.scope_revision, candidate, diff_base: base },
+        ],
+        diff_base: base,
+        invocation: digest(91),
+        environment: template.environment,
+        host_class: template.host_class,
+    };
+    let request = MemberVerifyRequest {
+        bloom,
+        member: pin.clone(),
+        input: input.clone(),
+        attempt: 0,
+        context: Some(context.clone()),
+        contract,
+        transformation: transformation(),
+        profile: profile(),
+        configs: configs(),
+    };
+    let composition = CompositionPlan {
+        bloom,
+        base: state.integration.head.clone(),
+        inputs: vec![input.clone()],
+        requests: vec![request.clone()],
+        contract: template
+            .bind(vec![MemberContractPin { request: request.digest(), contract: request.contract.digest() }]),
+    };
+    let run = SharedRunPlan {
+        mode: SharedRunMode::Contextual,
+        requests: vec![request.clone()],
+        composition: Some(composition),
+        probe_budget: 2,
+        execution_attempt: 0,
+    };
+    let node = SharedRunNode { plan: run.digest(), candidate, coverage: vec![pin] };
+    let contextual = ContextualAttemptDispatch {
+        bloom,
+        workpiece,
+        stage: StageId::Construct,
+        attempt: 1,
+        transformation: transformation(),
+        scope_revision: digest(88),
+        candidate: None,
+        profile: profile(),
+        configs: configs(),
+        context: context.clone(),
+    };
+    let checkpoint = ConstructionCheckpoint {
+        bloom,
+        workpiece: contextual.workpiece.clone(),
+        scope_revision: contextual.scope_revision,
+        nonce: digest(92),
+        observation: 1,
+        starting_checkout: context.starting_head.candidate.checkout,
+        candidate,
+    };
+    let append = crate::IntegrationAppendPlan {
+        bloom,
+        generation: state.integration.generation.digest(),
+        expected_parent: state.integration.head.clone(),
+        inputs: vec![input.clone()],
+    };
+    let partial = PartialHeadRepairPlan {
+        bloom,
+        generation: state.integration.generation.digest(),
+        head: state.integration.head.clone(),
+        inputs: vec![input],
+        evidence: digest(93),
+        attempt: 0,
+    };
+    let verification = Evidence { subject: candidate.tree, kind: EvidenceKind::VerificationResult, detail: digest(94) };
+
+    CoordinationGolden {
+        bloom,
+        base,
+        candidate,
+        state,
+        request,
+        run,
+        node,
+        context,
+        contextual,
+        checkpoint,
+        append,
+        partial,
+        verification,
+    }
+}
+
+fn coordination_run(fixture: &CoordinationGolden) -> SharedRunRecord {
+    let fault = Evidence { subject: fixture.candidate.tree, kind: EvidenceKind::ExecutorFault, detail: digest(95) };
+    let proof = VerifyProof {
+        gate_set: fixture.request.contract.gate_set,
+        stage: StageId::Verify,
+        evidence: fixture.verification.clone(),
+    };
+    SharedRunRecord {
+        plan: fixture.run.clone(),
+        node: Some(fixture.node.clone()),
+        phase: SharedRunPhase::Terminal,
+        stale: false,
+        physical_run: Some(digest(96)),
+        completed: vec![
+            MemberVerifyOutcome::PassedStandalone { request: fixture.request.digest(), proof },
+            MemberVerifyOutcome::PassedIn {
+                request: fixture.request.digest(),
+                node: fixture.node.digest(),
+                receipt: fixture.verification.clone(),
+            },
+            MemberVerifyOutcome::Failed {
+                request: fixture.request.digest(),
+                scope: FailureScope::Attributed {
+                    members: vec![fixture.request.member.clone()],
+                    evidence: fixture.verification.detail,
+                },
+                failures: once(VerifyFailure::Fmt).collect(),
+                evidence: fixture.verification.clone(),
+            },
+            MemberVerifyOutcome::HostFault { request: fixture.request.digest(), evidence: fault },
+            MemberVerifyOutcome::Survived {
+                request: fixture.request.digest(),
+                node: fixture.node.digest(),
+                observation: digest(97),
+            },
+            MemberVerifyOutcome::Pending { request: fixture.request.digest(), observation: digest(98) },
+        ],
+        unfinished: vec![fixture.request.digest()],
+        latencies: vec![MemberVerifyLatency {
+            request: fixture.request.digest(),
+            member: fixture.request.member.clone(),
+            latency_millis: 42,
+        }],
+    }
+}
+
+fn coordination_pending_run(
+    fixture: &CoordinationGolden,
+    phase: SharedRunPhase,
+    execution_attempt: u32,
+) -> SharedRunRecord {
+    let plan = SharedRunPlan { execution_attempt, ..fixture.run.clone() };
+    let node = (!matches!(phase, SharedRunPhase::Preparing))
+        .then(|| SharedRunNode { plan: plan.digest(), ..fixture.node.clone() });
+    SharedRunRecord {
+        plan,
+        node,
+        phase,
+        stale: false,
+        physical_run: matches!(phase, SharedRunPhase::Running).then_some(digest(99)),
+        completed: Vec::new(),
+        unfinished: vec![fixture.request.digest()],
+        latencies: Vec::new(),
+    }
+}
+
+fn populate_coordination_claims(fixture: &mut CoordinationGolden) {
+    let proof = VerifyProof {
+        gate_set: fixture.request.contract.gate_set,
+        stage: StageId::Verify,
+        evidence: fixture.verification.clone(),
+    };
+    fixture.state.requests.push(fixture.request.clone());
+    let runs = [
+        coordination_pending_run(fixture, SharedRunPhase::Preparing, 1),
+        coordination_pending_run(fixture, SharedRunPhase::Ready, 2),
+        coordination_pending_run(fixture, SharedRunPhase::Running, 3),
+        coordination_run(fixture),
+    ];
+    fixture.state.runs.extend(runs);
+    fixture.state.claims.insert(
+        fixture.request.member.workpiece.0.clone(),
+        ContextualResolutionClaim { member: fixture.request.member.clone(), proof: ResolutionProof::Standalone(proof) },
+    );
+    fixture.state.claims.insert(
+        String::from("beta"),
+        ContextualResolutionClaim {
+            member: MemberPin {
+                workpiece: WorkpieceId("beta".into()),
+                scope_revision: digest(99),
+                candidate: fixture.candidate,
+            },
+            proof: ResolutionProof::InComposition {
+                node: fixture.node.digest(),
+                receipt: fixture.verification.clone(),
+                plan: fixture.run.digest(),
+                request: fixture.request.digest(),
+                contract: fixture.run.composition.as_ref().expect("fixture composition").contract.digest(),
+            },
+        },
+    );
+    fixture.state.prepared.insert(
+        fixture.request.member.workpiece.0.clone(),
+        PreparedCandidate {
+            authored: fixture.candidate,
+            candidate: fixture.candidate,
+            context: fixture.context.clone(),
+            diff_base: fixture.base,
+        },
+    );
+    fixture.state.preparations.push(CandidatePreparationPlan {
+        bloom: fixture.bloom,
+        workpiece: fixture.request.member.workpiece.clone(),
+        scope_revision: fixture.request.member.scope_revision,
+        authored: fixture.candidate,
+        context: fixture.context.clone(),
+    });
+}
+
+fn populate_coordination_observations(fixture: &mut CoordinationGolden) {
+    fixture.state.contexts.insert(fixture.request.member.workpiece.0.clone(), fixture.context.clone());
+    fixture.state.checkpoints.insert(fixture.checkpoint.workpiece.0.clone(), fixture.checkpoint.clone());
+    fixture.state.queued_construction.insert(fixture.contextual.workpiece.0.clone(), fixture.contextual.clone());
+    fixture.state.admitted_construction.insert(
+        fixture.contextual.workpiece.0.clone(),
+        ConstructionAdmission { nonce: fixture.checkpoint.nonce, dispatch: fixture.contextual.clone() },
+    );
+    fixture.state.preview_plans.push(CompatibilityPreviewPlan {
+        bloom: fixture.bloom,
+        generation: fixture.partial.generation,
+        base: fixture.base,
+        checkpoints: vec![fixture.checkpoint.clone()],
+    });
+    fixture.state.previews.extend([
+        CompatibilityPreviewRecord { plan: digest(100), result: CompatibilityPreview::Clean { tree: digest(101) } },
+        CompatibilityPreviewRecord {
+            plan: digest(102),
+            result: CompatibilityPreview::Conflict { evidence: digest(103) },
+        },
+        CompatibilityPreviewRecord { plan: digest(104), result: CompatibilityPreview::Refused { detail: digest(105) } },
+    ]);
+    fixture.state.diagnostics.extend([
+        CoordinationDiagnostic {
+            subject: digest(106),
+            scope: FailureScope::Attributed {
+                members: vec![fixture.request.member.clone()],
+                evidence: fixture.verification.detail,
+            },
+        },
+        CoordinationDiagnostic {
+            subject: digest(107),
+            scope: FailureScope::Interaction {
+                members: vec![fixture.request.member.clone(), fixture.node.coverage[0].clone()],
+                evidence: fixture.verification.detail,
+            },
+        },
+        CoordinationDiagnostic {
+            subject: digest(108),
+            scope: FailureScope::Inherited { head: fixture.node.digest(), evidence: fixture.verification.detail },
+        },
+        CoordinationDiagnostic {
+            subject: digest(109),
+            scope: FailureScope::Unattributed { evidence: fixture.verification.detail },
+        },
+    ]);
+    fixture.state.survivor_groups.push(SurvivorGroup {
+        source_plan: fixture.run.digest(),
+        source_node: fixture.node.digest(),
+        requests: vec![fixture.request.digest()],
+    });
+    fixture.state.partial_head_repair = Some(fixture.partial.clone());
+    fixture.state.integration.reservation = Some(StableHeadReservation {
+        owner: fixture.request.member.workpiece.clone(),
+        generation: fixture.partial.generation,
+        node: fixture.state.integration.head.node,
+        movement_count: 2,
+        deadline_unix_millis: 123_456,
+        hold: digest(110),
+    });
+}
+
+fn coordination_decisions(fixture: CoordinationGolden) -> Vec<Decision> {
+    vec![
+        Decision::RecordCoordinationState { bloom: fixture.bloom, state: Some(Box::new(fixture.state)) },
+        Decision::DispatchIntegrationAppend { plan: fixture.append },
+        Decision::DispatchCandidatePreparation {
+            plan: CandidatePreparationPlan {
+                bloom: fixture.bloom,
+                workpiece: fixture.contextual.workpiece.clone(),
+                scope_revision: fixture.contextual.scope_revision,
+                authored: fixture.candidate,
+                context: fixture.context,
+            },
+        },
+        Decision::QueueMemberVerification { request: Box::new(fixture.request.clone()) },
+        Decision::DispatchSharedRunPreparation { plan: fixture.run.clone() },
+        Decision::DispatchSharedRun {
+            dispatch: SharedRunDispatch { plan: fixture.run.clone(), execution: SharedRunExecution::Serial },
+        },
+        Decision::DispatchSharedRun {
+            dispatch: SharedRunDispatch {
+                plan: fixture.run.clone(),
+                execution: SharedRunExecution::Contextual {
+                    node: Box::new(fixture.node),
+                    transformation: Box::new(transformation()),
+                    profile: profile(),
+                    configs: configs(),
+                },
+            },
+        },
+        Decision::CancelSharedRun { plan: fixture.run.digest() },
+        Decision::CancelMemberVerification { request: fixture.request.digest() },
+        Decision::DispatchCompatibilityPreview {
+            plan: CompatibilityPreviewPlan {
+                bloom: fixture.bloom,
+                generation: fixture.partial.generation,
+                base: fixture.base,
+                checkpoints: vec![fixture.checkpoint],
+            },
+        },
+        Decision::QueueConstructionAdmission { dispatch: fixture.contextual.clone() },
+        Decision::DispatchContextualAttempt { dispatch: fixture.contextual },
+        Decision::DispatchPartialHeadRepair {
+            dispatch: PartialHeadRepairDispatch {
+                plan: fixture.partial,
+                transformation: transformation(),
+                scope_revision: fixture.base.checkout,
+                profile: profile(),
+                configs: configs(),
+            },
+        },
+    ]
+}
+
+fn coordination_records(bloom: BloomId) -> Vec<Decision> {
+    let mut fixture = coordination_fixture(bloom);
+    populate_coordination_claims(&mut fixture);
+    populate_coordination_observations(&mut fixture);
+    coordination_decisions(fixture)
 }
 
 fn resolution_claim(workpiece: WorkpieceId) -> ResolutionClaim {
@@ -487,6 +895,87 @@ fn spend_quiesce_records(bloom: BloomId) -> [Decision; 2] {
     ]
 }
 
+fn bloom_lifecycle_records(bloom: BloomId, successor: BloomId, workpiece: &WorkpieceId) -> Vec<Decision> {
+    vec![
+        Decision::ClaimMembership { workpiece: workpiece.clone(), bloom },
+        Decision::ReleaseMembership { workpiece: workpiece.clone(), bloom },
+        Decision::InheritClaim { bloom: successor, claim: resolution_claim(workpiece.clone()) },
+        Decision::RecordResolution { bloom, claim: resolution_claim(workpiece.clone()) },
+        Decision::RevokeResolution { bloom, workpiece: workpiece.clone() },
+        advance_stage(bloom, workpiece.clone()),
+        Decision::RecordStageCatalog { bloom, catalog: stage_catalog() },
+        Decision::RecordEvidence {
+            bloom,
+            evidence: Evidence { subject: digest(6), kind: EvidenceKind::VerificationResult, detail: digest(7) },
+        },
+        Decision::AdvanceMainline { from: digest(8), to: digest(9) },
+        Decision::DispatchLand { bloom, expected_base: digest(8), new_head: digest(10) },
+        Decision::EmitReceipt(ProjectedReceipt {
+            receipt: LandingReceipt { bloom, previous_base: digest(8), new_head: digest(10) },
+            members: vec![workpiece.clone()],
+        }),
+        Decision::RecordObservation { head: digest(10) },
+        Decision::RecordAggregateRoll { bloom, rolls: 1 },
+        Decision::RecordAggregateVerifyRoll { bloom, rolls: 2 },
+        Decision::RecordLandingRoll { bloom, rolls: 3 },
+        Decision::RecordWedge {
+            bloom,
+            workpiece: workpiece.clone(),
+            wedge: Wedge {
+                stage: StageId::Verify,
+                evidence: digest(11),
+                repeated_verifiers: [VerifyFailure::Fmt, VerifyFailure::Dup].into_iter().collect(),
+            },
+        },
+        Decision::MarkSuperseded { bloom, by: successor },
+    ]
+}
+
+fn execution_records(bloom: BloomId, successor: BloomId, workpiece: &WorkpieceId) -> Vec<Decision> {
+    vec![
+        dispatch_attempt(bloom, workpiece.clone()),
+        Decision::RedispatchStage {
+            bloom,
+            question: digest(26),
+            answer: digest(27),
+            words: vec![0xde, 0xad, 0xbe, 0xef],
+        },
+        Decision::ReleaseHold { bloom, question: digest(26) },
+        Decision::DispatchIntegration {
+            bloom,
+            base: digest(28),
+            members: vec![MemberCandidate { workpiece: workpiece.clone(), candidate: digest(29) }],
+            adopt_from: Some(successor),
+        },
+        Decision::RecordIntegration {
+            bloom,
+            integration: Some(FoldedIntegration { tree: digest(30), head: digest(31), lineage: vec![digest(32)] }),
+        },
+        dispatch_aggregate_review(bloom),
+        Decision::RecordReviewPark { bloom, question: Some(digest(33)) },
+        dispatch_aggregate_verify(bloom),
+        set_resolved(bloom, workpiece.clone()),
+        Decision::SetUnresolved { bloom },
+        Decision::RecordVerifyProof { bloom, proof: verify_proof() },
+        Decision::RecordVerifyReuse {
+            bloom,
+            reuse: VerifyReuse { stage: StageId::AggregateVerify, proof: verify_proof() },
+        },
+        Decision::RecordOrphanClaimRelease {
+            request: digest(25),
+            target: orphan_claim_release(workpiece.clone(), bloom),
+            completion: Some(OrphanClaimReleaseCompletion::Changed { observed_holder: successor }),
+        },
+        Decision::DispatchOrphanClaimRelease {
+            request: digest(34),
+            target: orphan_claim_release(workpiece.clone(), successor),
+        },
+        record_composition_finding(bloom, workpiece.clone()),
+        record_adjudication(bloom),
+        record_operator_repair(bloom, workpiece.clone()),
+    ]
+}
+
 /// Representative [`Decisions`] value whose wire bytes the golden fixture pins.
 ///
 /// This is the one vocabulary the fixture command and the golden guards share.
@@ -495,100 +984,27 @@ pub fn representative() -> Decisions {
     let bloom = BloomId(digest(1));
     let successor = BloomId(digest(9));
     let workpiece = WorkpieceId("alpha".into());
-    Decisions {
-        outcome: Outcome::Sealed(bloom),
-        effects: vec![
-            Decision::ClaimMembership { workpiece: workpiece.clone(), bloom },
-            Decision::ReleaseMembership { workpiece: workpiece.clone(), bloom },
-            Decision::InheritClaim { bloom: successor, claim: resolution_claim(workpiece.clone()) },
-            Decision::RecordResolution { bloom, claim: resolution_claim(workpiece.clone()) },
-            Decision::RevokeResolution { bloom, workpiece: workpiece.clone() },
-            advance_stage(bloom, workpiece.clone()),
-            Decision::RecordStageCatalog { bloom, catalog: stage_catalog() },
-            Decision::RecordEvidence {
-                bloom,
-                evidence: Evidence { subject: digest(6), kind: EvidenceKind::VerificationResult, detail: digest(7) },
-            },
-            Decision::AdvanceMainline { from: digest(8), to: digest(9) },
-            Decision::DispatchLand { bloom, expected_base: digest(8), new_head: digest(10) },
-            Decision::EmitReceipt(ProjectedReceipt {
-                receipt: LandingReceipt { bloom, previous_base: digest(8), new_head: digest(10) },
-                members: vec![workpiece.clone()],
-            }),
-            Decision::RecordObservation { head: digest(10) },
-            Decision::RecordAggregateRoll { bloom, rolls: 1 },
-            Decision::RecordAggregateVerifyRoll { bloom, rolls: 2 },
-            Decision::RecordLandingRoll { bloom, rolls: 3 },
-            Decision::RecordWedge {
-                bloom,
-                workpiece: workpiece.clone(),
-                wedge: Wedge {
-                    stage: StageId::Verify,
-                    evidence: digest(11),
-                    repeated_verifiers: [VerifyFailure::Fmt, VerifyFailure::Dup].into_iter().collect(),
-                },
-            },
-            Decision::MarkSuperseded { bloom, by: successor },
-            dispatch_attempt(bloom, workpiece.clone()),
-            Decision::RedispatchStage {
-                bloom,
-                question: digest(26),
-                answer: digest(27),
-                words: vec![0xde, 0xad, 0xbe, 0xef],
-            },
-            Decision::ReleaseHold { bloom, question: digest(26) },
-            Decision::DispatchIntegration {
-                bloom,
-                base: digest(28),
-                members: vec![MemberCandidate { workpiece: workpiece.clone(), candidate: digest(29) }],
-                adopt_from: Some(successor),
-            },
-            Decision::RecordIntegration {
-                bloom,
-                integration: Some(FoldedIntegration { tree: digest(30), head: digest(31), lineage: vec![digest(32)] }),
-            },
-            dispatch_aggregate_review(bloom),
-            Decision::RecordReviewPark { bloom, question: Some(digest(33)) },
-            dispatch_aggregate_verify(bloom),
-            set_resolved(bloom, workpiece.clone()),
-            Decision::SetUnresolved { bloom },
-            Decision::RecordVerifyProof { bloom, proof: verify_proof() },
-            Decision::RecordVerifyReuse {
-                bloom,
-                reuse: VerifyReuse { stage: StageId::AggregateVerify, proof: verify_proof() },
-            },
-            Decision::RecordOrphanClaimRelease {
-                request: digest(25),
-                target: orphan_claim_release(workpiece.clone(), bloom),
-                completion: Some(OrphanClaimReleaseCompletion::Changed { observed_holder: successor }),
-            },
-            Decision::DispatchOrphanClaimRelease {
-                request: digest(34),
-                target: orphan_claim_release(workpiece.clone(), successor),
-            },
-            record_composition_finding(bloom, workpiece.clone()),
-            record_adjudication(bloom),
-            record_operator_repair(bloom, workpiece.clone()),
-        ]
-        .into_iter()
-        .chain(brake_records(bloom, workpiece.clone()))
-        .chain(spend_quiesce_records(bloom))
-        .chain([record_member_dependencies(bloom, workpiece.clone())])
-        .chain(host_fault_records(bloom, workpiece.clone()))
-        .chain([record_candidate_vehicle(bloom, workpiece.clone())])
-        .chain(brake_aggregates(bloom))
-        .chain([dispatch_splice(bloom, workpiece.clone(), successor)])
-        .chain([record_member_machinery(bloom, workpiece.clone())])
-        .chain(withdrawal_records(bloom, workpiece.clone()))
-        .chain(gate_passes(bloom))
-        .chain(refusal_records(bloom, workpiece))
-        .chain(base_verify_records())
-        .chain(proposal_records())
-        .chain([dispatch_study(bloom)])
-        .chain([Decision::RecordPipelineManifest { bloom, manifest: pipeline_manifest() }])
-        .chain(precheck_records(bloom))
-        .collect(),
-    }
+    let mut effects = bloom_lifecycle_records(bloom, successor, &workpiece);
+    effects.extend(execution_records(bloom, successor, &workpiece));
+    effects.extend(brake_records(bloom, workpiece.clone()));
+    effects.extend(spend_quiesce_records(bloom));
+    effects.push(record_member_dependencies(bloom, workpiece.clone()));
+    effects.extend(host_fault_records(bloom, workpiece.clone()));
+    effects.push(record_candidate_vehicle(bloom, workpiece.clone()));
+    effects.extend(brake_aggregates(bloom));
+    effects.push(dispatch_splice(bloom, workpiece.clone(), successor));
+    effects.push(record_member_machinery(bloom, workpiece.clone()));
+    effects.extend(withdrawal_records(bloom, workpiece.clone()));
+    effects.extend(gate_passes(bloom));
+    effects.extend(refusal_records(bloom, workpiece));
+    effects.extend(base_verify_records());
+    effects.extend(proposal_records());
+    effects.push(dispatch_study(bloom));
+    effects.push(Decision::RecordPipelineManifest { bloom, manifest: pipeline_manifest() });
+    effects.extend(precheck_records(bloom));
+    effects.extend(coordination_records(bloom));
+
+    Decisions { outcome: Outcome::Sealed(bloom), effects }
 }
 
 fn overlap_members() -> Vec<WorkpieceId> {

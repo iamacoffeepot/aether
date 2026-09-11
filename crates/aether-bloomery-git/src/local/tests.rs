@@ -1,6 +1,7 @@
 //! `LocalGitData` against temporary bare repositories.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::process::Command;
 use std::slice::from_ref;
@@ -71,6 +72,15 @@ fn commit_tree(local: &LocalGitData, message: &str, payload: &str) -> (String, S
     let tree = git(local, &["mktree"], &format!("100644 blob {blob}\t{payload}.txt\n"));
     let commit = local.create_commit(message, &tree, &[]).expect("commit-tree");
     (commit.sha, tree)
+}
+
+fn flat_tree(local: &LocalGitData, files: &[(&str, &str)]) -> String {
+    let entries = files.iter().fold(String::new(), |mut entries, (path, contents)| {
+        let blob = git(local, &["hash-object", "-w", "--stdin"], contents);
+        writeln!(entries, "100644 blob {blob}\t{path}").expect("writing a tree entry to a String cannot fail");
+        entries
+    });
+    git(local, &["mktree"], &entries)
 }
 
 fn git(local: &LocalGitData, args: &[&str], stdin: &str) -> String {
@@ -337,6 +347,48 @@ fn merge_writes_a_tree_and_reports_conflict_from_exit_status() {
         }
         other => panic!("expected Merged, got {other:?}"),
     }
+}
+
+#[test]
+fn changed_paths_cover_a_multi_commit_prepared_merge_range() {
+    let (_root, local) = open_temp();
+    let root_tree = flat_tree(&local, &[("base.txt", "base")]);
+    let root = local.create_commit("root", &root_tree, &[]).expect("root commit");
+    let base_tree = flat_tree(&local, &[("base.txt", "base"), ("head.txt", "head")]);
+    let base = local.create_commit("eager head", &base_tree, from_ref(&root.sha)).expect("head commit");
+    let authored_tree = flat_tree(&local, &[("authored.txt", "authored"), ("base.txt", "base")]);
+    let authored = local.create_commit("authored", &authored_tree, from_ref(&root.sha)).expect("authored commit");
+    let repaired_tree =
+        flat_tree(&local, &[("authored.txt", "authored"), ("base.txt", "base"), ("repaired.txt", "repaired")]);
+    let repaired = local
+        .create_commit("repaired authored", &repaired_tree, from_ref(&authored.sha))
+        .expect("multi-commit authored history");
+    let prepared_tree = flat_tree(
+        &local,
+        &[("authored.txt", "authored"), ("base.txt", "base"), ("head.txt", "head"), ("repaired.txt", "repaired")],
+    );
+    let prepared = local
+        .create_commit("prepared reconcile", &prepared_tree, &[base.sha.clone(), repaired.sha])
+        .expect("prepared merge commit");
+
+    assert_eq!(
+        local.changed_paths(&base.sha, &prepared.sha).expect("exact ancestor range"),
+        ["authored.txt", "repaired.txt"],
+    );
+}
+
+#[test]
+fn changed_paths_include_both_names_of_renames_and_copies() {
+    let (_root, local) = open_temp();
+    let base_tree = flat_tree(&local, &[("source.txt", "same contents")]);
+    let base = local.create_commit("base", &base_tree, &[]).expect("base commit");
+    let moved_tree = flat_tree(&local, &[("copied.txt", "same contents"), ("renamed.txt", "same contents")]);
+    let moved = local.create_commit("move and copy", &moved_tree, from_ref(&base.sha)).expect("changed commit");
+
+    assert_eq!(
+        local.changed_paths(&base.sha, &moved.sha).expect("exact renamed range"),
+        ["copied.txt", "renamed.txt", "source.txt"],
+    );
 }
 
 #[test]

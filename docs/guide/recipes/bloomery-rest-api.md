@@ -426,6 +426,60 @@ curl -fsS --connect-timeout 2 --max-time 10 "$COORDINATOR/view" | jq .
 curl -fsS --connect-timeout 2 --max-time 10 "$COORDINATOR/blooms/$bloom_id" | jq .
 ```
 
+### Optional: shared verification and eager integration
+
+A future draft can seal `aether.bloomery.coordination_policy` to enable the
+shared execution and eager-head pipeline described by
+[ADR-0218](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0218-contextual-verification-and-eager-integration.md).
+Absence preserves the existing behavior. Author the configuration through
+`POST /configs` and add its returned digest to the draft's `configs.entries`
+before seal, preserving every other registry entry.
+
+```json
+{
+  "kind": "aether.bloomery.coordination_policy",
+  "value": {
+    "verification": "Contextual",
+    "host_class": "fleet",
+    "eager_integration": true,
+    "max_run_members": 32,
+    "max_serial_requests": 8,
+    "max_attribution_probes": 64,
+    "movement_budget": 3,
+    "reservation_millis": 300000
+  }
+}
+```
+
+These values are an example of explicit resource bounds, not measured fleet
+optima. `verification` also accepts `Standalone` and `WarmSerial`.
+The executor's `AETHER_BLOOMERY_HOST_CLASS` must independently name the same
+class as `host_class`. An empty runtime class keeps legacy execution available
+but refuses shared work; the enabled policy has no implicit class.
+`WarmSerial` checks each member's own tree in one retained warm slot;
+`Contextual` checks an immutable composed tree and retains contextual member
+proofs. Ready work coalesces at dispatch without an arrival wait. Group size
+has no fixed two-member ceiling. Running inputs stay immutable.
+
+`/view` exposes `coordination`, including the selected head and coverage,
+member starting contexts, logical requests, shared runs, outcomes, and head
+reservation. The board keeps folded members visible until the atomic bloom
+finishes and shows each reconciliation target. Physical cost belongs once to
+the bloom; member latency and the shared-run reference describe each member's
+participation. A grouped pass never becomes a standalone proof for a parent.
+
+Late constructors inherit a pinned eligible head, with its included versions
+recorded separately from the sealed base. A known-red head blocks new
+inheritance. Reconcile verifies its candidate after preparation onto its
+recorded target head. Eager folding advances a partial head; it does not land
+members early or remove unresolved members from the final Resolve obligation.
+
+This policy and `PrecheckPolicy` are independent opt-ins. Use the latter for
+coalesced aggregate feedback when a prover is idle. Existing sealed blooms
+cannot be retrofitted by changing the configuration registry. Deployment and
+throughput trials follow completion of the implementation and an operator
+decision; creating this configuration does not modify a running service.
+
 ### Optional: aggregate pre-checks
 
 An updated coordinator can use idle local prover capacity to check a composed

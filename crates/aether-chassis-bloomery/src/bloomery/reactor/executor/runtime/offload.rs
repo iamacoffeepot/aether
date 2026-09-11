@@ -59,10 +59,14 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use aether_bloomery::{BackendId, BloomId, Nonce, ObservedLaneWrites, WorkHandle, WorkOrder, WorkpieceId};
+use aether_bloomery::{
+    BackendId, BloomId, CandidateRef, Digest, Nonce, ObservedConstructionCheckpoint, ObservedLaneWrites,
+    SourceSnapshot, WorkHandle, WorkOrder, WorkpieceId,
+};
 use aether_substrate::actor::native::{DEFAULT_MAX_IN_FLIGHT, NativeCtx};
 
 use super::CandidatePush;
+use crate::bloomery::SourceShell;
 use crate::bloomery::executor::{ExecutorPort, ExecutorPortError, ExecutorShell, RunObservation, Settled};
 
 /// How many blocking adapter calls this reactor may have in flight at once.
@@ -92,11 +96,21 @@ pub enum AdapterCall {
     Observe(Nonce),
     /// `ExecutorPort::cancel` for a nonce — the reactor's cancellation intent.
     Cancel(Nonce),
+    /// Release one retained physical lane.
+    ReleasePhysicalRun(Digest),
+    RetainPartialHeadRepair(Digest),
     /// `ExecutorPort::observe_writes`, which takes no argument and so is one
     /// call at a time for the whole reactor.
     ObserveWrites,
+    /// `ExecutorPort::observe_construction_checkpoints`, one whole-reactor read.
+    ObserveConstructionCheckpoints,
+    /// `SourceShell::snapshot` for an immutable sealed base checkout.
+    SnapshotBase(Digest),
     /// `CandidatePush::push` of one capture onto one ref (ADR-0152).
-    Publish { commit_hex: String, target_ref: String },
+    Publish {
+        commit_hex: String,
+        target_ref: String,
+    },
 }
 
 /// A call plus everything the worker needs that the key does not carry — the
@@ -115,7 +129,15 @@ enum AdapterWork {
     },
     Observe(WorkHandle),
     Cancel(WorkHandle),
+    ReleasePhysicalRun(Digest),
+    RetainPartialHeadRepair {
+        plan: Digest,
+        candidate: CandidateRef,
+        allowed_paths: Vec<String>,
+    },
     ObserveWrites,
+    ObserveConstructionCheckpoints,
+    SnapshotBase(Digest),
     Publish {
         commit_hex: String,
         target_ref: String,
@@ -129,7 +151,14 @@ impl AdapterWork {
             Self::SubmitIdle { order, .. } => AdapterCall::SubmitIdle(order.nonce.clone()),
             Self::Observe(handle) => AdapterCall::Observe(handle.nonce.clone()),
             Self::Cancel(handle) => AdapterCall::Cancel(handle.nonce.clone()),
+            Self::ReleasePhysicalRun(run) => AdapterCall::ReleasePhysicalRun(*run),
+            Self::RetainPartialHeadRepair { plan, candidate, allowed_paths } => {
+                let _ = (candidate, allowed_paths);
+                AdapterCall::RetainPartialHeadRepair(*plan)
+            }
             Self::ObserveWrites => AdapterCall::ObserveWrites,
+            Self::ObserveConstructionCheckpoints => AdapterCall::ObserveConstructionCheckpoints,
+            Self::SnapshotBase(base) => AdapterCall::SnapshotBase(*base),
             Self::Publish { commit_hex, target_ref } => {
                 AdapterCall::Publish { commit_hex: commit_hex.clone(), target_ref: target_ref.clone() }
             }
@@ -139,7 +168,7 @@ impl AdapterWork {
     /// Run the call. The whole blocking surface of this reactor is these arms,
     /// and they only ever execute on a worker thread. Submit uses the shell's
     /// inherent synchronous method — the identity arm of the port.
-    fn run(self, shell: &ExecutorShell, pusher: &dyn CandidatePush) -> AdapterAnswer {
+    fn run(self, shell: &ExecutorShell, source: Option<&SourceShell>, pusher: &dyn CandidatePush) -> AdapterAnswer {
         match self {
             Self::Submit(order) => AdapterAnswer::Submit(shell.submit(&order)),
             Self::SubmitIdle { order, allow_new } => AdapterAnswer::SubmitIdle(if allow_new {
@@ -149,7 +178,19 @@ impl AdapterWork {
             }),
             Self::Observe(handle) => AdapterAnswer::Observe(shell.observe_run(&handle)),
             Self::Cancel(handle) => AdapterAnswer::Cancel(shell.cancel(&handle)),
+            Self::ReleasePhysicalRun(run) => AdapterAnswer::ReleasePhysicalRun(shell.release_physical_run(&run)),
+            Self::RetainPartialHeadRepair { plan, candidate, allowed_paths } => AdapterAnswer::RetainPartialHeadRepair(
+                shell.retain_partial_head_repair(&plan, &candidate, &allowed_paths),
+            ),
             Self::ObserveWrites => AdapterAnswer::ObserveWrites(shell.observe_writes()),
+            Self::ObserveConstructionCheckpoints => {
+                AdapterAnswer::ObserveConstructionCheckpoints(shell.observe_construction_checkpoints())
+            }
+            Self::SnapshotBase(base) => AdapterAnswer::SnapshotBase(
+                source
+                    .ok_or_else(|| "source is not configured for base verification".to_owned())
+                    .and_then(|source| source.snapshot(&base).map_err(|error| error.to_string())),
+            ),
             Self::Publish { commit_hex, target_ref } => AdapterAnswer::Publish(pusher.push(&commit_hex, &target_ref)),
         }
     }
@@ -163,7 +204,11 @@ enum AdapterAnswer {
     SubmitIdle(Result<Option<WorkHandle>, ExecutorPortError>),
     Observe(Result<RunObservation, ExecutorPortError>),
     Cancel(Result<(), ExecutorPortError>),
+    ReleasePhysicalRun(Result<(), ExecutorPortError>),
+    RetainPartialHeadRepair(Result<(), ExecutorPortError>),
     ObserveWrites(Vec<ObservedLaneWrites>),
+    ObserveConstructionCheckpoints(Vec<ObservedConstructionCheckpoint>),
+    SnapshotBase(Result<SourceSnapshot, String>),
     Publish(Result<(), String>),
 }
 
@@ -296,7 +341,13 @@ impl AdapterOffload {
     /// Hand this round's backlog to workers, up to [`MAX_IN_FLIGHT`] at once.
     /// What does not fit stays queued and starts as slots free, so a round
     /// wider than the ceiling still finishes inside its own round.
-    pub fn start_wanted(&mut self, ctx: &mut NativeCtx<'_>, shell: &ExecutorShell, pusher: &Arc<dyn CandidatePush>) {
+    pub fn start_wanted(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        shell: &ExecutorShell,
+        source: Option<&SourceShell>,
+        pusher: &Arc<dyn CandidatePush>,
+    ) {
         // Every ledger borrow here is bound to its own block: the guard is not
         // reentrant, and this loop takes it three times per pass.
         while self.in_flight() < MAX_IN_FLIGHT {
@@ -320,7 +371,7 @@ impl AdapterOffload {
             // Already out on a worker from an earlier round — the re-derived
             // want is redundant, not a second run.
             if claimed {
-                self.spawn(ctx, shell, pusher, call, work);
+                self.spawn(ctx, shell, source, pusher, call, work);
             }
         }
     }
@@ -329,12 +380,14 @@ impl AdapterOffload {
         &self,
         ctx: &mut NativeCtx<'_>,
         shell: &ExecutorShell,
+        source: Option<&SourceShell>,
         pusher: &Arc<dyn CandidatePush>,
         call: AdapterCall,
         work: AdapterWork,
     ) {
         let ledger = Arc::clone(&self.ledger);
         let shell = shell.clone();
+        let source = source.cloned();
         let pusher = Arc::clone(pusher);
         let key = call.clone();
         ctx.dispatch_blocking_with(call, move || {
@@ -344,7 +397,7 @@ impl AdapterOffload {
             // ceiling therefore cannot be leaked by a worker that dies, and a
             // turn can never see a call that is neither in flight nor answered.
             let _slot = Slot { ledger: Arc::clone(&ledger), call: key.clone() };
-            let answer = work.run(&shell, pusher.as_ref());
+            let answer = work.run(&shell, source.as_ref(), pusher.as_ref());
             if let Ok(mut ledger) = ledger.lock() {
                 ledger.answers.insert(key, answer);
             }
@@ -389,6 +442,17 @@ impl AdapterOffload {
 pub struct OffloadedPort<'a> {
     offload: &'a AdapterOffload,
     shell: &'a ExecutorShell,
+}
+
+impl OffloadedPort<'_> {
+    /// Resolve the exact immutable tree beneath a sealed base checkout without
+    /// blocking the reactor turn.
+    pub fn snapshot_base(&self, base: &Digest) -> Settled<Result<SourceSnapshot, String>> {
+        match self.offload.take_or_want(AdapterWork::SnapshotBase(*base)) {
+            Some(AdapterAnswer::SnapshotBase(answer)) => Settled::Answered(answer),
+            _ => Settled::InFlight,
+        }
+    }
 }
 
 impl ExecutorPort for OffloadedPort<'_> {
@@ -495,9 +559,39 @@ impl ExecutorPort for OffloadedPort<'_> {
         }
     }
 
+    fn release_physical_run(&self, physical_run: &Digest) -> Settled<Result<(), ExecutorPortError>> {
+        match self.offload.take_or_want(AdapterWork::ReleasePhysicalRun(*physical_run)) {
+            Some(AdapterAnswer::ReleasePhysicalRun(answer)) => Settled::Answered(answer),
+            _ => Settled::InFlight,
+        }
+    }
+
+    fn retain_partial_head_repair(
+        &self,
+        plan: &Digest,
+        candidate: &CandidateRef,
+        allowed_paths: &[String],
+    ) -> Settled<Result<(), ExecutorPortError>> {
+        match self.offload.take_or_want(AdapterWork::RetainPartialHeadRepair {
+            plan: *plan,
+            candidate: *candidate,
+            allowed_paths: allowed_paths.to_vec(),
+        }) {
+            Some(AdapterAnswer::RetainPartialHeadRepair(answer)) => Settled::Answered(answer),
+            _ => Settled::InFlight,
+        }
+    }
+
     fn observe_writes(&self) -> Settled<Vec<ObservedLaneWrites>> {
         match self.offload.take_or_want(AdapterWork::ObserveWrites) {
             Some(AdapterAnswer::ObserveWrites(observed)) => Settled::Answered(observed),
+            _ => Settled::InFlight,
+        }
+    }
+
+    fn observe_construction_checkpoints(&self) -> Settled<Vec<ObservedConstructionCheckpoint>> {
+        match self.offload.take_or_want(AdapterWork::ObserveConstructionCheckpoints) {
+            Some(AdapterAnswer::ObserveConstructionCheckpoints(observed)) => Settled::Answered(observed),
             _ => Settled::InFlight,
         }
     }
@@ -528,7 +622,20 @@ mod tests {
             nonce: Nonce(nonce.to_owned()),
             instruction_bundle: None,
             prompt_manifest: None,
+            physical_run: None,
+            release_physical_run: true,
         }
+    }
+
+    #[test]
+    fn base_snapshot_is_queued_for_a_blocking_worker() {
+        let offload = AdapterOffload::new();
+        let shell = shell();
+        let base = digest(9);
+
+        assert!(matches!(offload.port(&shell).snapshot_base(&base), Settled::InFlight));
+        assert!(matches!(offload.lock().wanted.front(), Some(AdapterWork::SnapshotBase(held)) if *held == base));
+        assert!(offload.lock().answers.is_empty(), "the reactor turn does not execute source I/O inline");
     }
 
     #[test]

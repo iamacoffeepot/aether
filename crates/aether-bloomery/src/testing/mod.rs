@@ -288,6 +288,7 @@ impl Default for BloomView {
             leases: Vec::new(),
             narrowed_compositions: Vec::new(),
             precheck: None,
+            coordination: None,
         }
     }
 }

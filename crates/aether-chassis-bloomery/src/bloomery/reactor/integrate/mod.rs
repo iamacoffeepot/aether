@@ -33,7 +33,15 @@ impl IntegrateReactorCapability {
     /// pairing the topic tripwire checks against [`Topic::ALL`]. The integrate
     /// reactor is the sole drainer of [`Topic::Integrate`], [`Topic::Splice`]
     /// and immutable preview preparation through [`Topic::QueuePrecheckPlan`].
-    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::Integrate, Topic::Splice, Topic::QueuePrecheckPlan];
+    pub const DRAINED_TOPICS: &'static [Topic] = &[
+        Topic::Integrate,
+        Topic::Splice,
+        Topic::QueuePrecheckPlan,
+        Topic::IntegrationAppend,
+        Topic::CandidatePreparation,
+        Topic::CompatibilityPreview,
+        Topic::SharedRunPreparation,
+    ];
 }
 
 mod runtime;

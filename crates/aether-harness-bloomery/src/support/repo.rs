@@ -170,6 +170,24 @@ impl Repo {
         RepoBuilder::default().identity("test", "test@example.test").example_tree().bare_clone().create()
     }
 
+    /// [`with_example_project`](Self::with_example_project) with Rust sources
+    /// already normalized to the workspace formatter's output. Shared-run
+    /// containment scenarios use this so the executor's capture-time format
+    /// pass does not turn untouched sibling crates into candidate changes.
+    #[must_use]
+    pub fn with_formatted_example_project() -> Self {
+        let mut builder = RepoBuilder::default().identity("test", "test@example.test").example_tree();
+        for (path, contents) in &mut builder.seed_files {
+            *contents = match path.as_str() {
+                "crates/example-a/src/lib.rs" => "pub fn a() -> u8 {\n    1\n}\n".into(),
+                "crates/example-b/src/lib.rs" => "pub fn b() -> u8 {\n    1\n}\n".into(),
+                "crates/example-shared/src/lib.rs" => "pub fn shared() -> u8 {\n    1\n}\n".into(),
+                _ => continue,
+            };
+        }
+        builder.bare_clone().create()
+    }
+
     /// Start from a custom seed rather than either named shape.
     #[must_use]
     pub fn builder() -> RepoBuilder {

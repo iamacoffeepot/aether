@@ -12,11 +12,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use aether_actor::Addressable;
 use aether_bloomery::{
     AgentSelection, BackendObjectId, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CalibrationDocument,
-    CandidateRef, ConfigKind, ConfigRegistry, Correspondence, Digest, Evidence, EvidenceKind, Fact, FakeKeyProvider,
-    Harness, KeyId, MemberDependency, Membership, ModelOverride, ModelProcessInstructions, Observation, Outcome,
-    PipelineManifest, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Snapshot, StageCatalog, StageId,
-    Statement, StoreClass, VerifyFailureSet, ViewDocument, WorkpieceId, config_address, decode_recorded_event,
-    signed_approval,
+    CandidateRef, ConfigKind, ConfigRegistry, CoordinationPolicy, Correspondence, Digest, Evidence, EvidenceKind, Fact,
+    FakeKeyProvider, Harness, KeyId, MemberDependency, Membership, ModelOverride, ModelProcessInstructions,
+    Observation, Outcome, PipelineManifest, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Snapshot,
+    StageCatalog, StageId, Statement, StoreClass, VerifyFailureSet, ViewDocument, WorkpieceId, config_address,
+    decode_recorded_event, signed_approval,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
@@ -24,12 +24,13 @@ use aether_bloomery_github::{
 };
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, GetResult};
 use aether_chassis_bloomery::benchmark::{BenchmarkRunnerCapability, BenchmarkTick};
-use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, read_ledger};
+use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, read_ledger, release_marker, released_marker};
 use aether_chassis_bloomery::bloomery::{
     BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, DoctorReactorCapability, DoctorReport,
     DoctorTick, ExecutorReactorCapability, GithubConnectionConfig, IntegrateReactorCapability, IntegrateTick,
     JanitorReactorCapability, JanitorTick, LandReactorCapability, LandTick, NotifyConfig, ProposeReactorCapability,
-    ProposeTick, ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload, pin_instructions, reference_instructions,
+    ProposeTick, ScriptedEvidence, ScriptedEvidenceResult, ScriptedMemberVerificationGate, ScriptedUpload,
+    pin_instructions, reference_instructions,
 };
 use aether_chassis_bloomery::commission::task_text;
 use aether_chassis_bloomery::control::ObserveTick;
@@ -152,6 +153,9 @@ impl ScenarioHarness {
         if let Some(secs) = builder.wall_clock_secs {
             configs.overlay(author_catalog(&store_path, secs));
         }
+        if let Some(policy) = &builder.coordination_policy {
+            configs.overlay(author_coordination_policy(&store_path, policy));
+        }
 
         let (chassis, coordinator, wire, fake) = match builder.coordinator {
             CoordinatorKind::InProcess => {
@@ -184,6 +188,7 @@ impl ScenarioHarness {
                         heartbeat_silence_secs: builder.heartbeat_silence_secs,
                         authorized_instructions: &authorized,
                         retrospect_reader_enabled: builder.reader == Reader::On,
+                        host_class: builder.host_class(),
                     },
                 );
                 (None, Some(child), Wire::from_stream(stream), None)
@@ -696,8 +701,24 @@ impl ScenarioHarness {
 
     /// Pass a queued `verify.base` so a scenario that is not about base
     /// admission sees construct orders the way it did before the gate.
+    ///
+    /// The base gate is dispatched to a real lane child, whose evidence the
+    /// executor admits off its own adapter-settlement wake rather than only on
+    /// the ticks this loop issues. The order read here can therefore be spent
+    /// by that real admission before the scripted verdict lands — an
+    /// `UnknownNonce` refusal means the gate was answered for real, which is
+    /// the outcome this helper wanted, so it returns rather than failing the
+    /// scenario on a verdict it no longer needed to script.
+    ///
+    /// # Panics
+    /// The scripted verdict was refused for any reason other than the order
+    /// having already been answered.
     fn pass_outstanding_base_verify(&mut self) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // The order arrives behind an offloaded base-snapshot round trip, so a
+        // fixed few-second wait gives up on a loaded runner before it appears
+        // and the bloom then dispatches nothing; the step budget is the wait
+        // every other harness poll already tolerates.
+        let deadline = Instant::now() + self.step_budget;
         loop {
             self.dispatch_tick();
             let orders = self.orders();
@@ -705,7 +726,11 @@ impl ScenarioHarness {
                 .iter()
                 .find(|order| from_bytes::<StageId>(&order.stage).is_ok_and(|stage| stage == StageId::BaseVerify))
             {
-                self.upload_admitted(&passed(order));
+                match self.upload(&passed(order)) {
+                    ScriptedEvidenceResult::Admitted { .. } => {}
+                    ScriptedEvidenceResult::Refused { refusal } if refusal.starts_with("UnknownNonce") => {}
+                    other => panic!("the scripted base verdict was not admitted: {other:?}"),
+                }
                 return;
             }
             if !orders.is_empty() {
@@ -778,6 +803,35 @@ impl ScenarioHarness {
                 self.ledger().len(),
             );
             thread::sleep(SETTLE_POLL);
+        }
+    }
+
+    /// Release explicitly parked mock lanes together and wait until every
+    /// child has crossed its real worktree/evidence boundary.
+    ///
+    /// This does not tick the coordinator. Capture and intake remain
+    /// asynchronous after a child exits; grouping scenarios hold verification
+    /// service until every intended member has reached the durable queue.
+    ///
+    /// # Panics
+    /// A release marker could not be written, or a child did not acknowledge
+    /// release inside the scenario budget.
+    pub fn release_parked_lanes(&self, orders: &[OutstandingOrder]) {
+        let runs = Path::new(&self.worktree_base);
+        for order in orders {
+            fs::write(release_marker(runs, &order.nonce), []).expect("the parked lane release marker writes");
+        }
+
+        let deadline = Instant::now() + self.step_budget;
+        while orders.iter().any(|order| !released_marker(runs, &order.nonce).is_file()) {
+            assert!(Instant::now() < deadline, "the parked lanes did not all acknowledge release");
+            thread::sleep(POLL);
+        }
+        thread::sleep(POLL);
+
+        for order in orders {
+            fs::remove_file(release_marker(runs, &order.nonce)).expect("the parked lane release marker removes");
+            fs::remove_file(released_marker(runs, &order.nonce)).expect("the parked lane acknowledgement removes");
         }
     }
 
@@ -1024,6 +1078,7 @@ fn in_process_env(
         } else {
             defaults.operator_email
         },
+        host_class: builder.host_class().to_owned(),
         authority_backend: if builder.authority_path.is_some() {
             "local".to_owned()
         } else {
@@ -1095,6 +1150,8 @@ pub struct ForkedLaneSettings<'a> {
     /// `AETHER_BLOOMERY_RETROSPECT_READER_ENABLED` — whether the child
     /// dispatches the bloom-level reader after a landing (ADR-0216 §4).
     pub retrospect_reader_enabled: bool,
+    /// `AETHER_BLOOMERY_HOST_CLASS`, matching the sealed coordination policy.
+    pub host_class: &'a str,
 }
 
 impl ForkedLaneSettings<'_> {
@@ -1115,6 +1172,7 @@ impl ForkedLaneSettings<'_> {
             (String::from("AETHER_BLOOMERY_OPERATOR_EMAIL"), String::from("lane-harness@example.test")),
             (String::from("AETHER_BLOOMERY_AUTHORIZED_INSTRUCTIONS"), self.authorized_instructions.to_owned()),
             (String::from("AETHER_BLOOMERY_RETROSPECT_READER_ENABLED"), self.retrospect_reader_enabled.to_string()),
+            (String::from("AETHER_BLOOMERY_HOST_CLASS"), self.host_class.to_owned()),
         ];
         if let Some(secs) = self.heartbeat_silence_secs {
             env.push((String::from("AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS"), secs.to_string()));
@@ -1192,6 +1250,19 @@ fn author_catalog(store_path: &str, wall_clock_secs: u64) -> ConfigRegistry {
 
     let mut configs = ConfigRegistry::default();
     configs.insert::<StageCatalog>(address);
+    configs
+}
+
+fn author_coordination_policy(store_path: &str, policy: &CoordinationPolicy) -> ConfigRegistry {
+    let bytes = to_vec(policy).expect("the coordination policy encodes");
+    let address = config_address(CoordinationPolicy::NAME, &bytes);
+    SqliteStore::open(store_path)
+        .expect("the coordinator's journal opens for writing")
+        .record_config(address.as_bytes(), CoordinationPolicy::NAME, &bytes)
+        .expect("the coordination policy records");
+
+    let mut configs = ConfigRegistry::default();
+    configs.insert::<CoordinationPolicy>(address);
     configs
 }
 
@@ -1558,6 +1629,21 @@ impl ScenarioHarness {
             .into_iter()
             .filter_map(|nonce| store.lookup_order(&nonce).expect("a listed nonce resolves to its order"))
             .collect()
+    }
+
+    /// Hold or release service availability for new member verification plans.
+    ///
+    /// Capture and intake continue through the real executor while the gate is
+    /// held. Scenarios can therefore queue a deterministic ready set without
+    /// relying on child exits or asynchronous Git captures finishing together.
+    /// Existing immutable plans continue to replay and complete.
+    ///
+    /// # Panics
+    /// The test-only executor handler did not acknowledge the requested gate.
+    pub fn hold_member_verification(&mut self, held: bool) {
+        let mailbox = <ExecutorReactorCapability as Addressable>::resolve(0, ());
+        let reply: ScriptedMemberVerificationGate = self.wire.call(mailbox, &ScriptedMemberVerificationGate { held });
+        assert_eq!(reply.held, held, "the verification service gate acknowledged its state");
     }
 
     /// Upload one scripted verdict against an order the coordinator dispatched.

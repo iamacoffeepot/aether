@@ -30,6 +30,14 @@ uses both existing paths and creates no second proof-receipt database.
 
 ## Decision
 
+[ADR-0218](0218-contextual-verification-and-eager-integration.md) extends
+this lifecycle to the selected eager integration head. Newest-pending
+coalescing, immutable running nodes, required-work priority, retained result
+admission, and exact final joins remain. Its optional coordination policy
+adds contextual member proofs and explicit inherited construction heads;
+those permissions do not follow from `PrecheckPolicy` alone. The original
+standalone-member behavior below remains valid without that opt-in policy.
+
 ### Sealed, optional scheduling
 
 `PrecheckPolicy { run_budget }` is a bloom-wide configuration. Absence disables

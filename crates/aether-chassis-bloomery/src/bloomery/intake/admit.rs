@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 use super::admission_key::AdmissionKey;
 use super::dispatch::{DispatchRecord, dispatch_nonce};
 use super::retrospect::file_retrospect_findings;
-use crate::bloomery::findings::{FindingsDecomposition, decompose_findings};
+use crate::bloomery::findings::{FindingsDecomposition, decompose_findings, verification_findings_key};
 use crate::bloomery::precheck::findings_key;
 use crate::bloomery::triage::{TriageVerdict, triage_note, triage_repair};
 use crate::store::{OutstandingOrder, StoreBackend};
@@ -1094,7 +1094,9 @@ fn persist_precheck_findings(
     if !verdict_passed(upload.verdict)
         && upload.verdict != StageVerdict::ExecutorFault
         && let Some(findings) = &upload.observation.findings
+        && !findings.trim().is_empty()
     {
+        store.record_review_findings(record.bloom.0.as_bytes(), &verification_findings_key(upload.detail), findings)?;
         store.record_review_findings(record.bloom.0.as_bytes(), &findings_key(record.scope_revision), findings)?;
     }
     Ok(())
