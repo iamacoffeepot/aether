@@ -72,6 +72,44 @@ impl MemberVerificationScheduler {
             .and_then(|state| state.admitted_construction.get(&dispatch.workpiece.0))
             .is_some_and(|admission| admission.nonce == nonce && admission.dispatch == *dispatch)
     }
+
+    /// Whether coordination still holds `dispatch`'s admission, answered from a
+    /// journal read no older than the caller's own.
+    ///
+    /// [`retains_construction_admission`](Self::retains_construction_admission)
+    /// answers from the projection this turn refreshed before the drain began,
+    /// which is one read behind the outbox row the caller has just seen
+    /// journaled: control commits the accepted admission's journal row and its
+    /// `RecordCoordinationState` together, so a commit landing inside that
+    /// window makes a live admission read as superseded. Acting on that answer
+    /// retires the member's only queued construct permanently — the coordination
+    /// state already names it admitted, so nothing re-queues it and the member
+    /// never dispatches (#5903). Re-reading the journal here is what makes a
+    /// `false` mean superseded rather than not-yet-seen.
+    ///
+    /// `None` is the projection still paging through a long journal: it cannot
+    /// answer on this turn and the caller must leave the work pending and re-ask.
+    pub(super) fn confirm_construction_admission(
+        &mut self,
+        store: &mut dyn StoreBackend,
+        dispatch: &aether_bloomery::ContextualAttemptDispatch,
+        nonce: Digest,
+    ) -> rusqlite::Result<Option<bool>> {
+        if self.retains_construction_admission(dispatch, nonce) {
+            return Ok(Some(true));
+        }
+        let caught_up = self.refresh(store)?;
+        if self.retains_construction_admission(dispatch, nonce) {
+            return Ok(Some(true));
+        }
+        Ok(caught_up.then_some(false))
+    }
+
+    /// Whether the projection carries `bloom` and still names `row`'s request
+    /// the current one to verify.
+    fn holds_current_request(&self, bloom: BloomId, row: &QueuedMemberVerificationRow) -> bool {
+        self.states.get(&bloom).is_some_and(|state| current_request(state, row).is_some())
+    }
 }
 
 fn proposal_capacity_order(plan: &SharedRunPlan) -> Option<WorkOrder> {
@@ -409,11 +447,7 @@ pub(super) fn drain_member_verifications(
         }
         let first_payload = from_bytes::<MemberVerificationPayload>(&first.payload)
             .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
-        let current = scheduler
-            .states
-            .get(&first_payload.request.bloom)
-            .is_some_and(|state| current_request(state, first).is_some());
-        if current {
+        if scheduler.holds_current_request(first_payload.request.bloom, first) {
             break first;
         }
         store.mark_queued_member_verifications_scheduled(from_ref(&first.request))?;
@@ -468,16 +502,17 @@ mod tests {
 
     use aether_bloomery::{
         AgentProfile, BackendId, CandidateRef, CompatibilityPreviewPlan, CompatibilityPreviewRecord,
-        CompositionContractTemplate, CompositionInput, ConfigRegistry, ConstructContext, ConstructionAdmissionPayload,
-        ConstructionCheckpoint, ContextualAttemptDispatch, ContextualDispatchPayload, ContextualInvocationTemplate,
-        CoordinationPolicy, Digest, ExecutionLimits, GenerationMember, Harness, MemberPin, MemberVerifyRequest,
-        NetworkProfile, ObservedLaneWrites, ReasoningEffort, StageId, ToolPolicy, Transformation, VerificationContract,
-        VerificationMode, VerificationObligation, WorkHandle, WorkOrder, WorkpieceId,
+        CompositionContractTemplate, CompositionInput, ConfigRegistry, ConstructContext, ConstructionAdmission,
+        ConstructionAdmissionPayload, ConstructionCheckpoint, ContextualAttemptDispatch, ContextualDispatchPayload,
+        ContextualInvocationTemplate, CoordinationPolicy, Digest, ExecutionLimits, GenerationMember, Harness,
+        MemberPin, MemberVerifyRequest, NetworkProfile, ObservedLaneWrites, ReasoningEffort, StageId, ToolPolicy,
+        Transformation, VerificationContract, VerificationMode, VerificationObligation, WorkHandle, WorkOrder,
+        WorkpieceId, construction_nonce_digest,
     };
 
     use super::*;
     use crate::bloomery::executor::{ExecutorPort, ExecutorPortError, RunObservation, Settled};
-    use crate::store::{RecordOutcome, SqliteStore};
+    use crate::store::{JournalWrite, RecordOutcome, SqliteStore};
 
     struct CapacityPort(Cell<bool>);
 
@@ -704,14 +739,14 @@ mod tests {
         let capacity = CapacityPort(Cell::new(false));
 
         assert!(
-            super::super::shared::drain_construction_admissions(&scheduler, &mut store, &capacity, 1_000)
+            super::super::shared::drain_construction_admissions(&mut scheduler, &mut store, &capacity, 1_000)
                 .expect("busy admission")
                 .is_empty()
         );
         assert!(store.construction_admission_nonce(dispatch.digest().as_bytes()).expect("lookup").is_none());
 
         capacity.0.set(true);
-        let admits = super::super::shared::drain_construction_admissions(&scheduler, &mut store, &capacity, 1_000)
+        let admits = super::super::shared::drain_construction_admissions(&mut scheduler, &mut store, &capacity, 1_000)
             .expect("released capacity");
         let event = from_bytes::<Event>(&admits[0].event).expect("admission event");
         let Fact::RequestConstructionAdmission { admission } = event.fact else {
@@ -746,7 +781,7 @@ mod tests {
                 starting_head: state.integration.head,
             },
         };
-        let scheduler = MemberVerificationScheduler::default();
+        let mut scheduler = MemberVerificationScheduler::default();
         let mut store = SqliteStore::open(":memory:").expect("store");
         store
             .record_construction_admission(dispatch.digest().as_bytes(), "admission-nonce", 1_000, 61_000)
@@ -761,7 +796,7 @@ mod tests {
         let capacity = CapacityPort(Cell::new(true));
 
         assert!(
-            super::super::shared::drain_contextual_dispatches(&scheduler, &mut store, None, &capacity, 2_000,)
+            super::super::shared::drain_contextual_dispatches(&mut scheduler, &mut store, None, &capacity, 2_000,)
                 .expect("stale dispatch")
                 .is_empty()
         );
@@ -769,6 +804,86 @@ mod tests {
             store.construction_admission(dispatch.digest().as_bytes()).expect("lookup").expect("admission tombstone");
         assert!(retained.retired);
         assert!(store.lookup_order("admission-nonce").expect("order lookup").is_none());
+    }
+
+    /// The other side of `stale_unsubmitted_contextual_dispatch_retires_without_launching`.
+    ///
+    /// The plausible bug: retention is read from the projection this turn
+    /// refreshed before the drain began, one journal read older than the store
+    /// rows the drain then sees. Control commits an accepted admission's journal
+    /// row and its `RecordCoordinationState` together, so a commit landing
+    /// inside that window makes a live admission read as superseded — and
+    /// retiring it strands the member for good, because the coordination state
+    /// already names it admitted and nothing re-queues it (#5903). The journal
+    /// here holds the admission while the scheduler has replayed nothing, which
+    /// is exactly the state that window produces.
+    #[test]
+    fn an_admission_journaled_after_the_projection_refreshed_is_not_retired() {
+        let (state, _) = fixture();
+        let request = state.requests[0].clone();
+        let dispatch = ContextualAttemptDispatch {
+            bloom: request.bloom,
+            workpiece: request.member.workpiece,
+            stage: StageId::Construct,
+            attempt: 0,
+            transformation: request.transformation,
+            scope_revision: request.member.scope_revision,
+            candidate: Some(request.member.candidate.tree),
+            profile: request.profile,
+            configs: request.configs,
+            context: ConstructContext {
+                bloom_base: state.integration.generation.base,
+                starting_head: state.integration.head.clone(),
+            },
+        };
+        let mut admitted = state;
+        admitted.admitted_construction.insert(
+            dispatch.workpiece.0.clone(),
+            ConstructionAdmission {
+                nonce: construction_nonce_digest(&Nonce("admission-nonce".to_owned())),
+                dispatch: dispatch.clone(),
+            },
+        );
+
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        store
+            .record_construction_admission(dispatch.digest().as_bytes(), "admission-nonce", 1_000, 61_000)
+            .expect("retain admission");
+        let decisions = to_vec(&aether_bloomery::Decisions {
+            outcome: aether_bloomery::Outcome::MainlineUnchanged(digest(9)),
+            effects: vec![Decision::RecordCoordinationState { bloom: dispatch.bloom, state: Some(Box::new(admitted)) }],
+        })
+        .expect("decisions");
+        store
+            .append_event(&JournalWrite {
+                idempotency_key: "aether.bloomery.request_construction_admission:test",
+                event: &to_vec(&Event {
+                    idempotency_key: IdempotencyKey("aether.bloomery.request_construction_admission:test".to_owned()),
+                    fact: Fact::ObserveMainline { head: digest(9) },
+                })
+                .expect("event"),
+                decisions: &decisions,
+                decider: "test",
+            })
+            .expect("the admission's coordination row is journaled");
+        store
+            .enqueue_topic(
+                Topic::ContextualDispatch,
+                &to_vec(&ContextualDispatchPayload { dispatch: dispatch.clone() }).expect("payload"),
+                None,
+            )
+            .expect("queue contextual dispatch");
+
+        // Unrefreshed on purpose: the projection is behind the journal row the
+        // drain is about to read, the way a mid-turn commit leaves it.
+        let mut scheduler = MemberVerificationScheduler::default();
+        let capacity = CapacityPort(Cell::new(true));
+        super::super::shared::drain_contextual_dispatches(&mut scheduler, &mut store, None, &capacity, 2_000)
+            .expect("live dispatch");
+
+        let retained =
+            store.construction_admission(dispatch.digest().as_bytes()).expect("lookup").expect("admission row");
+        assert!(!retained.retired, "an admission the journal still holds must survive the drain");
     }
 
     #[test]

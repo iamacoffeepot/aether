@@ -283,7 +283,7 @@ pub(super) fn drain_shared_dispatches(
 /// while retaining its exact starting head beside the nonce. The same payload
 /// re-drives a submit-intent after restart; the context row is immutable.
 pub(super) fn drain_contextual_dispatches(
-    scheduler: &MemberVerificationScheduler,
+    scheduler: &mut MemberVerificationScheduler,
     store: &mut dyn StoreBackend,
     artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
@@ -321,13 +321,24 @@ pub(super) fn drain_contextual_dispatches(
             continue;
         }
         if admitted_construct
-            && !scheduler.retains_construction_admission(&payload.dispatch, construction_nonce_digest(&nonce))
             && admission.as_ref().is_some_and(|admission| !admission.submitted)
             && existing_order.is_none()
         {
-            store.retire_construction_admission(payload.dispatch.digest().as_bytes())?;
-            ack_through = Some(entry.sequence);
-            continue;
+            match scheduler.confirm_construction_admission(
+                store,
+                &payload.dispatch,
+                construction_nonce_digest(&nonce),
+            )? {
+                Some(false) => {
+                    store.retire_construction_admission(payload.dispatch.digest().as_bytes())?;
+                    ack_through = Some(entry.sequence);
+                    continue;
+                }
+                // The projection cannot answer this turn, and the dispatch is
+                // durable: leave it pending rather than retire a live admission.
+                None => break,
+                Some(true) => {}
+            }
         }
         store.record_contextual_dispatch(
             &nonce.0,
@@ -383,7 +394,7 @@ pub(super) fn drain_contextual_dispatches(
 }
 
 pub(super) fn drain_construction_admissions(
-    scheduler: &MemberVerificationScheduler,
+    scheduler: &mut MemberVerificationScheduler,
     store: &mut dyn StoreBackend,
     executor: &dyn ExecutorPort,
     now_unix_millis: u64,
@@ -445,10 +456,20 @@ pub(super) fn drain_construction_admissions(
             admits.extend(pending);
         }
         OutboxResultDelivery::Journaled => {
-            if scheduler.retains_construction_admission(&payload.dispatch, construction_nonce_digest(&nonce)) {
-                store.mark_construction_admission_journaled(dispatch_digest.as_bytes())?;
-            } else {
-                store.retire_construction_admission(dispatch_digest.as_bytes())?;
+            match scheduler.confirm_construction_admission(
+                store,
+                &payload.dispatch,
+                construction_nonce_digest(&nonce),
+            )? {
+                Some(true) => {
+                    store.mark_construction_admission_journaled(dispatch_digest.as_bytes())?;
+                }
+                Some(false) => {
+                    store.retire_construction_admission(dispatch_digest.as_bytes())?;
+                }
+                // Unanswerable this turn. Leaving the row un-acked re-asks on
+                // the next one rather than retiring a live admission.
+                None => return Ok(admits),
             }
             store.ack_topic(Topic::ConstructionAdmission, entry.sequence)?;
         }
