@@ -354,3 +354,50 @@ fn tuple_struct_encodes_fields_positionally() {
     assert_eq!(back.0, 7);
     assert!(back.1);
 }
+
+// Two structs that are identical except for whether the nested payload is
+// boxed. `Schema for Box<T>` is a transparent wrapper-around delegation, so
+// both must lower to the same field schema, hash to the same `Kind::ID`, and
+// encode to the same wire bytes. Sharing one `#[kind(name)]` is deliberate:
+// the id is `fnv1a_64_prefixed(KIND_DOMAIN, canonical_kind_bytes(name, schema))`,
+// so with the name held equal the id compares the schemas alone.
+#[derive(Serialize, Deserialize, aether_data::Schema, PartialEq, Debug)]
+struct Payload {
+    label: String,
+    count: u32,
+}
+
+#[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema, PartialEq, Debug)]
+#[kind(name = "test.carrier")]
+struct CarrierInline {
+    payload: Payload,
+    tail: u32,
+}
+
+#[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema, PartialEq, Debug)]
+#[kind(name = "test.carrier")]
+struct CarrierBoxed {
+    payload: Box<Payload>,
+    tail: u32,
+}
+
+#[test]
+fn boxed_field_is_schema_and_wire_transparent() {
+    use aether_data::wire::{decode_from_slice, encode_to_vec};
+
+    // Tripwire: boxing a field must change nothing an observer can see. If
+    // `Schema for Box<T>` ever stops delegating — gaining a node of its own,
+    // or a label — the schemas diverge, the computed `Kind::ID` forks, and a
+    // journal that boxed a large variant payload silently rewrites its
+    // persisted identity. The three asserts pin the three layers the issue's
+    // contract names: schema, digest, bytes.
+    assert_eq!(<CarrierBoxed as Schema>::SCHEMA, <CarrierInline as Schema>::SCHEMA);
+    assert_eq!(<CarrierBoxed as Kind>::ID, <CarrierInline as Kind>::ID);
+
+    let inline = CarrierInline { payload: Payload { label: "p".into(), count: 3 }, tail: 9 };
+    let boxed = CarrierBoxed { payload: Box::new(Payload { label: "p".into(), count: 3 }), tail: 9 };
+
+    let inline_bytes = encode_to_vec(&inline).expect("inline encode");
+    assert_eq!(encode_to_vec(&boxed).expect("boxed encode"), inline_bytes);
+    assert_eq!(decode_from_slice::<CarrierBoxed>(&inline_bytes).expect("boxed decode"), boxed);
+}
