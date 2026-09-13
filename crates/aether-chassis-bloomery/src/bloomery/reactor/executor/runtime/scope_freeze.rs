@@ -93,18 +93,19 @@ impl ScopeFreeze {
         let mut frozen = 0;
         for run in answered {
             match self.freeze(store, &run) {
-                Ok(true) => frozen += 1,
-                Ok(false) => {}
+                Ok(()) => frozen += 1,
                 Err(why) => self.report(&run, &why),
             }
         }
         frozen
     }
 
-    /// Freeze one run, answering whether it stored a revision. `Ok(false)` is a
-    /// run this pass has nothing to do for; `Err` carries what to tell the
-    /// operator.
-    fn freeze(&self, store: &mut dyn StoreBackend, run: &ScopeVerdictRow) -> Result<bool, String> {
+    /// Freeze one run. Every path that does not store a revision is an `Err`
+    /// carrying what to tell the operator — including the ordinary ones, a
+    /// failing verdict and a reclaimed evidence directory, because "this run
+    /// answered and its commission still has no revision" is the thing an
+    /// operator needs said whatever the reason.
+    fn freeze(&self, store: &mut dyn StoreBackend, run: &ScopeVerdictRow) -> Result<(), String> {
         if run.verdict != passed_spelling() {
             return Err(format!("the run's verdict is {} and only a passing run freezes", run.verdict));
         }
@@ -133,7 +134,7 @@ impl ScopeFreeze {
             revision = %digest.to_hex(),
             "scoping run froze its revision",
         );
-        Ok(true)
+        Ok(())
     }
 
     /// The evidence body a run wrote, from the working root first and the
