@@ -410,6 +410,25 @@ pub struct ScopeRunRow {
     pub instructions: Option<Vec<u8>>,
 }
 
+/// One scoping run that answered and has not frozen (ADR-0208): the `verdict`
+/// row joined to the nonce its `dispatched` row named.
+///
+/// The nonce is what the freeze resolves the run's retained evidence directory
+/// from, so it travels with the verdict rather than being looked up a second
+/// time per run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeVerdictRow {
+    /// The commission the run scopes.
+    pub commission: String,
+    /// The attempt ordinal that answered.
+    pub ordinal: u64,
+    /// The verdict spelling the intake recorded.
+    pub verdict: String,
+    /// The dispatch nonce, absent only for a run whose `dispatched` row was
+    /// never written (a submit that was refused permanently).
+    pub nonce: Option<String>,
+}
+
 /// One append-only proof-fact row (ADR-0200). Column order is the wire:
 /// a reshape is a migration, not an incidental edit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1110,6 +1129,36 @@ pub trait StoreBackend: Send {
     ) -> rusqlite::Result<()>;
     /// Record the revision a run froze — the terminal success.
     fn record_scope_frozen(&mut self, commission: &str, ordinal: u64, revision: &[u8]) -> rusqlite::Result<()>;
+    /// Every scoping run that answered and has not frozen, oldest first.
+    ///
+    /// A commission holding *any* `frozen` row is excluded whole rather than
+    /// row by row, because that is what `scope_run_state` reads: one frozen row
+    /// is the commission's terminal success, so a superseded earlier attempt is
+    /// not a second freeze still owed.
+    fn list_unfrozen_scope_verdicts(&mut self) -> rusqlite::Result<Vec<ScopeVerdictRow>>;
+    /// Store the revision a passing scoping run produced as the commission's
+    /// next one, and record the run's `frozen` row against the digest it landed
+    /// at (ADR-0208).
+    ///
+    /// The predecessor is read here rather than taken from the lane's bytes: a
+    /// lane replays its own call log and has no way to know which revision was
+    /// the commission's tip when its evidence came back, so it always emits
+    /// `predecessor: None`. Chaining onto the stored tip here is what makes a
+    /// re-scope a successor instead of an ordinal violation, and it reuses the
+    /// commission store's own validating write — ordinal, status, duplicate,
+    /// and the ADR-0208 surface-gap check included — rather than a second
+    /// insert path that would have to restate all four.
+    ///
+    /// # Errors
+    /// Every refusal [`CommissionBackend::write_revision`] states, plus a store
+    /// fault writing the ledger row.
+    fn freeze_scope_revision(
+        &mut self,
+        commission: &str,
+        ordinal: u64,
+        revision: &ScopeRevision,
+        evidence: &RevisionEvidence,
+    ) -> Result<Digest, CommissionError>;
     /// The run a dispatch nonce belongs to, as (`commission`, `ordinal`);
     /// `None` when the nonce names no scoping run.
     fn lookup_scope_run(&mut self, nonce: &str) -> rusqlite::Result<Option<(String, u64)>>;
@@ -4335,6 +4384,48 @@ impl StoreBackend for SqliteStore {
             rusqlite::params![commission, ordinal, revision],
         )?;
         Ok(())
+    }
+
+    fn list_unfrozen_scope_verdicts(&mut self) -> rusqlite::Result<Vec<ScopeVerdictRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT answered.commission, answered.ordinal, answered.verdict, dispatched.nonce \
+             FROM scope_runs AS answered \
+             LEFT JOIN scope_runs AS dispatched \
+               ON dispatched.commission = answered.commission \
+              AND dispatched.ordinal = answered.ordinal \
+              AND dispatched.kind = 'dispatched' \
+             WHERE answered.kind = 'verdict' \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM scope_runs AS frozen \
+                 WHERE frozen.commission = answered.commission AND frozen.kind = 'frozen') \
+             ORDER BY answered.sequence",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ScopeVerdictRow {
+                commission: row.get::<_, String>(0)?,
+                ordinal: u64::try_from(row.get::<_, i64>(1)?).unwrap_or_default(),
+                verdict: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                nonce: row.get::<_, Option<String>>(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    fn freeze_scope_revision(
+        &mut self,
+        commission: &str,
+        ordinal: u64,
+        revision: &ScopeRevision,
+        evidence: &RevisionEvidence,
+    ) -> Result<Digest, CommissionError> {
+        let id = WorkpieceId(commission.to_owned());
+        let Some(view) = CommissionBackend::load(self, &id)? else {
+            return Err(CommissionError::MissingCommission(commission.to_owned()));
+        };
+        let chained = ScopeRevision { predecessor: view.head.current_revision, ..revision.clone() };
+        let digest = CommissionBackend::write_revision(self, &chained, evidence)?;
+        StoreBackend::record_scope_frozen(self, commission, ordinal, digest.as_bytes().as_slice())?;
+        Ok(digest)
     }
 
     fn lookup_scope_run(&mut self, nonce: &str) -> rusqlite::Result<Option<(String, u64)>> {

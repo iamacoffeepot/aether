@@ -128,9 +128,9 @@ mod runtime;
 pub use runtime::{
     AppendOutcome, CANDIDATE_HASH_OCCASION_LAND, CANDIDATE_HASH_OCCASION_SEAL, CandidateHash, CommitOutcome,
     ConstructionAdmissionRow, JournalOpenError, JournalWrite, OrderLifecycle, OutstandingOrder, PartialHeadRepairRow,
-    ProofFactRow, ProofFactWrite, QueuedMemberVerificationRow, RecordOutcome, ScopeRunOpen, ScopeRunRow, SealOutcome,
-    SharedRunLifecycle, SharedRunMemberRow, SharedRunRow, SharedRunStepRow, SqliteStore, StoreBackend,
-    StoreCapabilityState, StudyRow, now_unix_millis,
+    ProofFactRow, ProofFactWrite, QueuedMemberVerificationRow, RecordOutcome, ScopeRunOpen, ScopeRunRow,
+    ScopeVerdictRow, SealOutcome, SharedRunLifecycle, SharedRunMemberRow, SharedRunRow, SharedRunStepRow, SqliteStore,
+    StoreBackend, StoreCapabilityState, StudyRow, now_unix_millis,
 };
 
 #[cfg(all(test, feature = "runtime"))]

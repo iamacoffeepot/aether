@@ -377,6 +377,8 @@ fn actor_setups(
             correspondence: executor_correspondence,
             store_path: coordinator.store_path.clone(),
             artifacts_root: coordinator.artifacts_root.clone(),
+            worktree_base: coordinator.local_worktree_base.clone(),
+            archive_base: coordinator.archive_base.clone(),
             poll_interval_secs: github_poll_interval_secs,
             stale_warn_after_secs: coordinator.stale_warn_after_secs,
             heartbeat_silence_secs: coordinator.heartbeat_silence_secs()?,
