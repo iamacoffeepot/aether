@@ -450,15 +450,18 @@ impl CalibrationLedger {
 
     /// Fold one recorded decision.
     fn observe_effect(&mut self, effect: &Decision, configs: &ResolvedConfigs) {
-        if let Some(dispatched) = SeatDispatch::from_effect(effect) {
-            let lane = match &dispatched.key {
-                DispatchKey::Member { workpiece, .. } => Some((dispatched.bloom, workpiece.clone())),
-                DispatchKey::Bloom { .. } => None,
-            };
-            if let Some(slot) = self.dispatch(dispatched, configs)
-                && let Some(lane) = lane
-            {
-                self.lanes.insert(lane, slot);
+        let dispatched = SeatDispatch::from_effect(effect);
+        if !dispatched.is_empty() {
+            for seat in dispatched {
+                let lane = match &seat.key {
+                    DispatchKey::Member { workpiece, .. } => Some((seat.bloom, workpiece.clone())),
+                    DispatchKey::Bloom { .. } => None,
+                };
+                if let Some(slot) = self.dispatch(seat, configs)
+                    && let Some(lane) = lane
+                {
+                    self.lanes.insert(lane, slot);
+                }
             }
             return;
         }

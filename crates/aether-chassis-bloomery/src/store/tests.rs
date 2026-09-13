@@ -7,12 +7,16 @@
 
 #![allow(clippy::unwrap_used)]
 
+use super::commission::{CommissionBackend, RevisionEvidence};
 use super::runtime::{
     AppendOutcome, CANDIDATE_HASH_OCCASION_SEAL, CommitOutcome, JournalWrite, OrderLifecycle, OutstandingOrder,
     ProofFactWrite, RecordOutcome, ScopeRunOpen, SealOutcome, SqliteStore, StoreBackend,
 };
 use aether_bloomery::persisted::DECISIONS;
-use aether_bloomery::{MembershipMutation, OutboxPayload, Topic, ViewDocument, WorkpieceId, decode_row, encode_row};
+use aether_bloomery::{
+    MembershipMutation, Observation, OutboxPayload, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting,
+    Statement, Topic, ViewDocument, WorkpieceId, decode_row, encode_row,
+};
 use aether_data::Kind;
 
 fn memory() -> SqliteStore {
@@ -1742,6 +1746,71 @@ fn a_v15_store_gains_an_empty_candidate_hash_journal() {
         .expect("the journal exists after migration");
     assert_eq!(hashes, 0, "migration invents no hashes");
     assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
+}
+
+/// A workpiece shaped the way a `scope.fill` lane emits one: no predecessor,
+/// because a lane replays its own call log and cannot know which revision was
+/// the commission's tip when its evidence came back.
+fn lane_revision(id: &str) -> ScopeRevision {
+    ScopeRevision {
+        schema: SCOPE_REVISION_SCHEMA,
+        workpiece: WorkpieceId(id.to_owned()),
+        predecessor: None,
+        problem: "problem".to_owned(),
+        design: "design".to_owned(),
+        plan: "plan".to_owned(),
+        declared_surface: vec!["crates/aether-bloomery/**".to_owned()],
+        dogfood_brief: String::new(),
+        routing: ScopeRouting { size: "M".to_owned(), model: String::new() },
+        dependencies: Vec::new(),
+        description: "advisory".to_owned(),
+        implements: Vec::new(),
+        declared_crates: Vec::new(),
+        declared_reads: Vec::new(),
+    }
+}
+
+fn lane_intent() -> Statement {
+    Statement {
+        words: b"scope this".to_vec(),
+        provenance: Provenance::ObservationAttestation(Observation { source: "test".to_owned() }),
+        parents: Vec::new(),
+    }
+}
+
+#[test]
+fn freezing_a_scope_run_chains_onto_the_commissions_current_tip() {
+    // A re-scope is the case: the lane's bytes always say `predecessor: None`,
+    // and writing them verbatim onto a commission that already has a tip is an
+    // OrdinalViolation — so every second scoping run of a commission would be
+    // refused forever while its evidence sat on disk holding a revision nobody
+    // could store. The freeze reads the tip and chains onto it.
+    let mut store = memory();
+    let id = "wp-rescope";
+    store.create(&WorkpieceId(id.to_owned()), &lane_intent()).expect("create commission");
+    let first = store.freeze_scope_revision(id, 1, &lane_revision(id), &RevisionEvidence::default()).expect("freeze");
+
+    let mut second = lane_revision(id);
+    second.plan = "a revised plan".to_owned();
+    let next = store.freeze_scope_revision(id, 2, &second, &RevisionEvidence::default()).expect("re-freeze");
+
+    assert_ne!(next, first, "the second freeze lands a new revision");
+    let stored = store.load_revision(next).expect("load").expect("the successor is stored");
+    assert_eq!(stored.predecessor, Some(first), "the successor names the tip it displaced");
+    let head = store.load(&WorkpieceId(id.to_owned())).expect("load").expect("the commission exists").head;
+    assert_eq!(head.current_revision, Some(next), "the commission's tip advanced");
+    assert_eq!(head.current_ordinal, Some(2), "onto the next ordinal on the chain");
+    let frozen: Vec<Vec<u8>> = store
+        .list_scope_runs(id)
+        .expect("list")
+        .into_iter()
+        .filter_map(|row| (row.kind == "frozen").then_some(row.revision).flatten())
+        .collect();
+    assert_eq!(
+        frozen,
+        vec![first.as_bytes().to_vec(), next.as_bytes().to_vec()],
+        "each run's frozen row names the digest its own write landed at",
+    );
 }
 
 #[test]
