@@ -8,13 +8,15 @@ mod common;
 
 use std::collections::BTreeMap;
 
+use aether_data::Kind;
 use aether_data::wire::to_vec;
 
 use aether_bloomery::{
-    AgentSelection, BloomId, BloomStatus, CandidateRef, Decision, Decisions, Event, Evidence, EvidenceKind, Fact,
-    Harness, MemberDependency, MetricBloom, MetricDispatch, MetricsLedger, ModelOverride, Outcome, ReasoningEffort,
-    ResolvedConfigs, SealError, Snapshot, SpendWindow, StageId, StageOverride, StudyCost, StudyRecord, SupersedeError,
-    WorkpieceId, reduce,
+    AgentSelection, BloomId, BloomStatus, CandidateRef, ConfigKind, ConstructionAdmission, CoordinationPolicy,
+    Decision, Decisions, Event, Evidence, EvidenceKind, Fact, Harness, MemberDependency, MetricBloom, MetricDispatch,
+    MetricsLedger, ModelOverride, Nonce, Outcome, ReasoningEffort, ResolvedConfigs, SealError, SharedRunMode,
+    SharedRunPlan, SharedRunPreparation, Snapshot, SpendWindow, StageId, StageOverride, StudyCost, StudyRecord,
+    SupersedeError, VerificationMode, VerifyFailureSet, WorkpieceId, construction_nonce_digest, reduce,
 };
 use common::{claim, compiled_resolved, digest, draft, draft_with_member_override, event, membership, workpiece};
 
@@ -53,6 +55,59 @@ impl Journal {
             next_sequence: 1,
         };
         journal.admit(&event("seal", Fact::Seal(spec)), Some(1_000));
+        journal
+    }
+
+    /// A sealed bloom running the ADR-0218 coordination policy: its Construct
+    /// is queued for just-in-time admission instead of dispatched inline, and
+    /// its Verify becomes a scheduled physical run.
+    fn coordinated() -> Self {
+        let policy = CoordinationPolicy {
+            verification: VerificationMode::WarmSerial,
+            eager_integration: true,
+            max_run_members: 4,
+            max_serial_requests: 4,
+            max_attribution_probes: 0,
+            movement_budget: 1,
+            reservation_millis: 1_000,
+            host_class: String::from("test"),
+        };
+        let mut configs = compiled_resolved();
+        configs.insert(policy.address(), CoordinationPolicy::NAME, to_vec(&policy).expect("policy encodes"), None);
+
+        let mut draft = draft(1, vec![membership(MEMBER, REVISION)]);
+        draft.configs.insert::<CoordinationPolicy>(policy.address());
+        let spec = draft.seal();
+        let bloom = spec.id();
+
+        let mut journal = Self {
+            snapshot: Snapshot::new(digest(1)).with_green_base(digest(1)),
+            ledger: MetricsLedger::default(),
+            configs,
+            bloom,
+            next_sequence: 1,
+        };
+        journal.admit(&event("seal", Fact::Seal(spec)), Some(1_000));
+        // A coordinated seal proves its base before it queues Construct
+        // (ADR-0200), so the green receipt comes first and the queued dispatch
+        // with it.
+        journal.admit(
+            &event(
+                "base-green",
+                Fact::BaseVerifyCompleted {
+                    base: digest(1),
+                    tree: digest(2),
+                    passed: true,
+                    evidence: Evidence {
+                        subject: digest(2),
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(91),
+                    },
+                    failed: VerifyFailureSet::EMPTY,
+                },
+            ),
+            Some(1_500),
+        );
         journal
     }
 
@@ -621,4 +676,106 @@ fn a_refused_or_duplicate_seal_does_not_mint_or_overwrite_a_bloom_rollup() {
         journal.ledger.bloom_rows()
     );
     assert_eq!(bloom_row(&journal.ledger, bloom).seal_sequence, 1);
+}
+
+/// The plausible bug: the fold matches only the pre-ADR-0218 dispatch
+/// vocabulary, so a coordinated bloom — whose Construct arrives as a contextual
+/// attempt and whose Verify arrives as a shared run — has an empty timeline, no
+/// dispatch rows, and no seat, while the same work under the old names folds.
+#[test]
+fn a_coordinated_blooms_contextual_attempt_and_shared_run_fold_like_the_dispatches_they_replace() {
+    let mut journal = Journal::coordinated();
+    let queued = journal.snapshot.blooms[&journal.bloom]
+        .coordination
+        .as_deref()
+        .expect("the sealed policy enabled coordination")
+        .queued_construction
+        .get(MEMBER)
+        .cloned()
+        .expect("a coordinated seal queues Construct for just-in-time admission");
+    let admitted = journal.admit(
+        &event(
+            "admit-construction",
+            Fact::RequestConstructionAdmission {
+                admission: ConstructionAdmission {
+                    nonce: construction_nonce_digest(&Nonce(String::from("construct/wp-a/1"))),
+                    dispatch: queued,
+                },
+            },
+        ),
+        Some(2_000),
+    );
+    assert!(
+        admitted.effects.iter().any(|effect| matches!(effect, Decision::DispatchContextualAttempt { .. })),
+        "admission dispatches the contextual attempt: {admitted:?}"
+    );
+
+    let captured = CandidateRef { tree: digest(TREE), checkout: digest(TREE + 1) };
+    let completed = journal.completed("construct", StageId::Construct, Some(captured), Some(3_000));
+    let request = completed
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            Decision::QueueMemberVerification { request } => Some((**request).clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("a coordinated Construct queues its member verification: {completed:?}"));
+
+    let plan = SharedRunPlan {
+        mode: SharedRunMode::Standalone,
+        requests: vec![request],
+        composition: None,
+        probe_budget: 0,
+        execution_attempt: 0,
+    };
+    journal
+        .admit(&event("propose-run", Fact::ProposeSharedRun { bloom: journal.bloom, plan: plan.clone() }), Some(4_000));
+    let dispatched = journal.admit(
+        &event(
+            "run-prepared",
+            Fact::SharedRunPrepared {
+                bloom: journal.bloom,
+                plan: plan.digest(),
+                preparation: SharedRunPreparation::Standalone,
+            },
+        ),
+        Some(5_000),
+    );
+    assert!(
+        dispatched.effects.iter().any(|effect| matches!(effect, Decision::DispatchSharedRun { .. })),
+        "preparation dispatches the physical run: {dispatched:?}"
+    );
+
+    let timeline = journal.ledger.timeline(journal.bloom);
+    let span = |stage| timeline.spans.iter().find(|span| span.stage == stage && span.workpiece == MEMBER);
+    assert!(
+        span(StageId::Construct).is_some_and(|span| span.started_unix_millis == Some(2_000)),
+        "the contextual attempt is the member's Construct span: {:?}",
+        timeline.spans
+    );
+    assert!(
+        span(StageId::Verify).is_some_and(|span| span.started_unix_millis == Some(5_000)),
+        "the shared run is the member's Verify span: {:?}",
+        timeline.spans
+    );
+
+    let rows = journal.ledger.dispatch_rows();
+    let row = |stage| rows.iter().find(|row| row.stage == stage && row.workpiece == MEMBER);
+    assert!(
+        row(StageId::Construct).is_some_and(|row| row.displayed == digest(REVISION)),
+        "the Construct row displays the member's scope revision: {rows:?}"
+    );
+    assert!(
+        row(StageId::Verify).is_some_and(|row| row.displayed == digest(TREE)),
+        "the Verify row displays the candidate the run judged: {rows:?}"
+    );
+    assert_eq!(
+        bloom_row(&journal.ledger, journal.bloom).dispatches,
+        2,
+        "the contextual attempt and the shared run are the bloom's two dispatches"
+    );
+    assert!(
+        journal.ledger.seats(|_| None).iter().any(|seat| seat.stage == StageId::Construct && seat.attempts == 1),
+        "the contextual attempt seats the model lane that ran it"
+    );
 }
