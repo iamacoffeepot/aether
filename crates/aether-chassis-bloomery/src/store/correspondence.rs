@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS backend_correspondence (
 );
 ";
 
+/// How long a correspondence connection waits for the WAL write lock before it
+/// gives up with `SQLITE_BUSY` — the store's own default, restated here because
+/// the two modules are independently featured.
+const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A `SQLite`-backed [`Correspondence`] over the store file. Holds its connection
 /// behind a `Mutex` so the trait's `&self` methods (the source/executor backends
 /// drive it behind a shared handle) can read and write.
@@ -50,12 +55,26 @@ impl SqliteCorrespondence {
     /// # Errors
     /// The connection could not be opened or the migration failed.
     pub fn open(path: &str) -> rusqlite::Result<Self> {
+        Self::open_with_busy_timeout(path, DEFAULT_BUSY_TIMEOUT)
+    }
+
+    /// [`open`](Self::open), waiting `busy_timeout` for a write lock another
+    /// connection holds instead of the default five seconds.
+    ///
+    /// The knob `SqliteStore::open_with_busy_timeout` carries, for the same
+    /// reason and over the same file: an observer beside a live coordinator
+    /// waits out the coordinator's write transaction rather than reporting a
+    /// `SQLITE_BUSY` in place of the answer it came for.
+    ///
+    /// # Errors
+    /// The connection could not be opened or the migration failed.
+    pub fn open_with_busy_timeout(path: &str, busy_timeout: Duration) -> rusqlite::Result<Self> {
         let mut conn = Connection::open(path)?;
         // Match the store's WAL + busy-timeout so a second connection to the same
         // file waits for the write lock rather than failing fast (see `SqliteStore`).
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.busy_timeout(busy_timeout)?;
         let transaction = conn.transaction()?;
         transaction.execute_batch(MIGRATIONS)?;
         let legacy_exists = transaction.query_row(
