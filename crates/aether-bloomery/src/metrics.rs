@@ -452,8 +452,11 @@ impl MetricsLedger {
     }
 
     fn observe_effect(&mut self, sequence: u64, effect: &Decision, configs: &ResolvedConfigs, envelope: Option<u64>) {
-        if let Some(dispatched) = SeatDispatch::from_effect(effect) {
-            self.dispatch(sequence, dispatched, configs, envelope);
+        let dispatched = SeatDispatch::from_effect(effect);
+        if !dispatched.is_empty() {
+            for seat in dispatched {
+                self.dispatch(sequence, seat, configs, envelope);
+            }
             return;
         }
         match effect {
