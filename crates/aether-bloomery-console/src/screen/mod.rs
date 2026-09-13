@@ -3,6 +3,7 @@
 mod artifact;
 mod backlog;
 mod board;
+mod coordinator;
 mod detail;
 mod dispatch;
 mod filed;
@@ -27,6 +28,7 @@ use crate::warroom::Focus;
 
 pub use backlog::Backlog;
 pub use board::{BloomRow, Board, BoardLane, BoardRow, MemberRow, RowId, member_status_state};
+pub use coordinator::CoordinatorLog;
 pub use detail::Detail;
 pub use metrics::{Breakdown, Dashboard, Days, Timeline, compose};
 pub use partition::{MemberState, is_history_status, is_live_status, live_blooms};
@@ -69,6 +71,9 @@ pub enum Screen {
     Cost(Breakdown),
     Backlog(Backlog),
     Workpiece(Workpiece),
+    /// Boxed: the log retains up to a thousand entries plus its search
+    /// index, so inlining it would size every pushed frame after it.
+    CoordinatorLog(Box<CoordinatorLog>),
 }
 
 impl Screen {
@@ -97,6 +102,7 @@ impl Screen {
             Nav::Days => Self::Days(Days::new()),
             Nav::Cost => Self::Cost(Breakdown::new()),
             Nav::Backlog => Self::Backlog(Backlog::new()),
+            Nav::CoordinatorLog => Self::CoordinatorLog(Box::default()),
         }
     }
 
@@ -113,7 +119,8 @@ impl Screen {
             | Self::Timeline(_)
             | Self::Days(_)
             | Self::Cost(_)
-            | Self::Backlog(_) => None,
+            | Self::Backlog(_)
+            | Self::CoordinatorLog(_) => None,
             Self::Workpiece(workpiece) => Some(workpiece.focus()),
         }
     }
@@ -140,6 +147,7 @@ impl Screen {
             Self::Days(_) => Nav::days().label(),
             Self::Cost(_) => Nav::cost().label(),
             Self::Backlog(_) => Nav::backlog().label(),
+            Self::CoordinatorLog(_) => Nav::coordinator_log().label(),
         }
     }
 
@@ -159,7 +167,8 @@ impl Screen {
             | Self::Days(_)
             | Self::Cost(_)
             | Self::Backlog(_)
-            | Self::Workpiece(_) => None,
+            | Self::Workpiece(_)
+            | Self::CoordinatorLog(_) => None,
         }
     }
 
@@ -177,7 +186,8 @@ impl Screen {
             | Self::Days(_)
             | Self::Cost(_)
             | Self::Backlog(_)
-            | Self::Workpiece(_) => 0,
+            | Self::Workpiece(_)
+            | Self::CoordinatorLog(_) => 0,
         }
     }
 
@@ -195,7 +205,8 @@ impl Screen {
             | Self::Transcript(_)
             | Self::Timeline(_)
             | Self::Days(_)
-            | Self::Cost(_) => None,
+            | Self::Cost(_)
+            | Self::CoordinatorLog(_) => None,
         }
     }
 
@@ -214,6 +225,7 @@ impl Screen {
             Self::Cost(cost) => cost.subscriptions(),
             Self::Backlog(backlog) => backlog.subscriptions(),
             Self::Workpiece(workpiece) => workpiece.subscriptions(),
+            Self::CoordinatorLog(log) => log.subscriptions(),
         }
     }
 
@@ -232,6 +244,7 @@ impl Screen {
             Self::Cost(_) => Breakdown::key_hints(),
             Self::Backlog(_) => Backlog::key_hints(),
             Self::Workpiece(_) => Workpiece::key_hints(),
+            Self::CoordinatorLog(_) => CoordinatorLog::key_hints(),
         }
     }
 
@@ -245,7 +258,8 @@ impl Screen {
             | Self::Record(_)
             | Self::Transcript(_)
             | Self::Days(_)
-            | Self::Cost(_) => None,
+            | Self::Cost(_)
+            | Self::CoordinatorLog(_) => None,
             Self::Artifact(artifact) => Some(artifact.digest_under_cursor()),
             Self::Timeline(timeline) => Some(timeline.bloom()),
             Self::Backlog(backlog) => backlog.digest_under_cursor(),
@@ -266,7 +280,8 @@ impl Screen {
             | Self::Record(_)
             | Self::Transcript(_)
             | Self::Days(_)
-            | Self::Cost(_) => None,
+            | Self::Cost(_)
+            | Self::CoordinatorLog(_) => None,
             Self::Detail(detail) => detail.openable_digest(),
             Self::Backlog(backlog) => backlog.digest_under_cursor(),
             Self::Workpiece(workpiece) => workpiece.openable_digest(),
@@ -287,7 +302,7 @@ impl Screen {
             Self::Transcript(_) => Transcript::enter_pushes(),
             Self::Timeline(_) => Timeline::enter_pushes(),
             Self::Cost(_) => Breakdown::enter_pushes(),
-            Self::Record(_) | Self::Artifact(_) | Self::Days(_) => false,
+            Self::Record(_) | Self::Artifact(_) | Self::Days(_) | Self::CoordinatorLog(_) => false,
         }
     }
 
@@ -305,6 +320,7 @@ impl Screen {
             Self::Cost(cost) => cost.handle_key(key, store),
             Self::Backlog(backlog) => backlog.handle_key(key, store),
             Self::Workpiece(workpiece) => workpiece.handle_key(key, store),
+            Self::CoordinatorLog(log) => log.handle_key(key, store),
         }
     }
 
@@ -319,6 +335,7 @@ impl Screen {
             Self::Cost(cost) => cost.reseat(store),
             Self::Backlog(backlog) => backlog.reseat(store),
             Self::Workpiece(workpiece) => workpiece.reseat(store),
+            Self::CoordinatorLog(log) => log.reseat(store),
             Self::Record(_) | Self::Artifact(_) | Self::Days(_) => {}
         }
     }
@@ -337,6 +354,7 @@ impl Screen {
             Self::Cost(cost) => cost.render(frame, area, store),
             Self::Backlog(backlog) => backlog.render(frame, area, store),
             Self::Workpiece(workpiece) => workpiece.render(frame, area, store),
+            Self::CoordinatorLog(log) => log.render(frame, area, store),
         }
     }
 }

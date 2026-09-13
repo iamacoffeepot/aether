@@ -277,6 +277,16 @@ impl Shell {
             (ResourceKey::Commission(id), Ok(_)) => {
                 self.store.apply_commission(id, Err("commission lane returned a non-commission body".to_owned()));
             }
+            (ResourceKey::CoordinatorLogs(query), Ok(ResourceBody::CoordinatorLogs(page))) => {
+                self.store.apply_coordinator_logs(query, Ok(page));
+            }
+            (ResourceKey::CoordinatorLogs(query), Err(error)) => {
+                self.store.apply_coordinator_logs(query, Err(error));
+            }
+            (ResourceKey::CoordinatorLogs(query), Ok(_)) => {
+                self.store
+                    .apply_coordinator_logs(query, Err("coordinator-log lane returned a non-log body".to_owned()));
+            }
         }
     }
 
@@ -556,6 +566,29 @@ mod tests {
         assert!(text.contains("STALE"), "{text}");
         assert!(text.contains("connection refused"), "{text}");
         assert!(text.contains("issue-keep"), "{text}");
+    }
+
+    #[test]
+    fn a_stale_sample_dims_the_quiet_status_line() {
+        // The plausible bug: a failed poll keeps the last heads on the quiet
+        // pane at full brightness, so stale mainline/observed read as live
+        // fact while the board around them dims.
+        let view = ViewDocument { mainline: digest(1), observed: digest(2), ..ViewDocument::default() };
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
+
+        let mut fresh = Shell::showing(&view, None);
+        terminal.draw(|frame| fresh.render(frame)).expect("draw");
+        assert!(
+            !right_column_modifiers(&terminal, "mainline").iter().any(|modifier| modifier.contains(Modifier::DIM)),
+            "live heads painted dim"
+        );
+
+        let mut stale = Shell::showing(&view, Some("connection refused"));
+        terminal.draw(|frame| stale.render(frame)).expect("draw");
+        assert!(
+            right_column_modifiers(&terminal, "mainline").iter().any(|modifier| modifier.contains(Modifier::DIM)),
+            "stale heads painted as live fact"
+        );
     }
 
     #[test]

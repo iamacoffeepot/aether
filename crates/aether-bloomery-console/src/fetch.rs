@@ -10,8 +10,9 @@ use std::thread;
 use std::time::Duration;
 
 use crate::dto::{
-    BloomDispatchesView, CommissionShowView, CommissionsView, DecodedArtifact, DispatchFilePage, JournalPage,
-    MetricDay, MetricDispatch, MetricsSeat, MetricsSummary, MetricsTimeline, SpendWindowView, ViewDocument,
+    BloomDispatchesView, CommissionShowView, CommissionsView, CoordinatorLogsView, DecodedArtifact, DispatchFilePage,
+    JournalPage, MetricDay, MetricDispatch, MetricsSeat, MetricsSummary, MetricsTimeline, SpendWindowView,
+    ViewDocument,
 };
 use crate::http::{self, Endpoint};
 use crate::store::{Lane, ResourceKey};
@@ -45,6 +46,7 @@ pub enum ResourceBody {
     Commissions(CommissionsView),
     CommissionsMissing,
     Commission(CommissionShowView),
+    CoordinatorLogs(CoordinatorLogsView),
 }
 
 /// Outcome posted back to the shell. The event loop never calls HTTP.
@@ -162,6 +164,9 @@ fn fetch_key(endpoint: &Endpoint, key: &ResourceKey, path: &str, timeout: Durati
         },
         ResourceKey::Commission(_) => http::get_json::<CommissionShowView>(endpoint, path, timeout)
             .map(ResourceBody::Commission)
+            .map_err(|error| error.to_string()),
+        ResourceKey::CoordinatorLogs(_) => http::get_json::<CoordinatorLogsView>(endpoint, path, timeout)
+            .map(ResourceBody::CoordinatorLogs)
             .map_err(|error| error.to_string()),
     }
 }

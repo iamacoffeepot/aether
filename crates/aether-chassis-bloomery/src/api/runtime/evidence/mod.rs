@@ -12,6 +12,7 @@ mod ranged;
 #[cfg(test)]
 mod tests;
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -69,7 +70,9 @@ pub(in crate::api::runtime) fn header_response(
     }
 }
 
-/// `GET /dispatches/{nonce}/transcript` and `/prompt` — ranged file read.
+/// `GET /dispatches/{nonce}/files/{name}` — ranged read of one retained
+/// evidence file. `/transcript` and `/prompt` stay as aliases for their one
+/// file each.
 pub(in crate::api::runtime) fn file_page(
     worktree_base: &Path,
     archive_base: &Path,
@@ -88,6 +91,7 @@ pub(in crate::api::runtime) fn file_page(
             json(200, &page)
         }
         Err(FileReadError::Missing) => error_response(404, &format!("{file} is not retained")),
+        Err(FileReadError::Invalid) => error_response(400, &format!("invalid evidence file name: {file}")),
         Err(FileReadError::Io(error)) => error_response(500, &format!("evidence read failed: {error}")),
     }
 }
@@ -110,10 +114,17 @@ fn read_named_file(
     cursor: Option<u64>,
     limit: u64,
 ) -> Result<DispatchFilePage, FileReadError> {
+    if !valid_evidence_name(file) {
+        return Err(FileReadError::Invalid);
+    }
     let Some(dir) = resolve_evidence_dir(worktree_base, archive_base, nonce) else {
         return Err(FileReadError::Missing);
     };
-    match ranged::read_ranged(&dir.join(file), cursor, limit) {
+    let path = dir.join(file);
+    if !is_retained_file(&path) {
+        return Err(FileReadError::Missing);
+    }
+    match ranged::read_ranged(&path, cursor, limit) {
         Ok(page) => Ok(page),
         Err(ranged::RangedError::NotFound) => Err(FileReadError::Missing),
         Err(ranged::RangedError::Io(error)) => Err(FileReadError::Io(error)),
@@ -122,7 +133,22 @@ fn read_named_file(
 
 enum FileReadError {
     Missing,
+    Invalid,
     Io(io::Error),
+}
+
+/// A servable evidence name is one plain file name. Anything shaped like a
+/// path is a malformed request, not a missing file: `Path::join` would let an
+/// absolute name escape the evidence directory, and `..` would climb out.
+fn valid_evidence_name(file: &str) -> bool {
+    !file.is_empty() && file != "." && file != ".." && !file.contains(['/', '\\', '\0'])
+}
+
+/// Only a top-level regular file is servable evidence. A subdirectory reads
+/// as not retained, and a symlink does too — its target lives outside the
+/// evidence directory the header listed.
+fn is_retained_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file())
 }
 
 fn evidence_dir(worktree_base: &Path, nonce: &str) -> PathBuf {

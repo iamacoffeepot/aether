@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
@@ -114,19 +114,37 @@ pub fn rule(width: u16) -> Paragraph<'static> {
     Paragraph::new("─".repeat(width as usize)).style(palette::border())
 }
 
+/// House stale language: stale chrome keeps its last facts on screen but dims
+/// them, so a failed poll never paints old data as live fact.
+fn stale_body(dimmed: bool) -> Style {
+    if dimmed {
+        palette::body().add_modifier(Modifier::DIM)
+    } else {
+        palette::body()
+    }
+}
+
 #[must_use]
-pub fn today(dashboard: &Dashboard) -> Paragraph<'static> {
-    Paragraph::new(dashboard.today.clone()).style(palette::body())
+pub fn today(dashboard: &Dashboard, dimmed: bool) -> Paragraph<'static> {
+    Paragraph::new(dashboard.today.clone()).style(stale_body(dimmed))
+}
+
+/// `mainline` / `observed` prefixes, plus whether they have diverged. One
+/// source for the painted status line and its tested string, so the heads the
+/// operator reads cannot drift from the heads the tests pin.
+fn status_parts(view: &ViewDocument) -> (String, bool) {
+    let line = format!("mainline {}  observed {}", view.mainline.prefix(), view.observed.prefix());
+    (line, view.mainline != view.observed)
 }
 
 /// `mainline` / `observed` prefixes, plus a divergence token when they differ.
 #[must_use]
 pub fn format_status(view: &ViewDocument) -> String {
-    let line = format!("mainline {}  observed {}", view.mainline.prefix(), view.observed.prefix());
-    if view.mainline == view.observed {
-        line
-    } else {
+    let (line, diverged) = status_parts(view);
+    if diverged {
         format!("{line}  diverged")
+    } else {
+        line
     }
 }
 
@@ -137,19 +155,26 @@ pub fn format_seal(quiesce: &SpendQuiesce) -> String {
 }
 
 #[must_use]
-pub fn status(view: &ViewDocument) -> Paragraph<'static> {
-    let mut spans =
-        vec![Span::raw(format!("mainline {}  observed {}", view.mainline.prefix(), view.observed.prefix()))];
-    if view.mainline != view.observed {
-        spans.push(Span::styled("  diverged", palette::paint(Role::Attention).add_modifier(Modifier::BOLD)));
+pub fn status(view: &ViewDocument, dimmed: bool) -> Paragraph<'static> {
+    let (line, diverged) = status_parts(view);
+    let mut spans = vec![Span::raw(line)];
+    if diverged {
+        let mut attention = palette::paint(Role::Attention).add_modifier(Modifier::BOLD);
+        if dimmed {
+            attention = attention.add_modifier(Modifier::DIM);
+        }
+        spans.push(Span::styled("  diverged", attention));
     }
-    Paragraph::new(Line::from(spans)).style(palette::body())
+    Paragraph::new(Line::from(spans)).style(stale_body(dimmed))
 }
 
 #[must_use]
-pub fn seal(quiesce: &SpendQuiesce) -> Paragraph<'static> {
-    Paragraph::new(Span::styled(format_seal(quiesce), palette::paint(Role::Loud).add_modifier(Modifier::BOLD)))
-        .style(palette::body())
+pub fn seal(quiesce: &SpendQuiesce, dimmed: bool) -> Paragraph<'static> {
+    let mut loud = palette::paint(Role::Loud).add_modifier(Modifier::BOLD);
+    if dimmed {
+        loud = loud.add_modifier(Modifier::DIM);
+    }
+    Paragraph::new(Span::styled(format_seal(quiesce), loud)).style(stale_body(dimmed))
 }
 
 #[must_use]
@@ -289,10 +314,13 @@ pub fn footer(trail: &str, hints: &[KeyHint], width: u16) -> Paragraph<'static> 
 
 #[cfg(test)]
 mod tests {
-    use super::{MARK, MARK_ASCII, format_age, format_seal, format_status, mark_span, needs_you_window};
+    use super::{MARK, MARK_ASCII, format_age, format_seal, format_status, mark_span, needs_you_window, status};
     use crate::dto::{DigestHex, SpendQuiesce, ViewDocument};
     use crate::palette::{self, Role};
     use crate::warroom::{Focus, NeedsYouRow, Severity};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Cell;
     use std::time::Duration;
 
     fn digest(byte: u8) -> DigestHex {
@@ -353,6 +381,20 @@ mod tests {
             }),
             "SEAL CLOSED  bloomery/daily/2026-08-17  12/10"
         );
+    }
+
+    #[test]
+    fn the_painted_status_line_matches_the_tested_string() {
+        // The plausible bug: `status` and `format_status` spell the heads
+        // twice, so the painted line drifts from the string the tests pin and
+        // the operator reads heads no test names.
+        for observed in [1u8, 2u8] {
+            let view = ViewDocument { mainline: digest(1), observed: digest(observed), ..ViewDocument::default() };
+            let mut terminal = Terminal::new(TestBackend::new(80, 1)).expect("test backend");
+            terminal.draw(|frame| frame.render_widget(status(&view, false), frame.area())).expect("draw");
+            let text: String = terminal.backend().buffer().content().iter().map(Cell::symbol).collect();
+            assert_eq!(text.trim_end().to_owned(), format_status(&view));
+        }
     }
 
     #[test]

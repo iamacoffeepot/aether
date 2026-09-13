@@ -16,8 +16,8 @@ use super::header::{ASSISTANT_TEXT_CAP, read as read_header};
 use super::list::assemble;
 use super::logs::{COORDINATOR_LOG_MAX, LogError, LogQuery, read_with};
 use super::ranged::{FileQuery, TRANSCRIPT_DEFAULT_LIMIT, TRANSCRIPT_LINE_CAP, TRANSCRIPT_MAX_LIMIT, read_ranged};
-use super::{SWEPT_NOTICE, evidence_dir};
-use crate::api::dto::CoordinatorLogsView;
+use super::{SWEPT_NOTICE, evidence_dir, file_page};
+use crate::api::dto::{CoordinatorLogsView, DispatchFilePage};
 use crate::store::{BloomDispatchLive, BloomDispatchRollup};
 
 #[test]
@@ -366,4 +366,67 @@ fn a_line_longer_than_the_page_budget_still_advances() {
         cursor = page.next_cursor;
     }
     assert!(seen.iter().any(|line| line == "next"), "later complete lines must remain reachable");
+}
+
+#[test]
+fn a_file_page_serves_any_retained_evidence_file() {
+    // The plausible bug: the name parameter is accepted but only the two
+    // historical files resolve, so `evidence.json` 404s even though the
+    // header lists it.
+    let work = tempfile::tempdir().expect("a working root is available");
+    let archive = tempfile::tempdir().expect("an archive root is available");
+    let evidence = evidence_dir(work.path(), "dispatch-7");
+    fs::create_dir_all(&evidence).expect("the evidence directory is created");
+    fs::write(evidence.join("evidence.json"), "{\"status\":\"pass\"}\n").expect("the evidence file writes");
+    let archived = archive.path().join("evidence").join("dispatch-8-evidence");
+    fs::create_dir_all(&archived).expect("the archived evidence directory is created");
+    fs::write(archived.join("instruction-manifest"), "bundle\n").expect("the archived file writes");
+
+    let response = file_page(work.path(), archive.path(), "dispatch-7", "evidence.json", "");
+    assert_eq!(response.status, 200);
+    let page: DispatchFilePage = serde_json::from_slice(&response.body).expect("a 200 body is a file page");
+    assert_eq!(page.lines, vec!["{\"status\":\"pass\"}".to_owned()]);
+
+    let response = file_page(work.path(), archive.path(), "dispatch-8", "instruction-manifest", "");
+    assert_eq!(response.status, 200, "the archive tier serves through the same route");
+    let page: DispatchFilePage = serde_json::from_slice(&response.body).expect("a 200 body is a file page");
+    assert_eq!(page.lines, vec!["bundle".to_owned()]);
+
+    let response = file_page(work.path(), archive.path(), "dispatch-7", "absent.txt", "");
+    assert_eq!(response.status, 404, "a well-formed but absent name is not retained");
+    assert!(
+        String::from_utf8_lossy(&response.body).contains("absent.txt is not retained"),
+        "the 404 names the file: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+}
+
+#[test]
+fn a_file_page_refuses_a_name_shaped_like_a_path() {
+    // The plausible bug: `dir.join(name)` on an absolute or `..` name
+    // escapes the evidence directory and serves (or probes) outside files.
+    let work = tempfile::tempdir().expect("a working root is available");
+    let evidence = evidence_dir(work.path(), "dispatch-7");
+    fs::create_dir_all(&evidence).expect("the evidence directory is created");
+    fs::write(work.path().join("outside.txt"), "outside\n").expect("the outside file writes");
+
+    for name in ["..", ".", "", "sub/dir", "/absolute", "C:\\windows"] {
+        let response = file_page(work.path(), work.path(), "dispatch-7", name, "");
+        assert_eq!(response.status, 400, "{name} is a malformed name, not a missing file");
+    }
+
+    let response = file_page(work.path(), work.path(), "dispatch-7", "outside.txt", "");
+    assert_eq!(response.status, 404, "a sibling of the evidence directory is not retained");
+}
+
+#[test]
+fn a_file_page_does_not_serve_a_subdirectory() {
+    // The plausible bug: opening a directory succeeds on some platforms and
+    // the read fails later as a 500, or lists directory bytes as lines.
+    let work = tempfile::tempdir().expect("a working root is available");
+    let evidence = evidence_dir(work.path(), "dispatch-7");
+    fs::create_dir_all(evidence.join("sub")).expect("a subdirectory is created");
+
+    let response = file_page(work.path(), work.path(), "dispatch-7", "sub", "");
+    assert_eq!(response.status, 404, "a directory entry is not a servable file");
 }

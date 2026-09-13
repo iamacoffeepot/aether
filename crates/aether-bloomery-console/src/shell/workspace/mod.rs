@@ -220,6 +220,7 @@ impl Workspace {
         let Some(view) = store.view().value.as_ref() else {
             return;
         };
+        let dimmed = store.view().is_stale();
         let seal = u16::from(view.spend_quiesce.is_some());
         let today = u16::from(!dashboard.today.is_empty());
         let rest = quiet_lines(view);
@@ -232,12 +233,12 @@ impl Workspace {
                 Constraint::Min(0),
             ])
             .split(inner);
-        frame.render_widget(chrome::status(view), chunks[0]);
+        frame.render_widget(chrome::status(view, dimmed), chunks[0]);
         if let Some(quiesce) = &view.spend_quiesce {
-            frame.render_widget(chrome::seal(quiesce), chunks[1]);
+            frame.render_widget(chrome::seal(quiesce, dimmed), chunks[1]);
         }
         if today > 0 {
-            frame.render_widget(chrome::today(dashboard), chunks[2]);
+            frame.render_widget(chrome::today(dashboard, dimmed), chunks[2]);
         }
         frame.render_widget(chrome::quiet(&rest), chunks[3]);
     }

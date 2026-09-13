@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use aether_bloomery::METRICS_MAX_LIMIT;
 
 use crate::dto::{
-    BloomDispatchesView, CommissionShowView, CommissionsView, DecodedArtifact, DigestHex, DispatchFilePage,
-    JournalPage, JournalRecordView, MetricDay, MetricDispatch, MetricsSeat, MetricsSummary, MetricsTimeline,
-    SpendWindowView, ViewDocument,
+    BloomDispatchesView, CommissionShowView, CommissionsView, CoordinatorLogsView, DecodedArtifact, DigestHex,
+    DispatchFilePage, JournalPage, JournalRecordView, MetricDay, MetricDispatch, MetricsSeat, MetricsSummary,
+    MetricsTimeline, SpendWindowView, ViewDocument,
 };
 
 /// Newest dispatch rows the board keeps. Matches the coordinator page ceiling so one catch-up page fills the bound.
@@ -32,6 +32,75 @@ pub enum ResourceKey {
     Spend,
     Commissions,
     Commission(String),
+    CoordinatorLogs(CoordinatorLogQuery),
+}
+
+/// Severity floor for one coordinator-log page. `None` on the query is every level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+}
+
+impl LogLevel {
+    /// The `level` query value the route parses.
+    #[must_use]
+    pub fn param(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+        }
+    }
+
+    /// The word the log screen paints.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        self.param()
+    }
+
+    /// Next floor, wrapping back to unfiltered. The order walks from the
+    /// quietest floor to the noisiest so one key press narrows first.
+    #[must_use]
+    pub fn cycle(level: Option<Self>) -> Option<Self> {
+        match level {
+            None => Some(Self::Error),
+            Some(Self::Error) => Some(Self::Warn),
+            Some(Self::Warn) => Some(Self::Info),
+            Some(Self::Info) => Some(Self::Debug),
+            Some(Self::Debug) => None,
+        }
+    }
+}
+
+/// Query identity for one coordinator-log page. `live` is cadence only — it
+/// is not on the wire.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CoordinatorLogQuery {
+    pub level: Option<LogLevel>,
+    pub cursor: Option<String>,
+    pub live: bool,
+}
+
+impl CoordinatorLogQuery {
+    #[must_use]
+    pub fn path(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(level) = self.level {
+            parts.push(format!("level={}", level.param()));
+        }
+        if let Some(cursor) = &self.cursor {
+            parts.push(format!("cursor={}", escape_segment(cursor)));
+        }
+        if parts.is_empty() {
+            "/logs/coordinator".to_owned()
+        } else {
+            format!("/logs/coordinator?{}", parts.join("&"))
+        }
+    }
 }
 
 /// Query identity for one journal page. Filter text lives on the screen.
@@ -119,7 +188,8 @@ impl ResourceKey {
             | Self::BloomDispatches(_)
             | Self::Spend
             | Self::Commissions
-            | Self::Commission(_) => Lane::Bulk,
+            | Self::Commission(_)
+            | Self::CoordinatorLogs(_) => Lane::Bulk,
         }
     }
 
@@ -139,12 +209,16 @@ impl ResourceKey {
             Self::BloomDispatches(bloom) => format!("/blooms/{}/dispatches", bloom.as_hex()),
             Self::Spend => "/spend".to_owned(),
             Self::Commissions => "/commissions".to_owned(),
-            Self::Commission(id) => format!("/commissions/{}", path_segment(id)),
+            Self::Commission(id) => format!("/commissions/{}", escape_segment(id)),
+            Self::CoordinatorLogs(query) => query.path(),
         }
     }
 }
 
-fn path_segment(id: &str) -> String {
+/// Percent-escape one path segment or query value. A journald cursor carries
+/// `;` and `=` that would otherwise survive into the query string raw, where
+/// `+` decodes to a space and `&` would split the value.
+fn escape_segment(id: &str) -> String {
     let mut out = String::new();
     for byte in id.bytes() {
         match byte {
@@ -240,6 +314,7 @@ pub struct Store {
     commission_capability: Option<CommissionCapability>,
     commissions: Cell<CommissionsView>,
     commission_shows: HashMap<String, Cell<CommissionShowView>>,
+    coordinator_logs: HashMap<CoordinatorLogQuery, Cell<CoordinatorLogsView>>,
 }
 
 impl Store {
@@ -264,6 +339,7 @@ impl Store {
             commission_capability: None,
             commissions: Cell::default(),
             commission_shows: HashMap::new(),
+            coordinator_logs: HashMap::new(),
         }
     }
 
@@ -343,6 +419,11 @@ impl Store {
     }
 
     #[must_use]
+    pub fn coordinator_logs(&self, query: &CoordinatorLogQuery) -> Option<&Cell<CoordinatorLogsView>> {
+        self.coordinator_logs.get(query)
+    }
+
+    #[must_use]
     pub fn record(&self, sequence: u64) -> Option<&JournalRecordView> {
         self.journals
             .values()
@@ -354,6 +435,7 @@ impl Store {
     #[must_use]
     pub fn cadence(&self, key: &ResourceKey) -> Duration {
         match key {
+            ResourceKey::CoordinatorLogs(query) if query.live => self.view_cadence,
             ResourceKey::Transcript(query) if query.live => self.view_cadence,
             ResourceKey::View
             | ResourceKey::MetricsSummary
@@ -368,7 +450,8 @@ impl Store {
             | ResourceKey::MetricsTimeline(_)
             | ResourceKey::MetricsSeats
             | ResourceKey::BloomDispatches(_)
-            | ResourceKey::Commission(_) => Duration::ZERO,
+            | ResourceKey::Commission(_)
+            | ResourceKey::CoordinatorLogs(_) => Duration::ZERO,
         }
     }
 
@@ -400,6 +483,13 @@ impl Store {
                 };
                 !cell.inflight && cell.completed_at.is_none_or(|at| at.elapsed() >= self.view_cadence)
             }
+            ResourceKey::CoordinatorLogs(query) if query.live => {
+                let Some(cell) = self.coordinator_logs.get(query) else {
+                    return true;
+                };
+                !cell.inflight && cell.completed_at.is_none_or(|at| at.elapsed() >= self.view_cadence)
+            }
+            ResourceKey::CoordinatorLogs(query) => self.coordinator_logs.get(query).is_none_or(Cell::on_demand_due),
             ResourceKey::Transcript(query) => self.transcripts.get(query).is_none_or(Cell::on_demand_due),
             ResourceKey::Prompt(query) => self.prompts.get(query).is_none_or(Cell::on_demand_due),
             ResourceKey::MetricsSummary => self.polled_due(&self.summary),
@@ -447,6 +537,7 @@ impl Store {
             ResourceKey::Spend => self.spend.inflight,
             ResourceKey::Commissions => self.commissions.inflight,
             ResourceKey::Commission(id) => self.commission_shows.get(id).is_some_and(|cell| cell.inflight),
+            ResourceKey::CoordinatorLogs(query) => self.coordinator_logs.get(query).is_some_and(|cell| cell.inflight),
         }
     }
 
@@ -466,6 +557,9 @@ impl Store {
             ResourceKey::Spend => self.spend.inflight = true,
             ResourceKey::Commissions => self.commissions.inflight = true,
             ResourceKey::Commission(id) => self.commission_shows.entry(id.clone()).or_default().inflight = true,
+            ResourceKey::CoordinatorLogs(query) => {
+                self.coordinator_logs.entry(query.clone()).or_default().inflight = true;
+            }
         }
     }
 
@@ -568,6 +662,10 @@ impl Store {
         apply(self.commission_shows.entry(id).or_default(), result);
     }
 
+    pub fn apply_coordinator_logs(&mut self, query: CoordinatorLogQuery, result: Result<CoordinatorLogsView, String>) {
+        apply(self.coordinator_logs.entry(query).or_default(), result);
+    }
+
     pub fn apply_err(&mut self, key: &ResourceKey, error: impl Display) {
         match key {
             ResourceKey::View => self.view.apply_err(error),
@@ -584,6 +682,9 @@ impl Store {
             ResourceKey::Spend => self.spend.apply_err(error),
             ResourceKey::Commissions => self.commissions.apply_err(error),
             ResourceKey::Commission(id) => self.commission_shows.entry(id.clone()).or_default().apply_err(error),
+            ResourceKey::CoordinatorLogs(query) => {
+                self.coordinator_logs.entry(query.clone()).or_default().apply_err(error);
+            }
         }
     }
 }
@@ -613,7 +714,7 @@ fn merge_dispatch_page(retained: Vec<MetricDispatch>, page: Vec<MetricDispatch>)
 
 #[cfg(test)]
 mod tests {
-    use super::{CommissionCapability, PromptQuery, ResourceKey, Store};
+    use super::{CommissionCapability, CoordinatorLogQuery, Lane, LogLevel, PromptQuery, ResourceKey, Store};
     use crate::dto::{BloomView, DigestHex, MemberView, MetricDispatch, ViewDocument};
     use aether_bloomery::METRICS_MAX_LIMIT;
     use std::thread;
@@ -689,6 +790,46 @@ mod tests {
             PromptQuery { nonce: "dispatch-1".into(), cursor: Some(40) }.path(),
             "/dispatches/dispatch-1/prompt?cursor=40"
         );
+    }
+
+    #[test]
+    fn a_coordinator_log_query_names_its_level_and_escapes_its_cursor() {
+        // Tripwire: the path is the whole contract with
+        // api/runtime/evidence/logs.rs. A journald cursor carries `;` and `=`
+        // that must ride escaped — `+` would decode to a space and `&` would
+        // split the value on the route's pairs() — and the level floor must be
+        // named or the route returns every severity.
+        assert_eq!(CoordinatorLogQuery { level: None, cursor: None, live: false }.path(), "/logs/coordinator");
+        assert_eq!(
+            CoordinatorLogQuery { level: Some(LogLevel::Warn), cursor: None, live: true }.path(),
+            "/logs/coordinator?level=warn"
+        );
+        assert_eq!(
+            CoordinatorLogQuery {
+                level: Some(LogLevel::Error),
+                cursor: Some("s=ab12;i=cd34;x=/ Matthews".to_owned()),
+                live: true,
+            }
+            .path(),
+            "/logs/coordinator?level=error&cursor=s%3Dab12%3Bi%3Dcd34%3Bx%3D%2F%20Matthews"
+        );
+    }
+
+    #[test]
+    fn a_live_coordinator_log_poll_repeats_at_cadence() {
+        // The plausible bug: the follow poll is on-demand, so the tail sits
+        // still until the operator presses `r`, or it rides the live lane
+        // whose 1 s timeout chops a full page.
+        let live = ResourceKey::CoordinatorLogs(CoordinatorLogQuery { level: None, cursor: None, live: true });
+        let once = ResourceKey::CoordinatorLogs(CoordinatorLogQuery { level: None, cursor: None, live: false });
+        assert_eq!(live.lane(), Lane::Bulk);
+        assert_eq!(once.lane(), Lane::Bulk);
+        let cadence = Duration::from_millis(10);
+        let mut store = Store::new(cadence);
+        assert!(store.due(&live));
+        assert!(store.due(&once));
+        store.mark_inflight(&live);
+        assert!(!store.due(&live));
     }
 
     #[test]

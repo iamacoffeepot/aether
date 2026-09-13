@@ -1,7 +1,12 @@
 //! Transcript viewer: follow-tail, incremental search, one row per event.
+//!
+//! The transcript is the agent's session: each row is a turn, a tool call, a
+//! tool result, or the terminal verdict, and the status line carries the
+//! session's turns, cost, and time off the terminal record.
 
 mod buffer;
 mod event;
+mod session;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -16,6 +21,7 @@ use crate::store::{PromptQuery, ResourceKey, Store, TranscriptQuery};
 use crate::warroom::Focus;
 
 pub use buffer::{DEFAULT_CAP, LineBuffer};
+use session::{SessionSummary, TAIL_SCAN, summarize_tail};
 
 const HINTS: &[KeyHint] = &[
     KeyHint { keys: "j/k", action: "select" },
@@ -589,6 +595,18 @@ impl Transcript {
         frame.render_widget(List::new(items).style(palette::body()), area);
     }
 
+    /// The session meters off the transcript tail — turns, cost, time — when
+    /// the transcript has reached a terminal record.
+    fn session_summary(&self) -> Option<SessionSummary> {
+        let len = self.buffer.len();
+        if len == 0 {
+            return None;
+        }
+        let start = len.saturating_sub(TAIL_SCAN);
+        let tail: Vec<&str> = (start..len).filter_map(|index| self.buffer.raw(index)).collect();
+        summarize_tail(&tail)
+    }
+
     fn status_line(&self) -> String {
         let (file, count) = match self.pane {
             Pane::Prompt => ("prompt.md", self.prompt.lines.len()),
@@ -596,6 +614,9 @@ impl Transcript {
         };
         let mut parts = vec![file.to_owned(), self.nonce.clone(), format!("{count} lines")];
         if self.pane == Pane::Transcript {
+            if let Some(summary) = self.session_summary() {
+                parts.push(summary.label());
+            }
             if self.follow {
                 parts.push("FOLLOW".to_owned());
             }
@@ -918,5 +939,36 @@ mod tests {
             wide.contains('}'),
             "widening must reclamp onto JSON content, not a blank pane or the status line:\n{wide}"
         );
+    }
+
+    #[test]
+    fn the_status_line_carries_the_sessions_turns_cost_and_time() {
+        // The plausible bug: the transcript paints every turn but never says
+        // what the session cost — the operator must expand the terminal row
+        // to learn the turns, price, and duration.
+        let store = store_with(page(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"looking"}]}}"#,
+            r#"{"type":"result","is_error":false,"num_turns":3,"total_cost_usd":0.42,"duration_ms":12000,"result":"VERDICT: pass"}"#,
+        ]));
+        let mut view = Transcript::new("dispatch-1");
+        view.reseat(&store);
+        let text = drawn(&mut view, &store);
+        let status = &text[text.len().saturating_sub(80)..];
+        assert!(status.contains("3 turns"), "{status}");
+        assert!(status.contains("$0.42"), "{status}");
+        assert!(status.contains("12s"), "{status}");
+    }
+
+    #[test]
+    fn a_running_session_advertises_no_meters() {
+        // The plausible bug: a transcript with no terminal record paints
+        // `ok  $0`, so a still-running session reads as a free completed one.
+        let store =
+            store_with(page(&[r#"{"type":"assistant","message":{"content":[{"type":"text","text":"looking"}]}}"#]));
+        let mut view = Transcript::new("dispatch-1");
+        view.reseat(&store);
+        let text = drawn(&mut view, &store);
+        assert!(!text.contains("turns"), "{text}");
+        assert!(!text.contains('$'), "{text}");
     }
 }
