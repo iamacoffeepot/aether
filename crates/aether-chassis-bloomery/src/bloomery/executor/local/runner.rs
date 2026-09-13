@@ -192,6 +192,11 @@ impl RunLifecycle {
 /// stub that writes a canned output dir, so the backend's registry / lifecycle /
 /// evidence logic is exercised without a real repo or Claude credential.
 pub trait TransformRunner: Send + Sync {
+    /// Repository whose object database owns executor-created private refs.
+    fn repository_root(&self) -> Option<PathBuf> {
+        None
+    }
+
     /// Materialize the checkout and spawn the transform, returning a handle to
     /// the running child.
     ///
@@ -247,6 +252,26 @@ pub trait TransformRunner: Send + Sync {
         worktree_dir: &Path,
         message: Option<&str>,
     ) -> Result<Option<CapturedObjects>, LocalExecutorError>;
+
+    /// Capture a construction lane's current files without changing its HEAD or
+    /// index. The returned commit is an immutable preview parented by
+    /// `starting_checkout`; it is not verification evidence.
+    ///
+    /// The default keeps test and remote runners that cannot snapshot a live
+    /// checkout honest: they publish no checkpoint rather than falling back to
+    /// the mutating terminal capture path.
+    ///
+    /// # Errors
+    /// The private snapshot could not be materialized.
+    fn capture_checkpoint(
+        &self,
+        worktree_dir: &Path,
+        evidence_dir: &Path,
+        starting_checkout: &str,
+    ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
+        let _ = (worktree_dir, evidence_dir, starting_checkout);
+        Ok(None)
+    }
 }
 
 /// What [`TransformRunner::capture`] produced: the capture commit wrapping the

@@ -173,6 +173,16 @@ pub struct ScriptedEvidence {
     pub upload: Vec<u8>,
 }
 
+/// `aether.bloomery.testing.scripted_member_verification_gate` — hold or
+/// release creation of new shared member-verification proposals in a fixture.
+/// Retained proposals continue replaying while held, so this seam cannot mask
+/// proposal recovery behavior.
+#[aether_data::kind(name = "aether.bloomery.testing.scripted_member_verification_gate")]
+pub struct ScriptedMemberVerificationGate {
+    /// Whether creation of a new proposal is held.
+    pub held: bool,
+}
+
 /// Reply to [`ScriptedEvidence`].
 ///
 /// Arms rather than a boolean because a scenario that fails needs to know

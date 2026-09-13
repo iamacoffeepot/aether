@@ -14,14 +14,26 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use aether_bloomery::{BloomId, BloomStatus, Digest, Snapshot, is_active_unlanded};
+use crate::bloomery::outbox::TopicOutbox;
+use crate::bloomery::precheck::namespace as preview_namespace;
+use aether_bloomery::{
+    BloomId, BloomStatus, CandidatePreparationPayload, ConstructionAdmissionPayload, Digest, IntegrationAppendPayload,
+    Nonce, PartialHeadRepairDispatch, PartialHeadRepairPayload, PartialHeadRepairPlan, QueuePrecheckPlanPayload,
+    SharedRunDispatch, Snapshot, Topic, construction_nonce_digest, is_active_unlanded,
+};
+use aether_bloomery_git::{construction_checkpoint_scope_namespace, partial_head_repair_namespace};
 use aether_bloomery_github::SourceError;
+use aether_data::wire::from_bytes;
 
 use crate::bloomery::LaneOccupancy;
 use crate::bloomery::SourceShell;
 use crate::bloomery::TransformRunner;
 use crate::bloomery::config::JANITOR_REF_PRUNES_PER_TICK;
-use crate::store::{StoreBackend, membership};
+use crate::bloomery::coordination::{
+    generation_namespace, preparation_namespace, shared_probe_namespace, shared_run_namespace,
+};
+use crate::bloomery::reactor::shared_run::SharedStepDescriptor;
+use crate::store::{SharedRunLifecycle, SharedRunRow, StoreBackend, membership};
 
 use super::records::{between_blooms, bloom_is_live, child_name_of, dispatch_owners};
 
@@ -201,11 +213,317 @@ pub fn sweep(request: &mut SweepRequest<'_>, scan: &mut TargetScan) -> rusqlite:
     } else {
         0
     };
-    let refs = request.source.map_or(0, |source| prune_terminal_refs(source, &snapshot, request.pruned));
+    let mut refs = request.source.map_or(0, |source| prune_terminal_refs(source, &snapshot, request.pruned));
+    if let Some(source) = request.source {
+        refs += prune_preview_refs(request.store, source, &snapshot, request.pruned)?;
+        refs += prune_coordination_refs(request.store, source, &snapshot, request.pruned)?;
+    }
     let interval = Duration::from_secs(request.policy.target_scan_interval_secs);
     let now = request.now;
     let (target_dirs, targets_measured) = sweep_targets(request, scan, interval, now);
     Ok(SweepReport { worktrees, refs, target_dirs, targets_measured })
+}
+
+/// Reclaim only namespaces named by retained immutable plans. Current
+/// generations and every context still retained by the reducer stay live;
+/// shared-run and probe namespaces stay until their durable run is terminal.
+/// One successful or attempted source prune bounds each class per tick.
+fn prune_coordination_refs(
+    store: &mut dyn StoreBackend,
+    source: &dyn WorkingRefPruner,
+    snapshot: &Snapshot,
+    already: &mut HashSet<BloomId>,
+) -> rusqlite::Result<usize> {
+    let shared_runs = store.list_shared_runs()?;
+    let retained_blooms = retained_coordination_blooms(store, snapshot, &shared_runs)?;
+    let protected_generations = protected_coordination_generations(snapshot, &retained_blooms);
+    let protected_repairs = protected_partial_head_repairs(store, snapshot)?;
+    Ok(prune_preparation_refs(store, source, snapshot, &retained_blooms, already)?
+        + prune_checkpoint_refs(store, source, snapshot, &retained_blooms, already)?
+        + prune_generation_refs(store, source, &protected_generations, already)?
+        + prune_partial_head_repair_refs(store, source, &protected_repairs, already)?
+        + prune_shared_refs(store, source, shared_runs, already)?)
+}
+
+fn retained_coordination_blooms(
+    store: &mut dyn StoreBackend,
+    snapshot: &Snapshot,
+    shared_runs: &[SharedRunRow],
+) -> rusqlite::Result<HashSet<BloomId>> {
+    let mut retained_blooms = HashSet::new();
+    for nonce in store.list_order_nonces()? {
+        if let Some(order) = store.lookup_order(&nonce)?
+            && let Some(bloom) = Digest::from_slice(&order.bloom)
+        {
+            retained_blooms.insert(BloomId(bloom));
+        }
+    }
+    for row in shared_runs {
+        if !shared_run_refs_are_live(store, row)? {
+            continue;
+        }
+        let dispatch = from_bytes::<SharedRunDispatch>(&row.dispatch)
+            .map_err(|error| rusqlite::Error::InvalidParameterName(format!("shared-run retain row: {error}")))?;
+        retained_blooms.extend(dispatch.plan.requests.iter().map(|request| request.bloom));
+    }
+    for (bloom, record) in &snapshot.blooms {
+        if coordination_refs_are_live(record.status, retained_blooms.contains(bloom)) {
+            retained_blooms.insert(*bloom);
+        }
+    }
+    Ok(retained_blooms)
+}
+
+fn protected_coordination_generations(snapshot: &Snapshot, retained_blooms: &HashSet<BloomId>) -> HashSet<Digest> {
+    let mut protected_generations = HashSet::new();
+    for (bloom, record) in &snapshot.blooms {
+        if !retained_blooms.contains(bloom) {
+            continue;
+        }
+        let Some(state) = record.coordination.as_deref() else {
+            continue;
+        };
+        protected_generations.insert(state.integration.generation.digest());
+        protected_generations.extend(state.contexts.values().map(|context| context.starting_head.generation));
+        protected_generations
+            .extend(state.prepared.values().map(|candidate| candidate.context.starting_head.generation));
+    }
+    protected_generations
+}
+
+fn protected_partial_head_repairs(
+    store: &mut dyn StoreBackend,
+    snapshot: &Snapshot,
+) -> rusqlite::Result<HashSet<Digest>> {
+    let mut protected = snapshot
+        .blooms
+        .values()
+        .filter_map(|record| record.coordination.as_deref())
+        .flat_map(|state| {
+            state
+                .partial_head_repair
+                .iter()
+                .map(PartialHeadRepairPlan::digest)
+                .chain((state.integration.head.plan != Digest::default()).then_some(state.integration.head.plan))
+        })
+        .collect::<HashSet<_>>();
+    for row in store.list_partial_head_repairs()? {
+        let dispatch = from_bytes::<PartialHeadRepairDispatch>(&row.dispatch)
+            .map_err(|error| rusqlite::Error::InvalidParameterName(format!("partial-head retain row: {error}")))?;
+        protected.insert(dispatch.plan.digest());
+    }
+    Ok(protected)
+}
+
+fn prune_preparation_refs(
+    store: &mut dyn StoreBackend,
+    source: &dyn WorkingRefPruner,
+    snapshot: &Snapshot,
+    retained_blooms: &HashSet<BloomId>,
+    already: &mut HashSet<BloomId>,
+) -> rusqlite::Result<usize> {
+    let mut pruned = 0;
+    let mut attempted = 0;
+    for entry in store.delivered_topic(Topic::CandidatePreparation)? {
+        let payload = from_bytes::<CandidatePreparationPayload>(&entry.payload).map_err(|error| {
+            rusqlite::Error::InvalidParameterName(format!("candidate preparation prune payload: {error}"))
+        })?;
+        let Some(record) = snapshot.blooms.get(&payload.plan.bloom) else {
+            continue;
+        };
+        let namespace = preparation_namespace(&payload.plan);
+        if retained_blooms.contains(&payload.plan.bloom)
+            || !refs_are_reclaimable(snapshot, &payload.plan.bloom, record.status)
+            || already.contains(&namespace)
+        {
+            continue;
+        }
+        if attempted >= JANITOR_REF_PRUNES_PER_TICK {
+            break;
+        }
+        attempted += 1;
+        pruned += prune_private_namespace(source, namespace, already, "terminal candidate preparation");
+    }
+    Ok(pruned)
+}
+
+fn prune_checkpoint_refs(
+    store: &mut dyn StoreBackend,
+    source: &dyn WorkingRefPruner,
+    snapshot: &Snapshot,
+    retained_blooms: &HashSet<BloomId>,
+    already: &mut HashSet<BloomId>,
+) -> rusqlite::Result<usize> {
+    let mut pruned = 0;
+    let mut attempted = 0;
+    for entry in store.delivered_topic(Topic::ConstructionAdmission)? {
+        let payload = from_bytes::<ConstructionAdmissionPayload>(&entry.payload)
+            .map_err(|error| rusqlite::Error::InvalidParameterName(format!("checkpoint prune payload: {error}")))?;
+        let dispatch = payload.dispatch;
+        let Some(nonce) = store.construction_admission_nonce(dispatch.digest().as_bytes())? else {
+            continue;
+        };
+        let nonce = construction_nonce_digest(&Nonce(nonce));
+        let namespace = construction_checkpoint_scope_namespace(
+            dispatch.bloom,
+            &dispatch.workpiece,
+            dispatch.scope_revision,
+            dispatch.context.starting_head.candidate.checkout,
+            nonce,
+        );
+        let retained = retained_blooms.contains(&dispatch.bloom)
+            && snapshot.blooms.get(&dispatch.bloom).and_then(|record| record.coordination.as_deref()).is_some_and(
+                |state| {
+                    state
+                        .admitted_construction
+                        .get(&dispatch.workpiece.0)
+                        .is_some_and(|admission| admission.nonce == nonce && admission.dispatch == dispatch)
+                        || state.checkpoints.get(&dispatch.workpiece.0).is_some_and(|checkpoint| {
+                            checkpoint.nonce == nonce
+                                && checkpoint.scope_revision == dispatch.scope_revision
+                                && checkpoint.starting_checkout == dispatch.context.starting_head.candidate.checkout
+                        })
+                },
+            );
+        if retained || already.contains(&namespace) {
+            continue;
+        }
+        if attempted >= JANITOR_REF_PRUNES_PER_TICK {
+            break;
+        }
+        attempted += 1;
+        pruned += prune_private_namespace(source, namespace, already, "retired construction checkpoints");
+    }
+    Ok(pruned)
+}
+
+fn prune_partial_head_repair_refs(
+    store: &mut dyn StoreBackend,
+    source: &dyn WorkingRefPruner,
+    protected: &HashSet<Digest>,
+    already: &mut HashSet<BloomId>,
+) -> rusqlite::Result<usize> {
+    let mut pruned = 0;
+    let mut attempted = 0;
+    for entry in store.delivered_topic(Topic::PartialHeadRepair)? {
+        let payload = from_bytes::<PartialHeadRepairPayload>(&entry.payload)
+            .map_err(|error| rusqlite::Error::InvalidParameterName(format!("partial-head prune payload: {error}")))?;
+        let plan = payload.dispatch.plan.digest();
+        let namespace = partial_head_repair_namespace(plan);
+        if protected.contains(&plan) || already.contains(&namespace) {
+            continue;
+        }
+        if attempted >= JANITOR_REF_PRUNES_PER_TICK {
+            break;
+        }
+        attempted += 1;
+        pruned += prune_private_namespace(source, namespace, already, "retired partial-head repair");
+    }
+    Ok(pruned)
+}
+
+fn prune_generation_refs(
+    store: &mut dyn StoreBackend,
+    source: &dyn WorkingRefPruner,
+    protected_generations: &HashSet<Digest>,
+    already: &mut HashSet<BloomId>,
+) -> rusqlite::Result<usize> {
+    let mut pruned = 0;
+    let mut attempted = 0;
+    for entry in store.delivered_topic(Topic::IntegrationAppend)? {
+        let payload = from_bytes::<IntegrationAppendPayload>(&entry.payload)
+            .map_err(|error| rusqlite::Error::InvalidParameterName(format!("eager append prune payload: {error}")))?;
+        let namespace = generation_namespace(payload.plan.generation);
+        if protected_generations.contains(&payload.plan.generation) || already.contains(&namespace) {
+            continue;
+        }
+        if attempted >= JANITOR_REF_PRUNES_PER_TICK {
+            break;
+        }
+        attempted += 1;
+        pruned += prune_private_namespace(source, namespace, already, "obsolete eager generation");
+    }
+    Ok(pruned)
+}
+
+fn prune_shared_refs(
+    store: &mut dyn StoreBackend,
+    source: &dyn WorkingRefPruner,
+    shared_runs: Vec<SharedRunRow>,
+    already: &mut HashSet<BloomId>,
+) -> rusqlite::Result<usize> {
+    let mut pruned = 0;
+    let mut attempted = 0;
+    for row in shared_runs {
+        if shared_run_refs_are_live(store, &row)? {
+            continue;
+        }
+        let dispatch = from_bytes::<SharedRunDispatch>(&row.dispatch)
+            .map_err(|error| rusqlite::Error::InvalidParameterName(format!("shared-run prune row: {error}")))?;
+        if attempted >= JANITOR_REF_PRUNES_PER_TICK {
+            break;
+        }
+        let namespace = shared_run_namespace(&dispatch.plan);
+        if dispatch.plan.composition.is_some() && !already.contains(&namespace) {
+            attempted += 1;
+            pruned += prune_private_namespace(source, namespace, already, "terminal shared run");
+            if !already.contains(&namespace) {
+                continue;
+            }
+        }
+        for step in store.shared_run_steps(&row.run)? {
+            let Ok(SharedStepDescriptor::Probe(probe)) = serde_json::from_slice(&step.descriptor) else {
+                continue;
+            };
+            let namespace = shared_probe_namespace(probe.run, probe.ordinal, probe.plan);
+            if already.contains(&namespace) || attempted >= JANITOR_REF_PRUNES_PER_TICK {
+                continue;
+            }
+            attempted += 1;
+            pruned += prune_private_namespace(source, namespace, already, "terminal shared probe");
+        }
+    }
+    Ok(pruned)
+}
+
+fn coordination_refs_are_live(status: BloomStatus, has_durable_work: bool) -> bool {
+    is_active_unlanded(status) || has_durable_work
+}
+
+fn shared_run_refs_are_live(store: &mut dyn StoreBackend, row: &SharedRunRow) -> rusqlite::Result<bool> {
+    if matches!(
+        row.lifecycle,
+        SharedRunLifecycle::Preparing
+            | SharedRunLifecycle::Ready
+            | SharedRunLifecycle::Running
+            | SharedRunLifecycle::Completing
+    ) {
+        return Ok(true);
+    }
+    for step in store.shared_run_steps(&row.run)? {
+        if step.receipt.is_none() || store.lookup_order(&step.nonce)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn prune_private_namespace(
+    source: &dyn WorkingRefPruner,
+    namespace: BloomId,
+    already: &mut HashSet<BloomId>,
+    class: &str,
+) -> usize {
+    match source.prune_working_refs(&namespace) {
+        Ok(count) => {
+            already.insert(namespace);
+            count
+        }
+        Err(error) => {
+            tracing::warn!(%error, %class, "janitor: private namespace prune failed; will retry");
+            0
+        }
+    }
 }
 
 fn reclaim_worktrees(
@@ -289,6 +607,55 @@ fn prune_terminal_refs(source: &dyn WorkingRefPruner, snapshot: &Snapshot, alrea
         }
     }
     pruned
+}
+
+/// Private plan namespaces are reconstructible from the existing outbox. A
+/// pending preparation may still own a Git worker; an outstanding order may
+/// still need its checkout, so neither namespace is eligible yet.
+fn prune_preview_refs(
+    store: &mut dyn StoreBackend,
+    source: &dyn WorkingRefPruner,
+    snapshot: &Snapshot,
+    already: &mut HashSet<BloomId>,
+) -> rusqlite::Result<usize> {
+    let plans = store.delivered_topic(Topic::QueuePrecheckPlan)?;
+    if plans.is_empty() {
+        return Ok(0);
+    }
+    let mut busy = HashSet::new();
+    for nonce in store.list_order_nonces()? {
+        if let Some(order) = store.lookup_order(&nonce)?
+            && let Some(bloom) = Digest::from_slice(&order.bloom)
+        {
+            busy.insert(BloomId(bloom));
+        }
+    }
+    let mut pruned = 0;
+    let mut attempted = 0;
+    for entry in plans {
+        let payload = from_bytes::<QueuePrecheckPlanPayload>(&entry.payload)
+            .map_err(|error| rusqlite::Error::InvalidParameterName(format!("pre-check prune payload: {error}")))?;
+        let bloom = BloomId(payload.bloom);
+        let namespace = preview_namespace(&payload.plan);
+        if already.contains(&namespace)
+            || busy.contains(&bloom)
+            || snapshot.blooms.get(&bloom).is_none_or(|record| is_active_unlanded(record.status))
+        {
+            continue;
+        }
+        if attempted >= JANITOR_REF_PRUNES_PER_TICK {
+            break;
+        }
+        attempted += 1;
+        match source.prune_working_refs(&namespace) {
+            Ok(count) => {
+                pruned += count;
+                already.insert(namespace);
+            }
+            Err(error) => tracing::warn!(%error, "janitor: private pre-check ref prune failed; will retry"),
+        }
+    }
+    Ok(pruned)
 }
 
 /// Whether a terminal bloom's working refs are this pass's to delete.
@@ -693,3 +1060,244 @@ fn hex_of(digest: &Digest) -> String {
 /// Retention window as a [`Duration`], for tests that age a directory.
 #[cfg(test)]
 pub(super) use super::records::retention_duration;
+
+#[cfg(test)]
+mod preview_tests {
+    use std::cell::RefCell;
+
+    use aether_bloomery::testing::{digest, draft, membership, splice_bloom, workpiece};
+    use aether_bloomery::{
+        AgentProfile, CandidateRef, CompositionContractTemplate, ConfigRegistry, ContextualInvocationTemplate,
+        CoordinationPolicy, CoordinationState, ExecutionLimits, Harness, NetworkProfile, PartialHeadRepairDispatch,
+        PartialHeadRepairPayload, PartialHeadRepairPlan, PrecheckPlan, ReasoningEffort, ToolPolicy, Transformation,
+        VerificationMode,
+    };
+    use aether_data::wire::to_vec;
+
+    use super::*;
+    use crate::store::{OrderLifecycle, OutstandingOrder, SharedRunStepRow, SqliteStore};
+
+    #[derive(Default)]
+    struct Pruner(RefCell<Vec<BloomId>>);
+
+    impl WorkingRefPruner for Pruner {
+        fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError> {
+            self.0.borrow_mut().push(*bloom);
+            Ok(1)
+        }
+    }
+
+    #[test]
+    fn preview_refs_wait_for_preparation_terminal_membership_and_settled_orders() {
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        let spec = draft(0, vec![membership("wp", 1)]).seal();
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &spec, BloomStatus::Landed);
+        let plan = PrecheckPlan { bloom: spec.id(), base: digest(0), members: Vec::new(), gate_set: digest(1) };
+        let namespace = preview_namespace(&plan);
+        let payload = QueuePrecheckPlanPayload { bloom: spec.id().0, plan };
+        store.enqueue_topic(Topic::QueuePrecheckPlan, &to_vec(&payload).expect("payload"), None).expect("enqueue");
+        let source = Pruner::default();
+        let mut already = HashSet::new();
+        assert_eq!(prune_preview_refs(&mut store, &source, &snapshot, &mut already).expect("pending"), 0);
+
+        let entry = store.drain_topic(Topic::QueuePrecheckPlan).expect("pending plan").remove(0);
+        store.ack_topic(Topic::QueuePrecheckPlan, entry.sequence).expect("finished preparation");
+        snapshot.blooms.get_mut(&spec.id()).expect("bloom").status = BloomStatus::Sealed;
+        assert_eq!(prune_preview_refs(&mut store, &source, &snapshot, &mut already).expect("active"), 0);
+
+        snapshot.blooms.get_mut(&spec.id()).expect("bloom").status = BloomStatus::Landed;
+        store
+            .record_order(&OutstandingOrder {
+                lifecycle: OrderLifecycle::Submitting,
+                ..super::super::tests::order_for("preview", &spec.id())
+            })
+            .expect("submitting order");
+        assert_eq!(prune_preview_refs(&mut store, &source, &snapshot, &mut already).expect("submitting"), 0);
+        store.consume_order("preview").expect("settled order");
+        assert_eq!(prune_preview_refs(&mut store, &source, &snapshot, &mut already).expect("terminal"), 1);
+        assert_eq!(*source.0.borrow(), vec![namespace]);
+        assert_ne!(namespace, spec.id());
+        assert_eq!(prune_preview_refs(&mut store, &source, &snapshot, &mut already).expect("repeat"), 0);
+    }
+
+    #[test]
+    fn completing_and_terminal_runs_with_open_orders_keep_their_refs() {
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        let mut row = SharedRunRow {
+            run: digest(70).as_bytes().to_vec(),
+            nonce: "shared".to_owned(),
+            dispatch: Vec::new(),
+            lifecycle: SharedRunLifecycle::Completing,
+            next_ordinal: 0,
+            deadline_unix_millis: 1,
+            charged: false,
+            physical_cost: None,
+        };
+        assert!(shared_run_refs_are_live(&mut store, &row).expect("completing"));
+
+        row.lifecycle = SharedRunLifecycle::Cancelled;
+        store.record_shared_run(&row, &[]).expect("cancelled run");
+        let step = SharedRunStepRow {
+            run: row.run.clone(),
+            ordinal: 0,
+            nonce: "shared-step-0".to_owned(),
+            request: None,
+            descriptor: Vec::new(),
+            prepared: None,
+            receipt: Some(vec![1]),
+            duration_millis: None,
+            release_physical_run: false,
+        };
+        store.record_shared_run_step(&step).expect("settled step");
+        store
+            .record_order(&OutstandingOrder {
+                lifecycle: OrderLifecycle::Submitted,
+                ..super::super::tests::order_for(&step.nonce, &BloomId(digest(71)))
+            })
+            .expect("open order");
+        assert!(shared_run_refs_are_live(&mut store, &row).expect("open order"));
+
+        store.consume_order(&step.nonce).expect("settle order");
+        assert!(!shared_run_refs_are_live(&mut store, &row).expect("terminal"));
+    }
+
+    #[test]
+    fn terminal_generation_refs_wait_only_for_durable_work() {
+        assert!(coordination_refs_are_live(BloomStatus::Sealed, false));
+        assert!(!coordination_refs_are_live(BloomStatus::Landed, false));
+        assert!(coordination_refs_are_live(BloomStatus::Landed, true));
+    }
+
+    fn partial_head_repair_payload(plan: &PartialHeadRepairPlan, base: CandidateRef) -> PartialHeadRepairPayload {
+        PartialHeadRepairPayload {
+            dispatch: PartialHeadRepairDispatch {
+                plan: plan.clone(),
+                transformation: Transformation {
+                    command: String::from("refine"),
+                    inputs: vec![plan.head.candidate.tree],
+                    checkout: plan.head.candidate.checkout,
+                    diff_base: Some(base.checkout),
+                    outputs: Vec::new(),
+                    image: String::from("test"),
+                    limits: ExecutionLimits { wall_clock_secs: 1 },
+                    network: NetworkProfile::None,
+                    description: None,
+                    model: None,
+                },
+                scope_revision: digest(0),
+                profile: AgentProfile {
+                    harness: Harness::Grok,
+                    model: String::from("test"),
+                    effort: ReasoningEffort::Low,
+                    tools: ToolPolicy::None,
+                },
+                configs: ConfigRegistry::default(),
+            },
+        }
+    }
+
+    fn partial_head_repair_fixture() -> (PartialHeadRepairPlan, Snapshot, SqliteStore) {
+        let spec = draft(0, vec![membership("wp", 1)]).seal();
+        let bloom = spec.id();
+        let base = CandidateRef { tree: digest(0), checkout: digest(0) };
+        let mut state = CoordinationState::new(
+            CoordinationPolicy {
+                verification: VerificationMode::Contextual,
+                eager_integration: true,
+                max_run_members: 2,
+                max_serial_requests: 2,
+                max_attribution_probes: 2,
+                movement_budget: 1,
+                reservation_millis: 1_000,
+                host_class: String::from("test"),
+            },
+            CompositionContractTemplate {
+                gate_set: digest(2),
+                gate_identities: vec![String::from("verify")],
+                invocation: ContextualInvocationTemplate {
+                    command: String::from("verify.check"),
+                    extra_inputs: Vec::new(),
+                    diff_base: Some(base.checkout),
+                    outputs: Vec::new(),
+                    image: String::from("test"),
+                    limits: ExecutionLimits { wall_clock_secs: 1 },
+                    network: NetworkProfile::None,
+                    description: None,
+                    model: None,
+                    profile: AgentProfile {
+                        harness: Harness::Grok,
+                        model: String::from("test"),
+                        effort: ReasoningEffort::Low,
+                        tools: ToolPolicy::None,
+                    },
+                    configs: ConfigRegistry::default(),
+                },
+                environment: digest(3),
+                host_class: digest(4),
+            },
+            bloom,
+            base,
+            vec![aether_bloomery::GenerationMember { workpiece: workpiece("wp"), scope_revision: digest(1) }],
+        );
+        let plan = PartialHeadRepairPlan {
+            bloom,
+            generation: state.integration.generation.digest(),
+            head: state.integration.head.clone(),
+            inputs: Vec::new(),
+            evidence: digest(5),
+            attempt: 0,
+        };
+        state.partial_head_repair = Some(plan.clone());
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &spec, BloomStatus::Sealed);
+        snapshot.blooms.get_mut(&bloom).expect("bloom").coordination = Some(Box::new(state));
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        let payload = partial_head_repair_payload(&plan, base);
+        store.enqueue_topic(Topic::PartialHeadRepair, &to_vec(&payload).expect("payload"), None).expect("enqueue");
+        let entry = store.drain_topic(Topic::PartialHeadRepair).expect("pending repair").remove(0);
+        store.ack_topic(Topic::PartialHeadRepair, entry.sequence).expect("delivered repair");
+
+        (plan, snapshot, store)
+    }
+
+    #[test]
+    fn active_and_published_partial_head_repairs_keep_their_source_pins() {
+        let (plan, mut snapshot, mut store) = partial_head_repair_fixture();
+        let bloom = plan.bloom;
+        let source = Pruner::default();
+        let mut already = HashSet::new();
+
+        let protected = protected_partial_head_repairs(&mut store, &snapshot).expect("active repair");
+        assert!(protected.contains(&plan.digest()));
+        assert_eq!(
+            prune_partial_head_repair_refs(&mut store, &source, &protected, &mut already).expect("active repair prune"),
+            0,
+        );
+
+        {
+            let state = snapshot.blooms.get_mut(&bloom).expect("bloom").coordination.as_mut().expect("coordination");
+            state.partial_head_repair = None;
+            state.integration.head.plan = plan.digest();
+        }
+        assert!(
+            protected_partial_head_repairs(&mut store, &snapshot).expect("published repair").contains(&plan.digest())
+        );
+        snapshot
+            .blooms
+            .get_mut(&bloom)
+            .expect("bloom")
+            .coordination
+            .as_mut()
+            .expect("coordination")
+            .integration
+            .head
+            .plan = Digest::default();
+        assert_eq!(
+            prune_partial_head_repair_refs(&mut store, &source, &HashSet::new(), &mut already)
+                .expect("retired repair prune"),
+            1,
+        );
+        assert_eq!(*source.0.borrow(), vec![partial_head_repair_namespace(plan.digest())]);
+    }
+}

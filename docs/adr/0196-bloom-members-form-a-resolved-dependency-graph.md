@@ -52,6 +52,14 @@ builds on.
 
 ## Decision
 
+[ADR-0218](0218-contextual-verification-and-eager-integration.md) amends
+readiness for blooms opting into eager integration: a dependency's current
+revision must be covered by the selected immutable head before its dependent
+dispatches. The order records that starting head and complete inherited
+versions separately from the sealed bloom base. Removing or replacing an
+inherited version invalidates its descendants' contexts. Legacy blooms retain
+the claim-based readiness rules below.
+
 A bloom's members form a directed acyclic graph, resolved at the seal door,
 scheduled by readiness, based by splicing, and landed exactly as today.
 

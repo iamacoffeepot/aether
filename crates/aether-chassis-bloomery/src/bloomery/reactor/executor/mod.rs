@@ -19,14 +19,14 @@
 
 use std::sync::Arc;
 
-use crate::bloomery::ExecutorShell;
+use crate::bloomery::{ExecutorShell, HostClass, SourceShell};
 // The scripted-lane seam's mail and reply kinds (#4711). Imported here, beside
 // the ZST, because `#[actor]` re-emits every handler's kinds in *this* module —
 // the same reason `DispatchTick` is re-exported below rather than left in
 // `runtime`. Gated exactly as the handler is, so a production build imports
 // nothing.
 #[cfg(any(test, feature = "testing"))]
-use crate::bloomery::testing::{ScriptedEvidence, ScriptedEvidenceResult};
+use crate::bloomery::testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedMemberVerificationGate};
 use aether_actor::actor;
 use aether_bloomery::SharedCorrespondence;
 use aether_bloomery::Topic;
@@ -40,7 +40,12 @@ pub use runtime::candidate_push_at;
 pub use runtime::{CandidatePush, DispatchTick, ExecutorReactorState};
 
 pub struct ExecutorReactorSetup {
+    /// Runtime host identity compared with each sealed shared-run contract.
+    pub host_class: HostClass,
     pub executor: Option<ExecutorShell>,
+    /// Source snapshot capability used to bind `BaseVerify` to the immutable
+    /// tree beneath its sealed checkout before any order is persisted.
+    pub source: Option<SourceShell>,
     pub correspondence: Option<SharedCorrespondence>,
     pub store_path: String,
     pub artifacts_root: Option<String>,
@@ -85,7 +90,9 @@ impl ExecutorReactorCapability {
     /// instruction-provenance gate refused, parked durably on the way out and
     /// admitted as a host fault on the way back in. And [`Topic::Study`]
     /// (ADR-0216): the bloom-level reader a landing decides, submitted through
-    /// the same shell under a bloom-level order record.
+    /// the same shell under a bloom-level order record. Aggregate pre-check
+    /// offers, dispatches, cancellation and promotion (ADR-0217) share
+    /// this reactor's admission and settlement cycle.
     pub const DRAINED_TOPICS: &'static [Topic] = &[
         Topic::Dispatch,
         Topic::AggregateReview,
@@ -96,6 +103,17 @@ impl ExecutorReactorCapability {
         Topic::BaseVerify,
         Topic::RefusedDispatch,
         Topic::Study,
+        Topic::OfferPrecheck,
+        Topic::DispatchPrecheck,
+        Topic::CancelPrecheck,
+        Topic::PromotePrecheck,
+        Topic::SharedRun,
+        Topic::MemberVerification,
+        Topic::CancelSharedRun,
+        Topic::CancelMemberVerification,
+        Topic::ContextualDispatch,
+        Topic::ConstructionAdmission,
+        Topic::PartialHeadRepair,
     ];
 }
 

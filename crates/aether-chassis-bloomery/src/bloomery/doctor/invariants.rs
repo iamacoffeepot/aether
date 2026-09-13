@@ -683,7 +683,7 @@ fn member_carries_excuse(
 ) -> bool {
     match excuse {
         Excuse::Wedge => record.wedged.contains_key(workpiece),
-        Excuse::Claim => record.claims.contains_key(workpiece),
+        Excuse::Claim => record.has_current_member_resolution(workpiece),
         Excuse::HostFault => record.host_faults.contains_key(workpiece),
         Excuse::Park => live.snapshot.member_park(bloom, workpiece).is_some(),
         Excuse::AwaitingSurface => live.snapshot.awaiting_surface(bloom, workpiece).is_some(),

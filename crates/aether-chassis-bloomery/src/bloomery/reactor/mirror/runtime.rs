@@ -151,8 +151,8 @@ impl MirrorReactorState {
 /// that topic's ack prefix; the entry re-delivers on the next drain.
 fn deliver(projection: &ProjectionShell, entry: &OutboxEntry) -> Result<(), String> {
     if entry.topic == Topic::ViewDocument {
-        let view: ViewDocument =
-            decode_row(&entry.payload, entry.payload_schema.as_deref()).map_err(|error| error.to_string())?;
+        let view = ViewDocument::decode_row(&entry.payload, entry.payload_schema.as_deref())
+            .map_err(|error| error.to_string())?;
         projection.reconcile_view(&view).map_err(|e| e.to_string())
     } else if entry.topic == Topic::LandingReceipt {
         let receipt: ProjectedReceipt = from_bytes(&entry.payload).map_err(|e| e.to_string())?;

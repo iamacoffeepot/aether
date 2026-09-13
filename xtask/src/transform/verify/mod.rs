@@ -1,5 +1,6 @@
 mod closure;
 mod nextest;
+mod observations;
 mod scope;
 mod symbols;
 mod tools;
@@ -2726,7 +2727,7 @@ fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTim
                 scope,
                 closure,
                 member_diff_base(id, args.diff_base.as_deref(), full),
-                &mut runner,
+                &mut observations::ObservingRunner::new(&mut runner, id, args.nonce.as_deref(), logs),
             )?,
         };
         runner.close_base();

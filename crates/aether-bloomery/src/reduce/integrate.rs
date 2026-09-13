@@ -9,6 +9,7 @@ use super::aggregate_verify::{aggregate_gate_dispatches, aggregate_review_dispat
 use super::boundary::EventBoundary;
 use super::gate::AGGREGATE_VERIFY_GATE;
 use super::lease::resume_entries;
+use super::precheck::final_join;
 use super::readiness::newly_ready_entries;
 use super::verify_memo::{proof_of, reuse_of};
 use super::{
@@ -18,7 +19,7 @@ use crate::digest::Digest;
 use crate::ids::BloomId;
 use crate::ids::StageId;
 use crate::reads;
-use crate::values::{CandidateRef, MemberCandidate, ResolutionClaim, VerifyProof};
+use crate::values::{CandidateRef, Evidence, MemberCandidate, ResolutionClaim, VerifyProof};
 
 /// The effects one member's resolution claim produces: the claim itself, the
 /// `provenance` note for the verdict it carries, and — when it completes the
@@ -196,6 +197,9 @@ pub(super) fn reduce_resolve(
     let Some(record) = snapshot.blooms.get(bloom) else {
         return Decisions::rejected(Outcome::ResolveRejected(ResolveError::UnknownOrInactiveBloom));
     };
+    if record.coordination.is_some() {
+        return super::coordination::reduce_coordination_resolve(record, *bloom, *tree, *head, lineage);
+    }
     // The roll this fold would buy, read before the guards so the ceiling guard
     // and the effects below agree on one number.
     let roll = record.aggregate_verify_rolls + 1;
@@ -272,7 +276,7 @@ pub(super) fn reduce_resolve(
 /// instead of their sum; the landing waits on the join of the two passes
 /// (`BloomRecord::aggregate_passed`), and a refusal from either re-weaves the
 /// composition once.
-fn folded(
+pub(super) fn folded(
     record: &BloomRecord,
     bloom: BloomId,
     tree: Digest,
@@ -282,6 +286,20 @@ fn folded(
 ) -> Decisions {
     let integration = FoldedIntegration { tree, head, lineage: lineage.to_vec() };
     let hold = Decision::RecordIntegration { bloom, integration: Some(integration) };
+
+    if let Some(node) = final_join(record, bloom, tree, head) {
+        let node_digest = node.digest();
+        let mut state = record.precheck.as_ref().expect("joined node has state").clone();
+        state.final_join = Some(node);
+        state.promoted = true;
+        let mut effects = alloc::vec![
+            hold,
+            Decision::RecordPrecheckState { bloom, state: Some(Box::new(state)) },
+            Decision::PromotePrecheck { bloom, node: node_digest },
+        ];
+        effects.extend(aggregate_review_dispatch(record, bloom, tree, head));
+        return Decisions { outcome: Outcome::PrecheckJoined { bloom, node: node_digest }, effects };
+    }
 
     // The fold may be a tree this bloom's fold gates have already proven
     // (#4891) — a re-weave that reproduces a tree an earlier round already put
@@ -305,6 +323,31 @@ fn folded(
     effects.extend(aggregate_gate_dispatches(record, bloom, tree, head));
 
     Decisions { outcome: Outcome::AggregateVerifyDispatched { bloom, roll }, effects }
+}
+
+/// Record an exact full-contract contextual aggregate result for its selected
+/// root, then dispatch only the critic. The receipt remains owned by the
+/// coordination state; this path deliberately does not populate the legacy
+/// tree/gate memo whose identity lacks the contextual contract.
+pub(super) fn folded_with_contextual_proof(
+    record: &BloomRecord,
+    bloom: BloomId,
+    tree: Digest,
+    head: Digest,
+    lineage: &[Digest],
+    roll: u32,
+    evidence: &Evidence,
+) -> Decisions {
+    let mut effects = alloc::vec![
+        Decision::RecordIntegration {
+            bloom,
+            integration: Some(FoldedIntegration { tree, head, lineage: lineage.to_vec() }),
+        },
+        Decision::RecordAggregateVerifyRoll { bloom, rolls: roll },
+        Decision::RecordAggregateGatePass { bloom, stage: StageId::AggregateVerify },
+    ];
+    effects.extend(aggregate_review_dispatch(record, bloom, tree, head));
+    Decisions { outcome: Outcome::AggregateVerifyReused { bloom, rolls: roll, proof: evidence.detail }, effects }
 }
 
 /// The effects of a fold whose mechanical verdict the journal already holds.

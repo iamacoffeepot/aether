@@ -12,6 +12,16 @@
 //! expands to every member, and every re-opened member then reads the full
 //! frozen bloom row instead of a slice.
 
+use aether_bloomery::Digest;
+
+/// The immutable findings lookup for an exact retained verification receipt.
+/// This stays separate from a member's latest advisory so a delayed repair
+/// cannot read a newer gate's diagnostic.
+#[must_use]
+pub fn verification_findings_key(evidence: Digest) -> String {
+    format!("verification-evidence:{}", evidence.to_hex())
+}
+
 /// The outcome of decomposing a findings text against a member roster.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct FindingsDecomposition {

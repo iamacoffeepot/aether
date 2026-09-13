@@ -132,6 +132,11 @@ pub struct GithubConnectionConfig {
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_GITHUB", cli_prefix = "github")]
 pub struct CoordinatorConfig {
+    /// Actual executor class for policy-enabled shared verification. Empty
+    /// preserves legacy operation and refuses shared work requiring a class.
+    /// A sealed coordination policy must independently name the same class.
+    #[config(env = "AETHER_BLOOMERY_HOST_CLASS", default = "")]
+    pub host_class: String,
     /// How often the mirror reactor ([`super::MirrorReactorCapability`])
     /// polls the store outbox for undelivered projection entries, in seconds.
     /// The land, integrate, and executor reactors use the same backend-neutral
@@ -525,6 +530,7 @@ impl Default for GithubConnectionConfig {
 impl Default for CoordinatorConfig {
     fn default() -> Self {
         Self {
+            host_class: String::new(),
             poll_interval_secs: 5,
             hourly_request_budget: 5000,
             store_path: ":memory:".to_owned(),

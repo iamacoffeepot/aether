@@ -19,10 +19,10 @@ use crate::digest::{Digest, digest_of};
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BaseReceipt, BloomSpec, CandidateRef, CompositionFinding, CompositionParents, ConfigScopes,
-    DispatchKey, Evidence, EvidenceKind, MemberDependency, OperatorHold, OperatorProposal, OperatorRepair,
-    OrphanClaimReleaseRecord, PipelineManifest, ResolutionClaim, ResolvedConfigs, SpendQuiesce, StageCatalog,
-    SuppressionDisposition, SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse,
-    Wedge, Withdrawal,
+    CoordinationState, DispatchKey, Evidence, EvidenceKind, MemberDependency, OperatorHold, OperatorProposal,
+    OperatorRepair, OrphanClaimReleaseRecord, PipelineManifest, PrecheckState, ResolutionClaim, ResolvedConfigs,
+    SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet,
+    VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 // Only [`Snapshot::with_green_base`] names it, and that door is behind the same cfg.
 // A plain import would be an unused one on a lib-scoped build, where the fixture
@@ -731,6 +731,12 @@ pub struct BloomRecord {
     /// that predates the field.
     #[serde(default)]
     pub withdrawn: BTreeMap<WorkpieceId, Withdrawal>,
+    /// Optional journal-derived aggregate pre-check scheduler state.
+    #[serde(default)]
+    pub precheck: Option<PrecheckState>,
+    /// Optional journal-derived shared verification and eager-head state.
+    #[serde(default)]
+    pub coordination: Option<Box<CoordinationState>>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
 }
@@ -1629,6 +1635,43 @@ impl Snapshot {
         }
     }
 
+    /// Fold coordination's durable projection and ignore its host-only queue
+    /// decisions. Keeping the whole vocabulary together makes replay's split
+    /// explicit: only `RecordCoordinationState` evolves the snapshot.
+    fn apply_coordination_effect(&mut self, effect: &Decision) {
+        if let Decision::RecordCoordinationState { bloom, state } = effect
+            && let Some(record) = self.blooms.get_mut(bloom)
+        {
+            record.coordination.clone_from(state);
+        }
+    }
+
+    /// Fold bloom and mainline lifecycle markers. These are the direct status
+    /// transitions whose projection does not belong to a stage-specific ledger.
+    fn apply_lifecycle_effect(&mut self, effect: &Decision) {
+        match effect {
+            Decision::MarkSuperseded { bloom, by } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.status = BloomStatus::Superseded;
+                    record.superseded_by = Some(*by);
+                }
+            }
+            Decision::AdvanceMainline { to, .. } => {
+                self.mainline = *to;
+                self.observed = *to;
+            }
+            Decision::RecordObservation { head } => {
+                self.observed = *head;
+            }
+            Decision::EmitReceipt(projected) => {
+                if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
+                    record.status = BloomStatus::Landed;
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn apply_effect(&mut self, effect: &Decision) {
         match effect {
             Decision::ClaimMembership { workpiece, bloom } => {
@@ -1647,25 +1690,16 @@ impl Snapshot {
             }
             Decision::ReleaseHold { .. } | Decision::RecordReviewPark { .. } => self.apply_hold_effect(effect),
             Decision::AdvanceStage { .. } => self.apply_advance_stage(effect),
-            Decision::RecordWedge { bloom, workpiece, wedge } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    record.wedged.insert(workpiece.clone(), *wedge);
-                    // A wedged workpiece is owed nothing (#4976). It spent its
-                    // budget, and a wedge is the reducer's statement that it
-                    // stops dispatching — so a release must not hand it the lap
-                    // the hold happened to be sitting on, which would make the
-                    // brake a retry grant wearing a different name. The doors
-                    // that do hand a wedged workpiece attempts (a grant, an
-                    // operator repair) move its cursor, and that is what puts it
-                    // back in the line.
-                    record.deferred_dispatches.remove(workpiece);
-                }
-            }
+            Decision::RecordWedge { .. } => self.apply_wedge_effect(effect),
             Decision::DispatchAttempt { .. }
+            | Decision::DispatchContextualAttempt { .. }
             | Decision::DispatchIntegration { .. }
             | Decision::DispatchSplice { .. }
             | Decision::DispatchAggregateVerify { .. }
             | Decision::DispatchAggregateReview { .. }
+            | Decision::DispatchPrecheck { .. }
+            | Decision::DispatchSharedRun { .. }
+            | Decision::DispatchPartialHeadRepair { .. }
             | Decision::DispatchStudy { .. }
             | Decision::DispatchLand { .. } => self.apply_dispatch_effect(effect),
             // Wholly snapshot-inert, like EmitReceipt's outbox row: a re-dispatch
@@ -1689,7 +1723,21 @@ impl Snapshot {
             | Decision::CancelDispatch { .. }
             | Decision::ReleaseMemberClaimRef { .. }
             | Decision::RecordRefusal { .. }
-            | Decision::DispatchProposal { .. } => {}
+            | Decision::DispatchProposal { .. }
+            | Decision::QueuePrecheckPlan { .. }
+            | Decision::OfferPrecheck { .. }
+            | Decision::CancelPrecheck { .. }
+            | Decision::PromotePrecheck { .. } => {}
+            Decision::RecordPrecheckState { .. } => self.apply_precheck_effect(effect),
+            Decision::RecordCoordinationState { .. }
+            | Decision::DispatchIntegrationAppend { .. }
+            | Decision::DispatchCandidatePreparation { .. }
+            | Decision::QueueMemberVerification { .. }
+            | Decision::DispatchSharedRunPreparation { .. }
+            | Decision::QueueConstructionAdmission { .. }
+            | Decision::CancelSharedRun { .. }
+            | Decision::CancelMemberVerification { .. }
+            | Decision::DispatchCompatibilityPreview { .. } => self.apply_coordination_effect(effect),
             Decision::RecordBaseReceipt { .. } => self.apply_base_verify_effect(effect),
             Decision::RecordOrphanClaimRelease { request, target, completion } => {
                 // Opening the record and completing it write the same entry, so
@@ -1711,22 +1759,13 @@ impl Snapshot {
                     record.claims.remove(workpiece);
                 }
             }
-            Decision::MarkSuperseded { bloom, by } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    record.status = BloomStatus::Superseded;
-                    record.superseded_by = Some(*by);
-                }
-            }
             Decision::SetResolved { .. } | Decision::SetUnresolved { .. } | Decision::RecordLandingRoll { .. } => {
                 self.apply_landing_effect(effect);
             }
-            Decision::AdvanceMainline { to, .. } => {
-                self.mainline = *to;
-                self.observed = *to;
-            }
-            Decision::RecordObservation { head } => {
-                self.observed = *head;
-            }
+            Decision::MarkSuperseded { .. }
+            | Decision::AdvanceMainline { .. }
+            | Decision::RecordObservation { .. }
+            | Decision::EmitReceipt(..) => self.apply_lifecycle_effect(effect),
             Decision::RecordStageCatalog { .. } | Decision::RecordPipelineManifest { .. } => {
                 self.apply_sealed_line_effect(effect);
             }
@@ -1746,11 +1785,6 @@ impl Snapshot {
             Decision::RecordMemberMachinery { .. } => self.apply_machinery_effect(effect),
             Decision::RecordWithdrawal { .. } | Decision::MarkBloomWithdrawn { .. } => {
                 self.apply_withdrawal_effect(effect);
-            }
-            Decision::EmitReceipt(projected) => {
-                if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
-                    record.status = BloomStatus::Landed;
-                }
             }
             Decision::QueueProposal { .. } | Decision::DequeueProposal { .. } => {
                 self.apply_proposal_queue_effect(effect);
@@ -1927,6 +1961,28 @@ impl Snapshot {
         }
     }
 
+    fn apply_precheck_effect(&mut self, effect: &Decision) {
+        let Decision::RecordPrecheckState { bloom, state } = effect else {
+            return;
+        };
+        if let Some(record) = self.blooms.get_mut(bloom) {
+            record.precheck = state.as_deref().cloned();
+        }
+    }
+
+    fn apply_wedge_effect(&mut self, effect: &Decision) {
+        let Decision::RecordWedge { bloom, workpiece, wedge } = effect else {
+            return;
+        };
+        if let Some(record) = self.blooms.get_mut(bloom) {
+            record.wedged.insert(workpiece.clone(), *wedge);
+            // A wedged workpiece is owed nothing (#4976). It spent its budget,
+            // so a release cannot hand it the lap the hold was sitting on.
+            // Doors that re-arm it move its cursor first.
+            record.deferred_dispatches.remove(workpiece);
+        }
+    }
+
     /// Fold a resolution claim and drop a vehicle whose tree is no longer
     /// the claim's identity (#5079).
     fn apply_claim_effect(&mut self, effect: &Decision) {
@@ -2069,6 +2125,9 @@ impl Snapshot {
             Decision::DispatchAttempt { bloom, workpiece, stage, .. } => {
                 (bloom, DispatchKey::Member { workpiece: workpiece.clone(), stage: *stage })
             }
+            Decision::DispatchContextualAttempt { dispatch } => {
+                (&dispatch.bloom, DispatchKey::Member { workpiece: dispatch.workpiece.clone(), stage: dispatch.stage })
+            }
             Decision::DispatchIntegration { bloom, .. } => (bloom, DispatchKey::Bloom { stage: StageId::Integrate }),
             Decision::DispatchSplice { bloom, workpiece, .. } => {
                 (bloom, DispatchKey::Member { workpiece: workpiece.clone(), stage: StageId::Integrate })
@@ -2076,6 +2135,17 @@ impl Snapshot {
             Decision::DispatchAggregateVerify { bloom, .. } => {
                 (bloom, DispatchKey::Bloom { stage: StageId::AggregateVerify })
             }
+            Decision::DispatchPrecheck { bloom, .. } => (bloom, DispatchKey::Bloom { stage: StageId::AggregateVerify }),
+            Decision::DispatchSharedRun { dispatch } => {
+                let Some(request) = dispatch.plan.requests.first() else {
+                    return;
+                };
+                (&request.bloom, DispatchKey::Bloom { stage: StageId::Verify })
+            }
+            Decision::DispatchPartialHeadRepair { dispatch } => (
+                &dispatch.plan.bloom,
+                DispatchKey::Member { workpiece: WorkpieceId::composition(), stage: StageId::Refine },
+            ),
             Decision::DispatchAggregateReview { bloom, .. } => {
                 (bloom, DispatchKey::Bloom { stage: StageId::AggregateReview })
             }
@@ -2223,6 +2293,8 @@ impl BloomRecord {
             host_faults: BTreeMap::new(),
             vehicles: BTreeMap::new(),
             withdrawn: BTreeMap::new(),
+            precheck: None,
+            coordination: None,
             superseded_by: None,
         }
     }
@@ -2260,6 +2332,37 @@ impl BloomRecord {
     pub fn verify_forgiveness_bound(&self) -> u32 {
         let identities = u32::try_from(self.pipeline_manifest.identity_count()).unwrap_or(u32::MAX);
         identities.saturating_add(self.stage_catalog.retry_budget_of(StageId::Verify).unwrap_or(1))
+    }
+
+    /// Whether `workpiece` carries a current logical resolution in this bloom.
+    ///
+    /// Legacy claims keep their existing meaning. Contextual claims count only
+    /// when their exact member version and retained proof are still current;
+    /// they remain their own proof class and are never projected as a legacy
+    /// [`ResolutionClaim`]. A withdrawn or replaced member is unresolved.
+    #[must_use]
+    pub fn has_current_member_resolution(&self, workpiece: &WorkpieceId) -> bool {
+        if self.withdrawn.contains_key(workpiece) {
+            return false;
+        }
+        let Some(member) = self.spec.members().iter().find(|member| member.workpiece == *workpiece) else {
+            return false;
+        };
+        if self
+            .claims
+            .get(workpiece)
+            .is_some_and(|claim| claim.workpiece == *workpiece && claim.scope_revision == member.scope_revision)
+        {
+            return true;
+        }
+        let Some(state) = self.coordination.as_deref() else {
+            return false;
+        };
+        state.claims.get(&workpiece.0).is_some_and(|claim| {
+            claim.member.workpiece == *workpiece
+                && claim.member.scope_revision == member.scope_revision
+                && state.has_exact_claim(&claim.member)
+        })
     }
 
     /// The composition findings no operator adjudication has closed (#4957).

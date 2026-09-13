@@ -34,8 +34,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BackendId, EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedLaneWrites, SharedCorrespondence, WorkHandle,
-    WorkOrder,
+    BackendId, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedConstructionCheckpoint,
+    ObservedLaneWrites, SharedCorrespondence, WorkHandle, WorkOrder,
 };
 use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError, LaneWorkflows};
 
@@ -188,6 +188,18 @@ where
         self.0.submit(order).map_err(Into::into)
     }
 
+    fn try_submit_idle(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, Self::Error> {
+        self.0.try_submit_idle(order).map_err(Into::into)
+    }
+
+    fn has_idle_capacity(&self, order: &WorkOrder) -> bool {
+        self.0.has_idle_capacity(order)
+    }
+
+    fn settle_idle_submission(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, Self::Error> {
+        self.0.settle_idle_submission(order).map_err(Into::into)
+    }
+
     fn inspect(&self, handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
         self.0.inspect(handle).map_err(Into::into)
     }
@@ -196,12 +208,20 @@ where
         self.0.cancel(handle).map_err(Into::into)
     }
 
+    fn release_physical_run(&self, physical_run: &Digest) -> Result<(), Self::Error> {
+        self.0.release_physical_run(physical_run).map_err(Into::into)
+    }
+
     fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
         self.0.stream_evidence(handle).map_err(Into::into)
     }
 
     fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
         self.0.observe_writes()
+    }
+
+    fn observe_construction_checkpoints(&self) -> Vec<ObservedConstructionCheckpoint> {
+        self.0.observe_construction_checkpoints()
     }
 
     fn backend_for(&self, handle: &WorkHandle) -> BackendId {
@@ -351,6 +371,28 @@ impl ExecutorShell {
         self.backend.submit(order)
     }
 
+    /// Attempt speculative work without joining the backend's waiting queue.
+    ///
+    /// # Errors
+    /// The admitted order's setup or spawn failed.
+    pub fn try_submit_idle(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, ExecutorPortError> {
+        self.backend.try_submit_idle(order)
+    }
+
+    /// Observe local spare capacity without reserving it.
+    #[must_use]
+    pub fn has_idle_capacity(&self, order: &WorkOrder) -> bool {
+        self.backend.has_idle_capacity(order)
+    }
+
+    /// Recover a prior idle submission without starting absent work.
+    ///
+    /// # Errors
+    /// The backend could not observe the prior submission.
+    pub fn settle_idle_submission(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, ExecutorPortError> {
+        self.backend.settle_idle_submission(order)
+    }
+
     /// Inspect the run the handle resolves to.
     ///
     /// # Errors
@@ -371,6 +413,11 @@ impl ExecutorShell {
         self.backend.cancel(handle)
     }
 
+    /// Release a retained shared-run lane lease.
+    pub fn release_physical_run(&self, physical_run: &Digest) -> Result<(), ExecutorPortError> {
+        self.backend.release_physical_run(physical_run)
+    }
+
     /// Stream the references to the run's uploaded evidence, filtered to the
     /// order's nonce.
     ///
@@ -389,6 +436,12 @@ impl ExecutorShell {
     #[must_use]
     pub fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
         self.backend.observe_writes()
+    }
+
+    /// Immutable, provisional checkpoints from live construction lanes.
+    #[must_use]
+    pub fn observe_construction_checkpoints(&self) -> Vec<ObservedConstructionCheckpoint> {
+        self.backend.observe_construction_checkpoints()
     }
 
     /// Which arm of the mounted backend owns `handle` (#5412) — how the intake

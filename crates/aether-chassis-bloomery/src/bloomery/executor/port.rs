@@ -34,7 +34,10 @@
 //! keep serving its direct callers unchanged while the reactor's helpers move
 //! over wholesale.
 
-use aether_bloomery::{BackendId, EvidenceRef, ExecutionStatus, ObservedLaneWrites, WorkHandle, WorkOrder};
+use aether_bloomery::{
+    BackendId, CandidateRef, Digest, EvidenceRef, ExecutionStatus, ObservedConstructionCheckpoint, ObservedLaneWrites,
+    WorkHandle, WorkOrder,
+};
 
 use super::{ExecutorPortError, ExecutorShell};
 
@@ -95,6 +98,26 @@ pub trait ExecutorPort {
     /// the unit suites driving a fake backend.
     fn submit(&self, order: &WorkOrder) -> Settled<Result<WorkHandle, ExecutorPortError>>;
 
+    /// Attempt an idle-only submission. `None` is a busy or unsupported backend,
+    /// not an accepted order; the durable request remains available to coalesce.
+    fn try_submit_idle(&self, order: &WorkOrder) -> Settled<Result<Option<WorkHandle>, ExecutorPortError>> {
+        let _ = order;
+        Settled::Answered(Ok(None))
+    }
+
+    /// Cheap advisory capacity read; the actual idle submit still reserves.
+    fn has_idle_capacity(&self, order: &WorkOrder) -> bool {
+        let _ = order;
+        false
+    }
+
+    /// Settle a previous idle submit or recover an existing process. Must not
+    /// start an absent order, including after a restart lost the offload ledger.
+    fn settle_idle_submission(&self, order: &WorkOrder) -> Settled<Result<Option<WorkHandle>, ExecutorPortError>> {
+        let _ = order;
+        Settled::Answered(Ok(None))
+    }
+
     /// Inspect the run the handle resolves to and, when it has completed,
     /// stream its evidence in the same call.
     ///
@@ -109,10 +132,34 @@ pub trait ExecutorPort {
     /// Cancel the run the handle resolves to. Idempotent (ADR-0177).
     fn cancel(&self, handle: &WorkHandle) -> Settled<Result<(), ExecutorPortError>>;
 
+    /// Release a retained warm lane after cancellation or retirement.
+    fn release_physical_run(&self, physical_run: &Digest) -> Settled<Result<(), ExecutorPortError>> {
+        let _ = physical_run;
+        Settled::Answered(Ok(()))
+    }
+
+    /// Retain a captured partial-head repair under its plan-owned Git ref
+    /// before the reducer can observe the repaired candidate.
+    fn retain_partial_head_repair(
+        &self,
+        plan: &Digest,
+        candidate: &CandidateRef,
+        allowed_paths: &[String],
+    ) -> Settled<Result<(), ExecutorPortError>> {
+        let _ = (plan, candidate, allowed_paths);
+        Settled::InFlight
+    }
+
     /// What each live construct lane has written into its working tree so far
     /// (ADR-0204). Infallible once answered: a mount with no readable working
     /// trees observes nothing, which is the honest answer and not a fault.
     fn observe_writes(&self) -> Settled<Vec<ObservedLaneWrites>>;
+
+    /// Capture immutable provisional construction checkpoints without changing
+    /// the author checkout's HEAD or index.
+    fn observe_construction_checkpoints(&self) -> Settled<Vec<ObservedConstructionCheckpoint>> {
+        Settled::Answered(Vec::new())
+    }
 }
 
 /// The shell answers every call itself, on the calling thread. The identity
@@ -132,6 +179,18 @@ impl ExecutorPort for ExecutorShell {
         Settled::Answered(self.backend.submit(order))
     }
 
+    fn try_submit_idle(&self, order: &WorkOrder) -> Settled<Result<Option<WorkHandle>, ExecutorPortError>> {
+        Settled::Answered(self.backend.try_submit_idle(order))
+    }
+
+    fn has_idle_capacity(&self, order: &WorkOrder) -> bool {
+        self.backend.has_idle_capacity(order)
+    }
+
+    fn settle_idle_submission(&self, order: &WorkOrder) -> Settled<Result<Option<WorkHandle>, ExecutorPortError>> {
+        Settled::Answered(self.backend.settle_idle_submission(order))
+    }
+
     fn observe(&self, handle: &WorkHandle) -> Settled<Result<RunObservation, ExecutorPortError>> {
         Settled::Answered(self.observe_run(handle))
     }
@@ -140,12 +199,40 @@ impl ExecutorPort for ExecutorShell {
         Settled::Answered(self.backend.cancel(handle))
     }
 
+    fn release_physical_run(&self, physical_run: &Digest) -> Settled<Result<(), ExecutorPortError>> {
+        Settled::Answered(self.backend.release_physical_run(physical_run))
+    }
+
+    fn retain_partial_head_repair(
+        &self,
+        plan: &Digest,
+        candidate: &CandidateRef,
+        allowed_paths: &[String],
+    ) -> Settled<Result<(), ExecutorPortError>> {
+        Settled::Answered(self.backend.retain_partial_head_repair(plan, candidate, allowed_paths))
+    }
+
     fn observe_writes(&self) -> Settled<Vec<ObservedLaneWrites>> {
         Settled::Answered(self.backend.observe_writes())
+    }
+
+    fn observe_construction_checkpoints(&self) -> Settled<Vec<ObservedConstructionCheckpoint>> {
+        Settled::Answered(self.backend.observe_construction_checkpoints())
     }
 }
 
 impl ExecutorShell {
+    /// Blocking identity arm for partial-head repair retention. The reactor
+    /// offloads this Git write before exposing the completion fact.
+    pub fn retain_partial_head_repair(
+        &self,
+        plan: &Digest,
+        candidate: &CandidateRef,
+        allowed_paths: &[String],
+    ) -> Result<(), ExecutorPortError> {
+        self.backend.retain_partial_head_repair(plan, candidate, allowed_paths)
+    }
+
     /// Inspect the run and, when it has completed, stream its evidence — the
     /// blocking body of [`ExecutorPort::observe`].
     ///

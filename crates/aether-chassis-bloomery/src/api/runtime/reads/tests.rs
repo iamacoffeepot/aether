@@ -1,7 +1,8 @@
 //! Paging, ranging, and kind-resolution tests for the REST read surface.
 
 use aether_bloomery::{
-    BloomId, Decisions, Digest, Event, Fact, IdempotencyKey, JournalRecord, Outcome, StudyCost, StudyRecord,
+    BloomId, CandidateRef, ConstructionCheckpoint, Decisions, Digest, Event, Fact, IdempotencyKey, JournalRecord,
+    Outcome, StudyCost, StudyRecord, WorkpieceId,
 };
 use aether_data::wire::to_vec;
 
@@ -122,6 +123,51 @@ fn the_bloom_filter_keeps_only_events_that_name_it() {
     let query = JournalQuery { bloom: Some(wanted), ..bare() };
     let view = page_journal(&records, &query).expect("fixture records decode");
     assert_eq!(view.records.iter().map(|entry| entry.sequence).collect::<Vec<_>>(), vec![4, 2]);
+    assert_eq!(view.total_matched, 2);
+}
+
+#[test]
+fn bloom_journal_keeps_shared_execution_and_nested_construction_context() {
+    let wanted = Digest::from_bytes([7; 32]);
+    let other = Digest::from_bytes([8; 32]);
+    let records = vec![
+        land(1, other),
+        observe(2, 1),
+        record(
+            3,
+            &Event {
+                idempotency_key: IdempotencyKey("checkpoint".to_owned()),
+                fact: Fact::ConstructionCheckpointObserved {
+                    checkpoint: ConstructionCheckpoint {
+                        bloom: BloomId(wanted),
+                        workpiece: WorkpieceId("member".to_owned()),
+                        scope_revision: Digest::from_bytes([2; 32]),
+                        nonce: Digest::from_bytes([3; 32]),
+                        observation: 1,
+                        starting_checkout: Digest::from_bytes([4; 32]),
+                        candidate: CandidateRef {
+                            tree: Digest::from_bytes([5; 32]),
+                            checkout: Digest::from_bytes([6; 32]),
+                        },
+                    },
+                },
+            },
+        ),
+        record(
+            4,
+            &Event {
+                idempotency_key: IdempotencyKey("shared-started".to_owned()),
+                fact: Fact::SharedRunStarted {
+                    bloom: BloomId(wanted),
+                    plan: Digest::from_bytes([9; 32]),
+                    run: Digest::from_bytes([10; 32]),
+                },
+            },
+        ),
+    ];
+    let query = JournalQuery { bloom: Some(wanted), ..bare() };
+    let view = page_journal(&records, &query).expect("coordination records decode");
+    assert_eq!(view.records.iter().map(|entry| entry.sequence).collect::<Vec<_>>(), vec![4, 3]);
     assert_eq!(view.total_matched, 2);
 }
 

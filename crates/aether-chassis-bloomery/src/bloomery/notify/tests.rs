@@ -69,6 +69,7 @@ fn resolved_member(workpiece: &str) -> MemberView {
 
     MemberView {
         workpiece: WorkpieceId(workpiece.to_owned()),
+        scope_revision: claim.scope_revision,
         resolution: Some(claim),
         cursor: Some(CompositionCursorView { stage: StageId::Verify, attempts: 1, candidate: None }),
         ..MemberView::default()

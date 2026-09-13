@@ -23,8 +23,9 @@
 //! [`TransformRunner`]: super::TransformRunner
 
 use std::ffi::OsString;
-use std::path::Path;
-use std::{env, error, fmt, io, process, thread};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+use std::{env, error, fmt, fs, io, process, thread};
 
 pub mod argv;
 pub mod evidence;
@@ -33,6 +34,22 @@ pub mod script;
 pub use argv::{ArgvError, LaneArgs};
 pub use evidence::{CANDIDATE_FILE, FOREIGN_SESSION_ID, REQUESTED_PATH};
 pub use script::{DispatchIdentity, LaneMode, LaneRun, LaneScript, LaneStep, ScriptSelectError, read_ledger};
+
+const RELEASE_POLL: Duration = Duration::from_millis(5);
+
+/// The per-run marker a harness creates to let an explicitly parked mock lane
+/// finish through its ordinary process/evidence path.
+#[must_use]
+pub fn release_marker(dir: &Path, nonce: &str) -> PathBuf {
+    dir.join(format!("{nonce}-release"))
+}
+
+/// The acknowledgement a released mock lane writes immediately before its
+/// process returns.
+#[must_use]
+pub fn released_marker(dir: &Path, nonce: &str) -> PathBuf {
+    dir.join(format!("{nonce}-released"))
+}
 
 /// Why a mock run could not do its job. Distinct from a lane *failing*, which is
 /// an outcome the script asked for and the evidence records.
@@ -144,11 +161,15 @@ fn run_recorded(parse_from: Vec<String>, recorded: Vec<String>, worktree: &Path)
     evidence::apply(&outcome, worktree, &args.out)?;
 
     if mode == LaneMode::NeverExits {
-        // Park rather than spin: the harness's own budget ends this run, and the
-        // coordinator's staleness sweep is what the scenario is watching.
-        loop {
-            thread::park();
+        // Park rather than spin: most scenarios let their own budget end this
+        // run. A grouping scenario may explicitly release several parked
+        // children together, after all of them crossed the real spawn and Git
+        // write boundary but before the executor observes any completion.
+        let release = release_marker(script_dir, &args.nonce);
+        while !release.try_exists()? {
+            thread::sleep(RELEASE_POLL);
         }
+        fs::write(released_marker(script_dir, &args.nonce), [])?;
     }
 
     Ok(outcome.exit_code)

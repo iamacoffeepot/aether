@@ -14,6 +14,7 @@ mod bloom;
 mod commission;
 mod composition;
 mod config;
+mod coordination;
 mod fields;
 mod finding;
 mod granularity;
@@ -24,6 +25,7 @@ mod narrowing;
 mod operator;
 mod orphan_claim;
 mod pipeline;
+mod precheck;
 mod price;
 mod process_instructions;
 pub(crate) mod process_instructions_pre_reader;
@@ -72,6 +74,19 @@ pub use config::{
     ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, ResolvedConfigs, Unproducible, config_address,
     decode_config,
 };
+pub use coordination::{
+    CandidatePreparation, CandidatePreparationPlan, CompatibilityPreview, CompatibilityPreviewPlan,
+    CompatibilityPreviewRecord, CompositionContract, CompositionContractTemplate, CompositionInput, CompositionPlan,
+    ConstructContext, ConstructionAdmission, ConstructionCheckpoint, ContextualAttemptDispatch,
+    ContextualInvocationTemplate, ContextualResolutionClaim, CoordinationDiagnostic, CoordinationPolicy,
+    CoordinationState, EagerIntegrationState, FailureScope, GenerationMember, IntegrationAppendPlan,
+    IntegrationGeneration, IntegrationHead, MemberContractPin, MemberPin, MemberVerifyLatency, MemberVerifyOutcome,
+    MemberVerifyRequest, PartialHeadRepairCompletion, PartialHeadRepairDispatch, PartialHeadRepairPlan,
+    PreparedCandidate, ResolutionProof, SharedRunCompletion, SharedRunDispatch, SharedRunExecution, SharedRunMode,
+    SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunPreparation, SharedRunRecord, StableHeadReservation,
+    SurvivorGroup, VerificationContract, VerificationMode, VerificationObligation, construction_nonce_digest,
+    host_class_digest, verification_environment_digest,
+};
 pub use fields::{FieldKind, WorkpieceFact, WorkpieceFields};
 pub use finding::{
     CHECK_KEY, CRITICAL_KEY, ClassifiedFinding, ClassifiedFindings, FindingClass, JUDGMENT_TAG, MECHANICAL_TAG,
@@ -92,6 +107,10 @@ pub use pipeline::{
     DeclaredEvidence, DeclaredLanes, DeclaredVerifiers, EVIDENCE_ENVELOPE_VERSION, LaneEntrypoint,
     MAX_VERIFIER_IDENTITIES, PIPELINE_MANIFEST_PATH, PIPELINE_MANIFEST_VERSION, PipelineManifest,
     PipelineManifestError,
+};
+pub use precheck::{
+    PrecheckCompletion, PrecheckDiagnostic, PrecheckMember, PrecheckNode, PrecheckPlan, PrecheckPolicy,
+    PrecheckPreparation, PrecheckResult, PrecheckState,
 };
 pub use price::{LongContextBand, PriceRates, PriceTable, SealedPriceTable};
 pub use process_instructions::{

@@ -200,12 +200,16 @@ fn push_bloom_events(events: &mut Vec<NotifyEvent>, bloom: &BloomView) {
     // progress report can be worse than no progress report.
     let in_line = bloom.members.iter().filter(|member| member.withdrawn.is_none());
     let progress = Progress {
-        resolved: in_line.clone().filter(|member| member.resolution.is_some()).count(),
+        resolved: in_line.clone().filter(|member| member_is_resolved(bloom, member)).count(),
         total: in_line.count(),
     };
     for member in &bloom.members {
-        push_member_events(events, &id, member, progress);
+        push_member_events(events, &id, member, progress, member_is_resolved(bloom, member));
     }
+}
+
+fn member_is_resolved(bloom: &BloomView, member: &MemberView) -> bool {
+    member.withdrawn.is_none() && bloom.has_current_member_resolution(&member.workpiece)
 }
 
 /// How far a bloom's membership has got, carried into each resolution
@@ -245,7 +249,13 @@ fn lifecycle_line(bloom: &BloomView, id: &str) -> Option<String> {
     }
 }
 
-fn push_member_events(events: &mut Vec<NotifyEvent>, bloom: &str, member: &MemberView, progress: Progress) {
+fn push_member_events(
+    events: &mut Vec<NotifyEvent>,
+    bloom: &str,
+    member: &MemberView,
+    progress: Progress,
+    resolved: bool,
+) {
     // A withdrawn member raises nothing, exactly as the war room has it: an
     // operator decided it, so there is no unanswered condition, and a wedge it
     // carried on the way out is history rather than a live stop.
@@ -301,7 +311,7 @@ fn push_member_events(events: &mut Vec<NotifyEvent>, bloom: &str, member: &Membe
     // carry and an operator most wants on a healthy night. The sibling count
     // rides in the message rather than the key, so the line reads as progress
     // while still posting exactly once per member.
-    if member.resolution.is_some() {
+    if resolved {
         events.push(NotifyEvent::milestone(
             format!("resolved:{bloom}:{workpiece}"),
             format!(

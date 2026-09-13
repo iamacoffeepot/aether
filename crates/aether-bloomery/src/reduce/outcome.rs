@@ -7,11 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
-    AggregateVerifyError, AttemptCompletedError, BaseReverifyError, Decision, FoldConflictError, GrantAttemptsError,
-    HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
-    NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ProposalError,
-    ResolveError, SealError, SpliceError, StudyError, SupersedeError, SuppressionDispositionError,
-    SurfaceRequestedError, VerifyFailedError, WithdrawError,
+    AggregateVerifyError, AttemptCompletedError, BaseReverifyError, CoordinationError, Decision, FoldConflictError,
+    GrantAttemptsError, HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError,
+    MemberExecutorFaultError, NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError,
+    PrecheckError, ProposalError, ResolveError, SealError, SpliceError, StudyError, SupersedeError,
+    SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -829,6 +829,22 @@ pub enum Outcome {
     /// A study result was refused. Appended so every prior outcome keeps its
     /// wire discriminant.
     StudyRejected(StudyError),
+    /// The host prepared an immutable scratch fold.
+    PrecheckPrepared { bloom: BloomId, node: Digest },
+    /// Scratch folding refused the current plan.
+    PrecheckPreparationRefused { bloom: BloomId, plan: Digest, diagnostic: Digest },
+    /// The idle offer was admitted and its physical run journaled.
+    PrecheckRequested { bloom: BloomId, node: Digest, run: u32 },
+    /// An issued pre-check completed.
+    PrecheckCompleted { bloom: BloomId, node: Digest },
+    /// Final resolution joined and promoted an exact issued node.
+    PrecheckJoined { bloom: BloomId, node: Digest },
+    /// A pre-check fact was refused.
+    PrecheckRejected(PrecheckError),
+    /// One shared-verification or eager-integration transition was admitted.
+    CoordinationAdvanced { bloom: BloomId, subject: Digest },
+    /// A shared-verification or eager-integration transition was refused.
+    CoordinationRejected(CoordinationError),
 }
 
 impl Outcome {

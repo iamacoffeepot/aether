@@ -41,7 +41,9 @@ use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::reduce::Decision;
 use crate::values::{
-    AgentProfile, ConfigRegistry, MemberCandidate, OperatorProposal, OrphanClaimRelease, Transformation,
+    AgentProfile, CandidatePreparationPlan, CompatibilityPreviewPlan, ConfigRegistry, ContextualAttemptDispatch,
+    IntegrationAppendPlan, MemberCandidate, MemberVerifyRequest, OperatorProposal, OrphanClaimRelease,
+    PartialHeadRepairDispatch, PrecheckNode, PrecheckPlan, SharedRunDispatch, SharedRunPlan, Transformation,
 };
 
 /// One active-membership mutation the store applies inside the combined
@@ -295,6 +297,22 @@ topic_vocabulary! {
     /// every sibling behind it. Appended so the prior topics' display spellings
     /// and ordering are unchanged.
     Study,
+    QueuePrecheckPlan,
+    OfferPrecheck,
+    DispatchPrecheck,
+    CancelPrecheck,
+    PromotePrecheck,
+    IntegrationAppend,
+    CandidatePreparation,
+    MemberVerification,
+    SharedRunPreparation,
+    SharedRun,
+    CancelSharedRun,
+    CancelMemberVerification,
+    CompatibilityPreview,
+    ConstructionAdmission,
+    ContextualDispatch,
+    PartialHeadRepair,
 }
 
 impl Topic {
@@ -326,6 +344,22 @@ impl Topic {
             Self::Proposal => "topic:proposal",
             Self::RefusedDispatch => "topic:refused_dispatch",
             Self::Study => "topic:study",
+            Self::QueuePrecheckPlan => "topic:queue_precheck_plan",
+            Self::OfferPrecheck => "topic:offer_precheck",
+            Self::DispatchPrecheck => "topic:dispatch_precheck",
+            Self::CancelPrecheck => "topic:cancel_precheck",
+            Self::PromotePrecheck => "topic:promote_precheck",
+            Self::IntegrationAppend => "topic:integration_append",
+            Self::CandidatePreparation => "topic:candidate_preparation",
+            Self::MemberVerification => "topic:member_verification",
+            Self::SharedRunPreparation => "topic:shared_run_preparation",
+            Self::SharedRun => "topic:shared_run",
+            Self::CancelSharedRun => "topic:cancel_shared_run",
+            Self::CancelMemberVerification => "topic:cancel_member_verification",
+            Self::CompatibilityPreview => "topic:compatibility_preview",
+            Self::ConstructionAdmission => "topic:construction_admission",
+            Self::ContextualDispatch => "topic:contextual_dispatch",
+            Self::PartialHeadRepair => "topic:partial_head_repair",
         }
     }
 
@@ -354,6 +388,22 @@ impl Topic {
             Decision::DispatchStudy { .. } => Some(Self::Study),
             Decision::CancelDispatch { .. } => Some(Self::CancelDispatch),
             Decision::ReleaseMemberClaimRef { .. } => Some(Self::MemberClaimRelease),
+            Decision::QueuePrecheckPlan { .. } => Some(Self::QueuePrecheckPlan),
+            Decision::OfferPrecheck { .. } => Some(Self::OfferPrecheck),
+            Decision::DispatchPrecheck { .. } => Some(Self::DispatchPrecheck),
+            Decision::CancelPrecheck { .. } => Some(Self::CancelPrecheck),
+            Decision::PromotePrecheck { .. } => Some(Self::PromotePrecheck),
+            Decision::DispatchIntegrationAppend { .. } => Some(Self::IntegrationAppend),
+            Decision::DispatchCandidatePreparation { .. } => Some(Self::CandidatePreparation),
+            Decision::QueueMemberVerification { .. } => Some(Self::MemberVerification),
+            Decision::DispatchSharedRunPreparation { .. } => Some(Self::SharedRunPreparation),
+            Decision::DispatchSharedRun { .. } => Some(Self::SharedRun),
+            Decision::CancelSharedRun { .. } => Some(Self::CancelSharedRun),
+            Decision::CancelMemberVerification { .. } => Some(Self::CancelMemberVerification),
+            Decision::DispatchCompatibilityPreview { .. } => Some(Self::CompatibilityPreview),
+            Decision::QueueConstructionAdmission { .. } => Some(Self::ConstructionAdmission),
+            Decision::DispatchContextualAttempt { .. } => Some(Self::ContextualDispatch),
+            Decision::DispatchPartialHeadRepair { .. } => Some(Self::PartialHeadRepair),
             Decision::ClaimMembership { .. }
             | Decision::ReleaseMembership { .. }
             | Decision::InheritClaim { .. }
@@ -463,7 +513,9 @@ impl Topic {
             | Decision::RecordRefusal { .. }
             | Decision::RecordBaseReceipt { .. }
             | Decision::QueueProposal { .. }
-            | Decision::DequeueProposal { .. } => None,
+            | Decision::DequeueProposal { .. }
+            | Decision::RecordPrecheckState { .. }
+            | Decision::RecordCoordinationState { .. } => None,
         }
     }
 }
@@ -742,6 +794,90 @@ pub struct AggregateVerifyPayload {
     /// The [`AgentProfile`] the bloom's sealed stage catalog calibrates
     /// `AggregateVerify` at (ADR-0174).
     pub profile: AgentProfile,
+}
+
+/// A scratch-fold request for one immutable captured-candidate plan.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct QueuePrecheckPlanPayload {
+    pub bloom: Digest,
+    pub plan: PrecheckPlan,
+}
+
+/// A prepared aggregate pre-check offered or dispatched to an executor.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PrecheckPayload {
+    pub bloom: Digest,
+    pub node: PrecheckNode,
+    pub transformation: Transformation,
+    pub profile: AgentProfile,
+    pub configs: ConfigRegistry,
+}
+
+/// A digest-only cancel or promotion request for a known pre-check node.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PrecheckNodePayload {
+    pub bloom: Digest,
+    pub node: Digest,
+}
+
+/// One exact eager append source request.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationAppendPayload {
+    pub plan: IntegrationAppendPlan,
+}
+
+/// One exact reconcile preparation source request.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CandidatePreparationPayload {
+    pub plan: CandidatePreparationPlan,
+}
+
+/// One logical member request offered to the shared-run scheduler.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MemberVerificationPayload {
+    pub request: MemberVerifyRequest,
+}
+
+/// One approved run plan awaiting contextual source preparation.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SharedRunPlanPayload {
+    pub plan: SharedRunPlan,
+}
+
+/// One immutable physical run or serial lease dispatch.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SharedRunDispatchPayload {
+    pub dispatch: SharedRunDispatch,
+}
+
+/// Digest-only retirement for a physical plan or logical request.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CoordinationCancelPayload {
+    pub subject: Digest,
+}
+
+/// One bounded immutable construction-checkpoint preview.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CompatibilityPreviewPayload {
+    pub plan: CompatibilityPreviewPlan,
+}
+
+/// One construction intent offered for just-in-time physical admission.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ConstructionAdmissionPayload {
+    pub dispatch: ContextualAttemptDispatch,
+}
+
+/// One member attempt carrying its immutable eager-head context.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ContextualDispatchPayload {
+    pub dispatch: ContextualAttemptDispatch,
+}
+
+/// One exact composition-owned repair of a red eager head.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PartialHeadRepairPayload {
+    pub dispatch: PartialHeadRepairDispatch,
 }
 
 /// The payload a [`Topic::Study`] outbox row carries — the bloom-level

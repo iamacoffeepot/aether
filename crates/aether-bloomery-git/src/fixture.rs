@@ -962,6 +962,16 @@ impl GitDataApi for FakeGithub {
         command::read_commit(&repo, sha)
     }
 
+    fn changed_paths(&self, base: &str, head: &str) -> Result<Vec<String>, GitDataError> {
+        let Some(repo) = self.object_repo() else {
+            return Err(GitDataError::Command("synthetic fixture commits do not retain changed paths".to_owned()));
+        };
+        if !command::is_ancestor(&repo, base, head)? {
+            return Err(GitDataError::Command(format!("changed-path base {base} is not an ancestor of {head}")));
+        }
+        command::changed_paths(&repo, base, head).map_err(Into::into)
+    }
+
     fn is_ancestor(&self, ancestor: &str, commit: &str) -> Result<bool, GitDataError> {
         if ancestor == commit {
             return Ok(true);

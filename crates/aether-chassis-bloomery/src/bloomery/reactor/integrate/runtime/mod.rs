@@ -50,7 +50,7 @@ use aether_bloomery::{
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 
@@ -60,9 +60,22 @@ use crate::bloomery::IntegrateReactorSetup;
 use crate::bloomery::SourceShell;
 use crate::bloomery::outbox::{OutboxResultDelivery, TopicOutbox};
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
+use crate::bloomery::precheck::PrecheckProjection;
 use crate::control::ControlCore;
-use crate::store::{SqliteStore, StoreBackend};
+use crate::store::{SqliteStore, StoreBackend, now_unix_millis};
 use aether_bloomery_github::candidate_ref_name;
+
+mod compatibility;
+mod coordination;
+mod eager;
+mod precheck;
+mod projection;
+use coordination::{
+    drain_candidate_preparations, drain_compatibility_previews, drain_integration_appends,
+    drain_shared_run_preparations, prepare_shared_probe_step,
+};
+use precheck::{Preview, PreviewWork, drain_precheck_plans};
+use projection::CoordinationProjection;
 
 // The autoloaded control-core component's lineage mailbox — where an admitted
 // `Fact::Resolve` is sent. Resolved from the lineage path, mirroring the land
@@ -77,6 +90,9 @@ pub struct IntegrateTick {}
 /// Runtime state for [`IntegrateReactorCapability`]. The shell + store are `Some`
 /// only when configured; a disabled reactor holds neither and spawns no timer.
 pub struct IntegrateReactorState {
+    coordination: CoordinationProjection,
+    prechecks: PrecheckProjection,
+    preview_work: PreviewWork,
     source: Option<SourceShell>,
     store: Option<SqliteStore>,
     // Where a fold-conflict overlay is filed so a wedge's evidence detail
@@ -104,6 +120,9 @@ impl IntegrateReactorState {
         self_mailbox: MailboxId,
     ) -> Self {
         Self {
+            coordination: CoordinationProjection::default(),
+            prechecks: PrecheckProjection::default(),
+            preview_work: PreviewWork::default(),
             source,
             store,
             artifacts: None,
@@ -112,6 +131,67 @@ impl IntegrateReactorState {
             self_mailbox,
             _timer: None,
         }
+    }
+}
+
+fn deliver_topic_results(
+    ctx: &mut NativeCtx<'_>,
+    store: &mut dyn StoreBackend,
+    control_mailbox: MailboxId,
+    topic: Topic,
+    result: rusqlite::Result<(Vec<Admit>, Option<u64>)>,
+    label: &str,
+) {
+    match result {
+        Ok((admits, ack_through)) => {
+            if let Some(sequence) = ack_through
+                && let Err(error) = store.ack_topic(topic, sequence)
+            {
+                tracing::warn!(%error, %label, "coordination outbox ack failed; entries re-drive");
+            }
+            for admit in admits {
+                let _ = ctx.send_envelope_detached(control_mailbox, Admit::ID, &admit.encode_into_bytes());
+            }
+        }
+        Err(error) => tracing::warn!(%error, %label, "coordination outbox drain failed"),
+    }
+}
+
+fn drive_coordination_work(
+    coordination: &mut CoordinationProjection,
+    store: &mut SqliteStore,
+    source: &SourceShell,
+    artifacts: &mut Option<ArtifactsCapabilityState>,
+    ctx: &mut NativeCtx<'_>,
+    control_mailbox: MailboxId,
+) {
+    let caught_up = match coordination.refresh(store) {
+        Ok(caught_up) => caught_up,
+        Err(error) => {
+            tracing::warn!(%error, "coordination projection refresh failed");
+            false
+        }
+    };
+    if !caught_up {
+        return;
+    }
+    for event in coordination.expired(now_unix_millis()) {
+        if let Ok(event) = to_vec(&event) {
+            let admit = Admit { event };
+            let _ = ctx.send_envelope_detached(control_mailbox, Admit::ID, &admit.encode_into_bytes());
+        }
+    }
+
+    let result = drain_integration_appends(store, source, artifacts.as_mut(), coordination);
+    deliver_topic_results(ctx, store, control_mailbox, Topic::IntegrationAppend, result, "eager integration");
+    let result = drain_candidate_preparations(store, source, artifacts.as_mut(), coordination);
+    deliver_topic_results(ctx, store, control_mailbox, Topic::CandidatePreparation, result, "candidate preparation");
+    let result = drain_compatibility_previews(store, source, artifacts.as_mut());
+    deliver_topic_results(ctx, store, control_mailbox, Topic::CompatibilityPreview, result, "compatibility preview");
+    let result = drain_shared_run_preparations(store, source, artifacts.as_mut(), coordination);
+    deliver_topic_results(ctx, store, control_mailbox, Topic::SharedRunPreparation, result, "shared-run preparation");
+    if let Err(error) = prepare_shared_probe_step(store, source, artifacts.as_mut()) {
+        tracing::warn!(%error, "shared probe preparation scan failed");
     }
 }
 
@@ -613,8 +693,8 @@ fn persist_conflict_overlays(
 
 /// Persist a nonempty result batch on the outbox row, then encode the admits to
 /// forward. `None` leaves the entry undelivered and sends no results.
-fn persist_pending_results(
-    store: &mut dyn StoreBackend,
+fn persist_pending_results<S: StoreBackend + ?Sized>(
+    store: &mut S,
     topic: Topic,
     sequence: u64,
     events: &[Event],
@@ -924,6 +1004,9 @@ impl NativeActor for IntegrateReactorCapability {
                 "integrate reactor mounted disabled (unconfigured token/owner/repo); integrate outbox will accumulate",
             );
             return Ok(IntegrateReactorState {
+                coordination: CoordinationProjection::default(),
+                prechecks: PrecheckProjection::default(),
+                preview_work: PreviewWork::default(),
                 source: None,
                 store: None,
                 artifacts: None,
@@ -951,6 +1034,9 @@ impl NativeActor for IntegrateReactorCapability {
             "integrate reactor mounted; polling the store for integration decisions",
         );
         Ok(IntegrateReactorState {
+            coordination: CoordinationProjection::default(),
+            prechecks: PrecheckProjection::default(),
+            preview_work: PreviewWork::default(),
             source: Some(source),
             store: Some(store),
             artifacts: open_artifacts(config.artifacts_root.as_deref()),
@@ -990,6 +1076,8 @@ impl NativeActor for IntegrateReactorCapability {
             return;
         };
 
+        drive_coordination_work(&mut state.coordination, store, &source, &mut state.artifacts, ctx, control_mailbox);
+
         match drain_and_integrate(store, &source, state.artifacts.as_mut()) {
             Ok((admits, ack_through)) => {
                 if let Some(sequence) = ack_through
@@ -1023,6 +1111,48 @@ impl NativeActor for IntegrateReactorCapability {
                 tracing::warn!(target: "aether_chassis_bloomery::integrate", %error, "splice drain failed");
             }
         }
+        match drain_precheck_plans(
+            store,
+            &source,
+            state.artifacts.as_mut(),
+            &mut state.prechecks,
+            &mut state.preview_work,
+            ctx,
+        ) {
+            Ok((admits, ack_through)) => {
+                if let Some(sequence) = ack_through
+                    && let Err(error) = store.ack_topic(Topic::QueuePrecheckPlan, sequence)
+                {
+                    tracing::warn!(%error, "pre-check preparation ack failed");
+                }
+                for admit in admits {
+                    let _ = ctx.send_envelope_detached(control_mailbox, Admit::ID, &admit.encode_into_bytes());
+                }
+            }
+            Err(error) => tracing::warn!(%error, "pre-check preparation drain failed"),
+        }
+        if state.prechecks.catching_up() || state.coordination.catching_up() {
+            let _ = ctx.send_envelope_detached(
+                state.self_mailbox,
+                IntegrateTick::ID,
+                &IntegrateTick::default().encode_into_bytes(),
+            );
+        }
+    }
+
+    #[handler(task)]
+    fn on_preview_prepared(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<Result<Preview, String>, Digest>,
+    ) {
+        state.preview_work.complete(*done.context(), done.output().clone());
+        done.release_no_reply();
+        let _ = ctx.send_envelope_detached(
+            state.self_mailbox,
+            IntegrateTick::ID,
+            &IntegrateTick::default().encode_into_bytes(),
+        );
     }
 
     /// Control's reply to a fire-and-forget admit. Ok is a no-op; Err is the

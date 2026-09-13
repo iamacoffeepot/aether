@@ -8,8 +8,8 @@
 //! [`HostClass`] is the opaque host the coordinator supplies; [`discriminate`]
 //! is the only constructor of facts the ledger will store;
 //! [`attribute_gate_failure`] is the failure-attribution path member verify
-//! and the aggregate gate share; [`run_batch_gate`] composes disjoint-surface
-//! members into one prove; [`run_sweep`] converts unknown facts on idle
+//! and the aggregate gate share; [`next_batch_probe`] attributes composed
+//! failures using retained subset experiments; [`run_sweep`] converts unknown facts on idle
 //! prover time and taints a closure on red; [`decide_roll`] holds the day
 //! on main until the coverage map is fully green.
 //! [`apply_containment`] fails a member Verify whose candidate edited a path
@@ -21,6 +21,8 @@ mod attribution;
 mod batch;
 mod closure;
 mod containment;
+#[cfg(feature = "runtime")]
+mod contextual_facts;
 mod facts;
 #[cfg(feature = "runtime")]
 mod roll;
@@ -34,15 +36,23 @@ pub use attribution::{
 };
 #[cfg(feature = "runtime")]
 pub use batch::{
-    Accumulation, BatchBisect, BatchComposer, BatchContext, BatchFailure, BatchFailureHooks, BatchGate, BatchMember,
-    BatchReport, BatchRestart, GateOutcome, MemberFate, RunningGate, SurfaceOverlap, decide_accumulation,
-    run_batch_gate,
+    BatchCheck, BatchFailure, BatchMember, BatchProbeReceipt, BatchProbeRequest, BatchProgress, BatchReport,
+    ProbeVerdict, next_batch_probe,
 };
 pub use closure::{ClosureKey, ClosureKeyError, closure_key};
-pub use containment::{apply_containment, candidate_delta_base, candidate_violations, changed_paths, path_in_surface};
+pub use containment::{
+    apply_containment, candidate_delta_base, candidate_violations, changed_paths, out_of_surface, path_in_surface,
+};
+#[cfg(feature = "runtime")]
+pub use contextual_facts::{
+    ContextualFactError, ContextualProofFactReuse, ContextualProofReuse, ContextualRunnerReport,
+    contextual_bundle_reports, contextual_fact_key, observed_probe_verdict, record_contextual_facts,
+    reuse_contextual_proof,
+};
 #[cfg(feature = "runtime")]
 pub use facts::record_proof_facts;
 pub use facts::{DiscriminatedFact, DiscriminatedFacts, ProofResult, ProofSource, RunnerReport, discriminate};
+
 #[cfg(feature = "runtime")]
 pub use roll::{
     CoverageEntry, CoverageMap, CoverageStatus, MissingCoverage, RollDecision, RollHold, TestClosure, coverage_map,
@@ -72,6 +82,16 @@ impl HostClass {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Exact opaque name bound into a contextual verification contract.
+    ///
+    /// The reducer seals a contract's `host_class` with the same function, and
+    /// the two digests are compared before a fact is recorded or reused — so
+    /// this is that one addressing, never a second declaration of it.
+    #[must_use]
+    pub fn digest(&self) -> aether_bloomery::Digest {
+        aether_bloomery::host_class_digest(&self.0)
     }
 }
 

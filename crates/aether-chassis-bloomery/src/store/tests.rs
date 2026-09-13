@@ -1443,12 +1443,14 @@ fn fold_journal(store: &mut SqliteStore) -> aether_bloomery::Snapshot {
 }
 
 #[test]
-fn proof_facts_append_and_never_replace() {
-    // The table is a ledger, not a cache keyed on (closure, test). Two writes
-    // of the same address are two rows; a later slice consults, this one only
-    // records.
+fn proof_facts_append_a_later_result_and_drop_a_replay_of_one_already_held() {
+    // The table is a ledger, not a cache keyed on (closure, test): a later run
+    // that observed something else is a second row, and consultation reads the
+    // newest. A replay of a row the table already holds is not a second
+    // observation — appending it would re-date that result past the one which
+    // superseded it.
     let mut store = memory();
-    let write = ProofFactWrite {
+    let green = ProofFactWrite {
         closure_key: &[0xC1; 32],
         test_id: "crate::once",
         result: "green",
@@ -1456,15 +1458,18 @@ fn proof_facts_append_and_never_replace() {
         producing_dispatch: "n-1",
         producing_bloom: &[0xB1; 32],
     };
-    store.append_proof_facts(&[write]).unwrap();
-    store.append_proof_facts(&[write]).unwrap();
+    let red = ProofFactWrite { result: "red", producing_dispatch: "n-2", ..green };
+
+    assert_eq!(store.append_proof_facts(&[green]).unwrap(), 1);
+    assert_eq!(store.append_proof_facts(&[red]).unwrap(), 1);
+    assert_eq!(store.append_proof_facts(&[green]).unwrap(), 0, "the replayed identity is dropped");
 
     let rows = store.list_proof_facts().unwrap();
-    assert_eq!(rows.len(), 2, "a second write appends; it does not replace");
-    assert_eq!(rows[0].sequence, 1);
-    assert_eq!(rows[1].sequence, 2);
+    assert_eq!(rows.len(), 2);
+    assert_eq!((rows[0].sequence, rows[0].result.as_str()), (1, "green"));
+    assert_eq!((rows[1].sequence, rows[1].result.as_str()), (2, "red"));
     assert_eq!(rows[0].test_id, "crate::once");
-    assert_eq!(rows[1].producing_dispatch, "n-1");
+    assert_eq!(rows[1].producing_dispatch, "n-2");
 }
 
 #[test]
@@ -1679,7 +1684,7 @@ fn a_v11_store_gains_an_empty_scope_verify_ledger() {
         .query_row("SELECT count(*) FROM scope_verify_reports", [], |row| row.get(0))
         .expect("the ledger exists after migration");
     assert_eq!(reports, 0, "migration invents no reports");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 22);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
 }
 
 #[test]
@@ -1711,7 +1716,7 @@ fn a_v15_store_gains_an_empty_candidate_hash_journal() {
         .query_row("SELECT count(*) FROM candidate_hash", [], |row| row.get(0))
         .expect("the journal exists after migration");
     assert_eq!(hashes, 0, "migration invents no hashes");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 22);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
 }
 
 #[test]
@@ -1769,7 +1774,7 @@ fn a_v20_store_gains_an_unpinned_scope_run_column() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v20 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 22);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
 
     let rows = store.list_scope_runs("wp-v20").unwrap();
     assert_eq!(rows.len(), 1);
@@ -1854,9 +1859,83 @@ fn a_v21_store_gains_a_nullable_prompt_manifest_column() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v21 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 22);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
     let found = store.lookup_order("n-v21").unwrap().expect("the pre-column row survives");
     assert!(found.prompt_manifest.is_none(), "migration invents no retained manifest");
+}
+
+#[test]
+fn a_v22_store_gains_the_empty_shared_run_tables() {
+    // Versions 23 and 24 add the durable shared-run projection to a store whose
+    // user_version was already "current" at 22. The tables arrive empty — the
+    // journal, not this projection, is what a physical run's coordination facts
+    // live in — and the order rows the store was already holding survive.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v22-shared-runs.db").to_str().unwrap().to_owned();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE journal (
+             sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+             idempotency_key TEXT NOT NULL UNIQUE,
+             event           BLOB NOT NULL,
+             decisions       BLOB,
+             decider         TEXT,
+             decisions_schema TEXT
+         );
+         CREATE TABLE outstanding_orders (
+             nonce                TEXT PRIMARY KEY,
+             bloom                BLOB NOT NULL,
+             workpiece            TEXT NOT NULL,
+             scope_revision       BLOB NOT NULL,
+             candidate            BLOB NOT NULL,
+             displayed_digest     BLOB NOT NULL,
+             stage                BLOB NOT NULL,
+             transformation       BLOB NOT NULL,
+             configs              BLOB NOT NULL,
+             profile              BLOB NOT NULL,
+             deadline_unix_millis INTEGER NOT NULL,
+             lifecycle            TEXT NOT NULL DEFAULT 'submitted',
+             prompt_manifest      BLOB
+         );
+         CREATE TABLE parked_question (
+             bloom                BLOB NOT NULL,
+             question             BLOB NOT NULL,
+             nonce                TEXT NOT NULL,
+             workpiece            TEXT NOT NULL,
+             scope_revision       BLOB NOT NULL,
+             candidate            BLOB NOT NULL,
+             displayed_digest     BLOB NOT NULL,
+             stage                BLOB NOT NULL,
+             transformation       BLOB NOT NULL,
+             configs              BLOB NOT NULL,
+             profile              BLOB NOT NULL,
+             deadline_unix_millis INTEGER NOT NULL,
+             lifecycle            TEXT NOT NULL DEFAULT 'submitted',
+             prompt_manifest      BLOB,
+             PRIMARY KEY (bloom, question)
+         );
+         PRAGMA user_version = 22;",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO outstanding_orders VALUES ('n-v22', x'01', 'wp', x'02', x'03', x'03', x'04', \
+         x'05', x'06', x'07', 0, 'submitted', NULL)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut store = SqliteStore::open(&path).expect("a v22 store migrates");
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
+    assert!(store.lookup_order("n-v22").unwrap().is_some(), "the pre-projection order row survives");
+    for table in ["shared_runs", "shared_run_members", "shared_run_steps", "shared_member_verification_queue"] {
+        assert_eq!(
+            store.conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get::<_, i64>(0)).unwrap(),
+            0,
+            "{table} arrives empty",
+        );
+    }
+    assert!(store.list_open_shared_runs().unwrap().is_empty());
 }
 
 mod schema_digest_migration {
@@ -1925,7 +2004,7 @@ mod schema_digest_migration {
         drop(conn);
 
         let mut store = SqliteStore::open(&path).expect("a v16 store migrates");
-        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 22);
+        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
         let journal = store.replay_journal().unwrap();
         assert_eq!(journal.len(), 2);
         let v2 = journal.iter().find(|row| row.idempotency_key == "v2").unwrap();
@@ -2073,7 +2152,7 @@ fn a_null_stamped_outbox_row_still_decodes_positionally_after_migration() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v17 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 22);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
     let entries = store.drain_outbox(Some(Topic::ViewDocument.as_str())).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].payload_schema, None, "migration invents no stamp");
@@ -2317,7 +2396,7 @@ mod outbox_results {
         drop(conn);
 
         let mut store = SqliteStore::open(&path).expect("a v18 store migrates");
-        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 22);
+        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
         let journal = store.replay_journal().unwrap();
         assert_eq!(journal.len(), 1);
         assert_eq!(journal[0].idempotency_key, "v18-journal");

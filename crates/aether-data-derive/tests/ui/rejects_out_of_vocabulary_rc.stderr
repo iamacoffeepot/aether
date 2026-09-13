@@ -7,12 +7,12 @@ error[E0277]: the trait bound `Rc<u32>: Schema` is not satisfied
   = help: the following other types implement trait `Schema`:
             ()
             BTreeMap<K, V>
+            Box<T>
             Counted
             DagId
             EngineId
             KindId
             MailId
-            MailboxId
           and $N others
 
 error[E0277]: the trait bound `Rc<u32>: WireEncode` is not satisfied

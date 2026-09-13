@@ -59,10 +59,14 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use aether_bloomery::{BackendId, BloomId, Nonce, ObservedLaneWrites, WorkHandle, WorkOrder, WorkpieceId};
+use aether_bloomery::{
+    BackendId, BloomId, CandidateRef, Digest, Nonce, ObservedConstructionCheckpoint, ObservedLaneWrites,
+    SourceSnapshot, WorkHandle, WorkOrder, WorkpieceId,
+};
 use aether_substrate::actor::native::{DEFAULT_MAX_IN_FLIGHT, NativeCtx};
 
 use super::CandidatePush;
+use crate::bloomery::SourceShell;
 use crate::bloomery::executor::{ExecutorPort, ExecutorPortError, ExecutorShell, RunObservation, Settled};
 
 /// How many blocking adapter calls this reactor may have in flight at once.
@@ -86,15 +90,27 @@ pub const MAX_IN_FLIGHT: usize = DEFAULT_MAX_IN_FLIGHT;
 pub enum AdapterCall {
     /// `ExecutorPort::submit` for an order's nonce.
     Submit(Nonce),
+    /// Idle-only admission has a different answer and never queues the order.
+    SubmitIdle(Nonce),
     /// `ExecutorPort::observe` for a tracked handle's nonce.
     Observe(Nonce),
     /// `ExecutorPort::cancel` for a nonce — the reactor's cancellation intent.
     Cancel(Nonce),
+    /// Release one retained physical lane.
+    ReleasePhysicalRun(Digest),
+    RetainPartialHeadRepair(Digest),
     /// `ExecutorPort::observe_writes`, which takes no argument and so is one
     /// call at a time for the whole reactor.
     ObserveWrites,
+    /// `ExecutorPort::observe_construction_checkpoints`, one whole-reactor read.
+    ObserveConstructionCheckpoints,
+    /// `SourceShell::snapshot` for an immutable sealed base checkout.
+    SnapshotBase(Digest),
     /// `CandidatePush::push` of one capture onto one ref (ADR-0152).
-    Publish { commit_hex: String, target_ref: String },
+    Publish {
+        commit_hex: String,
+        target_ref: String,
+    },
 }
 
 /// A call plus everything the worker needs that the key does not carry — the
@@ -107,9 +123,21 @@ enum AdapterWork {
     /// Boxed: `WorkOrder` is the transformation plus nonce, far larger than
     /// the other variants, and identity is the nonce on [`AdapterCall`].
     Submit(Box<WorkOrder>),
+    SubmitIdle {
+        order: Box<WorkOrder>,
+        allow_new: bool,
+    },
     Observe(WorkHandle),
     Cancel(WorkHandle),
+    ReleasePhysicalRun(Digest),
+    RetainPartialHeadRepair {
+        plan: Digest,
+        candidate: CandidateRef,
+        allowed_paths: Vec<String>,
+    },
     ObserveWrites,
+    ObserveConstructionCheckpoints,
+    SnapshotBase(Digest),
     Publish {
         commit_hex: String,
         target_ref: String,
@@ -120,9 +148,17 @@ impl AdapterWork {
     fn call(&self) -> AdapterCall {
         match self {
             Self::Submit(order) => AdapterCall::Submit(order.nonce.clone()),
+            Self::SubmitIdle { order, .. } => AdapterCall::SubmitIdle(order.nonce.clone()),
             Self::Observe(handle) => AdapterCall::Observe(handle.nonce.clone()),
             Self::Cancel(handle) => AdapterCall::Cancel(handle.nonce.clone()),
+            Self::ReleasePhysicalRun(run) => AdapterCall::ReleasePhysicalRun(*run),
+            Self::RetainPartialHeadRepair { plan, candidate, allowed_paths } => {
+                let _ = (candidate, allowed_paths);
+                AdapterCall::RetainPartialHeadRepair(*plan)
+            }
             Self::ObserveWrites => AdapterCall::ObserveWrites,
+            Self::ObserveConstructionCheckpoints => AdapterCall::ObserveConstructionCheckpoints,
+            Self::SnapshotBase(base) => AdapterCall::SnapshotBase(*base),
             Self::Publish { commit_hex, target_ref } => {
                 AdapterCall::Publish { commit_hex: commit_hex.clone(), target_ref: target_ref.clone() }
             }
@@ -132,12 +168,29 @@ impl AdapterWork {
     /// Run the call. The whole blocking surface of this reactor is these arms,
     /// and they only ever execute on a worker thread. Submit uses the shell's
     /// inherent synchronous method — the identity arm of the port.
-    fn run(self, shell: &ExecutorShell, pusher: &dyn CandidatePush) -> AdapterAnswer {
+    fn run(self, shell: &ExecutorShell, source: Option<&SourceShell>, pusher: &dyn CandidatePush) -> AdapterAnswer {
         match self {
             Self::Submit(order) => AdapterAnswer::Submit(shell.submit(&order)),
+            Self::SubmitIdle { order, allow_new } => AdapterAnswer::SubmitIdle(if allow_new {
+                shell.try_submit_idle(&order)
+            } else {
+                shell.settle_idle_submission(&order)
+            }),
             Self::Observe(handle) => AdapterAnswer::Observe(shell.observe_run(&handle)),
             Self::Cancel(handle) => AdapterAnswer::Cancel(shell.cancel(&handle)),
+            Self::ReleasePhysicalRun(run) => AdapterAnswer::ReleasePhysicalRun(shell.release_physical_run(&run)),
+            Self::RetainPartialHeadRepair { plan, candidate, allowed_paths } => AdapterAnswer::RetainPartialHeadRepair(
+                shell.retain_partial_head_repair(&plan, &candidate, &allowed_paths),
+            ),
             Self::ObserveWrites => AdapterAnswer::ObserveWrites(shell.observe_writes()),
+            Self::ObserveConstructionCheckpoints => {
+                AdapterAnswer::ObserveConstructionCheckpoints(shell.observe_construction_checkpoints())
+            }
+            Self::SnapshotBase(base) => AdapterAnswer::SnapshotBase(
+                source
+                    .ok_or_else(|| "source is not configured for base verification".to_owned())
+                    .and_then(|source| source.snapshot(&base).map_err(|error| error.to_string())),
+            ),
             Self::Publish { commit_hex, target_ref } => AdapterAnswer::Publish(pusher.push(&commit_hex, &target_ref)),
         }
     }
@@ -148,9 +201,14 @@ impl AdapterWork {
 #[derive(Debug)]
 enum AdapterAnswer {
     Submit(Result<WorkHandle, ExecutorPortError>),
+    SubmitIdle(Result<Option<WorkHandle>, ExecutorPortError>),
     Observe(Result<RunObservation, ExecutorPortError>),
     Cancel(Result<(), ExecutorPortError>),
+    ReleasePhysicalRun(Result<(), ExecutorPortError>),
+    RetainPartialHeadRepair(Result<(), ExecutorPortError>),
     ObserveWrites(Vec<ObservedLaneWrites>),
+    ObserveConstructionCheckpoints(Vec<ObservedConstructionCheckpoint>),
+    SnapshotBase(Result<SourceSnapshot, String>),
     Publish(Result<(), String>),
 }
 
@@ -283,7 +341,13 @@ impl AdapterOffload {
     /// Hand this round's backlog to workers, up to [`MAX_IN_FLIGHT`] at once.
     /// What does not fit stays queued and starts as slots free, so a round
     /// wider than the ceiling still finishes inside its own round.
-    pub fn start_wanted(&mut self, ctx: &mut NativeCtx<'_>, shell: &ExecutorShell, pusher: &Arc<dyn CandidatePush>) {
+    pub fn start_wanted(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        shell: &ExecutorShell,
+        source: Option<&SourceShell>,
+        pusher: &Arc<dyn CandidatePush>,
+    ) {
         // Every ledger borrow here is bound to its own block: the guard is not
         // reentrant, and this loop takes it three times per pass.
         while self.in_flight() < MAX_IN_FLIGHT {
@@ -307,7 +371,7 @@ impl AdapterOffload {
             // Already out on a worker from an earlier round — the re-derived
             // want is redundant, not a second run.
             if claimed {
-                self.spawn(ctx, shell, pusher, call, work);
+                self.spawn(ctx, shell, source, pusher, call, work);
             }
         }
     }
@@ -316,12 +380,14 @@ impl AdapterOffload {
         &self,
         ctx: &mut NativeCtx<'_>,
         shell: &ExecutorShell,
+        source: Option<&SourceShell>,
         pusher: &Arc<dyn CandidatePush>,
         call: AdapterCall,
         work: AdapterWork,
     ) {
         let ledger = Arc::clone(&self.ledger);
         let shell = shell.clone();
+        let source = source.cloned();
         let pusher = Arc::clone(pusher);
         let key = call.clone();
         ctx.dispatch_blocking_with(call, move || {
@@ -331,7 +397,7 @@ impl AdapterOffload {
             // ceiling therefore cannot be leaked by a worker that dies, and a
             // turn can never see a call that is neither in flight nor answered.
             let _slot = Slot { ledger: Arc::clone(&ledger), call: key.clone() };
-            let answer = work.run(&shell, pusher.as_ref());
+            let answer = work.run(&shell, source.as_ref(), pusher.as_ref());
             if let Ok(mut ledger) = ledger.lock() {
                 ledger.answers.insert(key, answer);
             }
@@ -378,6 +444,17 @@ pub struct OffloadedPort<'a> {
     shell: &'a ExecutorShell,
 }
 
+impl OffloadedPort<'_> {
+    /// Resolve the exact immutable tree beneath a sealed base checkout without
+    /// blocking the reactor turn.
+    pub fn snapshot_base(&self, base: &Digest) -> Settled<Result<SourceSnapshot, String>> {
+        match self.offload.take_or_want(AdapterWork::SnapshotBase(*base)) {
+            Some(AdapterAnswer::SnapshotBase(answer)) => Settled::Answered(answer),
+            _ => Settled::InFlight,
+        }
+    }
+}
+
 impl ExecutorPort for OffloadedPort<'_> {
     fn backend_for(&self, handle: &WorkHandle) -> BackendId {
         ExecutorPort::backend_for(self.shell, handle)
@@ -390,6 +467,74 @@ impl ExecutorPort for OffloadedPort<'_> {
         }
     }
 
+    fn try_submit_idle(&self, order: &WorkOrder) -> Settled<Result<Option<WorkHandle>, ExecutorPortError>> {
+        {
+            let mut ledger = self.offload.lock();
+            let call = AdapterCall::SubmitIdle(order.nonce.clone());
+            let cancel = AdapterCall::Cancel(order.nonce.clone());
+            if ledger.in_flight.contains(&cancel)
+                || ledger.answers.contains_key(&cancel)
+                || ledger.asked_this_round.contains(&cancel)
+                || ledger.wanted.iter().any(|work| work.call() == cancel)
+            {
+                return Settled::InFlight;
+            }
+            let required_pending = ledger.in_flight.iter().any(|call| matches!(call, AdapterCall::Submit(_)))
+                || ledger.wanted.iter().any(|work| matches!(work, AdapterWork::Submit(_)));
+            if required_pending && !ledger.in_flight.contains(&call) && !ledger.answers.contains_key(&call) {
+                ledger.wanted.retain(|work| work.call() != call);
+                drop(ledger);
+                return Settled::Answered(Ok(None));
+            }
+        }
+        match self.offload.take_or_want(AdapterWork::SubmitIdle { order: Box::new(order.clone()), allow_new: true }) {
+            Some(AdapterAnswer::SubmitIdle(answer)) => Settled::Answered(answer),
+            _ => Settled::InFlight,
+        }
+    }
+
+    fn has_idle_capacity(&self, order: &WorkOrder) -> bool {
+        let required_pending = {
+            let ledger = self.offload.lock();
+            ledger.in_flight.iter().any(|call| matches!(call, AdapterCall::Submit(_)))
+                || ledger.wanted.iter().any(|work| matches!(work, AdapterWork::Submit(_)))
+        };
+        !required_pending && self.shell.has_idle_capacity(order)
+    }
+
+    fn settle_idle_submission(&self, order: &WorkOrder) -> Settled<Result<Option<WorkHandle>, ExecutorPortError>> {
+        // A wanted call has not started yet; turn it into a probe before the
+        // worker takes it. An in-flight call keeps its immutable input and its
+        // answer is consumed through the same key as the original submission.
+        {
+            let mut ledger = self.offload.lock();
+            // A joined pre-check may already be preparing through the required
+            // submit path. Its own answer is authoritative: an inspect probe
+            // could otherwise mistake that in-progress preparation for a run.
+            let required = AdapterCall::Submit(order.nonce.clone());
+            if let Some(AdapterAnswer::Submit(answer)) = ledger.answers.remove(&required) {
+                return Settled::Answered(answer.map(Some));
+            }
+            if ledger.in_flight.contains(&required)
+                || ledger.asked_this_round.contains(&required)
+                || ledger.wanted.iter().any(|work| work.call() == required)
+            {
+                return Settled::InFlight;
+            }
+            for work in &mut ledger.wanted {
+                if let AdapterWork::SubmitIdle { order: wanted, allow_new } = work
+                    && wanted.nonce == order.nonce
+                {
+                    *allow_new = false;
+                }
+            }
+        }
+        match self.offload.take_or_want(AdapterWork::SubmitIdle { order: Box::new(order.clone()), allow_new: false }) {
+            Some(AdapterAnswer::SubmitIdle(answer)) => Settled::Answered(answer),
+            _ => Settled::InFlight,
+        }
+    }
+
     fn observe(&self, handle: &WorkHandle) -> Settled<Result<RunObservation, ExecutorPortError>> {
         match self.offload.take_or_want(AdapterWork::Observe(handle.clone())) {
             Some(AdapterAnswer::Observe(answer)) => Settled::Answered(answer),
@@ -398,8 +543,41 @@ impl ExecutorPort for OffloadedPort<'_> {
     }
 
     fn cancel(&self, handle: &WorkHandle) -> Settled<Result<(), ExecutorPortError>> {
+        {
+            let mut ledger = self.offload.lock();
+            let idle = AdapterCall::SubmitIdle(handle.nonce.clone());
+            ledger.wanted.retain(|work| work.call() != idle);
+            // A submit already on a worker can still create the process.
+            // Cancel only after that call settles, including expiry cancels.
+            if ledger.in_flight.contains(&idle) {
+                return Settled::InFlight;
+            }
+        }
         match self.offload.take_or_want(AdapterWork::Cancel(handle.clone())) {
             Some(AdapterAnswer::Cancel(answer)) => Settled::Answered(answer),
+            _ => Settled::InFlight,
+        }
+    }
+
+    fn release_physical_run(&self, physical_run: &Digest) -> Settled<Result<(), ExecutorPortError>> {
+        match self.offload.take_or_want(AdapterWork::ReleasePhysicalRun(*physical_run)) {
+            Some(AdapterAnswer::ReleasePhysicalRun(answer)) => Settled::Answered(answer),
+            _ => Settled::InFlight,
+        }
+    }
+
+    fn retain_partial_head_repair(
+        &self,
+        plan: &Digest,
+        candidate: &CandidateRef,
+        allowed_paths: &[String],
+    ) -> Settled<Result<(), ExecutorPortError>> {
+        match self.offload.take_or_want(AdapterWork::RetainPartialHeadRepair {
+            plan: *plan,
+            candidate: *candidate,
+            allowed_paths: allowed_paths.to_vec(),
+        }) {
+            Some(AdapterAnswer::RetainPartialHeadRepair(answer)) => Settled::Answered(answer),
             _ => Settled::InFlight,
         }
     }
@@ -409,5 +587,154 @@ impl ExecutorPort for OffloadedPort<'_> {
             Some(AdapterAnswer::ObserveWrites(observed)) => Settled::Answered(observed),
             _ => Settled::InFlight,
         }
+    }
+
+    fn observe_construction_checkpoints(&self) -> Settled<Vec<ObservedConstructionCheckpoint>> {
+        match self.offload.take_or_want(AdapterWork::ObserveConstructionCheckpoints) {
+            Some(AdapterAnswer::ObserveConstructionCheckpoints(observed)) => Settled::Answered(observed),
+            _ => Settled::InFlight,
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::bloomery::UnconfiguredActionsBackend;
+    use crate::bloomery::executor::LocalExecutorError;
+    use aether_bloomery::testing::digest;
+    use aether_bloomery::{StageCatalog, StageId, Transformation};
+    use std::io;
+
+    fn shell() -> ExecutorShell {
+        ExecutorShell::new(Arc::new(UnconfiguredActionsBackend::new("test backend".to_owned())))
+    }
+
+    fn order(nonce: &str) -> WorkOrder {
+        WorkOrder {
+            transformation: Transformation::for_aggregate_verify(
+                &StageCatalog::binding_of(StageId::AggregateVerify),
+                digest(1),
+                digest(2),
+                digest(3),
+            ),
+            nonce: Nonce(nonce.to_owned()),
+            instruction_bundle: None,
+            prompt_manifest: None,
+            physical_run: None,
+            release_physical_run: true,
+        }
+    }
+
+    #[test]
+    fn base_snapshot_is_queued_for_a_blocking_worker() {
+        let offload = AdapterOffload::new();
+        let shell = shell();
+        let base = digest(9);
+
+        assert!(matches!(offload.port(&shell).snapshot_base(&base), Settled::InFlight));
+        assert!(matches!(offload.lock().wanted.front(), Some(AdapterWork::SnapshotBase(held)) if *held == base));
+        assert!(offload.lock().answers.is_empty(), "the reactor turn does not execute source I/O inline");
+    }
+
+    #[test]
+    fn cancellation_downgrades_only_an_unstarted_idle_call_and_restart_only_probes() {
+        let offload = AdapterOffload::new();
+        let shell = shell();
+        let port = offload.port(&shell);
+        let order = order("idle");
+        assert!(matches!(port.try_submit_idle(&order), Settled::InFlight));
+        assert!(matches!(port.settle_idle_submission(&order), Settled::InFlight));
+        assert!(matches!(offload.lock().wanted.front(), Some(AdapterWork::SubmitIdle { allow_new: false, .. })));
+        let restarted = AdapterOffload::new();
+        assert!(matches!(restarted.port(&shell).settle_idle_submission(&order), Settled::InFlight));
+        assert!(matches!(restarted.lock().wanted.front(), Some(AdapterWork::SubmitIdle { allow_new: false, .. })));
+    }
+
+    #[test]
+    fn a_started_idle_answer_survives_promotion_without_another_submission() {
+        let offload = AdapterOffload::new();
+        let shell = shell();
+        let order = order("started");
+        let handle = WorkHandle::new(order.nonce.clone());
+        offload
+            .lock()
+            .answers
+            .insert(AdapterCall::SubmitIdle(order.nonce.clone()), AdapterAnswer::SubmitIdle(Ok(Some(handle.clone()))));
+        assert!(
+            matches!(offload.port(&shell).settle_idle_submission(&order), Settled::Answered(Ok(Some(got))) if got == handle)
+        );
+        assert!(offload.lock().wanted.is_empty());
+    }
+
+    #[test]
+    fn a_promoted_required_submit_settles_before_any_idle_probe() {
+        let offload = AdapterOffload::new();
+        let shell = shell();
+        let order = order("promoted");
+        let call = AdapterCall::Submit(order.nonce.clone());
+        offload.lock().in_flight.insert(call.clone());
+        assert!(matches!(offload.port(&shell).settle_idle_submission(&order), Settled::InFlight));
+        assert!(offload.lock().wanted.is_empty(), "no probe can mistake preparing for a successful run");
+        offload.lock().in_flight.remove(&call);
+        offload.lock().answers.insert(
+            call.clone(),
+            AdapterAnswer::Submit(Err(ExecutorPortError::Local(LocalExecutorError::Spawn(io::Error::from(
+                io::ErrorKind::ArgumentListTooLong,
+            ))))),
+        );
+        assert!(matches!(offload.port(&shell).settle_idle_submission(&order), Settled::Answered(Err(_))));
+        let ledger = offload.lock();
+        assert!(!ledger.answers.contains_key(&call));
+        assert!(ledger.wanted.is_empty(), "the required failure is returned, not hidden by inspect");
+        drop(ledger);
+    }
+
+    #[test]
+    fn expiry_cancel_removes_an_unstarted_idle_call_and_prevents_requeue() {
+        let offload = AdapterOffload::new();
+        let shell = shell();
+        let port = offload.port(&shell);
+        let order = order("expiring");
+        let handle = WorkHandle::new(order.nonce.clone());
+        assert!(matches!(port.try_submit_idle(&order), Settled::InFlight));
+        assert!(matches!(port.cancel(&handle), Settled::InFlight));
+        assert!(matches!(port.try_submit_idle(&order), Settled::InFlight));
+        let ledger = offload.lock();
+        assert_eq!(ledger.wanted.len(), 1);
+        assert!(matches!(ledger.wanted.front(), Some(AdapterWork::Cancel(_))));
+        drop(ledger);
+    }
+
+    #[test]
+    fn expiry_cancel_waits_for_a_started_idle_submission_to_settle() {
+        let offload = AdapterOffload::new();
+        let shell = shell();
+        let order = order("started-expiry");
+        let handle = WorkHandle::new(order.nonce.clone());
+        let call = AdapterCall::SubmitIdle(order.nonce);
+        offload.lock().in_flight.insert(call.clone());
+        assert!(matches!(offload.port(&shell).cancel(&handle), Settled::InFlight));
+        assert!(offload.lock().wanted.is_empty());
+        offload.lock().in_flight.remove(&call);
+        offload.lock().answers.insert(call, AdapterAnswer::SubmitIdle(Ok(Some(handle.clone()))));
+        assert!(matches!(offload.port(&shell).cancel(&handle), Settled::InFlight));
+        assert!(matches!(offload.lock().wanted.front(), Some(AdapterWork::Cancel(_))));
+    }
+
+    #[test]
+    fn required_adapter_work_overtakes_idle_work_that_has_not_started() {
+        let offload = AdapterOffload::new();
+        let shell = shell();
+        let port = offload.port(&shell);
+        let idle = order("idle");
+        assert!(matches!(port.try_submit_idle(&idle), Settled::InFlight));
+        assert!(matches!(port.submit(&order("required")), Settled::InFlight));
+        assert!(matches!(port.try_submit_idle(&idle), Settled::Answered(Ok(None))));
+        let ledger = offload.lock();
+        assert_eq!(ledger.wanted.len(), 1);
+        assert!(matches!(ledger.wanted.front(), Some(AdapterWork::Submit(_))));
+        drop(ledger);
     }
 }

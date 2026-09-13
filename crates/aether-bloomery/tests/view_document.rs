@@ -10,9 +10,10 @@
 mod common;
 
 use aether_bloomery::{
-    Evidence, EvidenceKind, Fact, Question, Snapshot, SpendQuiesce, SpendWindow, StageId, VerifyFailure,
-    VerifyFailureSet, WorkpieceId, reduce, view_of,
+    BloomStatus, Evidence, EvidenceKind, Fact, Question, Snapshot, SpendQuiesce, SpendWindow, StageId, VerifyFailure,
+    VerifyFailureSet, ViewDocument, WorkpieceId, decode_row, encode_row, reduce, view_of,
 };
+use aether_data::Kind;
 use common::{compiled_resolved, digest, draft, event, membership, observing, sealed_and_resolved};
 use proptest::collection::btree_set;
 use proptest::prelude::*;
@@ -37,6 +38,26 @@ fn sealed(members: Vec<aether_bloomery::Membership>) -> Snapshot {
         &reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default()),
         &compiled_resolved(),
     )
+}
+
+#[test]
+fn queued_precheck_predecessor_views_keep_their_members_and_default_the_new_state() {
+    let stored = include_bytes!("fixtures/pre-precheck-view-storage.bin");
+    let positional = include_bytes!("fixtures/pre-precheck-view-positional.bin");
+    for (bytes, schema) in [(stored.as_slice(), Some(ViewDocument::NAME)), (positional.as_slice(), None)] {
+        assert!(decode_row::<ViewDocument>(bytes, schema).is_err(), "the fixture requires its old-shape decoder");
+        let view = ViewDocument::decode_row(bytes, schema).expect("queued previous-binary view upcasts");
+        assert_eq!(view.blooms.len(), 1);
+        assert_eq!(view.blooms[0].status, BloomStatus::Sealed);
+        assert_eq!(
+            view.blooms[0].members.iter().map(|member| member.workpiece.0.as_str()).collect::<Vec<_>>(),
+            ["alpha", "beta"]
+        );
+        assert!(view.blooms[0].precheck.is_none());
+        let current = encode_row(&view, Some(ViewDocument::NAME)).expect("upcast view encodes");
+        assert_eq!(ViewDocument::decode_row(&current, Some(ViewDocument::NAME)).expect("current view decodes"), view);
+        assert!(ViewDocument::decode_row(&bytes[..8], schema).is_err(), "a corrupt row still refuses");
+    }
 }
 
 #[test]

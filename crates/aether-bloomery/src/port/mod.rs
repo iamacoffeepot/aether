@@ -30,8 +30,8 @@ mod row;
 mod source;
 
 pub use executor::{
-    BackendId, Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, LaneObservation, ObservedLaneWrites,
-    WorkHandle, WorkOrder,
+    BackendId, Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, LaneObservation,
+    ObservedConstructionCheckpoint, ObservedLaneWrites, WorkHandle, WorkOrder,
 };
 pub use projection::{
     AwaitingSurfaceView, BaseAlertView, BloomView, CommissionProjection, CompositionCursorView, CompositionView,

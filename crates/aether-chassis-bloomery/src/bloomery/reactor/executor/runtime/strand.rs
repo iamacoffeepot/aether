@@ -99,8 +99,14 @@ use crate::store::StoreBackend;
 /// only bloom that could refuse it is closed. A read lost to an ill-timed crash
 /// is a study that does not exist, which is the failure mode the ADR accepts by
 /// name: findings are a product, never a gate.
-const ORDER_BEARING_TOPICS: [Topic; 5] =
-    [Topic::Dispatch, Topic::AggregateReview, Topic::AggregateVerify, Topic::ScopeDispatch, Topic::BaseVerify];
+const ORDER_BEARING_TOPICS: [Topic; 6] = [
+    Topic::Dispatch,
+    Topic::AggregateReview,
+    Topic::AggregateVerify,
+    Topic::ScopeDispatch,
+    Topic::BaseVerify,
+    Topic::DispatchPrecheck,
+];
 
 /// Re-queue every acknowledged dispatch whose order was spent without its fact
 /// reaching the journal, returning the nonces put back in flight.

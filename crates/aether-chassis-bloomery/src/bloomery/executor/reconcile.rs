@@ -52,7 +52,7 @@
 
 use std::collections::BTreeSet;
 
-use aether_bloomery::{ExecutorBackend, Nonce, Transformation};
+use aether_bloomery::{Digest, ExecutorBackend, Nonce, Transformation};
 
 use super::local::LocalExecutorError;
 
@@ -70,6 +70,10 @@ pub struct OutstandingDispatch {
     pub nonce: Nonce,
     /// The transformation the order dispatched, decoded from the persisted row.
     pub transformation: Transformation,
+    /// Durable shared-run identity when this order is one physical step.
+    pub physical_run: Option<Digest>,
+    /// Whether settling this step releases the retained local slot.
+    pub release_physical_run: bool,
 }
 
 /// What one reconciliation pass did, for the boot log line and for a caller that

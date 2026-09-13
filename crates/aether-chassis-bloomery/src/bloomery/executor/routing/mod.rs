@@ -23,7 +23,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::{
-    BackendId, EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedLaneWrites, WorkHandle, WorkOrder,
+    BackendId, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedConstructionCheckpoint,
+    ObservedLaneWrites, WorkHandle, WorkOrder,
 };
 use aether_bloomery_github::ExecutorError;
 
@@ -96,6 +97,37 @@ impl ExecutorBackend for RoutingExecutor {
         Ok(handle)
     }
 
+    fn try_submit_idle(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, Self::Error> {
+        let lane = self.lane_for_command(&order.transformation.command);
+        let handle = match lane {
+            Lane::Actions => self.actions.try_submit_idle(order)?,
+            Lane::Local => self.local.try_submit_idle(order)?,
+        };
+        if handle.is_some() {
+            self.lock().insert(order.nonce.0.clone(), lane);
+        }
+        Ok(handle)
+    }
+
+    fn has_idle_capacity(&self, order: &WorkOrder) -> bool {
+        match self.lane_for_command(&order.transformation.command) {
+            Lane::Actions => self.actions.has_idle_capacity(order),
+            Lane::Local => self.local.has_idle_capacity(order),
+        }
+    }
+
+    fn settle_idle_submission(&self, order: &WorkOrder) -> Result<Option<WorkHandle>, Self::Error> {
+        let lane = self.lane_for_command(&order.transformation.command);
+        let handle = match lane {
+            Lane::Actions => self.actions.settle_idle_submission(order)?,
+            Lane::Local => self.local.settle_idle_submission(order)?,
+        };
+        if handle.is_some() {
+            self.lock().insert(order.nonce.0.clone(), lane);
+        }
+        Ok(handle)
+    }
+
     fn inspect(&self, handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
         Ok(match self.lane_of(&handle.nonce.0) {
             Lane::Actions => self.actions.inspect(handle)?,
@@ -119,6 +151,21 @@ impl ExecutorBackend for RoutingExecutor {
         Ok(())
     }
 
+    fn release_physical_run(&self, physical_run: &Digest) -> Result<(), Self::Error> {
+        self.local.release_physical_run(physical_run)?;
+        Ok(())
+    }
+
+    fn retain_partial_head_repair(
+        &self,
+        plan: &Digest,
+        candidate: &aether_bloomery::CandidateRef,
+        allowed_paths: &[String],
+    ) -> Result<(), Self::Error> {
+        self.local.retain_partial_head_repair(plan, candidate, allowed_paths)?;
+        Ok(())
+    }
+
     fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
         let refs = match self.lane_of(&handle.nonce.0) {
             Lane::Actions => self.actions.stream_evidence(handle)?,
@@ -139,6 +186,10 @@ impl ExecutorBackend for RoutingExecutor {
     /// router does not ask it.
     fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
         self.local.observe_writes()
+    }
+
+    fn observe_construction_checkpoints(&self) -> Vec<ObservedConstructionCheckpoint> {
+        self.local.observe_construction_checkpoints()
     }
 
     /// The arm `inspect` / `cancel` / `stream_evidence` would resolve this
