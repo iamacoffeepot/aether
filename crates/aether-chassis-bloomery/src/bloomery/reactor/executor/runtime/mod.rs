@@ -96,6 +96,9 @@ use offload::{AdapterCall, AdapterOffload, OffloadedPort, PendingPublish};
 mod scope;
 use scope::drain_and_dispatch_scope;
 
+mod scope_freeze;
+use scope_freeze::ScopeFreeze;
+
 mod shared;
 use shared::{
     drain_construction_admissions, drain_contextual_dispatches, drain_shared_cancellations, drain_shared_dispatches,
@@ -927,6 +930,10 @@ pub struct ExecutorReactorState {
     prechecks: PrecheckProjection,
     host_class: HostClass,
     member_verifications: MemberVerificationScheduler,
+    // Freezes the revision a passing pre-bloom scoping run produced (ADR-0208),
+    // over the run ledger rather than over an admission — so the boot backfill
+    // and the live pass are one thing and a redelivery is a no-op.
+    scope_freeze: ScopeFreeze,
 }
 
 impl ExecutorReactorState {
@@ -969,6 +976,7 @@ impl ExecutorReactorState {
             prechecks: PrecheckProjection::default(),
             host_class: HostClass::new("fleet"),
             member_verifications: MemberVerificationScheduler::default(),
+            scope_freeze: ScopeFreeze::new(&CoordinatorConfig::default().local_worktree_base, ""),
         }
     }
 
@@ -3543,6 +3551,11 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
             Clocks { tick: &clock, now: now_unix_millis },
             correspondence.as_ref(),
         );
+        // After the pull, because the verdict this pass reads is one the pull
+        // just recorded: a scoping run's verdict lands on the commission store's
+        // own ledger and has no `Fact` to ride, so the ledger is what says a run
+        // is ready to freeze (ADR-0208).
+        state.scope_freeze.run(store);
         state.tracked.extend(newly_tracked);
         admits.extend(pulled);
         (admits, published)
@@ -3630,6 +3643,7 @@ impl NativeActor for ExecutorReactorCapability {
                 prechecks: PrecheckProjection::default(),
                 host_class: config.host_class,
                 member_verifications: MemberVerificationScheduler::default(),
+                scope_freeze: ScopeFreeze::new(&config.worktree_base, &config.archive_base),
             });
         };
 
@@ -3671,6 +3685,15 @@ impl NativeActor for ExecutorReactorCapability {
         // permanently parked. Re-queue those for the ordinary drain. A read
         // fault fails boot for the same reason the two above do.
         let restranded = readopt_stranded_dispatches(&mut store).map_err(|e| BootError::Other(Box::new(e)))?;
+        // The fourth leg, and a scoping run's own (ADR-0208): a run that passed
+        // while a binary without the freeze was deployed left its commission
+        // with no revision, and its evidence is still on disk. A boot that
+        // skipped them would leave every such commission permanently unscoped
+        // — the freeze never retries what nothing selects. Not a boot failure:
+        // a run that cannot be completed here is one commission's scoping, and
+        // refusing to mount over it would stop the whole board.
+        let mut scope_freeze = ScopeFreeze::new(&config.worktree_base, &config.archive_base);
+        let backfilled = scope_freeze.run(&mut store);
         let interval = Duration::from_secs(config.poll_interval_secs.max(1));
         let timer = spawn_timer(
             Arc::clone(&mailer),
@@ -3688,6 +3711,7 @@ impl NativeActor for ExecutorReactorCapability {
             readopted = reconciled.readopted.len(),
             reclaimed = reconciled.reclaimed,
             requeued = restranded.len(),
+            scopes_frozen = backfilled,
             "executor dispatch reactor mounted; polling the store for dispatch decisions",
         );
         // The push side resolves an admitted capture's commit through its own
@@ -3716,6 +3740,7 @@ impl NativeActor for ExecutorReactorCapability {
             prechecks: PrecheckProjection::default(),
             host_class: config.host_class,
             member_verifications: MemberVerificationScheduler::default(),
+            scope_freeze,
         })
     }
 

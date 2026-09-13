@@ -9,11 +9,13 @@
 //!   construction, so that check would retire every entry undispatched.
 //! - **No `hold_overlapping_reconcile`.** That hold is about two members
 //!   writing one tree inside one bloom; there is no bloom and no sibling.
-//! - **No `overlay_member_advisory` and no `ModelOverride`.** The advisory
-//!   returns at its first line for any command that is not
+//! - **No `overlay_member_advisory` and no sealed `ModelOverride`.** The
+//!   advisory returns at its first line for any command that is not
 //!   `construct.implement`, and a `ModelOverride` is sealed into a *bloom's*
-//!   `ConfigRegistry` — there is none to resolve against. The seat rides the
-//!   payload unread: whatever the compiled line calibrates is what dispatches.
+//!   `ConfigRegistry` — there is none to resolve against, so the default
+//!   override is the honest input to the one resolution rule. The seat itself
+//!   is resolved onto the dispatched transformation exactly as every other
+//!   model lane's is; see [`drain_and_dispatch_scope`].
 //!
 //! # The reserved bloom
 //!
@@ -28,9 +30,10 @@
 //! an existing identity space, rather than a second space.
 
 use aether_bloomery::control::decode_scope_dispatch;
-use aether_bloomery::{BloomId, ConfigRegistry, Digest, ModelProcessInstructions, Topic, WorkHandle};
+use aether_bloomery::{BloomId, ConfigRegistry, Digest, ModelOverride, ModelProcessInstructions, Topic, WorkHandle};
 
 use crate::artifacts::ArtifactsCapabilityState;
+use crate::bloomery::dispatch_model;
 use crate::bloomery::executor::{ExecutorPort, Settled};
 use crate::bloomery::intake::{DispatchRecord, dispatch_and_record, dispatch_nonce};
 use crate::bloomery::outbox::TopicOutbox;
@@ -92,6 +95,18 @@ pub(super) fn drain_and_dispatch_scope(
         if let Some(pin) = payload.instructions {
             configs.insert::<ModelProcessInstructions>(pin);
         }
+        // The seat, resolved onto the dispatched transformation the way every
+        // other model lane's is (ADR-0149 §The line). `scope.fill` is an
+        // `is_model_lane` command, so the runner turns this into the lane's
+        // `--harness` / `--model` / `--effort`; an order that names none leaves
+        // the lane on the operator's ambient CLI default, and the receipt then
+        // attests a seat that did not run. There is no sealed `ModelOverride`
+        // to resolve against — that value belongs to a bloom's registry and a
+        // scoping run has none — so the default override falls the payload's
+        // whole profile through, which is the compiled line's Scope seat.
+        let mut transformation = payload.transformation;
+        transformation.model = Some(dispatch_model(payload.stage, &payload.profile, &ModelOverride::default()));
+
         let record = DispatchRecord {
             nonce: dispatch_nonce(entry.sequence),
             bloom: BloomId(scope_run_bloom()),
@@ -101,7 +116,7 @@ pub(super) fn drain_and_dispatch_scope(
             candidate: payload.subject,
             displayed_digest: payload.subject,
             stage: payload.stage,
-            transformation: payload.transformation,
+            transformation,
             configs,
             instruction_bundle: None,
             prompt_manifest: None,

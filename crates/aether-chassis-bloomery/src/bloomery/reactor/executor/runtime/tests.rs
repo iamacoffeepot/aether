@@ -18,8 +18,9 @@ use aether_bloomery::testing::digest;
 use aether_bloomery::{
     Admit, AgentSelection, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, BloomId, CandidateRef,
     Conclusion, ConfigKind, ConfigRegistry, Digest, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend,
-    Fact, Harness, LaneObservation, ModelOverride, ModelProcessInstructions, Nonce, Observation, Provenance,
-    ReasoningEffort, RedispatchPayload, ReviewPass, SharedCorrespondence, SourceSnapshot, StageCatalog, StageId,
+    Fact, Harness, LaneObservation, ModelOverride, ModelProcessInstructions, NamedPath, Nonce, Observation, PathOrigin,
+    Provenance, ReasoningEffort, RedispatchPayload, ReviewPass, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA,
+    ScopeRevision, ScopeRouting, ScopeVerifyInput, SharedCorrespondence, SourceSnapshot, StageCatalog, StageId,
     StageOverride, Statement, TimeoutRecord, Topic, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle,
     WorkOrder, WorkpieceId, pin_workpiece_description, split_lane_identity,
 };
@@ -33,6 +34,7 @@ use aether_data::{Kind, MailboxId};
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::registry::Registry;
 
+use super::scope_freeze::ScopeFreeze;
 use super::strand::readopt_stranded_dispatches;
 use super::{
     BACKOFF_CAP, BaseSnapshotPort, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState,
@@ -47,13 +49,13 @@ use crate::bloomery::intake::{
     Admission, AdmissionKey, AdmitDecision, DispatchError, DispatchRecord, PendingObservation, UploadedEvidence,
     admit_uploaded, attempt_artifact_name, dispatch_nonce, record_dispatch,
 };
-use crate::bloomery::open_scope_run;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::{CoordinatorConfig, GithubConnectionConfig};
 use crate::bloomery::{
     ExecutorPort, ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, Settled,
     UnconfiguredActionsBackend,
 };
+use crate::bloomery::{ScopeRunState, open_scope_run, scope_run_state};
 use crate::bloomery::{authorize_instructions, reference_instructions};
 use crate::session::SessionConfig;
 use crate::store::{
@@ -772,6 +774,202 @@ fn the_dispatched_scope_order_carries_the_pinned_sketch() {
         split_lane_identity(description),
         ("the sketch body", Some("Workpiece: wp-scope-sketch")),
         "the sketch is pinned with the commission id so the lane's ## Lane and ## Task both resolve",
+    );
+}
+
+// Tripwire: the dispatched scoping run names the seat the line calibrates for
+// Scope. The payload carried that profile from the day the topic shipped and
+// the drain never overlaid it onto the transformation, so the runner emitted no
+// `--harness` / `--model` / `--effort` and every scope lane ran on whatever the
+// operator's ambient CLI default happened to be — four runs on 2026-09-13 billed
+// a model nothing had chosen (#5921). Pinned against the line's own profile
+// rather than a literal so a recalibration moves both together; what trips it is
+// the dispatch dropping back to ambient or to a dispatch-time choice.
+#[test]
+fn the_dispatched_scope_order_runs_under_the_lines_scope_seat() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let (commission, intent) = seed_commission(&mut store, "wp-scope-seat");
+    open_scope_run(&mut store, &commission, intent, digest(2), "scope sketch").expect("open");
+
+    drain_and_dispatch_scope(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    let orders = backend.orders();
+    let dispatched = orders[0].transformation.model.clone().expect("a model lane names its profile");
+    let scope = StageCatalog::profile_of(StageId::Scope);
+    assert_eq!(dispatched.harness, scope.harness, "the scope lane forks the calibrated Scope harness");
+    assert_eq!(dispatched.model, scope.model, "under the calibrated Scope model");
+    assert_eq!(dispatched.effort, scope.effort, "at its calibrated effort");
+}
+
+/// A workpiece a scope lane could have assembled, declaring `surface`.
+fn scope_revision(id: &str, surface: &[&str]) -> ScopeRevision {
+    ScopeRevision {
+        schema: SCOPE_REVISION_SCHEMA,
+        workpiece: WorkpieceId(id.to_owned()),
+        // What a lane always emits: it replays its own call log and cannot know
+        // which revision was the commission's tip when its evidence returned.
+        predecessor: None,
+        problem: "problem".to_owned(),
+        design: "design".to_owned(),
+        plan: "plan".to_owned(),
+        declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
+        dogfood_brief: String::new(),
+        routing: ScopeRouting { size: "M".to_owned(), model: String::new() },
+        dependencies: Vec::new(),
+        description: "advisory".to_owned(),
+        implements: Vec::new(),
+        declared_crates: Vec::new(),
+        declared_reads: Vec::new(),
+    }
+}
+
+/// The freeze-check projection a lane binds beside its revision: one plan step
+/// naming `path`, judged against `surface`.
+fn scope_projection(path: &str, surface: &[&str]) -> ScopeVerifyInput {
+    ScopeVerifyInput {
+        schema: SCOPE_VERIFY_SCHEMA,
+        named_paths: vec![NamedPath { path: path.to_owned(), origin: PathOrigin::PlanStep { step: 1 } }],
+        named_symbols: Vec::new(),
+        declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
+    }
+}
+
+/// Write the `evidence.json` a scope lane leaves in its retained evidence
+/// directory — the copy the freeze reads the bound revision back out of.
+fn retain_scope_evidence(base: &Path, nonce: &str, revision: &ScopeRevision, projection: &ScopeVerifyInput) {
+    let dir = base.join(format!("{nonce}-evidence"));
+    fs::create_dir_all(&dir).expect("the evidence directory is created");
+    let evidence = serde_json::json!({
+        "command": "scope.fill",
+        "nonce": nonce,
+        "status": "pass",
+        "result_record": {
+            "revision": aether_bloomery::encode_hex(&revision.to_canonical()),
+            "verify_input": aether_bloomery::encode_hex(&projection.to_canonical()),
+        },
+    });
+    fs::write(dir.join("evidence.json"), serde_json::to_vec(&evidence).expect("evidence encodes"))
+        .expect("the evidence is written");
+}
+
+/// Open, dispatch, and answer one scoping run with `verdict`, returning the
+/// commission it scopes and the nonce its dispatch row named.
+fn answered_scope_run(
+    store: &mut SqliteStore,
+    shell: &ExecutorShell,
+    id: &str,
+    verdict: StageVerdict,
+) -> (WorkpieceId, Nonce, u64) {
+    let (commission, intent) = seed_commission(store, id);
+    let opened = open_scope_run(store, &commission, intent, digest(2), "scope sketch").expect("open");
+    drain_and_dispatch_scope(store, shell, NOW_UNIX_MILLIS).unwrap();
+    store
+        .record_scope_verdict(&commission.0, opened.ordinal, &format!("{verdict:?}"), digest(3).as_bytes().as_slice())
+        .expect("the intake records the verdict");
+    (commission, dispatch_nonce(opened.sequence), opened.ordinal)
+}
+
+#[test]
+fn a_passing_scope_run_freezes_its_revision_exactly_once() {
+    // The other half of #5921: the lane verified its workpiece and bound the
+    // frozen revision into its evidence, the intake recorded the verdict, and
+    // nothing stored the revision — so a passing run left the commission with
+    // `current_revision: none`, exactly as if it had never run. The second pass
+    // is the redelivery: the ledger is what selects a run, so a commission that
+    // froze must not be picked up again and chained a second revision.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let shell = ExecutorShell::new(Arc::new(CapturingBackend::default()));
+    let (commission, nonce, _ordinal) =
+        answered_scope_run(&mut store, &shell, "wp-scope-frozen", StageVerdict::VerificationPassed);
+    let surface = &["crates/aether-bloomery/**"];
+    let revision = scope_revision(&commission.0, surface);
+    let evidence_root = tempfile::tempdir().expect("temp evidence root");
+    retain_scope_evidence(
+        evidence_root.path(),
+        &nonce.0,
+        &revision,
+        &scope_projection("crates/aether-bloomery/src/values/stage.rs", surface),
+    );
+
+    let mut freeze = ScopeFreeze::new(evidence_root.path().to_str().expect("utf-8 root"), "");
+    assert_eq!(freeze.run(&mut store), 1, "the passing run freezes its revision");
+
+    let view = store.load(&commission).expect("load").expect("the commission exists");
+    let tip = view.head.current_revision.expect("the freeze advanced the commission's tip");
+    assert_eq!(view.head.current_ordinal, Some(1), "the first freeze takes ordinal 1");
+    assert_eq!(
+        scope_run_state(&store.list_scope_runs(&commission.0).expect("list")),
+        ScopeRunState::Frozen { revision: tip.as_bytes().to_vec() },
+        "the ledger's terminal row carries the digest the store landed at",
+    );
+
+    assert_eq!(freeze.run(&mut store), 0, "a redelivered verdict freezes nothing");
+    let frozen = store.list_scope_runs(&commission.0).expect("list");
+    assert_eq!(frozen.iter().filter(|row| row.kind == "frozen").count(), 1, "and writes no second frozen row");
+}
+
+#[test]
+fn a_failing_scope_run_freezes_nothing() {
+    // The verdict row is the whole record of a failed attempt: the termination
+    // rule reads it as an attempt spent and the retry budget decides what
+    // happens next. Freezing here would store a workpiece the lane itself
+    // judged unfillable and let it be approved and sealed.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let shell = ExecutorShell::new(Arc::new(CapturingBackend::default()));
+    let (commission, nonce, _ordinal) =
+        answered_scope_run(&mut store, &shell, "wp-scope-failed", StageVerdict::VerificationFailed);
+    let surface = &["crates/aether-bloomery/**"];
+    let evidence_root = tempfile::tempdir().expect("temp evidence root");
+    // The evidence still binds a revision — a lane that assembled a workpiece
+    // and then failed its own checks writes both.
+    retain_scope_evidence(
+        evidence_root.path(),
+        &nonce.0,
+        &scope_revision(&commission.0, surface),
+        &scope_projection("crates/aether-bloomery/src/values/stage.rs", surface),
+    );
+
+    assert_eq!(
+        ScopeFreeze::new(evidence_root.path().to_str().expect("utf-8 root"), "").run(&mut store),
+        0,
+        "only a passing verdict freezes",
+    );
+    assert!(
+        store.load(&commission).expect("load").expect("the commission exists").head.current_revision.is_none(),
+        "the commission keeps its absent tip",
+    );
+}
+
+#[test]
+fn a_scope_run_whose_workpiece_leaves_its_surface_freezes_nothing() {
+    // The freeze check is the store's (ADR-0208) and the pass reuses it rather
+    // than writing around it: a workpiece whose plan names a path no glob in
+    // its own declared surface admits is refused, and the refusal is what the
+    // commission keeps instead of a contradiction that would first surface
+    // hours later at Member-Verify.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let shell = ExecutorShell::new(Arc::new(CapturingBackend::default()));
+    let (commission, nonce, _ordinal) =
+        answered_scope_run(&mut store, &shell, "wp-scope-gap", StageVerdict::VerificationPassed);
+    let surface = &["crates/aether-bloomery/**"];
+    let evidence_root = tempfile::tempdir().expect("temp evidence root");
+    retain_scope_evidence(
+        evidence_root.path(),
+        &nonce.0,
+        &scope_revision(&commission.0, surface),
+        &scope_projection("crates/aether-chassis-bloomery/src/store/runtime.rs", surface),
+    );
+
+    assert_eq!(
+        ScopeFreeze::new(evidence_root.path().to_str().expect("utf-8 root"), "").run(&mut store),
+        0,
+        "a refused report freezes nothing",
+    );
+    assert!(
+        store.load(&commission).expect("load").expect("the commission exists").head.current_revision.is_none(),
+        "the commission keeps its absent tip",
     );
 }
 

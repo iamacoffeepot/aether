@@ -95,9 +95,11 @@ pub fn scope_dispatch_payload(
         base,
         stage: StageId::Scope,
         transformation,
-        // Carried unread: whatever the compiled line calibrates is what
-        // dispatches. No `ModelOverride` is resolved against it — that type is
-        // sealed into a *bloom's* registry, and there is no bloom here.
+        // The seat the drain resolves onto the dispatched transformation, so
+        // the lane forks the harness and model this line calibrates rather
+        // than the operator's ambient CLI default. No `ModelOverride` narrows
+        // it — that type is sealed into a *bloom's* registry, and there is no
+        // bloom here — so the compiled line is the whole answer.
         profile: StageCatalog::profile_of(StageId::Scope),
         instructions,
     }

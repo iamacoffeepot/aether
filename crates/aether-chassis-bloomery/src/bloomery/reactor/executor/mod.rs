@@ -49,6 +49,12 @@ pub struct ExecutorReactorSetup {
     pub correspondence: Option<SharedCorrespondence>,
     pub store_path: String,
     pub artifacts_root: Option<String>,
+    /// Working root of the retained lane evidence directories — where the
+    /// scoping-run freeze reads the revision a passing run bound (ADR-0208).
+    pub worktree_base: String,
+    /// Root of the archive tier the same read falls back to (ADR-0211). Empty
+    /// resolves to `<worktree_base>/archive`.
+    pub archive_base: String,
     pub poll_interval_secs: u64,
     pub stale_warn_after_secs: u64,
     /// How long a local model lane may stay silent before this host cancels it
