@@ -11,6 +11,10 @@ path = "src/bin/bloomery_console.rs"
 
 [dependencies]
 aether-bloomery = { path = "../aether-bloomery", default-features = false }
+# The REST edge's hex codec. A shared run's `unfinished` list names requests by
+# content address, so the console decodes one back through the same adapter the
+# control API rendered it with before it can compute that address.
+aether-bloomery-rest = { path = "../aether-bloomery-rest" }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 crossterm = { workspace = true }

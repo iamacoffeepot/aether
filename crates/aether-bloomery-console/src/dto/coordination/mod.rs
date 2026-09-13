@@ -5,8 +5,6 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
-mod json;
-
 use super::{CandidateRef, DigestHex, MemberView, PrecheckView, StageId};
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -152,7 +150,7 @@ impl<'de> Deserialize<'de> for MemberRequestView {
             value.get("member").and_then(|member| serde_json::from_value(member.clone()).ok()).unwrap_or_default();
         // Unknown future request shapes remain readable. A request labels a
         // live row only when its complete canonical identity is in unfinished.
-        let id = json::from_value::<aether_bloomery::MemberVerifyRequest>(value)
+        let id = aether_bloomery_rest::from_value::<aether_bloomery::MemberVerifyRequest>(value)
             .ok()
             .map(|request| DigestHex::from_bytes(*request.digest().as_bytes()));
         Ok(Self { member, id })

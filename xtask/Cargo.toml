@@ -21,6 +21,10 @@ aether-bloomery = { path = "../crates/aether-bloomery", features = ["testing"] }
 # The day roll's coverage-map type (ADR-0203). The git adapter owns the
 # fleet-main compare-and-swap the operator command drives through `git`.
 aether-bloomery-git = { path = "../crates/aether-bloomery-git" }
+# The REST edge's hex codec. `bloom` is a client of the coordinator's control
+# API, so it renders and parses request bodies through the same adapters the
+# API serves them with rather than keeping its own copy.
+aether-bloomery-rest = { path = "../crates/aether-bloomery-rest" }
 aether-chassis = { path = "../crates/aether-chassis" }
 aether-data = { path = "../crates/aether-data" }
 anyhow = { workspace = true }

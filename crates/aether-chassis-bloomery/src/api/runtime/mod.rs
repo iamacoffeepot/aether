@@ -65,7 +65,6 @@ mod commissions;
 mod configs;
 mod drafts;
 mod evidence;
-pub mod hex;
 mod metrics;
 mod pipeline;
 mod proposals;
@@ -86,6 +85,10 @@ use aether_bloomery::{
     AdmitResult, Digest, EnumerateClaimsResult, LoadConfigsResult, MetricsQueryResult, QueryResult, QuerySelector,
     ResolvedConfigs, SpendQueryResult, StoreClass,
 };
+// The REST edge's hex spelling — path segments and JSON bodies alike. It is a
+// crate rather than a module here because the two clients of this API speak the
+// same spelling: `xtask bloom` and the terminal console.
+pub use aether_bloomery_rest as hex;
 use aether_http as http;
 use aether_http::{HttpServerResponse, RegisterRouteResult};
 use aether_kinds::trace::Settled;

@@ -1,24 +1,31 @@
-//! The REST edge's digest form: 64 lowercase hex characters, in a path segment
-//! and in a JSON body alike.
+//! The Bloomery REST edge's digest form: 64 lowercase hex characters, in a path
+//! segment and in a JSON body alike.
 //!
 //! A digest addressed in a path segment has always been hex — every `{id}` /
 //! `{digest}` route decodes through [`digest_from_hex`] and every id rendered
 //! back into a response encodes through [`hex_encode`]. The body codecs next
-//! door ([`from_slice`], [`to_vec`]) give a body the same spelling, so an
-//! operator authors and reads one representation of a digest across the whole
-//! surface instead of typing `"base": [185, 103, …]` into the body of a request
-//! whose path segment names the same kind of value in hex.
+//! door ([`from_slice`], [`from_value`], [`to_vec`]) give a body the same
+//! spelling, so an operator authors and reads one representation of a digest
+//! across the whole surface instead of typing `"base": [185, 103, …]` into the
+//! body of a request whose path segment names the same kind of value in hex.
 //!
 //! The hex form lives only at this edge. Both codecs resolve it into (and
 //! render it from) the canonical 32 bytes before anything downstream sees the
 //! value, so the wire encoding, the digests computed over it, and the journal
 //! are untouched — the same split `aether-mcp` keeps between its `$`-sigil blob
 //! embeds and the strict wire codec behind them.
+//!
+//! The edge has three sides and they share this one codec rather than each
+//! keeping a copy: the control API that serves it (`aether-chassis-bloomery`),
+//! the operator CLI that drives it (`xtask bloom`), and the terminal console
+//! that reads it (`aether-bloomery-console`).
+
+#![forbid(unsafe_code)]
 
 mod deserialize;
 mod serialize;
 
-pub use deserialize::from_slice;
+pub use deserialize::{from_slice, from_value};
 pub use serialize::to_vec;
 
 use aether_bloomery::Digest;
@@ -29,23 +36,24 @@ use aether_bloomery::Digest;
 const DIGEST: &str = "Digest";
 
 /// Lowercase-hex-encode bytes (bloom ids in URLs).
-pub(super) fn hex_encode(bytes: &[u8]) -> String {
+#[must_use]
+pub fn hex_encode(bytes: &[u8]) -> String {
     aether_bloomery::encode_hex(bytes)
 }
 
 /// Decode a lowercase hex string of exactly 32 bytes into a digest.
-pub(super) fn digest_from_hex(hex: &str) -> Option<Digest> {
+#[must_use]
+pub fn digest_from_hex(hex: &str) -> Option<Digest> {
     Digest::from_hex(hex)
 }
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery::{Digest, Workpiece, WorkpieceId};
+    use aether_bloomery::{Digest, DraftPatch, Workpiece, WorkpieceId};
     use aether_data::wire;
     use serde_json::json;
 
     use super::{digest_from_hex, from_slice, hex_encode, to_vec};
-    use crate::api::dto::DraftPatch;
 
     /// The base digest a draft is patched with, in both spellings.
     const BASE: Digest = Digest::from_bytes([0x5c; 32]);
