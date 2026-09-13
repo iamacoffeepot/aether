@@ -213,6 +213,8 @@ impl Detail {
             | Focus::Record { .. }
             | Focus::Artifact { .. }
             | Focus::Transcript { .. }
+            | Focus::Evidence { .. }
+            | Focus::EvidenceFile { .. }
             | Focus::Workpiece { .. } => None,
         }
     }
@@ -231,6 +233,8 @@ impl Detail {
             | Focus::Record { .. }
             | Focus::Artifact { .. }
             | Focus::Transcript { .. }
+            | Focus::Evidence { .. }
+            | Focus::EvidenceFile { .. }
             | Focus::Workpiece { .. } => false,
         };
 
@@ -244,6 +248,8 @@ impl Detail {
             Focus::Record { sequence } => vec![label(RowKey::Identity, format!("record {sequence}"))],
             Focus::Artifact { digest } => vec![label(RowKey::Identity, format!("artifact {}", digest.prefix()))],
             Focus::Transcript { nonce } => vec![label(RowKey::Identity, format!("transcript {nonce}"))],
+            Focus::Evidence { nonce } => vec![label(RowKey::Identity, format!("evidence {nonce}"))],
+            Focus::EvidenceFile { name, nonce } => vec![label(RowKey::Identity, format!("file {name} {nonce}"))],
             Focus::Workpiece { id } => vec![label(RowKey::Identity, format!("workpiece {id}"))],
         };
     }
@@ -257,7 +263,12 @@ fn focus_exists(focus: &Focus, view: &ViewDocument) -> bool {
         }
         Focus::Composition { bloom } => find_bloom(view, *bloom).is_some_and(|bloom| bloom.composition.is_some()),
         Focus::Seal => true,
-        Focus::Record { .. } | Focus::Artifact { .. } | Focus::Transcript { .. } | Focus::Workpiece { .. } => false,
+        Focus::Record { .. }
+        | Focus::Artifact { .. }
+        | Focus::Transcript { .. }
+        | Focus::Evidence { .. }
+        | Focus::EvidenceFile { .. }
+        | Focus::Workpiece { .. } => false,
     }
 }
 

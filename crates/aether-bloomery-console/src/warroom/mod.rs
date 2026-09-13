@@ -25,6 +25,8 @@ pub enum Focus {
     Record { sequence: u64 },
     Artifact { digest: DigestHex },
     Transcript { nonce: String },
+    Evidence { nonce: String },
+    EvidenceFile { nonce: String, name: String },
     Workpiece { id: String },
 }
 
@@ -70,6 +72,16 @@ impl Focus {
     }
 
     #[must_use]
+    pub fn evidence(nonce: impl Into<String>) -> Self {
+        Self::Evidence { nonce: nonce.into() }
+    }
+
+    #[must_use]
+    pub fn evidence_file(nonce: impl Into<String>, name: impl Into<String>) -> Self {
+        Self::EvidenceFile { nonce: nonce.into(), name: name.into() }
+    }
+
+    #[must_use]
     pub fn workpiece(id: impl Into<String>) -> Self {
         Self::Workpiece { id: id.into() }
     }
@@ -86,6 +98,8 @@ impl Focus {
             Self::Record { sequence } => format!("record {sequence}"),
             Self::Artifact { digest } => format!("artifact {}", digest.prefix()),
             Self::Transcript { nonce } => format!("transcript {nonce}"),
+            Self::Evidence { nonce } => format!("evidence {nonce}"),
+            Self::EvidenceFile { name, .. } => name.clone(),
             Self::Workpiece { id } => format!("workpiece {id}"),
         }
     }
@@ -100,7 +114,8 @@ impl Focus {
             }
             Self::Seal => "seal".to_owned(),
             Self::Record { sequence } => format!("record {sequence}"),
-            Self::Transcript { nonce } => nonce.clone(),
+            Self::Transcript { nonce } | Self::Evidence { nonce } => nonce.clone(),
+            Self::EvidenceFile { name, .. } => name.clone(),
         }
     }
 
@@ -110,11 +125,13 @@ impl Focus {
         match self {
             Self::Dispatch { bloom, workpiece } => Some(Self::member(*bloom, workpiece.clone())),
             Self::Member { bloom, .. } | Self::Composition { bloom } => Some(Self::bloom(*bloom)),
+            Self::EvidenceFile { nonce, .. } => Some(Self::evidence(nonce.clone())),
             Self::Bloom { .. }
             | Self::Seal
             | Self::Record { .. }
             | Self::Artifact { .. }
             | Self::Transcript { .. }
+            | Self::Evidence { .. }
             | Self::Workpiece { .. } => None,
         }
     }

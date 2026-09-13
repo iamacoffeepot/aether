@@ -625,6 +625,44 @@ pub struct BloomDispatchView {
     pub evidence_retained: bool,
 }
 
+/// `GET /dispatches/{nonce}` — one dispatch's evidence header.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DispatchEvidenceView {
+    #[serde(default)]
+    pub nonce: String,
+    #[serde(default)]
+    pub retained: bool,
+    #[serde(default)]
+    pub notice: Option<String>,
+    #[serde(default)]
+    pub assistant_text: Option<String>,
+    #[serde(default)]
+    pub assistant_text_truncated: bool,
+    #[serde(default)]
+    pub commit_message: Option<String>,
+    #[serde(default)]
+    pub commit_message_truncated: bool,
+    #[serde(default)]
+    pub process: Option<DispatchProcessView>,
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub archived: Option<String>,
+}
+
+/// The pid / pgid / starttime / boot id a lane recorded at spawn.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DispatchProcessView {
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub pgid: u32,
+    #[serde(default)]
+    pub starttime: u64,
+    #[serde(default)]
+    pub boot_id: String,
+}
+
 /// One bounded `GET /journal` page.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct JournalPage {

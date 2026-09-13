@@ -10,9 +10,9 @@ use std::thread;
 use std::time::Duration;
 
 use crate::dto::{
-    BloomDispatchesView, CommissionShowView, CommissionsView, CoordinatorLogsView, DecodedArtifact, DispatchFilePage,
-    JournalPage, MetricDay, MetricDispatch, MetricsSeat, MetricsSummary, MetricsTimeline, SpendWindowView,
-    ViewDocument,
+    BloomDispatchesView, CommissionShowView, CommissionsView, CoordinatorLogsView, DecodedArtifact,
+    DispatchEvidenceView, DispatchFilePage, JournalPage, MetricDay, MetricDispatch, MetricsSeat, MetricsSummary,
+    MetricsTimeline, SpendWindowView, ViewDocument,
 };
 use crate::http::{self, Endpoint};
 use crate::store::{Lane, ResourceKey};
@@ -42,6 +42,8 @@ pub enum ResourceBody {
     Seats(Vec<MetricsSeat>),
     Dispatches(Vec<MetricDispatch>),
     BloomDispatches(BloomDispatchesView),
+    Dispatch(DispatchEvidenceView),
+    DispatchFile(DispatchFilePage),
     Spend(SpendWindowView),
     Commissions(CommissionsView),
     CommissionsMissing,
@@ -153,6 +155,12 @@ fn fetch_key(endpoint: &Endpoint, key: &ResourceKey, path: &str, timeout: Durati
             .map_err(|error| error.to_string()),
         ResourceKey::BloomDispatches(_) => http::get_json::<BloomDispatchesView>(endpoint, path, timeout)
             .map(ResourceBody::BloomDispatches)
+            .map_err(|error| error.to_string()),
+        ResourceKey::Dispatch(_) => http::get_json::<DispatchEvidenceView>(endpoint, path, timeout)
+            .map(ResourceBody::Dispatch)
+            .map_err(|error| error.to_string()),
+        ResourceKey::DispatchFile(_) => http::get_json::<DispatchFilePage>(endpoint, path, timeout)
+            .map(ResourceBody::DispatchFile)
             .map_err(|error| error.to_string()),
         ResourceKey::Spend => http::get_json::<SpendWindowView>(endpoint, path, timeout)
             .map(ResourceBody::Spend)

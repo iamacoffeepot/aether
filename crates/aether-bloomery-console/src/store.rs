@@ -8,8 +8,8 @@ use aether_bloomery::METRICS_MAX_LIMIT;
 
 use crate::dto::{
     BloomDispatchesView, CommissionShowView, CommissionsView, CoordinatorLogsView, DecodedArtifact, DigestHex,
-    DispatchFilePage, JournalPage, JournalRecordView, MetricDay, MetricDispatch, MetricsSeat, MetricsSummary,
-    MetricsTimeline, SpendWindowView, ViewDocument,
+    DispatchEvidenceView, DispatchFilePage, JournalPage, JournalRecordView, MetricDay, MetricDispatch, MetricsSeat,
+    MetricsSummary, MetricsTimeline, SpendWindowView, ViewDocument,
 };
 
 /// Newest dispatch rows the board keeps. Matches the coordinator page ceiling so one catch-up page fills the bound.
@@ -29,6 +29,8 @@ pub enum ResourceKey {
     MetricsSeats,
     MetricsDispatches,
     BloomDispatches(DigestHex),
+    Dispatch(String),
+    DispatchFile(DispatchFileQuery),
     Spend,
     Commissions,
     Commission(String),
@@ -164,6 +166,26 @@ impl PromptQuery {
     }
 }
 
+/// One ranged `GET /dispatches/{nonce}/files/{name}` page. `cursor` is the
+/// byte offset; `None` is the tail.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DispatchFileQuery {
+    pub nonce: String,
+    pub name: String,
+    pub cursor: Option<u64>,
+}
+
+impl DispatchFileQuery {
+    #[must_use]
+    pub fn path(&self) -> String {
+        let name = escape_segment(&self.name);
+        self.cursor.map_or_else(
+            || format!("/dispatches/{}/files/{name}", self.nonce),
+            |cursor| format!("/dispatches/{}/files/{name}?cursor={cursor}", self.nonce),
+        )
+    }
+}
+
 /// Which fetch thread serves a resource.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lane {
@@ -186,6 +208,8 @@ impl ResourceKey {
             | Self::MetricsSeats
             | Self::MetricsDispatches
             | Self::BloomDispatches(_)
+            | Self::Dispatch(_)
+            | Self::DispatchFile(_)
             | Self::Spend
             | Self::Commissions
             | Self::Commission(_)
@@ -207,6 +231,8 @@ impl ResourceKey {
             Self::MetricsSeats => "/metrics/seats".to_owned(),
             Self::MetricsDispatches => "/metrics/dispatches".to_owned(),
             Self::BloomDispatches(bloom) => format!("/blooms/{}/dispatches", bloom.as_hex()),
+            Self::Dispatch(nonce) => format!("/dispatches/{nonce}"),
+            Self::DispatchFile(query) => query.path(),
             Self::Spend => "/spend".to_owned(),
             Self::Commissions => "/commissions".to_owned(),
             Self::Commission(id) => format!("/commissions/{}", escape_segment(id)),
@@ -310,6 +336,8 @@ pub struct Store {
     dispatch_cursor: u64,
     dispatch_page_full: bool,
     bloom_dispatches: HashMap<DigestHex, Cell<BloomDispatchesView>>,
+    dispatches_by_nonce: HashMap<String, Cell<DispatchEvidenceView>>,
+    dispatch_files: HashMap<DispatchFileQuery, Cell<DispatchFilePage>>,
     spend: Cell<SpendWindowView>,
     commission_capability: Option<CommissionCapability>,
     commissions: Cell<CommissionsView>,
@@ -335,6 +363,8 @@ impl Store {
             dispatch_cursor: 0,
             dispatch_page_full: false,
             bloom_dispatches: HashMap::new(),
+            dispatches_by_nonce: HashMap::new(),
+            dispatch_files: HashMap::new(),
             spend: Cell::default(),
             commission_capability: None,
             commissions: Cell::default(),
@@ -399,6 +429,16 @@ impl Store {
     }
 
     #[must_use]
+    pub fn dispatch(&self, nonce: &str) -> Option<&Cell<DispatchEvidenceView>> {
+        self.dispatches_by_nonce.get(nonce)
+    }
+
+    #[must_use]
+    pub fn dispatch_file(&self, query: &DispatchFileQuery) -> Option<&Cell<DispatchFilePage>> {
+        self.dispatch_files.get(query)
+    }
+
+    #[must_use]
     pub fn spend(&self) -> &Cell<SpendWindowView> {
         &self.spend
     }
@@ -450,6 +490,8 @@ impl Store {
             | ResourceKey::MetricsTimeline(_)
             | ResourceKey::MetricsSeats
             | ResourceKey::BloomDispatches(_)
+            | ResourceKey::Dispatch(_)
+            | ResourceKey::DispatchFile(_)
             | ResourceKey::Commission(_)
             | ResourceKey::CoordinatorLogs(_) => Duration::ZERO,
         }
@@ -500,6 +542,8 @@ impl Store {
                 (self.dispatch_page_full && !self.dispatches.inflight) || self.polled_due(&self.dispatches)
             }
             ResourceKey::BloomDispatches(bloom) => self.bloom_dispatches.get(bloom).is_none_or(Cell::on_demand_due),
+            ResourceKey::Dispatch(nonce) => self.dispatches_by_nonce.get(nonce).is_none_or(Cell::on_demand_due),
+            ResourceKey::DispatchFile(query) => self.dispatch_files.get(query).is_none_or(Cell::on_demand_due),
             ResourceKey::MetricsTimeline(bloom) => self.timelines.get(bloom).is_none_or(Cell::on_demand_due),
             ResourceKey::Commissions => {
                 if self.commission_capability == Some(CommissionCapability::Absent) {
@@ -534,6 +578,8 @@ impl Store {
             ResourceKey::MetricsSeats => self.seats.inflight,
             ResourceKey::MetricsDispatches => self.dispatches.inflight,
             ResourceKey::BloomDispatches(bloom) => self.bloom_dispatches.get(bloom).is_some_and(|cell| cell.inflight),
+            ResourceKey::Dispatch(nonce) => self.dispatches_by_nonce.get(nonce).is_some_and(|cell| cell.inflight),
+            ResourceKey::DispatchFile(query) => self.dispatch_files.get(query).is_some_and(|cell| cell.inflight),
             ResourceKey::Spend => self.spend.inflight,
             ResourceKey::Commissions => self.commissions.inflight,
             ResourceKey::Commission(id) => self.commission_shows.get(id).is_some_and(|cell| cell.inflight),
@@ -554,6 +600,8 @@ impl Store {
             ResourceKey::MetricsSeats => self.seats.inflight = true,
             ResourceKey::MetricsDispatches => self.dispatches.inflight = true,
             ResourceKey::BloomDispatches(bloom) => self.bloom_dispatches.entry(*bloom).or_default().inflight = true,
+            ResourceKey::Dispatch(nonce) => self.dispatches_by_nonce.entry(nonce.clone()).or_default().inflight = true,
+            ResourceKey::DispatchFile(query) => self.dispatch_files.entry(query.clone()).or_default().inflight = true,
             ResourceKey::Spend => self.spend.inflight = true,
             ResourceKey::Commissions => self.commissions.inflight = true,
             ResourceKey::Commission(id) => self.commission_shows.entry(id.clone()).or_default().inflight = true,
@@ -639,6 +687,14 @@ impl Store {
         apply(self.bloom_dispatches.entry(bloom).or_default(), result);
     }
 
+    pub fn apply_dispatch(&mut self, nonce: String, result: Result<DispatchEvidenceView, String>) {
+        apply(self.dispatches_by_nonce.entry(nonce).or_default(), result);
+    }
+
+    pub fn apply_dispatch_file(&mut self, query: DispatchFileQuery, result: Result<DispatchFilePage, String>) {
+        apply(self.dispatch_files.entry(query).or_default(), result);
+    }
+
     pub fn apply_spend(&mut self, result: Result<SpendWindowView, String>) {
         apply(&mut self.spend, result);
     }
@@ -679,6 +735,8 @@ impl Store {
             ResourceKey::MetricsSeats => self.seats.apply_err(error),
             ResourceKey::MetricsDispatches => self.apply_dispatches(Err(error.to_string())),
             ResourceKey::BloomDispatches(bloom) => self.bloom_dispatches.entry(*bloom).or_default().apply_err(error),
+            ResourceKey::Dispatch(nonce) => self.dispatches_by_nonce.entry(nonce.clone()).or_default().apply_err(error),
+            ResourceKey::DispatchFile(query) => self.dispatch_files.entry(query.clone()).or_default().apply_err(error),
             ResourceKey::Spend => self.spend.apply_err(error),
             ResourceKey::Commissions => self.commissions.apply_err(error),
             ResourceKey::Commission(id) => self.commission_shows.entry(id.clone()).or_default().apply_err(error),
@@ -714,7 +772,9 @@ fn merge_dispatch_page(retained: Vec<MetricDispatch>, page: Vec<MetricDispatch>)
 
 #[cfg(test)]
 mod tests {
-    use super::{CommissionCapability, CoordinatorLogQuery, Lane, LogLevel, PromptQuery, ResourceKey, Store};
+    use super::{
+        CommissionCapability, CoordinatorLogQuery, DispatchFileQuery, Lane, LogLevel, PromptQuery, ResourceKey, Store,
+    };
     use crate::dto::{BloomView, DigestHex, MemberView, MetricDispatch, ViewDocument};
     use aether_bloomery::METRICS_MAX_LIMIT;
     use std::thread;
@@ -789,6 +849,26 @@ mod tests {
         assert_eq!(
             PromptQuery { nonce: "dispatch-1".into(), cursor: Some(40) }.path(),
             "/dispatches/dispatch-1/prompt?cursor=40"
+        );
+    }
+
+    #[test]
+    fn a_dispatch_header_and_file_query_name_their_routes() {
+        // Tripwire: the path is the whole contract with
+        // api/runtime/mod.rs GET /dispatches/{nonce} and /files/{name}; a
+        // typo here is a 404 the browser cannot tell from a swept file.
+        assert_eq!(ResourceKey::Dispatch("dispatch-1".into()).path(), "/dispatches/dispatch-1");
+        assert_eq!(
+            DispatchFileQuery { nonce: "dispatch-1".into(), name: "evidence.json".into(), cursor: Some(0) }.path(),
+            "/dispatches/dispatch-1/files/evidence.json?cursor=0"
+        );
+        assert_eq!(
+            DispatchFileQuery { nonce: "dispatch-1".into(), name: "verify.clippy.log".into(), cursor: None }.path(),
+            "/dispatches/dispatch-1/files/verify.clippy.log"
+        );
+        assert_eq!(
+            DispatchFileQuery { nonce: "dispatch-1".into(), name: "a b.json".into(), cursor: Some(40) }.path(),
+            "/dispatches/dispatch-1/files/a%20b.json?cursor=40"
         );
     }
 
