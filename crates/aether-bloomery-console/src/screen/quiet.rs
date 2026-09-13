@@ -28,7 +28,7 @@ pub fn quiet_lines(view: &ViewDocument) -> Vec<QuietLine> {
     for bloom in live_blooms(view) {
         let mut walking = false;
         for member in &bloom.members {
-            match MemberState::of(member) {
+            match MemberState::of(member, view.has_order(bloom.id, &member.workpiece)) {
                 MemberState::Integrated => resolved += 1,
                 MemberState::Blocked => blocked += 1,
                 MemberState::Idle => idle += 1,
@@ -64,7 +64,7 @@ mod tests {
     use super::super::partition::{MemberState, live_blooms};
     use super::quiet_lines;
     use crate::dto::{
-        BloomStatus, BloomView, CompositionCursorView, DigestHex, MemberView, Present, StageId, ViewDocument,
+        BloomStatus, BloomView, CompositionCursorView, DigestHex, MemberView, OrderView, Present, StageId, ViewDocument,
     };
 
     fn digest(byte: u8) -> DigestHex {
@@ -86,12 +86,19 @@ mod tests {
     fn a_zero_count_prints_no_line() {
         // The plausible bug: an all-walking fleet still paints "0 idle", so
         // the quiet pane invents rest that the live board did not drop.
+        let bloom = digest(1);
         let view = ViewDocument {
             blooms: vec![BloomView {
-                id: digest(1),
+                id: bloom,
                 status: Some(BloomStatus::Sealed),
                 members: vec![running("wp")],
                 ..BloomView::default()
+            }],
+            orders: vec![OrderView {
+                nonce: "dispatch-wp".to_owned(),
+                bloom,
+                workpiece: "wp".to_owned(),
+                stage: StageId::Construct,
             }],
             ..ViewDocument::default()
         };
@@ -133,12 +140,19 @@ mod tests {
                     ..BloomView::default()
                 },
             ],
+            orders: vec![OrderView {
+                nonce: "dispatch-wp-walk".to_owned(),
+                bloom: digest(1),
+                workpiece: "wp-walk".to_owned(),
+                stage: StageId::Construct,
+            }],
             ..ViewDocument::default()
         };
         let lines = quiet_lines(&view);
         let dropped: Vec<_> = live_blooms(&view)
-            .flat_map(|bloom| bloom.members.iter())
-            .filter(|member| !MemberState::of(member).walks())
+            .flat_map(|bloom| bloom.members.iter().map(move |member| (bloom.id, member)))
+            .filter(|(id, member)| !MemberState::of(member, view.has_order(*id, &member.workpiece)).walks())
+            .map(|(_, member)| member)
             .collect();
         let member_counts: usize =
             lines.iter().filter(|line| line.phrase != "blooms at rest").map(|line| line.count).sum();

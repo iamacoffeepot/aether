@@ -327,7 +327,7 @@ fn bloom_lines(view: &ViewDocument, store: &Store, id: DigestHex) -> Vec<Line> {
     }
     lines.extend(lease_lines(bloom));
     for member in &bloom.members {
-        let state = member_status_state(member);
+        let state = member_status_state(member, view.has_order(bloom.id, &member.workpiece));
         lines.push(Line {
             key: RowKey::Member(member.workpiece.clone()),
             text: format!("  {}  {state}", member.workpiece),
@@ -462,7 +462,10 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
         digest: None,
         openable: false,
     }];
-    lines.push(label(RowKey::Other(0), format!("state  {}", member_status_state(member))));
+    lines.push(label(
+        RowKey::Other(0),
+        format!("state  {}", member_status_state(member, view.has_order(bloom.id, &member.workpiece))),
+    ));
     if let Some(coordination) = &bloom.coordination {
         lines.push(label(RowKey::Other(400), coordination.member_summary(member)));
         if let Some((run, millis)) = coordination.member_latency(member) {

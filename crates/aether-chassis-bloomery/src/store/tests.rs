@@ -1508,6 +1508,31 @@ fn list_bloom_dispatch_live_is_scoped_to_the_named_bloom() {
 }
 
 #[test]
+fn list_live_orders_includes_a_bloom_less_base_verify_and_drops_submit_intents() {
+    // The plausible bug: the view list is scoped like list_bloom_dispatch_live,
+    // so a zero-bloom BaseVerify never appears, or a submitting reservation
+    // paints as a live lane.
+    let mut store = memory();
+    let mut member = order("dispatch-1");
+    member.bloom = vec![0xAA; 32];
+    let mut base = order("dispatch-base");
+    base.bloom = vec![0; 32];
+    base.workpiece = String::new();
+    let mut intent = order("dispatch-intent");
+    intent.lifecycle = OrderLifecycle::Submitting;
+    store.record_order(&member).unwrap();
+    store.record_order(&base).unwrap();
+    store.record_order(&intent).unwrap();
+
+    let live = store.list_live_orders().unwrap();
+    let nonces: Vec<&str> = live.iter().map(|order| order.nonce.as_str()).collect();
+    assert_eq!(nonces, vec!["dispatch-1", "dispatch-base"]);
+    let base = live.iter().find(|order| order.nonce == "dispatch-base").expect("the bloom-less order is listed");
+    assert!(base.bloom.iter().all(|byte| *byte == 0), "the placeholder bloom is the zero digest");
+    assert!(base.workpiece.is_empty(), "a workspace stage has no member");
+}
+
+#[test]
 fn construct_session_records_and_supersedes_per_member() {
     // The handle a same-member refine resumes is keyed like findings, not like
     // a nonce — a later construct capture must replace the previous session

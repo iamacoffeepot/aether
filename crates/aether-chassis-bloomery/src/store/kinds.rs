@@ -458,3 +458,40 @@ pub enum LookupDispatchResult {
         error: String,
     },
 }
+
+/// One live outstanding order as `GET /view` projects it: the host nonce, the
+/// bloom it belongs to (the zero digest for a bloom-less `BaseVerify`), the
+/// workpiece (empty for a bloom-wide or workspace stage), and the dispatched
+/// stage. Submit-intent rows are not live and do not appear.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct LiveOrder {
+    /// The host dispatch nonce (`dispatch-` or `redispatch-`).
+    pub nonce: String,
+    /// The bloom's digest bytes. Zero for a bloom-less whole-workspace stage.
+    #[serde(with = "aether_data::bytes")]
+    pub bloom: Vec<u8>,
+    /// Member workpiece this order is for. Empty for a bloom-wide or workspace stage.
+    pub workpiece: String,
+    /// Wire-encoded [`aether_bloomery::StageId`].
+    #[serde(with = "aether_data::bytes")]
+    pub stage: Vec<u8>,
+}
+
+/// `GET /view` — every live outstanding order, including bloom-less stages.
+#[aether_data::kind(name = "aether.store.list_outstanding_orders", default, eq)]
+pub struct ListOutstandingOrders;
+
+/// Reply to [`ListOutstandingOrders`].
+#[aether_data::kind(name = "aether.store.list_outstanding_orders_result")]
+pub enum ListOutstandingOrdersResult {
+    /// Live submitted orders, in nonce order.
+    Ok {
+        /// Orders still outstanding as a live dispatch.
+        orders: Vec<LiveOrder>,
+    },
+    /// The read failed.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}

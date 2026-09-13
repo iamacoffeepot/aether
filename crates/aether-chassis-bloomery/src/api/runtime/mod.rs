@@ -79,11 +79,14 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "github")]
 use std::sync::Arc;
 
-use crate::store::{ListBloomDispatchesResult, LookupDispatchResult};
+use crate::store::{
+    ListBloomDispatchesResult, ListOutstandingOrders, ListOutstandingOrdersResult, LiveOrder, LookupDispatchResult,
+    StoreCapability,
+};
 use aether_actor::{Manual, runtime};
 use aether_bloomery::{
-    AdmitResult, Digest, EnumerateClaimsResult, LoadConfigsResult, MetricsQueryResult, QueryResult, QuerySelector,
-    ResolvedConfigs, SpendQueryResult, StoreClass,
+    AdmitResult, Digest, EnumerateClaimsResult, LoadConfigsResult, MetricsQueryResult, QueryResult, ResolvedConfigs,
+    SpendQueryResult, StoreClass,
 };
 // The REST edge's hex spelling — path segments and JSON bodies alike. It is a
 // crate rather than a module here because the two clients of this API speak the
@@ -105,7 +108,7 @@ use claims::{claims_response, release_status_response};
 use configs::{config_response, load_configs};
 use reads::{ArtifactQuery, JournalQuery, artifact_response, journal_response};
 use response::{error_response, json};
-use state::{Routed, SealVerify, VerifyPending, finish};
+use state::{PendingView, Routed, SealVerify, VerifyPending, finish};
 
 use super::BloomeryApiCapability;
 
@@ -287,6 +290,7 @@ impl NativeActor for BloomeryApiCapability {
             commission_verifying: HashMap::new(),
             commission_writing: HashMap::new(),
             commission_http: HashMap::new(),
+            view_http: HashMap::new(),
             commission_seals: HashMap::new(),
             next_commission_seal: 1,
             seal_commission_loads: HashMap::new(),
@@ -510,15 +514,13 @@ impl NativeActor for BloomeryApiCapability {
     /// `GET /blooms` — read the whole live projection.
     #[http::route(Get, "/blooms")]
     fn on_get_blooms(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = ApiCapabilityState::query(QuerySelector::Document);
-        finish(state, ctx, routed)
+        finish(state, ctx, Routed::LiveView)
     }
 
     /// `GET /view` — read the whole live projection (the `GET /blooms` alias).
     #[http::route(Get, "/view")]
     fn on_get_view(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = ApiCapabilityState::query(QuerySelector::Document);
-        finish(state, ctx, routed)
+        finish(state, ctx, Routed::LiveView)
     }
 
     /// `GET /blooms/{id}` — read one bloom's live view by hex id.
@@ -1050,28 +1052,43 @@ impl NativeActor for BloomeryApiCapability {
     /// The control core's reply to a live projection read, to an orphan-claim
     /// release's status read (ADR-0179), or to a calibration read (ADR-0184).
     ///
-    /// One `Query` kind answers all three, so which read this is answering is
-    /// decided by the reply's own variant rather than by anything the route held
-    /// — the relay surfaces no correlation to key a second table on.
-    #[http::reply]
-    fn on_query_result(
-        state: &mut ApiCapabilityState,
-        _ctx: &mut NativeCtx<'_, Manual>,
-        mail: QueryResult,
-    ) -> HttpServerResponse {
+    /// One `Query` kind answers all three. `GET /view` / `GET /blooms` hold the
+    /// HTTP inbound and continue onto the outstanding-order hop; every other
+    /// selector still answers through the 1:1 deferred source.
+    #[handler::manual]
+    fn on_query_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: QueryResult) {
+        let correlation = ctx.reply_target().correlation_id;
+        if let Some(pending) = state.view_http.remove(&correlation) {
+            match (pending, mail) {
+                (PendingView::AwaitingDocument { inbound }, QueryResult::Document { document }) => {
+                    let correlation = state.send_tracked(ctx.actor::<StoreCapability>(), &ListOutstandingOrders);
+                    state.view_http.insert(correlation, PendingView::AwaitingOrders { inbound, document });
+                }
+                (pending, mail) => {
+                    pending.inbound().reply(&view_query_response(state, mail));
+                }
+            }
+            return;
+        }
+        http::answer_deferred(ctx, &view_query_response(state, mail));
+    }
+
+    #[handler::manual]
+    fn on_list_outstanding_orders_result(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Manual>,
+        mail: ListOutstandingOrdersResult,
+    ) {
+        let correlation = ctx.reply_target().correlation_id;
+        let Some(PendingView::AwaitingOrders { inbound, document }) = state.view_http.remove(&correlation) else {
+            return;
+        };
         match mail {
-            QueryResult::Release { .. } | QueryResult::ReleaseNotFound => release_status_response(mail),
-            QueryResult::Calibration { document } => calibration_response(&document),
-            mail => {
-                #[cfg(feature = "github")]
-                {
-                    query_response(mail, state.doctor.as_ref())
-                }
-                #[cfg(not(feature = "github"))]
-                {
-                    let _ = state;
-                    query_response(mail, None)
-                }
+            ListOutstandingOrdersResult::Ok { orders } => {
+                inbound.reply(&view_document_response(state, document, &orders));
+            }
+            ListOutstandingOrdersResult::Err { error } => {
+                inbound.reply(&error_response(500, &format!("outstanding orders read failed: {error}")));
             }
         }
     }
@@ -1392,9 +1409,41 @@ impl NativeActor for BloomeryApiCapability {
             state.fail_seal(seal, 504, "signature verification settled without a reply");
         } else if let Some(CommissionHttp { inbound, .. }) = state.commission_http.remove(&mail.root.correlation_id) {
             inbound.reply(&error_response(504, "commission store read settled without a reply"));
+        } else if let Some(pending) = state.view_http.remove(&mail.root.correlation_id) {
+            pending.inbound().reply(&error_response(504, "live view read settled without a reply"));
         } else if let Some(load) = state.seal_commission_loads.remove(&mail.root.correlation_id) {
             state.fail_commission_seal(load.seal, 504, "commission store read settled without a reply");
         }
+    }
+}
+
+fn view_query_response(state: &ApiCapabilityState, mail: QueryResult) -> HttpServerResponse {
+    match mail {
+        QueryResult::Release { .. } | QueryResult::ReleaseNotFound => release_status_response(mail),
+        QueryResult::Calibration { document } => calibration_response(&document),
+        mail => {
+            #[cfg(feature = "github")]
+            {
+                query_response(mail, state.doctor.as_ref(), &[])
+            }
+            #[cfg(not(feature = "github"))]
+            {
+                let _ = state;
+                query_response(mail, None, &[])
+            }
+        }
+    }
+}
+
+fn view_document_response(state: &ApiCapabilityState, document: Vec<u8>, orders: &[LiveOrder]) -> HttpServerResponse {
+    #[cfg(feature = "github")]
+    {
+        query_response(QueryResult::Document { document }, state.doctor.as_ref(), orders)
+    }
+    #[cfg(not(feature = "github"))]
+    {
+        let _ = state;
+        query_response(QueryResult::Document { document }, None, orders)
     }
 }
 

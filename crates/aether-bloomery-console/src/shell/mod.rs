@@ -491,7 +491,7 @@ mod tests {
     use crate::dto::{
         BloomDispatchView, BloomDispatchesView, BloomStatus, BloomView, CompositionCursorView, CompositionFinding,
         CompositionView, DigestHex, DispatchEvidenceView, ExecutorFaultView, HostFaultView, LandingBlock, MemberView,
-        OperatorHoldView, PendingDecisionView, Present, ReviewParkView, SpendQuiesce, StageId, ViewDocument,
+        OperatorHoldView, OrderView, PendingDecisionView, Present, ReviewParkView, SpendQuiesce, StageId, ViewDocument,
         WedgeCause,
     };
     use crate::fetch::{FetchReply, ResourceBody};
@@ -569,20 +569,14 @@ mod tests {
     fn a_stale_board_keeps_the_last_rows_and_names_the_error() {
         // The plausible bug: unreachable coordinator blanks the table or
         // leaves the last sample looking current.
+        let members = vec![MemberView {
+            workpiece: "issue-keep".to_owned(),
+            cursor: Some(CompositionCursorView { stage: Some(StageId::Construct), attempts: 1, candidate: None }),
+            ..MemberView::default()
+        }];
         let view = ViewDocument {
-            blooms: vec![BloomView {
-                id: digest(1),
-                members: vec![MemberView {
-                    workpiece: "issue-keep".to_owned(),
-                    cursor: Some(CompositionCursorView {
-                        stage: Some(StageId::Construct),
-                        attempts: 1,
-                        candidate: None,
-                    }),
-                    ..MemberView::default()
-                }],
-                ..BloomView::default()
-            }],
+            blooms: vec![BloomView { id: digest(1), members: members.clone(), ..BloomView::default() }],
+            orders: orders_on(digest(1), &members),
             ..ViewDocument::default()
         };
         let mut shell = Shell::showing(&view, Some("connection refused"));
@@ -659,20 +653,14 @@ mod tests {
         // The plausible bug: the store updates and the table paints but the
         // cursor stays empty, so the first row is never highlighted.
         let (mut shell, probe) = Shell::harness(Duration::from_secs(1));
+        let members = vec![MemberView {
+            workpiece: "wp-a".to_owned(),
+            cursor: Some(CompositionCursorView { stage: Some(StageId::Construct), attempts: 1, candidate: None }),
+            ..MemberView::default()
+        }];
         let view = ViewDocument {
-            blooms: vec![BloomView {
-                id: digest(1),
-                members: vec![MemberView {
-                    workpiece: "wp-a".to_owned(),
-                    cursor: Some(CompositionCursorView {
-                        stage: Some(StageId::Construct),
-                        attempts: 1,
-                        candidate: None,
-                    }),
-                    ..MemberView::default()
-                }],
-                ..BloomView::default()
-            }],
+            blooms: vec![BloomView { id: digest(1), members: members.clone(), ..BloomView::default() }],
+            orders: orders_on(digest(1), &members),
             ..ViewDocument::default()
         };
         probe.reply(FetchReply { key: ResourceKey::View, outcome: Ok(ResourceBody::View(view)) });
@@ -737,7 +725,21 @@ mod tests {
     fn bloom_with(members: Vec<MemberView>, mutate: impl FnOnce(&mut BloomView)) -> ViewDocument {
         let mut bloom = BloomView { id: digest(0xab), members, ..BloomView::default() };
         mutate(&mut bloom);
-        ViewDocument { blooms: vec![bloom], ..ViewDocument::default() }
+        let orders = orders_on(bloom.id, &bloom.members);
+        ViewDocument { blooms: vec![bloom], orders, ..ViewDocument::default() }
+    }
+
+    fn orders_on(bloom: DigestHex, members: &[MemberView]) -> Vec<OrderView> {
+        members
+            .iter()
+            .filter(|member| member.cursor.as_ref().is_some_and(|cursor| cursor.attempts > 0))
+            .map(|member| OrderView {
+                nonce: format!("dispatch-{}", member.workpiece),
+                bloom,
+                workpiece: member.workpiece.clone(),
+                stage: member.cursor.as_ref().and_then(|cursor| cursor.stage).unwrap_or_default(),
+            })
+            .collect()
     }
 
     fn draw(shell: &mut Shell) -> String {
@@ -1300,25 +1302,24 @@ mod tests {
     }
 
     fn parked_blooms(count: u8) -> ViewDocument {
-        ViewDocument {
-            blooms: (1..=count)
-                .map(|n| BloomView {
-                    id: digest(n),
-                    review_park: Some(ReviewParkView::default()),
-                    members: vec![MemberView {
-                        workpiece: format!("wp-{n}"),
-                        cursor: Some(CompositionCursorView {
-                            stage: Some(StageId::Construct),
-                            attempts: 1,
-                            candidate: None,
-                        }),
-                        ..MemberView::default()
-                    }],
-                    ..BloomView::default()
-                })
-                .collect(),
-            ..ViewDocument::default()
-        }
+        let blooms: Vec<BloomView> = (1..=count)
+            .map(|n| BloomView {
+                id: digest(n),
+                review_park: Some(ReviewParkView::default()),
+                members: vec![MemberView {
+                    workpiece: format!("wp-{n}"),
+                    cursor: Some(CompositionCursorView {
+                        stage: Some(StageId::Construct),
+                        attempts: 1,
+                        candidate: None,
+                    }),
+                    ..MemberView::default()
+                }],
+                ..BloomView::default()
+            })
+            .collect();
+        let orders = blooms.iter().flat_map(|bloom| orders_on(bloom.id, &bloom.members)).collect();
+        ViewDocument { blooms, orders, ..ViewDocument::default() }
     }
 
     #[test]

@@ -31,8 +31,8 @@ use aether_actor::{HandlesKind, Manual};
 #[cfg(feature = "github")]
 use aether_bloomery::EnumerateClaims;
 use aether_bloomery::{
-    Admit, ApprovalPolicy, BloomDraft, BloomId, Digest, Event, MemberDependency, MetricsQuery, Query, ResolvedConfigs,
-    SpendQuery, Statement, StoreClass, Workpiece, WorkpieceId,
+    Admit, ApprovalPolicy, BloomDraft, BloomId, Digest, Event, MemberDependency, MetricsQuery, Query, QuerySelector,
+    ResolvedConfigs, SpendQuery, Statement, StoreClass, Workpiece, WorkpieceId,
 };
 use aether_data::wire::to_vec;
 use aether_data::{Kind, MailId, MailboxId};
@@ -181,6 +181,8 @@ pub struct ApiCapabilityState {
     /// Commission list/show/workpiece reads awaiting the store, keyed by the
     /// load or list dispatch correlation.
     pub(super) commission_http: HashMap<u64, CommissionHttp>,
+    /// `GET /view` / `GET /blooms` held across the document then outstanding-order hops.
+    pub(super) view_http: HashMap<u64, PendingView>,
     /// Seals held across N commission loads, keyed by a minted handle.
     pub(super) commission_seals: HashMap<u64, PendingCommissionSeal>,
     /// The next commission-seal handle to mint.
@@ -347,6 +349,33 @@ pub(super) struct CommissionHttp {
     pub(super) render: CommissionHttpRender,
 }
 
+/// A live-view HTTP read waiting on the control-core document, then the store's
+/// outstanding orders. The document hop is not the answer: `/view` without the
+/// live lanes cannot tell a cursor from a running worker, and cannot name a
+/// bloom-less `BaseVerify`.
+pub(super) enum PendingView {
+    /// Waiting on `QuerySelector::Document`.
+    AwaitingDocument {
+        /// The held HTTP reply obligation.
+        inbound: InboundMail,
+    },
+    /// Waiting on `ListOutstandingOrders`.
+    AwaitingOrders {
+        /// The held HTTP reply obligation.
+        inbound: InboundMail,
+        /// Wire-encoded [`aether_bloomery::ViewDocument`].
+        document: Vec<u8>,
+    },
+}
+
+impl PendingView {
+    pub(super) fn inbound(self) -> InboundMail {
+        match self {
+            Self::AwaitingDocument { inbound } | Self::AwaitingOrders { inbound, .. } => inbound,
+        }
+    }
+}
+
 /// A seal held across N commission loads (#5048). Each member's store row
 /// lands here; a second round then loads any declared non-member dependencies.
 /// The last load materializes projections and continues into
@@ -416,6 +445,8 @@ pub(super) enum Routed {
     },
     /// Relay to the control core; its `QueryResult` answers.
     Query(Query),
+    /// `GET /view` / `GET /blooms`: query the document, then overlay live orders.
+    LiveView,
     /// Relay to the control core; its `MetricsQueryResult` answers.
     Metrics(MetricsQuery),
     /// Relay to the control core; its `SpendQueryResult` answers.
@@ -576,6 +607,7 @@ pub(super) fn finish(
             http::Outcome::Deferred
         }
         Routed::Query(request) => ctx.defer(&request).to::<ControlCore>(),
+        Routed::LiveView => hold_live_view(state, &mut ctx),
         Routed::Metrics(request) => ctx.defer(&request).to::<ControlCore>(),
         Routed::Spend(request) => ctx.defer(&request).to::<ControlCore>(),
         Routed::ReplayJournal(request) => ctx.defer(&request).to::<StoreCapability>(),
@@ -640,6 +672,14 @@ pub(super) fn finish(
             http::Outcome::Deferred
         }
     }
+}
+
+/// Hold `GET /view` across the document hop. The outstanding-order hop is
+/// dispatched from the query reply, because the 1:1 relay cannot join two peers.
+fn hold_live_view(state: &mut ApiCapabilityState, ctx: &mut http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+    let correlation = state.send_tracked(ctx.actor::<ControlCore>(), &Query { selector: QuerySelector::Document });
+    state.view_http.insert(correlation, PendingView::AwaitingDocument { inbound: ctx.take_inbound() });
+    http::Outcome::Deferred
 }
 
 /// Hold a commission HTTP read across a store hop and answer it from the

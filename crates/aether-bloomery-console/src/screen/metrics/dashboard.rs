@@ -90,7 +90,11 @@ fn occupancy(view: Option<&ViewDocument>) -> (usize, usize) {
     let Some(view) = view else {
         return (0, 0);
     };
-    let states: Vec<_> = live_blooms(view).flat_map(|bloom| bloom.members.iter()).map(MemberState::of).collect();
+    let states: Vec<_> = live_blooms(view)
+        .flat_map(|bloom| {
+            bloom.members.iter().map(move |member| MemberState::of(member, view.has_order(bloom.id, &member.workpiece)))
+        })
+        .collect();
     let busy = states.iter().filter(|state| **state == MemberState::Running).count();
     let total = states.iter().filter(|state| state.walks()).count();
     (busy, total)
@@ -134,8 +138,8 @@ fn spend_gauge(spent: u64, ceiling: Option<u64>, width: usize) -> String {
 mod tests {
     use super::{compose, format_duration, occupancy};
     use crate::dto::{
-        BloomStatus, BloomView, CompositionCursorView, MemberView, MetricDay, PendingDecisionView, Present, StageId,
-        ViewDocument,
+        BloomStatus, BloomView, CompositionCursorView, MemberView, MetricDay, OrderView, PendingDecisionView, Present,
+        StageId, ViewDocument,
     };
     use crate::store::Store;
     use std::time::Duration;
@@ -145,10 +149,19 @@ mod tests {
     }
 
     fn live_view(members: Vec<MemberView>) -> ViewDocument {
-        ViewDocument {
-            blooms: vec![BloomView { status: Some(BloomStatus::Sealed), members, ..BloomView::default() }],
-            ..ViewDocument::default()
-        }
+        let bloom = BloomView { status: Some(BloomStatus::Sealed), members, ..BloomView::default() };
+        let orders = bloom
+            .members
+            .iter()
+            .filter(|member| member.cursor.as_ref().is_some_and(|cursor| cursor.attempts > 0))
+            .map(|member| OrderView {
+                nonce: format!("dispatch-{}", member.workpiece),
+                bloom: bloom.id,
+                workpiece: member.workpiece.clone(),
+                stage: member.cursor.as_ref().and_then(|cursor| cursor.stage).unwrap_or_default(),
+            })
+            .collect();
+        ViewDocument { blooms: vec![bloom], orders, ..ViewDocument::default() }
     }
 
     #[test]

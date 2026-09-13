@@ -10,7 +10,7 @@ use ratatui::style::Modifier;
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
 use crate::cursor::Cursor;
-use crate::dto::{BloomStatus, DigestHex, MemberView, MetricsTimeline, TimelineSpan};
+use crate::dto::{BloomStatus, BloomView, DigestHex, MemberView, MetricsTimeline, TimelineSpan};
 use crate::keys::{KeyHint, Outcome};
 use crate::palette;
 use crate::screen::board::member_status_state;
@@ -160,33 +160,15 @@ fn lane_title(prefix: &str, reconstructed: bool) -> String {
 
 fn rows_of(doc: &MetricsTimeline, store: &Store, width: usize) -> Vec<LaneRow> {
     let now = now_millis();
-    let live = store.view().value.as_ref().and_then(|view| view.blooms.iter().find(|bloom| bloom.id == doc.bloom));
+    let view = store.view().value.as_ref();
+    let live = view.and_then(|view| view.blooms.iter().find(|bloom| bloom.id == doc.bloom));
     let reconstructed = doc.spans.iter().any(|span| span.reconstructed || span.started_unix_millis.is_none());
     let (range_start, range_end) = if reconstructed {
         reconstructed_range(&doc.spans)
     } else {
         axis_range(&doc.spans, now).map_or((0, 1), |(start, end, _)| (start, end))
     };
-    let mut names: Vec<String> = Vec::new();
-    for span in &doc.spans {
-        if !names.contains(&span.workpiece) {
-            names.push(span.workpiece.clone());
-        }
-    }
-    if let Some(bloom) = live {
-        for member in &bloom.members {
-            if !names.contains(&member.workpiece) {
-                names.push(member.workpiece.clone());
-            }
-        }
-        if bloom.composition.is_some() {
-            let composition = String::from(WorkpieceId::COMPOSITION);
-            if !names.contains(&composition) {
-                names.push(composition);
-            }
-        }
-    }
-    names
+    lane_names(doc, live)
         .into_iter()
         .map(|workpiece| {
             let member_spans: Vec<TimelineSpan> =
@@ -232,7 +214,15 @@ fn rows_of(doc: &MetricsTimeline, store: &Store, width: usize) -> Vec<LaneRow> {
                             .map(|stage| stage.to_string())
                             .unwrap_or_default()
                     } else {
-                        member.map(|member| member_status_state(member).to_owned()).unwrap_or_default()
+                        member
+                            .map(|member| {
+                                member_status_state(
+                                    member,
+                                    view.is_some_and(|view| view.has_order(doc.bloom, &member.workpiece)),
+                                )
+                                .to_owned()
+                            })
+                            .unwrap_or_default()
                     }
                 },
                 |span| span.stage.to_string(),
@@ -257,6 +247,30 @@ fn rows_of(doc: &MetricsTimeline, store: &Store, width: usize) -> Vec<LaneRow> {
             }
         })
         .collect()
+}
+
+fn lane_names(doc: &MetricsTimeline, live: Option<&BloomView>) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for span in &doc.spans {
+        if !names.contains(&span.workpiece) {
+            names.push(span.workpiece.clone());
+        }
+    }
+    let Some(bloom) = live else {
+        return names;
+    };
+    for member in &bloom.members {
+        if !names.contains(&member.workpiece) {
+            names.push(member.workpiece.clone());
+        }
+    }
+    if bloom.composition.is_some() {
+        let composition = String::from(WorkpieceId::COMPOSITION);
+        if !names.contains(&composition) {
+            names.push(composition);
+        }
+    }
+    names
 }
 
 fn silence_of(member: Option<&MemberView>) -> Silence {

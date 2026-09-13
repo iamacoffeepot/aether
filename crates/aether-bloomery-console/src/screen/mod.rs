@@ -28,7 +28,7 @@ use crate::store::{ResourceKey, Store};
 use crate::warroom::Focus;
 
 pub use backlog::Backlog;
-pub use board::{BloomRow, Board, BoardLane, BoardRow, MemberRow, RowId, member_status_state};
+pub use board::{BloomRow, Board, BoardLane, BoardRow, MemberRow, OrderRow, RowId, member_status_state};
 pub use coordinator::CoordinatorLog;
 pub use detail::Detail;
 pub use metrics::{Breakdown, Dashboard, Days, Timeline, compose};
