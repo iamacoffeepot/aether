@@ -59,6 +59,25 @@ fn wait_until_the_reader_has_answered(harness: &mut ScenarioHarness, bloom: Bloo
     harness.pump_until("the reader answers", |harness| !harness.study_verdicts(bloom).is_empty());
 }
 
+/// Where the harness's session trees live, canonical.
+///
+/// A lane records the checkout it actually stood in, so its path arrives
+/// resolved through every symlink on the way — on macOS the temp root is
+/// reached through `/var` → `/private/var` — while `runs_dir()` is the root as
+/// the fixture created it. Comparing the two unresolved fails on the symlink
+/// rather than on the structure under test.
+fn sessions_root(harness: &LaneHarness) -> PathBuf {
+    fs::canonicalize(harness.runs_dir()).unwrap().join("sessions")
+}
+
+/// The same resolution for a path a lane recorded, so a ledger entry written
+/// before the symlink was resolved still compares against the canonical root.
+/// A tree the scenario has already reaped canonicalizes to nothing and is
+/// compared as recorded.
+fn as_canonical(recorded: &str) -> PathBuf {
+    fs::canonicalize(recorded).unwrap_or_else(|_| PathBuf::from(recorded))
+}
+
 #[test]
 fn a_bloom_whose_lanes_all_pass_resolves_its_member() {
     // The green path, end to end below the spawn seam: a construct lane writes
@@ -124,7 +143,7 @@ fn a_conversation_keeps_its_session_tree_and_a_mechanical_lane_builds_in_its_slo
     harness
         .settle("the member resolves", |bloom| bloom.members.first().is_some_and(|member| member.resolution.is_some()));
 
-    let sessions = harness.runs_dir().join("sessions");
+    let sessions = sessions_root(&harness);
     let placed: Vec<(String, String)> =
         harness.ledger().into_iter().filter_map(|run| run.worktree.map(|worktree| (run.command, worktree))).collect();
 
@@ -134,7 +153,7 @@ fn a_conversation_keeps_its_session_tree_and_a_mechanical_lane_builds_in_its_slo
     assert!(commands.contains(CONSTRUCT_IMPLEMENT_COMMAND), "the conversation lane ran in a session tree: {placed:?}");
     let trees: BTreeSet<&str> = session_lanes.iter().map(|(_, worktree)| worktree.as_str()).collect();
     assert_eq!(trees.len(), 1, "every conversation launch stood in one tree: {session_lanes:?}");
-    let tree = Path::new(trees.iter().next().unwrap());
+    let tree = as_canonical(trees.iter().next().unwrap());
     assert_eq!(tree.file_name().and_then(|name| name.to_str()), Some("tree"));
     assert_eq!(tree.parent().and_then(Path::parent), Some(sessions.as_path()), "and it is a session's: {tree:?}");
 
@@ -975,7 +994,7 @@ fn registered_scratch_checkouts(harness: &LaneHarness) -> Vec<PathBuf> {
 // count plus the lane ceiling, however many orders run. Anything named after an
 // order is the leak, and the shape is what says so.
 fn assert_scratch_checkouts_are_named_for_work(harness: &LaneHarness, context: &str) {
-    let sessions = fs::canonicalize(harness.runs_dir()).unwrap().join("sessions");
+    let sessions = sessions_root(harness);
     for checkout in registered_scratch_checkouts(harness) {
         let name = checkout.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_owned();
         let slot = name.strip_prefix("slot-").is_some_and(|index| index.chars().all(|digit| digit.is_ascii_digit()));
