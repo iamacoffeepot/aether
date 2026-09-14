@@ -28,7 +28,7 @@ pub fn quiet_lines(view: &ViewDocument) -> Vec<QuietLine> {
     for bloom in live_blooms(view) {
         let mut walking = false;
         for member in &bloom.members {
-            match MemberState::of(member, view.has_order(bloom.id, &member.workpiece)) {
+            match MemberState::of(member, view.has_lane(bloom.id, member)) {
                 MemberState::Integrated => resolved += 1,
                 MemberState::Blocked => blocked += 1,
                 MemberState::Idle => idle += 1,
@@ -151,7 +151,7 @@ mod tests {
         let lines = quiet_lines(&view);
         let dropped: Vec<_> = live_blooms(&view)
             .flat_map(|bloom| bloom.members.iter().map(move |member| (bloom.id, member)))
-            .filter(|(id, member)| !MemberState::of(member, view.has_order(*id, &member.workpiece)).walks())
+            .filter(|(id, member)| !MemberState::of(member, view.has_lane(*id, member)).walks())
             .map(|(_, member)| member)
             .collect();
         let member_counts: usize =

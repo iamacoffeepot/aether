@@ -92,7 +92,7 @@ fn occupancy(view: Option<&ViewDocument>) -> (usize, usize) {
     };
     let states: Vec<_> = live_blooms(view)
         .flat_map(|bloom| {
-            bloom.members.iter().map(move |member| MemberState::of(member, view.has_order(bloom.id, &member.workpiece)))
+            bloom.members.iter().map(move |member| MemberState::of(member, view.has_lane(bloom.id, member)))
         })
         .collect();
     let busy = states.iter().filter(|state| **state == MemberState::Running).count();

@@ -26,7 +26,8 @@ pub fn history_blooms(view: &ViewDocument) -> impl Iterator<Item = &BloomView> {
 /// One member's standing on the operator ladder. Precedence matches
 /// `scripts/bloomery-operator.py`'s `member_status_state` with the
 /// construct-declined park named rather than swallowed as running: wedge,
-/// surface request, park, hold, resolution, live outstanding order, blocked, idle.
+/// surface request, park, hold, resolution, live lane (outstanding order or
+/// unfinished shared verify run), blocked, idle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemberState {
     /// An operator took this member out of the bloom (#5327). Ranked first
@@ -60,7 +61,7 @@ pub enum MemberState {
 
 impl MemberState {
     #[must_use]
-    pub fn of(member: &MemberView, has_order: bool) -> Self {
+    pub fn of(member: &MemberView, has_lane: bool) -> Self {
         if member.withdrawn.is_some() {
             return Self::Withdrawn;
         }
@@ -82,7 +83,7 @@ impl MemberState {
         if member.resolution.is_some() {
             return Self::Integrated;
         }
-        if has_order {
+        if has_lane {
             return Self::Running;
         }
         if member.blocked_by.as_deref().is_some_and(|name| !name.is_empty()) {
