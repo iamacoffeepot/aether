@@ -46,6 +46,32 @@ fn workpiece_key(workpiece: &WorkpieceId) -> &str {
     workpiece.0.as_str()
 }
 
+/// The head's pin for this member version's content, when the head already
+/// carries it: the same workpiece at the same scope revision whose candidate
+/// tree is identical.
+///
+/// Tree — never checkout — is the candidate's identity: a re-capture of the
+/// same tree is the same work and the checkout is vehicle state. Git ancestry
+/// is invisible here — the reducer holds digests, not the DAG — so a
+/// candidate at a different tree digest still misses even when the head's
+/// tree contains it; the lane judges containment on the real trees and its
+/// decline resolves through the Reconcile-decline arm instead.
+pub(super) fn carried_head_pin(
+    head: &IntegrationHead,
+    workpiece: &WorkpieceId,
+    scope_revision: Digest,
+    tree: Digest,
+) -> Option<MemberPin> {
+    head.coverage
+        .iter()
+        .find(|covered| {
+            covered.workpiece == *workpiece
+                && covered.scope_revision == scope_revision
+                && covered.candidate.tree == tree
+        })
+        .cloned()
+}
+
 fn rejected(error: CoordinationError) -> Decisions {
     Decisions::rejected(Outcome::CoordinationRejected(error))
 }
@@ -1102,7 +1128,17 @@ pub(super) fn reduce_integration_conflicted(snapshot: &Snapshot, conflict: Integ
         scope: FailureScope::Interaction { members: input.members.clone(), evidence: evidence.detail },
     });
     let mut effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
+    // A stale append re-names members the head integrated since the plan was
+    // cut. Their pins sit in the current coverage at identical trees, so a
+    // lap would reproduce the conflicted merge only to rediscover nothing.
+    // They are already integrated at this generation: their contexts, cursors,
+    // and claims stay exactly where the head put them, and only a member the
+    // head does not carry is sent back.
+    let mut reconciled_owner: Option<WorkpieceId> = None;
     for pin in &input.members {
+        if carried_head_pin(&state.integration.head, &pin.workpiece, pin.scope_revision, pin.candidate.tree).is_some() {
+            continue;
+        }
         let Some(member) = record.spec.members().iter().find(|member| member.workpiece == pin.workpiece) else {
             return rejected(CoordinationError::MemberVersionMismatch { workpiece: pin.workpiece.clone() });
         };
@@ -1129,15 +1165,22 @@ pub(super) fn reduce_integration_conflicted(snapshot: &Snapshot, conflict: Integ
         };
         let _ = member;
         queue_context_dispatch(record, &mut next, *bloom, &pin.workpiece, &progress, context, &mut effects);
+        if reconciled_owner.is_none() {
+            reconciled_owner = Some(pin.workpiece.clone());
+        }
     }
+    // The reservation steadies the head for a member that is about to repair
+    // onto it. A member the head already carries repairs nothing, so it never
+    // owns the reservation — and when every member was carried there is no
+    // lap at all and nothing to steady.
     if next.integration.movement_count >= next.policy.movement_budget
-        && let Some(owner) = input.members.first()
+        && let Some(owner) = reconciled_owner
     {
         let Some(deadline) = observed_at_unix_millis.checked_add(next.policy.reservation_millis) else {
             return rejected(CoordinationError::InvalidPlan);
         };
         next.integration.reservation = Some(StableHeadReservation {
-            owner: owner.workpiece.clone(),
+            owner,
             generation,
             node: expected_parent,
             movement_count: next.integration.movement_count,
@@ -3234,7 +3277,8 @@ mod tests {
     use super::*;
     use crate::testing::{digest, draft, membership};
     use crate::values::{
-        ConfigRegistry, Harness, ReasoningEffort, ToolPolicy, VerifyProof, Withdrawal, WithdrawalCause,
+        ConfigRegistry, ContextualResolutionClaim, Harness, ReasoningEffort, ResolutionProof, ToolPolicy, VerifyProof,
+        Withdrawal, WithdrawalCause,
     };
     use alloc::boxed::Box;
     use core::iter::once;
@@ -5312,6 +5356,167 @@ mod tests {
         assert!(next.integration.reservation.as_ref().is_some_and(|reservation| {
             reservation.owner == colliding.members[0].workpiece && reservation.node == head.node
         }));
+    }
+
+    /// Three members over the same generation with the head already covering
+    /// two of them, for the stale-append tests below.
+    fn three_member_head() -> (BloomRecord, CoordinationState, MemberPin, MemberPin, MemberPin) {
+        let spec =
+            draft(1, alloc::vec![membership("alpha", 10), membership("beta", 11), membership("gamma", 12)]).seal();
+        let record = BloomRecord::empty(spec.clone());
+        let mut state = initialized_effects(
+            &Snapshot::new(spec.base()),
+            &spec,
+            &record.stage_catalog,
+            &record.pipeline_manifest,
+            Some(policy()),
+        )
+        .expect("valid policy")
+        .into_iter()
+        .find_map(|effect| match effect {
+            Decision::RecordCoordinationState { state: Some(state), .. } => Some(*state),
+            _ => None,
+        })
+        .expect("coordination state");
+        let alpha = pin("alpha", 10, 40);
+        let beta = pin("beta", 11, 30);
+        let gamma = pin("gamma", 12, 50);
+        for covered in [&alpha, &beta] {
+            state.claims.insert(
+                covered.workpiece.0.clone(),
+                ContextualResolutionClaim {
+                    member: covered.clone(),
+                    proof: ResolutionProof::Standalone(VerifyProof {
+                        stage: StageId::Verify,
+                        gate_set: Digest::default(),
+                        evidence: Evidence {
+                            subject: covered.candidate.tree,
+                            kind: EvidenceKind::VerificationResult,
+                            detail: digest(70),
+                        },
+                    }),
+                },
+            );
+        }
+        state.integration.head = IntegrationHead {
+            generation: state.integration.generation.digest(),
+            node: digest(90),
+            candidate: CandidateRef { tree: digest(91), checkout: digest(92) },
+            plan: digest(89),
+            coverage: alloc::vec![alpha.clone(), beta.clone()],
+        };
+        (record, state, alpha, beta, gamma)
+    }
+
+    /// A conflicted append plan over `members`: the input names pins the head
+    /// integrated since the composition was cut, whether the parent is stale
+    /// or the merge itself collided. The plan is installed directly rather
+    /// than scheduled — a fully covered input is never append-ready, which is
+    /// exactly the shape under test.
+    fn conflicting_append(
+        record: &BloomRecord,
+        state: &mut CoordinationState,
+        members: Vec<MemberPin>,
+        candidate: CandidateRef,
+    ) -> (Snapshot, BloomId, IntegrationAppendPlan, CompositionInput, Evidence) {
+        let conflicting = CompositionInput { node: digest(51), candidate, members };
+        state.integration.queued = alloc::vec![conflicting.clone()];
+        state.integration.movement_count = state.policy.movement_budget - 1;
+        let plan = IntegrationAppendPlan {
+            bloom: record.spec.id(),
+            generation: state.integration.generation.digest(),
+            expected_parent: state.integration.head.clone(),
+            inputs: alloc::vec![conflicting.clone()],
+        };
+        state.integration.in_flight = Some(plan.clone());
+        let (snapshot, bloom) = in_flight_snapshot(record.clone(), state.clone());
+        let evidence =
+            Evidence { subject: conflicting.candidate.tree, kind: EvidenceKind::FoldConflict, detail: digest(55) };
+        (snapshot, bloom, plan, conflicting, evidence)
+    }
+
+    #[test]
+    fn an_append_conflict_skips_members_the_head_already_carries() {
+        let (record, mut state, alpha, beta, gamma) = three_member_head();
+        let (snapshot, bloom, plan, conflicting, evidence) =
+            conflicting_append(&record, &mut state, alloc::vec![alpha, beta, gamma.clone()], gamma.candidate);
+
+        let decisions = reduce_integration_conflicted(
+            &snapshot,
+            IntegrationConflict {
+                bloom: &bloom,
+                plan: plan.digest(),
+                generation: plan.generation,
+                expected_parent: plan.expected_parent.node,
+                input: &conflicting,
+                at: conflicting.candidate,
+                evidence: &evidence,
+                observed_at_unix_millis: 10,
+            },
+        );
+
+        let reconciled = decisions
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::AdvanceStage { workpiece, progress, .. } => Some((workpiece, *progress)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            reconciled.as_slice(),
+            [(workpiece, progress)]
+                if workpiece.0 == "gamma" && progress.stage == StageId::Reconcile
+        ));
+        assert_eq!(
+            decisions
+                .effects
+                .iter()
+                .filter(|effect| matches!(effect, Decision::DispatchContextualAttempt { .. }))
+                .count(),
+            1,
+            "only the member the head does not carry gets a lap"
+        );
+        let next = recorded(&decisions);
+        assert!(!next.contexts.contains_key("alpha") && !next.contexts.contains_key("beta"));
+        assert!(next.claims.contains_key("alpha") && next.claims.contains_key("beta"));
+        assert!(next.integration.reservation.as_ref().is_some_and(|reservation| { reservation.owner.0 == "gamma" }));
+    }
+
+    #[test]
+    fn an_append_conflict_covering_only_carried_members_dispatches_no_lap() {
+        let (record, mut state, alpha, beta, _) = three_member_head();
+        let candidate = beta.candidate;
+        let (snapshot, bloom, plan, conflicting, evidence) =
+            conflicting_append(&record, &mut state, alloc::vec![alpha, beta], candidate);
+
+        let decisions = reduce_integration_conflicted(
+            &snapshot,
+            IntegrationConflict {
+                bloom: &bloom,
+                plan: plan.digest(),
+                generation: plan.generation,
+                expected_parent: plan.expected_parent.node,
+                input: &conflicting,
+                at: conflicting.candidate,
+                evidence: &evidence,
+                observed_at_unix_millis: 10,
+            },
+        );
+
+        assert!(matches!(decisions.outcome, Outcome::CoordinationAdvanced { .. }));
+        assert!(
+            !decisions.effects.iter().any(|effect| {
+                matches!(effect, Decision::AdvanceStage { .. } | Decision::DispatchContextualAttempt { .. })
+            }),
+            "no cursor moves and no lap when every member is already integrated"
+        );
+        let next = recorded(&decisions);
+        assert!(next.integration.reservation.is_none(), "nothing repairs, so nothing owns a reservation");
+        assert!(
+            next.diagnostics.iter().any(|diagnostic| diagnostic.subject == conflicting.digest()),
+            "the collision is still journaled even though it dispatches nothing"
+        );
     }
 
     #[test]

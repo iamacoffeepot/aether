@@ -4,6 +4,7 @@
 use alloc::vec::Vec;
 
 use super::composition::reduce_composition_attempt;
+use super::coordination::carried_head_pin;
 use super::integrate::claim_effects;
 use super::splice::member_construct_base;
 use super::verify_memo::reuse_of;
@@ -244,7 +245,9 @@ pub(super) fn stage_binding(catalog: &StageCatalog, stage: StageId) -> StageBind
 /// ADR-0153); a failing gate re-dispatches the same stage while the stage's
 /// `retry_budget` allows and wedges the member once it is exhausted. A failing
 /// Construct whose evidence is [`EvidenceKind::ConstructDeclined`] parks
-/// instead: attempts and repair rolls stay put. The terminal `Verify` never
+/// instead: attempts and repair rolls stay put — except a Reconcile decline on
+/// work the head already carries with a standing claim, which resolves as
+/// current rather than parking a member that has nothing left to do. The terminal `Verify` never
 /// completes here: a pass integrates through
 /// [`Fact::Integrate`](crate::Fact::Integrate), while a failure carries its typed
 /// identities through [`Fact::VerifyFailed`](crate::Fact::VerifyFailed).
@@ -325,6 +328,11 @@ pub(super) fn reduce_attempt_completed(
         && matches!(stage, StageId::Construct | StageId::Refine | StageId::Reconcile)
         && evidence.kind == EvidenceKind::ConstructDeclined
     {
+        if stage == StageId::Reconcile
+            && let Some(resolved) = resolve_covered_reconcile(record, member, &cursor, *bloom, workpiece, evidence)
+        {
+            return resolved;
+        }
         return park_declined_construct(
             *bloom,
             workpiece,
@@ -615,6 +623,62 @@ fn retry_or_wedge(
     wedged(bloom, workpiece, stage, &wedge_evidence, effects)
 }
 
+/// Resolve a Reconcile decline as current when the declined lap, the standing
+/// claim, and the head all name the same member version's content.
+///
+/// A reconcile lap that finds the head already carrying its subject concludes
+/// with nothing to produce — the lane's decline. Retrying reproduces the
+/// refusal, and parking strands the cursor at Reconcile while the claim
+/// stands, which the console reads as stuck. When the member's claim is
+/// recorded at the version the head carries, there is nothing to repair and
+/// nowhere to repair it onto: the cursor rejoins the line at Verify on the
+/// carried candidate, with no dispatch — the work the head holds is already
+/// proven by the standing claim.
+///
+/// Anything less than the full triangle still parks: an uncovered member, a
+/// claim for another version, or a lap for another version is genuine
+/// divergence the reducer cannot verify from digests, and the park keeps it
+/// visible.
+fn resolve_covered_reconcile(
+    record: &BloomRecord,
+    member: &Membership,
+    cursor: &StageProgress,
+    bloom: BloomId,
+    workpiece: &WorkpieceId,
+    evidence: &Evidence,
+) -> Option<Decisions> {
+    let state = record.coordination.as_deref()?;
+    let authored = cursor.candidate?;
+    let claim = state.claims.get(workpiece.0.as_str())?;
+    if claim.member.scope_revision != member.scope_revision || authored.tree != claim.member.candidate.tree {
+        return None;
+    }
+    let carried =
+        carried_head_pin(&state.integration.head, workpiece, claim.member.scope_revision, claim.member.candidate.tree)?;
+    let progress = StageProgress {
+        stage: StageId::Verify,
+        attempts: 1,
+        candidate: Some(carried.candidate),
+        repair_rolls: cursor.repair_rolls,
+        seen_verify_failures: cursor.seen_verify_failures,
+        fold_checkpoint: None,
+        fold_conflict_evidence: None,
+        reconcile_assembles_base: false,
+    };
+    Some(Decisions {
+        outcome: Outcome::AttemptAdvanced {
+            bloom,
+            workpiece: workpiece.clone(),
+            from: StageId::Reconcile,
+            to: StageId::Verify,
+        },
+        effects: alloc::vec![
+            Decision::RecordEvidence { bloom, evidence: evidence.clone() },
+            Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress },
+        ],
+    })
+}
+
 /// Park a construct that concluded without a candidate: record the evidence,
 /// leave the cursor (and therefore `attempts` and `repair_rolls`) untouched,
 /// and emit no dispatch. Distinct from [`wedged`]: a wedge spent the budget
@@ -705,10 +769,14 @@ pub(super) fn wedged(
 mod tests {
     use crate::testing::{step as testing_step, with_compiled_manifest};
 
+    use super::super::coordination::initialized_effects;
     use super::*;
     use crate::ids::IdempotencyKey;
     use crate::reduce::{Event, Fact, GrantAttemptsError, Outcome};
-    use crate::values::{BloomDraft, BloomSpec, EvidenceKind, Membership, OperatorHold};
+    use crate::values::{
+        BloomDraft, BloomSpec, ContextualResolutionClaim, CoordinationPolicy, EvidenceKind, MemberPin, Membership,
+        OperatorHold, ResolutionProof, VerificationMode, VerifyProof,
+    };
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
@@ -1077,6 +1145,170 @@ mod tests {
             "the snapshot holds the park so the served view can name the member",
         );
         assert!(!after.blooms[&bloom].wedged.contains_key(&workpiece), "a parked member is not wedged");
+    }
+
+    /// A sealed bloom with coordination state whose head carries `wp`'s claim,
+    /// and whose cursor sits at Reconcile on `cursor_candidate`.
+    fn reconcile_on_carried_claim(cursor_candidate: CandidateRef) -> (Snapshot, BloomId, CandidateRef) {
+        let (snapshot, bloom) = sealed();
+        let mut record = snapshot.blooms.get(&bloom).expect("sealed bloom").clone();
+        let mut state = initialized_effects(
+            &Snapshot::new(record.spec.base()),
+            &record.spec,
+            &record.stage_catalog,
+            &record.pipeline_manifest,
+            Some(CoordinationPolicy {
+                verification: VerificationMode::Contextual,
+                eager_integration: true,
+                max_run_members: 4,
+                max_serial_requests: 4,
+                max_attribution_probes: 3,
+                movement_budget: 2,
+                reservation_millis: 1_000,
+                coalesce_millis: None,
+                host_class: String::from("test-host"),
+            }),
+        )
+        .expect("valid policy")
+        .into_iter()
+        .find_map(|effect| match effect {
+            Decision::RecordCoordinationState { state: Some(state), .. } => Some(*state),
+            _ => None,
+        })
+        .expect("coordination state");
+        let carried = CandidateRef { tree: digest(40), checkout: digest(41) };
+        let pin = MemberPin { workpiece: WorkpieceId("wp".into()), scope_revision: digest(10), candidate: carried };
+        state.claims.insert(
+            String::from("wp"),
+            ContextualResolutionClaim {
+                member: pin.clone(),
+                proof: ResolutionProof::Standalone(VerifyProof {
+                    stage: StageId::Verify,
+                    gate_set: Digest::default(),
+                    evidence: Evidence {
+                        subject: carried.tree,
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(70),
+                    },
+                }),
+            },
+        );
+        state.integration.head.coverage = alloc::vec![pin];
+        state.integration.head.generation = state.integration.generation.digest();
+        record.coordination = Some(Box::new(state));
+        record.progress.insert(
+            WorkpieceId("wp".into()),
+            StageProgress {
+                stage: StageId::Reconcile,
+                attempts: 1,
+                candidate: Some(cursor_candidate),
+                repair_rolls: 0,
+                seen_verify_failures: VerifyFailureSet::EMPTY,
+                fold_checkpoint: Some(digest(61)),
+                fold_conflict_evidence: Some(digest(62)),
+                reconcile_assembles_base: false,
+            },
+        );
+        let mut snapshot = snapshot;
+        snapshot.blooms.insert(bloom, record);
+        (snapshot, bloom, carried)
+    }
+
+    fn decline_reconcile(bloom: BloomId, key: &str) -> Event {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: WorkpieceId("wp".into()),
+                stage: StageId::Reconcile,
+                passed: false,
+                evidence: Evidence { subject: digest(1), kind: EvidenceKind::ConstructDeclined, detail: digest(91) },
+                candidate: None,
+            },
+        )
+    }
+
+    // The plausible bug: a Reconcile lane that declines because the head
+    // already carries its subject parks the member at Reconcile while its
+    // claim stands, and the console reads a stuck bloom (#5966).
+    #[test]
+    fn a_reconcile_decline_on_head_carried_work_resolves_current() {
+        let carried = CandidateRef { tree: digest(40), checkout: digest(41) };
+        let (snapshot, bloom, _) = reconcile_on_carried_claim(carried);
+        let workpiece = WorkpieceId("wp".into());
+        let (after, decided) = step(&snapshot, &decline_reconcile(bloom, "r-decline"));
+
+        assert!(
+            matches!(decided.outcome, Outcome::AttemptAdvanced { from: StageId::Reconcile, to: StageId::Verify, .. }),
+            "the decline resolves as current instead of parking: {decided:?}",
+        );
+        let advanced = decided
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                Decision::AdvanceStage { progress, .. } => Some(*progress),
+                _ => None,
+            })
+            .expect("the cursor leaves Reconcile");
+        assert_eq!(advanced.stage, StageId::Verify);
+        assert_eq!(advanced.candidate, Some(carried));
+        assert!(
+            !decided.effects.iter().any(|effect| {
+                matches!(
+                    effect,
+                    Decision::DispatchAttempt { .. }
+                        | Decision::DispatchContextualAttempt { .. }
+                        | Decision::DispatchCandidatePreparation { .. }
+                        | Decision::QueueMemberVerification { .. }
+                )
+            }),
+            "resolving as current dispatches nothing — the head's work is already proven",
+        );
+        let cursor = after.blooms[&bloom].progress[&workpiece];
+        assert_eq!(cursor.stage, StageId::Verify);
+        assert!(after.member_park(&bloom, &workpiece).is_none(), "no park is recorded");
+    }
+
+    // The plausible bug: the resolve-as-current arm fires on any Reconcile
+    // decline under coordination, silently dropping work the head never
+    // carried.
+    #[test]
+    fn a_reconcile_decline_on_work_the_head_does_not_carry_still_parks() {
+        let other = CandidateRef { tree: digest(42), checkout: digest(43) };
+        let (mut snapshot, bloom, _) = reconcile_on_carried_claim(other);
+        let workpiece = WorkpieceId("wp".into());
+        let record = snapshot.blooms.get_mut(&bloom).expect("sealed bloom");
+        let state = record.coordination.as_mut().expect("coordination state");
+        state.claims.clear();
+        state.integration.head.coverage.clear();
+        let reason = digest(91);
+        let (after, decided) = step(&snapshot, &decline_reconcile(bloom, "r-decline"));
+
+        assert!(
+            matches!(
+                decided.outcome,
+                Outcome::AttemptParked { stage: StageId::Reconcile, reason: got, .. } if got == reason
+            ),
+            "an uncovered decline still parks: {decided:?}",
+        );
+        assert_eq!(after.member_park(&bloom, &workpiece).map(|park| park.stage), Some(StageId::Reconcile),);
+    }
+
+    // The plausible bug: the resolve-as-current arm matches the claim without
+    // checking the lap was for it, so a decline for a newer version resolves
+    // onto the older carried pin and strands the newer work.
+    #[test]
+    fn a_reconcile_decline_for_a_newer_version_than_the_claim_still_parks() {
+        let other = CandidateRef { tree: digest(42), checkout: digest(43) };
+        let (snapshot, bloom, _) = reconcile_on_carried_claim(other);
+        let workpiece = WorkpieceId("wp".into());
+        let (after, decided) = step(&snapshot, &decline_reconcile(bloom, "r-decline"));
+
+        assert!(
+            matches!(decided.outcome, Outcome::AttemptParked { stage: StageId::Reconcile, .. }),
+            "a decline for another version still parks: {decided:?}",
+        );
+        assert!(after.member_park(&bloom, &workpiece).is_some(), "the park stays visible");
     }
 
     // The plausible bug: a refused grant aimed at a parked member still
