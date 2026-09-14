@@ -104,12 +104,22 @@ pub(super) fn move_effects_with_checkpoint(
         return [advance, Decision::DeferDispatch { bloom, workpiece: workpiece.clone() }];
     }
     let binding = stage_binding(sealed.catalog, progress.stage);
-    let mut transformation = Transformation::for_member_stage(&binding, targets.subject, targets.checkout, sealed.base);
+    let subject = if progress.stage == StageId::Construct {
+        scope_revision
+    } else {
+        targets.subject
+    };
+    let mut transformation = Transformation::for_member_stage(&binding, subject, targets.checkout, sealed.base);
     if progress.stage == StageId::Construct
         && let Some(base) = construct_checkpoint_base
     {
         transformation.diff_base = Some(base);
     }
+    let candidate = if progress.stage == StageId::Construct {
+        None
+    } else {
+        candidate
+    };
 
     [
         advance,
@@ -374,17 +384,24 @@ pub(super) fn reduce_attempt_completed(
     let member_checkpoint = captured
         .filter(|_| stage == StageId::Construct && !passed)
         .or_else(|| snapshot.member_checkpoint(bloom, workpiece));
-    let (targets, construct_checkpoint_base) = if assembling && passed {
-        (
-            DispatchTargets {
-                subject: member.scope_revision,
-                checkout: candidate.map_or(construct_base, |current| current.checkout),
-            },
-            None,
-        )
+    let target_stage = if passed {
+        next.unwrap_or(stage)
     } else {
-        reconcile_or_line_targets(member.scope_revision, construct_base, candidate, fold_checkpoint, member_checkpoint)
+        stage
     };
+    let target_fold = if passed {
+        None
+    } else {
+        fold_checkpoint
+    };
+    let (targets, construct_checkpoint_base) = reconcile_or_line_targets(
+        target_stage,
+        member.scope_revision,
+        construct_base,
+        candidate,
+        target_fold,
+        member_checkpoint,
+    );
     let ctx = CompletionCtx {
         bloom: *bloom,
         workpiece,
@@ -483,19 +500,25 @@ pub(super) fn reduce_member_executor_fault(
 
     let fold_checkpoint = cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile);
     let (targets, construct_checkpoint_base) = reconcile_or_line_targets(
+        stage,
         member.scope_revision,
         member_construct_base(record, workpiece),
         cursor.candidate,
         fold_checkpoint,
         snapshot.member_checkpoint(bloom, workpiece),
     );
+    let displayed = if stage == StageId::Construct {
+        None
+    } else {
+        cursor.candidate.map(|current| current.tree)
+    };
     effects.extend(move_effects_with_checkpoint(
         *bloom,
         workpiece,
         member.scope_revision,
         &cursor,
         (targets, construct_checkpoint_base),
-        cursor.candidate.map(|current| current.tree),
+        displayed,
         SealedLine::of(record, member),
     ));
     Decisions {
@@ -562,13 +585,18 @@ fn advance_after_pass(
         };
     }
 
+    let displayed = if next == StageId::Construct {
+        None
+    } else {
+        candidate.map(|current| current.tree)
+    };
     effects.extend(move_effects_with_checkpoint(
         bloom,
         workpiece,
         member.scope_revision,
         &progress,
         (targets, construct_checkpoint_base),
-        candidate.map(|current| current.tree),
+        displayed,
         SealedLine::of(record, member),
     ));
     Decisions {
@@ -599,13 +627,18 @@ fn retry_or_wedge(
             fold_conflict_evidence,
             reconcile_assembles_base: cursor.reconcile_assembles_base,
         };
+        let displayed = if stage == StageId::Construct {
+            None
+        } else {
+            candidate.map(|current| current.tree)
+        };
         effects.extend(move_effects_with_checkpoint(
             bloom,
             workpiece,
             member.scope_revision,
             &progress,
             (targets, construct_checkpoint_base),
-            candidate.map(|current| current.tree),
+            displayed,
             SealedLine::of(record, member),
         ));
         return Decisions {
@@ -706,17 +739,39 @@ fn park_declined_construct(
 /// partial work; a checkpoint never becomes the evidence-binding subject
 /// (#4994).
 ///
+/// A Construct dispatch always binds the scope revision, never a candidate
+/// tree: the held candidate is the checkout the lane starts from, not the
+/// subject the evidence binds to (#5968). Every other stage binds the
+/// candidate tree once one exists.
+///
 /// The second return is the member's clean or spliced `base` only when the
 /// checkout is that construct checkpoint — the provenance [`move_effects_with_checkpoint`]
 /// stamps onto a Construct `diff_base`. Fold checkpoints, finished
 /// candidates, and a cold or spliced-base start return `None`.
 pub(super) fn reconcile_or_line_targets(
+    stage: StageId,
     scope_revision: Digest,
     base: Digest,
     candidate: Option<CandidateRef>,
     fold_checkpoint: Option<Digest>,
     member_checkpoint: Option<CandidateRef>,
 ) -> (DispatchTargets, Option<Digest>) {
+    if stage == StageId::Construct {
+        if let Some(checkpoint) = fold_checkpoint {
+            return (DispatchTargets { subject: scope_revision, checkout: checkpoint }, None);
+        }
+        return candidate.map_or_else(
+            || {
+                member_checkpoint.map_or(
+                    (DispatchTargets { subject: scope_revision, checkout: base }, None),
+                    |checkpoint| {
+                        (DispatchTargets { subject: scope_revision, checkout: checkpoint.checkout }, Some(base))
+                    },
+                )
+            },
+            |current| (DispatchTargets { subject: scope_revision, checkout: current.checkout }, None),
+        );
+    }
     if let Some(checkpoint) = fold_checkpoint {
         return (
             DispatchTargets { subject: candidate.map_or(scope_revision, |current| current.tree), checkout: checkpoint },
@@ -886,24 +941,35 @@ mod tests {
         let checkpoint = CandidateRef { tree: digest(21), checkout: digest(22) };
         let candidate = CandidateRef { tree: digest(31), checkout: digest(32) };
 
-        let (cold, cold_mark) = reconcile_or_line_targets(scope, base, None, None, None);
+        let (cold, cold_mark) = reconcile_or_line_targets(StageId::Verify, scope, base, None, None, None);
         assert_eq!(cold.checkout, base, "neither a candidate nor a checkpoint checks out the sealed base");
         assert_eq!(cold.subject, scope);
         assert_eq!(cold_mark, None, "a cold or spliced-base start is unmarked");
 
-        let (seeded, seeded_mark) = reconcile_or_line_targets(scope, base, None, None, Some(checkpoint));
+        let (seeded, seeded_mark) =
+            reconcile_or_line_targets(StageId::Verify, scope, base, None, None, Some(checkpoint));
         assert_eq!(seeded.checkout, checkpoint.checkout, "a checkpoint without a candidate seeds the checkout");
         assert_eq!(seeded.subject, scope, "a checkpoint is not a finished candidate: evidence still binds the scope");
         assert_eq!(seeded_mark, Some(base), "only the checkpoint case carries the member's base as provenance");
 
-        let (finished, finished_mark) = reconcile_or_line_targets(scope, base, Some(candidate), None, Some(checkpoint));
+        let (finished, finished_mark) =
+            reconcile_or_line_targets(StageId::Verify, scope, base, Some(candidate), None, Some(checkpoint));
         assert_eq!(finished.checkout, candidate.checkout, "a candidate outranks a checkpoint");
         assert_eq!(finished.subject, candidate.tree);
         assert_eq!(finished_mark, None, "a finished candidate is not a construct checkpoint");
 
-        let (folded, folded_mark) = reconcile_or_line_targets(scope, base, None, Some(digest(40)), Some(checkpoint));
+        let (folded, folded_mark) =
+            reconcile_or_line_targets(StageId::Reconcile, scope, base, None, Some(digest(40)), Some(checkpoint));
         assert_eq!(folded.checkout, digest(40), "a fold checkpoint outranks the construct checkpoint");
         assert_eq!(folded_mark, None, "a Reconcile fold checkout is not Construct provenance");
+
+        // Tripwire (#5968): a Construct with a held candidate still binds the
+        // scope revision — the candidate is the checkout, never the subject.
+        let (held, held_mark) =
+            reconcile_or_line_targets(StageId::Construct, scope, base, Some(candidate), None, Some(checkpoint));
+        assert_eq!(held.checkout, candidate.checkout, "a held candidate is still the checkout the lane starts from");
+        assert_eq!(held.subject, scope, "a Construct binds the scope revision even with a held candidate");
+        assert_eq!(held_mark, None, "a held candidate is not a construct checkpoint");
     }
 
     // The plausible bug: a first construct is seeded from an empty checkpoint
@@ -1603,6 +1669,45 @@ mod tests {
             captured.checkout,
             "Construct checks out the assembled capture",
         );
+    }
+
+    // Tripwire (#5968): a Construct issued from a Reconcile completion on a
+    // held candidate binds the scope revision, never the candidate tree. The
+    // plausible bug is two builders disagreeing — the issue-time order
+    // displaying the candidate while carrying the scope as inputs[0] — so a
+    // real lane's evidence binds inputs[0] and intake refuses it.
+    #[test]
+    fn a_base_assembly_construct_binds_the_scope_revision() {
+        let (snapshot, bloom) = sealed();
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "splice-conflict",
+                Fact::FoldConflict {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    checkpoint: digest(30),
+                    head: digest(31),
+                    evidence: conflict_evidence(30),
+                },
+            ),
+        );
+        let captured = CandidateRef { tree: digest(41), checkout: digest(42) };
+        let decided = pass_reconcile(&snapshot, bloom, "wp", "reconcile-pass", captured);
+
+        let transformation = construct_dispatch(&decided);
+        assert_eq!(
+            transformation.inputs[0],
+            digest(10),
+            "a held candidate is the checkout, never the evidence-binding subject",
+        );
+        assert_eq!(transformation.checkout, captured.checkout, "Construct still starts from the assembled tree");
+        match decided.effects.iter().find(|effect| matches!(effect, Decision::DispatchAttempt { .. })) {
+            Some(Decision::DispatchAttempt { candidate, .. }) => {
+                assert_eq!(*candidate, None, "a Construct displays the scope revision, never a held candidate");
+            }
+            other => panic!("expected a Construct dispatch, got {other:?}"),
+        }
     }
 
     // The plausible bug: leaving `reconcile_assembles_base` set after the

@@ -2671,3 +2671,60 @@ fn a_passing_review_carrying_advisories_is_kinded_as_one() {
         "a blocking class on a passing verdict is not an advisory — the lane would have reported a fail",
     );
 }
+
+#[test]
+fn a_refused_construct_mismatch_preserves_its_capture_for_the_checkpoint_push() {
+    // A refused claim is a bookkeeping fault; the tree the model built is the
+    // most valuable thing on the host (#5968). A completed Construct run whose
+    // subject differs from the displayed digest still captured work, so the
+    // cycle reports it for the member checkpoint push while recovering the
+    // order as a machinery fault.
+    let workpiece = WorkpieceId("wp-checkpoint".to_owned());
+    let scope_revision = Digest::from_bytes([2; 32]);
+
+    let fake = FakeGithub::new();
+    let shell = shell(fake.clone());
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let mut record = dispatch_record("n-refused-capture", bloom, &workpiece, scope_revision, scope_revision);
+    record.stage = StageId::Construct;
+    record.candidate = scope_revision;
+    record.displayed_digest = scope_revision;
+    let handle = answered(dispatch_and_record(&shell, &mut store, None, &record, NOW_UNIX_MILLIS));
+
+    let run_id = fake.seed_run("n-refused-capture", RunStatus::Completed, Some(RunConclusion::Success));
+    fake.seed_run_artifacts(
+        run_id,
+        vec![Artifact { id: 1, name: "evidence-n-refused-capture-log".to_owned(), size_bytes: 10 }],
+    );
+
+    let captured = CandidateRef { tree: Digest::from_bytes([41; 32]), checkout: Digest::from_bytes([42; 32]) };
+    let mut claims = HashMap::new();
+    claims.insert(
+        "n-refused-capture".to_owned(),
+        UploadedEvidence {
+            nonce: Nonce("n-refused-capture".to_owned()),
+            subject: Digest::from_bytes([9; 32]),
+            verdict: StageVerdict::Approved,
+            detail: Digest::from_bytes([7; 32]),
+            observation: LaneObservation { candidate: Some(captured), ..LaneObservation::default() },
+        },
+    );
+    let claims = SeededClaims(claims);
+    let mut sink = Collector::default();
+
+    let report = run_intake_cycle(&mut store, &shell, &[handle], &claims, None, &mut sink).unwrap();
+    assert_eq!((report.completed, report.refused), (1, 1), "the mismatched upload is refused");
+    assert_eq!(report.refused_checkpoints.len(), 1, "the capture survives the refusal for the checkpoint push");
+    let checkpoint = &report.refused_checkpoints[0];
+    assert_eq!(checkpoint.bloom, bloom);
+    assert_eq!(checkpoint.workpiece, workpiece);
+    assert_eq!(checkpoint.candidate, captured, "whatever the lane committed is what is preserved");
+    assert!(
+        sink.0.iter().any(|admission| matches!(
+            &admission.event.fact,
+            Fact::MemberExecutorFault { workpiece: faulted, stage: StageId::Construct, .. } if *faulted == workpiece
+        )),
+        "the refusal is still visible on the member as a machinery fault",
+    );
+}
