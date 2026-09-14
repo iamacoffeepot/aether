@@ -1,6 +1,7 @@
-//! A Contextual proposal that is still preparing when the head advances must be
-//! re-proposed against the new head. Without a retry on that stale preparation,
-//! the member sits at Verify with a terminal run and a dead queue row.
+//! A Contextual proposal still preparing when a closure-disjoint sibling folds
+//! must keep that plan. Re-proposing it against the new head was the waste
+//! #5938 removes: the older node still answers, and the pass rebases at
+//! integration.
 
 #![allow(clippy::unwrap_used)]
 
@@ -41,7 +42,7 @@ fn eager_contextual_policy() -> CoordinationPolicy {
 fn approve_scopes(harness: &ScenarioHarness, scope_revisions: &[Digest]) {
     let mut store = harness.commission_store();
     for scope_revision in scope_revisions {
-        let approval = signed_approval(KeyId(String::from("stale-prep harness")), &[0x0A; 32], *scope_revision);
+        let approval = signed_approval(KeyId(String::from("disjoint-fold harness")), &[0x0A; 32], *scope_revision);
         store
             .insert_approval(&approval, &FakeKeyProvider)
             .expect("the original member scope retains its signed approval");
@@ -159,7 +160,7 @@ fn dispatch_until(harness: &mut ScenarioHarness, what: &str, pred: impl Fn(&mut 
 }
 
 #[test]
-fn a_stale_unprepared_contextual_run_reproposes_against_the_new_head() {
+fn a_disjoint_contextual_run_survives_a_sibling_fold() {
     let authority = Repo::with_formatted_example_project();
     let script = LaneScript::all_passing().then_for(FIRST, StageId::Construct, LaneMode::NeverExits).then_for(
         SECOND,
@@ -169,7 +170,7 @@ fn a_stale_unprepared_contextual_run_reproposes_against_the_new_head() {
     let mut harness = HarnessBuilder::local_authority(&authority)
         .coordination(eager_contextual_policy())
         .script(&script)
-        .start("stale-unprepared-contextual-run");
+        .start("disjoint-contextual-run-survives-sibling-fold");
     let first = harness.author_scope_revision(FIRST, &["crates/example-a/**"]);
     let second = harness.author_scope_revision(SECOND, &["crates/example-b/**"]);
     approve_scopes(&harness, &[first, second]);
@@ -197,7 +198,7 @@ fn a_stale_unprepared_contextual_run_reproposes_against_the_new_head() {
             == 1
     });
 
-    let lagging = {
+    let (lagging, lagging_plan) = {
         let completed = facts(&harness, |fact| match fact {
             Fact::SharedRunCompleted { completion, .. } => Some(completion.plan),
             _ => None,
@@ -205,61 +206,58 @@ fn a_stale_unprepared_contextual_run_reproposes_against_the_new_head() {
         let leading_plan =
             initial.iter().find(|plan| completed.contains(&plan.digest())).expect("the completed run was proposed");
         let leading = leading_plan.requests[0].member.workpiece.0.as_str();
-        if leading == FIRST {
+        let lagging = if leading == FIRST {
             SECOND
         } else {
             FIRST
-        }
+        };
+        let lagging_plan = initial
+            .iter()
+            .find(|plan| plan.requests.iter().any(|request| request.member.workpiece.0 == lagging))
+            .map(SharedRunPlan::digest)
+            .expect("the lagging member was proposed");
+        (lagging.to_owned(), lagging_plan)
     };
 
+    let leading = if lagging == FIRST {
+        SECOND
+    } else {
+        FIRST
+    };
+    harness.integrate_tick();
+    harness.pump_until("the finished sibling occupies the head", |harness| {
+        covers(&head(harness, bloom).coverage, leading)
+    });
     let snapshot = replay_snapshot(&mut harness.commission_store());
     let state = snapshot.blooms.get(&bloom).expect("bloom").coordination.as_ref().expect("coordination");
+    let lagging_run =
+        state.runs.iter().find(|run| run.plan.digest() == lagging_plan).expect("the original lagging plan is retained");
+    assert!(!lagging_run.stale, "a closure-disjoint fold must not retire the preparing sibling");
     assert!(
-        state.runs.iter().any(|run| {
-            run.phase == SharedRunPhase::Preparing
-                && run.plan.requests.iter().any(|request| request.member.workpiece.0 == lagging)
+        matches!(lagging_run.phase, SharedRunPhase::Preparing | SharedRunPhase::Ready | SharedRunPhase::Running),
+        "the original plan is still live: {:?}",
+        lagging_run.phase
+    );
+    assert!(
+        !proposed_plans(&harness).iter().any(|plan| {
+            plan.digest() != lagging_plan && plan.requests.iter().any(|request| request.member.workpiece.0 == lagging)
         }),
-        "the sibling is still preparing when the first run settles: {:?}",
-        state
-            .runs
-            .iter()
-            .map(|run| (
-                &run.phase,
-                run.plan.requests.iter().map(|request| request.member.workpiece.0.as_str()).collect::<Vec<_>>()
-            ))
-            .collect::<Vec<_>>()
+        "the sibling must not be re-proposed against the new head"
     );
 
-    harness.integrate_tick();
-    harness.pump_until("the displaced member is proposed against the head that moved under it", |harness| {
-        let head = head(harness, bloom);
-        covers(
-            &head.coverage,
-            if lagging == FIRST {
-                SECOND
-            } else {
-                FIRST
-            },
-        ) && proposed_plans(harness).iter().any(|plan| {
-            plan.requests.iter().any(|request| request.member.workpiece.0 == lagging)
-                && plan.composition.as_ref().is_some_and(|composition| composition.base == head)
+    dispatch_until(&mut harness, "the original lagging plan completes on the node it prepared", |harness| {
+        facts(harness, |fact| match fact {
+            Fact::SharedRunCompleted { completion, .. } if completion.plan == lagging_plan => Some(completion.plan),
+            _ => None,
         })
+        .len()
+            == 1
     });
 
+    harness.integrate_tick();
+    harness.pump_until("the lagging pass integrates onto the head the sibling already occupies", |harness| {
+        covers(&head(harness, bloom).coverage, &lagging)
+    });
     let head = head(&harness, bloom);
-    assert!(covers(
-        &head.coverage,
-        if lagging == FIRST {
-            SECOND
-        } else {
-            FIRST
-        }
-    ));
-    assert!(
-        proposed_plans(&harness).iter().any(|plan| {
-            plan.requests.iter().any(|request| request.member.workpiece.0 == lagging)
-                && plan.composition.as_ref().is_some_and(|composition| composition.base.node == head.node)
-        }),
-        "the lagging member's replacement proposal must name the head that displaced it"
-    );
+    assert!(covers(&head.coverage, FIRST) && covers(&head.coverage, SECOND));
 }
