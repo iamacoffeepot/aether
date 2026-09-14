@@ -1742,6 +1742,22 @@ pub trait HostSource: SourceBackend<Error = SourceError> {
         Err(SourceError::Malformed("source backend does not support pinned candidate preparation".to_owned()))
     }
 
+    /// The tree digest the member's candidate ref currently carries — read the
+    /// ref, read the commit it names, and reverse-resolve that commit's tree.
+    ///
+    /// The question this answers is "does the ref a fold will merge still carry
+    /// the candidate the journal claims" (#5992), so `None` means *unanswerable*,
+    /// never *drifted*: the ref is absent, or the commit's tree is not one
+    /// correspondence can name. A caller comparing against a claimed tree treats
+    /// `None` as no finding; only a `Some` that differs is drift.
+    ///
+    /// # Errors
+    /// A transport fault reading the ref or the commit it names.
+    fn candidate_ref_tree(&self, bloom: &BloomId, workpiece: &str) -> Result<Option<Digest>, SourceError> {
+        let _ = (bloom, workpiece);
+        Ok(None)
+    }
+
     /// Delete `bloom`'s candidate, integration, and checkpoint refs. Claim refs
     /// and the landing branch are spared. See [`GitSource::prune_working_refs`].
     ///
@@ -1751,6 +1767,24 @@ pub trait HostSource: SourceBackend<Error = SourceError> {
 }
 
 impl<C: GitDataApi> HostSource for GitSource<C> {
+    fn candidate_ref_tree(&self, bloom: &BloomId, workpiece: &str) -> Result<Option<Digest>, SourceError> {
+        let Some(git_ref) = self.client.get_ref(&candidate_ref(bloom, workpiece))? else {
+            return Ok(None);
+        };
+        let tree = self.client.get_commit(&git_ref.sha)?.tree;
+        let Some(object) = GitObjectId::from_hex(&tree) else {
+            return Ok(None);
+        };
+        // A reverse-resolve and not `integration_tree_digest`: an unrecorded
+        // tree here means the comparison cannot be made, and minting an address
+        // for it would answer the caller with a digest that differs from every
+        // claim by construction — drift invented by the reader. An unparseable
+        // sha is the same `None` for the same reason, and not the `Malformed`
+        // the mainline paths raise: those need the object, this one needs an
+        // answer about it, and "I cannot say" is an answer they cannot give.
+        Ok(self.correspondence.resolve_digest(&BackendObjectId::from(object))?)
+    }
+
     fn changed_paths(&self, base: &CandidateRef, candidate: &CandidateRef) -> Result<Vec<String>, SourceError> {
         let base_sha = self.pinned_candidate_sha(base, "member delta base")?;
         let candidate_sha = self.pinned_candidate_sha(candidate, "member delta candidate")?;

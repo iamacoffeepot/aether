@@ -275,6 +275,16 @@ impl SourceShell {
         self.backend.integrate_merge(bloom, candidate_ref, expected)
     }
 
+    /// The tree digest `workpiece`'s candidate ref currently carries, or `None`
+    /// when the question is unanswerable — an absent ref, or a commit whose tree
+    /// correspondence never recorded.
+    ///
+    /// # Errors
+    /// A transport fault reading the ref or the commit it names.
+    pub fn candidate_ref_tree(&self, bloom: &BloomId, workpiece: &str) -> Result<Option<Digest>, SourceError> {
+        self.backend.candidate_ref_tree(bloom, workpiece)
+    }
+
     /// Merge the exact pinned candidate into an owned preview namespace.
     ///
     /// # Errors

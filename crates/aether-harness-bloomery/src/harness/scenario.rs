@@ -20,7 +20,8 @@ use aether_bloomery::{
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
-    ChecksState, GitDataApi, NewPullRequest, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex,
+    ChecksState, GitDataApi, GitObjectId, NewPullRequest, PullRequestApi, candidate_ref_name, landing_branch,
+    short_hex, to_hex,
 };
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, GetResult};
 use aether_chassis_bloomery::benchmark::{BenchmarkRunnerCapability, BenchmarkTick};
@@ -1693,22 +1694,71 @@ impl ScenarioHarness {
         }
     }
 
-    /// Stage the capture a construct lane would have produced.
+    /// Stage the capture a lane would have produced, and publish it to the
+    /// member's candidate ref — the substitution this cell makes for the
+    /// executor's ADR-0152 push, which shells a real `git push`.
     ///
     /// # Panics
     /// The fixture could not mint the capture commit.
     #[must_use]
     pub fn seed_capture(&self, bloom: BloomId, workpiece: &str, tree: Digest, checkout: Digest) -> CandidateRef {
+        let candidate = self.seed_unpublished_capture(workpiece, tree, checkout);
+        self.publish_capture(bloom, workpiece, &candidate);
+        candidate
+    }
+
+    /// The capture without the publish: mint the commit and record both
+    /// correspondences, leaving the candidate ref exactly where it was.
+    ///
+    /// The half of [`seed_capture`](Self::seed_capture) that stands in for a lane;
+    /// the other half stands in for the executor's push. A scenario about what a
+    /// *missed* push does to the fold needs them apart (#5992), because a
+    /// harness that always plants the ref is a harness in which no push can ever
+    /// be missed.
+    ///
+    /// # Panics
+    /// The fixture could not mint the capture commit.
+    #[must_use]
+    pub fn seed_unpublished_capture(&self, workpiece: &str, tree: Digest, checkout: Digest) -> CandidateRef {
         let tree_sha = to_hex(&tree);
         let commit = self
             .fake()
             .create_commit(&format!("capture {workpiece}"), &tree_sha, &[])
             .expect("the fixture mints the capture commit");
 
-        self.fake().seed_ref(candidate_ref_name(&bloom, workpiece).trim_start_matches("refs/"), &commit.sha);
         self.fake().seed_correspondence(&tree, &tree_sha);
         self.fake().seed_correspondence(&checkout, &commit.sha);
         CandidateRef { tree, checkout }
+    }
+
+    /// Point the member's candidate ref at `candidate`'s checkout commit — what
+    /// the executor's pusher does once an admitted capture resolves.
+    ///
+    /// # Panics
+    /// The checkout has no recorded correspondence, so there is no commit to
+    /// publish.
+    pub fn publish_capture(&self, bloom: BloomId, workpiece: &str, candidate: &CandidateRef) {
+        let commit = self
+            .fake()
+            .resolve_backend_object(&candidate.checkout)
+            .expect("the correspondence store reads")
+            .and_then(|object| GitObjectId::try_from(object).ok())
+            .expect("the capture checkout has a recorded commit");
+
+        self.fake().seed_ref(candidate_ref_name(&bloom, workpiece).trim_start_matches("refs/"), &commit.to_hex());
+    }
+
+    /// The capture commit the member's candidate ref points at, as its checkout
+    /// digest — the vehicle a combining fold will merge, comparable against the
+    /// [`CandidateRef`] a lane produced.
+    ///
+    /// # Panics
+    /// The correspondence store could not be read.
+    #[must_use]
+    pub fn candidate_ref_commit(&self, bloom: BloomId, workpiece: &str) -> Option<Digest> {
+        let sha = self.fake().ref_target(candidate_ref_name(&bloom, workpiece).trim_start_matches("refs/"))?;
+        let object = GitObjectId::from_hex(&sha)?;
+        self.fake().resolve_digest(&BackendObjectId::from(object)).expect("the correspondence store reads")
     }
 
     /// The study artifact the executor reactor filed for `(bloom, attempt)`.

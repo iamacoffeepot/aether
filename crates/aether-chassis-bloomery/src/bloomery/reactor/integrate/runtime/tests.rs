@@ -167,6 +167,53 @@ fn seed_candidate_branch(fake: &FakeGithub, bloom: &BloomId, workpiece: &str, tr
     commit.sha
 }
 
+// The same seed, but with the branch commit over a tree correspondence can name
+// — the shape the ref-versus-claim guard can actually compare. `seed_candidate_branch`
+// commits over an opaque label instead, which is unanswerable by design.
+fn seed_corresponded_candidate_branch(fake: &FakeGithub, bloom: &BloomId, workpiece: &str, tree: &Digest) {
+    fake.seed_git_object(tree);
+    let commit = fake.create_commit(workpiece, &tree.to_hex(), &[]).unwrap();
+    fake.seed_ref(candidate_ref_name(bloom, workpiece).trim_start_matches("refs/"), &commit.sha);
+}
+
+// #5992 — the candidate ref and the member's claimed candidate are written by
+// different halves of the coordinator, and a skipped push (an ADR-0189 Reconcile
+// lap's was skipped outright) leaves the ref behind the claim. Merging it raised
+// the collision the lap had already answered and wedged the member on a spent
+// budget, with nothing in between naming the cause. Catches the combining fold
+// merging a ref it never compared.
+#[test]
+fn a_combining_fold_refuses_a_candidate_ref_that_is_behind_the_claim() {
+    let (first, second) = (digest(0xAB), digest(0xAC));
+    let (fake, base) = seeded(&first);
+    fake.seed_git_object(&second);
+    let bloom = BloomId(digest(1));
+    seed_candidate_branch(&fake, &bloom, "wp-0", "tree-a");
+    // The lap produced `second`; the ref was never moved off the pre-lap tree.
+    seed_corresponded_candidate_branch(&fake, &bloom, "wp-1", &digest(0xBE));
+    let source = shell(fake);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let sequence = enqueue_integration(&mut store, bloom, base, vec![first, second]);
+
+    let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
+
+    assert_eq!(admits.len(), 1, "the drifted ref refuses the fold rather than merging the stale commit");
+    assert_unacked(&mut store, Topic::Integrate, sequence, ack_through);
+    match decoded_event(&admits[0]).fact {
+        Fact::FoldRefused { bloom: refused, refusal } => {
+            assert_eq!(refused, bloom);
+            assert_eq!(refusal.guard, "candidate_ref_matches_cursor");
+            let read =
+                |field: &str| refusal.reads.iter().find(|entry| entry.field == field).map(|entry| entry.value.as_str());
+            let (claimed, carried) = (second.to_hex(), digest(0xBE).to_hex());
+            assert_eq!(read("member"), Some("wp-1"), "the refusal names the drifted member");
+            assert_eq!(read("claimed"), Some(claimed.as_str()), "and the candidate its claim names");
+            assert_eq!(read("ref_carries"), Some(carried.as_str()), "and what the ref carries instead");
+        }
+        other => panic!("expected Fact::FoldRefused, got {other:?}"),
+    }
+}
+
 // ADR-0152 / #3653 — a multi-member fold merges every member's candidate ref
 // instead of refusing. The refusal this replaces existed because tree-replace
 // would keep only the last member's work; the decisive assertion is that the

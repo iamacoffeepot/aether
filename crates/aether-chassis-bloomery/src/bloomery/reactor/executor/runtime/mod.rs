@@ -2838,11 +2838,20 @@ pub fn candidate_push_at(refuse: bool, repo: impl Into<PathBuf>, remote: impl In
 }
 
 /// Name the bloom ref each admitted capture publishes to (ADR-0152). A passing
-/// construct or refine goes to [`candidate_ref_name`]; a failing construct that
-/// still captured work goes to [`member_checkpoint_ref_name`]. Refine is in the
-/// passing arm because a composition weave-repair capture is the head landing
-/// will create its branch from — skipping it leaves that commit local-only and
-/// the land loop 422s on an object the source repository has never seen.
+/// construct, refine or reconcile goes to [`candidate_ref_name`]; a failing
+/// construct that still captured work goes to [`member_checkpoint_ref_name`].
+/// Refine is in the passing arm because a composition weave-repair capture is
+/// the head landing will create its branch from — skipping it leaves that commit
+/// local-only and the land loop 422s on an object the source repository has
+/// never seen.
+///
+/// Reconcile is in it for the sharper version of the same reason (#5992): the
+/// whole point of an ADR-0189 lap is to produce a candidate the *next fold*
+/// merges, and the fold reads [`candidate_ref_name`], never the cursor. Left
+/// out, the lap's commit stayed local-only, the fold re-merged the
+/// pre-Reconcile one, raised the identical collision, and wedged the member at
+/// Reconcile with its budget spent — with the cursor still advancing, so the
+/// member read healthy the whole way.
 ///
 /// The push itself shells `git` (a force-push to the hosted repo, or a local
 /// authority's `update-ref`), so it does not happen here: the caller queues each
@@ -2860,7 +2869,7 @@ fn admitted_candidate_pushes(
             Fact::AttemptCompleted {
                 bloom,
                 workpiece,
-                stage: StageId::Construct | StageId::Refine,
+                stage: StageId::Construct | StageId::Refine | StageId::Reconcile,
                 passed: true,
                 candidate: Some(candidate),
                 ..

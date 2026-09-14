@@ -363,6 +363,46 @@ fn adopt_inherited(
     Ok(())
 }
 
+/// Refuse before merging a candidate ref that no longer carries the tree the
+/// member's claim names (#5992).
+///
+/// Two sources of truth meet here. The journal's cursor says which tree the
+/// member resolved on; the candidate ref says which commit a merge will
+/// actually fold, and the executor's push between them is best-effort. When a
+/// push is skipped outright — as an ADR-0189 Reconcile lap's was — the fold
+/// silently merges the pre-lap commit, raises the collision the lap already
+/// answered, and wedges the member on a budget it spent for nothing. Nothing
+/// downstream can tell that apart from a genuine collision, so it is caught
+/// here, where the two truths are both in hand.
+///
+/// Answered only where the source can answer it: an absent ref and an
+/// unrecorded tree are both `None`, and neither refuses — an absent ref is the
+/// merge's own `MissingRef`, and a tree correspondence never saw is a
+/// comparison this guard cannot make rather than a mismatch it found.
+fn require_candidate_ref_matches(
+    source: &SourceShell,
+    bloom: &BloomId,
+    member: &MemberCandidate,
+    gate: &'static str,
+) -> Result<(), FoldOutcome> {
+    let carried = match source.candidate_ref_tree(bloom, &member.workpiece.0) {
+        Ok(carried) => carried,
+        Err(error) => return Err(FoldOutcome::Stopped(format!("reading a candidate ref failed: {error}"))),
+    };
+    match carried {
+        Some(tree) if tree != member.candidate => Err(FoldOutcome::Refused(fold_refusal(
+            gate,
+            "candidate_ref_matches_cursor",
+            aether_bloomery::reads![
+                member: member.workpiece.0,
+                claimed: member.candidate.to_hex(),
+                ref_carries: tree.to_hex(),
+            ],
+        ))),
+        _ => Ok(()),
+    }
+}
+
 fn fold_refused_key(bloom: &Digest, guard: &str, member: &str) -> IdempotencyKey {
     let mut key = String::with_capacity(32 + 64 + 1 + guard.len() + 1 + member.len());
     key.push_str("aether.bloomery.fold-refused:");
@@ -457,6 +497,9 @@ fn fold_integration(source: &SourceShell, payload: &IntegratePayload) -> FoldOut
         collisions.clear();
         for member in round {
             let folded = if combining {
+                if let Err(outcome) = require_candidate_ref_matches(source, &bloom, member, "fold") {
+                    return outcome;
+                }
                 source.integrate_merge(&bloom, &candidate_ref_name(&bloom, &member.workpiece.0), &expected)
             } else {
                 source.integrate(&bloom, &member.candidate, &expected)
@@ -582,6 +625,9 @@ fn fold_splice(source: &SourceShell, payload: &SplicePayload) -> FoldOutcome {
     let mut head = position.head;
     let mut collisions: Vec<Collision<'_>> = Vec::new();
     for member in &payload.members {
+        if let Err(outcome) = require_candidate_ref_matches(source, &bloom, member, "splice") {
+            return outcome;
+        }
         match source.integrate_merge(&namespace, &candidate_ref_name(&bloom, &member.workpiece.0), &expected) {
             Ok(IntegrateOutcome::Integrated { tree, head: new_head }) => {
                 expected = Checkpoint { bloom: namespace, tree };

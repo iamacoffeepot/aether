@@ -2,7 +2,7 @@
 //! invariants, mail the completed report to the REST API, and post new
 //! violations through the operator alert channel.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -201,6 +201,7 @@ fn collect_and_evaluate(request: &mut CollectRequest<'_>) -> rusqlite::Result<Do
     let replica_topics = request.store.drain_outbox(Some(Topic::SourceReplica.as_str()))?;
     let replica = observe_replica(&replica_topics, request.replica_seen, request.replica_passes, request.now);
     let surface_parks = observe_surface_parks(&replayed.snapshot, request.surface_seen, request.now);
+    let candidate_ref_trees = candidate_ref_trees(request.source, &replayed.snapshot);
     let ancestry = |from: &Digest, to: &Digest| request.source.and_then(|source| source.is_fast_forward(from, to).ok());
 
     Ok(evaluate(&LiveState {
@@ -220,7 +221,48 @@ fn collect_and_evaluate(request: &mut CollectRequest<'_>) -> rusqlite::Result<Do
         lanes_running: request.lanes_running,
         evidence_nonces: &evidence_refs,
         unresolved_head_age,
+        candidate_ref_trees: &candidate_ref_trees,
     }))
+}
+
+/// Read the candidate ref of every member an active bloom could still fold.
+///
+/// Scoped to members that already have a candidate to compare against, in
+/// blooms that have not landed: the read is one ref plus one commit per member,
+/// and asking it of a landed bloom's retired namespace would cost the same and
+/// mean nothing. A source that cannot answer — unconfigured, an absent ref, a
+/// tree with no correspondence — contributes no row, so the invariant reports
+/// drift and never absence.
+fn candidate_ref_trees(source: Option<&SourceShell>, snapshot: &Snapshot) -> Vec<(BloomId, WorkpieceId, Digest)> {
+    let Some(source) = source else {
+        return Vec::new();
+    };
+    let mut trees = Vec::new();
+    for (bloom, record) in &snapshot.blooms {
+        if !is_active_unlanded(record.status) {
+            continue;
+        }
+        // A set, because a resolved member appears on both sides and the read
+        // costs a ref plus a commit each time.
+        let mut members: BTreeSet<&WorkpieceId> = BTreeSet::new();
+        members.extend(record.claims.keys());
+        members
+            .extend(record.progress.iter().filter(|(_, cursor)| cursor.candidate.is_some()).map(|(member, _)| member));
+
+        for workpiece in members {
+            match source.candidate_ref_tree(bloom, &workpiece.0) {
+                Ok(Some(tree)) => trees.push((*bloom, workpiece.clone(), tree)),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    target: "aether_chassis_bloomery::doctor",
+                    workpiece = %workpiece.0,
+                    %error,
+                    "doctor could not read a candidate ref",
+                ),
+            }
+        }
+    }
+    trees
 }
 
 struct Replay {
