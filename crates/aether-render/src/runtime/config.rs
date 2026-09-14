@@ -1,7 +1,6 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
-use aether_data::KindId;
+use aether_data::MailboxId;
 use aether_substrate::config::{ConfigError, ConfigProvenance, ConfigSources};
 
 /// The historical dark field, kept as the default so nothing but a line
@@ -134,17 +133,20 @@ pub fn apply_manifest_clear_color(sources: &mut ConfigSources, clear_color: Opti
 /// (ADR-0156 §3): the non-knob wiring the chassis computes at boot, kept
 /// off the operator-resolvable [`RenderTuningConfig`] `Config`.
 ///
-/// `observed_kinds`, when set, has every successfully-dispatched
-/// inbound mail's kind id pushed to it from the cap's `#[handler]`
-/// methods — used by the in-process substrate-harness to assert what kinds
-/// the cap has seen. Production chassis leave it `None` (zero
-/// overhead). Decode failures and unknown kinds don't push (the
+/// `observed_kinds`, when set, is the harness observer inbox every
+/// successfully-dispatched inbound mail is witnessed to from the cap's
+/// `#[handler]` methods — used by the in-process substrate-harness to
+/// assert what kinds the cap has seen. The witness is mail, not shared
+/// state: each handler sends an empty same-kind envelope to this mailbox
+/// (issue 5965), which the harness's inline observer records as the
+/// dispatched kind id. Production chassis leave it `None` (zero
+/// overhead). Decode failures and unknown kinds don't witness (the
 /// macro miss path warn-logs at the chassis-side dispatcher and
 /// short-circuits before any handler runs).
 #[derive(Clone, Default)]
 pub struct RenderParams {
-    /// `SubstrateHarness` observation sink.
-    pub observed_kinds: Option<Arc<Mutex<Vec<KindId>>>>,
+    /// `SubstrateHarness` observer inbox for dispatch witnesses.
+    pub observed_kinds: Option<MailboxId>,
     /// Resolved path for the `"assets"` namespace, used by the
     /// `capture_frame` handler to read reference images for similarity
     /// checks (iamacoffeepot/aether#1780). The handler resolves the

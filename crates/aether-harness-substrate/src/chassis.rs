@@ -40,7 +40,9 @@ pub const WORKERS: usize = 2;
 /// Test-harness observability mailbox. Scenarios that want to assert
 /// on component-emitted kinds (the probe's
 /// `aether.test_fixture.tick_observed`, for example) target this
-/// name with `ctx.send_to_named`; the substrate-harness chassis registers
+/// name with `ctx.send_to_named`; the pumped `aether.render` dispatch
+/// witnesses every kind it delivers here by mail (issue 5965); the
+/// substrate-harness chassis registers
 /// a synchronous-handler closure under this namespace via
 /// `Registry::register_inline` (see `build_passive`) and the
 /// closure records each kind name in `SubstrateHarnessEnv::observed_kinds`.
@@ -174,9 +176,11 @@ pub trait FrameHook {
 pub struct RenderHookWiring {
     /// The chassis mailer, so the hook can mail `frame` to the pumped slot.
     pub mailer: Arc<Mailer>,
-    /// `SubstrateHarness` observation sink threaded into the render actor's
-    /// `RenderParams`.
-    pub observed_kinds: Option<Arc<Mutex<Vec<KindId>>>>,
+    /// `SubstrateHarness` observer inbox, threaded into the render actor's
+    /// `RenderParams` so the pumped dispatch witnesses every kind it
+    /// delivers by mail (issue 5965) — no shared state crosses into the
+    /// cap. `None` disables render dispatch witnesses.
+    pub observed_kinds: Option<MailboxId>,
     /// Resolved `"assets"` root for `capture_frame` similarity references.
     pub assets_dir: Option<PathBuf>,
 }
@@ -208,9 +212,11 @@ pub struct SubstrateHarnessEnv {
     /// keeps the built-in scheduler literals / adaptive knobs. Per-harness,
     /// no process env.
     pub scheduler_tuning: SchedulerTuning,
-    /// Optional observation log: when `Some`, both render and
-    /// camera dispatchers push every inbound mail's kind name to it.
-    /// In-process API uses this to assert what the sinks have seen;
+    /// Optional observation log: when `Some`, the chassis registers the
+    /// observer inbox whose inline handler records every witnessed kind
+    /// id here — the pumped `aether.render` dispatch witnesses by mail
+    /// (issue 5965), fixtures witness component-emitted kinds the same
+    /// way. In-process API uses this to assert what the sinks have seen;
     /// binary passes `None` for zero overhead.
     pub observed_kinds: Option<Arc<Mutex<Vec<KindId>>>>,
     /// Sender side of the chassis event channel. Cloned into the

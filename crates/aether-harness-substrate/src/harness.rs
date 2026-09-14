@@ -54,7 +54,7 @@ use aether_substrate_harness_cap::SubstrateHarnessCapability;
 
 use super::chassis::{
     ComposeFn, FrameHook, RenderHookWiring, SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv,
-    WORKERS,
+    WORKERS, substrate_harness_observer_mailbox,
 };
 use aether_substrate_harness_cap::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use std::error;
@@ -270,17 +270,18 @@ pub struct SubstrateHarness {
     /// late-arriving frame) doesn't get silently dropped.
     stashed_replies: HashMap<u64, EgressEvent>,
 
-    /// Kind names of mail observed via the chassis-owned render sink
-    /// (`aether.render` — both `aether.draw_triangle` and
-    /// `aether.view_projection` flow here post-ADR-0074 §Decision 7) plus
-    /// broadcast / session-zero frames that arrived on the loopback.
+    /// Kind ids of mail witnessed to the harness observer inbox
+    /// (`aether.substrate_harness.observer`): the pumped `aether.render`
+    /// dispatch witnesses every kind it delivers there by mail (issue
+    /// 5965) — both `aether.draw_triangle` and `aether.view_projection`
+    /// flow here post-ADR-0074 §Decision 7 — and fixtures witness
+    /// component-emitted kinds the same way.
     /// Read back via [`Self::count_observed`] / [`Self::observed_kinds`]
     /// for scenario assertions.
     /// Limitation (v1): mail addressed to other sinks
     /// (`aether.fs`, `aether.log`) and direct
     /// component-to-component mail does not show up here — those
-    /// flows don't pass through outbound and are not observed by the
-    /// chassis-owned sinks the harness wraps.
+    /// flows witness nothing to the observer inbox.
     observed_kinds: Arc<Mutex<Vec<KindId>>>,
 
     /// Lifetime guard. Boot owns the scheduler; dropping the
@@ -647,7 +648,7 @@ impl SubstrateHarness {
         let observed_kinds = Arc::new(Mutex::new(Vec::<KindId>::new()));
 
         // ADR-0161 slice R4: the pumped render slot is booted post-`build_passive`
-        // by the hook factory, so the non-knob render wiring (observation sink,
+        // by the hook factory, so the non-knob render wiring (observer inbox,
         // similarity assets root) is handed to the factory rather than composed
         // through `RenderParams`. Resolve the assets root before `namespace_roots`
         // moves into the env, mirroring the chassis's own capture-similarity wiring.
@@ -687,7 +688,7 @@ impl SubstrateHarness {
             .map(|factory| {
                 let wiring = RenderHookWiring {
                     mailer: Arc::clone(&boot.queue),
-                    observed_kinds: Some(Arc::clone(&observed_kinds)),
+                    observed_kinds: Some(substrate_harness_observer_mailbox()),
                     assets_dir: render_assets_dir,
                 };
                 factory(&passive, wiring, width, height)
@@ -742,10 +743,10 @@ impl SubstrateHarness {
     }
 
     /// Count how many mail observations match `kind_name`. Includes
-    /// mail observed at the chassis-owned `aether.render` sink
-    /// (which receives both `aether.draw_triangle` and
-    /// `aether.view_projection` post-ADR-0074 §Decision 7) plus any broadcast
-    /// / session-zero frames that arrived on the loopback. Mail to
+    /// every kind the pumped `aether.render` dispatch witnessed to the
+    /// observer inbox (which receives both `aether.draw_triangle` and
+    /// `aether.view_projection` post-ADR-0074 §Decision 7) plus any
+    /// fixture-mailed observations. Mail to
     /// other sinks and direct component-to-component flows are not
     /// observed (v1).
     ///
