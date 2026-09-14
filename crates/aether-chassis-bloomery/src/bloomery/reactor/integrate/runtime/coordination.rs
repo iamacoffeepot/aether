@@ -285,6 +285,16 @@ where
                     if !retain_diagnostic(artifacts.as_deref_mut(), &diagnostic, &parent) {
                         return None;
                     }
+                    if let SharedRunPreparation::Conflict { input, .. } = &preparation {
+                        for pin in &input.members {
+                            if let Err(error) =
+                                store.record_fold_conflict(bloom.0.as_bytes(), &pin.workpiece.0, &diagnostic)
+                            {
+                                tracing::warn!(sequence, %error, "shared-run conflict overlay did not persist");
+                                return None;
+                            }
+                        }
+                    }
                     preparation
                 }
                 SharedPreparationResult::Stopped(error) => {

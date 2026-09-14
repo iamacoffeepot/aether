@@ -1520,10 +1520,76 @@ pub(super) fn reduce_shared_run_prepared(
             let refused = run.plan.clone();
             serial_fallbacks(&mut next, &refused, &mut effects);
         }
+        SharedRunPreparation::Conflict { input, at, evidence } if run.plan.mode == SharedRunMode::Contextual => {
+            let Some(composition) = run.plan.composition.clone() else {
+                return rejected(CoordinationError::InvalidPlan);
+            };
+            if evidence.kind != EvidenceKind::FoldConflict
+                || evidence.subject != at.tree
+                || !composition.inputs.iter().any(|expected| expected == input)
+            {
+                return rejected(CoordinationError::InvalidPlan);
+            }
+            run.phase = SharedRunPhase::Terminal;
+            let refused = run.plan.clone();
+            if let Err(error) =
+                apply_shared_run_conflict(record, &mut next, &composition, &refused, input, evidence, &mut effects)
+            {
+                return rejected(error);
+            }
+        }
         _ => return rejected(CoordinationError::InvalidPlan),
     }
     effects.insert(0, record_state(*bloom, next));
     accepted(*bloom, plan, effects)
+}
+
+fn apply_shared_run_conflict(
+    record: &BloomRecord,
+    state: &mut CoordinationState,
+    composition: &CompositionPlan,
+    refused: &SharedRunPlan,
+    input: &CompositionInput,
+    evidence: &Evidence,
+    effects: &mut Vec<Decision>,
+) -> Result<(), CoordinationError> {
+    state.diagnostics.push(CoordinationDiagnostic {
+        subject: input.digest(),
+        scope: FailureScope::Interaction { members: input.members.clone(), evidence: evidence.detail },
+    });
+    state.integration.queued.retain(|queued| queued.digest() != input.digest());
+    effects.push(Decision::RecordEvidence { bloom: composition.bloom, evidence: evidence.clone() });
+    let context =
+        ConstructContext { bloom_base: state.integration.generation.base, starting_head: composition.base.clone() };
+    for pin in &input.members {
+        if !record.spec.members().iter().any(|member| member.workpiece == pin.workpiece) {
+            return Err(CoordinationError::MemberVersionMismatch { workpiece: pin.workpiece.clone() });
+        }
+        state.contexts.insert(pin.workpiece.0.clone(), context.clone());
+        let old = record.progress.get(&pin.workpiece).copied();
+        let progress = StageProgress {
+            stage: StageId::Reconcile,
+            attempts: 1,
+            candidate: Some(pin.candidate),
+            repair_rolls: old.map_or(0, |progress| progress.repair_rolls),
+            seen_verify_failures: old.map_or(VerifyFailureSet::EMPTY, |progress| progress.seen_verify_failures),
+            fold_checkpoint: Some(composition.base.candidate.checkout),
+            fold_conflict_evidence: Some(evidence.detail),
+            reconcile_assembles_base: false,
+        };
+        queue_context_dispatch(record, state, composition.bloom, &pin.workpiece, &progress, context.clone(), effects);
+    }
+    let remaining = SharedRunPlan {
+        mode: SharedRunMode::Standalone,
+        requests: refused.requests.iter().filter(|request| !input.members.contains(&request.member)).cloned().collect(),
+        composition: None,
+        probe_budget: 0,
+        execution_attempt: 0,
+    };
+    if !remaining.requests.is_empty() {
+        serial_fallbacks(state, &remaining, effects);
+    }
+    Ok(())
 }
 
 pub(super) fn reduce_shared_run_started(
@@ -4733,6 +4799,122 @@ mod tests {
         invalidate_member_version(&record, &mut state, &ejected.workpiece, &mut effects).expect("replacement");
 
         assert!(state.requests.is_empty(), "an input carrying the ejected pin cannot outlive it");
+    }
+
+    fn preparing_contextual_run() -> (Snapshot, BloomId, SharedRunPlan) {
+        let (mut snapshot, bloom, plan, _) = active_contextual_run();
+        let state = snapshot.blooms.get_mut(&bloom).expect("record").coordination.as_mut().expect("coordination");
+        state.runs[0].phase = SharedRunPhase::Preparing;
+        state.runs[0].node = None;
+        state.runs[0].physical_run = None;
+        (snapshot, bloom, plan)
+    }
+
+    #[test]
+    fn a_preparation_conflict_reconciles_the_collider_and_falls_back_siblings() {
+        let (snapshot, bloom, plan) = preparing_contextual_run();
+        let composition = plan.composition.as_ref().expect("contextual plan carries its composition");
+        let colliding = composition.inputs[1].clone();
+        let sibling = plan.requests[0].clone();
+        let head = composition.base.clone();
+        let evidence = Evidence { subject: head.candidate.tree, kind: EvidenceKind::FoldConflict, detail: digest(55) };
+
+        let decisions = reduce_shared_run_prepared(
+            &snapshot,
+            &bloom,
+            plan.digest(),
+            &SharedRunPreparation::Conflict {
+                input: colliding.clone(),
+                at: head.candidate,
+                evidence: evidence.clone(),
+            },
+        );
+
+        let next = recorded(&decisions);
+        assert!(next.runs.iter().any(|run| run.plan.digest() == plan.digest() && run.is_terminal()));
+        assert!(
+            !next.integration.queued.iter().any(|queued| queued.digest() == colliding.digest()),
+            "the input that would not place is withdrawn rather than left to append-conflict",
+        );
+        let reconciled = decisions
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::AdvanceStage { workpiece, progress, .. } => Some((workpiece, *progress)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            reconciled.as_slice(),
+            [(workpiece, progress)]
+                if **workpiece == colliding.members[0].workpiece
+                    && progress.stage == StageId::Reconcile
+                    && progress.fold_checkpoint == Some(head.candidate.checkout)
+                    && progress.fold_conflict_evidence == Some(evidence.detail)
+        ));
+        assert!(
+            decisions.effects.iter().any(|effect| {
+                matches!(effect, Decision::DispatchContextualAttempt { dispatch }
+                    if dispatch.stage == StageId::Reconcile
+                        && dispatch.workpiece == colliding.members[0].workpiece
+                        && dispatch.transformation.checkout == head.candidate.checkout
+                        && dispatch.transformation.inputs.as_slice() == from_ref(&colliding.candidate.tree))
+            }),
+            "the lap stands on the recorded head and carries the collider's candidate as the subject"
+        );
+        assert!(
+            !decisions.effects.iter().any(|effect| {
+                matches!(effect, Decision::DispatchSharedRunPreparation { plan: fallback }
+                    if fallback.requests.iter().any(|request| request.member == colliding.members[0]))
+            }),
+            "the collider must not spend a standalone proof on a candidate that cannot place"
+        );
+        assert!(
+            decisions.effects.iter().any(|effect| {
+                matches!(effect, Decision::DispatchSharedRunPreparation { plan: fallback }
+                    if fallback.mode == SharedRunMode::Standalone
+                        && fallback.requests.iter().any(|request| request.digest() == sibling.digest()))
+            }),
+            "a sibling that did not collide still falls back to standalone"
+        );
+        assert!(decisions.effects.iter().any(|effect| {
+            matches!(effect, Decision::RecordEvidence { evidence: recorded, .. } if recorded == &evidence)
+        }));
+    }
+
+    #[test]
+    fn a_non_conflict_preparation_refusal_still_falls_back_to_standalone() {
+        let (snapshot, bloom, plan) = preparing_contextual_run();
+        let detail = digest(70);
+
+        let decisions =
+            reduce_shared_run_prepared(&snapshot, &bloom, plan.digest(), &SharedRunPreparation::Refused { detail });
+
+        let next = recorded(&decisions);
+        assert!(next.runs.iter().any(|run| run.plan.digest() == plan.digest() && run.is_terminal()));
+        assert!(
+            next.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.scope == FailureScope::Unattributed { evidence: detail })
+        );
+        assert_eq!(
+            decisions
+                .effects
+                .iter()
+                .filter(|effect| matches!(
+                    effect,
+                    Decision::DispatchSharedRunPreparation { plan: fallback }
+                    if fallback.mode == SharedRunMode::Standalone
+                ))
+                .count(),
+            plan.requests.len(),
+        );
+        assert!(
+            !decisions.effects.iter().any(|effect| {
+                matches!(effect, Decision::DispatchContextualAttempt { dispatch } if dispatch.stage == StageId::Reconcile)
+            }),
+            "a host or contract refusal is not a composition conflict"
+        );
     }
 
     #[test]
