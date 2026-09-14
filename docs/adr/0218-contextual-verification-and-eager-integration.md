@@ -387,3 +387,17 @@ the application after the full path is implemented.
   combinations and discards existing slot warmth.
 - Keep a second contextual receipt database: duplicates the journal,
   retained-result lifecycle, and ADR-0200 proof ledger.
+
+## Amendment: composition conflicts at shared-run preparation (2026-09-14, #5919)
+
+A contextual shared-run preparation that collides while folding its inputs
+is a fold conflict, not a host or contract refusal. The source reports
+`SharedRunPreparation::Conflict` naming the colliding input, the parent it
+could not place onto, and FoldConflict evidence that carries the conflicting
+paths and contribution diff. The reducer sends those members straight to
+`Reconcile` against the plan's recorded head — the same dispatch
+`Fact::IntegrationAppendConflicted` already uses — and keeps the Standalone
+fallback for `SharedRunPreparation::Refused` (host-class mismatch, invalid
+contract, unreadable delta). Spending a standalone proof on a candidate that
+cannot append is discarded work: the later append rediscovers the same
+collision and drops the claim once Reconcile authors a new tree.

@@ -359,6 +359,16 @@ pub const DECISIONS_PRE_COORDINATION_DIGEST: Digest =
 pub const EVENT_PRE_COORDINATION_DIGEST: Digest =
     Digest::pinned("55af52a6acdc3e695b0da93f05a73b414485a6526a863e1ab4129a42be788052");
 
+/// Event schema immediately before `SharedRunPreparation::Conflict`.
+///
+/// Copied from the `event` line the ledger carried as current at
+/// `ad794b045e2479ab9f1afd49ea6c4dc1dc27aee2` —
+/// `19dfa8e6713e44674a1b75b87e10ebda393dbab3f2f286e78230dfa4a8565e2e`. The
+/// conflict variant is appended past `Refused`, so every discriminant a row
+/// of that era could hold is unmoved.
+pub const EVENT_PRE_PREPARATION_CONFLICT_DIGEST: Digest =
+    Digest::pinned("19dfa8e6713e44674a1b75b87e10ebda393dbab3f2f286e78230dfa4a8565e2e");
+
 /// The stamp on sealed model-process instruction bundles written before
 /// ADR-0216 appended `retrospect` and `retrospect_finding_contract`.
 pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
@@ -473,6 +483,12 @@ fn upcast_event_pre_coordination(bytes: &[u8]) -> Result<Event, WireError> {
     from_bytes(bytes)
 }
 
+/// Pre-preparation-conflict rows carry the same wire layout today's decoder
+/// reads: `SharedRunPreparation::Conflict` is appended past `Refused`.
+fn upcast_event_pre_preparation_conflict(bytes: &[u8]) -> Result<Event, WireError> {
+    from_bytes(bytes)
+}
+
 /// Pre-ADR-0216 bundles carry seventeen fields where today's decoder reads
 /// nineteen, so the row is decoded through its frozen shape and re-encoded
 /// with both reader fields empty.
@@ -492,7 +508,13 @@ pub fn decode_recorded_event(bytes: &[u8], schema: Option<&[u8]>) -> Result<Even
         &EVENT,
         schema,
         bytes,
-        &[upcast_event_pre_propose, upcast_event_pre_study, upcast_event_pre_precheck, upcast_event_pre_coordination],
+        &[
+            upcast_event_pre_propose,
+            upcast_event_pre_study,
+            upcast_event_pre_precheck,
+            upcast_event_pre_coordination,
+            upcast_event_pre_preparation_conflict,
+        ],
     )
 }
 
@@ -524,6 +546,7 @@ pub static EVENT: PersistedKind = PersistedKind {
         PersistedUpcast { digest: EVENT_PRE_STUDY_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_PRECHECK_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_COORDINATION_DIGEST, reshape: None },
+        PersistedUpcast { digest: EVENT_PRE_PREPARATION_CONFLICT_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };

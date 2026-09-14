@@ -696,6 +696,14 @@ pub enum SharedRunPreparation {
     Refused {
         detail: Digest,
     },
+    /// Folding the plan's inputs collided. The named input could not place
+    /// onto `at`; that is a composition conflict, not a host or contract
+    /// refusal, and the colliding members go to Reconcile.
+    Conflict {
+        input: CompositionInput,
+        at: CandidateRef,
+        evidence: Evidence,
+    },
 }
 
 /// Exact executor input of one reducer-approved physical run.
