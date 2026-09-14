@@ -13,10 +13,12 @@ use aether_data::wire::to_vec;
 
 use aether_bloomery::{
     AgentSelection, BloomId, BloomStatus, CandidateRef, ConfigKind, ConstructionAdmission, CoordinationPolicy,
-    Decision, Decisions, Event, Evidence, EvidenceKind, Fact, Harness, MemberDependency, MetricBloom, MetricDispatch,
-    MetricsLedger, ModelOverride, Nonce, Outcome, ReasoningEffort, ResolvedConfigs, SealError, SharedRunMode,
+    Decision, Decisions, Event, Evidence, EvidenceKind, Fact, Harness, MemberDependency, MemberVerifyLatency,
+    MemberVerifyOutcome, MetricBloom, MetricDispatch, MetricsLedger, ModelOverride, Nonce, Outcome, ReasoningEffort,
+    ResolvedConfigs, SPAN_OUTCOME_RETIRED, SPAN_SUBSTAGE_PREPARE, SealError, SharedRunCompletion, SharedRunMode,
     SharedRunPlan, SharedRunPreparation, Snapshot, SpendWindow, StageId, StageOverride, StudyCost, StudyRecord,
-    SupersedeError, VerificationMode, VerifyFailureSet, WorkpieceId, construction_nonce_digest, reduce,
+    SupersedeError, TimelineGateTiming, TimelineTimings, VerificationMode, VerifyFailureSet, Withdrawal,
+    WithdrawalCause, WorkpieceId, construction_nonce_digest, reduce,
 };
 use common::{claim, compiled_resolved, digest, draft, draft_with_member_override, event, membership, workpiece};
 
@@ -368,8 +370,13 @@ fn timeline_spans_carry_envelope_stamps_or_are_marked_reconstructed() {
     stamped.completed("construct", StageId::Construct, Some(captured), Some(2_000));
     let timeline = stamped.ledger.timeline(stamped.bloom);
     assert!(
-        timeline.spans.iter().any(|span| span.started_unix_millis == Some(2_000) && !span.reconstructed),
-        "a stamped dispatch is a wall-clock span: {:?}",
+        timeline.spans.iter().any(|span| {
+            span.stage == StageId::Construct
+                && span.started_unix_millis == Some(1_000)
+                && span.ended_unix_millis == Some(2_000)
+                && !span.reconstructed
+        }),
+        "a stamped dispatch carries its own end, not the next start: {:?}",
         timeline.spans
     );
 
@@ -747,7 +754,9 @@ fn a_coordinated_blooms_contextual_attempt_and_shared_run_fold_like_the_dispatch
     );
 
     let timeline = journal.ledger.timeline(journal.bloom);
-    let span = |stage| timeline.spans.iter().find(|span| span.stage == stage && span.workpiece == MEMBER);
+    let span = |stage| {
+        timeline.spans.iter().find(|span| span.stage == stage && span.workpiece == MEMBER && span.substage.is_none())
+    };
     assert!(
         span(StageId::Construct).is_some_and(|span| span.started_unix_millis == Some(2_000)),
         "the contextual attempt is the member's Construct span: {:?}",
@@ -777,5 +786,254 @@ fn a_coordinated_blooms_contextual_attempt_and_shared_run_fold_like_the_dispatch
     assert!(
         journal.ledger.seats(|_| None).iter().any(|seat| seat.stage == StageId::Construct && seat.attempts == 1),
         "the contextual attempt seats the model lane that ran it"
+    );
+}
+
+fn prepared_shared_run(journal: &mut Journal) -> SharedRunPlan {
+    let queued = journal.snapshot.blooms[&journal.bloom]
+        .coordination
+        .as_deref()
+        .expect("the sealed policy enabled coordination")
+        .queued_construction
+        .get(MEMBER)
+        .cloned()
+        .expect("a coordinated seal queues Construct for just-in-time admission");
+    journal.admit(
+        &event(
+            "admit-construction",
+            Fact::RequestConstructionAdmission {
+                admission: ConstructionAdmission {
+                    nonce: construction_nonce_digest(&Nonce(String::from("construct/wp-a/1"))),
+                    dispatch: queued,
+                },
+            },
+        ),
+        Some(2_000),
+    );
+    let captured = CandidateRef { tree: digest(TREE), checkout: digest(TREE + 1) };
+    let completed = journal.completed("construct", StageId::Construct, Some(captured), Some(3_000));
+    let request = completed
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            Decision::QueueMemberVerification { request } => Some((**request).clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("a coordinated Construct queues its member verification: {completed:?}"));
+    let plan = SharedRunPlan {
+        mode: SharedRunMode::Standalone,
+        requests: vec![request],
+        composition: None,
+        probe_budget: 0,
+        execution_attempt: 0,
+    };
+    journal
+        .admit(&event("propose-run", Fact::ProposeSharedRun { bloom: journal.bloom, plan: plan.clone() }), Some(4_000));
+    journal.admit(
+        &event(
+            "run-prepared",
+            Fact::SharedRunPrepared {
+                bloom: journal.bloom,
+                plan: plan.digest(),
+                preparation: SharedRunPreparation::Standalone,
+            },
+        ),
+        Some(5_000),
+    );
+    plan
+}
+
+/// The plausible bug: a shared-run verify is a composition span without an end,
+/// so a member's verify time is invisible and duration is inferred from the next
+/// start.
+#[test]
+fn a_shared_run_verify_span_belongs_to_the_member_and_carries_its_own_end() {
+    let mut journal = Journal::coordinated();
+    let plan = prepared_shared_run(&mut journal);
+    let run = digest(80);
+    let started = journal.admit(
+        &event("run-started", Fact::SharedRunStarted { bloom: journal.bloom, plan: plan.digest(), run }),
+        Some(6_000),
+    );
+    assert!(!matches!(started.outcome, Outcome::CoordinationRejected(_)), "an approved ready plan starts: {started:?}");
+
+    let request = &plan.requests[0];
+    let evidence = Evidence { subject: digest(TREE), kind: EvidenceKind::VerificationResult, detail: digest(81) };
+    let completed = journal.admit(
+        &event(
+            "run-completed",
+            Fact::SharedRunCompleted {
+                bloom: journal.bloom,
+                completion: SharedRunCompletion {
+                    plan: plan.digest(),
+                    run,
+                    outcomes: vec![MemberVerifyOutcome::PassedStandalone {
+                        request: request.digest(),
+                        proof: aether_bloomery::VerifyProof {
+                            gate_set: request.contract.gate_set,
+                            stage: StageId::Verify,
+                            evidence,
+                        },
+                    }],
+                    unfinished: Vec::new(),
+                    latencies: vec![MemberVerifyLatency {
+                        request: request.digest(),
+                        member: request.member.clone(),
+                        latency_millis: 1_000,
+                    }],
+                },
+            },
+        ),
+        Some(7_000),
+    );
+    assert!(
+        !matches!(completed.outcome, Outcome::CoordinationRejected(_)),
+        "a matching completion settles: {completed:?}"
+    );
+
+    let timeline = journal.ledger.timeline(journal.bloom);
+    let verify = timeline
+        .spans
+        .iter()
+        .filter(|span| span.stage == StageId::Verify && span.workpiece == MEMBER && span.substage.is_none())
+        .collect::<Vec<_>>();
+    assert_eq!(verify.len(), 1, "one physical run is one member verify span: {:?}", timeline.spans);
+    assert_eq!(verify[0].run, Some(run), "the span names the physical run: {:?}", verify[0]);
+    assert_eq!(verify[0].started_unix_millis, Some(6_000), "start is SharedRunStarted: {:?}", verify[0]);
+    assert_eq!(
+        verify[0].ended_unix_millis,
+        Some(7_000),
+        "end is SharedRunCompleted, not the next start: {:?}",
+        verify[0]
+    );
+    assert!(
+        timeline.spans.iter().all(|span| span.workpiece != WorkpieceId::COMPOSITION || span.stage != StageId::Verify),
+        "the member's verify is not attributed to the composition: {:?}",
+        timeline.spans
+    );
+}
+
+/// Tripwire: withdrawing the last member cancels its in-flight shared run, and
+/// that cancel is a retired verify span with its own end — not an open bar
+/// whose duration is inferred from a later start.
+#[test]
+fn a_cancelled_shared_run_is_a_retired_verify_span_with_an_end() {
+    let mut journal = Journal::coordinated();
+    let plan = prepared_shared_run(&mut journal);
+    let run = digest(80);
+    journal.admit(
+        &event("run-started", Fact::SharedRunStarted { bloom: journal.bloom, plan: plan.digest(), run }),
+        Some(6_000),
+    );
+    let withdrawn = journal.admit(
+        &event(
+            "withdraw",
+            Fact::Withdraw {
+                bloom: journal.bloom,
+                withdrawals: vec![Withdrawal {
+                    workpiece: workpiece(MEMBER),
+                    cause: WithdrawalCause::Operator,
+                    reason: String::from("retire in-flight verify"),
+                    operator: String::from("test"),
+                }],
+                cascade: false,
+            },
+        ),
+        Some(6_500),
+    );
+    assert!(
+        withdrawn.effects.iter().any(|effect| matches!(effect, Decision::CancelSharedRun { .. })),
+        "a terminal bloom cancels the in-flight run: {withdrawn:?}"
+    );
+    let retired = journal.ledger.timeline(journal.bloom).spans.into_iter().find(|span| {
+        span.stage == StageId::Verify && span.workpiece == MEMBER && span.run == Some(run) && span.substage.is_none()
+    });
+    assert!(
+        retired.as_ref().is_some_and(|span| {
+            span.ended_unix_millis == Some(6_500) && span.outcome.as_deref() == Some(SPAN_OUTCOME_RETIRED)
+        }),
+        "the cancelled run is a retired span with its own end: {retired:?}"
+    );
+}
+
+/// Gate substages under a completed run are placed from the run start and sum
+/// to the run's duration when the fixture's receipts do.
+#[test]
+fn gate_substages_under_an_integrated_run_sum_to_the_run_duration() {
+    let mut journal = Journal::coordinated();
+    let plan = prepared_shared_run(&mut journal);
+    let run = digest(80);
+    journal.admit(
+        &event("run-started", Fact::SharedRunStarted { bloom: journal.bloom, plan: plan.digest(), run }),
+        Some(6_000),
+    );
+    let request = &plan.requests[0];
+    let evidence = Evidence { subject: digest(TREE), kind: EvidenceKind::VerificationResult, detail: digest(81) };
+    journal.admit(
+        &event(
+            "run-completed",
+            Fact::SharedRunCompleted {
+                bloom: journal.bloom,
+                completion: SharedRunCompletion {
+                    plan: plan.digest(),
+                    run,
+                    outcomes: vec![MemberVerifyOutcome::PassedStandalone {
+                        request: request.digest(),
+                        proof: aether_bloomery::VerifyProof {
+                            gate_set: request.contract.gate_set,
+                            stage: StageId::Verify,
+                            evidence,
+                        },
+                    }],
+                    unfinished: Vec::new(),
+                    latencies: vec![MemberVerifyLatency {
+                        request: request.digest(),
+                        member: request.member.clone(),
+                        latency_millis: 1_000,
+                    }],
+                },
+            },
+        ),
+        Some(7_000),
+    );
+
+    let timings = TimelineTimings {
+        duration_millis: 1_000,
+        gates: vec![
+            TimelineGateTiming { command: "verify.fmt".into(), duration_millis: 200, prepare_millis: None },
+            TimelineGateTiming { command: "verify.test".into(), duration_millis: 800, prepare_millis: None },
+        ],
+    };
+    let timeline =
+        journal.ledger.timeline_with(journal.bloom, |detail| (*detail == digest(81)).then_some(timings.clone()));
+    let run_span = timeline
+        .spans
+        .iter()
+        .find(|span| span.stage == StageId::Verify && span.workpiece == MEMBER && span.substage.is_none())
+        .expect("the member has a verify run");
+    let gates: Vec<_> = timeline
+        .spans
+        .iter()
+        .filter(|span| {
+            span.run == Some(run) && span.substage.as_deref().is_some_and(|name| name.starts_with("verify."))
+        })
+        .collect();
+    assert_eq!(
+        gates.iter().map(|span| span.substage.as_deref()).collect::<Vec<_>>(),
+        [Some("verify.fmt"), Some("verify.test")],
+        "each gate is a substage under the run: {:?}",
+        timeline.spans
+    );
+    let gate_millis: u64 = gates
+        .iter()
+        .map(|span| span.ended_unix_millis.unwrap_or(0).saturating_sub(span.started_unix_millis.unwrap_or(0)))
+        .sum();
+    let run_duration =
+        run_span.ended_unix_millis.unwrap_or(0).saturating_sub(run_span.started_unix_millis.unwrap_or(0));
+    assert_eq!(gate_millis, run_duration, "fixture gates sum to the run: {gates:?} {run_span:?}");
+    assert!(
+        timeline.spans.iter().any(|span| span.substage.as_deref() == Some(SPAN_SUBSTAGE_PREPARE)),
+        "source preparation is a verify substage: {:?}",
+        timeline.spans
     );
 }

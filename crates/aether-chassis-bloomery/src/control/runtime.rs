@@ -55,8 +55,8 @@ use aether_bloomery::{
     ClaimRefState, CompatibilityPreviewPlan, CompositionPlan, ContextualAttemptDispatch, DAYS_CAP, Decision, Decisions,
     Digest, Event, EvidenceKind, Fact, IdempotencyKey, METRICS_DEFAULT_LIMIT, METRICS_MAX_LIMIT, MetricsLedger,
     OperatorRepairError, Outcome, Question, ResolvedConfigs, SharedRunPlan, Snapshot, SpendWindow, StoreClass,
-    StudyRecord, Unproducible, ViewDocument, decode_recorded_decisions, decode_recorded_event, encode_row, grade,
-    is_active_unlanded, measure, reduce, view_of, why_of, window_label,
+    StudyRecord, TimelineGateTiming, TimelineTimings, Unproducible, ViewDocument, decode_recorded_decisions,
+    decode_recorded_event, encode_row, grade, is_active_unlanded, measure, reduce, view_of, why_of, window_label,
 };
 
 use super::{ControlCore, ControlSetup, ObserveTick, PRE_REPLAY_REFUSAL};
@@ -1263,7 +1263,17 @@ fn metrics_response(state: &mut ControlCoreState, query: MetricsQuery) -> Metric
             if !state.snapshot.blooms.contains_key(&bloom) && state.metrics.timeline(bloom).spans.is_empty() {
                 return MetricsQueryResult::NotFound;
             }
-            encode_metrics(state.metrics.timeline(bloom), notice)
+            let mut artifacts = state.artifacts.as_mut();
+            encode_metrics(
+                state.metrics.timeline_with(bloom, |digest| {
+                    let artifacts = artifacts.as_mut()?;
+                    let GetResult::Ok { bytes, .. } = artifacts.get(lowercase_hex(digest.as_bytes())) else {
+                        return None;
+                    };
+                    parse_timeline_timings(&bytes)
+                }),
+                notice,
+            )
         }
         MetricsView::Seats => {
             let records = load_study_records(state.artifacts.as_mut(), &state.snapshot);
@@ -2146,6 +2156,25 @@ fn admit_ok(outcome: &Outcome) -> AdmitResult {
         Ok(outcome) => AdmitResult::Ok { outcome },
         Err(error) => AdmitResult::Err { error: format!("admit outcome encode failed: {error}") },
     }
+}
+
+fn parse_timeline_timings(bytes: &[u8]) -> Option<TimelineTimings> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let duration_millis = value.get("duration_millis").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let gates = value
+        .get("gates")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|gate| {
+            Some(TimelineGateTiming {
+                command: gate.get("command")?.as_str()?.to_owned(),
+                duration_millis: gate.get("duration_millis")?.as_u64()?,
+                prepare_millis: gate.get("prepare_millis").and_then(serde_json::Value::as_u64),
+            })
+        })
+        .collect::<Vec<_>>();
+    (duration_millis > 0 || !gates.is_empty()).then_some(TimelineTimings { duration_millis, gates })
 }
 
 fn lowercase_hex(bytes: &[u8]) -> String {
