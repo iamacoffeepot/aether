@@ -3,11 +3,11 @@
 //! than at a unit seam.
 //!
 //! When the limit passes, the run is cancelled where it stands. Until #5998 the
-//! tree it had built was discarded with it: the cancel released the lane slot,
-//! the next dispatch reset that checkout, and the retry lap re-derived an hour's
-//! work from a resumed context or from nothing. Now the cancel captures the
-//! tree first, and it lands in the same member-checkpoint ref a *failing*
-//! construct's tree lands in — so the retry lap resumes from it.
+//! tree it had built was discarded with it: the cancel released the lane slot
+//! and the next dispatch reset that checkout, so an hour of building was gone
+//! before anyone could look at it. Now the cancel captures the tree first and
+//! publishes it to the member-checkpoint ref, and the lane is told the deadline
+//! up front so it can plan to leave something capturable there.
 //!
 //! And the limit is no longer one number for every member. The band a stage
 //! dispatches at is resolved from the size the member's sealed scope revision
@@ -16,7 +16,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use aether_bloomery::{Digest, FakeKeyProvider, KeyId, StageId, signed_approval};
+use aether_bloomery::{Digest, EXECUTION_DEADLINE_ENV, FakeKeyProvider, KeyId, StageId, signed_approval};
 use aether_bloomery_github::member_checkpoint_ref_name;
 use aether_chassis_bloomery::bloomery::mock_lane::{CANDIDATE_FILE, LaneMode, LaneScript};
 use aether_chassis_bloomery::store::CommissionBackend;
@@ -83,22 +83,18 @@ fn a_lane_cancelled_at_its_sealed_limit_is_captured_to_the_member_checkpoint() {
         "the checkpoint carries what the cancelled lane had written, not an empty tree: {names}",
     );
 
-    // The point of keeping the tree: the lap that follows starts from it. The
-    // executor renders a selected checkpoint as `--seeded <commit>`, which is
-    // what grows the prompt's `## Seeded checkpoint` section.
-    harness.pump_until("the member re-dispatches its construct from the checkpoint", |harness| {
-        harness.ledger().iter().any(|run| run.argv.iter().any(|arg| arg == "--seeded"))
-    });
-    let seeded = harness
+    // And the lane was told the same limit the cancel enforced, so it could have
+    // planned to leave that tree rather than discovering the limit by being
+    // killed. Names only — the mock ledger records no environment values.
+    let cancelled = harness
         .ledger()
         .into_iter()
-        .find(|run| run.argv.iter().any(|arg| arg == "--seeded"))
-        .expect("the retry lap carries a checkpoint");
-    assert_eq!(seeded.stage, Some(StageId::Construct), "only the construct line resumes from a checkpoint");
+        .find(|run| run.stage == Some(StageId::Construct))
+        .expect("the cancelled construct recorded a run");
     assert!(
-        seeded.argv.windows(2).any(|pair| pair[0] == "--seeded" && pair[1] == checkpoint),
-        "the retry names the very checkpoint the cancel captured ({checkpoint}): {:?}",
-        seeded.argv,
+        cancelled.env.iter().any(|name| name == EXECUTION_DEADLINE_ENV),
+        "a dispatched construct lane comes up knowing its own deadline: {:?}",
+        cancelled.env,
     );
 }
 

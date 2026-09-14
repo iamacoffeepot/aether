@@ -252,6 +252,19 @@ pub struct ExecutionLimits {
     pub wall_clock_secs: u64,
 }
 
+/// The environment key a dispatched lane learns its own deadline through
+/// (#5998): the absolute instant the coordinator cancels the run at, in Unix
+/// milliseconds.
+///
+/// The environment rather than the argv, and that is load-bearing rather than a
+/// style choice. A lane spawns `cargo xtask transform` **compiled from the
+/// sealed subject tree**, which predates any flag added here — so a new argv
+/// flag is one an already-sealed dispatch's own CLI has never heard of, and the
+/// lane dies on the unexpected argument before it does any work. An
+/// environment key an older lane does not read is simply ignored, so the same
+/// coordinator drives bases from either side of this change.
+pub const EXECUTION_DEADLINE_ENV: &str = "AETHER_BLOOMERY_EXECUTION_DEADLINE_UNIX_MILLIS";
+
 impl ExecutionLimits {
     /// The ceiling on an authored wall-clock limit: one day.
     ///

@@ -197,7 +197,7 @@ pub(super) fn run_construct(args: &TransformArgs, bundle: &ModelProcessInstructi
     // What this dispatch has left of its sealed execution limit (#5998):
     // stated to the model in the prompt, and the clamp every piece of the
     // lane's own post-model work runs under.
-    let budget = Budget::resolve(args.deadline_unix_millis);
+    let budget = Budget::resolve();
     let prompt = assemble_construct_prompt(
         bundle,
         &bundle.construct,

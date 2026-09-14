@@ -11,13 +11,16 @@
 //! fifty-odd minutes of building, five or six in the bar, cancelled two minutes
 //! into the repair turn the bar had just bought.
 //!
-//! The executor now names the absolute deadline on the child's argv, and this
-//! is what the lane reads it as: the time remaining, a clamp for every
-//! harness-side budget, and the `## Budget` section of the assembled prompt.
-//! Absent — an older executor, a store-less backend, a hand-run lane — leaves
-//! every caller exactly where it was, unbounded.
+//! The executor now names the absolute deadline in the child's environment
+//! ([`EXECUTION_DEADLINE_ENV`]), and this is what the lane reads it as: the time
+//! remaining, a clamp for every harness-side budget, and the `## Budget` section
+//! of the assembled prompt. Absent — an older executor, a store-less backend, a
+//! hand-run lane — leaves every caller exactly where it was, unbounded.
 
+use std::env;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use aether_bloomery::EXECUTION_DEADLINE_ENV;
 
 /// How much of the limit the lane keeps clear of the cancel.
 ///
@@ -39,20 +42,35 @@ pub(super) struct Budget {
 }
 
 impl Budget {
-    /// The budget a dispatch's `--deadline-unix-millis` names.
+    /// The budget this dispatch's environment names.
     ///
-    /// `None` when the dispatch named none, and when the named deadline is
-    /// already in the past — a lane that launched past its own cancel is about
-    /// to be killed, and pretending it has a budget of zero would make every
-    /// caller below skip its work and hand off an unfixed tree a moment before
-    /// the run is discarded anyway.
-    pub(super) fn resolve(deadline_unix_millis: Option<u64>) -> Option<Self> {
-        let deadline_unix_millis = deadline_unix_millis?;
+    /// A process-level fact about the run this binary *is*, not configuration of
+    /// anything it hosts — the coordinator that forked this lane is the only
+    /// writer, and there is no argv to carry it (see the module docs).
+    #[allow(clippy::disallowed_methods)] // aether-suppression-request: the coordinator's deadline for this child, not cap config
+    pub(super) fn resolve() -> Option<Self> {
+        Self::at(env::var(EXECUTION_DEADLINE_ENV).ok()?.trim().parse().ok()?)
+    }
+
+    /// The budget a stated deadline names.
+    ///
+    /// `None` when the deadline is already in the past — a lane that launched
+    /// past its own cancel is about to be killed, and pretending it has a budget
+    /// of zero would make every caller below skip its work and hand off an
+    /// unfixed tree a moment before the run is discarded anyway. `None` too for
+    /// a deadline no monotonic clock can reach, which is a misread number rather
+    /// than a very patient coordinator, and which `Instant + Duration` would
+    /// answer by panicking the lane.
+    fn at(deadline_unix_millis: u64) -> Option<Self> {
         let now_unix_millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
         let remaining = Duration::from_millis(deadline_unix_millis.checked_sub(now_unix_millis)?);
-        (!remaining.is_zero()).then(|| Self { deadline: Instant::now() + remaining })
+        if remaining.is_zero() {
+            return None;
+        }
+
+        Instant::now().checked_add(remaining).map(|deadline| Self { deadline })
     }
 
     /// How long until the cancel.
@@ -108,7 +126,7 @@ fn render(duration: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{Budget, HANDOFF_MARGIN, render};
 
@@ -142,15 +160,24 @@ mod tests {
         assert_eq!(budget.clamp(Duration::from_mins(15)), Duration::ZERO);
     }
 
-    // Tripwire: a dispatch that names no deadline is the old behaviour, and a
-    // deadline already past is a run about to be killed. Both must resolve
-    // nothing rather than a zero budget, which every caller below would read as
-    // "skip your work" — for the second case that is a tree left unfixed a
-    // moment before the run is discarded anyway.
+    // Tripwire: a deadline already past is a run about to be killed. It must
+    // resolve nothing rather than a zero budget, which every caller below would
+    // read as "skip your work" — a tree left unfixed a moment before the run is
+    // discarded anyway. (A dispatch that names no deadline at all is the same
+    // `None`, one layer up, and is the old unbounded behaviour.)
     #[test]
-    fn no_deadline_and_a_passed_deadline_both_resolve_no_budget() {
-        assert!(Budget::resolve(None).is_none());
-        assert!(Budget::resolve(Some(0)).is_none(), "a deadline at the epoch is long past");
+    fn a_passed_deadline_resolves_no_budget() {
+        let now_unix_millis = u64::try_from(
+            SystemTime::now().duration_since(UNIX_EPOCH).expect("the host clock is past the epoch").as_millis(),
+        )
+        .expect("the host clock fits");
+
+        assert!(Budget::at(0).is_none(), "a deadline at the epoch is long past");
+        assert!(Budget::at(now_unix_millis + 60_000).is_some(), "a deadline a minute out resolves a budget");
+        // A misread number, not a very patient coordinator: `Instant + Duration`
+        // answers a half-million-year offset by panicking the lane it was
+        // supposed to be bounding.
+        assert!(Budget::at(u64::MAX).is_none(), "a deadline no monotonic clock can reach resolves nothing");
     }
 
     #[test]

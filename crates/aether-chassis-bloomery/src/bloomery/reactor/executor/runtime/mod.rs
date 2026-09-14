@@ -425,6 +425,7 @@ fn expire_overdue_orders(
     tracked: &mut Vec<TrackedHandle>,
     unobserved: &[Nonce],
     now_unix_millis: u64,
+    captures: &mut Vec<CancelledCapture>,
 ) -> Vec<Admit> {
     let Stores { store, mut artifacts } = stores;
     let expired = match store.list_expired_orders(now_unix_millis) {
@@ -448,9 +449,15 @@ fn expire_overdue_orders(
         if unobserved.iter().any(|nonce| nonce.0 == order.nonce) {
             continue;
         }
-        if let Some(admit) =
-            terminate_live_order(store, artifacts.as_deref_mut(), executor, tracked, &order, TerminationCause::Deadline)
-        {
+        if let Some(admit) = terminate_live_order(
+            store,
+            artifacts.as_deref_mut(),
+            executor,
+            tracked,
+            &order,
+            TerminationCause::Deadline,
+            captures,
+        ) {
             admits.push(admit);
         }
     }
@@ -494,6 +501,7 @@ fn terminate_live_order(
     tracked: &mut Vec<TrackedHandle>,
     order: &OutstandingOrder,
     cause: TerminationCause,
+    captures: &mut Vec<CancelledCapture>,
 ) -> Option<Admit> {
     let deadline = order.deadline_unix_millis;
     let nonce = Nonce(order.nonce.clone());
@@ -568,12 +576,24 @@ fn terminate_live_order(
         subject: record.displayed_digest,
         verdict,
         detail,
-        // The captured tree rides the same channel a failing construct's does,
-        // so the reducer files it as this member's checkpoint and the existing
-        // push publishes it to the member-checkpoint ref — the retry lap then
-        // resumes from it instead of from nothing (#5998).
-        observation: LaneObservation { failed_verifiers, candidate: captured, ..LaneObservation::default() },
+        observation: LaneObservation { failed_verifiers, ..LaneObservation::default() },
     };
+    // The captured tree is published as a host effect rather than carried on
+    // the observation (#5998). A cancelled member admits
+    // `Fact::MemberExecutorFault` (ADR-0195), whose payload has no candidate
+    // slot — and giving it one is a journal migration, not an incidental edit:
+    // the `event` and `decisions` schema digests, every pinned upcast, and the
+    // golden fixtures that freeze them all move. So what the ref buys today is
+    // that the work exists and is named, rather than being reset with the lane
+    // slot; a retry lap resuming from it automatically is the half that waits
+    // on that migration.
+    if let Some(candidate) = captured.filter(|_| record.stage == StageId::Construct) {
+        captures.push(CancelledCapture {
+            bloom: BloomId(record.bloom.0),
+            workpiece: record.workpiece.clone(),
+            candidate,
+        });
+    }
     match admit_uploaded(store, &upload) {
         Ok(AdmitDecision::Admitted(admission)) => {
             warn_terminated(cause, &record, deadline);
@@ -724,6 +744,7 @@ fn expire_silent_orders(
     pending: &[PendingObservation],
     unobserved: &[Nonce],
     silence_millis: u64,
+    captures: &mut Vec<CancelledCapture>,
 ) -> Vec<Admit> {
     let Stores { store, mut artifacts } = stores;
     record_observed_heartbeats(tracked, pending, store);
@@ -779,6 +800,7 @@ fn expire_silent_orders(
             tracked,
             &order,
             TerminationCause::HeartbeatSilence,
+            captures,
         ) {
             admits.push(admit);
         }
@@ -2895,6 +2917,48 @@ pub fn candidate_push_at(refuse: bool, repo: impl Into<PathBuf>, remote: impl In
     }
 }
 
+/// A tree a cancelled construct lane left behind, waiting to be published to
+/// its member-checkpoint ref (#5998).
+///
+/// Its own value rather than a `LaneObservation` field because the cancel's
+/// admitted fact cannot carry it — see [`terminate_live_order`].
+struct CancelledCapture {
+    /// The bloom the cancelled member belongs to.
+    bloom: BloomId,
+    /// The member whose checkpoint ref the capture lands on.
+    workpiece: WorkpieceId,
+    /// The captured tree and its capture commit.
+    candidate: CandidateRef,
+}
+
+/// Name each cancelled construct capture's publication, so the tree a lane had
+/// built when its limit passed is reachable at a named ref rather than reset
+/// with the lane slot behind it (#5998).
+///
+/// The same ref and the same best-effort posture
+/// [`admitted_candidate_pushes`] gives a failing construct's capture: a push
+/// that does not answer leaves the commit local to the coordinator's own
+/// repository, which is still one lookup better than a checkout that was
+/// cleaned.
+fn cancelled_capture_pushes(
+    captures: &[CancelledCapture],
+    correspondence: Option<&SharedCorrespondence>,
+) -> Vec<PendingPublish> {
+    captures
+        .iter()
+        .filter_map(|capture| {
+            let commit = resolve_capture_commit(correspondence, &capture.workpiece, &capture.candidate)?;
+            Some(PendingPublish {
+                bloom: BloomId(capture.bloom.0),
+                workpiece: capture.workpiece.clone(),
+                target_ref: member_checkpoint_ref_name(&capture.bloom, &capture.workpiece.0),
+                commit_hex: commit.to_hex(),
+                kind: "cancelled member checkpoint",
+            })
+        })
+        .collect()
+}
+
 /// Name the bloom ref each admitted capture publishes to (ADR-0152). A passing
 /// construct or refine goes to [`candidate_ref_name`]; a failing construct that
 /// still captured work goes to [`member_checkpoint_ref_name`]. Refine is in the
@@ -3242,6 +3306,7 @@ fn pull_and_admit<Now: FnMut() -> u64>(
     // evidence, spending a retry to hide a transport blip. A deferred sweep
     // costs one poll interval and the transport re-drives; a wrong sweep
     // destroys the attempt.
+    let mut captures = Vec::new();
     let timed_out = if completion_was_observed {
         expire_overdue_orders(
             Stores { store, artifacts: artifacts.as_deref_mut() },
@@ -3249,6 +3314,7 @@ fn pull_and_admit<Now: FnMut() -> u64>(
             tracked,
             &report.unobserved,
             deadline_unix_millis,
+            &mut captures,
         )
     } else {
         Vec::new()
@@ -3267,6 +3333,7 @@ fn pull_and_admit<Now: FnMut() -> u64>(
             &report.pending,
             &report.unobserved,
             clock.heartbeat_silence_millis,
+            &mut captures,
         )
     } else {
         Vec::new()
@@ -3286,7 +3353,8 @@ fn pull_and_admit<Now: FnMut() -> u64>(
     // it: the follow-on stage can be dispatched to a zero-secret Actions runner
     // that must fetch it, so it wants to be reachable on the hosted repo as
     // soon as the push answers (ADR-0152).
-    let publications = admitted_candidate_pushes(&sink.0, correspondence);
+    let mut publications = admitted_candidate_pushes(&sink.0, correspondence);
+    publications.extend(cancelled_capture_pushes(&captures, correspondence));
 
     let admits = sink.0.into_iter().map(|admission| admission.admit).chain(timed_out).chain(silenced).collect();
     (admits, publications)
