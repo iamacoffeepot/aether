@@ -184,7 +184,7 @@ fn item_preview(value: &Value) -> String {
         .map_or_else(|| kind.to_owned(), |text| format!("{kind}  {}", one_line(text)))
 }
 
-fn content_blocks(value: &Value) -> impl Iterator<Item = &Value> {
+pub(super) fn content_blocks(value: &Value) -> impl Iterator<Item = &Value> {
     value
         .get("message")
         .and_then(|message| message.get("content"))
@@ -194,7 +194,7 @@ fn content_blocks(value: &Value) -> impl Iterator<Item = &Value> {
         .flatten()
 }
 
-fn first_text(value: &Value) -> Option<String> {
+pub(super) fn first_text(value: &Value) -> Option<String> {
     if let Some(text) = value.get("text").and_then(Value::as_str).filter(|text| !text.is_empty()) {
         return Some(one_line(text));
     }
@@ -216,7 +216,7 @@ fn field(value: &Value, name: &str) -> Option<String> {
     value.get(name).and_then(Value::as_str).filter(|text| !text.is_empty()).map(one_line)
 }
 
-fn one_line(text: &str) -> String {
+pub(super) fn one_line(text: &str) -> String {
     text.chars()
         .map(|ch| {
             if ch == '\n' || ch == '\r' {
