@@ -225,6 +225,20 @@ pub struct LaneObservation {
     /// Raw bounded contextual gate observations read from the trusted result
     /// artifact. This is in-memory transport state and is never journaled.
     pub contextual_observations: Option<Vec<u8>>,
+    /// Umbrella wall-clock from `evidence.json` `duration_millis`, when the
+    /// backend read the file. Mechanical verify writes no study cost, so this
+    /// is the duration a shared-run step records.
+    pub duration_millis: Option<u64>,
+    /// Per-gate wall-clock receipts from `evidence.json` `gates`.
+    pub gates: Vec<EvidenceGateTiming>,
+}
+
+/// One umbrella member's wall-clock share, copied off `evidence.json`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EvidenceGateTiming {
+    pub command: String,
+    pub duration_millis: u64,
+    pub prepare_millis: Option<u64>,
 }
 
 /// A reference to one piece of evidence a run uploaded — the transport-level

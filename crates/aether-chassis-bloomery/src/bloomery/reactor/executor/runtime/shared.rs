@@ -1247,6 +1247,12 @@ fn complete_observed_step(
         (SharedStepDescriptor::Probe(_), None) => Some(ProbeVerdict::Unknown),
         _ => None,
     };
+    let duration_millis = upload
+        .observation
+        .duration_millis
+        .or_else(|| upload.observation.cost.map(|cost| cost.duration_millis))
+        .filter(|millis| *millis > 0)
+        .unwrap_or(0);
     let receipt = SharedStepReceipt {
         invocation: Digest::of_wire_bytes(format!("{}:{}", step.nonce, upload.detail.to_hex()).as_bytes()),
         evidence: evidence_for(upload.verdict, upload.subject, upload.detail),
@@ -1260,7 +1266,7 @@ fn complete_observed_step(
         probe_verdict,
     };
     let bytes = encode_host(&receipt)?;
-    if store.complete_shared_run_step(&step.nonce, &bytes, receipt.cost.map_or(0, |cost| cost.duration_millis))? {
+    if store.complete_shared_run_step(&step.nonce, &bytes, duration_millis)? {
         project_shared_findings(store, dispatch, &receipt)?;
         if matches!(descriptor, SharedStepDescriptor::ContextualFull { .. }) {
             record_independent_contextual_facts(store, dispatch, step, &receipt, host_class)?;
