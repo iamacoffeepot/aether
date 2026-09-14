@@ -324,7 +324,7 @@ impl Screen {
             Self::Workpiece(workpiece) => workpiece.enter_pushes(),
             Self::Backlog(backlog) => backlog.enter_pushes(store),
             Self::Transcript(_) => Transcript::enter_pushes(),
-            Self::Timeline(_) => Timeline::enter_pushes(),
+            Self::Timeline(timeline) => timeline.enter_pushes(),
             Self::Cost(_) => Breakdown::enter_pushes(),
             Self::Record(_) | Self::Artifact(_) | Self::Days(_) | Self::EvidenceFile(_) | Self::CoordinatorLog(_) => {
                 false
