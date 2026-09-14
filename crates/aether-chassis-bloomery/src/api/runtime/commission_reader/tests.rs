@@ -108,8 +108,9 @@ fn a_verified_row_materializes_the_workpiece_and_the_frozen_projection() {
 #[test]
 fn an_empty_description_is_refused_not_dispatched() {
     // Tripwire: an empty description used to miss the door and dispatch an
-    // empty ## Task. Structured fields are not a substitute once the verb
-    // stores the rendered work order on the revision.
+    // empty ## Task. It heads the rendered order rather than being it now, but
+    // a member whose summary nobody wrote is still one nobody named, and the
+    // door that refuses it is this one.
     let mut revision = revision("wp-local", "Need a CLI.");
     revision.description.clear();
     let digest = digest_of(&revision);
