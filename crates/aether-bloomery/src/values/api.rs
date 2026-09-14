@@ -947,13 +947,30 @@ pub struct CommissionReopenedView {
 }
 
 /// `POST /commissions/{id}/scope-runs` body: the observed mainline the run
-/// reads code at. The coordinator does not invent a tree; this is
-/// `Snapshot.mainline` as the CLI (or a caller that has just read `GET /view`)
-/// observed it.
+/// reads code at, plus the seat the run dispatches under. The coordinator
+/// does not invent a tree; `base` is `Snapshot.mainline` as the CLI (or a
+/// caller that has just read `GET /view`) observed it.
+///
+/// A run without a seat dispatches the compiled line's Scope calibration
+/// (ADR-0146). A run that names one resolves its Scope seat from
+/// [`Self::model_override`] before that line is consulted (issue 5945): `model_override` is a
+/// `ModelOverride` config digest authored through `POST /configs`, and
+/// `profile` is the filing-time label naming the profiles-file entry it was
+/// resolved from. A `profile` with no digest is refused — the coordinator
+/// holds no profile registry, so a bare name is resolved at filing time,
+/// never here; only the digest travels past the door.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScopeRunRequest {
     /// The observed mainline head.
     pub base: Digest,
+    /// The filing-time label for the run's seat. Refused without
+    /// [`Self::model_override`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// The `ModelOverride` config digest the run resolves its Scope seat
+    /// from. `None` dispatches the compiled seat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<Digest>,
 }
 
 /// `POST /commissions/{id}/scope-runs` reply.

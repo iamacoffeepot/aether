@@ -11,8 +11,8 @@ use super::dto::{
     ApprovalStoredView, BloomView, CancelCommissionRequest, CommissionCancelledView, CommissionReopenedView,
     CommissionShowView, ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView,
     OutcomeView, ProposeRequest, ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest,
-    RevisionEvidence, ScopeRevisionWrittenView, SealRequest, SupersedeRequest, SuppressionAnswerRequest,
-    WithdrawRequest, WriteRevisionRequest,
+    RevisionEvidence, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest,
+    SuppressionAnswerRequest, WithdrawRequest, WriteRevisionRequest,
 };
 use super::http;
 use super::plan::spec_id;
@@ -167,6 +167,11 @@ impl<'a> Client<'a> {
     /// Put a landed commission back in the line with a signed reopen envelope.
     pub fn reopen(&self, id: &str, request: &ReopenCommissionRequest) -> Result<CommissionReopenedView> {
         self.send("POST", &format!("/commissions/{id}/reopen"), request)
+    }
+
+    /// Open a pre-bloom scoping run on a commission.
+    pub fn scope_run(&self, id: &str, request: &ScopeRunRequest) -> Result<ScopeRunOpenedView> {
+        self.send("POST", &format!("/commissions/{id}/scope-runs"), request)
     }
 
     /// A stored configuration, decoded through its kind's schema.

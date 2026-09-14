@@ -142,6 +142,8 @@ enum BloomCommand {
     Cancel(CancelArgs),
     /// Put a landed commission whose member never resolved back in the line.
     Reopen(ReopenArgs),
+    /// Open a pre-bloom scoping run on a commission.
+    ScopeRun(ScopeRunArgs),
 }
 
 #[derive(Args, Debug)]
@@ -343,6 +345,34 @@ struct ReopenArgs {
     signer: String,
 }
 
+/// Open a pre-bloom scoping run on a commission.
+///
+/// Without a seat the run dispatches the compiled line's Scope calibration.
+/// With one it resolves its seat from the named override before that line is
+/// consulted, and the run record carries the digest.
+#[derive(Args, Debug)]
+struct ScopeRunArgs {
+    /// The commission to scope.
+    workpiece: String,
+
+    /// Run base: `mainline` (default), `observed`, or a 64-hex digest — the
+    /// tree the run reads code at, the same choice seal offers.
+    #[arg(long, default_value = "mainline", value_parser = BaseChoice::parse)]
+    base: BaseChoice,
+
+    /// Named bundle from the checked-in profiles file. Resolves to a
+    /// model-override digest through `POST /configs` — the same path
+    /// `--profile` on seal uses — and the run carries that digest as its
+    /// seat. Takes exactly one of this and `--model-override`.
+    #[arg(long)]
+    profile: Option<String>,
+
+    /// Explicit model-override config digest (64 hex). Names the run's seat
+    /// directly instead of resolving `--profile`; takes exactly one of the two.
+    #[arg(long, value_parser = plan::parse_digest_flag)]
+    model_override: Option<dto::DigestHex>,
+}
+
 /// Shape and seal a new bloom.
 ///
 /// Declared surface, completeness, description, and approval come off each
@@ -455,6 +485,7 @@ fn run_on_with_policy(endpoint: &Endpoint, command: &BloomCommand, approval_poli
         BloomCommand::Suppression(args) => run_suppression(&client, args),
         BloomCommand::Cancel(args) => run_cancel(&client, args),
         BloomCommand::Reopen(args) => run_reopen(&client, args),
+        BloomCommand::ScopeRun(args) => run_scope_run(&client, args),
     }
 }
 
@@ -766,6 +797,42 @@ fn run_reopen(client: &Client<'_>, args: &ReopenArgs) -> Result<String> {
     Ok(format!("reopened {} {} ({})\n", args.workpiece, restored.digest, restored.status))
 }
 
+/// Open a pre-bloom scoping run, resolving `--profile` the way seal does.
+///
+/// The profile expands through `POST /configs` to authored digests and the
+/// run carries the model-override one as its seat, so a scope run filed
+/// under a seat profile dispatches that profile's Scope seat rather than the
+/// compiled line's. An explicit `--model-override` names the digest directly.
+fn run_scope_run(client: &Client<'_>, args: &ScopeRunArgs) -> Result<String> {
+    // The seat composes before any read: a flag refusal must not spend the
+    // operator's attention on a view, and an unknown profile never reaches
+    // the coordinator to file a run on the compiled seat.
+    if args.profile.is_some() && args.model_override.is_some() {
+        bail!("scope-run takes --profile or --model-override, not both");
+    }
+    if let Some(name) = args.profile.as_deref() {
+        profiles::resolve_shipped(name)
+            .with_context(|| format!("unknown profile `{name}` (resolving before any coordinator read)"))?;
+    }
+    let view = client.view()?;
+    let base = plan::resolve_base(&args.base, &view);
+    let (profile, model_override) = match (&args.profile, &args.model_override) {
+        (Some(name), None) => {
+            let authored = plan::author_profile_and_flags(client, Some(name), &[])?;
+            let digest = authored
+                .configs
+                .address::<dto::ModelOverride>()
+                .with_context(|| format!("profile `{name}` authors no model override"))?;
+            (Some(name.clone()), Some(digest))
+        }
+        (None, Some(digest)) => (None, Some(digest.digest())),
+        (None, None) => (None, None),
+        (Some(_), Some(_)) => unreachable!("scope-run refuses --profile with --model-override above"),
+    };
+    let opened = client.scope_run(&args.workpiece, &dto::ScopeRunRequest { base, profile, model_override })?;
+    Ok(format!("{} ordinal {} sequence {} subject {}\n", opened.id, opened.ordinal, opened.sequence, opened.subject))
+}
+
 fn run_seal(client: &Client<'_>, args: &SealArgs, approval_policy: &Path) -> Result<String> {
     let task = plan::read_task_file(&args.task_file)?;
     plan::require_task(&task, &args.task_file)?;
@@ -878,7 +945,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        BloomCommand, CancelArgs, Endpoint, ProposeArgs, ReopenArgs, RepairArgs, SealArgs, SupersedeArgs,
+        BloomCommand, CancelArgs, Endpoint, ProposeArgs, ReopenArgs, RepairArgs, ScopeRunArgs, SealArgs, SupersedeArgs,
         SuppressionArgs, repair_body, run_on,
     };
     use crate::bloom::dto;
@@ -1753,6 +1820,144 @@ mod tests {
         assert_eq!(patch["configs"]["entries"]["aether.bloomery.model_override"], override_digest);
         assert_eq!(patch["configs"]["entries"]["aether.bloomery.price_table"], table_digest);
         assert!(output.contains("Sealed"), "outcome is printed: {output}");
+    }
+
+    fn scope_run_args(workpiece: &str) -> ScopeRunArgs {
+        ScopeRunArgs {
+            workpiece: workpiece.to_owned(),
+            base: BaseChoice::Mainline,
+            profile: None,
+            model_override: None,
+        }
+    }
+
+    #[test]
+    fn scope_run_with_a_profile_posts_its_seat_digest_and_name() {
+        // Tripwire: `scope-run --profile grok-build-sonnet-judge` must file
+        // the run on that profile's Scope seat. The client authors the
+        // profile's kinds through POST /configs — the same path seal
+        // --profile uses — and posts the model-override digest as the run's
+        // seat alongside the profile name for the record.
+        let override_digest = hex_of(digest(0xc1));
+        let override_for_reply = override_digest.clone();
+        let table_digest = hex_of(digest(0xc2));
+        let table_for_reply = table_digest;
+        let (output, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/view") => (200, empty_view()),
+                ("POST", "/configs") => {
+                    let body = request.body.as_ref().expect("config body");
+                    let kind = body["kind"].as_str().expect("kind");
+                    assert!(body["value"].is_object(), "profile value is authored JSON, not a digest: {body}");
+                    match kind {
+                        "aether.bloomery.model_override" => {
+                            (200, json!({ "digest": override_for_reply, "kind": kind }))
+                        }
+                        "aether.bloomery.price_table" => (200, json!({ "digest": table_for_reply, "kind": kind })),
+                        other => (400, json!({ "error": format!("unexpected kind {other}") })),
+                    }
+                }
+                ("POST", "/commissions/wp-scope/scope-runs") => (
+                    201,
+                    as_json(&aether_bloomery::ScopeRunOpenedView {
+                        id: WorkpieceId("wp-scope".to_owned()),
+                        ordinal: 1,
+                        sequence: 7,
+                        subject: digest(0x59),
+                    }),
+                ),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &BloomCommand::ScopeRun(ScopeRunArgs {
+                        profile: Some("grok-build-sonnet-judge".to_owned()),
+                        ..scope_run_args("wp-scope")
+                    }),
+                )
+                .expect("scope-run --profile against the fake coordinator")
+            },
+        );
+
+        let filed = find(&log, "POST", "/commissions/wp-scope/scope-runs");
+        let body = filed.body.as_ref().expect("scope-run body");
+        assert_eq!(body["base"], hex_of(digest(1)), "the default run base is the commission mainline: {body}");
+        assert_eq!(body["profile"], "grok-build-sonnet-judge", "the profile name rides for the record: {body}");
+        assert_eq!(body["model_override"], override_digest, "the authored digest is the run's seat: {body}");
+        assert!(output.contains("ordinal 1"), "the opened run is printed: {output}");
+    }
+
+    #[test]
+    fn scope_run_without_a_seat_posts_the_base_alone() {
+        // A run that names no seat dispatches the compiled line: the body
+        // carries the base and neither seat field, so the door reads it as
+        // the pre-seat shape rather than a profile it failed to resolve.
+        let (output, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/view") => (200, empty_view()),
+                ("POST", "/commissions/wp-scope/scope-runs") => (
+                    201,
+                    as_json(&aether_bloomery::ScopeRunOpenedView {
+                        id: WorkpieceId("wp-scope".to_owned()),
+                        ordinal: 1,
+                        sequence: 7,
+                        subject: digest(0x59),
+                    }),
+                ),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &BloomCommand::ScopeRun(scope_run_args("wp-scope")),
+                )
+                .expect("seatless scope-run against the fake coordinator")
+            },
+        );
+
+        let filed = find(&log, "POST", "/commissions/wp-scope/scope-runs");
+        let body = filed.body.as_ref().expect("scope-run body");
+        assert_eq!(body["base"], hex_of(digest(1)), "the base still rides: {body}");
+        assert!(body.get("profile").is_none(), "no profile name without --profile: {body}");
+        assert!(body.get("model_override").is_none(), "no seat digest without --profile: {body}");
+        assert!(output.contains("ordinal 1"), "the opened run is printed: {output}");
+    }
+
+    #[test]
+    fn scope_run_takes_a_profile_or_an_explicit_override_not_both() {
+        // The profile name would misdescribe an explicitly named digest, so
+        // the pair is refused locally before any write — the same one-of-two
+        // the approve door enforces for its envelope and seed.
+        let error = run_on(
+            &Endpoint { host: "127.0.0.1".to_owned(), port: 1, token: None },
+            &BloomCommand::ScopeRun(ScopeRunArgs {
+                profile: Some("grok-build-sonnet-judge".to_owned()),
+                model_override: Some(DigestHex::from(digest(0xdd))),
+                ..scope_run_args("wp-scope")
+            }),
+        )
+        .expect_err("both seat spellings must refuse");
+        assert!(error.to_string().contains("not both"), "the refusal names the conflict: {error}");
+    }
+
+    #[test]
+    fn scope_run_with_an_unknown_profile_names_what_would_have_worked() {
+        // An unresolvable profile never reaches the coordinator: the filing
+        // path fails on the name it was given, listing the names that would
+        // have worked, rather than filing a run on the compiled seat.
+        let error = run_on(
+            &Endpoint { host: "127.0.0.1".to_owned(), port: 1, token: None },
+            &BloomCommand::ScopeRun(ScopeRunArgs {
+                profile: Some("no-such-profile".to_owned()),
+                ..scope_run_args("wp-scope")
+            }),
+        )
+        .expect_err("an unknown profile must refuse");
+        assert!(
+            error.to_string().contains("unknown profile `no-such-profile`"),
+            "the refusal names the missing profile: {error}"
+        );
     }
 
     fn cancel_args(workpiece: &str, reason: &str, seed_file: PathBuf) -> BloomCommand {
