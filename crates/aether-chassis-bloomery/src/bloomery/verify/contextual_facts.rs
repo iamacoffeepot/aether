@@ -8,8 +8,8 @@ use std::error::Error;
 use std::fmt;
 
 use super::{
-    BatchCheck, ClosureKey, HostClass, ProbeVerdict, ProofResult, ProofSource, RunnerReport, discriminate,
-    record_proof_facts,
+    BatchCheck, ClosureKey, DiscriminatedFacts, HostClass, ProbeVerdict, ProofResult, ProofSource, RunnerReport,
+    discriminate, record_proof_facts,
 };
 use crate::store::StoreBackend;
 
@@ -417,6 +417,44 @@ pub fn record_contextual_facts(
     )?)
 }
 
+/// Record one green fact per declared gate from a contextual run that already
+/// passed. A second suite is not required; that wait is why a green shared run
+/// never populated the ledger (#5948).
+///
+/// # Errors
+/// The host class does not match the sealed contract, or the proof ledger
+/// could not persist the facts.
+pub fn record_green_contextual_facts(
+    store: &mut dyn StoreBackend,
+    node: &SharedRunNode,
+    contract: &CompositionContract,
+    class_name: &HostClass,
+    dispatch: &str,
+    bloom: &[u8],
+) -> Result<usize, ContextualFactError> {
+    if class_name.digest() != contract.host_class {
+        return Err(ContextualFactError::InputMismatch);
+    }
+    let mut declared = BTreeSet::new();
+    if contract.gate_identities.iter().any(|gate| gate.is_empty() || !declared.insert(gate.as_str()))
+        || declared.is_empty()
+    {
+        return Ok(0);
+    }
+    let mut report = RunnerReport::new();
+    for gate in &contract.gate_identities {
+        report.insert(format!("gate:{gate}"), ProofResult::Green);
+    }
+    Ok(record_proof_facts(
+        store,
+        &ProofSource::Contextual { input: contextual_fact_key(node, contract) },
+        &DiscriminatedFacts::from_green_run(&report),
+        class_name,
+        dispatch,
+        bloom,
+    )?)
+}
+
 /// A refused fact is not a member verification failure.
 #[derive(Debug)]
 pub enum ContextualFactError {
@@ -546,6 +584,43 @@ mod tests {
             .expect("valid contextual fact"),
             1,
         );
+    }
+
+    #[test]
+    fn a_single_green_run_records_one_fact_per_declared_gate() {
+        // A green shared run supplies one observation. Waiting for a second
+        // suite is why production recorded nothing (#5948).
+        let mut store = SqliteStore::open(":memory:").expect("valid contextual fixture");
+        let (node, mut contract) = inputs();
+        contract.gate_identities.push("verify.clippy".to_owned());
+        assert_eq!(
+            record_green_contextual_facts(
+                &mut store,
+                &node,
+                &contract,
+                &HostClass::new("fleet"),
+                "green-run",
+                &[1; 32],
+            )
+            .expect("a green run writes"),
+            2
+        );
+        let rows = store.list_proof_facts().expect("proof facts read");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.result == "green" && row.host_class == "fleet"));
+        assert_eq!(
+            rows.iter().map(|row| row.test_id.as_str()).collect::<Vec<_>>(),
+            ["gate:verify.clippy", "gate:verify.test"]
+        );
+
+        let reuse = reuse_contextual_proof(&mut store, &node, &contract, &HostClass::new("fleet"))
+            .expect("proof lookup")
+            .expect("declared gates are green");
+        assert_eq!(
+            reuse.facts.iter().map(|fact| fact.gate.as_str()).collect::<Vec<_>>(),
+            ["verify.test", "verify.clippy"]
+        );
+        assert!(rows.iter().all(|row| row.producing_dispatch == "green-run"));
     }
 
     #[test]

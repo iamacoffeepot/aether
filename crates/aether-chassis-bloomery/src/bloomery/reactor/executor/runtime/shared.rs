@@ -35,7 +35,7 @@ use crate::bloomery::{
     BatchCheck, BatchFailure, BatchMember, BatchProbeReceipt, BatchProbeRequest, BatchProgress, BatchReport,
     ContextualProofReuse, HostClass, ProbeVerdict, contextual_bundle_reports, contextual_fact_key, dispatch_model,
     findings::verification_findings_key, next_batch_probe, observed_failed_tests, observed_probe_verdict,
-    record_contextual_facts, reuse_contextual_proof,
+    record_contextual_facts, record_green_contextual_facts, reuse_contextual_proof,
 };
 use crate::store::{
     CommissionBackend, ConstructionAdmissionRow, OrderLifecycle, PartialHeadRepairRow, SharedRunLifecycle,
@@ -1277,12 +1277,9 @@ fn record_independent_contextual_facts(
     receipt: &SharedStepReceipt,
     host_class: &HostClass,
 ) -> rusqlite::Result<()> {
-    let (SharedRunExecution::Contextual { node, .. }, Some(composition), Some(observations), Some(bloom)) = (
-        &dispatch.execution,
-        dispatch.plan.composition.as_ref(),
-        receipt.contextual_observations.as_deref(),
-        dispatch_bloom(dispatch),
-    ) else {
+    let (SharedRunExecution::Contextual { node, .. }, Some(composition), Some(bloom)) =
+        (&dispatch.execution, dispatch.plan.composition.as_ref(), dispatch_bloom(dispatch))
+    else {
         return Ok(());
     };
     if !contextual_contract_valid(dispatch)
@@ -1291,6 +1288,21 @@ fn record_independent_contextual_facts(
     {
         return Ok(());
     }
+    if receipt.verdict == StageVerdict::VerificationPassed
+        && let Err(error) = record_green_contextual_facts(
+            store,
+            node,
+            &composition.contract,
+            host_class,
+            &step.nonce,
+            bloom.0.as_bytes(),
+        )
+    {
+        tracing::warn!(%error, nonce = %step.nonce, "contextual proof facts were not recorded");
+    }
+    let Some(observations) = receipt.contextual_observations.as_deref() else {
+        return Ok(());
+    };
     let current = match contextual_bundle_reports(observations, &step.nonce, node, &composition.contract) {
         Ok(reports) => reports,
         Err(error) => {
@@ -2131,35 +2143,59 @@ fn retain_contextual_proof_reuse(
     row: &SharedRunRow,
     dispatch: &SharedRunDispatch,
     host_class: &HostClass,
-) -> rusqlite::Result<bool> {
+) -> rusqlite::Result<Option<Vec<Admit>>> {
     if dispatch.plan.mode != SharedRunMode::Contextual
         || store.shared_run_proof_reuse(&row.run)?.is_some()
         || !store.shared_run_steps(&row.run)?.is_empty()
     {
-        return Ok(false);
+        return Ok(None);
     }
     let (SharedRunExecution::Contextual { node, .. }, Some(composition), Some(artifacts)) =
         (&dispatch.execution, dispatch.plan.composition.as_ref(), artifacts)
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let Some(witness) = reuse_contextual_proof(store, node, &composition.contract, host_class)? else {
-        return Ok(false);
+        return Ok(None);
     };
     let witness_bytes = encode_host(&witness)?;
     let parents = vec![node.digest().to_hex(), composition.contract.digest().to_hex()];
     let PutResult::Ok { digest } = artifacts.put(&witness_bytes, &parents) else {
-        return Ok(false);
+        return Ok(None);
     };
     let Some(detail) = Digest::from_hex(&digest) else {
-        return Ok(false);
+        return Ok(None);
     };
     let reuse = ReusedContextualProof {
         witness,
         evidence: Evidence { subject: node.candidate.tree, kind: EvidenceKind::VerificationResult, detail },
     };
+    let Some(bloom) = dispatch_bloom(dispatch) else {
+        store.record_shared_run_proof_reuse(&row.run, &encode_host(&reuse)?)?;
+        return Ok(Some(Vec::new()));
+    };
+    let Some(run) = Digest::from_slice(&row.run) else {
+        store.record_shared_run_proof_reuse(&row.run, &encode_host(&reuse)?)?;
+        return Ok(Some(Vec::new()));
+    };
+    let closure = contextual_fact_key(node, &composition.contract).digest();
+    let mut admits = Vec::new();
+    for fact in &reuse.witness.facts {
+        let event = Event {
+            idempotency_key: IdempotencyKey(format!("aether.bloomery.proof_reused:{}:{}", run.to_hex(), fact.gate)),
+            fact: Fact::ProofReused {
+                bloom,
+                gate: fact.gate.clone(),
+                closure,
+                producing_dispatch: fact.producing_dispatch.clone(),
+            },
+        };
+        if !store.journal_holds_any(from_ref(&event.idempotency_key.0))? {
+            admits.extend(admit(&event));
+        }
+    }
     store.record_shared_run_proof_reuse(&row.run, &encode_host(&reuse)?)?;
-    Ok(true)
+    Ok(Some(admits))
 }
 
 fn replay_completion(
@@ -2410,7 +2446,10 @@ pub(super) fn drive_shared_runs(
         if !matches!(current.lifecycle, SharedRunLifecycle::Ready | SharedRunLifecycle::Running) {
             continue;
         }
-        if retain_contextual_proof_reuse(store, artifacts.as_deref_mut(), &current, &dispatch, host_class)? {
+        if let Some(reused) =
+            retain_contextual_proof_reuse(store, artifacts.as_deref_mut(), &current, &dispatch, host_class)?
+        {
+            admits.extend(reused);
             admits.extend(finish_if_terminal(store, executor, &current, &dispatch, now_unix_millis)?);
             continue;
         }
@@ -3344,6 +3383,144 @@ mod tests {
         };
         node.plan = Digest::of_wire_bytes(b"stale physical plan");
         assert!(!contextual_contract_valid(&stale));
+    }
+
+    fn fleet_contextual_dispatch() -> (SharedRunDispatch, HostClass) {
+        let host = HostClass::new("fleet");
+        let host_digest = host.digest();
+        let mut dispatch = reducer_shaped_contextual_dispatch();
+        for request in &mut dispatch.plan.requests {
+            request.contract.host_class = host_digest;
+        }
+        let request = &dispatch.plan.requests[0];
+        let request_digest = request.digest();
+        let contract_digest = request.contract.digest();
+        if let Some(composition) = dispatch.plan.composition.as_mut() {
+            composition.contract.host_class = host_digest;
+            composition.requests.clone_from(&dispatch.plan.requests);
+            composition.contract.members[0].request = request_digest;
+            composition.contract.members[0].contract = contract_digest;
+        }
+        if let SharedRunExecution::Contextual { node, .. } = &mut dispatch.execution {
+            node.plan = dispatch.plan.digest();
+        }
+        (dispatch, host)
+    }
+
+    fn green_contextual_receipt(node: &SharedRunNode, nonce: &str) -> SharedStepReceipt {
+        SharedStepReceipt {
+            invocation: Digest::of_wire_bytes(format!("{nonce}:invocation").as_bytes()),
+            evidence: Evidence {
+                subject: node.candidate.tree,
+                kind: EvidenceKind::VerificationResult,
+                detail: Digest::of_wire_bytes(format!("{nonce}:detail").as_bytes()),
+            },
+            verdict: StageVerdict::VerificationPassed,
+            failed_verifiers: VerifyFailureSet::default(),
+            failed_verifier_names: Vec::new(),
+            findings: None,
+            cost: None,
+            calls: None,
+            contextual_observations: None,
+            probe_verdict: None,
+        }
+    }
+
+    #[test]
+    fn a_green_contextual_run_records_one_fact_per_declared_gate_without_a_prior_run() {
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        let (dispatch, host) = fleet_contextual_dispatch();
+        let SharedRunExecution::Contextual { node, .. } = &dispatch.execution else {
+            panic!("contextual execution");
+        };
+        let step = SharedRunStepRow {
+            run: Digest::of_wire_bytes(b"green-run").as_bytes().to_vec(),
+            ordinal: 1,
+            nonce: "green-step".to_owned(),
+            request: None,
+            descriptor: encode_host(&SharedStepDescriptor::ContextualFull { node: node.digest() }).expect("descriptor"),
+            prepared: None,
+            receipt: None,
+            duration_millis: None,
+            release_physical_run: false,
+        };
+        let receipt = green_contextual_receipt(node, &step.nonce);
+
+        record_independent_contextual_facts(&mut store, &dispatch, &step, &receipt, &host)
+            .expect("a green run records");
+
+        let rows = store.list_proof_facts().expect("the table reads");
+        assert_eq!(rows.len(), 1, "one declared gate, one fact");
+        assert_eq!(rows[0].test_id, "gate:verify.test");
+        assert_eq!(rows[0].result, "green");
+        assert_eq!(rows[0].host_class, "fleet");
+        assert_eq!(rows[0].producing_dispatch, "green-step");
+        assert_eq!(
+            rows[0].closure_key,
+            contextual_fact_key(node, &dispatch.plan.composition.as_ref().expect("composition").contract).as_bytes()
+        );
+        assert!(
+            reuse_contextual_proof(
+                &mut store,
+                node,
+                &dispatch.plan.composition.as_ref().expect("composition").contract,
+                &host
+            )
+            .expect("proof lookup")
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn retained_proof_reuse_journals_the_gate_closure_and_producing_dispatch() {
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        let (dispatch, host) = fleet_contextual_dispatch();
+        let SharedRunExecution::Contextual { node, .. } = &dispatch.execution else {
+            panic!("contextual execution");
+        };
+        let composition = dispatch.plan.composition.as_ref().expect("composition");
+        record_green_contextual_facts(
+            &mut store,
+            node,
+            &composition.contract,
+            &host,
+            "first-green",
+            dispatch.plan.requests[0].bloom.0.as_bytes(),
+        )
+        .expect("the first green run writes");
+
+        let run = Digest::of_wire_bytes(b"reused-run");
+        let row = SharedRunRow {
+            run: run.as_bytes().to_vec(),
+            nonce: "reused".to_owned(),
+            dispatch: to_vec(&dispatch).expect("dispatch wire"),
+            lifecycle: SharedRunLifecycle::Ready,
+            next_ordinal: 0,
+            deadline_unix_millis: 10_000,
+            charged: false,
+            physical_cost: None,
+        };
+        store.record_shared_run(&row, &[]).expect("run");
+
+        let directory = tempfile::tempdir().expect("artifact root");
+        let mut artifacts = ArtifactsCapabilityState::open(directory.path()).expect("artifacts");
+        let admits = retain_contextual_proof_reuse(&mut store, Some(&mut artifacts), &row, &dispatch, &host)
+            .expect("reuse consults")
+            .expect("matching green facts skip physical work");
+
+        assert!(store.shared_run_steps(&row.run).expect("steps").is_empty());
+        assert!(store.shared_run_proof_reuse(&row.run).expect("reuse").is_some());
+        assert_eq!(admits.len(), 1, "one declared gate, one reused-proof fact");
+        let event = from_bytes::<Event>(&admits[0].event).expect("proof-reuse event decodes");
+        match event.fact {
+            Fact::ProofReused { bloom, gate, closure, producing_dispatch } => {
+                assert_eq!(bloom, dispatch.plan.requests[0].bloom);
+                assert_eq!(gate, "verify.test");
+                assert_eq!(closure, contextual_fact_key(node, &composition.contract).digest());
+                assert_eq!(producing_dispatch, "first-green");
+            }
+            other => panic!("expected ProofReused, got {other:?}"),
+        }
     }
 
     #[test]

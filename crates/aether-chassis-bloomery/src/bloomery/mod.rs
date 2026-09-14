@@ -146,7 +146,7 @@ pub use verify::{
 pub use verify::{
     ContextualFactError, ContextualProofFactReuse, ContextualProofReuse, ContextualRunnerReport,
     contextual_bundle_reports, contextual_fact_key, observed_failed_tests, observed_probe_verdict,
-    record_contextual_facts, reuse_contextual_proof,
+    record_contextual_facts, record_green_contextual_facts, reuse_contextual_proof,
 };
 
 pub use verify::{
