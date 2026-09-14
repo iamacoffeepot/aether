@@ -116,7 +116,7 @@ const SEED_RULES: [SeedRule; 2] = [
         name: "hand-rolled-hex",
         needle: "0x0f",
         also: Some(">> 4"),
-        owners: &["crates/aether-bloomery/src/digest.rs", "xtask/src/bloom/hex"],
+        owners: &["crates/aether-bloomery/src/digest.rs", "xtask/src/bloom/hex.rs"],
         reach_for: "Digest::to_hex / digest_from_hex, or xtask's bloom::hex, which own the nibble loop",
     },
 ];
@@ -670,12 +670,14 @@ mod tests {
 
     #[test]
     fn owned_by_matches_a_directory_prefix() {
-        // The hex wrappers live under `xtask/src/bloom/hex/`, not `hex.rs`. An
-        // exact-file owner would flag the module that already reaches for the
-        // codec.
-        assert!(owned_by("xtask/src/bloom/hex/mod.rs", &["xtask/src/bloom/hex"]));
+        // A directory prefix matches its children; a file matches only itself.
+        // `hex.rs` is not a child of `hex/`, which is why the seed-rule owner
+        // is the file after the flatten.
+        assert!(owned_by("xtask/src/bloom/hex.rs", &["xtask/src/bloom/hex.rs"]));
+        assert!(owned_by("crates/demo/src/hex/mod.rs", &["crates/demo/src/hex"]));
+        assert!(!owned_by("crates/demo/src/hex.rs", &["crates/demo/src/hex"]));
         assert!(owned_by("crates/aether-bloomery/src/digest.rs", &["crates/aether-bloomery/src/digest.rs"]));
-        assert!(!owned_by("crates/demo/src/lib.rs", &["xtask/src/bloom/hex"]));
+        assert!(!owned_by("crates/demo/src/lib.rs", &["xtask/src/bloom/hex.rs"]));
     }
 
     #[test]
@@ -764,7 +766,7 @@ mod tests {
     fn a_split_nibble_loop_outside_the_codec_is_flagged() {
         // The codec writes the shift and the mask on adjacent lines. A rule
         // that required both on one line would miss the shape it exists to
-        // catch, and an exact-file owner of `hex.rs` would miss the hex module.
+        // catch.
         let root = scratch_repo();
         let path = "crates/demo/src/lib.rs";
         commit_file(&root, path, "fn live() {}\n", "base");
@@ -778,7 +780,7 @@ mod tests {
     #[test]
     fn an_owner_module_is_not_flagged_for_its_own_primitive() {
         let root = scratch_repo();
-        let path = "xtask/src/bloom/hex/mod.rs";
+        let path = "xtask/src/bloom/hex.rs";
         commit_file(&root, path, "fn live() {}\n", "base");
         fs::write(root.join(path), nibble_loop_source()).expect("candidate");
 
