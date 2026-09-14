@@ -152,6 +152,32 @@ fn construct_routes_local_and_verify_routes_actions_by_default() {
 }
 
 #[test]
+fn a_model_lane_routes_local_even_when_its_prefix_is_not_configured() {
+    // The host's prefix set is config and predates the reader: production
+    // `local_lane_commands` listed construct/review/scope/verify and the study
+    // order fell through to Actions, whose workflow is disabled. Model lanes
+    // share an ambient credential the zero-secret runner lacks, so
+    // `is_model_lane` selects the local arm independently of the prefix list.
+    let (router, actions_seen, local_seen, _, _) = router(vec!["construct.".to_owned()]);
+
+    router.submit(&order("retrospect.read", "n-r")).unwrap();
+    router.submit(&order("review.critic", "n-rev")).unwrap();
+    router.submit(&order("scope.fill", "n-s")).unwrap();
+    router.submit(&order("verify.clippy", "n-v")).unwrap();
+
+    assert_eq!(
+        *local_seen.lock().unwrap(),
+        vec!["n-r".to_owned(), "n-rev".to_owned(), "n-s".to_owned()],
+        "every model lane routes local even though the prefix set names only construct",
+    );
+    assert_eq!(
+        *actions_seen.lock().unwrap(),
+        vec!["n-v".to_owned()],
+        "a mechanical lane with no matching prefix still takes Actions",
+    );
+}
+
+#[test]
 fn a_config_override_repoints_a_verify_lane_to_local() {
     // The release valve: adding `verify.` to the local prefix set flips the verify
     // lane to the local backend without touching the routing code.

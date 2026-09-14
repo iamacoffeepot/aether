@@ -20,7 +20,9 @@
 //!   authors prose for it.
 //!
 //! A refused or faulted submit is not escalated anywhere. The bloom has landed;
-//! the only thing at stake is whether its study exists.
+//! the only thing at stake is whether its study exists. A permanent submit
+//! refusal is journaled as that study going missing, with the refusal as
+//! evidence, rather than acked off the record.
 //!
 //! Whether the read is dispatched at all is a host knob (ADR-0216 §4). The seat
 //! is the owner's call and the ADR does not make it, so it cannot ride on the
@@ -38,7 +40,7 @@ use aether_data::wire::from_bytes;
 use crate::artifacts::ArtifactsCapabilityState;
 use crate::bloomery::dispatch_model;
 use crate::bloomery::executor::{ExecutorPort, Settled};
-use crate::bloomery::intake::{DispatchRecord, dispatch_and_record, dispatch_nonce};
+use crate::bloomery::intake::{DispatchError, DispatchRecord, dispatch_and_record, dispatch_nonce};
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::provenance::{ProvenanceRefusal, journal_refusal};
 use crate::store::{StoreBackend, StoreConfigError, resolve_config};
@@ -133,15 +135,21 @@ pub(super) fn drain_and_dispatch_study(
                 // Including a provenance refusal (ADR-0214): the reader is a
                 // model lane, so it passes the same gate, and a bloom whose
                 // sealed bundle is not authorized simply does not get read.
-                // `dispatch_and_record` journals that refusal itself.
+                // `dispatch_and_record` journals that refusal itself. A submit
+                // the executor refuses permanently (a disabled workflow,
+                // missing knobs) is the same missing study, so the drain
+                // journals it here rather than acking the row off the record.
                 tracing::error!(
                     target: "aether_chassis_bloomery::executor",
                     sequence = entry.sequence,
                     bloom = %short_hex(&record.bloom.0),
                     nonce = %record.nonce.0,
                     %error,
-                    "study submit refused permanently; parking the entry instead of re-driving",
+                    "study submit refused permanently; journaling the study as missing",
                 );
+                if !matches!(error, DispatchError::Provenance(_)) {
+                    journal_refusal(store, &record, &ProvenanceRefusal::SubmitRefused(error.to_string()));
+                }
                 ack_through = Some(entry.sequence);
                 break;
             }

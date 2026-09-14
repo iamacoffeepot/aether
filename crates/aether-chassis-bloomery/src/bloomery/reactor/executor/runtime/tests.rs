@@ -19,10 +19,10 @@ use aether_bloomery::{
     Admit, AgentSelection, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, BloomId, CandidateRef,
     Conclusion, ConfigKind, ConfigRegistry, Digest, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend,
     Fact, Harness, LaneObservation, ModelOverride, ModelProcessInstructions, NamedPath, Nonce, Observation, PathOrigin,
-    Provenance, ReasoningEffort, RedispatchPayload, ReviewPass, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA,
-    ScopeRevision, ScopeRouting, ScopeVerifyInput, SharedCorrespondence, SourceSnapshot, StageCatalog, StageId,
-    StageOverride, Statement, TimeoutRecord, Topic, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle,
-    WorkOrder, WorkpieceId, pin_workpiece_description, split_lane_identity,
+    Provenance, RETROSPECT_READ_COMMAND, ReasoningEffort, RedispatchPayload, ReviewPass, SCOPE_REVISION_SCHEMA,
+    SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting, ScopeVerifyInput, SharedCorrespondence, SourceSnapshot,
+    StageCatalog, StageId, StageOverride, Statement, StudyPayload, TimeoutRecord, Topic, Transformation, VerifyFailure,
+    VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description, split_lane_identity,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
@@ -56,7 +56,7 @@ use crate::bloomery::{
     UnconfiguredActionsBackend,
 };
 use crate::bloomery::{ScopeRunState, open_scope_run, scope_run_state};
-use crate::bloomery::{authorize_instructions, reference_instructions};
+use crate::bloomery::{authorize_instructions, drain_refusals, reference_instructions};
 use crate::session::SessionConfig;
 use crate::store::{
     CANDIDATE_HASH_OCCASION_SEAL, CommissionBackend, JournalWrite, OrderLifecycle, OutstandingOrder, SqliteStore,
@@ -112,6 +112,30 @@ fn drain_and_dispatch_scope(
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
     super::drain_and_dispatch_scope(store, None, executor, now_unix_millis)
+}
+
+fn drain_and_dispatch_study(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    reader_enabled: bool,
+    now_unix_millis: u64,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    super::drain_and_dispatch_study(store, None, executor, reader_enabled, now_unix_millis)
+}
+
+fn enqueue_study(store: &mut SqliteStore, bloom: BloomId, subject: Digest) -> u64 {
+    let payload = StudyPayload {
+        bloom: bloom.0,
+        transformation: Transformation::for_study_read(
+            &StageCatalog::binding_of(StageId::Study),
+            subject,
+            digest(0xC0),
+            digest(0xB0),
+        ),
+        profile: StageCatalog::profile_of(StageId::Study),
+        configs: authorized_over(store, ConfigRegistry::default()),
+    };
+    store.enqueue_topic(Topic::Study, &to_vec(&payload).unwrap(), None).unwrap()
 }
 
 fn drain_and_redispatch(
@@ -2078,6 +2102,62 @@ fn drain_and_dispatch_parks_a_permanent_refusal_instead_of_re_driving() {
 
     store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
     assert!(store.drain_topic(Topic::Dispatch).unwrap().is_empty(), "the parked entry does not re-drain");
+}
+
+#[test]
+fn drain_and_dispatch_study_submits_the_reader_on_the_landed_range() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    let subject = digest(0x51);
+    let sequence = enqueue_study(&mut store, bloom, subject);
+
+    let (handles, ack_through, transient) =
+        drain_and_dispatch_study(&mut store, &shell, true, NOW_UNIX_MILLIS).unwrap();
+
+    assert_eq!(handles.len(), 1, "the reader dispatched");
+    assert_eq!(ack_through, Some(sequence));
+    assert_eq!(transient, None);
+    let order = &backend.orders()[0];
+    assert_eq!(order.transformation.command, RETROSPECT_READ_COMMAND);
+    assert_eq!(order.transformation.inputs, [subject], "the order pins the landing receipt");
+    assert_eq!(order.transformation.checkout, digest(0xC0), "the reader checks out the landed head");
+    assert_eq!(order.transformation.diff_base, Some(digest(0xB0)), "and reads it against the bloom's sealed base");
+}
+
+#[test]
+fn drain_and_dispatch_study_journals_a_permanent_refusal_instead_of_parking_it() {
+    // Production: the Actions workflow was disabled, submit returned 422, and
+    // the drain acked the row with no StudyCompleted — the read vanished off
+    // the record. ADR-0216 wants a missing study with a reason.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let shell = failing_shell(422);
+    let bloom = BloomId(digest(1));
+    let subject = digest(0x51);
+    let sequence = enqueue_study(&mut store, bloom, subject);
+
+    let (handles, ack_through, transient) =
+        drain_and_dispatch_study(&mut store, &shell, true, NOW_UNIX_MILLIS).unwrap();
+
+    assert!(handles.is_empty(), "the refused entry never dispatched");
+    assert_eq!(ack_through, Some(sequence), "the entry is acked past rather than re-driven");
+    assert_eq!(transient, None);
+
+    store.ack_topic(Topic::Study, ack_through.unwrap()).unwrap();
+    assert!(store.drain_topic(Topic::Study).unwrap().is_empty(), "the acked entry does not re-drain");
+
+    let admits = drain_refusals(&mut store).expect("the journaled refusal drains");
+    assert_eq!(admits.len(), 1, "one refusal, one admission");
+    let event: aether_bloomery::Event = from_bytes(&admits[0].event).unwrap();
+    match event.fact {
+        Fact::StudyCompleted { bloom: read, passed, evidence } => {
+            assert_eq!(read, bloom);
+            assert!(!passed, "a refused read is a study that did not pass");
+            assert_eq!(evidence.subject, subject, "the fault binds the receipt the order pinned");
+        }
+        other => panic!("a refused study submit is StudyCompleted {{ passed: false }}, got {other:?}"),
+    }
 }
 
 #[test]
