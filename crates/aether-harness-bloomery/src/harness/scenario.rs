@@ -46,7 +46,7 @@ use aether_rpc::RpcServerHandle;
 use aether_substrate::chassis::builder::BuiltChassis;
 
 use super::digest;
-use super::drive::{member, member_with, passed};
+use super::drive::{member, member_with, passed, reviewed};
 use super::roots::FixtureRoots;
 use super::{
     BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, InstructionAuthorization, Lane, POLL,
@@ -1623,7 +1623,17 @@ impl ScenarioHarness {
         let mut keys = Vec::new();
         for order in &orders {
             assert!(order.workpiece.is_empty(), "a bloom-level order carries no member axis");
-            keys.push(self.upload_admitted(&passed(order)));
+            // The review has to say what it read. Intake refuses a passing
+            // review carrying neither a finding nor a note as a lane that never
+            // judged the fold, so the two bloom-level gates upload differently:
+            // a compiler has nothing to say, a critic does.
+            let is_review = from_bytes::<StageId>(&order.stage).is_ok_and(|stage| stage == StageId::AggregateReview);
+            let upload = if is_review {
+                reviewed(order)
+            } else {
+                passed(order)
+            };
+            keys.push(self.upload_admitted(&upload));
         }
         for gate in ["aether.bloomery.aggregate_review:", "aether.bloomery.aggregate_verify:"] {
             assert!(keys.iter().any(|key| key.starts_with(gate)), "the {gate} gate ran: {keys:?}");

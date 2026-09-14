@@ -571,6 +571,36 @@ fn advisory_evidence(upload: &UploadedEvidence, passed: bool, evidence: Evidence
     }
 }
 
+/// Whether a claimed aggregate-review verdict is an *empty* one: a pass naming
+/// no finding and no note, so nothing in it says a review happened at all.
+///
+/// A clean review stamps no findings by definition, so the findings channel on
+/// its own cannot tell a critic that read the fold and found nothing from a lane
+/// whose report tools were never reachable — the second leaves exactly the same
+/// empty file. The note naming what was reviewed is the difference, and it is
+/// the reason [`LaneObservation::notes`] is its own channel. A completion
+/// carrying neither is a lane fault: it charges no member, stays retryable
+/// against the review's own budget, and shows on the bloom's `executor_fault`
+/// series instead of landing a fold nobody judged.
+///
+/// Scoped to a passing verdict on purpose. A finding carries its own prose, an
+/// `environment` verdict is already a fault, and a park is a question — none of
+/// them is the empty pass this refuses.
+///
+/// [`LaneObservation::notes`]: aether_bloomery::LaneObservation::notes
+fn reviewed_nothing(upload: &UploadedEvidence) -> bool {
+    let stated = |prose: &Option<String>| prose.as_deref().is_some_and(|prose| !prose.trim().is_empty());
+    verdict_passed(upload.verdict) && !stated(&upload.observation.findings) && !stated(&upload.observation.notes)
+}
+
+/// Whether an aggregate-review upload folds as a fault rather than a verdict —
+/// the lane's own `environment` stamp, or the empty verdict above. Read in both
+/// places that branch on it, so the fact the admission files and the findings it
+/// persists cannot disagree about what happened.
+fn aggregate_review_faulted(upload: &UploadedEvidence) -> bool {
+    upload.verdict == StageVerdict::ExecutorFault || reviewed_nothing(upload)
+}
+
 /// The admission event for an aggregate review whose executor could not judge
 /// the fold (ADR-0176) — the sibling of [`aggregate_review_event`] for the one
 /// verdict that is not a verdict.
@@ -1018,7 +1048,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
             },
         }
     } else if record.stage == StageId::AggregateReview {
-        if upload.verdict == StageVerdict::ExecutorFault {
+        if aggregate_review_faulted(upload) {
             aggregate_review_executor_fault_event(&record, evidence)
         } else {
             let (event, decomposition) = aggregate_review_event(store, &record, upload, evidence)?;
@@ -1176,7 +1206,7 @@ fn persist_consumed(
         persist_narrowed_work_order(store, record, upload)?;
     } else if record.stage == StageId::AggregateVerify {
         persist_aggregate_verify_findings(store, record, upload)?;
-    } else if record.stage == StageId::AggregateReview && upload.verdict != StageVerdict::ExecutorFault {
+    } else if record.stage == StageId::AggregateReview && !aggregate_review_faulted(upload) {
         persist_aggregate_findings(store, record, upload, aggregate_findings)?;
     } else if record.stage == StageId::Study && upload.verdict != StageVerdict::ExecutorFault {
         // A faulted read reached no verdict, so whatever rode its observation is

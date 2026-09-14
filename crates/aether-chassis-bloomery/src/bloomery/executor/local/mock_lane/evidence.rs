@@ -280,6 +280,10 @@ fn review_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: 
         "findings": findings,
         "result_record": result_record(false, findings.as_str()),
     });
+    // A real critic files at least one note naming what it read, and intake
+    // refuses a completion carrying neither a finding nor a note as a lane that
+    // never reviewed anything.
+    review["notes"] = Value::String("read the whole candidate and checked all five pillars against it.".to_owned());
     stamp_claimed_subject(&mut review, mode, subject);
     Outcome { evidence: Some(evidence_bytes(&review)), exit_code: 0, candidate_path: None, candidate: None }
 }
