@@ -21,6 +21,7 @@
 //!   bloom landed and stamps `retrospect_findings` as untrusted claims. It
 //!   never writes to the tree.
 
+mod budget;
 mod claude;
 pub mod construct;
 pub mod conventions;
@@ -136,6 +137,15 @@ pub struct TransformArgs {
     /// `construct.implement`.
     #[arg(long)]
     seeded: Option<String>,
+    /// When the coordinator cancels this run, in Unix milliseconds — the
+    /// absolute deadline the order row carries, minted from the sealed
+    /// execution limit (ADR-0177, #5998). The lane names the time remaining in
+    /// the assembled prompt and holds its own post-model work inside it, so a
+    /// run that finished building is never cancelled by its own lint bar.
+    /// Absent leaves the lane unbounded, which is what it was before the
+    /// executor threaded this. Ignored by the verify lane.
+    #[arg(long)]
+    deadline_unix_millis: Option<u64>,
     /// Packages `verify.test` restricts the suite to — CI's affected
     /// selection (#3611, #4883). Each becomes a `-p` on the canonical nextest
     /// argv. Refused on every other command: applying it to `verify.clippy`

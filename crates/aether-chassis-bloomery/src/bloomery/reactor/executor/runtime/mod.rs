@@ -47,9 +47,10 @@ use aether_actor::runtime;
 use aether_bloomery::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, BloomId,
     CancelDispatchPayload, CandidateRef, ConfigRegistry, ConfigScopes, ContextualAttemptDispatch, Digest,
-    DispatchPayload, Event, ExecutionStatus, Fact, LaneObservation, MemberPin, ModelOverride, Nonce, RedispatchPayload,
-    ReviewPass, SharedCorrespondence, SourceSnapshot, StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailureSet,
-    WorkHandle, WorkpieceId, normalize_write_paths, pin_workpiece_description,
+    DispatchPayload, Event, ExecutionLimits, ExecutionStatus, Fact, LaneObservation, MemberPin, ModelOverride, Nonce,
+    RedispatchPayload, ReviewPass, SharedCorrespondence, SourceSnapshot, StageId, StageVerdict, TimeoutRecord, Topic,
+    VerifyFailureSet, WorkHandle, WorkpieceId, WorkpieceSize, normalize_write_paths, pin_workpiece_description,
+    sized_wall_clock_secs,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_github::{GitObjectId, candidate_ref_name, member_checkpoint_ref_name, short_hex};
@@ -529,6 +530,12 @@ fn terminate_live_order(
             return None;
         }
     }
+    // What the cancelled lane had built, if it was a construct and left a dirty
+    // tree (#5998). Collected straight after the cancel that captured it,
+    // before anything below can decline to terminate the order: the capture is
+    // read once per nonce, and a read that never happens loses the tree the
+    // cancel went out of its way to keep.
+    let captured = executor.cancelled_capture(&WorkHandle::new(nonce.clone()));
     let Some(record) = DispatchRecord::from_stored(order) else {
         latch_unterminable(tracked, &nonce);
         tracing::error!(
@@ -561,7 +568,11 @@ fn terminate_live_order(
         subject: record.displayed_digest,
         verdict,
         detail,
-        observation: LaneObservation { failed_verifiers, ..LaneObservation::default() },
+        // The captured tree rides the same channel a failing construct's does,
+        // so the reducer files it as this member's checkpoint and the existing
+        // push publishes it to the member-checkpoint ref — the retry lap then
+        // resumes from it instead of from nothing (#5998).
+        observation: LaneObservation { failed_verifiers, candidate: captured, ..LaneObservation::default() },
     };
     match admit_uploaded(store, &upload) {
         Ok(AdmitDecision::Admitted(admission)) => {
@@ -1052,6 +1063,38 @@ fn shared_member_advisory(
     Ok(findings)
 }
 
+/// The size band the member's sealed scope revision routed this work into.
+///
+/// [`WorkpieceSize::Medium`] whenever the revision cannot be read — a row that
+/// is not there, a store that will not answer. That is the band every member
+/// ran under before the bands existed, so a dispatch that cannot see a size
+/// runs exactly as it did; giving it the longest band instead would let an
+/// unreadable revision buy a stuck lane twice the slot.
+fn member_size(store: &mut dyn StoreBackend, record: &DispatchRecord, sequence: u64) -> WorkpieceSize {
+    match store.load_revision(record.scope_revision) {
+        Ok(Some(revision)) => WorkpieceSize::of_line(&revision.routing.size),
+        Ok(None) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                workpiece = %record.workpiece.0,
+                "no scope revision stored for the dispatched member; running its stage's middling size band",
+            );
+            WorkpieceSize::Medium
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                workpiece = %record.workpiece.0,
+                %error,
+                "the dispatched member's scope revision would not load; running its stage's middling size band",
+            );
+            WorkpieceSize::Medium
+        }
+    }
+}
+
 fn overlay_member_advisory(
     store: &mut dyn StoreBackend,
     record: &mut DispatchRecord,
@@ -1074,6 +1117,21 @@ fn overlay_member_advisory(
     let model_override =
         resolve_config::<ModelOverride>(store, ConfigScopes::bloom_wide(&record.configs))?.unwrap_or_default();
     record.transformation.model = Some(dispatch_model(record.stage, &record.profile, &model_override));
+
+    // And the size band the member's scope routed it into (#5998), on the same
+    // channel and for the same reason: the catalog authors one limit per stage,
+    // which is the middling band, and the size line lives in the sealed scope
+    // revision — a value the reducer names by digest and never reads. An hour
+    // is half of what a size L member needs and three times what a size S one
+    // does, so a flat limit either cancels finished work or lets a stuck lane
+    // hold a slot.
+    record.transformation.limits = ExecutionLimits {
+        wall_clock_secs: sized_wall_clock_secs(
+            record.stage,
+            record.transformation.limits.wall_clock_secs,
+            member_size(store, record, sequence),
+        ),
+    };
 
     // A failing verdict's persisted findings ride the same advisory channel as
     // their own labeled section (#3656, ADR-0153), so a Refine re-entry's prompt

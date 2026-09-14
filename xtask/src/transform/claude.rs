@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use aether_bloomery::{ModelProcessInstructions, SCOPE_FILL_COMMAND, split_lane_identity};
 
 use crate::transform::TransformArgs;
+use crate::transform::budget::Budget;
 use crate::transform::lane::{
     Resumed, execute, export_build_dir, resume_handle_rejected, resumed_prompt, without_resume,
 };
@@ -106,14 +107,15 @@ fn claude_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str>, 
 ///
 /// Prompt caching is prefix-exact (#4985). The shared bulk leads — conventions
 /// first, then the lane instructions, subject, and work-order body — and anything
-/// that varies per lane (a leading `Workpiece:` identity header, #4984) sits in a
-/// trailing `## Lane` section.
+/// that varies per lane (a leading `Workpiece:` identity header, #4984; this
+/// dispatch's remaining execution budget, #5998) sits in the trailing sections.
 pub(super) fn assemble_construct_prompt(
     bundle: &ModelProcessInstructions,
     instructions: &str,
     subject: Option<&str>,
     task: Option<&str>,
     seeded: Option<&str>,
+    budget: Option<Budget>,
 ) -> String {
     let subject_body = subject.map_or_else(
         || bundle.subject_unspecified.clone(),
@@ -128,9 +130,14 @@ pub(super) fn assemble_construct_prompt(
     let seeded_section = seeded.map_or_else(String::new, |commit| {
         format!("\n## Seeded state\n\n{}\n\n## Seeded checkpoint\n\n`{commit}`\n", bundle.seeded_state)
     });
+    // The budget varies per dispatch — the same member launched twice has
+    // different time left — so it sits at the tail with the lane identity
+    // rather than in the cached prefix.
+    let budget_section = budget.map_or_else(String::new, Budget::section);
     let lane_section = lane_identity.map_or_else(String::new, |id| format!("\n## Lane\n\n{id}\n"));
     format!(
-        "{}\n\n{instructions}\n\n## Subject\n\n{subject_body}\n{task_section}{seeded_section}{lane_section}",
+        "{}\n\n{instructions}\n\n## Subject\n\n{subject_body}\n{task_section}{seeded_section}{budget_section}\
+         {lane_section}",
         bundle.conventions
     )
 }

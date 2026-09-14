@@ -509,6 +509,12 @@ fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) 
     }
     if is_model_lane(spec.command) {
         task_argv::push_value_flag(&mut args, "--subject", checkout);
+        // The instant the coordinator cancels this run (ADR-0177), so the lane
+        // can plan to leave a candidate before it rather than discover the limit
+        // by being killed mid-turn (#5998).
+        if let Some(deadline_unix_millis) = spec.deadline_unix_millis {
+            task_argv::push_value_flag(&mut args, "--deadline-unix-millis", deadline_unix_millis.to_string());
+        }
         if let Some(harness) = spec.harness {
             task_argv::push_value_flag(&mut args, "--harness", harness);
         }
@@ -1247,6 +1253,7 @@ mod tests {
             entrypoint: LaneProgram::default(),
             instruction_bundle: None,
             instruction_bundle_digest: None,
+            deadline_unix_millis: None,
         }
     }
 

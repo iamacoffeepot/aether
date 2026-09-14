@@ -463,6 +463,7 @@ pub(super) fn run_review(args: &TransformArgs, bundle: &ModelProcessInstructions
         args.subject.as_deref(),
         args.task.as_deref(),
         None,
+        None,
     );
     let run = run_model_lane(&prompt, args, Resumed::AfterReset)?;
     // Claude injects the report tools and the findings file is the verdict

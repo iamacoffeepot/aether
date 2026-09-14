@@ -17,6 +17,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use std::{fs, io, thread};
 
+use crate::transform::budget::Budget;
 use crate::transform::sccache;
 
 /// How long `cargo fmt` may run before it is treated as a failed fixer.
@@ -86,7 +87,13 @@ impl Report {
 /// Run the mechanical fixers over `worktree`. Infallible: a fixer that
 /// errors or times out is rolled back to the snapshot taken just before
 /// *that* command, and the lane still returns a report.
-pub(super) fn apply(worktree: &Path, out_dir: &Path) -> Report {
+///
+/// `budget` is what the dispatch has left of its sealed execution limit
+/// (#5998). Each fixer's own budget is clamped to it, so the pass that tidies a
+/// finished candidate can never be the thing that spends the last of the run:
+/// a fixer cut short rolls back and the lane hands off, which is what it
+/// already does for a fixer that times out on its own budget.
+pub(super) fn apply(worktree: &Path, out_dir: &Path, budget: Option<Budget>) -> Report {
     let rust_files = dirty_rust_files(worktree, out_dir);
     if rust_files.is_empty() {
         return Report::default();
@@ -99,9 +106,11 @@ pub(super) fn apply(worktree: &Path, out_dir: &Path) -> Report {
     let packages = owning_packages_of(worktree, &rust_files);
     let before = worktree_state(worktree, out_dir);
 
-    run_fixer(worktree, out_dir, "cargo", &fmt_argv(worktree, &rust_files), FMT_BUDGET, |_| {});
+    let allowed = |want: Duration| budget.map_or(want, |budget| budget.clamp(want));
+
+    run_fixer(worktree, out_dir, "cargo", &fmt_argv(worktree, &rust_files), allowed(FMT_BUDGET), |_| {});
     if !packages.is_empty() {
-        run_fixer(worktree, out_dir, "cargo", &clippy_fix_argv(&packages), CLIPPY_FIX_BUDGET, |command| {
+        run_fixer(worktree, out_dir, "cargo", &clippy_fix_argv(&packages), allowed(CLIPPY_FIX_BUDGET), |command| {
             command.env("CARGO_INCREMENTAL", "0");
             sccache::export(sccache::detect().as_ref(), command);
         });
@@ -144,12 +153,12 @@ fn owning_packages_of(worktree: &Path, rust_files: &[String]) -> Vec<String> {
 /// The packages a post-model pass over `worktree` is scoped to: those owning
 /// the rust files the run left dirty.
 ///
-/// The construct lane's post-fixer lint check runs over exactly this set, not
-/// its reverse-dependency closure — the check exists to show the model what
-/// `--fix` could not apply *in the files it wrote*, and a closure would put a
-/// dependent crate's diagnostics in front of a model whose work order does not
-/// reach them. Shared with [`apply`] rather than re-derived, so the check
-/// cannot lint a different set than the fixer rewrote.
+/// What [`apply`] points `clippy --fix` at, and what the construct lane's lint
+/// bar falls back to when the candidate's reverse-dependency closure cannot be
+/// bounded (#6000). The bar's own set is that closure — the same one the verify
+/// gate resolves — because the class it exists to catch is an edit to a shared
+/// type breaking a dependent crate's test target, which this set does not
+/// reach.
 pub(super) fn scoped_packages(worktree: &Path, out_dir: &Path) -> Vec<String> {
     owning_packages_of(worktree, &dirty_rust_files(worktree, out_dir))
 }

@@ -4351,6 +4351,7 @@ fn identity(stage: StageId, workpiece: &str, candidate: Digest, scope_revision: 
         stage,
         candidate: Some(candidate),
         scope_revision: Some(scope_revision),
+        deadline_unix_millis: 0,
     }
 }
 

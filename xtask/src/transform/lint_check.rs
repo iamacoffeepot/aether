@@ -26,6 +26,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use crate::transform::budget::Budget;
 use crate::transform::lane::Resumed;
 use crate::transform::verify::scope::Scope;
 use crate::transform::verify::{Judge, distil_diagnostics, judged_errors, judged_findings, render_diagnostics};
@@ -204,7 +205,24 @@ pub(super) struct Outcome {
 /// hands off. `session` is the handle the construct turn reported, which the
 /// repair turn resumes so the model reads its findings with its own work still
 /// in context rather than re-deriving it from a cold prompt.
-pub(super) fn run(worktree: &Path, args: &TransformArgs, session: Option<&str>, repair_instructions: &str) -> Outcome {
+pub(super) fn run(
+    worktree: &Path,
+    args: &TransformArgs,
+    budget: Option<Budget>,
+    session: Option<&str>,
+    repair_instructions: &str,
+) -> Outcome {
+    // The round is the lane's own gate, and a lane cancelled in the middle of
+    // it loses a candidate the model had already finished — which is how #5945
+    // and #5969 died, two minutes into the repair turn this round had just
+    // bought. So the round runs only when the whole of it fits inside what the
+    // dispatch has left, and hands off otherwise: Verify names the lint residue,
+    // which is what this round is a cheaper substitute for, not a replacement.
+    if budget.is_some_and(|budget| !budget.fits(LINT_ROUND_BUDGET)) {
+        eprintln!("construct lane: the sealed execution limit leaves no room for a lint round; handing off");
+        return Outcome { report: Report::default(), fixers: None };
+    }
+
     let deadline = Instant::now() + LINT_ROUND_BUDGET;
     let bar = Bar::resolve(worktree, &args.out);
     let scope = Some(bar.receipt());
@@ -217,7 +235,7 @@ pub(super) fn run(worktree: &Path, args: &TransformArgs, session: Option<&str>, 
         || check(worktree, &args.out, &bar, deadline),
         |found| {
             let repaired = repair(args, session, &bar.packages, found, deadline, repair_instructions);
-            applied = repaired.then(|| fixers::apply(worktree, &args.out));
+            applied = repaired.then(|| fixers::apply(worktree, &args.out, budget));
             repaired
         },
     );

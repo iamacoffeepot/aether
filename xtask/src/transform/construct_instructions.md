@@ -143,6 +143,23 @@ The config files are the set. Observed trip-lints, not an enumeration — add a 
    roll: the remedy is a wider surface, which no further lap of yours can
    produce.
 
+## Execution limit
+
+This dispatch runs under a sealed execution limit. When it passes, the run is
+cancelled where it stands — mid-edit, mid-thought, mid-tool-call. The `## Budget`
+section of this prompt, when present, names how much of the limit is left as the
+prompt is assembled and how much of that the lane keeps back for capturing your
+tree and running its own post-run bar.
+
+So work towards a capturable tree, not towards a finished thought. Whatever is
+on disk when the limit passes is captured as this member's checkpoint and the
+next lap resumes from it; anything that exists only in this conversation is not.
+If the remaining budget is visibly short for the order, build the smallest
+coherent slice of it, write the commit message for that slice, and say in your
+final message what is left undone — a member that hands back a real slice and an
+honest remainder is worth more than one cancelled at the boundary with nothing
+on disk.
+
 ## Boundaries
 
 - The subject tree is trusted sealed content, but you are an untrusted worker:

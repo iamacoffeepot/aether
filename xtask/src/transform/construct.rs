@@ -10,6 +10,7 @@ use std::process::Command;
 use aether_bloomery::ModelProcessInstructions;
 use anyhow::Result;
 
+use crate::transform::budget::Budget;
 use crate::transform::claude::assemble_construct_prompt;
 use crate::transform::fixers::{self, Report as FixerReport};
 use crate::transform::lane::Resumed;
@@ -193,12 +194,17 @@ fn capture_produced_candidate(out_dir: &Path) -> bool {
 pub(super) fn run_construct(args: &TransformArgs, bundle: &ModelProcessInstructions) -> Result<()> {
     // The lane consumes the authorized bundle the host handed it (ADR-0214):
     // instruction text is those bytes unchanged, never files in this checkout.
+    // What this dispatch has left of its sealed execution limit (#5998):
+    // stated to the model in the prompt, and the clamp every piece of the
+    // lane's own post-model work runs under.
+    let budget = Budget::resolve(args.deadline_unix_millis);
     let prompt = assemble_construct_prompt(
         bundle,
         &bundle.construct,
         args.subject.as_deref(),
         args.task.as_deref(),
         args.seeded.as_deref(),
+        budget,
     );
     let run = run_model_lane(&prompt, args, Resumed::AfterReset)?;
 
@@ -218,8 +224,9 @@ pub(super) fn run_construct(args: &TransformArgs, bundle: &ModelProcessInstructi
     // transcript. The guard drops at the end of the function so the stretch
     // through `write_evidence_json` is covered.
     let _beat = heartbeat::Beat::start(&args.out);
-    let applied = fixers::apply(Path::new("."), &args.out);
-    let lint = lint_check::run(Path::new("."), args, run.record["session_id"].as_str(), &bundle.construct_lint_repair);
+    let applied = fixers::apply(Path::new("."), &args.out, budget);
+    let lint =
+        lint_check::run(Path::new("."), args, budget, run.record["session_id"].as_str(), &bundle.construct_lint_repair);
     let fixers = lint.fixers.map_or(applied, |repaired| applied.merged(repaired));
 
     // Take the commit-message deliverable before the candidate is inspected, and
@@ -253,12 +260,13 @@ pub(super) fn run_construct(args: &TransformArgs, bundle: &ModelProcessInstructi
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs, process};
 
     use aether_bloomery::{LANE_WORKPIECE_HEADER, pin_workpiece_description};
 
     use super::{
-        COMMIT_MESSAGE_DELIVERABLE, CONSTRUCT_IMPLEMENT, Deliverables, FixerReport, LintReport, Measurements,
+        Budget, COMMIT_MESSAGE_DELIVERABLE, CONSTRUCT_IMPLEMENT, Deliverables, FixerReport, LintReport, Measurements,
         SURFACE_REQUEST_DELIVERABLE, porcelain_signals_candidate, stamp_construct_evidence, take_commit_message,
         take_surface_request,
     };
@@ -273,7 +281,21 @@ mod tests {
         let mut bundle = fixture_bundle();
         bundle.conventions = conventions::section(LANE_CONTEXT);
         bundle.construct = CONSTRUCT_SOURCE.to_owned();
-        assemble_construct_prompt(&bundle, &bundle.construct, subject, task, seeded)
+        assemble_construct_prompt(&bundle, &bundle.construct, subject, task, seeded, None)
+    }
+
+    fn assembled_with_budget(subject: Option<&str>, task: Option<&str>, budget: Option<Budget>) -> String {
+        let mut bundle = fixture_bundle();
+        bundle.conventions = conventions::section(LANE_CONTEXT);
+        bundle.construct = CONSTRUCT_SOURCE.to_owned();
+        assemble_construct_prompt(&bundle, &bundle.construct, subject, task, None, budget)
+    }
+
+    /// The wall clock the executor mints a dispatch deadline against.
+    fn now_unix_millis() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
     }
 
     #[test]
@@ -629,6 +651,7 @@ mod tests {
             Some("abc123"),
             Some("shared order"),
             None,
+            None,
         );
         let prefix_len = construct.bytes().zip(review.bytes()).take_while(|(a, b)| a == b).count();
         assert!(construct.starts_with("## Conventions\n"), "lane context leads the prompt");
@@ -670,6 +693,36 @@ mod tests {
             cold_sibling[..prefix_len].contains(body),
             "a seeded dispatch must not push the work order out of the shared prefix",
         );
+    }
+
+    // Tripwire for #5998: the remaining budget is a property of *this* dispatch
+    // — the same member launched twice has different time left, and a lane run
+    // by hand has none at all. The plausible bug is the numbers moving into the
+    // instruction source, where they would be wrong for every dispatch but the
+    // one they were written for, and where they would break the shared
+    // prompt-cache prefix every sibling lane relies on.
+    #[test]
+    fn construct_prompt_names_the_budget_only_when_the_dispatch_carries_one() {
+        let unbounded = assembled_with_budget(Some("abc123"), Some("shared order"), None);
+        assert!(!unbounded.contains("## Budget"), "a dispatch that named no deadline grows no budget section");
+        assert!(
+            !CONSTRUCT_SOURCE.contains("## Budget\n"),
+            "the instruction source must not state a budget it cannot know",
+        );
+        assert!(
+            CONSTRUCT_SOURCE.contains("## Execution limit"),
+            "the policy for what to do about the limit is authored instruction text, not composed here",
+        );
+
+        let bounded = assembled_with_budget(
+            Some("abc123"),
+            Some("shared order"),
+            Budget::resolve(Some(now_unix_millis() + 58 * 60 * 1_000)),
+        );
+        let task_at = bounded.find("\n## Task\n").expect("the work order keeps its section");
+        let budget_at = bounded.find("\n## Budget\n").expect("a bounded dispatch names its budget");
+        assert!(task_at < budget_at, "the per-dispatch budget sits after the shared work order");
+        assert!(bounded.contains("minute(s) remain"), "the section states the time left: {bounded}");
     }
 
     // Tripwire for #5078: Construct used to restate Verify's full mechanical

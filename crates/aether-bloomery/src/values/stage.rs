@@ -17,6 +17,7 @@ use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::{StageId, WorkpieceId};
 use crate::values::{
     AgentProfile, ConfigScopes, Harness, PipelineManifest, ReasoningEffort, ResolvedConfigs, ResolvedModel, ToolPolicy,
+    WorkpieceSize,
 };
 
 /// The declared output name every dispatched attempt uploads its result record
@@ -292,7 +293,76 @@ pub struct StageBinding {
     /// [`ExecutionLimits`]. Authored per stage for the same reason
     /// [`retry_budget`](Self::retry_budget) is: a model lane and a compiler lane
     /// do not converge on the same clock.
+    ///
+    /// This is the limit a member of the middling size band runs under. The
+    /// other two bands are derived from it by
+    /// [`wall_clock_at`](Self::wall_clock_at) rather than authored beside it —
+    /// see that method for why the scaling is compiled rather than sealed.
     pub wall_clock_secs: u64,
+}
+
+impl StageBinding {
+    /// This binding's limit at `size` — [`sized_wall_clock_secs`] over the
+    /// number this binding authored.
+    #[must_use]
+    pub const fn wall_clock_at(&self, size: WorkpieceSize) -> u64 {
+        sized_wall_clock_secs(self.stage, self.wall_clock_secs, size)
+    }
+}
+
+/// The limit a member the scope routed into `size` runs under at `stage`, given
+/// the stage's authored wall clock (#5998).
+///
+/// One number for every member is a calibration nobody can make right: an hour
+/// was half of what a size L member on a thorough seat needed and three times
+/// what a size S one did, so the same value either cancelled finished work or
+/// let a stuck lane hold a slot for forty spare minutes. Bloom `7a2ff988…` on
+/// 2026-09-14 cancelled two size M members and one size L one at sixty minutes,
+/// the L one with nothing captured.
+///
+/// The scaling is compiled rather than authored beside
+/// [`StageBinding::wall_clock_secs`], which is the same choice the tag / gate
+/// strings and the retry budgets beside it are — refinable without an ADR.
+/// Sealing it instead would mean a third integer in every binding, which is a
+/// wire-shape change to a value the journal's decisions rows carry inline: the
+/// sealed bytes, their schema-digest ledger line, their upcast, and the pinned
+/// fixtures that freeze them would all move, for a calibration that is not a
+/// statement an operator makes about *this* bloom. What the operator authors
+/// stays one number per stage, and it still decides every band, because every
+/// band is a function of it.
+///
+/// Only the stages a model builds in scale. Everything else runs a compiler
+/// over the candidate's reverse-dependency closure or is a host gate, and
+/// answers the same question at the same cost whatever the scope called the
+/// work.
+///
+/// A free function rather than only a method on [`StageBinding`] because the
+/// host resolves the band at dispatch, where it holds the stage and the number
+/// the reducer already copied off the binding but not the binding itself. One
+/// definition, so the two cannot answer differently.
+#[must_use]
+pub const fn sized_wall_clock_secs(stage: StageId, authored_secs: u64, size: WorkpieceSize) -> u64 {
+    if !stage_scales_with_size(stage) {
+        return authored_secs;
+    }
+    match size {
+        // Never below the authored limit's own floor: a catalog may author a
+        // one-second stage, and halving that to nothing would dispatch a limit
+        // `validate` refuses to seal.
+        WorkpieceSize::Small if authored_secs > 1 => authored_secs / 2,
+        WorkpieceSize::Small | WorkpieceSize::Medium => authored_secs,
+        WorkpieceSize::Large => authored_secs.saturating_mul(2),
+    }
+}
+
+/// Whether a stage's cost tracks the size band the scope routed the work into.
+///
+/// The three stages a model builds in do: a size S member is half an hour's
+/// work and a size L one is an afternoon's. The compiler lanes and the host
+/// gates do not — they run over the candidate's closure, which the scope's own
+/// size line says nothing about.
+const fn stage_scales_with_size(stage: StageId) -> bool {
+    matches!(stage, StageId::Construct | StageId::Refine | StageId::Reconcile)
 }
 
 /// The set of stage bindings a bloom runs (ADR-0149 §The line).
@@ -1535,6 +1605,57 @@ mod tests {
             Err(CatalogError::WallClockOutOfRange { stage: StageId::Verify, wall_clock_secs: 86_401 })
         );
         assert_eq!(catalog_with_wall_clock(StageId::Verify, 900).validate(), Ok(()));
+    }
+
+    // Tripwire: the bands. A size L member gets longer than a middling one and
+    // a size S member less, at the three stages a model builds in and nowhere
+    // else — and the middle band stays the number the catalog authored, so a
+    // bloom sealed before the bands dispatches exactly the limits it did. A
+    // resolver that flattened back would restore #5998's incident: a size L
+    // member cancelled at sixty minutes with nothing captured.
+    #[test]
+    fn a_model_built_stage_runs_longer_at_l_than_at_s_and_a_compiler_lane_does_not() {
+        for stage in [StageId::Construct, StageId::Refine, StageId::Reconcile] {
+            let binding = binding(stage);
+            assert_eq!(binding.wall_clock_at(WorkpieceSize::Medium), binding.wall_clock_secs, "{stage:?}");
+            assert!(
+                binding.wall_clock_at(WorkpieceSize::Large) > binding.wall_clock_at(WorkpieceSize::Medium),
+                "{stage:?} must give a size L member more than a middling one",
+            );
+            assert!(
+                binding.wall_clock_at(WorkpieceSize::Small) < binding.wall_clock_at(WorkpieceSize::Medium),
+                "{stage:?} must not hold a slot for a size S member as long as for a middling one",
+            );
+        }
+
+        for stage in [StageId::Verify, StageId::AggregateVerify, StageId::BaseVerify, StageId::Study] {
+            let binding = binding(stage);
+            assert_eq!(
+                [
+                    binding.wall_clock_at(WorkpieceSize::Small),
+                    binding.wall_clock_at(WorkpieceSize::Medium),
+                    binding.wall_clock_at(WorkpieceSize::Large),
+                ],
+                [binding.wall_clock_secs; 3],
+                "{stage:?} runs over the candidate's closure, which the scope's size line says nothing about",
+            );
+        }
+    }
+
+    // Tripwire: the seal door refuses a zero limit, so no band may resolve one.
+    // A one-second stage is authorable, and halving it is the one arithmetic
+    // here that can reach zero.
+    #[test]
+    fn no_band_resolves_a_limit_the_seal_door_would_refuse() {
+        let mut shortest = binding(StageId::Construct);
+        shortest.wall_clock_secs = 1;
+        for size in [WorkpieceSize::Small, WorkpieceSize::Medium, WorkpieceSize::Large] {
+            assert!(shortest.wall_clock_at(size) > 0, "{size:?} resolved a limit no worker could run under");
+        }
+
+        let mut longest = binding(StageId::Construct);
+        longest.wall_clock_secs = u64::MAX;
+        assert_eq!(longest.wall_clock_at(WorkpieceSize::Large), u64::MAX, "the L band saturates rather than wrapping");
     }
 
     #[test]

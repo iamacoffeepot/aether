@@ -621,6 +621,7 @@ pub use values::WorkpieceBuilder;
 pub use values::WorkpieceFact;
 pub use values::WorkpieceFields;
 pub use values::WorkpieceRefusal;
+pub use values::WorkpieceSize;
 pub use values::WorkpiecesView;
 pub use values::WriteRevisionRequest;
 pub use values::classify_findings;
@@ -648,6 +649,7 @@ pub use values::signed_cancel;
 pub use values::signed_proposal;
 #[cfg(not(target_arch = "wasm32"))]
 pub use values::signed_reopen;
+pub use values::sized_wall_clock_secs;
 pub use values::split_lane_identity;
 pub use values::surface_additions;
 pub use values::surface_intersection;
