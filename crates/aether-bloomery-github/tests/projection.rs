@@ -16,7 +16,7 @@ use aether_bloomery::{
 use aether_bloomery_github::{
     CommissionProjectionApi, GithubError, GithubProjection, HttpRequest, HttpResponse, HttpTransport, Marker, NewIssue,
     ReqwestGithub, StaticTokenSource, commission_floor_title, fixture::FakeGithub, issue_title_is_valid,
-    landing_branch, marker::render_marker,
+    landing_branch, marker::render_marker, short_hex,
 };
 
 /// The two issue numbers the view's members address — objects the repository
@@ -379,6 +379,7 @@ fn commission(workpiece: &str, recorded_issue: Option<u64>) -> CommissionProject
         status: "open".to_owned(),
         recorded_issue,
         title: String::new(),
+        scope: None,
     }
 }
 
@@ -414,6 +415,22 @@ fn a_missing_receipt_does_not_adopt_a_matching_marker() {
     assert_eq!(projection.client().issue_body(first).as_deref(), Some(body.as_str()));
     assert_eq!(projection.client().issue_is_closed(first), Some(false), "the unrecepted create stays open");
     assert_eq!(projection.client().updated_issue_count(), 0, "the unrecepted create is not overwritten");
+}
+
+#[test]
+fn the_commission_mirror_renders_the_scope_not_its_digest() {
+    // The plausible bug: the replica dumps `scope_revision` as hex, so an
+    // operator opening the issue reads an address instead of the work order.
+    let projection = GithubProjection::new(FakeGithub::new());
+    let mut open = commission("wp-1", None);
+    open.scope = Some("## Problem statement\n\nNeed a CLI.\n\n## Design notes\n\nSeparate binary.\n".to_owned());
+
+    let number = projection.project_commission(&open).expect("create").expect("owns a replica");
+    let body = projection.client().issue_body(number).expect("the replica exists");
+    assert!(body.contains("## Problem statement") && body.contains("Need a CLI."), "the work order: {body}");
+    assert!(body.contains("Separate binary."), "design notes reach the replica: {body}");
+    assert!(!body.contains(&short_hex(&open.scope_revision.unwrap())), "the scope digest is not the body: {body}");
+    assert!(!body.contains(&short_hex(&open.intent)), "the intent digest is not the body: {body}");
 }
 
 #[test]

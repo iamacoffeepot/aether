@@ -33,6 +33,7 @@ mod profile;
 mod proof;
 mod question;
 mod retrospect;
+mod scope_render;
 mod scope_verify;
 mod spend;
 mod stage;

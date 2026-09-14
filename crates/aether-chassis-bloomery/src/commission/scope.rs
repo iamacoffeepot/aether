@@ -23,22 +23,13 @@ const DOGFOOD: &str = "Dogfood brief";
 const MANAGED: &[&str] =
     &[PROBLEM, DESIGN, PLAN, "Sub-issues", DEPENDS, SURFACE, CRATES, PROTECTED, READS, DOGFOOD, "Side findings"];
 
-/// The three labels that close `## Implementation plan`, shared by the parser
-/// that requires them and the renderer that writes them.
+/// The three labels that close `## Implementation plan`.
 ///
-/// Stated once because they are the one place the two sides must agree
-/// character for character: a renderer that stopped one label short of what the
-/// parser demands wrote every revision a description its own parser refused.
+/// [`ScopeRevision::render_fields`] writes the same labels. The roundtrip
+/// test is the tripwire that they still agree character for character.
 const SIZE_LABEL: &str = "**Size:**";
 const MODEL_LABEL: &str = "**Implementation model:**";
 const REASON_LABEL: &str = "**Routing reason:**";
-
-/// What the renderer writes on the reason line.
-///
-/// [`ScopeRouting`] stores size and model and discards the reason the parser
-/// validated, so a re-render has no authored reason to restate and says so
-/// rather than inventing one.
-const RERENDERED_REASON: &str = "re-rendered from the stored revision, which carries no authored reason";
 
 /// Render `markdown` as the next scope revision for `workpiece`.
 ///
@@ -106,171 +97,16 @@ fn parse_declaration(sections: &BTreeMap<String, String>) -> Result<(Vec<String>
 
 /// Work-order text the seal persists for construct.
 ///
-/// A stored advisory description wins when the operator put one on the
-/// revision. Otherwise the signed managed headings are rendered. A GitHub
-/// issue body is never an input.
-///
-/// The surface declaration is the exception: it is always rendered from the
-/// revision's own fields, over whatever block the stored description carries.
-/// [`declared_surface`](ScopeRevision::declared_surface) is what the seal door
-/// and the containment gate read, so it is the authority and the block is its
-/// rendering. An operator answering a parked surface request writes the
-/// successor as the current revision with a widened field and every other field
-/// — the description included — carried unchanged
-/// ([`with_widened_surface`](ScopeRevision::with_widened_surface), the shape
-/// `cargo xtask bloom amend` re-pins the member at). A renderer that echoed a
-/// description frozen one revision ago would hand the re-dispatched lane the
-/// exact surface it had just declined against.
+/// Delegates to [`ScopeRevision::render`]: a stored advisory description wins
+/// when present, otherwise the signed managed headings, and the surface
+/// declaration is always the revision's own fields.
 #[must_use]
 pub fn task_text(revision: &ScopeRevision) -> String {
-    if revision.description.trim().is_empty() {
-        return render_work_order(revision);
-    }
-    retarget_declaration(&revision.description, revision)
-}
-
-/// `body` with its managed surface-declaration blocks replaced by the ones
-/// `revision` renders to, spliced in where the first of them stood.
-///
-/// A body that declares no surface at all gets the declaration appended, which
-/// is the honest rendering of a revision whose field says something the text
-/// never did.
-fn retarget_declaration(body: &str, revision: &ScopeRevision) -> String {
-    let mut declaration = String::new();
-    push_declaration(&mut declaration, revision);
-
-    let mut out = String::with_capacity(body.len() + declaration.len());
-    let mut spliced = false;
-    let mut dropping = false;
-    for line in body.split_inclusive('\n') {
-        if let Some(name) = line.trim_end_matches(['\n', '\r']).strip_prefix("## ") {
-            dropping = matches!(name, SURFACE | CRATES | PROTECTED);
-            if dropping && !spliced {
-                splice(&mut out, &declaration);
-                spliced = true;
-            }
-        }
-        if !dropping {
-            out.push_str(line);
-        }
-    }
-    if !spliced {
-        splice(&mut out, &declaration);
-    }
-    out
-}
-
-/// Append `declaration` to `out` with exactly one blank line before it.
-///
-/// `declaration` opens with the newline [`push_list`] emits, so what varies is
-/// how much whitespace the text it lands after already ended with.
-fn splice(out: &mut String, declaration: &str) {
-    if out.is_empty() {
-        out.push_str(declaration.trim_start_matches('\n'));
-        return;
-    }
-    while out.ends_with("\n\n") {
-        out.pop();
-    }
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(declaration);
+    revision.render()
 }
 
 fn render_work_order(revision: &ScopeRevision) -> String {
-    let mut out = String::new();
-    push_section(&mut out, PROBLEM, &revision.problem);
-    push_section(&mut out, DESIGN, &revision.design);
-    out.push_str("## ");
-    out.push_str(PLAN);
-    out.push_str("\n\n");
-    out.push_str(revision.plan.trim());
-    out.push_str("\n\n");
-    out.push_str(SIZE_LABEL);
-    out.push(' ');
-    out.push_str(&revision.routing.size);
-    out.push('\n');
-    out.push_str(MODEL_LABEL);
-    out.push(' ');
-    out.push_str(&revision.routing.model);
-    out.push('\n');
-    out.push_str(REASON_LABEL);
-    out.push(' ');
-    out.push_str(RERENDERED_REASON);
-    out.push('\n');
-    if !revision.dependencies.is_empty() {
-        out.push_str("\n## ");
-        out.push_str(DEPENDS);
-        out.push_str("\n\n");
-        for dep in &revision.dependencies {
-            out.push_str("- ");
-            out.push_str(&dep.0);
-            out.push('\n');
-        }
-    }
-    push_declaration(&mut out, revision);
-    if !revision.declared_reads.is_empty() {
-        push_list(&mut out, READS, &revision.declared_reads);
-    }
-    if !revision.dogfood_brief.trim().is_empty() {
-        out.push('\n');
-        push_section(&mut out, DOGFOOD, &revision.dogfood_brief);
-    }
-    out
-}
-
-/// The surface-declaration blocks a revision renders to.
-///
-/// A crate-declared scope renders the blocks it was written with, not the globs
-/// they expanded to: the derived surface is a machine artifact of the workspace
-/// graph, and re-rendering it as the operator's own declaration would turn the
-/// next edit of this work order into a hand-maintained file list — the thing the
-/// crate block exists to stop.
-fn push_declaration(out: &mut String, revision: &ScopeRevision) {
-    if revision.declared_crates.is_empty() {
-        push_list(out, SURFACE, &revision.declared_surface);
-    } else {
-        push_list(out, CRATES, &revision.declared_crates);
-        let protected = protected_files(&revision.declared_surface);
-        if !protected.is_empty() {
-            push_list(out, PROTECTED, &protected);
-        }
-    }
-}
-
-fn push_list(out: &mut String, name: &str, entries: &[String]) {
-    out.push_str("\n## ");
-    out.push_str(name);
-    out.push_str("\n\n");
-    for entry in entries {
-        out.push_str(entry);
-        out.push('\n');
-    }
-}
-
-/// The file-granular entries of a derived surface — what `## Protected files`
-/// put there.
-///
-/// Read back out of the surface rather than stored beside it: a derived
-/// surface's only literal entries are the protected ones (a crate subtree is a
-/// `dir/**`, a shared root likewise), and the granularity check refuses any
-/// literal the approval policy does not name, so nothing else can be sitting in
-/// that position.
-fn protected_files(surface: &[String]) -> Vec<String> {
-    surface
-        .iter()
-        .filter(|glob| matches!(SurfacePattern::parse(glob), Some(SurfacePattern::Exact(_))))
-        .cloned()
-        .collect()
-}
-
-fn push_section(out: &mut String, name: &str, body: &str) {
-    out.push_str("## ");
-    out.push_str(name);
-    out.push_str("\n\n");
-    out.push_str(body.trim());
-    out.push_str("\n\n");
+    revision.render_fields()
 }
 
 /// Load `path` and parse it as a revision for `workpiece`.
