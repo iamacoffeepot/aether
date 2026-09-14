@@ -1150,4 +1150,50 @@ impl CoordinationState {
             })
         })
     }
+
+    /// The retained receipt when a settled contextual run proved `tree` under
+    /// the complete currently sealed composition contract.
+    ///
+    /// The tree-keyed sibling of [`Self::contextual_aggregate_proof`]: the
+    /// head-keyed form answers whether the current selected root may reuse its
+    /// run, this form answers whether a resolving fold may mint the legacy
+    /// aggregate-verify memo entry the landing's base receipt reads. Same
+    /// validation — a terminal green contextual run with a full contract
+    /// binding, every request passed in with a `VerificationResult` bound to
+    /// the tree — without the head equality that ties the reuse seam to the
+    /// current root.
+    #[must_use]
+    pub fn contextual_proof_for_tree(&self, tree: Digest) -> Option<&Evidence> {
+        self.runs.iter().find_map(|run| {
+            let (Some(node), Some(composition)) = (run.node.as_ref(), run.plan.composition.as_ref()) else {
+                return None;
+            };
+            let members = run
+                .plan
+                .requests
+                .iter()
+                .map(|request| MemberContractPin { request: request.digest(), contract: request.contract.digest() })
+                .collect();
+            let valid = run.plan.mode == SharedRunMode::Contextual
+                && !run.plan.requests.is_empty()
+                && run.is_terminal()
+                && !run.stale
+                && run.unfinished.is_empty()
+                && node.candidate.tree == tree
+                && composition.contract == self.composition_contract.bind(members)
+                && run.plan.requests.iter().all(|request| self.composition_contract.covers(request))
+                && run.completed.len() == run.plan.requests.len()
+                && run.plan.requests.iter().zip(&run.completed).all(|(request, outcome)| {
+                    matches!(outcome, MemberVerifyOutcome::PassedIn { request: proven_request, node: proven, receipt }
+                        if *proven_request == request.digest()
+                            && *proven == node.digest()
+                            && receipt.kind == crate::EvidenceKind::VerificationResult
+                            && receipt.validates(&node.candidate.tree))
+                });
+            valid.then(|| match &run.completed[0] {
+                MemberVerifyOutcome::PassedIn { receipt, .. } => receipt,
+                _ => unreachable!("validated contextual completion"),
+            })
+        })
+    }
 }
