@@ -57,16 +57,17 @@ use std::sync::OnceLock;
 use aether_data::Kind;
 use aether_data::Schema;
 use aether_data::schema::SchemaType;
-use aether_data::wire::{Error as WireError, from_bytes, to_vec};
+use aether_data::wire::{Error as WireError, from_bytes, take_from_bytes, to_vec};
 use serde::de::DeserializeOwned;
 
 use crate::digest::{Digest, encode_hex, schema_digest};
 use crate::reduce::decisions_v1::DecisionsV1;
-use crate::reduce::{Decisions, Event};
+use crate::reduce::{Decision, Decisions, Event, Outcome};
+use crate::values::coordination_pre_coalesce::{CoordinationPolicyPreCoalesce, CoordinationStatePreCoalesce};
 use crate::values::process_instructions_pre_reader::ModelProcessInstructionsPreReader;
 use crate::values::{
-    ApprovalPolicy, CoordinationPolicy, ModelOverride, ModelProcessInstructions, PipelineManifest, PrecheckPolicy,
-    PriceTable, SpendCeiling, StageCatalog,
+    ApprovalPolicy, CoordinationPolicy, CoordinationState, ModelOverride, ModelProcessInstructions, PipelineManifest,
+    PrecheckPolicy, PriceTable, SpendCeiling, StageCatalog,
 };
 
 pub use rendering::{RenderError, render_schema};
@@ -379,6 +380,37 @@ pub const EVENT_PRE_PREPARATION_CONFLICT_DIGEST: Digest =
 pub const EVENT_PRE_PROOF_REUSED_DIGEST: Digest =
     Digest::pinned("56e92c7ed1b72788f1021c5f4c6382863e743be79ae3097631c83b507742e4e9");
 
+/// Journal schema immediately before `CoordinationPolicy::coalesce_millis`.
+///
+/// Copied from the `decisions` line the ledger carried as current at
+/// `a12fe3fc4951a2b2890fa29b4a22b5e219383776` —
+/// `a6311d65d812630ad5ae3c0804c4ac92aaa8ac98c373d6106921cf3d5956d5c8`.
+pub const DECISIONS_PRE_COALESCE_DIGEST: Digest =
+    Digest::pinned("a6311d65d812630ad5ae3c0804c4ac92aaa8ac98c373d6106921cf3d5956d5c8");
+
+/// Event schema immediately before `Fact::HoldSharedRunCoalesce`.
+///
+/// Copied from the `event` line the ledger carried as current at
+/// `a12fe3fc4951a2b2890fa29b4a22b5e219383776` —
+/// `9e55e67bebd4cc5e421e61d07e352c0535f9ba09548c207cb353649b97df1f1c`. The
+/// hold variant is appended past `ProofReused`, so every discriminant a row
+/// of that era could hold is unmoved.
+pub const EVENT_PRE_COALESCE_DIGEST: Digest =
+    Digest::pinned("9e55e67bebd4cc5e421e61d07e352c0535f9ba09548c207cb353649b97df1f1c");
+
+/// Sealed [`CoordinationPolicy`] schema immediately before `coalesce_millis`.
+///
+/// Copied from the `aether.bloomery.coordination_policy` line the ledger
+/// carried as current at `a12fe3fc4951a2b2890fa29b4a22b5e219383776` —
+/// `3848558a440bcdfcb70156fafb03479b2bb4e64f80e018560d01f7844620831a`.
+pub const COORDINATION_POLICY_PRE_COALESCE_DIGEST: Digest =
+    Digest::pinned("3848558a440bcdfcb70156fafb03479b2bb4e64f80e018560d01f7844620831a");
+
+/// `Decision::RecordCoordinationState`'s declaration index. A tripwire in
+/// this module's tests pins it against an encoded `None` state so a variant
+/// inserted rather than appended cannot silently decode the wrong body.
+const RECORD_COORDINATION_STATE: u32 = 64;
+
 /// The stamp on sealed model-process instruction bundles written before
 /// ADR-0216 appended `retrospect` and `retrospect_finding_contract`.
 pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
@@ -412,6 +444,7 @@ pub fn decode_recorded_decisions(bytes: &[u8], schema: Option<&[u8]>) -> Result<
             upcast_decisions_pre_manifestless,
             upcast_decisions_pre_precheck,
             upcast_decisions_pre_coordination,
+            upcast_decisions_pre_coalesce,
         ],
     )
 }
@@ -469,6 +502,45 @@ fn upcast_decisions_pre_coordination(bytes: &[u8]) -> Result<Decisions, WireErro
     from_bytes(bytes)
 }
 
+/// Pre-coalesce rows carry an eight-field policy inside
+/// `RecordCoordinationState`. Today's decoder reads a trailing optional there,
+/// so those rows are decoded through the frozen policy and state.
+fn upcast_decisions_pre_coalesce(bytes: &[u8]) -> Result<Decisions, WireError> {
+    let (outcome, rest) = take_from_bytes::<Outcome>(bytes)?;
+    let mut cursor = rest;
+    let count = read_u32(&mut cursor)? as usize;
+    let mut effects = Vec::with_capacity(count);
+    for _ in 0..count {
+        effects.push(decode_decision_pre_coalesce(&mut cursor)?);
+    }
+    if !cursor.is_empty() {
+        return Err(WireError::TrailingBytes);
+    }
+    Ok(Decisions { outcome, effects })
+}
+
+fn read_u32(cursor: &mut &[u8]) -> Result<u32, WireError> {
+    let bytes: [u8; 4] = cursor.get(..4).and_then(|slice| slice.try_into().ok()).ok_or(WireError::UnexpectedEof)?;
+    *cursor = &cursor[4..];
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn decode_decision_pre_coalesce(cursor: &mut &[u8]) -> Result<Decision, WireError> {
+    let selector =
+        u32::from_le_bytes(cursor.get(..4).and_then(|slice| slice.try_into().ok()).ok_or(WireError::UnexpectedEof)?);
+    if selector != RECORD_COORDINATION_STATE {
+        let (decision, rest) = take_from_bytes::<Decision>(cursor)?;
+        *cursor = rest;
+        return Ok(decision);
+    }
+    *cursor = &cursor[4..];
+    let (bloom, rest) = take_from_bytes(cursor)?;
+    *cursor = rest;
+    let (state, rest) = take_from_bytes::<Option<Box<CoordinationStatePreCoalesce>>>(cursor)?;
+    *cursor = rest;
+    Ok(Decision::RecordCoordinationState { bloom, state: state.map(|prior| Box::new(CoordinationState::from(*prior))) })
+}
+
 /// Pre-#5278 rows carry the same wire layout today's decoder reads: the fold
 /// only appended `Fact::ProposeChange`, past every discriminant a row of that
 /// era could hold.
@@ -505,6 +577,12 @@ fn upcast_event_pre_proof_reused(bytes: &[u8]) -> Result<Event, WireError> {
     from_bytes(bytes)
 }
 
+/// Pre-coalesce event rows carry the same wire layout today's decoder reads:
+/// `Fact::HoldSharedRunCoalesce` is appended past every prior discriminant.
+fn upcast_event_pre_coalesce(bytes: &[u8]) -> Result<Event, WireError> {
+    from_bytes(bytes)
+}
+
 /// Pre-ADR-0216 bundles carry seventeen fields where today's decoder reads
 /// nineteen, so the row is decoded through its frozen shape and re-encoded
 /// with both reader fields empty.
@@ -531,6 +609,7 @@ pub fn decode_recorded_event(bytes: &[u8], schema: Option<&[u8]>) -> Result<Even
             upcast_event_pre_coordination,
             upcast_event_pre_preparation_conflict,
             upcast_event_pre_proof_reused,
+            upcast_event_pre_coalesce,
         ],
     )
 }
@@ -549,6 +628,7 @@ pub static DECISIONS: PersistedKind = PersistedKind {
         PersistedUpcast { digest: DECISIONS_PRE_MANIFESTLESS_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_PRECHECK_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_COORDINATION_DIGEST, reshape: None },
+        PersistedUpcast { digest: DECISIONS_PRE_COALESCE_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };
@@ -565,6 +645,7 @@ pub static EVENT: PersistedKind = PersistedKind {
         PersistedUpcast { digest: EVENT_PRE_COORDINATION_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_PREPARATION_CONFLICT_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_PROOF_REUSED_DIGEST, reshape: None },
+        PersistedUpcast { digest: EVENT_PRE_COALESCE_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };
@@ -587,12 +668,22 @@ pub static PRECHECK_POLICY: PersistedKind = PersistedKind {
     current: OnceLock::new(),
 };
 
+/// Pre-#5947 policies carry eight fields where today's decoder reads nine, so
+/// the row is decoded through its frozen shape and re-encoded with the hold
+/// absent.
+fn reshape_coordination_policy_pre_coalesce(bytes: &[u8]) -> Result<Vec<u8>, WireError> {
+    to_vec(&CoordinationPolicy::from(from_bytes::<CoordinationPolicyPreCoalesce>(bytes)?))
+}
+
 /// The [`PersistedKind`] for sealed [`CoordinationPolicy`].
 pub static COORDINATION_POLICY: PersistedKind = PersistedKind {
     name: CoordinationPolicy::NAME,
     schema: &<CoordinationPolicy as Schema>::SCHEMA,
     bootstrap: Bootstrap::Current,
-    upcasts: &[],
+    upcasts: &[PersistedUpcast {
+        digest: COORDINATION_POLICY_PRE_COALESCE_DIGEST,
+        reshape: Some(reshape_coordination_policy_pre_coalesce),
+    }],
     current: OnceLock::new(),
 };
 
@@ -691,9 +782,12 @@ mod tests {
     use aether_data::Schema;
     use aether_data::wire::to_vec;
 
-    use super::{DECISIONS, EVENT, PersistedSchemaError, decode_persisted, decode_recorded_decisions};
+    use super::{
+        DECISIONS, EVENT, PersistedSchemaError, RECORD_COORDINATION_STATE, decode_persisted, decode_recorded_decisions,
+    };
     use crate::digest::{Digest, SCHEMA_DIGEST_DOMAIN, schema_digest};
-    use crate::reduce::{Decisions, Event, Outcome};
+    use crate::ids::BloomId;
+    use crate::reduce::{Decision, Decisions, Event, Outcome};
 
     fn empty_decisions() -> Decisions {
         Decisions { outcome: Outcome::Duplicate, effects: Vec::new() }
@@ -710,6 +804,17 @@ mod tests {
         let decoded = decode_persisted(&DECISIONS, Some(current.as_bytes()), &bytes, &[super::upcast_decisions_v1])
             .expect("matching digest decodes");
         assert_eq!(decoded, recorded);
+    }
+
+    #[test]
+    fn record_coordination_state_selector_is_its_declaration_index() {
+        // Tripwire: the pre-coalesce upcast peeks this discriminant to decode
+        // the old policy shape. Inserting a Decision variant in front of
+        // RecordCoordinationState would make that peek read the wrong body.
+        let encoded = to_vec(&Decision::RecordCoordinationState { bloom: BloomId(Digest::default()), state: None })
+            .expect("an empty coordination record encodes");
+        let selector = u32::from_le_bytes(encoded[..4].try_into().expect("a selector is four bytes"));
+        assert_eq!(selector, RECORD_COORDINATION_STATE);
     }
 
     #[test]

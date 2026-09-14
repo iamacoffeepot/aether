@@ -926,6 +926,11 @@ pub enum Fact {
         /// The trusted dispatch nonce that produced the reused fact.
         producing_dispatch: String,
     },
+    /// A ready contextual verification request is waiting for sibling
+    /// constructs still in flight before the scheduler proposes a shared run.
+    /// Appended past [`Fact::ProofReused`] so every prior fact keeps its wire
+    /// discriminant.
+    HoldSharedRunCoalesce { bloom: BloomId, until_unix_millis: u64, waiting_for: Vec<WorkpieceId> },
 }
 
 impl Fact {

@@ -174,6 +174,7 @@ fn coordination_state(
         max_attribution_probes: 2,
         movement_budget: 2,
         reservation_millis: 30_000,
+        coalesce_millis: None,
         host_class: "fixture".into(),
     };
     let template = CompositionContractTemplate {

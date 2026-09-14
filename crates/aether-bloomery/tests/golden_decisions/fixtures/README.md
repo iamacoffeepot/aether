@@ -18,6 +18,14 @@ verification and eager integration. Raw sha256
 `28a3ba3a8bd3477f805b52cedb7cadd5a575cadaf050f1ae61cb62fddc444a2a`; they
 carry the stamps `decisions cd1234d2…` and `event 55af52a6…`.
 
+`pre-coalesce-decisions.bin` and `pre-coalesce-event.bin` are the
+`decisions.bin` and `containment-refused-event.bin` of
+`a12fe3fc4951a2b2890fa29b4a22b5e219383776`, the last commit before
+`CoordinationPolicy::coalesce_millis`. Raw sha256
+`0dbfcab9761e8887a14fcf76702286c635db1381a0f577ac0950e202f44d2914` and
+`28a3ba3a8bd3477f805b52cedb7cadd5a575cadaf050f1ae61cb62fddc444a2a`; they
+carry the stamps `decisions a6311d65…` and `event 9e55e67b…`.
+
 `schema-digests.txt` pins a *history*: one kind-and-digest line per
 persisted shape, oldest first. A shape change appends a line and
 registers an upcast. Regenerating this file only appends a newly current

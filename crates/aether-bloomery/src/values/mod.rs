@@ -15,6 +15,7 @@ mod commission;
 mod composition;
 mod config;
 mod coordination;
+pub(crate) mod coordination_pre_coalesce;
 mod fields;
 mod finding;
 mod granularity;
@@ -80,13 +81,13 @@ pub use coordination::{
     CompatibilityPreviewRecord, CompositionContract, CompositionContractTemplate, CompositionInput, CompositionPlan,
     ConstructContext, ConstructionAdmission, ConstructionCheckpoint, ContextualAttemptDispatch,
     ContextualInvocationTemplate, ContextualResolutionClaim, CoordinationDiagnostic, CoordinationPolicy,
-    CoordinationState, EagerIntegrationState, FailureScope, GenerationMember, IntegrationAppendPlan,
-    IntegrationGeneration, IntegrationHead, MemberContractPin, MemberPin, MemberVerifyLatency, MemberVerifyOutcome,
-    MemberVerifyRequest, PartialHeadRepairCompletion, PartialHeadRepairDispatch, PartialHeadRepairPlan,
-    PreparedCandidate, ResolutionProof, SharedRunCompletion, SharedRunDispatch, SharedRunExecution, SharedRunMode,
-    SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunPreparation, SharedRunRecord, StableHeadReservation,
-    SurvivorGroup, VerificationContract, VerificationMode, VerificationObligation, construction_nonce_digest,
-    host_class_digest, verification_environment_digest,
+    CoordinationState, DEFAULT_COALESCE_MILLIS, EagerIntegrationState, FailureScope, GenerationMember,
+    IntegrationAppendPlan, IntegrationGeneration, IntegrationHead, MemberContractPin, MemberPin, MemberVerifyLatency,
+    MemberVerifyOutcome, MemberVerifyRequest, PartialHeadRepairCompletion, PartialHeadRepairDispatch,
+    PartialHeadRepairPlan, PreparedCandidate, ResolutionProof, SharedRunCompletion, SharedRunDispatch,
+    SharedRunExecution, SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunPreparation,
+    SharedRunRecord, StableHeadReservation, SurvivorGroup, VerificationContract, VerificationMode,
+    VerificationObligation, construction_nonce_digest, host_class_digest, verification_environment_digest,
 };
 pub use fields::{FieldKind, WorkpieceFact, WorkpieceFields};
 pub use finding::{
