@@ -135,6 +135,20 @@ Review = { agent = { harness = "Claude", model = "claude-sonnet-5" }, reasoning_
 AggregateReview = { agent = { harness = "Claude", model = "claude-sonnet-5" }, reasoning_effort = "High" }
 Study = { agent = { harness = "Claude", model = "claude-opus-5" }, reasoning_effort = "High" }
 
+# Muse 1.3 writes, Sonnet judges. The 1.3 retest: muse-spark-1.3-contributor
+# High on Construct/Refine/Reconcile, claude-sonnet-5 High on the two review
+# seats. The catalog still defaults those construct seats to 1.2, so this
+# profile is what pins the generation — a copy of the catalog default would
+# silently retest 1.2. The reader sits on Opus, same owner decision as
+# grok-build-sonnet-judge.
+[model_overrides.muse-build-sonnet-judge.per_stage]
+Construct = { agent = { harness = "Muse", model = "muse-spark-1.3-contributor" }, reasoning_effort = "High" }
+Refine = { agent = { harness = "Muse", model = "muse-spark-1.3-contributor" }, reasoning_effort = "High" }
+Reconcile = { agent = { harness = "Muse", model = "muse-spark-1.3-contributor" }, reasoning_effort = "High" }
+Review = { agent = { harness = "Claude", model = "claude-sonnet-5" }, reasoning_effort = "High" }
+AggregateReview = { agent = { harness = "Claude", model = "claude-sonnet-5" }, reasoning_effort = "High" }
+Study = { agent = { harness = "Claude", model = "claude-opus-5" }, reasoning_effort = "High" }
+
 [forecasts.none]
 predicted_tokens = 0
 predicted_worker_secs = 0
@@ -167,5 +181,10 @@ forecast = "none"
 
 [profiles.grok-build-sonnet-judge]
 model_override = "grok-build-sonnet-judge"
+price_table = "standard"
+forecast = "none"
+
+[profiles.muse-build-sonnet-judge]
+model_override = "muse-build-sonnet-judge"
 price_table = "standard"
 forecast = "none"
