@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use aether_bloomery::WorkpieceId;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -26,6 +27,7 @@ const HINTS: &[KeyHint] = &[
     KeyHint { keys: "Enter", action: "open" },
     KeyHint { keys: "l", action: "journal" },
     KeyHint { keys: "t", action: "timeline" },
+    KeyHint { keys: "b", action: "time" },
     KeyHint { keys: "d", action: "days" },
     KeyHint { keys: "c", action: "cost" },
     KeyHint { keys: "o", action: "logs" },
@@ -157,6 +159,7 @@ impl Detail {
             }
             KeyCode::Char('l') => self.bloom_id().map_or(Outcome::Handled, |id| Outcome::Push(Nav::journal(Some(id)))),
             KeyCode::Char('t') => self.bloom_id().map_or(Outcome::Handled, |id| Outcome::Push(Nav::timeline(id))),
+            KeyCode::Char('b') => self.time_nav().map_or(Outcome::Handled, Outcome::Push),
             KeyCode::Char('d') => Outcome::Push(Nav::days()),
             KeyCode::Char('c') => Outcome::Push(Nav::cost()),
             KeyCode::Char('o') => Outcome::Push(Nav::coordinator_log()),
@@ -240,6 +243,25 @@ impl Detail {
             Focus::Bloom { id } | Focus::Composition { bloom: id } => Some(*id),
             Focus::Member { bloom, .. } | Focus::Dispatch { bloom, .. } => Some(*bloom),
             Focus::Seal
+            | Focus::Record { .. }
+            | Focus::Artifact { .. }
+            | Focus::Transcript { .. }
+            | Focus::Evidence { .. }
+            | Focus::EvidenceFile { .. }
+            | Focus::Workpiece { .. } => None,
+        }
+    }
+
+    fn time_nav(&self) -> Option<Nav> {
+        match &self.focus {
+            Focus::Member { bloom, workpiece } => Some(Nav::time(*bloom, workpiece.clone())),
+            Focus::Composition { bloom } => Some(Nav::time(*bloom, WorkpieceId::COMPOSITION)),
+            Focus::Bloom { id } => match self.selected_line() {
+                Some(Line { key: RowKey::Member(workpiece), .. }) => Some(Nav::time(*id, workpiece.clone())),
+                _ => None,
+            },
+            Focus::Seal
+            | Focus::Dispatch { .. }
             | Focus::Record { .. }
             | Focus::Artifact { .. }
             | Focus::Transcript { .. }
@@ -720,6 +742,25 @@ mod tests {
             assert_eq!(detail.handle_key(KeyEvent::from(KeyCode::Char('j')), store), Outcome::Handled);
         }
         panic!("never reached digest {}", target.as_hex());
+    }
+
+    #[test]
+    fn b_opens_the_member_time_breakdown() {
+        // The plausible bug: the footer paints `b time` on a member frame
+        // while the match drops it, so the advertised door goes nowhere.
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: digest(1),
+                members: vec![MemberView { workpiece: "wp-a".to_owned(), ..MemberView::default() }],
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        let (mut detail, store) = detail_over(Focus::member(digest(1), "wp-a"), view);
+        assert_eq!(
+            detail.handle_key(KeyEvent::from(KeyCode::Char('b')), &store),
+            Outcome::Push(Nav::time(digest(1), "wp-a"))
+        );
     }
 
     #[test]

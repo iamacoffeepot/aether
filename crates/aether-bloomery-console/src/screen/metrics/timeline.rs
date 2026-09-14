@@ -27,6 +27,7 @@ use super::glyph::{CellKind, Silence, operator_action};
 const HINTS: &[KeyHint] = &[
     KeyHint { keys: "j/k", action: "select" },
     KeyHint { keys: "Enter", action: "open" },
+    KeyHint { keys: "b", action: "time" },
     KeyHint { keys: "Esc", action: "back" },
     KeyHint { keys: "r", action: "refresh" },
     KeyHint { keys: "q", action: "quit" },
@@ -87,6 +88,11 @@ impl Timeline {
                 Outcome::Handled
             }
             KeyCode::Enter => self.selected_focus().map_or(Outcome::Handled, |focus| Outcome::Push(Nav::focus(focus))),
+            KeyCode::Char('b') => self
+                .cursor
+                .selected()
+                .cloned()
+                .map_or(Outcome::Handled, |workpiece| Outcome::Push(Nav::time(self.bloom, workpiece))),
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -332,6 +338,34 @@ mod tests {
         assert!(reconstructed.contains("axis: reconstructed"), "{reconstructed}");
         assert!(!live.contains("axis: reconstructed"), "{live}");
         assert_ne!(live, reconstructed);
+    }
+
+    #[test]
+    fn b_opens_the_member_time_breakdown() {
+        // The plausible bug: the footer paints `b time` while Enter is still
+        // the only drill-in, so the operator cannot reach the breakdown from
+        // the lane they are already looking at.
+        let bloom = DigestHex::from_bytes([1; 32]);
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_timeline(
+            bloom,
+            Ok(MetricsTimeline {
+                bloom,
+                spans: vec![TimelineSpan {
+                    workpiece: "wp-a".to_owned(),
+                    stage: StageId::Construct,
+                    started_unix_millis: Some(1_000),
+                    ..TimelineSpan::default()
+                }],
+                ..MetricsTimeline::default()
+            }),
+        );
+        let mut timeline = Timeline::new(bloom);
+        timeline.reseat(&store);
+        assert_eq!(
+            timeline.handle_key(KeyEvent::from(KeyCode::Char('b')), &store),
+            Outcome::Push(Nav::time(bloom, "wp-a"))
+        );
     }
 
     #[test]
