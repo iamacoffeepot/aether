@@ -599,6 +599,24 @@ fn aggregate_review_faulted(upload: &UploadedEvidence) -> bool {
     upload.verdict == StageVerdict::ExecutorFault || reviewed_nothing(upload)
 }
 
+/// Re-kind an empty verdict's evidence as the fault the admission files it as.
+///
+/// `normalize_stage_result` kinds a passing verdict `Approval`, and the
+/// reducer's fault series folds on the kind: an `Approval` reaches
+/// `RecordEvidence` and derives nothing, so the bloom would take the fault fact
+/// and still render as an ordinary bloom sitting quietly between dispatches —
+/// the exact shape ADR-0176's `executor_fault` view exists to make visible.
+/// Only the kind moves — the same subject, the same detail artifact — exactly as
+/// a bounced repair lap and an advisory pass re-kind theirs. A lane that stamped
+/// `ExecutorFault` itself already carries the kind and is untouched.
+fn empty_verdict_evidence(upload: &UploadedEvidence, evidence: Evidence) -> Evidence {
+    if reviewed_nothing(upload) {
+        Evidence { kind: EvidenceKind::ExecutorFault, ..evidence }
+    } else {
+        evidence
+    }
+}
+
 /// The admission event for an aggregate review whose executor could not judge
 /// the fold (ADR-0176) — the sibling of [`aggregate_review_event`] for the one
 /// verdict that is not a verdict.
@@ -1047,7 +1065,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
         }
     } else if record.stage == StageId::AggregateReview {
         if aggregate_review_faulted(upload) {
-            aggregate_review_executor_fault_event(&record, evidence)
+            aggregate_review_executor_fault_event(&record, empty_verdict_evidence(upload, evidence))
         } else {
             let (event, decomposition) = aggregate_review_event(store, &record, upload, evidence)?;
             aggregate_findings = decomposition;

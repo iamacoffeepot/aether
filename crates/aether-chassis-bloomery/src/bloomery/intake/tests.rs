@@ -1718,6 +1718,14 @@ fn a_passing_review_with_no_findings_and_no_notes_folds_as_a_fault() {
     };
 
     let empty = admit(&mut store, "n-empty", None);
+    // Tripwire: `normalize_stage_result` kinds a passing verdict `Approval`,
+    // and the reducer's fault series folds on the kind — an `Approval` here
+    // files the fact and derives nothing, leaving the bloom rendering as an
+    // ordinary one sitting quietly between dispatches.
+    if let Fact::AggregateReviewExecutorFault { evidence, .. } = &empty {
+        assert_eq!(evidence.kind, EvidenceKind::ExecutorFault, "the empty verdict is re-kinded as the fault it is");
+        assert_eq!(evidence.subject, tree, "and still binds the tree the order displayed");
+    }
     assert!(
         matches!(&empty, Fact::AggregateReviewExecutorFault { bloom: faulted, .. } if *faulted == bloom),
         "a verdict with nothing in it is a lane that never judged the fold, got {empty:?}",
