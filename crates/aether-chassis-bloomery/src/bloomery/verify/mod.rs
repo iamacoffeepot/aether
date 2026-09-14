@@ -6,7 +6,8 @@
 //! A proof fact is addressed by `(closure_key, test, result, host_class)`.
 //! [`closure_key`] hashes a package's git-addressed dependency closure;
 //! [`HostClass`] is the opaque host the coordinator supplies; [`discriminate`]
-//! is the only constructor of facts the ledger will store;
+//! constructs member, aggregate, and sweep facts, and a green contextual shared
+//! run records declared-gate facts without a second suite (#5948);
 //! [`attribute_gate_failure`] is the failure-attribution path member verify
 //! and the aggregate gate share; [`next_batch_probe`] attributes composed
 //! failures using retained subset experiments; [`run_sweep`] converts unknown facts on idle
@@ -47,7 +48,7 @@ pub use containment::{
 pub use contextual_facts::{
     ContextualFactError, ContextualProofFactReuse, ContextualProofReuse, ContextualRunnerReport,
     contextual_bundle_reports, contextual_fact_key, observed_failed_tests, observed_probe_verdict,
-    record_contextual_facts, reuse_contextual_proof,
+    record_contextual_facts, record_green_contextual_facts, reuse_contextual_proof,
 };
 #[cfg(feature = "runtime")]
 pub use facts::record_proof_facts;

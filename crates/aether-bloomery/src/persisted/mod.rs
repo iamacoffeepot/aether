@@ -369,6 +369,16 @@ pub const EVENT_PRE_COORDINATION_DIGEST: Digest =
 pub const EVENT_PRE_PREPARATION_CONFLICT_DIGEST: Digest =
     Digest::pinned("19dfa8e6713e44674a1b75b87e10ebda393dbab3f2f286e78230dfa4a8565e2e");
 
+/// Event schema immediately before `Fact::ProofReused`.
+///
+/// Copied from the `event` line the ledger carried as current at
+/// `7a21be82832097be17c46b9af94f5e6bfced54d7` —
+/// `56e92c7ed1b72788f1021c5f4c6382863e743be79ae3097631c83b507742e4e9`. The
+/// reused-proof variant is appended past `RequestConstructionAdmission`, so
+/// every discriminant a row of that era could hold is unmoved.
+pub const EVENT_PRE_PROOF_REUSED_DIGEST: Digest =
+    Digest::pinned("56e92c7ed1b72788f1021c5f4c6382863e743be79ae3097631c83b507742e4e9");
+
 /// The stamp on sealed model-process instruction bundles written before
 /// ADR-0216 appended `retrospect` and `retrospect_finding_contract`.
 pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
@@ -489,6 +499,12 @@ fn upcast_event_pre_preparation_conflict(bytes: &[u8]) -> Result<Event, WireErro
     from_bytes(bytes)
 }
 
+/// Pre-proof-reuse event rows carry the same wire layout today's decoder
+/// reads: `Fact::ProofReused` is appended past every prior discriminant.
+fn upcast_event_pre_proof_reused(bytes: &[u8]) -> Result<Event, WireError> {
+    from_bytes(bytes)
+}
+
 /// Pre-ADR-0216 bundles carry seventeen fields where today's decoder reads
 /// nineteen, so the row is decoded through its frozen shape and re-encoded
 /// with both reader fields empty.
@@ -514,6 +530,7 @@ pub fn decode_recorded_event(bytes: &[u8], schema: Option<&[u8]>) -> Result<Even
             upcast_event_pre_precheck,
             upcast_event_pre_coordination,
             upcast_event_pre_preparation_conflict,
+            upcast_event_pre_proof_reused,
         ],
     )
 }
@@ -547,6 +564,7 @@ pub static EVENT: PersistedKind = PersistedKind {
         PersistedUpcast { digest: EVENT_PRE_PRECHECK_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_COORDINATION_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_PREPARATION_CONFLICT_DIGEST, reshape: None },
+        PersistedUpcast { digest: EVENT_PRE_PROOF_REUSED_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };

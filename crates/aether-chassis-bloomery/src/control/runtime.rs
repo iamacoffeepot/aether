@@ -1464,7 +1464,8 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::SuppressionDisposition { bloom, .. }
         | Fact::CompositionNarrowed { bloom, .. }
         | Fact::SurfaceGranted { bloom, .. }
-        | Fact::StudyCompleted { bloom, .. } => Some(*bloom),
+        | Fact::StudyCompleted { bloom, .. }
+        | Fact::ProofReused { bloom, .. } => Some(*bloom),
         Fact::ConstructionCheckpointObserved { checkpoint } => Some(checkpoint.bloom),
         Fact::RequestConstructionAdmission { admission } => Some(admission.dispatch.bloom),
         Fact::ObserveMainline { .. }

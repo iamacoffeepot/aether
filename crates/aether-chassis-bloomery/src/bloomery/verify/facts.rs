@@ -1,8 +1,10 @@
 //! Discriminated proof facts and the only path that writes them (ADR-0200).
 //!
 //! A runner report is not a fact. [`discriminate`] keeps only tests that
-//! agreed across two independent runs; [`record_proof_facts`] is the verify
-//! path that persists those, and it will not accept a raw report.
+//! agreed across two independent runs. A green contextual shared run is the
+//! other admitted source: [`DiscriminatedFacts::from_green_run`] records one
+//! fact per declared gate so a single pass can populate the ledger (#5948).
+//! [`record_proof_facts`] persists those and will not accept a raw report.
 
 use std::collections::BTreeMap;
 
@@ -80,16 +82,31 @@ pub struct DiscriminatedFact {
     pub result: ProofResult,
 }
 
-/// Facts that have passed flake discrimination (ADR-0200 integrity rule 1).
+/// Facts the ledger will store (ADR-0200 integrity rule 1).
 ///
-/// The only constructor is [`discriminate`]. A [`RunnerReport`] cannot be
-/// recorded, so a single-run observation has no path into the table.
+/// Member, aggregate, and sweep facts are constructed only by [`discriminate`].
+/// A green contextual shared run is the other constructor: waiting for a second
+/// suite is why production recorded nothing (#5948).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscriminatedFacts {
     facts: Vec<DiscriminatedFact>,
 }
 
 impl DiscriminatedFacts {
+    /// Green declared-gate facts from one contextual shared run that already
+    /// passed. Two independent runs remain the only constructor for member,
+    /// aggregate, and sweep facts.
+    #[must_use]
+    pub fn from_green_run(report: &RunnerReport) -> Self {
+        let facts = report
+            .outcomes
+            .iter()
+            .filter(|(_, result)| **result == ProofResult::Green)
+            .map(|(test_id, result)| DiscriminatedFact { test_id: test_id.clone(), result: *result })
+            .collect();
+        Self { facts }
+    }
+
     /// The facts in test-id order.
     pub fn iter(&self) -> impl Iterator<Item = &DiscriminatedFact> {
         self.facts.iter()
