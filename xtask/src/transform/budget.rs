@@ -29,7 +29,7 @@ use aether_bloomery::EXECUTION_DEADLINE_ENV;
 /// so a remaining budget past that is a misread number rather than a very
 /// patient coordinator — and believing one would hand every clamp below an
 /// unbounded answer while looking like a bounded lane.
-const LONGEST_CREDIBLE_BUDGET: Duration = Duration::from_secs(86_400);
+const LONGEST_CREDIBLE_BUDGET: Duration = Duration::from_days(1);
 
 /// How much of the limit the lane keeps clear of the cancel.
 ///
@@ -150,7 +150,7 @@ mod tests {
         let budget = with_remaining(Duration::from_mins(30));
 
         assert!(budget.clamp(Duration::from_mins(15)) == Duration::from_mins(15), "work that fits is not shortened");
-        let clamped = budget.clamp(Duration::from_mins(60));
+        let clamped = budget.clamp(Duration::from_hours(1));
         assert!(clamped <= Duration::from_mins(28), "work past the limit is cut to the usable remainder: {clamped:?}");
         assert!(clamped >= Duration::from_mins(27), "and not cut further than the margin: {clamped:?}");
     }
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn a_duration_renders_in_the_unit_a_reader_planning_an_hour_needs() {
         assert_eq!(render(Duration::from_secs(45)), "45 second(s)");
-        assert_eq!(render(Duration::from_secs(60)), "1 minute(s)");
+        assert_eq!(render(Duration::from_mins(1)), "1 minute(s)");
         assert_eq!(render(Duration::from_secs(3_599)), "59 minute(s)");
     }
 }
