@@ -1,16 +1,20 @@
 //! The day's coverage map, derived from the live view and the journal.
 //!
-//! A landed workpiece is covered only by an `Integrate` claim whose evidence
-//! is a `VerificationResult`. Inherited or fixture evidence, or no integrate
-//! fact at all, leaves the workpiece on the hold list. Superseded blooms never
-//! reached main and are not required, and neither is a member the day withdrew:
-//! it left the line before integration, so no receipt for it can ever exist.
+//! A landed workpiece is covered by a verified integration and nothing less:
+//! an `Integrate` claim whose evidence is a `VerificationResult`, or — under an
+//! ADR-0218 coordination policy, which never emits that claim — an
+//! `IntegrationAdvanced` head whose coverage pins the workpiece, since an eager
+//! append promotes only a verified input (ADR-0218 §Eager immutable heads).
+//! Inherited or fixture evidence, or no integration fact at all, leaves the
+//! workpiece on the hold list. Superseded blooms never reached main and are not
+//! required, and neither is a member the day withdrew: it left the line before
+//! integration, so no receipt for it can ever exist.
 
 use std::collections::BTreeSet;
 
 use aether_bloomery::{BloomStatus, EvidenceKind, Fact, JournalView, ViewDocument};
 
-/// Standing landed workpieces minus those with a `VerificationResult` integrate claim.
+/// Standing landed workpieces minus those a verified integration covers.
 pub fn day_coverage(view: &ViewDocument, journal: &JournalView) -> aether_bloomery_git::DayCoverage {
     let required: BTreeSet<String> = view
         .blooms
@@ -21,7 +25,7 @@ pub fn day_coverage(view: &ViewDocument, journal: &JournalView) -> aether_bloome
         })
         .collect();
     let covered: BTreeSet<String> =
-        journal.records.iter().filter_map(|record| integrate_workpiece(&record.event.fact)).collect();
+        journal.records.iter().flat_map(|record| integrated_workpieces(&record.event.fact)).collect();
 
     if required.is_subset(&covered) {
         aether_bloomery_git::DayCoverage::green()
@@ -39,12 +43,14 @@ fn evaluated_trailer(journal: &JournalView) -> String {
     )
 }
 
-fn integrate_workpiece(fact: &Fact) -> Option<String> {
+/// The workpieces one journal fact proves integrated under a passed verification.
+fn integrated_workpieces(fact: &Fact) -> Vec<String> {
     match fact {
         Fact::Integrate { claim, .. } if claim.evidence.kind == EvidenceKind::VerificationResult => {
-            Some(claim.workpiece.0.clone())
+            vec![claim.workpiece.0.clone()]
         }
-        _ => None,
+        Fact::IntegrationAdvanced { head, .. } => head.coverage.iter().map(|pin| pin.workpiece.0.clone()).collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -53,8 +59,8 @@ mod tests {
     use super::day_coverage;
     use crate::bloom::dto::{test_bloom, test_member, test_view};
     use aether_bloomery::{
-        BloomStatus, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, JournalEntry, JournalView, Outcome,
-        ResolutionClaim, WithdrawnView, WorkpieceId,
+        BloomStatus, CandidateRef, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, IntegrationHead,
+        JournalEntry, JournalView, MemberPin, Outcome, ResolutionClaim, WithdrawnView, WorkpieceId,
     };
     use aether_bloomery_git::DayCoverage;
 
@@ -116,6 +122,29 @@ mod tests {
         }
     }
 
+    /// An ADR-0218 eager append that advanced a head covering `workpieces`.
+    fn advanced(workpieces: &[&str]) -> Fact {
+        let candidate = CandidateRef { tree: digest(8), checkout: digest(10) };
+        Fact::IntegrationAdvanced {
+            bloom: aether_bloomery::BloomId(digest(1)),
+            plan: digest(11),
+            head: IntegrationHead {
+                generation: digest(12),
+                node: digest(13),
+                candidate,
+                plan: digest(11),
+                coverage: workpieces
+                    .iter()
+                    .map(|workpiece| MemberPin {
+                        workpiece: WorkpieceId((*workpiece).to_owned()),
+                        scope_revision: digest(7),
+                        candidate,
+                    })
+                    .collect(),
+            },
+        }
+    }
+
     #[test]
     fn a_landed_member_with_a_verification_result_is_green() {
         assert_eq!(
@@ -131,6 +160,27 @@ mod tests {
     fn a_landed_member_with_any_other_evidence_kind_is_held() {
         let journal = journal([integrate("issue-4945", EvidenceKind::Approval)]);
         assert_eq!(day_coverage(&landed(&["issue-4945"]), &journal), held("issue-4945", &journal));
+    }
+
+    #[test]
+    fn a_landed_member_pinned_by_an_advanced_head_is_green() {
+        // Tripwire: bloom 4e6d47c2… (the first ADR-0218 policy bloom, landed
+        // 2026-09-13) journaled `IntegrationAdvanced` heads and no `Integrate`
+        // claim at all, so a fold that reads only the claim held the roll on
+        // a member whose verification had passed.
+        assert_eq!(
+            day_coverage(
+                &landed(&["issue-a", "issue-b"]),
+                &journal([advanced(&["issue-a"]), advanced(&["issue-a", "issue-b"])])
+            ),
+            DayCoverage::green()
+        );
+    }
+
+    #[test]
+    fn an_advanced_head_that_does_not_pin_the_member_holds() {
+        let journal = journal([advanced(&["issue-a"])]);
+        assert_eq!(day_coverage(&landed(&["issue-a", "issue-b"]), &journal), held("issue-b", &journal));
     }
 
     #[test]
