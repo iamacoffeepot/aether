@@ -543,7 +543,7 @@ fn terminate_live_order(
     // before anything below can decline to terminate the order: the capture is
     // read once per nonce, and a read that never happens loses the tree the
     // cancel went out of its way to keep.
-    let captured = executor.cancelled_capture(&WorkHandle::new(nonce.clone()));
+    let kept_tree = executor.cancelled_capture(&WorkHandle::new(nonce.clone()));
     let Some(record) = DispatchRecord::from_stored(order) else {
         latch_unterminable(tracked, &nonce);
         tracing::error!(
@@ -587,7 +587,7 @@ fn terminate_live_order(
     // that the work exists and is named, rather than being reset with the lane
     // slot; a retry lap resuming from it automatically is the half that waits
     // on that migration.
-    if let Some(candidate) = captured.filter(|_| record.stage == StageId::Construct) {
+    if let Some(candidate) = kept_tree.filter(|_| record.stage == StageId::Construct) {
         captures.push(CancelledCapture {
             bloom: BloomId(record.bloom.0),
             workpiece: record.workpiece.clone(),

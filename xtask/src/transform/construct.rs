@@ -717,7 +717,7 @@ mod tests {
         let bounded = assembled_with_budget(
             Some("abc123"),
             Some("shared order"),
-            Budget::resolve(Some(now_unix_millis() + 58 * 60 * 1_000)),
+            Budget::at(now_unix_millis() + 58 * 60 * 1_000),
         );
         let task_at = bounded.find("\n## Task\n").expect("the work order keeps its section");
         let budget_at = bounded.find("\n## Budget\n").expect("a bounded dispatch names its budget");
