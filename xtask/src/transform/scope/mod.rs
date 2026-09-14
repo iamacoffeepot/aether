@@ -3,8 +3,16 @@
 //! call log through [`aether_bloomery::WorkpieceBuilder`], derive inverse-search, verify the
 //! workpiece against its own declared surface, and stamp a review-shaped
 //! evidence envelope.
+//!
+//! The lane also answers the seal door's own rules before it binds a revision
+//! as passed — declared-surface granularity, the description the door requires,
+//! and the one model routing its completeness gate counts — so a revision that
+//! cannot be sealed fails here with findings rather than at the operator's seal.
+//! See [`door`].
 
 mod anchors;
+mod door;
+mod paths;
 
 use std::env;
 use std::fs;
@@ -12,13 +20,16 @@ use std::path::{Path, PathBuf, absolute};
 
 use aether_bloomery::{
     FieldKind, LANE_WORKPIECE_HEADER, ModelProcessInstructions, NamedPath, NamedSymbol, PathOrigin, SCOPE_FILL_COMMAND,
-    SCOPE_VERIFY_SCHEMA, ScopeRouting, ScopeVerifyInput, ScopeVerifyReport, WorkpieceId, WorkpieceRefusal, encode_hex,
+    SCOPE_VERIFY_SCHEMA, ScopeVerifyInput, ScopeVerifyReport, WorkpieceId, WorkpieceRefusal, encode_hex,
     split_lane_identity, verify_scope,
 };
 use anyhow::Result;
 use serde_json::{Value, json};
 
 use self::anchors::Definition;
+use self::paths::{TreeIndex, backtick_spans, extract_paths};
+use crate::bloom::DEFAULT_POLICY_FILE;
+use crate::bloom::plan::load_policy;
 use crate::scope::{load, replay, winning_texts};
 use crate::symbols::references::{self, ReferenceSearch, Role};
 use crate::transform::claude::assemble_construct_prompt;
@@ -42,13 +53,17 @@ fn status_token(status: ScopeStatus) -> &'static str {
     }
 }
 
-/// Pass when the verify report refuses nothing. Advisory buckets — including
-/// `resolved_outside` — must not map to fail.
-fn status_from_report(report: &ScopeVerifyReport) -> ScopeStatus {
-    if report.refused() {
-        ScopeStatus::Fail
+/// The lane's terminal status and findings over everything that refuses this
+/// run — the verify report's own refusals and the seal door's refusals the lane
+/// mirrors in [`door`].
+///
+/// Pass when the list is empty. Advisory buckets — including `resolved_outside`
+/// — never reach it, so they cannot map to fail.
+fn terminal(refusals: &[String]) -> (ScopeStatus, Option<String>) {
+    if refusals.is_empty() {
+        (ScopeStatus::Pass, None)
     } else {
-        ScopeStatus::Pass
+        (ScopeStatus::Fail, Some(refusals.join("\n")))
     }
 }
 
@@ -137,7 +152,7 @@ fn finalize(args: &TransformArgs, run_dir: &Path, run: LaneRun) -> Value {
 
     let workpiece =
         workpiece_from_task(args.task.as_deref()).unwrap_or_else(|| WorkpieceId(String::from("unspecified")));
-    let builder = replay(workpiece, &calls);
+    let builder = replay(workpiece.clone(), &calls);
     let surface = owned(winning_texts(&calls, FieldKind::DeclaredSurface));
     let steps = owned(winning_texts(&calls, FieldKind::PlanStep));
 
@@ -156,7 +171,7 @@ fn finalize(args: &TransformArgs, run_dir: &Path, run: LaneRun) -> Value {
     };
     let report = verify_scope(&projection.input);
 
-    match builder.finish(None, ScopeRouting { size: String::new(), model: String::new() }) {
+    match builder.finish(None, door::routing(&owned(winning_texts(&calls, FieldKind::RoutingHint)))) {
         Err(refusal) => stamp_scope_evidence(
             args.nonce.as_deref(),
             ScopeStatus::Fail,
@@ -164,12 +179,27 @@ fn finalize(args: &TransformArgs, run_dir: &Path, run: LaneRun) -> Value {
             &bind_result(record, None, Some(&projection)),
             measured,
         ),
-        Ok(revision) => {
-            let status = status_from_report(&report);
+        Ok(mut revision) => {
+            let mut refusals: Vec<String> = findings_from_report(&report).into_iter().collect();
+            refusals.extend(door::surface_granularity(
+                load_policy(Path::new(DEFAULT_POLICY_FILE)).as_ref(),
+                &workpiece.0,
+                &surface,
+            ));
+            match door::description(
+                args.task.as_deref(),
+                &owned(winning_texts(&calls, FieldKind::Success)),
+                &owned(winning_texts(&calls, FieldKind::Problem)),
+            ) {
+                Ok(description) => revision.description = description,
+                Err(finding) => refusals.push(finding),
+            }
+
+            let (status, findings) = terminal(&refusals);
             stamp_scope_evidence(
                 args.nonce.as_deref(),
                 status,
-                findings_from_report(&report),
+                findings,
                 &bind_result(record, Some(&revision.to_canonical()), Some(&projection)),
                 measured,
             )
@@ -239,13 +269,15 @@ struct Projection {
 /// Project the authored plan steps and declared surface into what the freeze
 /// verifies.
 ///
-/// Every path a plan step names enters the refusing population unconditionally.
+/// Every path a plan step names enters the refusing population unconditionally
+/// — where "names a path" is [`paths::extract_paths`]'s answer against the
+/// subject tree, not every slashed token in the prose.
 /// A backticked anchor's defining paths enter it only when
 /// [`anchors::calibrate`] reads the anchor as a claim about this work: a common
 /// word resolves definitions in crates the workpiece never touches, and
 /// demanding coverage of those refuses a run for naming a word.
 fn project_verify_input(steps: &[String], surface: &[String], rev: &str) -> Result<Projection> {
-    let mut named_paths = named_paths_from_plan(steps);
+    let mut named_paths = named_paths_from_plan(steps, &paths::index(rev)?);
     let mut named_symbols = Vec::new();
     let mut discounted = Vec::new();
 
@@ -286,11 +318,11 @@ fn project_verify_input(steps: &[String], surface: &[String], rev: &str) -> Resu
     Ok(Projection { input, discounted })
 }
 
-fn named_paths_from_plan(steps: &[String]) -> Vec<NamedPath> {
+fn named_paths_from_plan(steps: &[String], tree: &TreeIndex) -> Vec<NamedPath> {
     let mut named = Vec::new();
     for (index, step) in steps.iter().enumerate() {
         let number = u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX);
-        for path in extract_paths(step) {
+        for path in extract_paths(step, tree) {
             named.push(NamedPath { path, origin: PathOrigin::PlanStep { step: number } });
         }
     }
@@ -310,55 +342,6 @@ fn symbols_from_plan(steps: &[String]) -> Vec<String> {
     symbols
 }
 
-fn extract_paths(text: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    for candidate in backtick_spans(text).into_iter().chain(bare_tokens(text)) {
-        let Some(path) = as_repo_path(candidate) else {
-            continue;
-        };
-        if !paths.iter().any(|existing| existing == &path) {
-            paths.push(path);
-        }
-    }
-    paths
-}
-
-fn as_repo_path(token: &str) -> Option<String> {
-    let token = token.trim();
-    let token = token.strip_suffix("(create)").map_or(token, str::trim);
-    let token = token.trim_end_matches(['.', ',', ';', ':', ')']);
-    if token.contains("://") || token.starts_with('/') || token.contains('\\') {
-        return None;
-    }
-    if !token.contains('/') {
-        return None;
-    }
-    if token.chars().any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '*'))) {
-        return None;
-    }
-    Some(token.to_owned())
-}
-
-fn backtick_spans(text: &str) -> Vec<&str> {
-    let mut spans = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find('`') {
-        rest = &rest[start + 1..];
-        let Some(end) = rest.find('`') else {
-            break;
-        };
-        spans.push(&rest[..end]);
-        rest = &rest[end + 1..];
-    }
-    spans
-}
-
-fn bare_tokens(text: &str) -> Vec<&str> {
-    text.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '*')))
-        .filter(|token| !token.is_empty())
-        .collect()
-}
-
 fn is_identifier(symbol: &str) -> bool {
     !symbol.is_empty()
         && !symbol.starts_with(|first: char| first.is_ascii_digit())
@@ -374,15 +357,57 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        assemble_scope_prompt, findings_from_report, project_verify_input, stamp_scope_evidence, status_from_report,
+        assemble_scope_prompt, door, findings_from_report, owned, project_verify_input, stamp_scope_evidence, terminal,
     };
+    use crate::scope::{append, load, replay, winning_texts};
     use crate::transform::Measurements;
     use crate::transform::claude::assemble_construct_prompt;
     use crate::transform::conventions;
     use crate::transform::instructions::fixture_bundle;
-    use aether_bloomery::{NamedPath, NamedSymbol, PathOrigin, SCOPE_VERIFY_SCHEMA, ScopeVerifyReport, verify_scope};
+    use aether_bloomery::{
+        FieldKind, NamedPath, NamedSymbol, PathOrigin, SCOPE_VERIFY_SCHEMA, ScopeVerifyReport, WorkpieceId,
+        verify_scope,
+    };
     use serde_json::json;
+    use std::fs::remove_dir_all;
     use std::path::Path;
+    use std::{env, process};
+
+    #[test]
+    fn a_run_that_authored_only_problem_plan_and_surface_still_freezes_sealably() {
+        // The minimum a scoper can author, replayed and frozen the way
+        // `finalize` freezes it. The seal door refuses a member whose stored
+        // revision carries an empty description, and its completeness gate
+        // counts an empty model routing as zero routings — so a revision frozen
+        // from the builder's own defaults is unsealable on both counts, which is
+        // what refused all three of 2026-09-13's lane-frozen revisions.
+        let run = env::temp_dir().join(format!("aether-scope-freeze-{}", process::id()));
+        let _ = remove_dir_all(&run);
+        for (kind, value) in [
+            (FieldKind::Problem, "Step 3 calls a concrete path a glob. The seal door disagrees."),
+            (FieldKind::PlanStep, "Rewrite step 3 in xtask/src/transform/scope/scope_instructions.md."),
+            (FieldKind::DeclaredSurface, "xtask/src/**"),
+        ] {
+            append(&run, kind, value.to_owned()).expect("append a setter call");
+        }
+        let calls = load(&run).expect("the lane reads its own call log");
+
+        let mut revision = replay(WorkpieceId(String::from("issue-5924")), &calls)
+            .finish(None, door::routing(&owned(winning_texts(&calls, FieldKind::RoutingHint))))
+            .expect("problem, plan and surface are a fillable workpiece");
+        assert!(!revision.routing.model.trim().is_empty(), "the gate counts this as one model routing");
+        assert!(revision.description.is_empty(), "the builder renders none, so the lane has to derive one");
+
+        revision.description = door::description(
+            Some("Workpiece: issue-5924\n\nan order with no heading of its own\n"),
+            &owned(winning_texts(&calls, FieldKind::Success)),
+            &owned(winning_texts(&calls, FieldKind::Problem)),
+        )
+        .expect("the problem's first sentence is the floor");
+        assert_eq!(revision.description, "Step 3 calls a concrete path a glob.");
+
+        let _ = remove_dir_all(&run);
+    }
 
     #[test]
     fn the_scope_prompt_shares_the_cached_prefix() {
@@ -478,13 +503,8 @@ mod tests {
             }],
             checked: 0,
         };
-        let passed = stamp_scope_evidence(
-            Some("n-1"),
-            status_from_report(&advisory),
-            findings_from_report(&advisory),
-            &record,
-            Measurements::default(),
-        );
+        let (status, findings) = terminal(&findings_from_report(&advisory).into_iter().collect::<Vec<_>>());
+        let passed = stamp_scope_evidence(Some("n-1"), status, findings, &record, Measurements::default());
         assert_eq!(passed["status"], "pass");
         assert!(passed.get("findings").is_none(), "a run with no findings stamps no findings key");
 
@@ -499,13 +519,8 @@ mod tests {
             resolved_outside: Vec::new(),
             checked: 1,
         };
-        let failed = stamp_scope_evidence(
-            Some("n-2"),
-            status_from_report(&refused),
-            findings_from_report(&refused),
-            &record,
-            Measurements::default(),
-        );
+        let (status, findings) = terminal(&findings_from_report(&refused).into_iter().collect::<Vec<_>>());
+        let failed = stamp_scope_evidence(Some("n-2"), status, findings, &record, Measurements::default());
         assert_eq!(failed["status"], "fail");
         let findings = failed["findings"].as_str().expect("a refusal stamps its own text as findings");
         assert!(findings.contains("plan step 2"), "{findings}");

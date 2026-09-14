@@ -14,7 +14,7 @@ mod dto;
 mod hex;
 mod http;
 mod instructions;
-mod plan;
+pub mod plan;
 mod profiles;
 mod roll;
 mod status;
