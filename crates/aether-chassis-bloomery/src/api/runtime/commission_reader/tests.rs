@@ -130,14 +130,13 @@ fn an_empty_section_is_refused_naming_the_field() {
     // revision door's own check passes through. A member admitted with an empty
     // section dispatches a lane holding a heading and no work order, which is
     // the title-only construct run this check exists to stop.
-    let blanks: [(&str, fn(&mut ScopeRevision)); 3] = [
-        ("problem", |revision| revision.problem.clear()),
-        ("design", |revision| revision.design.clear()),
-        ("plan", |revision| revision.plan.clear()),
-    ];
-    for (section, blank) in blanks {
+    for section in ["problem", "design", "plan"] {
         let mut incomplete = revision("wp-local", "Need a CLI.");
-        blank(&mut incomplete);
+        match section {
+            "problem" => incomplete.problem.clear(),
+            "design" => incomplete.design.clear(),
+            _ => incomplete.plan.clear(),
+        }
         let digest = digest_of(&incomplete);
         let error = admit(digest, loaded("wp-local", &incomplete, vec![auto_approval(digest)]))
             .expect_err("an empty section must not admit");
