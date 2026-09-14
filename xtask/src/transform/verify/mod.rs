@@ -12,6 +12,7 @@ mod workflow;
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -175,12 +176,19 @@ impl VerifyInvocation {
     /// be a second list to keep true, and both are inert in a member that never
     /// invokes rustc.
     ///
-    /// What the member does *not* set is its build directory or its job cap.
-    /// `CARGO_TARGET_DIR` and `CARGO_BUILD_JOBS` are inherited from the lane the
-    /// coordinator dispatched (#4912), which is the whole point of them: the gate
-    /// has to build where the lane that produced the candidate built, in the slot
-    /// that lane holds, under the same share of the host. Setting either here
-    /// would override the dispatch that knows which slot this is.
+    /// What the member does *not* set is its job cap. `CARGO_BUILD_JOBS` is
+    /// inherited from the lane the coordinator dispatched (#4912), which is the
+    /// whole point of it: the gate builds under the same share of the host as
+    /// the lane that produced the candidate. Setting it here would override the
+    /// dispatch that knows which slot this is.
+    ///
+    /// The build directory is the one deliberate exception, applied after this
+    /// returns (see [`export_gate_target_dir`]): a build-lane gate builds into
+    /// the slot's directory with its own suffix rather than the slot directory
+    /// itself, so the three compiling gates share no artifact lock. The value
+    /// still derives from the dispatch — the suffix is appended to the lane's
+    /// own directory — so the gate builds where the lane built, in the slot it
+    /// holds.
     fn command(
         &self,
         scope: &Scope,
@@ -920,26 +928,70 @@ fn spawnable_runs<'a>(manifest: &'a PipelineManifest, command: &str) -> Vec<&'a 
         .collect()
 }
 
-/// The members that build into the lane's `CARGO_TARGET_DIR`, and so cannot run
+/// The members that compile, each on its own target directory so all of them run
 /// beside each other.
 ///
 /// Cargo takes an exclusive lock on the artifact directory for the whole of a
 /// build — a second invocation against the same one prints "Blocking waiting for
-/// file lock on artifact directory" and waits — so running these three at once
-/// buys nothing and costs the log noise. Giving each its own directory would
-/// undo far more than it bought: clippy, rustdoc and the test build share one
-/// compiled dependency tree, and splitting them makes every one of them rebuild
-/// it. `verify.test`'s prepare builds into the same directory, so it belongs to
-/// the same lane.
+/// file lock on artifact directory" and waits — so three compiling gates sharing
+/// one `CARGO_TARGET_DIR` serialize on it. Each gate instead builds into the
+/// slot's directory with its own suffix (see [`gate_target_dir`]):
+/// `slot-0-target-clippy` beside `slot-0-target`. The three run in parallel on
+/// one thread each, sharing only the sccache compiler cache, which keys each
+/// invocation by content and so stays shared across the three trees. The
+/// directories are per slot, never per run, so warm fingerprints survive between
+/// runs the way the single directory did; `verify.test`'s prepare builds into
+/// the test gate's directory, so it shares the member's fingerprints rather
+/// than growing a fourth tree.
 ///
 /// Everything else — the formatter, the clone detector, the dependency scan,
 /// the suppression scan, the lockfile freshness check — reads the tree and
-/// never writes an artifact, so it runs alongside the compiles.
+/// never writes an artifact, so it runs alongside the compiles unchanged.
 const BUILD_LANE_MEMBERS: [&str; 3] = ["verify.clippy", "verify.docs", "verify.test"];
 
-/// Whether this member holds the cargo artifact lock — see [`BUILD_LANE_MEMBERS`].
+/// Whether this member compiles, and so builds on its own target directory —
+/// see [`BUILD_LANE_MEMBERS`].
 fn builds_artifacts(id: &str) -> bool {
     BUILD_LANE_MEMBERS.contains(&id)
+}
+
+/// The suffix this build-lane gate appends to the slot's target directory: the
+/// member's own short name, so `verify.clippy` builds into `…-clippy`.
+///
+/// Derived rather than stated, so a fourth compiling member takes its own
+/// directory with it. A stated table is a second list to keep true, and a gate
+/// that compiled into the shared directory would block on a sibling's artifact
+/// lock instead of running.
+fn gate_target_suffix(id: &str) -> Option<&str> {
+    if builds_artifacts(id) {
+        id.rsplit('.').next()
+    } else {
+        None
+    }
+}
+
+/// This gate's own target directory: the slot's directory with the gate's
+/// suffix, or `None` for a gate that shares the slot directory — a read-only
+/// member — or when `inherited` names no slot directory at all, which is a
+/// developer running the arm by hand.
+///
+/// Per slot, never per run: the value derives from the lane's directory alone,
+/// so two runs in one slot resolve the same tree and the second is warm on the
+/// first's fingerprints.
+fn gate_target_dir(inherited: Option<OsString>, id: &str) -> Option<PathBuf> {
+    let suffix = gate_target_suffix(id)?;
+    let mut dir = PathBuf::from(inherited.filter(|dir| !dir.is_empty())?);
+    dir.as_mut_os_string().push(format!("-{suffix}"));
+    Some(dir)
+}
+
+/// Point `command`'s build at this gate's own target directory, when it has one
+/// (see [`gate_target_dir`]).
+#[allow(clippy::disallowed_methods)] // aether-suppression-request: the gate's target directory derives from the host-dispatched slot directory (build location), not cap config
+fn export_gate_target_dir(command: &mut Command, id: &str) {
+    if let Some(dir) = gate_target_dir(env::var_os("CARGO_TARGET_DIR"), id) {
+        command.env("CARGO_TARGET_DIR", dir);
+    }
 }
 
 /// The status the umbrella stamps, from what its members said (ADR-0176's
@@ -1249,6 +1301,9 @@ trait MemberRunner {
 struct SpawnRunner<'a> {
     cache: Option<&'a CompilerCache>,
     peak: &'a PeakMemory,
+    /// The gate this runner spawns for — what [`export_gate_target_dir`] reads
+    /// to point each candidate-tree spawn at the gate's own target directory.
+    gate: &'static str,
     /// The base checkout this member's replays share, opened by the first one
     /// that needs it and kept until the member is done.
     ///
@@ -1267,7 +1322,9 @@ struct SpawnRunner<'a> {
 
 impl MemberRunner for SpawnRunner<'_> {
     fn run(&mut self, invocation: &VerifyInvocation, scope: &Scope, diff_base: Option<&str>) -> Result<Captured> {
-        let output = run_captured(invocation.command(scope, diff_base, self.cache, self.peak, TestSchedule::default()))
+        let mut command = invocation.command(scope, diff_base, self.cache, self.peak, TestSchedule::default());
+        export_gate_target_dir(&mut command, self.gate);
+        let output = run_captured(command)
             .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
         // The wrapper's report is taken off the stderr the member's log keeps:
         // the reading belongs in the evidence record, and the log belongs to
@@ -1286,8 +1343,8 @@ impl MemberRunner for SpawnRunner<'_> {
 }
 
 impl<'a> SpawnRunner<'a> {
-    fn new(cache: Option<&'a CompilerCache>, peak: &'a PeakMemory) -> Self {
-        Self { cache, peak, base: None, workspace: None }
+    fn new(gate: &'static str, cache: Option<&'a CompilerCache>, peak: &'a PeakMemory) -> Self {
+        Self { gate, cache, peak, base: None, workspace: None }
     }
 
     /// The tree this member's base replays run in, opened on the first replay
@@ -1425,6 +1482,11 @@ impl<'a> SpawnRunner<'a> {
             // fingerprints of its own. It is the checkout's, so it lives as
             // long as the checkout does and every replay after the first is warm.
             command.current_dir(at).env("CARGO_TARGET_DIR", at.join("target"));
+        } else {
+            // The candidate tree: the gate's own directory, so the replay reuses
+            // the member's fingerprints rather than rebuilding cold into a slot
+            // directory its siblings no longer share.
+            export_gate_target_dir(&mut command, self.gate);
         }
         sccache::export(self.cache, &mut command);
         command
@@ -2123,6 +2185,10 @@ fn run_prepare(
     // environment, and the peak-memory wrapper like the member it belongs to.
     let mut step = peak.command("cargo");
     step.args(prepare).envs(CI_BUILD_ENV.iter().copied());
+    // Into the gate's own directory: the prepare belongs to this member, and
+    // the member builds there — the shared directory would serialize the lane
+    // on the artifact lock again.
+    export_gate_target_dir(&mut step, id);
     sccache::export(cache, &mut step);
     let output = run_captured(step).with_context(|| format!("spawn cargo {}", prepare.join(" ")))?;
     // Read before the success check: the pre-build is the lane's largest single
@@ -2269,8 +2335,12 @@ fn dispatch_single(
         return Ok(MemberRun::plain(&args.command, outcome, log.into_bytes(), code));
     }
 
-    let output = run_captured(invocation.command(scope, args.diff_base.as_deref(), cache, peak, schedule))
-        .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
+    let mut command = invocation.command(scope, args.diff_base.as_deref(), cache, peak, schedule);
+    // A lone gate answers the same directory it holds inside the umbrella, so a
+    // hand run warms the same tree the lane builds.
+    export_gate_target_dir(&mut command, &args.command);
+    let output =
+        run_captured(command).with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
     let stderr = peak.take_report(output.stderr);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2718,7 +2788,7 @@ fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTim
         (run, None)
     } else {
         let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, scope, cache, peak, false)?;
-        let mut runner = SpawnRunner::new(cache, peak);
+        let mut runner = SpawnRunner::new(id, cache, peak);
         let run = match prepare_failure {
             Some((log, code, outcome)) => MemberRun::plain(id, outcome, log.into_bytes(), code),
             None => run_member_discriminated(
@@ -2748,6 +2818,23 @@ fn panic_message(panicked: &Box<dyn Any + Send>) -> String {
         .map(|message| (*message).to_owned())
         .or_else(|| panicked.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| String::from("a verify lane thread panicked"))
+}
+
+/// Run `work` for every member on its own thread, collecting each result.
+///
+/// One thread per member rather than one lane per kind: every build-lane gate
+/// builds on its own target directory, so no member holds cargo's artifact lock
+/// while another waits on it. Results arrive in completion order — the caller
+/// reassembles CI-parity order itself, so the umbrella's exit code and log list
+/// never depend on which gate finished first.
+fn fan_out(
+    members: &[&'static str],
+    work: impl Fn(&'static str) -> Result<(MemberRun, GateTiming)> + Sync,
+) -> Result<Vec<(MemberRun, GateTiming)>> {
+    thread::scope(|threads| {
+        let handles: Vec<_> = members.iter().map(|id| threads.spawn(|| work(id))).collect();
+        handles.into_iter().map(|handle| handle.join().map_err(|panicked| anyhow!(panic_message(&panicked)))?).collect()
+    })
 }
 
 /// Run every member `position` fans out to over the current tree, in CI-parity
@@ -2784,25 +2871,14 @@ fn check_pass(args: &TransformArgs, logs: &Path, position: Position) -> Result<C
     fs::write(&scope_path, scope.receipt()).with_context(|| format!("write {}", scope_path.display()))?;
     let mut log_names = vec![String::from(SCOPE_LOG)];
 
-    // Two lanes, run at once: the members that compile take the cargo artifact
-    // lock and so go one at a time, and everything else runs beside them for
-    // free (see `BUILD_LANE_MEMBERS`). Both keep their own order, so a lane that
-    // dies mid-pass has still run its members in the order the receipts name.
+    // One thread per member: the build-lane gates each hold their own target
+    // directory (see `BUILD_LANE_MEMBERS`), so no member shares cargo's
+    // artifact lock with another and none waits on one. The read-only members
+    // ran beside the compiles before; now everything runs beside everything.
     let pass =
         GatePass { args, full, logs, scope: &scope, closure: closure.as_ref(), cache: cache.as_ref(), peak: &peak };
-    let lane = |members: Vec<&'static str>| -> Result<Vec<(MemberRun, GateTiming)>> {
-        members.into_iter().map(|id| run_gate(id, &pass)).collect()
-    };
     let members = position.members();
-    let (compiled, read_only): (Vec<&str>, Vec<&str>) = members.iter().copied().partition(|id| builds_artifacts(id));
-    let mut completed = thread::scope(|threads| -> Result<Vec<(MemberRun, GateTiming)>> {
-        let reading = threads.spawn(|| lane(read_only));
-        let compiling = lane(compiled);
-        let read = reading.join().map_err(|panicked| anyhow!(panic_message(&panicked)))?;
-        let mut completed = compiling?;
-        completed.extend(read?);
-        Ok(completed)
-    })?;
+    let mut completed = fan_out(&members, |id| run_gate(id, &pass))?;
 
     // Reassembled in CI-parity order rather than completion order: the umbrella's
     // exit code is the *first* failing member's, the evidence `log` field lists
@@ -2838,19 +2914,24 @@ fn check_pass(args: &TransformArgs, logs: &Path, position: Position) -> Result<C
 #[cfg(test)]
 mod tests {
     use super::{
-        BASE_SET_SUBJECT, Captured, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner,
-        Position, SUPPRESS_MEMBER, Scope, SpawnRunner, TestSchedule, VERIFY_BASE, VERIFY_CHECK, VERIFY_MEMBER,
-        VerifyInvocation, builds_artifacts, clippy_verdict, closure, distil_diagnostics, effective_exit_code,
-        empty_closure_run, environment_observations, failed_verifiers, failed_verifiers_of, host_fault_in,
-        member_diff_base, member_outcome, member_scope_notice, operational_failure_notice, package_name,
-        preflight_tools, prepare_failure_log, render_diagnostics, replay_args, required_targets, required_tools,
-        run_member, run_member_discriminated, run_timed_prepare, spawnable_runs, umbrella_status, unjudged_notice,
-        verify_check_members, verify_command, verify_findings, workflow,
+        BASE_SET_SUBJECT, BUILD_LANE_MEMBERS, Captured, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun,
+        MemberRunner, Position, SUPPRESS_MEMBER, Scope, SpawnRunner, TestSchedule, VERIFY_BASE, VERIFY_CHECK,
+        VERIFY_MEMBER, VerifyInvocation, builds_artifacts, clippy_verdict, closure, distil_diagnostics,
+        effective_exit_code, empty_closure_run, environment_observations, failed_verifiers, failed_verifiers_of,
+        fan_out, gate_target_dir, gate_target_suffix, host_fault_in, member_diff_base, member_outcome,
+        member_scope_notice, operational_failure_notice, package_name, preflight_tools, prepare_failure_log,
+        render_diagnostics, replay_args, required_targets, required_tools, run_member, run_member_discriminated,
+        run_timed_prepare, spawnable_runs, umbrella_status, unjudged_notice, verify_check_members, verify_command,
+        verify_findings, workflow,
     };
     use std::iter;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Condvar, Mutex};
+    use std::time::Duration;
 
     use crate::cargo::WASM_TARGET;
+    use crate::transform::GateTiming;
     use crate::transform::construct::CONSTRUCT_IMPLEMENT;
     use crate::transform::peak_memory;
     use crate::transform::review::REVIEW_CRITIC;
@@ -3308,7 +3389,7 @@ mod tests {
         let invocation = verify_command("verify.test").expect("verify.test mapped");
         let peak = peak_memory::detect();
         let cache = CompilerCache::unused();
-        let runner = SpawnRunner::new(Some(&cache), &peak);
+        let runner = SpawnRunner::new("verify.test", Some(&cache), &peak);
         let command = runner.replay_command(
             &invocation,
             "aether-chassis-hub::fleetharness_binary_store fleetharness_uploads_lists_and_dedups_a_real_binary",
@@ -4184,15 +4265,16 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
     }
 
     #[test]
-    fn every_member_that_compiles_runs_in_the_lane_that_holds_the_build_lock() {
-        // Tripwire: the umbrella runs the read-only members beside the compiling
-        // ones, and cargo locks its artifact directory for the whole of a build.
-        // A member that compiles and is not named in BUILD_LANE_MEMBERS would be
-        // started against a directory another gate holds — it would block on the
-        // lock rather than run, and the receipt would charge it that wait. The
-        // subcommand is the axis: `fmt` and `metadata` read, everything else
-        // here writes artifacts. A prepare step compiles too, whatever the
-        // member's own argv does.
+    fn every_member_that_compiles_builds_on_its_own_target_directory() {
+        // Tripwire: every compiling member runs on its own target directory, and
+        // cargo locks its artifact directory for the whole of a build. A member
+        // that compiles and is not named in BUILD_LANE_MEMBERS would be started
+        // against the slot directory a sibling gate holds — it would block on
+        // the lock rather than run, and the receipt would charge it that wait. A
+        // member that does not compile and is named there would grow a cold
+        // tree for nothing. The subcommand is the axis: `fmt` and `metadata`
+        // read, everything else here writes artifacts. A prepare step compiles
+        // too, whatever the member's own argv does.
         const READS_ONLY: [&str; 2] = ["fmt", "metadata"];
 
         for id in verify_check_members() {
@@ -4202,10 +4284,97 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             assert_eq!(
                 compiles,
                 builds_artifacts(id),
-                "{id} builds artifacts: {compiles}, but the build lane says {}",
+                "{id} builds artifacts: {compiles}, but the isolated-directory set says {}",
                 builds_artifacts(id),
             );
         }
+    }
+
+    #[test]
+    fn each_build_lane_gate_builds_in_a_directory_of_its_own_stable_across_runs_in_one_slot() {
+        // The parallel-build contract, both halves. Distinct: two gates sharing
+        // a directory serialize on cargo's artifact lock, which is the wait this
+        // change exists to end. Stable across two runs in one slot: the value
+        // derives from the slot's directory alone — no nonce, no process id, no
+        // clock — so the second run in a slot is warm on the first's
+        // fingerprints. The spellings are pinned because they cross the lane
+        // boundary: the slot layout and the janitor's target pruning read these
+        // names, so a rename here orphans a tree or wedges a budget.
+        let dir = |slot: &str, id: &str| {
+            gate_target_dir(Some(slot.to_owned().into()), id)
+                .unwrap_or_else(|| panic!("{id} compiles, so it holds its own target directory"))
+        };
+
+        assert_eq!(
+            BUILD_LANE_MEMBERS.map(gate_target_suffix),
+            [Some("clippy"), Some("docs"), Some("test")],
+            "each compiling gate takes its own short name as its suffix",
+        );
+        assert_eq!(gate_target_suffix("verify.fmt"), None, "a read-only member shares the slot directory");
+
+        let clippy = dir("/runs/slot-3-target", "verify.clippy");
+        let docs = dir("/runs/slot-3-target", "verify.docs");
+        let test = dir("/runs/slot-3-target", "verify.test");
+        assert_eq!(clippy, PathBuf::from("/runs/slot-3-target-clippy"));
+        assert_eq!(docs, PathBuf::from("/runs/slot-3-target-docs"));
+        assert_eq!(test, PathBuf::from("/runs/slot-3-target-test"));
+
+        assert_eq!(
+            dir("/runs/slot-3-target", "verify.clippy"),
+            clippy,
+            "the same slot resolves the same tree twice: the second run is warm",
+        );
+        assert_ne!(
+            dir("/runs/slot-4-target", "verify.clippy"),
+            clippy,
+            "a neighbouring slot holds its own tree: sharing one would serialize two lanes on one lock",
+        );
+
+        assert_eq!(gate_target_dir(Some("/runs/slot-3-target".to_owned().into()), "verify.fmt"), None);
+        assert_eq!(gate_target_dir(None, "verify.clippy"), None, "a hand run names no slot directory");
+        assert_eq!(
+            gate_target_dir(Some(String::new().into()), "verify.clippy"),
+            None,
+            "an empty directory is no directory",
+        );
+    }
+
+    #[test]
+    fn the_build_lane_gates_start_without_waiting_on_each_other() {
+        // The lane fans out one thread per member rather than running the
+        // compiling members down a serial lane: every gate must have started
+        // before any finishes. The last gate to arrive releases the rest, so a
+        // serial fan-out leaves the first arrival waiting past its timeout and
+        // fails instead of hanging.
+        let members: &[&'static str] = &["verify.clippy", "verify.docs", "verify.test"];
+        let arrived = AtomicUsize::new(0);
+        let release: Mutex<bool> = Mutex::new(false);
+        let released: Condvar = Condvar::new();
+
+        let completed = fan_out(members, |id| {
+            if arrived.fetch_add(1, Ordering::SeqCst) + 1 == members.len() {
+                *release.lock().expect("the last arrival owns the release flag") = true;
+                released.notify_all();
+            } else {
+                let (open, timed_out) = released
+                    .wait_timeout_while(
+                        release.lock().expect("each gate reads the release flag"),
+                        Duration::from_secs(30),
+                        |open| !*open,
+                    )
+                    .expect("the release flag stays readable");
+                assert!(!timed_out.timed_out(), "{id} started, so every sibling must start too");
+                assert!(*open);
+            }
+            Ok((
+                MemberRun::plain(id, MemberOutcome::Passed, Vec::new(), 0),
+                GateTiming { command: id.to_owned(), duration_millis: 0, prepare_millis: None },
+            ))
+        })
+        .expect("the fan-out collects every member");
+
+        assert_eq!(completed.len(), members.len(), "every member reports exactly once");
+        assert_eq!(arrived.load(Ordering::SeqCst), members.len(), "and every one of them started");
     }
 
     #[test]
