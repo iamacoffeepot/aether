@@ -1253,28 +1253,43 @@ fn hold_overlapping_reconcile(
     Ok(true)
 }
 
-/// Hold a member dispatch while the same member already has a live order.
+/// Hold a Reconcile while the same member already runs another stage.
 /// Held, not acked, so the entry re-drains after the outstanding run admits:
-/// two orders on one workpiece never run beside each other in the same
-/// checkout (#5968). A Reconcile raised while its member's Construct is still
-/// outstanding queues here rather than opening a second lane in that tree.
+/// a Reconcile raised while its member's Construct (or Verify) is still live
+/// queues here rather than opening a second lane in that same checkout
+/// (#5968).
+///
+/// Reconcile only, deliberately. A same-stage second order is the operator
+/// retry overtaking a dispatch that will never answer: the reducer mints it
+/// beside the order it overtook, which is left to the deadline sweep, and
+/// holding it would stall the retry the operator just asked for.
 fn hold_overlapping_member_dispatch(
     store: &mut dyn StoreBackend,
     payload: &DispatchPayload,
     sequence: u64,
 ) -> rusqlite::Result<bool> {
+    if payload.stage != StageId::Reconcile {
+        return Ok(false);
+    }
     for live in store.list_bloom_dispatch_live(payload.bloom.as_bytes())? {
-        if live.workpiece == payload.workpiece.0 {
-            tracing::info!(
-                target: "aether_chassis_bloomery::executor",
-                sequence,
-                bloom = %short_hex(&payload.bloom),
-                workpiece = %payload.workpiece.0,
-                live_nonce = %live.nonce,
-                "member already has an outstanding order; holding this dispatch until it admits",
-            );
-            return Ok(true);
+        if live.workpiece != payload.workpiece.0 {
+            continue;
         }
+        let Ok(stage) = from_bytes::<StageId>(&live.stage) else {
+            continue;
+        };
+        if stage == StageId::Reconcile {
+            continue;
+        }
+        tracing::info!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            bloom = %short_hex(&payload.bloom),
+            workpiece = %payload.workpiece.0,
+            live_nonce = %live.nonce,
+            "member already runs another stage; holding this reconcile until it admits",
+        );
+        return Ok(true);
     }
     Ok(false)
 }

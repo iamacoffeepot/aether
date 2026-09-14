@@ -2809,9 +2809,6 @@ fn composition_refine_persists_a_generated_order_carrying_aggregate_findings() {
     let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
     assert_eq!(handles.len(), 1, "a composition Refine with findings dispatches");
     store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
-    // One outstanding order per member (#5968): admit the first lap before the
-    // retry dispatches, so the second never runs beside it in one checkout.
-    store.consume_order(&handles[0].nonce.0).unwrap();
 
     let orders = backend.orders();
     let description = orders[0].transformation.description.as_deref().unwrap();
@@ -3300,16 +3297,7 @@ fn one_members_construct_and_refine_dispatch_under_different_agents() {
         enqueue_dispatch_with_configs(&mut store, bloom, "wp-escalating", digest(5), stage, configs.clone());
     }
 
-    // One outstanding order per member (#5968): the two stages dispatch in
-    // sequence, never beside each other in one checkout. Admit the first so
-    // the second can follow and both resolutions stay observable.
-    let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
-    assert_eq!(handles.len(), 1, "the second stage queues behind the first");
-    store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
-    store.consume_order(&handles[0].nonce.0).unwrap();
-    let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
-    assert_eq!(handles.len(), 1, "the queued stage dispatches once the member is free");
-    store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
+    drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     let orders = backend.orders();
     let dispatched = |index: usize| orders[index].transformation.model.clone().expect("a model lane names its profile");
@@ -5046,9 +5034,9 @@ fn a_malformed_construct_whose_subject_differs_from_displayed_is_refused_before_
 
 #[test]
 fn a_second_dispatch_for_a_member_with_a_live_order_queues_behind_it() {
-    // One outstanding order per member (#5968): a Reconcile raised while its
-    // member's Construct is still outstanding never runs beside it in the same
-    // checkout. The second entry holds unacked until the first admits.
+    // A Reconcile raised while its member's Construct is still live never runs
+    // beside it in the same checkout (#5968). The second entry holds unacked
+    // until the first admits.
     let mut store = SqliteStore::open(":memory:").unwrap();
     let backend = Arc::new(CapturingBackend::default());
     let shell = ExecutorShell::new(Arc::clone(&backend));
@@ -5081,4 +5069,23 @@ fn a_second_dispatch_for_a_member_with_a_live_order_queues_behind_it() {
     let live = store.list_bloom_dispatch_live(bloom.0.as_bytes()).unwrap();
     assert_eq!(live.len(), 1, "exactly one outstanding order names the member");
     assert_eq!(live[0].workpiece, "wp-single");
+}
+
+#[test]
+fn a_same_stage_retry_dispatches_beside_the_order_it_overtakes() {
+    // The operator retry overtakes a dispatch that will never answer: the
+    // reducer mints the same stage again beside the order it overtook, which
+    // is left to the deadline sweep. The member hold is Reconcile-only, so it
+    // must not stall the retry (#5968).
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+
+    enqueue_dispatch_at(&mut store, bloom, "wp-retry", 10, StageId::Verify);
+    enqueue_dispatch_at(&mut store, bloom, "wp-retry", 10, StageId::Verify);
+
+    let (handles, _, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    assert_eq!(handles.len(), 2, "the retry dispatches beside the overtaken order");
+    assert_eq!(backend.orders().len(), 2);
 }
