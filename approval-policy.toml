@@ -262,3 +262,14 @@ tier = "judge"
 [[rules]]
 glob = "crates/aether-behavior/**"
 tier = "judge"
+
+# Repo-level gate configs. A lint ban or a formatting rule is one file at the
+# root, so a member that changes one has to name it, and a surface may name a
+# file only when a rule here knows it. Human tier: each is a repo-wide gate.
+[[rules]]
+glob = "/clippy.toml"
+tier = "human"
+
+[[rules]]
+glob = "/rustfmt.toml"
+tier = "human"
