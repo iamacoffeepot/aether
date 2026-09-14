@@ -704,9 +704,9 @@ mod tests {
     #[test]
     fn construct_prompt_names_the_budget_only_when_the_dispatch_carries_one() {
         let unbounded = assembled_with_budget(Some("abc123"), Some("shared order"), None);
-        assert!(!unbounded.contains("## Budget"), "a dispatch that named no deadline grows no budget section");
+        assert!(!unbounded.contains("\n## Budget\n"), "a dispatch that named no deadline grows no budget section",);
         assert!(
-            !CONSTRUCT_SOURCE.contains("## Budget\n"),
+            !CONSTRUCT_SOURCE.contains("\n## Budget\n"),
             "the instruction source must not state a budget it cannot know",
         );
         assert!(

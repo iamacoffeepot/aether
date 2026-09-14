@@ -559,6 +559,13 @@ impl ExecutorPort for OffloadedPort<'_> {
         }
     }
 
+    fn cancelled_capture(&self, handle: &WorkHandle) -> Option<CandidateRef> {
+        // Straight to the shell rather than through the offload: the capture
+        // already happened inside the cancel a worker answered, so this is the
+        // reactor collecting a registry row, not asking for work.
+        self.shell.cancelled_capture(handle)
+    }
+
     fn release_physical_run(&self, physical_run: &Digest) -> Settled<Result<(), ExecutorPortError>> {
         match self.offload.take_or_want(AdapterWork::ReleasePhysicalRun(*physical_run)) {
             Some(AdapterAnswer::ReleasePhysicalRun(answer)) => Settled::Answered(answer),

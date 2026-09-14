@@ -22,6 +22,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::EXECUTION_DEADLINE_ENV;
 
+/// The longest budget the lane will believe.
+///
+/// The seal door refuses an authored wall clock above one day
+/// ([`ExecutionLimits::MAX_WALL_CLOCK_SECS`](aether_bloomery::ExecutionLimits::MAX_WALL_CLOCK_SECS)),
+/// so a remaining budget past that is a misread number rather than a very
+/// patient coordinator — and believing one would hand every clamp below an
+/// unbounded answer while looking like a bounded lane.
+const LONGEST_CREDIBLE_BUDGET: Duration = Duration::from_secs(86_400);
+
 /// How much of the limit the lane keeps clear of the cancel.
 ///
 /// Handing off with two minutes unspent is the whole point: the candidate, its
@@ -57,20 +66,18 @@ impl Budget {
     /// `None` when the deadline is already in the past — a lane that launched
     /// past its own cancel is about to be killed, and pretending it has a budget
     /// of zero would make every caller below skip its work and hand off an
-    /// unfixed tree a moment before the run is discarded anyway. `None` too for
-    /// a deadline no monotonic clock can reach, which is a misread number rather
-    /// than a very patient coordinator, and which `Instant + Duration` would
-    /// answer by panicking the lane.
+    /// unfixed tree a moment before the run is discarded anyway. `None` too past
+    /// [`LONGEST_CREDIBLE_BUDGET`], which is not a budget at all.
     pub(super) fn at(deadline_unix_millis: u64) -> Option<Self> {
         let now_unix_millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
         let remaining = Duration::from_millis(deadline_unix_millis.checked_sub(now_unix_millis)?);
-        if remaining.is_zero() {
+        if remaining.is_zero() || remaining > LONGEST_CREDIBLE_BUDGET {
             return None;
         }
 
-        Instant::now().checked_add(remaining).map(|deadline| Self { deadline })
+        Some(Self { deadline: Instant::now() + remaining })
     }
 
     /// How long until the cancel.
@@ -174,15 +181,17 @@ mod tests {
 
         assert!(Budget::at(0).is_none(), "a deadline at the epoch is long past");
         assert!(Budget::at(now_unix_millis + 60_000).is_some(), "a deadline a minute out resolves a budget");
-        // A misread number, not a very patient coordinator: `Instant + Duration`
-        // answers a half-million-year offset by panicking the lane it was
-        // supposed to be bounding.
-        assert!(Budget::at(u64::MAX).is_none(), "a deadline no monotonic clock can reach resolves nothing");
+        // A misread number, not a very patient coordinator: the seal door
+        // refuses an authored limit past a day, so nothing downstream should
+        // believe a remaining budget of half a million years and clamp nothing.
+        assert!(Budget::at(u64::MAX).is_none(), "a deadline past any sealable limit resolves nothing");
     }
 
     #[test]
     fn the_budget_section_states_the_limit_and_what_is_left_of_it() {
-        let section = with_remaining(Duration::from_mins(58)).section();
+        // A second past the whole minute, because the render truncates and the
+        // clock moves between constructing the budget and reading it.
+        let section = with_remaining(Duration::from_mins(58) + Duration::from_secs(1)).section();
 
         assert!(section.starts_with("\n## Budget\n\n"), "the budget is a context slot, not inlined instructions");
         assert!(section.contains("58 minute(s)"), "got: {section}");

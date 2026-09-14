@@ -23,9 +23,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs, thread};
 
 use aether_bloomery::{
-    BloomId, BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, CommissionStatus, INSTRUCTION_MANIFEST_DIGEST_ENV,
-    INSTRUCTION_MANIFEST_ENV, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_MEMBER_COMMAND, VerifyFailure,
-    VerifyFailureSet,
+    BloomId, BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, CommissionStatus, EXECUTION_DEADLINE_ENV,
+    INSTRUCTION_MANIFEST_DIGEST_ENV, INSTRUCTION_MANIFEST_ENV, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND,
+    VERIFY_MEMBER_COMMAND, VerifyFailure, VerifyFailureSet,
 };
 use aether_chassis_bloomery::bloomery::admits_lane_key;
 use aether_chassis_bloomery::bloomery::mock_lane::{FOREIGN_SESSION_ID, LaneMode, LaneRun, LaneScript, read_ledger};
@@ -199,8 +199,11 @@ const SELF_STAMPED: [&str; 1] = ["__CF_USER_TEXT_ENCODING"];
 /// Names the dispatch writes onto the child after constructing its environment
 /// from the allow list — host-to-lane contract, not coordinator inheritance.
 /// `CARGO_TARGET_DIR` is the same class on non-unix; unix lanes reach the slot
-/// target through a checkout symlink instead, so it does not appear here.
-const DISPATCH_STAMPED: [&str; 2] = [INSTRUCTION_MANIFEST_ENV, INSTRUCTION_MANIFEST_DIGEST_ENV];
+/// target through a checkout symlink instead, so it does not appear here. The
+/// execution deadline joins them for the same reason and by the same route
+/// (#5998): a model lane is told when it will be cancelled, and an argv flag
+/// would be one the sealed subject tree's own `xtask` cannot parse.
+const DISPATCH_STAMPED: [&str; 3] = [INSTRUCTION_MANIFEST_ENV, INSTRUCTION_MANIFEST_DIGEST_ENV, EXECUTION_DEADLINE_ENV];
 
 #[test]
 fn a_lane_child_comes_up_on_a_constructed_environment_not_the_coordinators() {
