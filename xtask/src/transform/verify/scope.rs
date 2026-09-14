@@ -19,9 +19,12 @@
 //!
 //! Everything the closure cannot see fails open, and the blind spots are
 //! enumerated rather than assumed: a workspace-level input (lockfile, lint
-//! config, cargo/nextest config, the selection machinery), a path matching no
+//! config, cargo/nextest config, the gate code itself), a path matching no
 //! package and no rule, a component crate anywhere in the closure, and any
-//! error at all reaching for git or the package graph.
+//! error at all reaching for git or the package graph. The one xtask path that
+//! is *not* such an input is the tool around the gate — see
+//! [`super::inputs`] for where that line is drawn and what a tool change
+//! compiles instead.
 //!
 //! The one direction that does not widen is a diff that entered no crate at
 //! all — [`Scope::Outside`]. There the whole tree is not the safe answer but
@@ -43,22 +46,13 @@
 
 use std::collections::BTreeSet;
 use std::process::Command;
+use std::slice::from_ref;
 
 use anyhow::{Context, Result, bail};
 
+use super::inputs::{self, SMOKE_PACKAGE, ToolChange};
 use crate::affected::graph::Workspace;
 use crate::affected::rules::global_screen;
-
-/// Workspace-level inputs on top of the ones [`global_screen`] already names.
-///
-/// That screen answers "which tests must run", so it names only what can move
-/// a test outcome; this one answers "which crates does the whole mechanical
-/// gate run over", and `rustfmt.toml` reshapes what `cargo fmt -- --check`
-/// says about every file in the tree. The member it moves is workspace-wide
-/// whatever the diff touched, so the entry changes no verdict today — it is
-/// here so the list reads as the complete set of workspace inputs rather than
-/// as the subset that happens to matter under the current member breakdown.
-const VERIFY_RUN_ALL_EXACT: &[&str] = &["rustfmt.toml"];
 
 /// How many of the diff's paths an [`Scope::Outside`] receipt names before it
 /// says how many more there are. The reader needs to recognize the diff, not to
@@ -87,6 +81,11 @@ pub(super) enum Scope {
         /// `wasm_needed`, carried rather than recomputed so the lane and the
         /// gate it predicts cannot answer it two ways.
         wasm_needed: bool,
+        /// Why this closure holds a crate the diff cannot reach, when it does —
+        /// today only the smoke crate an xtask tool change adds. A package in
+        /// the argv that the linkage story does not account for is exactly the
+        /// kind of thing a reader must not have to guess at.
+        note: Option<String>,
     },
     /// The candidate diff entered no workspace crate at all, so the compiling
     /// members have an empty closure and nothing of the candidate's to build.
@@ -132,12 +131,16 @@ impl Scope {
     /// The scope a candidate diff of these paths computes — the whole decision
     /// past the git read, so it is exercisable against a stated diff.
     fn over_changed(changed: &[String]) -> Result<Self> {
-        if let Some(hit) = global_screen(changed).or_else(|| verify_screen(changed)) {
+        let tool = ToolChange::of(changed);
+        if let ToolChange::Gate(path) = tool {
+            return Ok(Self::workspace(format!("a workspace-level input changed: {path}")));
+        }
+        if let Some(hit) = outside_the_tool(changed) {
             return Ok(Self::workspace(format!("a workspace-level input changed: {hit}")));
         }
 
         let workspace = Workspace::load()?;
-        let selection = workspace.select(changed)?;
+        let mut selection = workspace.select(changed)?;
         if let Some(reason) = selection.run_all {
             return Ok(Self::workspace(reason));
         }
@@ -150,12 +153,27 @@ impl Scope {
             )));
         }
 
+        // A tool change proves itself by compiling xtask's own closure and
+        // then running each gate once over one real crate — the smoke check
+        // that says the tool still drives a gate end to end (#6001).
+        let note = match tool {
+            ToolChange::Tool(path) => {
+                selection.packages.insert(SMOKE_PACKAGE.to_owned());
+                Some(format!(
+                    "{path} changed the tool the gates run through rather than the gate code, so {SMOKE_PACKAGE} \
+                     joins the closure as one run of each gate over a real crate"
+                ))
+            }
+            ToolChange::Gate(_) | ToolChange::Ordinary => None,
+        };
+
         let members = workspace.members();
         let skipped = members.difference(&selection.packages).cloned().collect();
         Ok(Self::Closure {
             packages: selection.packages.into_iter().collect(),
             skipped,
             wasm_needed: selection.wasm_needed,
+            note,
         })
     }
 
@@ -266,9 +284,9 @@ impl Scope {
     pub(super) fn receipt(&self) -> String {
         match self {
             Self::Workspace { reason } => format!("verify scope: every workspace crate — {reason}\n"),
-            Self::Closure { packages, skipped, wasm_needed } => format!(
+            Self::Closure { packages, skipped, wasm_needed, note } => format!(
                 "verify scope: the candidate diff's reverse-dependency closure.\n\
-                 crates in ({}): {}\ncrates skipped ({}): {}\ndist pre-build: {}\n",
+                 crates in ({}): {}\ncrates skipped ({}): {}\ndist pre-build: {}\n{}",
                 packages.len(),
                 packages.join(" "),
                 skipped.len(),
@@ -278,6 +296,7 @@ impl Scope {
                 } else {
                     "not needed — no crate in the closure resolves a dist artifact by path"
                 },
+                note.as_ref().map_or_else(String::new, |note| format!("smoke check: {note}\n")),
             ),
             Self::Outside { paths } => format!(
                 "verify scope: no workspace crate — every one of the candidate diff's {} path(s) lies outside \
@@ -373,10 +392,16 @@ fn changed_paths(base: &str) -> Result<Vec<String>> {
         .collect())
 }
 
-/// Screen for the workspace-level inputs this lane names beyond the
-/// affected-package screen's, returning the first hit.
-fn verify_screen(changed: &[String]) -> Option<&str> {
-    changed.iter().map(String::as_str).find(|path| VERIFY_RUN_ALL_EXACT.contains(path))
+/// The selection lane's run-everything screen, asked of every path in the diff
+/// except the tool's own sources.
+///
+/// That screen names several xtask paths — the selection machinery, the dist
+/// builder, the binary entry — because a change to them moves which tests CI
+/// selects. This lane has already decided that question for xtask on its own
+/// terms ([`ToolChange`]), so re-asking the shared screen about the same paths
+/// would take the widening back one line after declining it.
+fn outside_the_tool(changed: &[String]) -> Option<&str> {
+    changed.iter().filter(|path| !inputs::is_tool(path)).find_map(|path| global_screen(from_ref(path)))
 }
 
 /// The first component crate in `packages`, when the closure reached one.
@@ -395,7 +420,7 @@ fn wasm_source_in<'a>(packages: &'a BTreeSet<String>, wasm_sources: &BTreeSet<St
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{Scope, verify_screen, wasm_source_in};
+    use super::{SMOKE_PACKAGE, Scope, outside_the_tool, wasm_source_in};
     use crate::affected::graph::Workspace;
 
     /// The crate the two-hop tripwire starts from: a foundational, widely
@@ -557,7 +582,7 @@ mod tests {
             "rust-toolchain.toml",
             ".config/nextest.toml",
             ".cargo/config.toml",
-            "xtask/src/affected/rules.rs",
+            "xtask/src/transform/verify/mod.rs",
             ".github/workflows/ci.yml",
         ] {
             let scope = Scope::over_changed(&strings(&[path])).expect("screen the changed path");
@@ -566,17 +591,32 @@ mod tests {
         }
 
         assert!(
-            verify_screen(&strings(&["crates/aether-math/src/lib.rs"])).is_none(),
+            outside_the_tool(&strings(&["crates/aether-math/src/lib.rs"])).is_none(),
             "an ordinary crate source must not be screened",
         );
+    }
 
-        let operator_tooling = Scope::over_changed(&strings(&["xtask/src/bloom/roll/coverage.rs"]))
-            .expect("screen an operator-tooling xtask path");
-        assert!(
-            operator_tooling.packages().is_some(),
-            "an xtask path outside the selection machinery must not force the whole workspace: {}",
-            operator_tooling.receipt(),
-        );
+    #[test]
+    fn a_change_to_the_tool_around_the_gate_compiles_xtask_and_the_smoke_crate() {
+        // Tripwire for #6001. Nothing in the workspace links xtask, so the only
+        // thing that ever widened a tool change to sixty crates was xtask being
+        // what runs the gates — true of the gate code, not of the selection
+        // graph beside it. Both directions matter: a rule that stops narrowing
+        // puts the 13-to-21-minute runs back, and one that starts narrowing the
+        // *gate* code lets a change to the scope computation prove itself on
+        // the crates it chose to look at.
+        let tool = Scope::over_changed(&strings(&["xtask/src/affected/graph.rs"]))
+            .expect("compute the scope over a tool change");
+
+        let packages = tool.packages().expect("a tool change narrows");
+        assert!(packages.contains(&"xtask".to_owned()), "the tool's own crate is compiled: {packages:?}");
+        assert!(packages.contains(&SMOKE_PACKAGE.to_owned()), "and one real crate is run through each gate");
+        assert_eq!(packages.len(), 2, "and nothing else: {packages:?}");
+        assert!(tool.receipt().contains("smoke check:"), "the receipt accounts for it: {}", tool.receipt());
+
+        let gate = Scope::over_changed(&strings(&["xtask/src/transform/verify/scope.rs"]))
+            .expect("compute the scope over a gate change");
+        assert_eq!(gate.packages(), None, "the gate code still runs every crate: {}", gate.receipt());
     }
 
     #[test]
