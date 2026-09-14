@@ -15,8 +15,9 @@ use super::{
     AggregateReviewError, AggregateReviewFault, BloomRecord, BloomStatus, Decision, Decisions, FoldedIntegration,
     Outcome, Snapshot,
 };
+use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{Evidence, EvidenceKind, ResolvedBloom};
+use crate::values::{Evidence, EvidenceKind, ResolvedBloom, VerifyGateSet, VerifyProof};
 
 /// Candidate-review judgments per bloom (ADR-0153). Independent of the sealed
 /// `AggregateReview` retry budget, which ADR-0176 assigns to the executor-fault
@@ -77,13 +78,43 @@ pub(super) fn resolution_effects(
     // commit's digest (distinct from the artifact `tree`) the mainline advances
     // to; the reducer never does the I/O. The consumed fold is cleared — a
     // resolved bloom holds no pending gate run.
-    let effects = alloc::vec![
+    let mut effects = Vec::new();
+    if let Some(proof) = contextual_memo_proof(record, integration.tree) {
+        effects.push(Decision::RecordVerifyProof { bloom, proof });
+    }
+    effects.extend(alloc::vec![
         Decision::RecordIntegration { bloom, integration: None },
         Decision::SetResolved { bloom, resolved: resolved.clone() },
         Decision::DispatchLand { bloom, expected_base: record.spec.base(), new_head: integration.head },
-    ];
+    ]);
 
     (resolved, effects)
+}
+
+/// The legacy aggregate-verify memo entry a contextual resolve files for the
+/// tree it lands, or `None` when this resolve needs none.
+///
+/// A contextual bloom integrates through shared runs whose `PassedIn` receipts
+/// never enter the memo, so without this the landing that follows finds no
+/// `AggregateVerify` proof for the tree and files no base receipt — and the
+/// next seal re-proves a head the landing already proved. The proof stands on
+/// the green shared run whose candidate is the resolved tree, filed under the
+/// fold gate set so `verify_proof_for(AggregateVerify, tree)` answers the way
+/// a classic bloom's does. A resolve that already holds such a proof — every
+/// classic bloom, whose `AggregateVerifyCompleted` filed it — mints nothing.
+fn contextual_memo_proof(record: &BloomRecord, tree: Digest) -> Option<VerifyProof> {
+    if record.verify_proof_for(StageId::AggregateVerify, tree).is_some() {
+        return None;
+    }
+    let receipt = record.coordination.as_deref()?.contextual_proof_for_tree(tree)?;
+    if receipt.kind != EvidenceKind::VerificationResult || !receipt.validates(&tree) {
+        return None;
+    }
+    Some(VerifyProof {
+        gate_set: VerifyGateSet::fold_of(&record.pipeline_manifest).digest(),
+        stage: StageId::AggregateVerify,
+        evidence: receipt.clone(),
+    })
 }
 
 /// Reduce a composition-review verdict (ADR-0153, ADR-0191 §3). A passing
