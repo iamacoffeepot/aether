@@ -21,6 +21,8 @@ use serde_json::Value;
 
 mod coordination;
 pub use coordination::CoordinationView;
+#[cfg(test)]
+pub(crate) use coordination::{MemberPinView, MemberRequestView, SharedRunPlanView, SharedRunView};
 
 /// A digest as the REST edge renders it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -251,7 +253,7 @@ pub struct OrderView {
 }
 
 impl ViewDocument {
-    /// Whether the host still holds a live lane for this bloom and workpiece.
+    /// Whether `/view` overlays a per-member outstanding order for this pair.
     #[must_use]
     pub fn has_order(&self, bloom: DigestHex, workpiece: &str) -> bool {
         self.order_for(bloom, workpiece).is_some()
@@ -261,6 +263,23 @@ impl ViewDocument {
     #[must_use]
     pub fn order_for(&self, bloom: DigestHex, workpiece: &str) -> Option<&OrderView> {
         self.orders.iter().find(|order| order.bloom == bloom && order.workpiece == workpiece)
+    }
+
+    /// Whether the host still holds a live lane for this member.
+    ///
+    /// A per-member outstanding order is the ordinary case. A contextual shared
+    /// verify run (ADR-0218) seats the composition workpiece instead, so a
+    /// member whose request is still unfinished on a live run has a lane even
+    /// when [`Self::has_order`] is false.
+    #[must_use]
+    pub fn has_lane(&self, bloom: DigestHex, member: &MemberView) -> bool {
+        self.has_order(bloom, &member.workpiece)
+            || self
+                .blooms
+                .iter()
+                .find(|row| row.id == bloom)
+                .and_then(|row| row.coordination.as_ref())
+                .is_some_and(|coordination| coordination.has_live_run(member))
     }
 }
 

@@ -237,11 +237,8 @@ fn rows_of(doc: &MetricsTimeline, store: &Store, width: usize) -> Vec<LaneRow> {
                     } else {
                         member
                             .map(|member| {
-                                member_status_state(
-                                    member,
-                                    view.is_some_and(|view| view.has_order(doc.bloom, &member.workpiece)),
-                                )
-                                .to_owned()
+                                member_status_state(member, view.is_some_and(|view| view.has_lane(doc.bloom, member)))
+                                    .to_owned()
                             })
                             .unwrap_or_default()
                     }

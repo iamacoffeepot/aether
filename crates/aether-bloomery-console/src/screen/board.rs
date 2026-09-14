@@ -286,11 +286,11 @@ impl Board {
 }
 
 /// The one-word state `scripts/bloomery-operator.py`'s `member_status_state`
-/// prints. `has_order` is the live outstanding-order overlay `/view` now
-/// projects, so `running` means the host still holds a lane.
+/// prints. `has_lane` is a live outstanding order or an unfinished request on
+/// a live shared verify run, so `running` means the host still holds a lane.
 #[must_use]
-pub fn member_status_state(member: &MemberView, has_order: bool) -> &'static str {
-    MemberState::of(member, has_order).label()
+pub fn member_status_state(member: &MemberView, has_lane: bool) -> &'static str {
+    MemberState::of(member, has_lane).label()
 }
 
 fn rows_from(store: &Store, lane: BoardLane) -> Vec<BoardRow> {
@@ -319,8 +319,7 @@ fn rows_of(view: &ViewDocument, lane: BoardLane, dispatches: &[MetricDispatch]) 
                 .members
                 .iter()
                 .filter(|member| {
-                    bloom.coordination.is_some()
-                        || MemberState::of(member, view.has_order(bloom.id, &member.workpiece)).walks()
+                    bloom.coordination.is_some() || MemberState::of(member, view.has_lane(bloom.id, member)).walks()
                 })
                 .collect(),
             BoardLane::History => bloom.members.iter().collect(),
@@ -353,7 +352,7 @@ fn rows_of(view: &ViewDocument, lane: BoardLane, dispatches: &[MetricDispatch]) 
         }));
         for member in members {
             let order = view.order_for(bloom.id, &member.workpiece);
-            let mut row = member_row(bloom.id, member, dispatches, order);
+            let mut row = member_row(bloom.id, member, dispatches, order, view.has_lane(bloom.id, member));
             if let Some(state) = &bloom.coordination {
                 row.stage = format!("{} · {}", row.stage, state.member_summary(member));
                 if let Some((_, millis)) = state.member_latency(member) {
@@ -381,11 +380,12 @@ fn member_row(
     member: &MemberView,
     dispatches: &[MetricDispatch],
     order: Option<&OrderView>,
+    has_lane: bool,
 ) -> MemberRow {
     MemberRow {
         bloom,
         workpiece: member.workpiece.clone(),
-        state: member_status_state(member, order.is_some()).to_owned(),
+        state: member_status_state(member, has_lane).to_owned(),
         stage: member_stage(member, bloom, dispatches, order),
         age: elapsed_of(dispatches, bloom, Some(&member.workpiece)),
     }
@@ -431,8 +431,9 @@ fn elapsed_of(dispatches: &[MetricDispatch], bloom: DigestHex, workpiece: Option
 mod tests {
     use super::{Board, BoardLane, BoardRow, member_status_state, rows_of};
     use crate::dto::{
-        BloomStatus, BloomView, CompositionCursorView, DigestHex, MemberView, MetricDispatch, OrderView,
-        PendingDecisionView, Present, StageId, ViewDocument,
+        BloomStatus, BloomView, CandidateRef, CompositionCursorView, CoordinationView, DigestHex, MemberPinView,
+        MemberRequestView, MemberView, MetricDispatch, OrderView, PendingDecisionView, Present, SharedRunPlanView,
+        SharedRunView, StageId, ViewDocument,
     };
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
@@ -462,6 +463,33 @@ mod tests {
 
     fn live_order(bloom: DigestHex, workpiece: &str, stage: StageId) -> OrderView {
         OrderView { nonce: format!("dispatch-{workpiece}"), bloom, workpiece: workpiece.to_owned(), stage }
+    }
+
+    fn pinned(workpiece: &str) -> MemberView {
+        MemberView {
+            workpiece: workpiece.to_owned(),
+            scope_revision: DigestHex::from_bytes([4; 32]),
+            cursor: Some(CompositionCursorView {
+                stage: Some(StageId::Verify),
+                attempts: 1,
+                candidate: Some(CandidateRef {
+                    tree: DigestHex::from_bytes([1; 32]),
+                    checkout: DigestHex::from_bytes([2; 32]),
+                }),
+            }),
+            ..MemberView::default()
+        }
+    }
+
+    fn request_for(member: &MemberView, id: DigestHex) -> MemberRequestView {
+        MemberRequestView {
+            member: MemberPinView {
+                workpiece: member.workpiece.clone(),
+                scope_revision: member.scope_revision,
+                candidate: member.cursor.as_ref().and_then(|cursor| cursor.candidate.clone()).unwrap_or_default(),
+            },
+            id: Some(id),
+        }
     }
 
     fn dispatch(bloom: DigestHex, workpiece: &str, recorded_unix_millis: Option<u64>, sequence: u64) -> MetricDispatch {
@@ -550,6 +578,52 @@ mod tests {
         );
         assert_eq!(member_status_state(&MemberView { blocked_by: Some(String::new()), ..member("wp") }, false), "idle");
         assert_eq!(member_status_state(&member("wp"), false), "idle");
+    }
+
+    #[test]
+    fn a_member_on_a_shared_verify_run_paints_running() {
+        // The plausible bug: a contextual shared run seats the composition
+        // workpiece, so looking only at a per-member outstanding order paints
+        // the covered member idle while STAGE already names the shared run.
+        let bloom = digest(1);
+        let covered = pinned("wp-run");
+        let waiting = pinned("wp-idle");
+        let request_id = DigestHex::from_bytes([8; 32]);
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: bloom,
+                status: Some(BloomStatus::Sealed),
+                members: vec![covered.clone(), waiting],
+                coordination: Some(CoordinationView {
+                    runs: vec![SharedRunView {
+                        plan: SharedRunPlanView { requests: vec![request_for(&covered, request_id)] },
+                        phase: "Running".to_owned(),
+                        physical_run: Some(DigestHex::from_bytes([7; 32])),
+                        unfinished: vec![request_id],
+                        ..SharedRunView::default()
+                    }],
+                    ..CoordinationView::default()
+                }),
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        let rows = rows_of(&view, BoardLane::Live, &[]);
+        let members: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                BoardRow::Member(member) => {
+                    Some((member.workpiece.as_str(), member.state.as_str(), member.stage.as_str()))
+                }
+                BoardRow::Bloom(_) | BoardRow::Order(_) => None,
+            })
+            .collect();
+        assert_eq!(members.len(), 2, "{members:?}");
+        assert_eq!(members[0].0, "wp-run");
+        assert_eq!(members[0].1, "running");
+        assert!(members[0].2.contains("shared 07070707"), "{}", members[0].2);
+        assert_eq!(members[1].0, "wp-idle");
+        assert_eq!(members[1].1, "idle");
     }
 
     #[test]
