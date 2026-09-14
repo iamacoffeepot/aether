@@ -586,8 +586,6 @@ fn advisory_evidence(upload: &UploadedEvidence, passed: bool, evidence: Evidence
 /// Scoped to a passing verdict on purpose. A finding carries its own prose, an
 /// `environment` verdict is already a fault, and a park is a question — none of
 /// them is the empty pass this refuses.
-///
-/// [`LaneObservation::notes`]: aether_bloomery::LaneObservation::notes
 fn reviewed_nothing(upload: &UploadedEvidence) -> bool {
     let stated = |prose: &Option<String>| prose.as_deref().is_some_and(|prose| !prose.trim().is_empty());
     verdict_passed(upload.verdict) && !stated(&upload.observation.findings) && !stated(&upload.observation.notes)
