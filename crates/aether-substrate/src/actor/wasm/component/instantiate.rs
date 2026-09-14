@@ -10,7 +10,7 @@ pub struct Component {
     /// Issue 584 Phase 2b: post-init mail-allowed hook. Stored (rather
     /// than called inside [`Self::instantiate`]) so the trampoline
     /// can fire it AFTER its mailbox is registered — issue 640
-    /// Phase 2 surfaced a race where `wire`-time `subscribe_input`
+    /// Phase 2 surfaced a race where `wire`-time `aether.window.subscribe`
     /// mail was rejected by the window cap's
     /// `validate_subscriber_mailbox` because the trampoline mailbox
     /// hadn't been registered yet (init runs in

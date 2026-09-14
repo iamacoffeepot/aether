@@ -117,9 +117,9 @@ fn list_components_reports_loaded_probe_lineage() {
 
 /// Subscribing the fixture to Tick yields exactly one
 /// `tick_observed` broadcast per advance tick. Validates the
-/// `subscribe_input` → tick fanout path end-to-end.
+/// `aether.lifecycle.subscribe` → tick fanout path end-to-end.
 #[test]
-fn input_subscription_yields_one_tick_observed_per_advance() {
+fn tick_subscription_yields_one_tick_observed_per_advance() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };

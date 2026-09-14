@@ -133,7 +133,7 @@ impl NativeActor for WasmTrampoline {
     /// post-registration. The cap-side spawn flow registers the
     /// trampoline mailbox in step 5–7; this hook runs after that
     /// as part of the dispatcher's lifecycle, so a wire-time
-    /// `subscribe_input` mail validates against a live closure
+    /// `aether.window.subscribe` mail validates against a live closure
     /// entry. Pre-issue-640 the call lived inside
     /// `Component::instantiate` (step 4, before registration) and
     /// races the window cap's `validate_subscriber_mailbox`,
