@@ -73,12 +73,17 @@ pub fn summarize_tail(lines: &[&str]) -> Option<SessionSummary> {
 /// The terminal record on one raw line, in either transcript dialect.
 #[must_use]
 pub fn parse_terminal(raw: &str) -> Option<SessionSummary> {
-    let value: Value = serde_json::from_str(raw).ok()?;
+    summary_of(&serde_json::from_str(raw).ok()?)
+}
+
+/// The terminal record on a parsed event, in either transcript dialect.
+#[must_use]
+pub fn summary_of(value: &Value) -> Option<SessionSummary> {
     if value.get("type").and_then(Value::as_str) == Some("result") {
         return Some(SessionSummary {
-            turns: turns_of(&value),
-            cost_micro_usd: cost_micros_of(&value),
-            duration_millis: duration_millis_of(&value),
+            turns: turns_of(value),
+            cost_micro_usd: cost_micros_of(value),
+            duration_millis: duration_millis_of(value),
             is_error: value.get("is_error").and_then(Value::as_bool),
             session_id: value.get("session_id").and_then(Value::as_str).map(str::to_owned),
         });

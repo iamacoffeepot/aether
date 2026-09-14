@@ -1,10 +1,13 @@
-//! Transcript viewer: follow-tail, incremental search, one row per event.
+//! Transcript viewer: follow-tail, incremental search, one row per event,
+//! and a swappable conversation view.
 //!
 //! The transcript is the agent's session: each row is a turn, a tool call, a
 //! tool result, or the terminal verdict, and the status line carries the
-//! session's turns, cost, and time off the terminal record.
+//! session's turns, cost, and time off the terminal record. `v` swaps the
+//! log rows for a conversation layout of the same events.
 
 mod buffer;
+mod conversation;
 mod event;
 mod session;
 
@@ -12,6 +15,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
+use ratatui::text::Span;
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::dto::DispatchFilePage;
@@ -32,6 +36,7 @@ const HINTS: &[KeyHint] = &[
     KeyHint { keys: "n/N", action: "next" },
     KeyHint { keys: "</>", action: "pan" },
     KeyHint { keys: "p", action: "prompt" },
+    KeyHint { keys: "v", action: "view" },
     KeyHint { keys: "Esc", action: "back" },
     KeyHint { keys: "r", action: "refresh" },
     KeyHint { keys: "q", action: "quit" },
@@ -50,6 +55,23 @@ impl Pane {
         match self {
             Self::Transcript => Self::Prompt,
             Self::Prompt => Self::Transcript,
+        }
+    }
+}
+
+/// How the transcript pane paints events. The cursor is an event id, so a
+/// swap never loses the place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum View {
+    Lines,
+    Conversation,
+}
+
+impl View {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Lines => Self::Conversation,
+            Self::Conversation => Self::Lines,
         }
     }
 }
@@ -104,7 +126,10 @@ pub struct Transcript {
     search: Search,
     last_error: Option<String>,
     pane: Pane,
+    view: View,
     prompt: PromptPane,
+    conv_span: Option<(u64, u64)>,
+    layout_count: usize,
 }
 
 #[derive(Default)]
@@ -114,6 +139,13 @@ struct Search {
     matches: Vec<u64>,
     at: Option<usize>,
     scan_at: usize,
+}
+
+/// One event's contribution to the conversation viewport.
+struct Slice {
+    id: u64,
+    skip: usize,
+    lines: Vec<conversation::Line>,
 }
 
 impl Transcript {
@@ -147,7 +179,10 @@ impl Transcript {
             search: Search::default(),
             last_error: None,
             pane: Pane::Transcript,
+            view: View::Lines,
             prompt: PromptPane::default(),
+            conv_span: None,
+            layout_count: 0,
         }
     }
 
@@ -164,6 +199,12 @@ impl Transcript {
     #[must_use]
     pub fn parse_count(&self) -> usize {
         self.buffer.parse_count()
+    }
+
+    /// Events laid out for the last conversation paint. Zero in the lines view.
+    #[must_use]
+    pub fn layout_count(&self) -> usize {
+        self.layout_count
     }
 
     #[must_use]
@@ -190,7 +231,9 @@ impl Transcript {
         if self.search.editing {
             return self.handle_search_edit(key);
         }
-        if let Some(id) = self.expanded {
+        if self.view == View::Lines
+            && let Some(id) = self.expanded
+        {
             return self.handle_expanded(key, id);
         }
         if self.pane == Pane::Prompt {
@@ -207,8 +250,11 @@ impl Transcript {
                 Outcome::Handled
             }
             KeyCode::Enter => {
-                self.expanded = self.selected;
-                self.expand_scroll = 0;
+                self.toggle_unfold();
+                Outcome::Handled
+            }
+            KeyCode::Esc if self.expanded.is_some() => {
+                self.expanded = None;
                 Outcome::Handled
             }
             KeyCode::Char('f' | 'G') => {
@@ -239,6 +285,10 @@ impl Transcript {
                 self.pane = self.pane.toggle();
                 Outcome::Handled
             }
+            KeyCode::Char('v') => {
+                self.view = self.view.toggle();
+                Outcome::Handled
+            }
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -249,6 +299,10 @@ impl Transcript {
         match key.code {
             KeyCode::Char('p') => {
                 self.pane = self.pane.toggle();
+                Outcome::Handled
+            }
+            KeyCode::Char('v') => {
+                self.view = self.view.toggle();
                 Outcome::Handled
             }
             KeyCode::Char('j') | KeyCode::Down => {
@@ -303,6 +357,7 @@ impl Transcript {
 
         match self.pane {
             Pane::Prompt => self.render_prompt(frame, chunks[1]),
+            Pane::Transcript if self.view == View::Conversation => self.render_conversation(frame, chunks[1]),
             Pane::Transcript => {
                 if let Some(id) = self.expanded {
                     self.render_expanded(frame, chunks[1], id);
@@ -465,8 +520,21 @@ impl Transcript {
         }
     }
 
+    fn toggle_unfold(&mut self) {
+        self.expanded = if self.view == View::Conversation && self.expanded == self.selected {
+            None
+        } else {
+            self.selected
+        };
+        self.expand_scroll = 0;
+    }
+
     fn handle_expanded(&mut self, key: KeyEvent, _id: u64) -> Outcome {
         match key.code {
+            KeyCode::Char('v') => {
+                self.view = self.view.toggle();
+                Outcome::Handled
+            }
             KeyCode::Esc | KeyCode::Enter => {
                 self.expanded = None;
                 Outcome::Handled
@@ -557,6 +625,127 @@ impl Transcript {
         frame.render_stateful_widget(list, area, &mut state);
     }
 
+    fn render_conversation(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let height = usize::from(area.height.max(1));
+        let width = usize::from(area.width.max(1));
+        let slices = self.conversation_slices(height, width);
+        let mut items = Vec::new();
+        let mut remaining = height;
+        let mut marked = false;
+        for slice in &slices {
+            if remaining == 0 {
+                break;
+            }
+            let selected = Some(slice.id) == self.selected;
+            for line in slice.lines.iter().skip(slice.skip) {
+                if remaining == 0 {
+                    break;
+                }
+                let highlight = selected && !marked;
+                if highlight {
+                    marked = true;
+                }
+                let text = truncate(&line.text, self.pan, width);
+                let style = if highlight {
+                    palette::cursor()
+                } else {
+                    line.kind.style()
+                };
+                items.push(ListItem::new(Span::styled(text, style)));
+                remaining = remaining.saturating_sub(1);
+            }
+        }
+        if items.is_empty() {
+            items.push(ListItem::new(self.empty_label()));
+        }
+        frame.render_widget(List::new(items).style(palette::body()), area);
+    }
+
+    fn conversation_slices(&mut self, height: usize, width: usize) -> Vec<Slice> {
+        self.layout_count = 0;
+        if self.buffer.is_empty() {
+            self.conv_span = None;
+            return Vec::new();
+        }
+        let last = self.buffer.len().saturating_sub(1);
+        let selected = self.selected.and_then(|id| self.buffer.index_of(id)).unwrap_or(last);
+        if self.follow {
+            let slices = self.slices_ending_at(last, height, width);
+            return self.finish_window(slices);
+        }
+        if let Some((start_id, end_id)) = self.conv_span
+            && let (Some(start), Some(end)) = (self.buffer.index_of(start_id), self.buffer.index_of(end_id))
+        {
+            if selected >= start && selected <= end {
+                let slices = self.slices_starting_at(self.scroll.min(start), height, width);
+                if slices.iter().any(|slice| Some(slice.id) == self.selected) {
+                    return self.finish_window(slices);
+                }
+            } else if selected < start {
+                let slices = self.slices_starting_at(selected, height, width);
+                return self.finish_window(slices);
+            }
+        }
+        let slices = self.slices_ending_at(selected, height, width);
+        self.finish_window(slices)
+    }
+
+    fn finish_window(&mut self, slices: Vec<Slice>) -> Vec<Slice> {
+        let first = slices.first().map(|slice| slice.id);
+        let last = slices.last().map(|slice| slice.id);
+        if let (Some(first), Some(last)) = (first, last) {
+            self.conv_span = Some((first, last));
+            if let Some(index) = self.buffer.index_of(first) {
+                self.scroll = index;
+            }
+        } else {
+            self.conv_span = None;
+        }
+        slices
+    }
+
+    fn slices_ending_at(&mut self, end: usize, height: usize, width: usize) -> Vec<Slice> {
+        let mut acc = Vec::new();
+        let mut rows = 0;
+        let mut index = end;
+        loop {
+            if rows >= height {
+                break;
+            }
+            let lines = self.layout_at(index, width);
+            let take = lines.len().min(height.saturating_sub(rows));
+            let skip = lines.len().saturating_sub(take);
+            rows = rows.saturating_add(take);
+            acc.push(Slice { id: self.buffer.abs_id(index), skip, lines });
+            if index == 0 {
+                break;
+            }
+            index -= 1;
+        }
+        acc.reverse();
+        acc
+    }
+
+    fn slices_starting_at(&mut self, start: usize, height: usize, width: usize) -> Vec<Slice> {
+        let mut acc = Vec::new();
+        let mut rows = 0;
+        for index in start..self.buffer.len() {
+            if rows >= height {
+                break;
+            }
+            let lines = self.layout_at(index, width);
+            rows = rows.saturating_add(lines.len());
+            acc.push(Slice { id: self.buffer.abs_id(index), skip: 0, lines });
+        }
+        acc
+    }
+
+    fn layout_at(&mut self, index: usize, width: usize) -> Vec<conversation::Line> {
+        self.layout_count = self.layout_count.saturating_add(1);
+        let expanded = self.expanded == Some(self.buffer.abs_id(index));
+        conversation::event_lines(self.buffer.raw(index).unwrap_or(""), width, expanded)
+    }
+
     fn render_expanded(&mut self, frame: &mut Frame<'_>, area: Rect, id: u64) {
         let raw = self.buffer.index_of(id).and_then(|index| self.buffer.raw(index));
         if let Some(raw) = raw
@@ -623,6 +812,9 @@ impl Transcript {
         };
         let mut parts = vec![file.to_owned(), self.nonce.clone(), format!("{count} lines")];
         if self.pane == Pane::Transcript {
+            if self.view == View::Conversation {
+                parts.push("conversation".to_owned());
+            }
             if let Some(summary) = self.session_summary() {
                 parts.push(summary.label());
             }
@@ -668,7 +860,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::Transcript;
+    use super::{Transcript, View};
     use crate::dto::DispatchFilePage;
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
@@ -979,5 +1171,124 @@ mod tests {
         let text = drawn(&mut view, &store);
         assert!(!text.contains("turns"), "{text}");
         assert!(!text.contains('$'), "{text}");
+    }
+
+    #[test]
+    fn transcript_footer_advertises_the_view_key() {
+        assert!(
+            Transcript::key_hints().iter().any(|hint| hint.keys == "v"),
+            "the transcript footer must advertise v so the conversation view is discoverable"
+        );
+    }
+
+    #[test]
+    fn v_swaps_the_view_and_keeps_the_event_cursor() {
+        // The plausible bug: swapping the view rebuilds from the tail and
+        // loses the event the operator was reading.
+        let store = store_with(page(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"alpha"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"beta"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"gamma"}]}}"#,
+        ]));
+        let mut view = Transcript::new("dispatch-1");
+        view.reseat(&store);
+        view.handle_key(KeyEvent::from(KeyCode::Char('k')), &store);
+        let stayed = view.selected;
+        assert_eq!(view.handle_key(KeyEvent::from(KeyCode::Char('v')), &store), Outcome::Handled);
+        assert_eq!(view.view, View::Conversation);
+        assert_eq!(view.selected, stayed);
+        let text = drawn(&mut view, &store);
+        assert!(text.contains("beta"), "{text}");
+        assert!(!text.contains("assistant  beta"), "{text}");
+        assert!(text.contains("conversation"), "{text}");
+
+        assert_eq!(view.handle_key(KeyEvent::from(KeyCode::Char('v')), &store), Outcome::Handled);
+        assert_eq!(view.view, View::Lines);
+        assert_eq!(view.selected, stayed);
+        let text = drawn(&mut view, &store);
+        assert!(text.contains("assistant  beta"), "{text}");
+        assert!(!text.contains("conversation"), "{text}");
+    }
+
+    #[test]
+    fn conversation_draw_parses_only_the_visible_span() {
+        // Same laziness pin as the lines view: a tall fixture must not
+        // conversation-layout rows the viewport never shows.
+        let lines: Vec<String> = (0..400)
+            .map(|index| {
+                format!(r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{index}"}}]}}}}"#)
+            })
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let store = store_with(page(&refs));
+        let mut view = Transcript::new("dispatch-1");
+        view.reseat(&store);
+        assert_eq!(view.handle_key(KeyEvent::from(KeyCode::Char('v')), &store), Outcome::Handled);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("test backend");
+        terminal.draw(|frame| view.render(frame, frame.area(), &store)).expect("draw");
+        assert!(view.layout_count() <= 12, "laid out {} events for an 8-row viewport", view.layout_count());
+    }
+
+    #[test]
+    fn conversation_follow_keeps_the_tail_in_view() {
+        // The plausible bug: conversation lays out from event 0, so follow
+        // pins the cursor to the last event but the viewport still shows the
+        // opening prose.
+        let lines: Vec<String> = (0..40)
+            .map(|index| {
+                format!(r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"row-{index}"}}]}}}}"#)
+            })
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let store = store_with(page(&refs));
+        let mut view = Transcript::new("dispatch-1");
+        view.reseat(&store);
+        view.handle_key(KeyEvent::from(KeyCode::Char('v')), &store);
+        view.handle_key(KeyEvent::from(KeyCode::Char('f')), &store);
+        let text = drawn(&mut view, &store);
+        assert!(text.contains("row-39"), "{text}");
+        assert!(!text.contains("row-0"), "{text}");
+    }
+
+    #[test]
+    fn conversation_enter_unfolds_a_folded_tool_result() {
+        // The plausible bug: Enter in conversation still opens the JSON pane,
+        // so the operator never sees the folded tool body in place.
+        let store = store_with(page(&[
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok-head\nSECRET_TAIL","is_error":false}]}}"#,
+        ]));
+        let mut view = Transcript::new("dispatch-1");
+        view.reseat(&store);
+        view.handle_key(KeyEvent::from(KeyCode::Char('v')), &store);
+        let folded = drawn(&mut view, &store);
+        assert!(folded.contains("↳ ok"), "{folded}");
+        assert!(!folded.contains("SECRET_TAIL"), "{folded}");
+
+        assert_eq!(view.handle_key(KeyEvent::from(KeyCode::Enter), &store), Outcome::Handled);
+        let open = drawn(&mut view, &store);
+        assert!(open.contains("SECRET_TAIL"), "{open}");
+        assert!(!open.contains("\"type\""), "Enter must not switch to the JSON pane:\n{open}");
+    }
+
+    #[test]
+    fn search_still_finds_events_in_conversation() {
+        // The plausible bug: search is wired only to the lines view, so n/N
+        // go nowhere after the operator swaps to conversation.
+        let store = store_with(page(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"alpha"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"beta"}]}}"#,
+        ]));
+        let mut view = Transcript::new("dispatch-1");
+        view.reseat(&store);
+        view.handle_key(KeyEvent::from(KeyCode::Char('v')), &store);
+        view.handle_key(KeyEvent::from(KeyCode::Char('/')), &store);
+        for ch in ['b', 'e', 't', 'a'] {
+            view.handle_key(KeyEvent::from(KeyCode::Char(ch)), &store);
+        }
+        view.scan_matches(64);
+        assert_eq!(view.search.matches.len(), 1, "search must still walk collapsed previews after a view swap");
+        view.handle_key(KeyEvent::from(KeyCode::Char('n')), &store);
+        assert_eq!(view.selected, Some(view.buffer.abs_id(1)));
     }
 }
