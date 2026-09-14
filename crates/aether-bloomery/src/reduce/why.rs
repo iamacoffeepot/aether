@@ -146,7 +146,10 @@ fn member_state(
         );
     }
     if record.deferred_dispatches.contains(workpiece) {
-        return (WhyState::Blocked, "its dispatch is deferred by the operator brake".to_owned());
+        if record.operator_hold.is_some() {
+            return (WhyState::Blocked, "its dispatch is deferred by the operator brake".to_owned());
+        }
+        return (WhyState::Blocked, deferred_reason(record));
     }
     if let Some(ancestor) = blocking_ancestor(record, workpiece) {
         return (WhyState::Blocked, format!("waiting on the declared dependency {}", ancestor.0));
@@ -269,6 +272,22 @@ fn land_rung(record: &BloomRecord, verify: &TransitionWhy, review: &TransitionWh
         );
     }
     rung(LAND, WhyState::Blocked, "both aggregate gates passed but the bloom is not resolved".to_owned(), None)
+}
+
+/// Why a deferred dispatch without an operator hold is still waiting.
+///
+/// The hold is only one way into [`BloomRecord::deferred_dispatches`]: an
+/// unproven base withholds entry the same way, and a sibling fold or head move
+/// can leave an entry standing after the brake lifts. Reading every entry as
+/// the brake sends an operator to `release` with nothing to release, so the
+/// brake sentence stays gated on [`BloomRecord::operator_hold`] and the rest
+/// name what actually withholds the dispatch, in the lease-eviction shape.
+fn deferred_reason(record: &BloomRecord) -> String {
+    if record.base_proven {
+        "its dispatch is deferred for a sibling fold or head move; it re-dispatches when that completes".to_owned()
+    } else {
+        "its dispatch is withheld until the base is green; it re-dispatches when the base verify passes".to_owned()
+    }
 }
 
 /// The operator brake, worded once. It stops dispatch at every rung, so the
@@ -414,5 +433,64 @@ mod tests {
         let (snapshot, _) = sealed(&[]);
 
         assert!(why_of(&snapshot, &BloomId(digest(0xAB))).is_none());
+    }
+
+    #[test]
+    fn a_deferred_member_without_a_hold_names_the_base_wait_never_the_brake() {
+        // Issue 5967: every deferred entry read as the operator brake, so a
+        // bloom sealed onto an unproven base told the operator to reach for
+        // `release` with nothing to release.
+        let spec = draft(0, vec![membership("wp-a", 1), membership("wp-b", 2)]).seal();
+        let bloom = spec.id();
+        let snapshot = Snapshot::new(digest(0));
+        let seal = Event {
+            idempotency_key: IdempotencyKey("seal".into()),
+            fact: Fact::GraphSeal { predecessor: None, spec, edges: vec![] },
+        };
+        let decided = reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default());
+        let snapshot = snapshot.apply(&seal, &decided, &compiled_resolved());
+        let record = snapshot.blooms.get(&bloom).expect("the bloom sealed");
+        assert!(record.operator_hold.is_none());
+        assert!(!record.base_proven);
+        assert!(!record.deferred_dispatches.is_empty(), "an unproven entry defers");
+
+        let document = why_of(&snapshot, &bloom).expect("the bloom is known");
+        let waiting = document.members.iter().find(|member| member.workpiece.0 == "wp-a").expect("the deferred member");
+
+        assert!(!waiting.because.contains("brake"), "{}", waiting.because);
+        assert!(waiting.because.contains("base"), "{}", waiting.because);
+        assert!(waiting.because.contains("re-dispatches"), "{}", waiting.because);
+    }
+
+    #[test]
+    fn a_deferred_member_after_the_brake_lifts_names_the_deferral_never_the_brake() {
+        // The reported bloom: `operator_hold` is `None` on a live run, yet the
+        // stale deferred entry still read as the brake. A sibling fold or head
+        // move can leave the entry standing after the brake lifts, so the
+        // report must name that wait instead.
+        let (mut snapshot, bloom) = sealed(&[]);
+        snapshot
+            .blooms
+            .get_mut(&bloom)
+            .expect("the bloom sealed")
+            .deferred_dispatches
+            .insert(WorkpieceId("wp-a".into()));
+
+        let document = why_of(&snapshot, &bloom).expect("the bloom is known");
+        let waiting = document.members.iter().find(|member| member.workpiece.0 == "wp-a").expect("the deferred member");
+
+        assert_eq!(waiting.state, WhyState::Blocked);
+        assert!(!waiting.because.contains("brake"), "{}", waiting.because);
+        assert!(waiting.because.contains("re-dispatches"), "{}", waiting.because);
+        assert!(
+            waiting.because.contains("sibling fold") || waiting.because.contains("head move"),
+            "{}",
+            waiting.because
+        );
+        assert!(
+            !rung(&document.chain, super::DISPATCH_MEMBER).because.contains("brake"),
+            "the chain inherits the member sentence: {}",
+            rung(&document.chain, super::DISPATCH_MEMBER).because
+        );
     }
 }
