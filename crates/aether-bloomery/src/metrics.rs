@@ -24,15 +24,26 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
-use crate::ids::{BloomId, StageId};
+use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::ledger::{SeatDispatch, priced_micro_usd};
 use crate::reduce::{Decision, Decisions, Event, Fact, Outcome};
 use crate::values::{
-    BloomSpec, DispatchKey, EvidenceKind, ReasoningEffort, ResolvedConfigs, ResolvedModel, StudyRecord,
+    BloomSpec, DispatchKey, EvidenceKind, MemberPin, MemberVerifyOutcome, ReasoningEffort, ResolvedConfigs,
+    ResolvedModel, SharedRunCompletion, SharedRunPlan, StudyRecord,
 };
 
 /// How many timeline spans one bloom read returns before it truncates.
 pub const TIMELINE_SPAN_CAP: u64 = 256;
+/// A shared-run verify span whose candidate is on the selected head.
+pub const SPAN_OUTCOME_INTEGRATED: &str = "integrated";
+/// A shared-run verify span retired by a closure-intersecting head move.
+pub const SPAN_OUTCOME_RETIRED: &str = "retired";
+/// A shared-run verify span whose member was attributed a test failure.
+pub const SPAN_OUTCOME_FAILED: &str = "failed";
+/// A shared-run substage that ran an attribution probe.
+pub const SPAN_OUTCOME_PROBE: &str = "probe";
+/// Source-preparation substage under a shared-run verify span.
+pub const SPAN_SUBSTAGE_PREPARE: &str = "prepare";
 /// How many day rows a days read returns at most.
 pub const DAYS_CAP: u64 = 90;
 /// Default page size for bloom and dispatch lists.
@@ -71,6 +82,12 @@ pub struct MetricsLedger {
     blooms: BTreeMap<BloomId, BloomAcc>,
     days: BTreeMap<String, DayAcc>,
     studies: Vec<Study>,
+    /// Shared-run plans remembered so a later start/complete can name members.
+    plans: BTreeMap<Digest, PlanAcc>,
+    /// Per-member verify spans attributed from shared-run facts, keyed by run then workpiece.
+    verify_spans: BTreeMap<(Digest, String), VerifySpanAcc>,
+    /// Source-preparation substages keyed by plan then workpiece.
+    prepare_spans: BTreeMap<(Digest, String), PrepareSpanAcc>,
     /// Highest journal sequence observed. `0` means nothing has been folded.
     through_sequence: u64,
 }
@@ -87,11 +104,44 @@ struct DispatchAcc {
     displayed: Digest,
     sequence: u64,
     recorded_unix_millis: Option<u64>,
+    ended_unix_millis: Option<u64>,
     reconstructed: bool,
     agent: ResolvedModel,
     /// Whether the sealed command is a model lane. Mechanical dispatches stay
     /// on the dispatch rollup; they do not mint a seat.
     model_lane: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct PlanAcc {
+    bloom: BloomId,
+    members: Vec<(Digest, String)>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct VerifySpanAcc {
+    bloom: BloomId,
+    workpiece: String,
+    run: Digest,
+    plan: Digest,
+    sequence: u64,
+    started_unix_millis: Option<u64>,
+    ended_unix_millis: Option<u64>,
+    reconstructed: bool,
+    outcome: Option<String>,
+    evidence: Option<Digest>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct PrepareSpanAcc {
+    bloom: BloomId,
+    workpiece: String,
+    plan: Digest,
+    run: Option<Digest>,
+    sequence: u64,
+    started_unix_millis: Option<u64>,
+    ended_unix_millis: Option<u64>,
+    reconstructed: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -210,8 +260,11 @@ impl MetricsSeat {
     }
 }
 
-/// One stage span on a bloom timeline — a member lane, or the composition
-/// workpiece's integration tail.
+/// One stage span on a bloom timeline — a member lane, a composition tail,
+/// or a substage nested under a shared-run verify.
+///
+/// Trailing fields are optional so a consumer that only knows the original
+/// five still decodes; a missing end must not be inferred from the next start.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TimelineSpan {
     pub workpiece: String,
@@ -221,6 +274,29 @@ pub struct TimelineSpan {
     /// True when no envelope stamp was present on the dispatch that opened
     /// this span — the reader must not treat the order as wall-clock time.
     pub reconstructed: bool,
+    pub ended_unix_millis: Option<u64>,
+    /// Physical shared-run identity, when this span is a member verify or a
+    /// substage of one.
+    pub run: Option<Digest>,
+    /// `integrated`, `retired`, `failed`, or `probe` when the fold has one.
+    pub outcome: Option<String>,
+    /// `prepare`, a gate identity, or `probe` under a verify span.
+    pub substage: Option<String>,
+}
+
+/// Wall-clock receipts for one evidence artifact, used to emit gate substages.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct TimelineTimings {
+    pub duration_millis: u64,
+    pub gates: Vec<TimelineGateTiming>,
+}
+
+/// One umbrella member's wall-clock share from `evidence.json`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TimelineGateTiming {
+    pub command: String,
+    pub duration_millis: u64,
+    pub prepare_millis: Option<u64>,
 }
 
 /// A bloom's stage timeline, truncated at [`TIMELINE_SPAN_CAP`].
@@ -268,6 +344,7 @@ impl MetricsLedger {
             acc.seal_sequence = sequence;
             acc.members = u64::try_from(spec.members().len()).unwrap_or(u64::MAX);
         }
+        self.observe_shared_run(sequence, event, decisions, envelope);
         for effect in &decisions.effects {
             self.observe_effect(sequence, effect, configs, envelope);
         }
@@ -432,19 +509,80 @@ impl MetricsLedger {
     /// and the composition's aggregate-gate identities share this list.
     #[must_use]
     pub fn timeline(&self, bloom: BloomId) -> MetricsTimeline {
+        self.timeline_with(bloom, |_| None)
+    }
+
+    /// [`timeline`](Self::timeline), with gate substages from evidence receipts.
+    ///
+    /// `timings` is keyed by the evidence digest a completed verify span
+    /// retained. A miss emits the run span without gates.
+    #[must_use]
+    pub fn timeline_with(
+        &self,
+        bloom: BloomId,
+        mut timings: impl FnMut(&Digest) -> Option<TimelineTimings>,
+    ) -> MetricsTimeline {
+        let attributed =
+            |workpiece: &str| self.verify_spans.values().any(|span| span.bloom == bloom && span.workpiece == workpiece);
+        let has_member_verify = self.verify_spans.values().any(|span| span.bloom == bloom);
         let mut spans: Vec<TimelineSpan> = self
             .dispatches
             .values()
             .filter(|row| row.bloom == bloom)
+            .filter(|row| {
+                row.stage != StageId::Verify
+                    || !(attributed(&row.workpiece) || has_member_verify && row.workpiece == WorkpieceId::COMPOSITION)
+            })
             .map(|row| TimelineSpan {
                 workpiece: row.workpiece.clone(),
                 stage: row.stage,
                 sequence: row.sequence,
                 started_unix_millis: row.recorded_unix_millis,
                 reconstructed: row.reconstructed,
+                ended_unix_millis: row.ended_unix_millis,
+                run: None,
+                outcome: None,
+                substage: None,
             })
             .collect();
-        spans.sort_by(|a, b| a.sequence.cmp(&b.sequence).then_with(|| a.workpiece.cmp(&b.workpiece)));
+        spans.extend(self.verify_spans.values().filter(|span| span.bloom == bloom).map(|span| TimelineSpan {
+            workpiece: span.workpiece.clone(),
+            stage: StageId::Verify,
+            sequence: span.sequence,
+            started_unix_millis: span.started_unix_millis,
+            reconstructed: span.reconstructed,
+            ended_unix_millis: span.ended_unix_millis,
+            run: Some(span.run),
+            outcome: span.outcome.clone(),
+            substage: None,
+        }));
+        spans.extend(self.prepare_spans.values().filter(|span| span.bloom == bloom).map(|span| TimelineSpan {
+            workpiece: span.workpiece.clone(),
+            stage: StageId::Verify,
+            sequence: span.sequence,
+            started_unix_millis: span.started_unix_millis,
+            reconstructed: span.reconstructed,
+            ended_unix_millis: span.ended_unix_millis,
+            run: span.run,
+            outcome: None,
+            substage: Some(String::from(SPAN_SUBSTAGE_PREPARE)),
+        }));
+        for span in self.verify_spans.values().filter(|span| span.bloom == bloom) {
+            let Some(evidence) = span.evidence else {
+                continue;
+            };
+            let Some(receipt) = timings(&evidence) else {
+                continue;
+            };
+            spans.extend(gate_substages(span, &receipt));
+        }
+        spans.sort_by(|a, b| {
+            a.sequence
+                .cmp(&b.sequence)
+                .then_with(|| a.workpiece.cmp(&b.workpiece))
+                .then_with(|| a.substage.is_some().cmp(&b.substage.is_some()))
+                .then_with(|| a.substage.cmp(&b.substage))
+        });
         let cap = usize::try_from(TIMELINE_SPAN_CAP).unwrap_or(usize::MAX);
         let truncated = spans.len() > cap;
         spans.truncate(cap);
@@ -503,6 +641,7 @@ impl MetricsLedger {
             displayed,
             sequence,
             recorded_unix_millis: envelope,
+            ended_unix_millis: None,
             reconstructed: envelope.is_none(),
             agent,
             model_lane,
@@ -520,6 +659,162 @@ impl MetricsLedger {
             let day = self.day(envelope);
             day.dispatches = day.dispatches.saturating_add(1);
         }
+    }
+
+    fn observe_shared_run(&mut self, sequence: u64, event: &Event, decisions: &Decisions, envelope: Option<u64>) {
+        for effect in &decisions.effects {
+            match effect {
+                Decision::DispatchSharedRun { dispatch } => self.remember_plan(&dispatch.plan),
+                Decision::DispatchSharedRunPreparation { plan } => {
+                    self.remember_plan(plan);
+                    self.open_prepare_spans(sequence, plan, envelope);
+                }
+                Decision::CancelSharedRun { plan } => self.retire_plan(*plan, envelope),
+                _ => {}
+            }
+        }
+        match &event.fact {
+            Fact::ProposeSharedRun { plan, .. } => self.remember_plan(plan),
+            Fact::SharedRunPrepared { plan, .. } => self.close_prepare_spans(*plan, envelope),
+            Fact::SharedRunStarted { plan, run, .. } => self.open_verify_spans(sequence, *plan, *run, envelope),
+            Fact::SharedRunCompleted { completion, .. } => self.close_verify_spans(completion, envelope),
+            Fact::IntegrationAdvanced { head, .. } => self.mark_integrated(&head.coverage, envelope),
+            Fact::AttemptCompleted { bloom, workpiece, stage, .. } => {
+                self.close_dispatch(*bloom, &workpiece.0, *stage, envelope);
+            }
+            _ => {}
+        }
+    }
+
+    fn remember_plan(&mut self, plan: &SharedRunPlan) {
+        self.plans.insert(
+            plan.digest(),
+            PlanAcc {
+                bloom: plan_bloom(plan),
+                members: plan
+                    .requests
+                    .iter()
+                    .map(|request| (request.digest(), request.member.workpiece.0.clone()))
+                    .collect(),
+            },
+        );
+    }
+
+    fn open_prepare_spans(&mut self, sequence: u64, plan: &SharedRunPlan, envelope: Option<u64>) {
+        let bloom = plan_bloom(plan);
+        for request in &plan.requests {
+            self.prepare_spans.entry((plan.digest(), request.member.workpiece.0.clone())).or_insert_with(|| {
+                PrepareSpanAcc {
+                    bloom,
+                    workpiece: request.member.workpiece.0.clone(),
+                    plan: plan.digest(),
+                    run: None,
+                    sequence,
+                    started_unix_millis: envelope,
+                    ended_unix_millis: None,
+                    reconstructed: envelope.is_none(),
+                }
+            });
+        }
+    }
+
+    fn close_prepare_spans(&mut self, plan: Digest, envelope: Option<u64>) {
+        for span in self.prepare_spans.values_mut().filter(|span| span.plan == plan && span.ended_unix_millis.is_none())
+        {
+            span.ended_unix_millis = envelope;
+        }
+    }
+
+    fn open_verify_spans(&mut self, sequence: u64, plan: Digest, run: Digest, envelope: Option<u64>) {
+        let Some(remembered) = self.plans.get(&plan).cloned() else {
+            return;
+        };
+        for (_, member) in &remembered.members {
+            if let Some(prepare) = self.prepare_spans.get_mut(&(plan, member.clone())) {
+                prepare.run = Some(run);
+            }
+            self.verify_spans.entry((run, member.clone())).or_insert_with(|| VerifySpanAcc {
+                bloom: remembered.bloom,
+                workpiece: member.clone(),
+                run,
+                plan,
+                sequence,
+                started_unix_millis: envelope,
+                ended_unix_millis: None,
+                reconstructed: envelope.is_none(),
+                outcome: None,
+                evidence: None,
+            });
+        }
+    }
+
+    fn close_verify_spans(&mut self, completion: &SharedRunCompletion, envelope: Option<u64>) {
+        let members = self.plans.get(&completion.plan).map(|plan| plan.members.clone()).unwrap_or_default();
+        for outcome in &completion.outcomes {
+            let Some(workpiece) = members
+                .iter()
+                .find_map(|(request, workpiece)| (*request == outcome.request()).then_some(workpiece.clone()))
+            else {
+                continue;
+            };
+            let Some(span) = self.verify_spans.get_mut(&(completion.run, workpiece)) else {
+                continue;
+            };
+            span.ended_unix_millis = envelope.or(span.ended_unix_millis);
+            span.evidence = outcome_evidence(outcome).or(span.evidence);
+            if span.outcome.is_none() {
+                span.outcome = outcome_label(outcome).map(str::to_owned);
+            }
+        }
+        for span in
+            self.verify_spans.values_mut().filter(|span| span.run == completion.run && span.ended_unix_millis.is_none())
+        {
+            span.ended_unix_millis = envelope;
+        }
+    }
+
+    fn retire_plan(&mut self, plan: Digest, envelope: Option<u64>) {
+        for span in self.verify_spans.values_mut().filter(|span| span.plan == plan && span.ended_unix_millis.is_none())
+        {
+            span.ended_unix_millis = envelope;
+            if span.outcome.is_none() {
+                span.outcome = Some(String::from(SPAN_OUTCOME_RETIRED));
+            }
+        }
+        self.close_prepare_spans(plan, envelope);
+    }
+
+    fn mark_integrated(&mut self, coverage: &[MemberPin], envelope: Option<u64>) {
+        for pin in coverage {
+            let Some(span) = self
+                .verify_spans
+                .values_mut()
+                .filter(|span| {
+                    span.workpiece == pin.workpiece.0
+                        && span.outcome.as_deref() != Some(SPAN_OUTCOME_RETIRED)
+                        && span.outcome.as_deref() != Some(SPAN_OUTCOME_FAILED)
+                })
+                .max_by_key(|span| span.sequence)
+            else {
+                continue;
+            };
+            span.ended_unix_millis = span.ended_unix_millis.or(envelope);
+            if span.outcome.as_deref() != Some(SPAN_OUTCOME_FAILED) {
+                span.outcome = Some(String::from(SPAN_OUTCOME_INTEGRATED));
+            }
+        }
+    }
+
+    fn close_dispatch(&mut self, bloom: BloomId, workpiece: &str, stage: StageId, envelope: Option<u64>) {
+        let Some(acc) = self
+            .dispatches
+            .values_mut()
+            .filter(|row| row.bloom == bloom && row.workpiece == workpiece && row.stage == stage)
+            .max_by_key(|row| row.sequence)
+        else {
+            return;
+        };
+        acc.ended_unix_millis = envelope.or(acc.ended_unix_millis);
     }
 
     fn day(&mut self, envelope: Option<u64>) -> &mut DayAcc {
@@ -579,6 +874,53 @@ fn admitted_bloom<'a>(fact: &'a Fact, outcome: &Outcome) -> Option<(&'a BloomSpe
         }
         _ => None,
     }
+}
+
+fn outcome_label(outcome: &MemberVerifyOutcome) -> Option<&'static str> {
+    match outcome {
+        MemberVerifyOutcome::Failed { .. } => Some(SPAN_OUTCOME_FAILED),
+        MemberVerifyOutcome::PassedIn { .. }
+        | MemberVerifyOutcome::PassedStandalone { .. }
+        | MemberVerifyOutcome::HostFault { .. }
+        | MemberVerifyOutcome::Survived { .. }
+        | MemberVerifyOutcome::Pending { .. } => None,
+    }
+}
+
+fn plan_bloom(plan: &SharedRunPlan) -> BloomId {
+    plan.requests.first().map_or_else(|| BloomId(Digest::default()), |request| request.bloom)
+}
+
+fn outcome_evidence(outcome: &MemberVerifyOutcome) -> Option<Digest> {
+    match outcome {
+        MemberVerifyOutcome::PassedStandalone { proof, .. } => Some(proof.evidence.detail),
+        MemberVerifyOutcome::PassedIn { receipt, .. }
+        | MemberVerifyOutcome::Failed { evidence: receipt, .. }
+        | MemberVerifyOutcome::HostFault { evidence: receipt, .. } => Some(receipt.detail),
+        MemberVerifyOutcome::Survived { .. } | MemberVerifyOutcome::Pending { .. } => None,
+    }
+}
+
+fn gate_substages(span: &VerifySpanAcc, timings: &TimelineTimings) -> Vec<TimelineSpan> {
+    let mut cursor = span.started_unix_millis.unwrap_or(0);
+    let mut substages = Vec::new();
+    for gate in &timings.gates {
+        let duration = gate.duration_millis.saturating_add(gate.prepare_millis.unwrap_or(0));
+        let end = cursor.saturating_add(duration);
+        substages.push(TimelineSpan {
+            workpiece: span.workpiece.clone(),
+            stage: StageId::Verify,
+            sequence: span.sequence,
+            started_unix_millis: Some(cursor),
+            reconstructed: span.reconstructed,
+            ended_unix_millis: Some(end),
+            run: Some(span.run),
+            outcome: None,
+            substage: Some(gate.command.clone()),
+        });
+        cursor = end;
+    }
+    substages
 }
 
 fn day_label(envelope: Option<u64>) -> String {
