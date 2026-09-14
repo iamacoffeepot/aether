@@ -674,6 +674,7 @@ fn claim_for_carries_the_whole_observation() {
         contextual_observations: Some(br#"{"protocol":1,"documents":[]}"#.to_vec()),
         candidate: Some(CandidateRef { tree: Digest::from_bytes([5; 32]), checkout: Digest::from_bytes([6; 32]) }),
         findings: Some("critic findings".into()),
+        notes: Some("read the whole candidate".into()),
         failed_verifiers: VerifyFailureSet::one(VerifyFailure::Fmt),
         failed_verifier_names: vec!["verify.fmt".into()],
         cost: Some(StudyCost {
