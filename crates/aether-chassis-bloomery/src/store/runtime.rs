@@ -21,9 +21,10 @@ use super::holder::{self, JournalHolderError};
 use super::kinds::{
     AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, BloomDispatchLive, BloomDispatchRollup, ClaimSeal,
     ClaimSealResult, DrainOutbox, DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, ListBloomDispatches,
-    ListBloomDispatchesResult, LookupDispatch, LookupDispatchResult, OutboxEntry, PageJournal, PageJournalResult,
-    RecordConfig, RecordConfigResult, RecordDispatchDescription, RecordDispatchDescriptionResult, ReleaseMembership,
-    ReleaseMembershipResult, Supersede, SupersedeResult,
+    ListBloomDispatchesResult, ListOutstandingOrders, ListOutstandingOrdersResult, LiveOrder, LookupDispatch,
+    LookupDispatchResult, OutboxEntry, PageJournal, PageJournalResult, RecordConfig, RecordConfigResult,
+    RecordDispatchDescription, RecordDispatchDescriptionResult, ReleaseMembership, ReleaseMembershipResult, Supersede,
+    SupersedeResult,
 };
 use aether_actor::runtime;
 // The control-plane transact-mails the wasm control actor drives — `Commit` and
@@ -1079,6 +1080,12 @@ pub trait StoreBackend: Send {
     fn list_bloom_dispatch_rollup(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<BloomDispatchRollup>>;
     /// Outstanding orders for one bloom, in nonce order.
     fn list_bloom_dispatch_live(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<BloomDispatchLive>>;
+    /// Every live outstanding order, including bloom-less stages, in nonce order.
+    ///
+    /// Submit-intent rows are omitted: they have no handle yet. The view reads
+    /// this set so `running` names a live lane and a `BaseVerify` order is
+    /// visible without a bloom to hang off.
+    fn list_live_orders(&mut self) -> rusqlite::Result<Vec<LiveOrder>>;
     /// The bloom that names `nonce` in `dispatch_owners`, `outstanding_orders`, or
     /// `metric_dispatch` — `None` when the journal has never heard of it.
     fn lookup_named_dispatch(&mut self, nonce: &str) -> rusqlite::Result<Option<Vec<u8>>>;
@@ -4286,6 +4293,17 @@ impl StoreBackend for SqliteStore {
         rows.collect()
     }
 
+    fn list_live_orders(&mut self) -> rusqlite::Result<Vec<LiveOrder>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT nonce, bloom, workpiece, stage FROM outstanding_orders \
+             WHERE lifecycle = ?1 ORDER BY nonce",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![OrderLifecycle::Submitted.as_str()], |row| {
+            Ok(LiveOrder { nonce: row.get(0)?, bloom: row.get(1)?, workpiece: row.get(2)?, stage: row.get(3)? })
+        })?;
+        rows.collect()
+    }
+
     fn lookup_named_dispatch(&mut self, nonce: &str) -> rusqlite::Result<Option<Vec<u8>>> {
         if let Some(bloom) = self.lookup_dispatch_owner(nonce)? {
             return Ok(Some(bloom));
@@ -4787,6 +4805,18 @@ impl NativeActor for StoreCapability {
         match state.backend.list_bloom_dispatch_live(&bloom) {
             Ok(outstanding) => ListBloomDispatchesResult::Ok { rollup, outstanding },
             Err(error) => ListBloomDispatchesResult::Err { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_list_outstanding_orders(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: ListOutstandingOrders,
+    ) -> ListOutstandingOrdersResult {
+        match state.backend.list_live_orders() {
+            Ok(orders) => ListOutstandingOrdersResult::Ok { orders },
+            Err(error) => ListOutstandingOrdersResult::Err { error: error.to_string() },
         }
     }
 

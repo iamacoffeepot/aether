@@ -26,7 +26,7 @@ pub fn history_blooms(view: &ViewDocument) -> impl Iterator<Item = &BloomView> {
 /// One member's standing on the operator ladder. Precedence matches
 /// `scripts/bloomery-operator.py`'s `member_status_state` with the
 /// construct-declined park named rather than swallowed as running: wedge,
-/// surface request, park, hold, resolution, in-flight attempt, blocked, idle.
+/// surface request, park, hold, resolution, live outstanding order, blocked, idle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemberState {
     /// An operator took this member out of the bloom (#5327). Ranked first
@@ -60,7 +60,7 @@ pub enum MemberState {
 
 impl MemberState {
     #[must_use]
-    pub fn of(member: &MemberView) -> Self {
+    pub fn of(member: &MemberView, has_order: bool) -> Self {
         if member.withdrawn.is_some() {
             return Self::Withdrawn;
         }
@@ -82,7 +82,7 @@ impl MemberState {
         if member.resolution.is_some() {
             return Self::Integrated;
         }
-        if attempt_in_flight(member) {
+        if has_order {
             return Self::Running;
         }
         if member.blocked_by.as_deref().is_some_and(|name| !name.is_empty()) {
@@ -117,11 +117,6 @@ impl MemberState {
         // the live board it would go quiet exactly while it is waiting.
         matches!(self, Self::Running | Self::Wedged | Self::AwaitingSurface | Self::Parked | Self::Evicted | Self::Held)
     }
-}
-
-fn attempt_in_flight(member: &MemberView) -> bool {
-    member.host_fault.is_none()
-        && member.cursor.as_ref().is_some_and(|cursor| cursor.stage.is_some() && cursor.attempts > 0)
 }
 
 #[cfg(test)]
@@ -195,11 +190,10 @@ mod tests {
         // wedged member paints as blocked and the ladder disagrees with the
         // operator script.
         assert_eq!(
-            MemberState::of(&MemberView {
-                wedge: Some(Present {}),
-                blocked_by: Some("wp-a".to_owned()),
-                ..MemberView::default()
-            }),
+            MemberState::of(
+                &MemberView { wedge: Some(Present {}), blocked_by: Some("wp-a".to_owned()), ..MemberView::default() },
+                false
+            ),
             MemberState::Wedged
         );
     }
@@ -220,24 +214,24 @@ mod tests {
             ..MemberView::default()
         };
 
-        assert_eq!(MemberState::of(&evicted), MemberState::Evicted);
-        assert_eq!(MemberState::of(&evicted).label(), "evicted");
-        assert!(MemberState::of(&evicted).walks());
+        assert_eq!(MemberState::of(&evicted, false), MemberState::Evicted);
+        assert_eq!(MemberState::of(&evicted, false).label(), "evicted");
+        assert!(MemberState::of(&evicted, false).walks());
     }
 
     #[test]
     fn a_parked_member_is_not_running() {
-        // The plausible bug: a construct-declined park leaves the stage cursor
-        // in place with a non-zero attempt count, so attempt_in_flight is true
-        // and the board paints the stopped member as a burning lane.
+        // The plausible bug: a construct-declined park leaves a live-looking
+        // cursor, so a leftover order (or a cursor-as-running proxy) paints the
+        // stopped member as a burning lane.
         let parked = MemberView {
             park: Some(Present {}),
             cursor: Some(CompositionCursorView { stage: Some(StageId::Construct), attempts: 1, candidate: None }),
             ..MemberView::default()
         };
 
-        assert_eq!(MemberState::of(&parked), MemberState::Parked);
-        assert_eq!(MemberState::of(&parked).label(), "parked");
-        assert!(MemberState::of(&parked).walks());
+        assert_eq!(MemberState::of(&parked, true), MemberState::Parked);
+        assert_eq!(MemberState::of(&parked, true).label(), "parked");
+        assert!(MemberState::of(&parked, true).walks());
     }
 }

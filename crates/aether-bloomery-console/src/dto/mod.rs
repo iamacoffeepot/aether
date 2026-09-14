@@ -143,6 +143,7 @@ pub enum StageId {
     Land,
     Study,
     Reconcile,
+    BaseVerify,
     #[default]
     #[serde(other)]
     Unknown,
@@ -165,6 +166,7 @@ impl StageId {
             Self::Land => "Land",
             Self::Study => "Study",
             Self::Reconcile => "Reconcile",
+            Self::BaseVerify => "BaseVerify",
             Self::Unknown => "unknown",
         }
     }
@@ -230,6 +232,36 @@ pub struct ViewDocument {
     pub blooms: Vec<BloomView>,
     #[serde(default)]
     pub base_alert: Option<BaseAlertView>,
+    /// Live outstanding orders, including bloom-less stages. Absent-tolerant.
+    #[serde(default)]
+    pub orders: Vec<OrderView>,
+}
+
+/// One live outstanding order as `/view` overlays it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OrderView {
+    #[serde(default)]
+    pub nonce: String,
+    #[serde(default)]
+    pub bloom: DigestHex,
+    #[serde(default)]
+    pub workpiece: String,
+    #[serde(default)]
+    pub stage: StageId,
+}
+
+impl ViewDocument {
+    /// Whether the host still holds a live lane for this bloom and workpiece.
+    #[must_use]
+    pub fn has_order(&self, bloom: DigestHex, workpiece: &str) -> bool {
+        self.order_for(bloom, workpiece).is_some()
+    }
+
+    /// The live order for this bloom and workpiece, if the host still holds one.
+    #[must_use]
+    pub fn order_for(&self, bloom: DigestHex, workpiece: &str) -> Option<&OrderView> {
+        self.orders.iter().find(|order| order.bloom == bloom && order.workpiece == workpiece)
+    }
 }
 
 /// A red whole-workspace base receipt holding the day.
@@ -623,6 +655,44 @@ pub struct BloomDispatchView {
     pub cost: Option<u64>,
     #[serde(default)]
     pub evidence_retained: bool,
+}
+
+/// `GET /dispatches/{nonce}` — one dispatch's evidence header.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DispatchEvidenceView {
+    #[serde(default)]
+    pub nonce: String,
+    #[serde(default)]
+    pub retained: bool,
+    #[serde(default)]
+    pub notice: Option<String>,
+    #[serde(default)]
+    pub assistant_text: Option<String>,
+    #[serde(default)]
+    pub assistant_text_truncated: bool,
+    #[serde(default)]
+    pub commit_message: Option<String>,
+    #[serde(default)]
+    pub commit_message_truncated: bool,
+    #[serde(default)]
+    pub process: Option<DispatchProcessView>,
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub archived: Option<String>,
+}
+
+/// The pid / pgid / starttime / boot id a lane recorded at spawn.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DispatchProcessView {
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub pgid: u32,
+    #[serde(default)]
+    pub starttime: u64,
+    #[serde(default)]
+    pub boot_id: String,
 }
 
 /// One bounded `GET /journal` page.

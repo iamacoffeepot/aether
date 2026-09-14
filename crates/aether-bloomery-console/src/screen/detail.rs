@@ -213,6 +213,8 @@ impl Detail {
             | Focus::Record { .. }
             | Focus::Artifact { .. }
             | Focus::Transcript { .. }
+            | Focus::Evidence { .. }
+            | Focus::EvidenceFile { .. }
             | Focus::Workpiece { .. } => None,
         }
     }
@@ -231,6 +233,8 @@ impl Detail {
             | Focus::Record { .. }
             | Focus::Artifact { .. }
             | Focus::Transcript { .. }
+            | Focus::Evidence { .. }
+            | Focus::EvidenceFile { .. }
             | Focus::Workpiece { .. } => false,
         };
 
@@ -244,6 +248,8 @@ impl Detail {
             Focus::Record { sequence } => vec![label(RowKey::Identity, format!("record {sequence}"))],
             Focus::Artifact { digest } => vec![label(RowKey::Identity, format!("artifact {}", digest.prefix()))],
             Focus::Transcript { nonce } => vec![label(RowKey::Identity, format!("transcript {nonce}"))],
+            Focus::Evidence { nonce } => vec![label(RowKey::Identity, format!("evidence {nonce}"))],
+            Focus::EvidenceFile { name, nonce } => vec![label(RowKey::Identity, format!("file {name} {nonce}"))],
             Focus::Workpiece { id } => vec![label(RowKey::Identity, format!("workpiece {id}"))],
         };
     }
@@ -257,7 +263,12 @@ fn focus_exists(focus: &Focus, view: &ViewDocument) -> bool {
         }
         Focus::Composition { bloom } => find_bloom(view, *bloom).is_some_and(|bloom| bloom.composition.is_some()),
         Focus::Seal => true,
-        Focus::Record { .. } | Focus::Artifact { .. } | Focus::Transcript { .. } | Focus::Workpiece { .. } => false,
+        Focus::Record { .. }
+        | Focus::Artifact { .. }
+        | Focus::Transcript { .. }
+        | Focus::Evidence { .. }
+        | Focus::EvidenceFile { .. }
+        | Focus::Workpiece { .. } => false,
     }
 }
 
@@ -316,7 +327,7 @@ fn bloom_lines(view: &ViewDocument, store: &Store, id: DigestHex) -> Vec<Line> {
     }
     lines.extend(lease_lines(bloom));
     for member in &bloom.members {
-        let state = member_status_state(member);
+        let state = member_status_state(member, view.has_order(bloom.id, &member.workpiece));
         lines.push(Line {
             key: RowKey::Member(member.workpiece.clone()),
             text: format!("  {}  {state}", member.workpiece),
@@ -451,7 +462,10 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
         digest: None,
         openable: false,
     }];
-    lines.push(label(RowKey::Other(0), format!("state  {}", member_status_state(member))));
+    lines.push(label(
+        RowKey::Other(0),
+        format!("state  {}", member_status_state(member, view.has_order(bloom.id, &member.workpiece))),
+    ));
     if let Some(coordination) = &bloom.coordination {
         lines.push(label(RowKey::Other(400), coordination.member_summary(member)));
         if let Some((run, millis)) = coordination.member_latency(member) {

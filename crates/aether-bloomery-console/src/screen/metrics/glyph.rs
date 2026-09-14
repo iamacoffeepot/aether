@@ -40,7 +40,7 @@ pub fn family_of(stage: StageId) -> StageFamily {
     match stage {
         StageId::Construct | StageId::Refine | StageId::Reconcile => StageFamily::Construct,
         StageId::Review | StageId::AggregateReview => StageFamily::Review,
-        StageId::Verify | StageId::AggregateVerify => StageFamily::Verify,
+        StageId::Verify | StageId::AggregateVerify | StageId::BaseVerify => StageFamily::Verify,
         StageId::Sketch
         | StageId::Scope
         | StageId::Approve

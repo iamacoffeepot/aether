@@ -23,12 +23,12 @@ use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
 use crate::screen::{Screen, compose};
-use crate::store::{ResourceKey, Store};
+use crate::store::{DispatchFileQuery, ResourceKey, Store};
 use crate::warroom::Focus;
 use workspace::Workspace;
 
 #[cfg(test)]
-use crate::dto::{BloomDispatchesView, DigestHex, ViewDocument};
+use crate::dto::{BloomDispatchesView, DigestHex, DispatchEvidenceView, ViewDocument};
 #[cfg(test)]
 use crate::fetch::FetchProbe;
 #[cfg(test)]
@@ -259,6 +259,8 @@ impl Shell {
                     Err("bloom-dispatches lane returned a non-dispatches body".to_owned()),
                 );
             }
+            (ResourceKey::Dispatch(nonce), outcome) => self.apply_dispatch_outcome(nonce, outcome),
+            (ResourceKey::DispatchFile(query), outcome) => self.apply_dispatch_file_outcome(query, outcome),
             (ResourceKey::Spend, Ok(ResourceBody::Spend(value))) => self.store.apply_spend(Ok(value)),
             (ResourceKey::Spend, Err(error)) => self.store.apply_spend(Err(error)),
             (ResourceKey::Spend, Ok(_)) => {
@@ -287,6 +289,24 @@ impl Shell {
                 self.store
                     .apply_coordinator_logs(query, Err("coordinator-log lane returned a non-log body".to_owned()));
             }
+        }
+    }
+
+    fn apply_dispatch_outcome(&mut self, nonce: String, outcome: Result<ResourceBody, String>) {
+        match outcome {
+            Ok(ResourceBody::Dispatch(value)) => self.store.apply_dispatch(nonce, Ok(value)),
+            Ok(_) => self.store.apply_dispatch(nonce, Err("dispatch lane returned a non-header body".to_owned())),
+            Err(error) => self.store.apply_dispatch(nonce, Err(error)),
+        }
+    }
+
+    fn apply_dispatch_file_outcome(&mut self, query: DispatchFileQuery, outcome: Result<ResourceBody, String>) {
+        match outcome {
+            Ok(ResourceBody::DispatchFile(page)) => self.store.apply_dispatch_file(query, Ok(page)),
+            Ok(_) => {
+                self.store.apply_dispatch_file(query, Err("dispatch-file lane returned a non-file body".to_owned()));
+            }
+            Err(error) => self.store.apply_dispatch_file(query, Err(error)),
         }
     }
 
@@ -423,6 +443,11 @@ impl Shell {
         self.reseat_top();
     }
 
+    fn apply_dispatch(&mut self, nonce: impl Into<String>, header: DispatchEvidenceView) {
+        self.store.apply_dispatch(nonce.into(), Ok(header));
+        self.reseat_top();
+    }
+
     fn top_scroll(&self) -> usize {
         self.stack.last().map_or(0, Screen::scroll)
     }
@@ -465,8 +490,9 @@ mod tests {
     use super::chrome;
     use crate::dto::{
         BloomDispatchView, BloomDispatchesView, BloomStatus, BloomView, CompositionCursorView, CompositionFinding,
-        CompositionView, DigestHex, ExecutorFaultView, HostFaultView, LandingBlock, MemberView, OperatorHoldView,
-        PendingDecisionView, Present, ReviewParkView, SpendQuiesce, StageId, ViewDocument, WedgeCause,
+        CompositionView, DigestHex, DispatchEvidenceView, ExecutorFaultView, HostFaultView, LandingBlock, MemberView,
+        OperatorHoldView, OrderView, PendingDecisionView, Present, ReviewParkView, SpendQuiesce, StageId, ViewDocument,
+        WedgeCause,
     };
     use crate::fetch::{FetchReply, ResourceBody};
     use crate::http::Endpoint;
@@ -543,20 +569,14 @@ mod tests {
     fn a_stale_board_keeps_the_last_rows_and_names_the_error() {
         // The plausible bug: unreachable coordinator blanks the table or
         // leaves the last sample looking current.
+        let members = vec![MemberView {
+            workpiece: "issue-keep".to_owned(),
+            cursor: Some(CompositionCursorView { stage: Some(StageId::Construct), attempts: 1, candidate: None }),
+            ..MemberView::default()
+        }];
         let view = ViewDocument {
-            blooms: vec![BloomView {
-                id: digest(1),
-                members: vec![MemberView {
-                    workpiece: "issue-keep".to_owned(),
-                    cursor: Some(CompositionCursorView {
-                        stage: Some(StageId::Construct),
-                        attempts: 1,
-                        candidate: None,
-                    }),
-                    ..MemberView::default()
-                }],
-                ..BloomView::default()
-            }],
+            blooms: vec![BloomView { id: digest(1), members: members.clone(), ..BloomView::default() }],
+            orders: orders_on(digest(1), &members),
             ..ViewDocument::default()
         };
         let mut shell = Shell::showing(&view, Some("connection refused"));
@@ -633,20 +653,14 @@ mod tests {
         // The plausible bug: the store updates and the table paints but the
         // cursor stays empty, so the first row is never highlighted.
         let (mut shell, probe) = Shell::harness(Duration::from_secs(1));
+        let members = vec![MemberView {
+            workpiece: "wp-a".to_owned(),
+            cursor: Some(CompositionCursorView { stage: Some(StageId::Construct), attempts: 1, candidate: None }),
+            ..MemberView::default()
+        }];
         let view = ViewDocument {
-            blooms: vec![BloomView {
-                id: digest(1),
-                members: vec![MemberView {
-                    workpiece: "wp-a".to_owned(),
-                    cursor: Some(CompositionCursorView {
-                        stage: Some(StageId::Construct),
-                        attempts: 1,
-                        candidate: None,
-                    }),
-                    ..MemberView::default()
-                }],
-                ..BloomView::default()
-            }],
+            blooms: vec![BloomView { id: digest(1), members: members.clone(), ..BloomView::default() }],
+            orders: orders_on(digest(1), &members),
             ..ViewDocument::default()
         };
         probe.reply(FetchReply { key: ResourceKey::View, outcome: Ok(ResourceBody::View(view)) });
@@ -711,7 +725,21 @@ mod tests {
     fn bloom_with(members: Vec<MemberView>, mutate: impl FnOnce(&mut BloomView)) -> ViewDocument {
         let mut bloom = BloomView { id: digest(0xab), members, ..BloomView::default() };
         mutate(&mut bloom);
-        ViewDocument { blooms: vec![bloom], ..ViewDocument::default() }
+        let orders = orders_on(bloom.id, &bloom.members);
+        ViewDocument { blooms: vec![bloom], orders, ..ViewDocument::default() }
+    }
+
+    fn orders_on(bloom: DigestHex, members: &[MemberView]) -> Vec<OrderView> {
+        members
+            .iter()
+            .filter(|member| member.cursor.as_ref().is_some_and(|cursor| cursor.attempts > 0))
+            .map(|member| OrderView {
+                nonce: format!("dispatch-{}", member.workpiece),
+                bloom,
+                workpiece: member.workpiece.clone(),
+                stage: member.cursor.as_ref().and_then(|cursor| cursor.stage).unwrap_or_default(),
+            })
+            .collect()
     }
 
     fn draw(shell: &mut Shell) -> String {
@@ -954,10 +982,9 @@ mod tests {
     }
 
     #[test]
-    fn a_member_enter_chain_reaches_the_transcript() {
-        // The plausible bug: Enter on a member pushes Focus::Dispatch into a
-        // titled detail frame, so Nav::transcript is never produced and the
-        // viewer stays unreachable from the operator's seat.
+    fn a_member_enter_chain_reaches_the_evidence() {
+        // The plausible bug: Enter on a retained dispatch still jumps to the
+        // transcript, so files and gate verdicts stay unreachable from the board.
         let bloom = digest(0xab);
         let mut shell = Shell::showing(
             &ViewDocument {
@@ -989,13 +1016,25 @@ mod tests {
             },
         );
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
+        assert_eq!(shell.top_focus(), Some(Focus::evidence("dispatch-1")));
+
+        shell.apply_dispatch(
+            "dispatch-1",
+            DispatchEvidenceView {
+                nonce: "dispatch-1".to_owned(),
+                retained: true,
+                files: vec!["transcript.jsonl".to_owned()],
+                ..DispatchEvidenceView::default()
+            },
+        );
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
         assert_eq!(shell.top_focus(), Some(Focus::transcript("dispatch-1")));
     }
 
     #[test]
     fn the_footer_trail_names_every_frame_on_the_stack() {
-        // The plausible bug: a three-Enter transcript names only the nonce, so
-        // the operator cannot tell which bloom or member the viewer belongs to.
+        // The plausible bug: a drill-in names only the nonce, so the operator
+        // cannot tell which bloom or member the evidence belongs to.
         let bloom = digest(0xab);
         let mut shell = Shell::showing(
             &ViewDocument {
@@ -1026,9 +1065,20 @@ mod tests {
             },
         );
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
+        shell.apply_dispatch(
+            "dispatch-1",
+            DispatchEvidenceView {
+                nonce: "dispatch-1".to_owned(),
+                retained: true,
+                files: vec!["transcript.jsonl".to_owned()],
+                ..DispatchEvidenceView::default()
+            },
+        );
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
         let trail = shell.breadcrumb_trail();
         assert!(trail.contains("board › bloom "), "{trail}");
         assert!(trail.contains("› member issue-1"), "{trail}");
+        assert!(trail.contains("› evidence"), "{trail}");
         assert!(trail.contains("› transcript"), "{trail}");
         let mut terminal = Terminal::new(TestBackend::new(240, 16)).expect("test backend");
         terminal.draw(|frame| shell.render(frame)).expect("draw");
@@ -1036,6 +1086,7 @@ mod tests {
         assert_eq!(last, composed_footer(&shell, 240), "{last}");
         assert!(last.contains("board › bloom "), "{last}");
         assert!(last.contains("› member issue-1"), "{last}");
+        assert!(last.contains("› evidence"), "{last}");
         assert!(last.contains("› transcript"), "{last}");
         assert!(last.contains("? keys"), "{last}");
         assert!(last.trim_end().ends_with("q quit"), "{last}");
@@ -1251,25 +1302,24 @@ mod tests {
     }
 
     fn parked_blooms(count: u8) -> ViewDocument {
-        ViewDocument {
-            blooms: (1..=count)
-                .map(|n| BloomView {
-                    id: digest(n),
-                    review_park: Some(ReviewParkView::default()),
-                    members: vec![MemberView {
-                        workpiece: format!("wp-{n}"),
-                        cursor: Some(CompositionCursorView {
-                            stage: Some(StageId::Construct),
-                            attempts: 1,
-                            candidate: None,
-                        }),
-                        ..MemberView::default()
-                    }],
-                    ..BloomView::default()
-                })
-                .collect(),
-            ..ViewDocument::default()
-        }
+        let blooms: Vec<BloomView> = (1..=count)
+            .map(|n| BloomView {
+                id: digest(n),
+                review_park: Some(ReviewParkView::default()),
+                members: vec![MemberView {
+                    workpiece: format!("wp-{n}"),
+                    cursor: Some(CompositionCursorView {
+                        stage: Some(StageId::Construct),
+                        attempts: 1,
+                        candidate: None,
+                    }),
+                    ..MemberView::default()
+                }],
+                ..BloomView::default()
+            })
+            .collect();
+        let orders = blooms.iter().flat_map(|bloom| orders_on(bloom.id, &bloom.members)).collect();
+        ViewDocument { blooms, orders, ..ViewDocument::default() }
     }
 
     #[test]

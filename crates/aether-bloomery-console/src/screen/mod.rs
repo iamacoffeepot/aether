@@ -6,6 +6,7 @@ mod board;
 mod coordinator;
 mod detail;
 mod dispatch;
+mod evidence;
 mod filed;
 mod journal;
 mod json;
@@ -27,7 +28,7 @@ use crate::store::{ResourceKey, Store};
 use crate::warroom::Focus;
 
 pub use backlog::Backlog;
-pub use board::{BloomRow, Board, BoardLane, BoardRow, MemberRow, RowId, member_status_state};
+pub use board::{BloomRow, Board, BoardLane, BoardRow, MemberRow, OrderRow, RowId, member_status_state};
 pub use coordinator::CoordinatorLog;
 pub use detail::Detail;
 pub use metrics::{Breakdown, Dashboard, Days, Timeline, compose};
@@ -38,6 +39,7 @@ pub use transcript::{LineBuffer, Transcript};
 use artifact::Artifact;
 use backlog::Workpiece;
 use dispatch::DispatchList;
+use evidence::{Evidence, EvidenceFile};
 use journal::{Journal, Record};
 
 /// Width-stable caret. Two spaces when Enter would not push, so rows do not
@@ -66,6 +68,8 @@ pub enum Screen {
     /// Boxed: the transcript carries two paged line buffers, so inlining it
     /// would size every pushed frame after the largest one.
     Transcript(Box<Transcript>),
+    Evidence(Evidence),
+    EvidenceFile(EvidenceFile),
     Timeline(Timeline),
     Days(Days),
     Cost(Breakdown),
@@ -93,6 +97,8 @@ impl Screen {
             Nav::Focus(Focus::Record { sequence }) => Self::Record(Record::new(sequence)),
             Nav::Focus(Focus::Artifact { digest }) => Self::Artifact(Artifact::new(digest)),
             Nav::Focus(Focus::Transcript { nonce }) => Self::Transcript(Box::new(Transcript::new(nonce))),
+            Nav::Focus(Focus::Evidence { nonce }) => Self::Evidence(Evidence::new(nonce)),
+            Nav::Focus(Focus::EvidenceFile { nonce, name }) => Self::EvidenceFile(EvidenceFile::new(nonce, name)),
             Nav::Focus(Focus::Dispatch { bloom, workpiece }) => Self::DispatchList(DispatchList::new(bloom, workpiece)),
             Nav::Focus(Focus::Workpiece { id }) => Self::Workpiece(Workpiece::new(id)),
             Nav::Focus(focus) => Self::Detail(Detail::new(focus)),
@@ -114,6 +120,8 @@ impl Screen {
             Self::Record(record) => Some(record.focus()),
             Self::Artifact(artifact) => Some(artifact.focus()),
             Self::Transcript(transcript) => Some(transcript.focus()),
+            Self::Evidence(evidence) => Some(evidence.focus()),
+            Self::EvidenceFile(file) => Some(file.focus()),
             Self::Board(_)
             | Self::Journal(_)
             | Self::Timeline(_)
@@ -134,6 +142,8 @@ impl Screen {
             | Self::Record(_)
             | Self::Artifact(_)
             | Self::Transcript(_)
+            | Self::Evidence(_)
+            | Self::EvidenceFile(_)
             | Self::Workpiece(_) => self.focus().as_ref().map_or_else(String::new, Focus::label),
             Self::Board(board) => {
                 if board.lane() == BoardLane::History {
@@ -158,7 +168,7 @@ impl Screen {
     #[must_use]
     pub fn reading_title(&self) -> Option<String> {
         match self {
-            Self::Artifact(_) | Self::Record(_) | Self::Transcript(_) => Some(self.label()),
+            Self::Artifact(_) | Self::Record(_) | Self::Transcript(_) | Self::EvidenceFile(_) => Some(self.label()),
             Self::Board(_)
             | Self::Detail(_)
             | Self::DispatchList(_)
@@ -168,6 +178,7 @@ impl Screen {
             | Self::Cost(_)
             | Self::Backlog(_)
             | Self::Workpiece(_)
+            | Self::Evidence(_)
             | Self::CoordinatorLog(_) => None,
         }
     }
@@ -182,6 +193,8 @@ impl Screen {
             | Self::Record(_)
             | Self::Artifact(_)
             | Self::Transcript(_)
+            | Self::Evidence(_)
+            | Self::EvidenceFile(_)
             | Self::Timeline(_)
             | Self::Days(_)
             | Self::Cost(_)
@@ -199,10 +212,12 @@ impl Screen {
             Self::Backlog(backlog) => backlog.selected_key().cloned(),
             Self::Workpiece(workpiece) => workpiece.selected_key().map(|key| format!("{key:?}")),
             Self::DispatchList(list) => list.selected_key().cloned(),
+            Self::Evidence(evidence) => evidence.selected_key().cloned(),
             Self::Journal(_)
             | Self::Record(_)
             | Self::Artifact(_)
             | Self::Transcript(_)
+            | Self::EvidenceFile(_)
             | Self::Timeline(_)
             | Self::Days(_)
             | Self::Cost(_)
@@ -220,6 +235,8 @@ impl Screen {
             Self::Record(_) => Record::subscriptions(),
             Self::Artifact(artifact) => artifact.subscriptions(),
             Self::Transcript(transcript) => transcript.subscriptions(),
+            Self::Evidence(evidence) => evidence.subscriptions(),
+            Self::EvidenceFile(file) => file.subscriptions(),
             Self::Timeline(timeline) => timeline.subscriptions(),
             Self::Days(days) => days.subscriptions(),
             Self::Cost(cost) => cost.subscriptions(),
@@ -239,6 +256,8 @@ impl Screen {
             Self::Record(_) => Record::key_hints(),
             Self::Artifact(_) => Artifact::key_hints(),
             Self::Transcript(_) => Transcript::key_hints(),
+            Self::Evidence(evidence) => evidence.key_hints(),
+            Self::EvidenceFile(_) => EvidenceFile::key_hints(),
             Self::Timeline(_) => Timeline::key_hints(),
             Self::Days(_) => Days::key_hints(),
             Self::Cost(_) => Breakdown::key_hints(),
@@ -257,6 +276,8 @@ impl Screen {
             | Self::DispatchList(_)
             | Self::Record(_)
             | Self::Transcript(_)
+            | Self::Evidence(_)
+            | Self::EvidenceFile(_)
             | Self::Days(_)
             | Self::Cost(_)
             | Self::CoordinatorLog(_) => None,
@@ -279,6 +300,8 @@ impl Screen {
             | Self::DispatchList(_)
             | Self::Record(_)
             | Self::Transcript(_)
+            | Self::Evidence(_)
+            | Self::EvidenceFile(_)
             | Self::Days(_)
             | Self::Cost(_)
             | Self::CoordinatorLog(_) => None,
@@ -296,13 +319,16 @@ impl Screen {
             Self::Board(board) => board.enter_pushes(),
             Self::Detail(detail) => detail.enter_pushes(),
             Self::DispatchList(list) => list.enter_pushes(store),
+            Self::Evidence(evidence) => evidence.enter_pushes(),
             Self::Journal(journal) => journal.enter_pushes(),
             Self::Workpiece(workpiece) => workpiece.enter_pushes(),
             Self::Backlog(backlog) => backlog.enter_pushes(store),
             Self::Transcript(_) => Transcript::enter_pushes(),
             Self::Timeline(_) => Timeline::enter_pushes(),
             Self::Cost(_) => Breakdown::enter_pushes(),
-            Self::Record(_) | Self::Artifact(_) | Self::Days(_) | Self::CoordinatorLog(_) => false,
+            Self::Record(_) | Self::Artifact(_) | Self::Days(_) | Self::EvidenceFile(_) | Self::CoordinatorLog(_) => {
+                false
+            }
         }
     }
 
@@ -315,6 +341,8 @@ impl Screen {
             Self::Record(record) => record.handle_key(key, store),
             Self::Artifact(artifact) => artifact.handle_key(key, store),
             Self::Transcript(transcript) => transcript.handle_key(key, store),
+            Self::Evidence(evidence) => evidence.handle_key(key, store),
+            Self::EvidenceFile(file) => file.handle_key(key, store),
             Self::Timeline(timeline) => timeline.handle_key(key, store),
             Self::Days(days) => days.handle_key(key, store),
             Self::Cost(cost) => cost.handle_key(key, store),
@@ -331,6 +359,8 @@ impl Screen {
             Self::DispatchList(list) => list.reseat(store),
             Self::Journal(journal) => journal.reseat(store),
             Self::Transcript(transcript) => transcript.reseat(store),
+            Self::Evidence(evidence) => evidence.reseat(store),
+            Self::EvidenceFile(file) => file.reseat(store),
             Self::Timeline(timeline) => timeline.reseat(store),
             Self::Cost(cost) => cost.reseat(store),
             Self::Backlog(backlog) => backlog.reseat(store),
@@ -349,6 +379,8 @@ impl Screen {
             Self::Record(record) => record.render(frame, area, store),
             Self::Artifact(artifact) => artifact.render(frame, area, store),
             Self::Transcript(transcript) => transcript.render(frame, area, store),
+            Self::Evidence(evidence) => evidence.render(frame, area, store),
+            Self::EvidenceFile(file) => file.render(frame, area, store),
             Self::Timeline(timeline) => timeline.render(frame, area, store),
             Self::Days(days) => days.render(frame, area, store),
             Self::Cost(cost) => cost.render(frame, area, store),

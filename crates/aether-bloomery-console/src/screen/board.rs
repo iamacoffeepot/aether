@@ -7,7 +7,7 @@ use ratatui::style::Modifier;
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
 use crate::cursor::Cursor;
-use crate::dto::{BloomStatus, DigestHex, MemberView, MetricDispatch, PrecheckView, ViewDocument};
+use crate::dto::{BloomStatus, DigestHex, MemberView, MetricDispatch, OrderView, PrecheckView, StageId, ViewDocument};
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
@@ -23,6 +23,7 @@ use super::partition::{MemberState, history_blooms, live_blooms};
 pub enum RowId {
     Bloom { id: DigestHex },
     Member { bloom: DigestHex, workpiece: String },
+    Order { nonce: String },
 }
 
 /// One rendered row on the board.
@@ -30,6 +31,7 @@ pub enum RowId {
 pub enum BoardRow {
     Bloom(BloomRow),
     Member(MemberRow),
+    Order(OrderRow),
 }
 
 /// A bloom header row.
@@ -53,12 +55,23 @@ pub struct MemberRow {
     pub age: String,
 }
 
+/// A bloom-less live order (the whole-workspace base verify).
+#[derive(Clone, Debug)]
+pub struct OrderRow {
+    pub nonce: String,
+    pub workpiece: String,
+    pub state: String,
+    pub stage: String,
+    pub age: String,
+}
+
 impl BoardRow {
     #[must_use]
     pub fn id(&self) -> RowId {
         match self {
             Self::Bloom(row) => RowId::Bloom { id: row.id },
             Self::Member(row) => RowId::Member { bloom: row.bloom, workpiece: row.workpiece.clone() },
+            Self::Order(row) => RowId::Order { nonce: row.nonce.clone() },
         }
     }
 }
@@ -152,7 +165,7 @@ impl Board {
         match self.cursor.selected() {
             Some(RowId::Bloom { id }) => Some(Focus::bloom(*id)),
             Some(RowId::Member { bloom, workpiece }) => Some(Focus::member(*bloom, workpiece.clone())),
-            None => None,
+            Some(RowId::Order { .. }) | None => None,
         }
     }
 
@@ -161,7 +174,7 @@ impl Board {
         match self.cursor.selected() {
             Some(RowId::Bloom { id }) => Some(*id),
             Some(RowId::Member { bloom, .. }) => Some(*bloom),
-            None => None,
+            Some(RowId::Order { .. }) | None => None,
         }
     }
 
@@ -248,6 +261,13 @@ impl Board {
                 Cell::from(member.age.clone()),
             ])
             .style(muted),
+            BoardRow::Order(order) => Row::new([
+                Cell::from(order.workpiece.clone()),
+                Cell::from(order.state.clone()),
+                Cell::from(order.stage.clone()),
+                Cell::from(order.age.clone()),
+            ])
+            .style(palette::body().add_modifier(Modifier::BOLD).patch(muted)),
         });
         let table = Table::new(
             table_rows,
@@ -266,12 +286,11 @@ impl Board {
 }
 
 /// The one-word state `scripts/bloomery-operator.py`'s `member_status_state`
-/// prints. The script's `has_order` bit comes from the journal; `/view` does
-/// not project outstanding orders, so `running` is the member cursor naming
-/// a stage with an attempt underway on a member the host is not holding.
+/// prints. `has_order` is the live outstanding-order overlay `/view` now
+/// projects, so `running` means the host still holds a lane.
 #[must_use]
-pub fn member_status_state(member: &MemberView) -> &'static str {
-    MemberState::of(member).label()
+pub fn member_status_state(member: &MemberView, has_order: bool) -> &'static str {
+    MemberState::of(member, has_order).label()
 }
 
 fn rows_from(store: &Store, lane: BoardLane) -> Vec<BoardRow> {
@@ -289,12 +308,20 @@ fn rows_of(view: &ViewDocument, lane: BoardLane, dispatches: &[MetricDispatch]) 
         BoardLane::History => history_blooms(view).collect::<Vec<_>>(),
     };
     let mut rows = Vec::new();
+    if lane == BoardLane::Live {
+        for order in view.orders.iter().filter(|order| order.stage == StageId::BaseVerify) {
+            rows.push(BoardRow::Order(workspace_order_row(order)));
+        }
+    }
     for bloom in blooms {
         let members: Vec<&MemberView> = match lane {
             BoardLane::Live => bloom
                 .members
                 .iter()
-                .filter(|member| bloom.coordination.is_some() || MemberState::of(member).walks())
+                .filter(|member| {
+                    bloom.coordination.is_some()
+                        || MemberState::of(member, view.has_order(bloom.id, &member.workpiece)).walks()
+                })
                 .collect(),
             BoardLane::History => bloom.members.iter().collect(),
         };
@@ -325,7 +352,8 @@ fn rows_of(view: &ViewDocument, lane: BoardLane, dispatches: &[MetricDispatch]) 
             age: elapsed_of(dispatches, bloom.id, None),
         }));
         for member in members {
-            let mut row = member_row(bloom.id, member, dispatches);
+            let order = view.order_for(bloom.id, &member.workpiece);
+            let mut row = member_row(bloom.id, member, dispatches, order);
             if let Some(state) = &bloom.coordination {
                 row.stage = format!("{} · {}", row.stage, state.member_summary(member));
                 if let Some((_, millis)) = state.member_latency(member) {
@@ -338,17 +366,40 @@ fn rows_of(view: &ViewDocument, lane: BoardLane, dispatches: &[MetricDispatch]) 
     rows
 }
 
-fn member_row(bloom: DigestHex, member: &MemberView, dispatches: &[MetricDispatch]) -> MemberRow {
+fn workspace_order_row(order: &OrderView) -> OrderRow {
+    OrderRow {
+        nonce: order.nonce.clone(),
+        workpiece: "base-verify".to_owned(),
+        state: "running".to_owned(),
+        stage: order.stage.label().to_owned(),
+        age: "—".to_owned(),
+    }
+}
+
+fn member_row(
+    bloom: DigestHex,
+    member: &MemberView,
+    dispatches: &[MetricDispatch],
+    order: Option<&OrderView>,
+) -> MemberRow {
     MemberRow {
         bloom,
         workpiece: member.workpiece.clone(),
-        state: member_status_state(member).to_owned(),
-        stage: member_stage(member, bloom, dispatches),
+        state: member_status_state(member, order.is_some()).to_owned(),
+        stage: member_stage(member, bloom, dispatches, order),
         age: elapsed_of(dispatches, bloom, Some(&member.workpiece)),
     }
 }
 
-fn member_stage(member: &MemberView, bloom: DigestHex, dispatches: &[MetricDispatch]) -> String {
+fn member_stage(
+    member: &MemberView,
+    bloom: DigestHex,
+    dispatches: &[MetricDispatch],
+    order: Option<&OrderView>,
+) -> String {
+    if let Some(order) = order {
+        return order.stage.label().to_owned();
+    }
     if let Some(stage) = member.cursor.as_ref().and_then(|cursor| cursor.stage) {
         return stage.label().to_owned();
     }
@@ -380,8 +431,8 @@ fn elapsed_of(dispatches: &[MetricDispatch], bloom: DigestHex, workpiece: Option
 mod tests {
     use super::{Board, BoardLane, BoardRow, member_status_state, rows_of};
     use crate::dto::{
-        BloomStatus, BloomView, CompositionCursorView, DigestHex, MemberView, MetricDispatch, PendingDecisionView,
-        Present, StageId, ViewDocument,
+        BloomStatus, BloomView, CompositionCursorView, DigestHex, MemberView, MetricDispatch, OrderView,
+        PendingDecisionView, Present, StageId, ViewDocument,
     };
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
@@ -407,6 +458,10 @@ mod tests {
             cursor: Some(CompositionCursorView { stage: Some(StageId::Construct), attempts: 1, candidate: None }),
             ..member(workpiece)
         }
+    }
+
+    fn live_order(bloom: DigestHex, workpiece: &str, stage: StageId) -> OrderView {
+        OrderView { nonce: format!("dispatch-{workpiece}"), bloom, workpiece: workpiece.to_owned(), stage }
     }
 
     fn dispatch(bloom: DigestHex, workpiece: &str, recorded_unix_millis: Option<u64>, sequence: u64) -> MetricDispatch {
@@ -442,6 +497,10 @@ mod tests {
                     ..BloomView::default()
                 },
             ],
+            orders: vec![
+                live_order(live, "wp-run", StageId::Construct),
+                live_order(live, "wp-gap", StageId::Construct),
+            ],
             ..ViewDocument::default()
         };
         let dispatches = [
@@ -462,44 +521,51 @@ mod tests {
         // The plausible bug: a dependent carrying blocked_by paints as idle
         // (the mysterious idleness the readiness scheduler exists to name),
         // or a wedge loses to blocked_by / resolution.
-        assert_eq!(member_status_state(&MemberView { blocked_by: Some("wp-a".to_owned()), ..member("wp") }), "blocked");
-        assert_eq!(member_status_state(&in_flight_construct("wp")), "running");
         assert_eq!(
-            member_status_state(&MemberView {
-                resolution: Some(Present {}),
-                blocked_by: Some("wp-a".to_owned()),
-                ..member("wp")
-            }),
+            member_status_state(&MemberView { blocked_by: Some("wp-a".to_owned()), ..member("wp") }, false),
+            "blocked"
+        );
+        assert_eq!(member_status_state(&in_flight_construct("wp"), false), "idle");
+        assert_eq!(member_status_state(&in_flight_construct("wp"), true), "running");
+        assert_eq!(
+            member_status_state(
+                &MemberView { resolution: Some(Present {}), blocked_by: Some("wp-a".to_owned()), ..member("wp") },
+                false
+            ),
             "integrated"
         );
         assert_eq!(
-            member_status_state(&MemberView {
-                wedge: Some(Present {}),
-                blocked_by: Some("wp-a".to_owned()),
-                ..member("wp")
-            }),
+            member_status_state(
+                &MemberView { wedge: Some(Present {}), blocked_by: Some("wp-a".to_owned()), ..member("wp") },
+                false
+            ),
             "WEDGED"
         );
         assert_eq!(
-            member_status_state(&MemberView { pending_decision: Some(PendingDecisionView::default()), ..member("wp") }),
+            member_status_state(
+                &MemberView { pending_decision: Some(PendingDecisionView::default()), ..member("wp") },
+                false
+            ),
             "held"
         );
-        assert_eq!(member_status_state(&MemberView { blocked_by: Some(String::new()), ..member("wp") }), "idle");
-        assert_eq!(member_status_state(&member("wp")), "idle");
+        assert_eq!(member_status_state(&MemberView { blocked_by: Some(String::new()), ..member("wp") }, false), "idle");
+        assert_eq!(member_status_state(&member("wp"), false), "idle");
     }
 
     #[test]
     fn an_in_flight_construct_renders_running() {
-        // Tripwire: rows_of used to pass has_order=false, so a member whose
-        // cursor names a live Construct attempt painted idle — the mysterious
-        // idleness the ladder's running rung exists to name.
+        // Tripwire: running used to be inferred from the cursor, so a member
+        // whose host still holds a Construct lane painted idle when the
+        // cursor was missing, and a cursor without a lane painted running.
+        let bloom = digest(1);
         let view = ViewDocument {
             blooms: vec![BloomView {
-                id: digest(1),
+                id: bloom,
                 status: Some(BloomStatus::Sealed),
                 members: vec![in_flight_construct("wp")],
                 ..BloomView::default()
             }],
+            orders: vec![live_order(bloom, "wp", StageId::Construct)],
             ..ViewDocument::default()
         };
         let rows = rows_of(&view, BoardLane::Live, &[]);
@@ -529,6 +595,7 @@ mod tests {
                     ..BloomView::default()
                 },
             ],
+            orders: vec![live_order(digest(2), "wp-run", StageId::Construct)],
             ..ViewDocument::default()
         };
         let live = rows_of(&view, BoardLane::Live, &[]);
@@ -536,7 +603,7 @@ mod tests {
             .iter()
             .filter_map(|row| match row {
                 BoardRow::Bloom(bloom) => Some(bloom.id),
-                BoardRow::Member(_) => None,
+                BoardRow::Member(_) | BoardRow::Order(_) => None,
             })
             .collect();
         assert_eq!(live_ids, vec![digest(2)]);
@@ -546,7 +613,7 @@ mod tests {
         assert_eq!(member.workpiece, "wp-run");
         assert!(live.iter().all(|row| match row {
             BoardRow::Member(member) => member.workpiece != "wp-done",
-            BoardRow::Bloom(_) => true,
+            BoardRow::Bloom(_) | BoardRow::Order(_) => true,
         }));
     }
 
@@ -576,18 +643,20 @@ mod tests {
     fn member_row_stage_and_age_match_the_column_headers() {
         // The plausible bug: STAGE/AGE cells still carry machinery rolls and
         // a blocked_by id, so a column header is only true of bloom rows.
+        let bloom = digest(1);
         let view = ViewDocument {
             blooms: vec![BloomView {
-                id: digest(1),
+                id: bloom,
                 status: Some(BloomStatus::Sealed),
                 members: vec![in_flight_construct("wp")],
                 ..BloomView::default()
             }],
+            orders: vec![live_order(bloom, "wp", StageId::Construct)],
             ..ViewDocument::default()
         };
         let dispatches = [
             MetricDispatch {
-                bloom: digest(1),
+                bloom,
                 workpiece: "wp".to_owned(),
                 recorded_unix_millis: Some(1_000),
                 sequence: 1,
@@ -651,6 +720,7 @@ mod tests {
         assert!(live_rows.iter().all(|row| match row {
             BoardRow::Member(member) => member.workpiece != "wp-done" && member.workpiece != "wp-landed",
             BoardRow::Bloom(bloom) => bloom.id != landed,
+            BoardRow::Order(_) => true,
         }));
 
         let history_rows = rows_of(&view, BoardLane::History, &dispatches);
@@ -705,20 +775,21 @@ mod tests {
                     ..BloomView::default()
                 },
             ],
+            orders: vec![live_order(digest(1), "wp", StageId::Construct)],
             ..ViewDocument::default()
         };
         let live: Vec<_> = rows_of(&view, BoardLane::Live, &[])
             .into_iter()
             .filter_map(|row| match row {
                 BoardRow::Bloom(bloom) => Some(bloom.id),
-                BoardRow::Member(_) => None,
+                BoardRow::Member(_) | BoardRow::Order(_) => None,
             })
             .collect();
         let history: Vec<_> = rows_of(&view, BoardLane::History, &[])
             .into_iter()
             .filter_map(|row| match row {
                 BoardRow::Bloom(bloom) => Some(bloom.id),
-                BoardRow::Member(_) => None,
+                BoardRow::Member(_) | BoardRow::Order(_) => None,
             })
             .collect();
         assert_eq!(live, vec![digest(1)]);
@@ -782,6 +853,7 @@ mod tests {
         let mut store = Store::new(Duration::from_secs(1));
         store.apply_view(Ok(ViewDocument {
             blooms: vec![BloomView { id: digest(1), members: vec![in_flight_construct("wp")], ..BloomView::default() }],
+            orders: vec![live_order(digest(1), "wp", StageId::Construct)],
             ..ViewDocument::default()
         }));
         let mut board = Board::new();
@@ -790,5 +862,30 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("test backend");
         terminal.draw(|frame| board.render(frame, frame.area(), &store)).expect("draw");
         assert_eq!(super::super::row_caret(&terminal, "wp"), "> ");
+    }
+
+    #[test]
+    fn a_live_base_verify_order_renders_as_a_stage_row() {
+        // The plausible bug: outstanding orders stay off /view, so a bloom-less
+        // BaseVerify never appears and the board cannot name the stage that is
+        // actually running.
+        let view = ViewDocument {
+            orders: vec![OrderView {
+                nonce: "dispatch-base".to_owned(),
+                bloom: DigestHex::default(),
+                workpiece: String::new(),
+                stage: StageId::BaseVerify,
+            }],
+            ..ViewDocument::default()
+        };
+        let live = rows_of(&view, BoardLane::Live, &[]);
+        assert_eq!(live.len(), 1);
+        let BoardRow::Order(order) = &live[0] else {
+            panic!("the live board names the workspace stage");
+        };
+        assert_eq!(order.workpiece, "base-verify");
+        assert_eq!(order.state, "running");
+        assert_eq!(order.stage, "BaseVerify");
+        assert!(rows_of(&view, BoardLane::History, &[]).is_empty());
     }
 }

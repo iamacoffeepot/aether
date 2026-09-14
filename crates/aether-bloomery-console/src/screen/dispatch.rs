@@ -1,4 +1,4 @@
-//! One bloom member's dispatch attempts. Enter opens the transcript viewer.
+//! One bloom member's dispatch attempts. Enter opens the evidence browser.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -97,7 +97,7 @@ impl DispatchList {
                     if rows.iter().find(|row| row.nonce == nonce).is_some_and(|row| !row.evidence_retained) {
                         Outcome::Handled
                     } else {
-                        Outcome::Push(Nav::transcript(nonce))
+                        Outcome::Push(Nav::evidence(nonce))
                     }
                 })
             }
@@ -267,9 +267,9 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_a_swept_row_does_not_push_a_transcript() {
-        // The plausible bug: Enter still pushes the transcript viewer for a
-        // nonce the coordinator will 404, even though the row is labelled swept.
+    fn enter_on_a_swept_row_does_not_push_evidence() {
+        // The plausible bug: Enter still pushes the evidence browser for a
+        // nonce the coordinator has reclaimed, even though the row is labelled swept.
         let bloom = digest(1);
         let mut store = Store::new(Duration::from_secs(1));
         store.apply_bloom_dispatches(bloom, Ok(page()));
@@ -295,9 +295,9 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_a_row_produces_the_transcript_nav() {
-        // The plausible bug: Enter still pushes Focus::Dispatch, so the
-        // transcript viewer is never constructed from a list row.
+    fn enter_on_a_row_produces_the_evidence_nav() {
+        // The plausible bug: Enter still pushes the transcript viewer, so
+        // retained files and gate verdicts stay unreachable from the list.
         let bloom = digest(1);
         let mut store = Store::new(Duration::from_secs(1));
         store.apply_bloom_dispatches(
@@ -315,10 +315,7 @@ mod tests {
         );
         let mut list = DispatchList::new(bloom, "wp-a");
         list.reseat(&store);
-        assert_eq!(
-            list.handle_key(KeyEvent::from(KeyCode::Enter), &store),
-            Outcome::Push(Nav::transcript("dispatch-1"))
-        );
+        assert_eq!(list.handle_key(KeyEvent::from(KeyCode::Enter), &store), Outcome::Push(Nav::evidence("dispatch-1")));
     }
 
     #[test]

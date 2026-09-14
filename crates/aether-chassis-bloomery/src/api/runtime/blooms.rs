@@ -30,6 +30,7 @@ use crate::bloomery::DoctorReport;
 use crate::bloomery::push_candidate;
 use crate::control::ControlCore;
 use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
+use crate::store::LiveOrder;
 
 impl ApiCapabilityState {
     /// `POST /blooms/{id}/supersede` — seal the named successor draft and admit
@@ -571,8 +572,8 @@ impl ApiCapabilityState {
     }
 
     /// The control-core read every live-read route here defers: one selector,
-    /// one [`QueryResult`] arm. `GET /blooms` and `GET /view` pass
-    /// [`QuerySelector::Document`].
+    /// one [`QueryResult`] arm. `GET /blooms` and `GET /view` join the document
+    /// with live outstanding orders through [`Routed::LiveView`] instead.
     pub(super) fn query(selector: QuerySelector) -> Routed {
         Routed::Query(Query { selector })
     }
@@ -854,14 +855,24 @@ fn admitted_response(outcome: Outcome) -> HttpServerResponse {
 }
 
 /// Render a live-read route's [`QueryResult`] into its HTTP response: the whole
-/// view document (with the doctor's latest report overlaid when one has run),
-/// one bloom view, a `404`, or the error.
-pub(super) fn query_response(result: QueryResult, doctor: Option<&DoctorReport>) -> HttpServerResponse {
+/// view document (with the doctor's latest report and live outstanding orders
+/// overlaid), one bloom view, a `404`, or the error.
+pub(super) fn query_response(
+    result: QueryResult,
+    doctor: Option<&DoctorReport>,
+    orders: &[LiveOrder],
+) -> HttpServerResponse {
     match result {
         QueryResult::Document { document } => match from_bytes::<ViewDocument>(&document) {
-            Ok(document) => {
-                json(200, &ViewWithDoctor { surface_alerts: surface_alerts(&document), document: &document, doctor })
-            }
+            Ok(document) => json(
+                200,
+                &ViewWithDoctor {
+                    surface_alerts: surface_alerts(&document),
+                    document: &document,
+                    doctor,
+                    orders: order_alerts(orders),
+                },
+            ),
             Err(error) => error_response(500, &format!("view document decode failed: {error}")),
         },
         QueryResult::Bloom { view } => match from_bytes::<BloomView>(&view) {
@@ -885,10 +896,10 @@ pub(super) fn query_response(result: QueryResult, doctor: Option<&DoctorReport>)
     }
 }
 
-/// `GET /view` is the journal projection plus the doctor's latest pass and the
-/// surface parks lifted out of it. Neither is a [`ViewDocument`] field: that
-/// document is wire-encoded in the outbox, and a trailing optional there would
-/// break queued payloads.
+/// `GET /view` is the journal projection plus the doctor's latest pass, the
+/// surface parks lifted out of it, and the live outstanding orders. None of
+/// those is a [`ViewDocument`] field: that document is wire-encoded in the
+/// outbox, and a trailing optional there would break queued payloads.
 #[derive(Serialize)]
 struct ViewWithDoctor<'a> {
     #[serde(flatten)]
@@ -907,6 +918,36 @@ struct ViewWithDoctor<'a> {
     /// ordinary `/view` is unchanged.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     surface_alerts: Vec<SurfaceAlert<'a>>,
+    /// Live outstanding orders, including bloom-less stages such as
+    /// `BaseVerify`. Omitted when nothing is running so an idle `/view` is
+    /// unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    orders: Vec<OrderAlert>,
+}
+
+/// One live outstanding order flattened onto `/view`: which bloom (zero for a
+/// bloom-less workspace stage), which workpiece (empty for a bloom-wide or
+/// workspace stage), and which stage the host is actually running.
+#[derive(Serialize)]
+struct OrderAlert {
+    nonce: String,
+    bloom: Digest,
+    workpiece: String,
+    stage: StageId,
+}
+
+fn order_alerts(orders: &[LiveOrder]) -> Vec<OrderAlert> {
+    orders
+        .iter()
+        .filter_map(|order| {
+            Some(OrderAlert {
+                nonce: order.nonce.clone(),
+                bloom: Digest::from_slice(&order.bloom)?,
+                workpiece: order.workpiece.clone(),
+                stage: from_bytes(&order.stage).ok()?,
+            })
+        })
+        .collect()
 }
 
 /// One member's surface park, flattened to the top of `/view`: which member of
@@ -969,6 +1010,7 @@ mod tests {
     };
     use crate::api::dto::RepairRequest;
     use crate::bloomery::{CheckResult, DoctorReport};
+    use crate::store::LiveOrder;
 
     /// A bloom id in the spelling the routes take.
     const BLOOM: &str = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -989,7 +1031,7 @@ mod tests {
             base_alert: None,
         };
         let result = QueryResult::Document { document: to_vec(&document).unwrap() };
-        let response = query_response(result, None);
+        let response = query_response(result, None, &[]);
         assert_eq!(response.status, 200);
         let body = String::from_utf8(response.body).unwrap();
         assert!(body.contains("Window"), "the axis is named: {body}");
@@ -1018,7 +1060,7 @@ mod tests {
             }],
         };
         let result = QueryResult::Document { document: to_vec(&document).unwrap() };
-        let response = query_response(result, Some(&report));
+        let response = query_response(result, Some(&report), &[]);
         assert_eq!(response.status, 200);
         let body = String::from_utf8(response.body).unwrap();
         assert!(body.contains("claim_refs_name_active_blooms"), "the invariant is named: {body}");
@@ -1058,7 +1100,7 @@ mod tests {
             base_alert: None,
         };
 
-        let response = query_response(QueryResult::Document { document: to_vec(&document).unwrap() }, None);
+        let response = query_response(QueryResult::Document { document: to_vec(&document).unwrap() }, None, &[]);
         assert_eq!(response.status, 200);
         let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
 
@@ -1072,6 +1114,35 @@ mod tests {
             alert["paths"][0]["reason"], "the refusal this fixes is raised there",
             "and the reason that justifies it"
         );
+    }
+
+    // The plausible bug: GET /view renders the journal projection and drops
+    // outstanding orders, so a bloom-less BaseVerify is invisible and `running`
+    // is inferred from a cursor rather than a live lane.
+    #[test]
+    fn query_response_overlays_live_orders_including_base_verify() {
+        let document = ViewDocument {
+            mainline: Digest::from_bytes([1; 32]),
+            observed: Digest::from_bytes([2; 32]),
+            spend_quiesce: None,
+            blooms: Vec::new(),
+            base_alert: None,
+        };
+        let orders = [LiveOrder {
+            nonce: "dispatch-base".to_owned(),
+            bloom: vec![0; 32],
+            workpiece: String::new(),
+            stage: to_vec(&StageId::BaseVerify).unwrap(),
+        }];
+        let result = QueryResult::Document { document: to_vec(&document).unwrap() };
+        let response = query_response(result, None, &orders);
+        assert_eq!(response.status, 200);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        let order = &body.get("orders").expect("live orders are named at the top of /view")[0];
+        assert_eq!(order["nonce"], "dispatch-base");
+        assert_eq!(order["bloom"], "00".repeat(32), "the bloom-less placeholder is the zero digest");
+        assert_eq!(order["workpiece"], "", "a workspace stage has no member");
+        assert_eq!(order["stage"], "BaseVerify", "the board can name the stage");
     }
 
     /// A finding digest in the same spelling.

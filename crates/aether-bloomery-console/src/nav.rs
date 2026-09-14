@@ -36,6 +36,16 @@ impl Nav {
     }
 
     #[must_use]
+    pub fn evidence(nonce: impl Into<String>) -> Self {
+        Self::Focus(Focus::evidence(nonce))
+    }
+
+    #[must_use]
+    pub fn evidence_file(nonce: impl Into<String>, name: impl Into<String>) -> Self {
+        Self::Focus(Focus::evidence_file(nonce, name))
+    }
+
+    #[must_use]
     pub fn timeline(bloom: DigestHex) -> Self {
         Self::Timeline { bloom }
     }
