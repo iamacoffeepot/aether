@@ -1,5 +1,7 @@
 //! Bloom, member, composition, dispatch, and seal detail.
 
+use std::collections::{HashMap, HashSet};
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -7,7 +9,9 @@ use ratatui::style::Modifier;
 use ratatui::widgets::{List, ListItem, ListState};
 
 use crate::cursor::Cursor;
-use crate::dto::{BloomStatus, BloomView, CompositionFinding, CompositionView, DigestHex, MemberView, ViewDocument};
+use crate::dto::{
+    BloomStatus, BloomView, CompositionFinding, CompositionView, DigestHex, MemberView, StageId, ViewDocument,
+};
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
@@ -31,7 +35,7 @@ const HINTS: &[KeyHint] = &[
 ];
 
 /// Stable identity of one selectable detail row.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RowKey {
     Identity,
     Successor,
@@ -39,6 +43,7 @@ pub enum RowKey {
     BlockedBy,
     Digest(DigestHex),
     Dispatch,
+    Transcript(String),
     Filing(String),
     Other(u16),
 }
@@ -60,6 +65,8 @@ pub struct Detail {
     vanished: bool,
     cursor: Cursor<RowKey>,
     scroll: usize,
+    last: HashMap<RowKey, String>,
+    flashed: HashSet<RowKey>,
     /// Whether the subject is a landed bloom, learned from the last rebuild.
     ///
     /// The filed-findings tail costs a bloom-filtered journal page and the
@@ -71,7 +78,16 @@ pub struct Detail {
 impl Detail {
     #[must_use]
     pub fn new(focus: Focus) -> Self {
-        Self { focus, lines: Vec::new(), vanished: false, cursor: Cursor::new(), scroll: 0, landed: false }
+        Self {
+            focus,
+            lines: Vec::new(),
+            vanished: false,
+            cursor: Cursor::new(),
+            scroll: 0,
+            last: HashMap::new(),
+            flashed: HashSet::new(),
+            landed: false,
+        }
     }
 
     #[must_use]
@@ -100,7 +116,7 @@ impl Detail {
         if self.landed
             && let Focus::Bloom { id } = &self.focus
         {
-            keys.push(ResourceKey::Journal(JournalQuery { bloom: Some(*id), from_sequence: None }));
+            keys.push(ResourceKey::Journal(JournalQuery { bloom: Some(*id), ..JournalQuery::default() }));
             keys.push(ResourceKey::Commissions);
         }
         keys
@@ -157,6 +173,7 @@ impl Detail {
         if focus_exists(&self.focus, view) {
             self.rebuild(view, store);
             self.vanished = false;
+            self.note_flash();
             self.reseat_cursor();
             return;
         }
@@ -166,6 +183,7 @@ impl Detail {
             self.focus = parent;
             self.rebuild(view, store);
             self.vanished = false;
+            self.note_flash();
             self.reseat_cursor();
             return;
         }
@@ -187,8 +205,20 @@ impl Detail {
         } else {
             palette::body()
         };
-        let items: Vec<ListItem> =
-            self.lines.iter().map(|line| ListItem::new(line.text.clone()).style(muted)).collect();
+        let items: Vec<ListItem> = self
+            .lines
+            .iter()
+            .map(|line| {
+                let style = if dimmed {
+                    muted
+                } else if self.flashed.contains(&line.key) {
+                    palette::flash()
+                } else {
+                    muted
+                };
+                ListItem::new(line.text.clone()).style(style)
+            })
+            .collect();
         let list = List::new(items)
             .style(palette::body())
             .highlight_style(palette::cursor())
@@ -221,6 +251,19 @@ impl Detail {
 
     fn reseat_cursor(&mut self) {
         self.cursor.reseat(&self.lines, |line| line.key.clone(), |_, lines| lines.first().map(|line| line.key.clone()));
+    }
+
+    fn note_flash(&mut self) {
+        let mut lit = HashSet::new();
+        let mut next = HashMap::new();
+        for line in &self.lines {
+            if self.last.get(&line.key).is_some_and(|prev| prev != &line.text) {
+                lit.insert(line.key.clone());
+            }
+            next.insert(line.key.clone(), line.text.clone());
+        }
+        self.last = next;
+        self.flashed = lit;
     }
 
     fn rebuild(&mut self, view: &ViewDocument, store: &Store) {
@@ -346,7 +389,7 @@ fn bloom_lines(view: &ViewDocument, store: &Store, id: DigestHex) -> Vec<Line> {
 /// since the lane is authored and not yet enabled — and the section disappears
 /// entirely rather than rendering an empty heading.
 fn filed_rows(store: &Store, bloom: &BloomView) -> Vec<FiledRow> {
-    if let Some(journal) = store.journal(JournalQuery { bloom: Some(bloom.id), from_sequence: None })
+    if let Some(journal) = store.journal(JournalQuery { bloom: Some(bloom.id), ..JournalQuery::default() })
         && let Some(page) = journal.value.as_ref()
         && let Some(receipt) = read_receipt(page, bloom.id)
         && let Some(list) = store.commissions().value.as_ref()
@@ -455,30 +498,20 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
     let Some((bloom, member)) = find_member(view, bloom, workpiece) else {
         return Vec::new();
     };
-    let mut lines = vec![Line {
+    let mut lines = Vec::new();
+    push_verify_transcript(&mut lines, view, bloom.id, workpiece);
+    lines.push(Line {
         key: RowKey::Identity,
         text: format!("member {workpiece}  bloom {}  {}", bloom.id.prefix(), bloom.id.as_hex()),
         enter: Some(Nav::focus(Focus::dispatch(bloom.id, member.workpiece.clone()))),
         digest: None,
         openable: false,
-    }];
+    });
     lines.push(label(
         RowKey::Other(0),
         format!("state  {}", member_status_state(member, view.has_lane(bloom.id, member))),
     ));
-    if let Some(coordination) = &bloom.coordination {
-        lines.push(label(RowKey::Other(400), coordination.member_summary(member)));
-        if let Some((run, millis)) = coordination.member_latency(member) {
-            lines.push(label(RowKey::Other(403), format!("verification latency  {millis} ms")));
-            if let Some(run) = run {
-                lines.push(label(RowKey::Other(404), format!("shared physical run  {}", run.prefix())));
-            }
-        }
-        if let Some(context) = coordination.contexts.get(&member.workpiece) {
-            lines.push(reference_line(RowKey::Other(401), "sealed base", context.bloom_base.checkout));
-            lines.push(reference_line(RowKey::Other(402), "inherited head", context.starting_head.candidate.checkout));
-        }
-    }
+    push_member_coordination(&mut lines, bloom, member);
     if let Some(blocked) = member.blocked_by.as_deref().filter(|name| !name.is_empty()) {
         lines.push(Line {
             key: RowKey::BlockedBy,
@@ -555,6 +588,36 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
     lines
 }
 
+fn push_verify_transcript(lines: &mut Vec<Line>, view: &ViewDocument, bloom: DigestHex, workpiece: &str) {
+    let Some(order) = view.order_for(bloom, workpiece).filter(|order| order.stage == StageId::Verify) else {
+        return;
+    };
+    lines.push(Line {
+        key: RowKey::Transcript(order.nonce.clone()),
+        text: format!("transcript  {}", order.nonce),
+        enter: Some(Nav::transcript(&order.nonce)),
+        digest: None,
+        openable: false,
+    });
+}
+
+fn push_member_coordination(lines: &mut Vec<Line>, bloom: &BloomView, member: &MemberView) {
+    let Some(coordination) = &bloom.coordination else {
+        return;
+    };
+    lines.push(label(RowKey::Other(400), coordination.member_summary(member)));
+    if let Some((run, millis)) = coordination.member_latency(member) {
+        lines.push(label(RowKey::Other(403), format!("verification latency  {millis} ms")));
+        if let Some(run) = run {
+            lines.push(label(RowKey::Other(404), format!("shared physical run  {}", run.prefix())));
+        }
+    }
+    if let Some(context) = coordination.contexts.get(&member.workpiece) {
+        lines.push(reference_line(RowKey::Other(401), "sealed base", context.bloom_base.checkout));
+        lines.push(reference_line(RowKey::Other(402), "inherited head", context.starting_head.candidate.checkout));
+    }
+}
+
 /// The bloom's whole lease table, path-first (ADR-0204 / ADR-0198).
 ///
 /// Rendered on the bloom rather than only under each member because
@@ -624,8 +687,8 @@ fn reference_line(key: RowKey, title: &str, digest: DigestHex) -> Line {
 mod tests {
     use super::{Detail, RowKey};
     use crate::dto::{
-        BloomView, CandidateRef, CompositionCursorView, CompositionView, DigestHex, MemberView, ReviewParkView,
-        StageId, ViewDocument,
+        BloomView, CandidateRef, CompositionCursorView, CompositionView, DigestHex, MemberView, OrderView,
+        ReviewParkView, StageId, ViewDocument,
     };
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
@@ -764,6 +827,34 @@ mod tests {
         assert_eq!(
             detail.handle_key(KeyEvent::from(KeyCode::Enter), &store),
             Outcome::Push(Nav::focus(Focus::composition(bloom)))
+        );
+    }
+
+    #[test]
+    fn a_live_verify_order_opens_the_transcript() {
+        // The plausible bug: a live Verify order is only reachable through the
+        // on-demand dispatch list, so the operator never sees the session while
+        // it is still being written.
+        let bloom = digest(1);
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: bloom,
+                members: vec![MemberView { workpiece: "wp".to_owned(), ..MemberView::default() }],
+                ..BloomView::default()
+            }],
+            orders: vec![OrderView {
+                nonce: "dispatch-verify".to_owned(),
+                bloom,
+                workpiece: "wp".to_owned(),
+                stage: StageId::Verify,
+            }],
+            ..ViewDocument::default()
+        };
+        let (mut detail, store) = detail_over(Focus::member(bloom, "wp"), view);
+        assert_eq!(detail.selected_key(), Some(&RowKey::Transcript("dispatch-verify".to_owned())));
+        assert_eq!(
+            detail.handle_key(KeyEvent::from(KeyCode::Enter), &store),
+            Outcome::Push(Nav::transcript("dispatch-verify"))
         );
     }
 

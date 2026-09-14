@@ -122,6 +122,15 @@ impl Transcript {
         Self::with_cap(nonce, DEFAULT_CAP)
     }
 
+    /// Open following the tail — the live verify door, and any other
+    /// dispatch whose session is still being written.
+    #[must_use]
+    pub fn following(nonce: impl Into<String>) -> Self {
+        let mut this = Self::new(nonce);
+        this.arm();
+        this
+    }
+
     #[must_use]
     pub fn with_cap(nonce: impl Into<String>, cap: usize) -> Self {
         Self {

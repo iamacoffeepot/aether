@@ -105,11 +105,22 @@ impl CoordinatorLogQuery {
     }
 }
 
-/// Query identity for one journal page. Filter text lives on the screen.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+/// Query identity for one journal page. Search text lives on the screen.
+///
+/// `live` is cadence only — it is not on the wire. `descending` is the
+/// route's `order` (`desc` is the default and is omitted).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct JournalQuery {
     pub bloom: Option<DigestHex>,
     pub from_sequence: Option<u64>,
+    pub descending: bool,
+    pub live: bool,
+}
+
+impl Default for JournalQuery {
+    fn default() -> Self {
+        Self { bloom: None, from_sequence: None, descending: true, live: false }
+    }
 }
 
 impl JournalQuery {
@@ -121,6 +132,9 @@ impl JournalQuery {
         }
         if let Some(from) = self.from_sequence {
             parts.push(format!("from_sequence={from}"));
+        }
+        if !self.descending {
+            parts.push("order=asc".to_owned());
         }
         if parts.is_empty() {
             "/journal".to_owned()
@@ -477,6 +491,7 @@ impl Store {
         match key {
             ResourceKey::CoordinatorLogs(query) if query.live => self.view_cadence,
             ResourceKey::Transcript(query) if query.live => self.view_cadence,
+            ResourceKey::Journal(query) if query.live => self.view_cadence,
             ResourceKey::View
             | ResourceKey::MetricsSummary
             | ResourceKey::MetricsDays
@@ -516,6 +531,12 @@ impl Store {
                     return false;
                 }
                 self.view.completed_at.is_none_or(|at| at.elapsed() >= self.view_cadence)
+            }
+            ResourceKey::Journal(query) if query.live => {
+                let Some(cell) = self.journals.get(query) else {
+                    return true;
+                };
+                !cell.inflight && cell.completed_at.is_none_or(|at| at.elapsed() >= self.view_cadence)
             }
             ResourceKey::Journal(query) => self.journals.get(query).is_none_or(Cell::on_demand_due),
             ResourceKey::Artifact(digest) => self.artifacts.get(digest).is_none_or(Cell::on_demand_due),
@@ -773,7 +794,8 @@ fn merge_dispatch_page(retained: Vec<MetricDispatch>, page: Vec<MetricDispatch>)
 #[cfg(test)]
 mod tests {
     use super::{
-        CommissionCapability, CoordinatorLogQuery, DispatchFileQuery, Lane, LogLevel, PromptQuery, ResourceKey, Store,
+        CommissionCapability, CoordinatorLogQuery, DispatchFileQuery, JournalQuery, Lane, LogLevel, PromptQuery,
+        ResourceKey, Store,
     };
     use crate::dto::{BloomView, DigestHex, MemberView, MetricDispatch, ViewDocument};
     use aether_bloomery::METRICS_MAX_LIMIT;
@@ -904,6 +926,27 @@ mod tests {
         let once = ResourceKey::CoordinatorLogs(CoordinatorLogQuery { level: None, cursor: None, live: false });
         assert_eq!(live.lane(), Lane::Bulk);
         assert_eq!(once.lane(), Lane::Bulk);
+        let cadence = Duration::from_millis(10);
+        let mut store = Store::new(cadence);
+        assert!(store.due(&live));
+        assert!(store.due(&once));
+        store.mark_inflight(&live);
+        assert!(!store.due(&live));
+    }
+
+    #[test]
+    fn a_live_journal_poll_repeats_at_cadence_and_names_the_forward_cursor() {
+        // The plausible bug: follow reuses the newest-first page (or the live
+        // lane), so the tail never advances past the first sample, or `order=asc`
+        // is omitted and `from_sequence` pages backward.
+        let live = ResourceKey::Journal(JournalQuery { live: true, ..JournalQuery::default() });
+        let once = ResourceKey::Journal(JournalQuery::default());
+        assert_eq!(live.lane(), Lane::Bulk);
+        assert_eq!(once.path(), "/journal");
+        assert_eq!(
+            JournalQuery { from_sequence: Some(7), descending: false, live: true, bloom: None }.path(),
+            "/journal?from_sequence=7&order=asc"
+        );
         let cadence = Duration::from_millis(10);
         let mut store = Store::new(cadence);
         assert!(store.due(&live));

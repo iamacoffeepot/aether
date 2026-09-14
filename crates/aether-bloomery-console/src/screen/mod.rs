@@ -31,6 +31,7 @@ pub use backlog::Backlog;
 pub use board::{BloomRow, Board, BoardLane, BoardRow, MemberRow, OrderRow, RowId, member_status_state};
 pub use coordinator::CoordinatorLog;
 pub use detail::Detail;
+pub use journal::Journal;
 pub use metrics::{Breakdown, Dashboard, Days, Timeline, compose};
 pub use partition::{MemberState, is_history_status, is_live_status, live_blooms};
 pub use quiet::{QuietLine, quiet_lines};
@@ -40,7 +41,7 @@ use artifact::Artifact;
 use backlog::Workpiece;
 use dispatch::DispatchList;
 use evidence::{Evidence, EvidenceFile};
-use journal::{Journal, Record};
+use journal::Record;
 
 /// Width-stable caret. Two spaces when Enter would not push, so rows do not
 /// shift as the cursor moves.
@@ -96,7 +97,7 @@ impl Screen {
         match nav {
             Nav::Focus(Focus::Record { sequence }) => Self::Record(Record::new(sequence)),
             Nav::Focus(Focus::Artifact { digest }) => Self::Artifact(Artifact::new(digest)),
-            Nav::Focus(Focus::Transcript { nonce }) => Self::Transcript(Box::new(Transcript::new(nonce))),
+            Nav::Focus(Focus::Transcript { nonce }) => Self::Transcript(Box::new(Transcript::following(nonce))),
             Nav::Focus(Focus::Evidence { nonce }) => Self::Evidence(Evidence::new(nonce)),
             Nav::Focus(Focus::EvidenceFile { nonce, name }) => Self::EvidenceFile(EvidenceFile::new(nonce, name)),
             Nav::Focus(Focus::Dispatch { bloom, workpiece }) => Self::DispatchList(DispatchList::new(bloom, workpiece)),
