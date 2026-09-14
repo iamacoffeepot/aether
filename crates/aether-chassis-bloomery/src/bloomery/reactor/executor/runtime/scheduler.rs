@@ -7,8 +7,8 @@ use std::{
 
 use aether_bloomery::{
     Admit, BloomId, CompatibilityPreview, CompositionPlan, CoordinationState, Decision, Digest, Event, Fact,
-    IdempotencyKey, MemberContractPin, MemberVerificationPayload, Nonce, SharedRunMode, SharedRunPlan, SharedRunRecord,
-    Topic, VerificationMode, WorkOrder, decode_recorded_decisions,
+    IdempotencyKey, MemberContractPin, MemberVerificationPayload, MemberVerifyRequest, Nonce, SharedRunMode,
+    SharedRunPlan, SharedRunRecord, Topic, VerificationMode, WorkOrder, WorkpieceId, decode_recorded_decisions,
 };
 use aether_data::wire::{from_bytes, to_vec};
 
@@ -161,7 +161,7 @@ fn proposal_capacity_order(plan: &SharedRunPlan) -> Option<WorkOrder> {
     })
 }
 
-fn build_plan(state: &CoordinationState, requests: Vec<aether_bloomery::MemberVerifyRequest>) -> SharedRunPlan {
+fn build_plan(state: &CoordinationState, requests: Vec<MemberVerifyRequest>) -> SharedRunPlan {
     let mode = match state.policy.verification {
         VerificationMode::Contextual if requests.iter().all(|request| state.composition_contract.covers(request)) => {
             SharedRunMode::Contextual
@@ -215,10 +215,7 @@ trait SharedRunSelection {
 
 struct SealedPolicySelection;
 
-fn current_request(
-    state: &CoordinationState,
-    row: &QueuedMemberVerificationRow,
-) -> Option<aether_bloomery::MemberVerifyRequest> {
+fn current_request(state: &CoordinationState, row: &QueuedMemberVerificationRow) -> Option<MemberVerifyRequest> {
     let payload = from_bytes::<MemberVerificationPayload>(&row.payload).ok()?;
     state
         .request(payload.request.digest())
@@ -262,7 +259,7 @@ fn fresh_conflict(state: &CoordinationState, queued: &[QueuedMemberVerificationR
 fn retained_survivor_group(
     state: &CoordinationState,
     queued: &[QueuedMemberVerificationRow],
-    request: &aether_bloomery::MemberVerifyRequest,
+    request: &MemberVerifyRequest,
     limit: usize,
 ) -> Option<Vec<usize>> {
     let request_digest = request.digest();
@@ -398,6 +395,63 @@ impl SharedRunSelection for SealedPolicySelection {
         selected.sort_unstable();
         selected
     }
+}
+
+fn sibling_constructs_in_flight(state: &CoordinationState, selected: &[MemberVerifyRequest]) -> Vec<WorkpieceId> {
+    let selected = selected.iter().map(|request| request.member.workpiece.0.as_str()).collect::<BTreeSet<_>>();
+    state
+        .queued_construction
+        .keys()
+        .chain(state.admitted_construction.keys())
+        .filter(|workpiece| !selected.contains(workpiece.as_str()))
+        .map(|workpiece| WorkpieceId(workpiece.clone()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn complete_survivor_group(state: &CoordinationState, selected: &[MemberVerifyRequest]) -> bool {
+    let ids = selected.iter().map(MemberVerifyRequest::digest).collect::<Vec<_>>();
+    state.survivor_groups.iter().any(|group| group.requests == ids)
+}
+
+fn coalesce_hold(
+    state: &CoordinationState,
+    selected: &[MemberVerifyRequest],
+    rows: &[&QueuedMemberVerificationRow],
+    now_unix_millis: u64,
+) -> rusqlite::Result<Option<Admit>> {
+    if state.policy.verification != VerificationMode::Contextual || complete_survivor_group(state, selected) {
+        return Ok(None);
+    }
+    let hold_millis = state.policy.coalesce_hold_millis();
+    if hold_millis == 0 {
+        return Ok(None);
+    }
+    let waiting_for = sibling_constructs_in_flight(state, selected);
+    if waiting_for.is_empty() {
+        return Ok(None);
+    }
+    let Some(queued_unix_millis) = rows.iter().map(|row| row.queued_unix_millis).min() else {
+        return Ok(None);
+    };
+    let Some(deadline_unix_millis) = rows.iter().map(|row| row.deadline_unix_millis).min() else {
+        return Ok(None);
+    };
+    let until_unix_millis = queued_unix_millis.saturating_add(hold_millis).min(deadline_unix_millis);
+    if now_unix_millis >= until_unix_millis {
+        return Ok(None);
+    }
+    let Some(bloom) = selected.first().map(|request| request.bloom) else {
+        return Ok(None);
+    };
+    let event = Event {
+        idempotency_key: IdempotencyKey(format!(
+            "aether.bloomery.hold_shared_run_coalesce:{bloom}:{until_unix_millis}"
+        )),
+        fact: Fact::HoldSharedRunCoalesce { bloom, until_unix_millis, waiting_for },
+    };
+    Ok(Some(Admit { event: to_vec(&event).map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))? }))
 }
 
 fn proposal_event(bytes: &[u8]) -> rusqlite::Result<Event> {
@@ -551,6 +605,9 @@ pub(super) fn drain_member_verifications(
     if !executor.has_idle_capacity(&capacity_order) {
         return Ok(Vec::new());
     }
+    if let Some(hold) = coalesce_hold(state, &plan.requests, &rows, now_unix_millis)? {
+        return Ok(vec![hold]);
+    }
     let event = Event {
         idempotency_key: IdempotencyKey(format!("aether.bloomery.propose_shared_run:{}", plan.digest().to_hex())),
         fact: Fact::ProposeSharedRun { bloom: first_payload.request.bloom, plan },
@@ -571,9 +628,9 @@ mod tests {
         CompositionContractTemplate, CompositionInput, ConfigRegistry, ConstructContext, ConstructionAdmission,
         ConstructionAdmissionPayload, ConstructionCheckpoint, ContextualAttemptDispatch, ContextualDispatchPayload,
         ContextualInvocationTemplate, CoordinationPolicy, Digest, ExecutionLimits, GenerationMember, Harness,
-        MemberPin, MemberVerifyRequest, NetworkProfile, ObservedLaneWrites, ReasoningEffort, SharedRunPhase, StageId,
-        ToolPolicy, Transformation, VerificationContract, VerificationMode, VerificationObligation, WorkHandle,
-        WorkOrder, WorkpieceId, construction_nonce_digest,
+        IntegrationHead, MemberPin, MemberVerifyRequest, NetworkProfile, ObservedLaneWrites, ReasoningEffort,
+        SharedRunPhase, StageId, ToolPolicy, Transformation, VerificationContract, VerificationMode,
+        VerificationObligation, WorkHandle, WorkOrder, WorkpieceId, construction_nonce_digest,
     };
 
     use super::*;
@@ -685,6 +742,7 @@ mod tests {
                 max_attribution_probes: 4,
                 movement_budget: 2,
                 reservation_millis: 1_000,
+                coalesce_millis: None,
                 host_class: "test-host".to_owned(),
             },
             CompositionContractTemplate {
@@ -1053,6 +1111,109 @@ mod tests {
             assert_eq!(retained.deadline_unix_millis, deadline_unix_millis);
             assert!(retained.proposal.is_some());
         }
+    }
+
+    fn constructing(request: &MemberVerifyRequest, head: IntegrationHead) -> ContextualAttemptDispatch {
+        ContextualAttemptDispatch {
+            bloom: request.bloom,
+            workpiece: request.member.workpiece.clone(),
+            stage: StageId::Construct,
+            attempt: 0,
+            transformation: request.transformation.clone(),
+            scope_revision: request.member.scope_revision,
+            candidate: Some(request.member.candidate.tree),
+            profile: request.profile.clone(),
+            configs: request.configs.clone(),
+            context: ConstructContext { bloom_base: head.candidate, starting_head: head },
+        }
+    }
+
+    fn singleton_ready_with_sibling_construct(
+        coalesce_millis: Option<u64>,
+    ) -> (CoordinationState, Vec<QueuedMemberVerificationRow>) {
+        let (mut state, queued_rows) = fixture();
+        state.policy.coalesce_millis = coalesce_millis;
+        let sibling = constructing(&state.requests[0], state.integration.head.clone());
+        state.queued_construction.insert(sibling.workpiece.0.clone(), sibling);
+        (state, queued_rows)
+    }
+
+    #[test]
+    fn a_contextual_request_waits_for_a_sibling_construct_still_in_flight() {
+        // Beta's input is a singleton, so selection does not wait for an atomic
+        // peer. Alpha is still constructing. The plausible bug: a free prover
+        // proposes beta alone the moment it is ready.
+        let (state, queued_rows) = singleton_ready_with_sibling_construct(None);
+        let bloom = state.integration.generation.bloom;
+        let mut scheduler = MemberVerificationScheduler::default();
+        scheduler.states.insert(bloom, state);
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        store.enqueue_topic(Topic::MemberVerification, &queued_rows[1].payload, None).expect("enqueue ready request");
+        let capacity = CapacityPort(Cell::new(true));
+
+        let admits = drain_member_verifications(&mut scheduler, &mut store, &capacity, 9_000).expect("held scheduler");
+        assert_eq!(admits.len(), 1, "a hold is journaled while a sibling construct is in flight");
+        let event = from_bytes::<Event>(&admits[0].event).expect("hold event");
+        let Fact::HoldSharedRunCoalesce { until_unix_millis, waiting_for, .. } = event.fact else {
+            panic!("expected a coalescing hold, got {event:?}");
+        };
+        assert_eq!(until_unix_millis, 69_000, "the hold never outlives the ready request's deadline");
+        assert_eq!(waiting_for, vec![WorkpieceId(String::from("alpha"))]);
+        assert!(
+            store
+                .queued_member_verification(&queued_rows[1].request)
+                .expect("lookup")
+                .expect("retained")
+                .proposal
+                .is_none(),
+            "a held request is not proposed"
+        );
+    }
+
+    #[test]
+    fn a_zero_hold_proposes_while_a_sibling_construct_is_still_in_flight() {
+        let (state, queued_rows) = singleton_ready_with_sibling_construct(Some(0));
+        let bloom = state.integration.generation.bloom;
+        let expected = vec![state.requests[1].digest()];
+        let mut scheduler = MemberVerificationScheduler::default();
+        scheduler.states.insert(bloom, state);
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        store.enqueue_topic(Topic::MemberVerification, &queued_rows[1].payload, None).expect("enqueue ready request");
+        let capacity = CapacityPort(Cell::new(true));
+
+        let admits =
+            drain_member_verifications(&mut scheduler, &mut store, &capacity, 9_000).expect("immediate scheduler");
+        let event = from_bytes::<Event>(&admits[0].event).expect("proposal event");
+        let Fact::ProposeSharedRun { plan, .. } = event.fact else {
+            panic!("expected a shared run proposal, got {event:?}");
+        };
+        assert_eq!(plan.requests.iter().map(MemberVerifyRequest::digest).collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
+    fn the_hold_expires_at_the_ready_request_deadline() {
+        let (state, queued_rows) = singleton_ready_with_sibling_construct(None);
+        let bloom = state.integration.generation.bloom;
+        let expected = vec![state.requests[1].digest()];
+        let mut scheduler = MemberVerificationScheduler::default();
+        scheduler.states.insert(bloom, state);
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        store.enqueue_topic(Topic::MemberVerification, &queued_rows[1].payload, None).expect("enqueue ready request");
+        let capacity = CapacityPort(Cell::new(true));
+
+        let held = drain_member_verifications(&mut scheduler, &mut store, &capacity, 9_000).expect("held scheduler");
+        assert!(
+            matches!(from_bytes::<Event>(&held[0].event).expect("hold event").fact, Fact::HoldSharedRunCoalesce { .. }),
+            "the first drain journals the hold against the request's original clocks"
+        );
+
+        let admits =
+            drain_member_verifications(&mut scheduler, &mut store, &capacity, 69_000).expect("deadline scheduler");
+        let event = from_bytes::<Event>(&admits[0].event).expect("proposal event");
+        let Fact::ProposeSharedRun { plan, .. } = event.fact else {
+            panic!("expected a shared run proposal once the deadline arrives, got {event:?}");
+        };
+        assert_eq!(plan.requests.iter().map(MemberVerifyRequest::digest).collect::<Vec<_>>(), expected);
     }
 
     /// The verification-queue twin of

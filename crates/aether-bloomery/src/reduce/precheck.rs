@@ -845,6 +845,7 @@ mod tests {
                 max_attribution_probes: 32,
                 movement_budget: 3,
                 reservation_millis: 30_000,
+                coalesce_millis: None,
                 host_class: "test".to_owned(),
             }),
         )

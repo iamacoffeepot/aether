@@ -428,6 +428,7 @@ pub use values::CoordinationState;
 pub use values::CoordinatorLogEntry;
 pub use values::CoordinatorLogsView;
 pub use values::CreateCommissionRequest;
+pub use values::DEFAULT_COALESCE_MILLIS;
 pub use values::DEFAULT_HTTP_PORT;
 pub use values::DeclaredEvidence;
 pub use values::DeclaredIdentity;

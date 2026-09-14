@@ -72,6 +72,7 @@ fn coordination_state(spec: &BloomSpec) -> CoordinationState {
         max_attribution_probes: 4,
         movement_budget: 2,
         reservation_millis: 1_000,
+        coalesce_millis: None,
         host_class: String::from("linux-x86_64"),
     };
     let template = CompositionContractTemplate {
