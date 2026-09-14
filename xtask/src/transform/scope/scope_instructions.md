@@ -38,11 +38,19 @@ stamps the evidence. You do not POST a revision and you do not freeze anything.
    and newlines survives. Never pass the value as a shell-quoted argv scalar.
    For a repeated kind, call the setter once per item; consecutive calls of
    the same field form one list, and a later restatement replaces it.
-3. **Declare a surface that covers the plan.** Every repository-relative path
-   a plan step names must be admitted by a declared-surface glob. A glob is a
-   concrete path or a directory prefix ending in one final `/**`. Do not
-   widen toward the reverse-dependency closure — a path you only read is not
-   a path you will edit.
+3. **Declare a surface of directory globs that covers the plan.** Every
+   repository-relative path a plan step names must be admitted by a
+   declared-surface entry, and an entry is a directory prefix ending in one
+   final `/**` — `crates/<crate>/src/**`, `crates/<crate>/tests/**`,
+   `xtask/src/**`, `docs/adr/**`, `docs/guide/**`. A bare file path is not an
+   entry: the seal door refuses any single file the approval policy does not
+   already name by rule, which is a short owner-signed list of
+   repository-level files — `Cargo.toml`, `Cargo.lock`, `CLAUDE.md`,
+   `AGENTS.md`, `approval-policy.toml` and their like. Declare the directory
+   that holds the file instead. Prefer the narrowest glob that still admits
+   every path the plan names: one module's directory over its crate, and the
+   crate over the tree above it. Do not widen toward the reverse-dependency
+   closure — a path you only read is not a path you will edit.
 4. **Write no source.** Do not create, edit, or delete files in the tree. Do
    not run formatters, clippy, or tests. Stop when the authored fields are
    written.
@@ -71,12 +79,17 @@ Authored kinds. Call the setter with the kebab-case name.
   definitions are exactly what the search exists to make you declare — and
   refer to background code without backticks.
 - **acceptance** — one acceptance criterion. Repeated.
-- **declared-surface** — one glob the freeze will contain the work to.
-  Repeated.
+- **declared-surface** — one directory glob, ending in a final `/**`, the
+  freeze will contain the work to. Repeated. A bare file path is admitted only
+  when an approval-policy rule already names that exact file; any other single
+  file is refused, so name the directory that holds it.
 - **edge** — a declared dependency on another workpiece id. Repeated. A blank
   id is a refusal.
 - **routing-hint** — remaining judgement or risk class, mapped to a seat at
-  dispatch. Not a model name and not an authored size. Singular.
+  dispatch. Not a model name and not an authored size. Singular. The lane
+  derives the revision's routing itself; if your judgement happens to name a
+  lap size of `S`, `M` or `L` it carries that letter through, and otherwise
+  routes the workpiece at `M`.
 
 Derived kinds. Do not set them; the lane fills them after you stop.
 
@@ -85,5 +98,6 @@ Derived kinds. Do not set them; the lane fills them after you stop.
 - **implements** — an ADR digest this workpiece binds itself to.
 
 A missing problem, a blank problem, no plan step, an empty declared surface,
-an ungrammatical glob, or a blank edge is a refusal. The three advisory
-search buckets — resolved inside, unresolvable, resolved outside — are not.
+an ungrammatical glob, a surface entry that names one file no approval-policy
+rule names, or a blank edge is a refusal. The three advisory search buckets —
+resolved inside, unresolvable, resolved outside — are not.
