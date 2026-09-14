@@ -169,8 +169,12 @@ Passing, empty, or executor-fault observations cannot seed code-repair findings.
 Cancellation withdraws unstarted logical work while preserving completed
 receipts and other still-needed work. An already-running composition retains
 its immutable input until it finishes or is explicitly cancelled as a
-physical operation. Joining a required final gate preserves the original
-deadline and uses the existing outstanding-order lifecycle.
+physical operation. A later head does not itself cancel that composition
+when every fold between its composition base and the current head is
+closure-disjoint from the run's members (#5938); a closure-intersecting
+move, a generation change, or an explicit physical cancel still retires it.
+Joining a required final gate preserves the original deadline and uses the
+existing outstanding-order lifecycle.
 
 Before admission, the scheduler retains the exact proposal for every selected
 logical request in one transaction. New arrivals and a changed head cannot
@@ -401,3 +405,21 @@ fallback for `SharedRunPreparation::Refused` (host-class mismatch, invalid
 contract, unreadable delta). Spending a standalone proof on a candidate that
 cannot append is discarded work: the later append rediscovers the same
 collision and drops the claim once Reconcile authors a new tree.
+
+## Amendment: closure-disjoint head movement (2026-09-14, #5938)
+
+Contextual proof is head-exact up to closure-disjoint deltas. A running
+composition is retired on a head move only when the folds between its
+composition base and the current head intersect the `affected_closure`
+of the run's members — the same dependency blast radius member-version
+invalidation already computes. A closure-disjoint sibling fold leaves the
+run running against the node it prepared.
+
+A `PassedIn` outcome from that run is accepted against the current head when
+every intervening fold is closure-disjoint. The member's contribution then
+rebases at integration the way ADR-0207 rebases a resolved member whose
+sibling widened: the proved node is queued onto the current head, and the
+journaled `IntegrationAdvanced` folds between the two heads are the reason
+the older node still answers. A closure-intersecting move — including a
+generation change, or a version change of a pin the run already tested —
+keeps today's retirement.
