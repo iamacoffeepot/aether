@@ -208,6 +208,57 @@ pub fn observed_probe_verdict(
     Ok(result.unwrap_or(ProbeVerdict::Unknown))
 }
 
+/// Named tests this bundle reported as failed, as `(gate, test_id)` pairs.
+///
+/// The test id is the stable identity stored under `test:{id}` — never nextest's
+/// in-flight progress counter. Disagreeing invocations, internal baselines
+/// (`at` set), and missing names supply no check.
+///
+/// # Errors
+/// The bundle is malformed, duplicated, or bound to another physical step.
+pub fn observed_failed_tests(bytes: &[u8], expected_nonce: &str) -> Result<Vec<(String, String)>, ContextualFactError> {
+    let documents = observation_documents(bytes)?;
+    if documents.iter().any(|document| document.nonce.as_deref() != Some(expected_nonce)) {
+        return Err(ContextualFactError::InputMismatch);
+    }
+    let mut failed = Vec::new();
+    for document in documents {
+        let mut seen = BTreeSet::new();
+        let mut by_test: BTreeMap<String, Option<ObservedResult>> = BTreeMap::new();
+        for invocation in document.invocations {
+            if !seen.insert(invocation.invocation) {
+                return Err(ContextualFactError::RepeatedInvocation);
+            }
+            if invocation.at.is_some() {
+                continue;
+            }
+            for (key, result) in invocation.outcomes {
+                let Some(test) = key.strip_prefix("test:") else {
+                    continue;
+                };
+                if test.is_empty() {
+                    continue;
+                }
+                by_test
+                    .entry(test.to_owned())
+                    .and_modify(|previous| {
+                        if *previous != Some(result) {
+                            *previous = None;
+                        }
+                    })
+                    .or_insert(Some(result));
+            }
+        }
+        failed.extend(
+            by_test
+                .into_iter()
+                .filter(|(_, result)| *result == Some(ObservedResult::Failed))
+                .map(|(test, _)| (document.gate.clone(), test)),
+        );
+    }
+    Ok(failed)
+}
+
 fn declares_gate(contract: &CompositionContract, gate: &str) -> bool {
     contract.gate_identities.iter().any(|identity| identity == gate)
 }
@@ -930,6 +981,63 @@ mod tests {
             observed_probe_verdict(&bytes, "step", &BatchCheck::Gate { id: "verify.test".to_owned() })
                 .expect("valid contextual fixture"),
             ProbeVerdict::Passed
+        );
+    }
+
+    #[test]
+    fn a_passing_baseline_answers_the_named_test() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "protocol": 1,
+            "documents": [{
+                "protocol": 1, "nonce": "base", "gate": "verify.test",
+                "invocations": [{
+                    "invocation": digest(11), "at": null,
+                    "outcomes": {
+                        "gate:verify.test": "passed",
+                        "test:aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack": "passed"
+                    }
+                }]
+            }]
+        }))
+        .expect("valid contextual fixture");
+        let check = BatchCheck::Test {
+            gate: "verify.test".to_owned(),
+            id: "aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack".to_owned(),
+        };
+
+        assert_eq!(
+            observed_probe_verdict(&bytes, "base", &check).expect("valid contextual fixture"),
+            ProbeVerdict::Passed
+        );
+        assert_eq!(
+            observed_failed_tests(&bytes, "base").expect("valid contextual fixture"),
+            Vec::<(String, String)>::new()
+        );
+    }
+
+    #[test]
+    fn failed_test_observations_name_the_stable_identity() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "protocol": 1,
+            "documents": [{
+                "protocol": 1, "nonce": "step", "gate": "verify.test",
+                "invocations": [{
+                    "invocation": digest(11), "at": null,
+                    "outcomes": {
+                        "gate:verify.test": "failed",
+                        "test:aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack": "failed"
+                    }
+                }]
+            }]
+        }))
+        .expect("valid contextual fixture");
+
+        assert_eq!(
+            observed_failed_tests(&bytes, "step").expect("valid contextual fixture"),
+            vec![(
+                "verify.test".to_owned(),
+                "aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack".to_owned()
+            )]
         );
     }
 

@@ -11,6 +11,7 @@ use aether_bloomery::digest::{ContentAddressed, digest_of};
 use anyhow::Result;
 use serde::Serialize;
 
+use super::nextest::{captured_output_header, status_line_test};
 use super::{
     Captured, MemberOutcome, MemberRunner, Scope, VerifyInvocation, clippy_verdict, host_fault_in, member_outcome,
 };
@@ -145,12 +146,16 @@ impl MemberRunner for ObservingRunner<'_> {
     }
 }
 
-/// Read nextest's closing status block, excluding captured test output. Only
-/// named PASS/FAIL/TIMEOUT/ABORT results count; retries and omissions stay
-/// unknown. Requiring the Summary delimiter prevents a test's printed status
-/// line inside its captured output from creating a reusable proof fact.
+/// Read nextest's per-test status lines into stable identities.
+///
+/// A run that never printed `Summary` supplies no facts. The closing summary
+/// restates failures and is the only block that cannot contain a test's own
+/// captured output, so it is the authority for a red run. Passing runs restate
+/// nothing there; in-flight PASS lines before Summary — and before any captured
+/// output banner — are then the baseline's per-test ledger. The in-flight
+/// `(n/m)` progress counter is stripped: the same test observed by runs of
+/// different sizes is one key.
 fn test_observations(log: &str) -> BTreeMap<String, ObservedResult> {
-    let mut outcomes = BTreeMap::new();
     let Some(summary) = log
         .lines()
         .enumerate()
@@ -158,10 +163,22 @@ fn test_observations(log: &str) -> BTreeMap<String, ObservedResult> {
         .map(|(index, _)| index)
         .last()
     else {
-        return outcomes;
+        return BTreeMap::new();
     };
-    for line in log.lines().skip(summary + 1) {
-        let Some((status, tail)) = line.trim_start().split_once(' ') else {
+    let restated = collect_status_lines(log.lines().skip(summary + 1));
+    if !restated.is_empty() {
+        return restated;
+    }
+    collect_status_lines(log.lines().take(summary).take_while(|line| captured_output_header(line).is_none()))
+}
+
+fn collect_status_lines<'a, I>(lines: I) -> BTreeMap<String, ObservedResult>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let mut outcomes = BTreeMap::new();
+    for line in lines {
+        let Some((status, name)) = status_line_test(line) else {
             continue;
         };
         let verdict = match status {
@@ -169,24 +186,14 @@ fn test_observations(log: &str) -> BTreeMap<String, ObservedResult> {
             "FAIL" | "TIMEOUT" | "ABORT" => ObservedResult::Failed,
             _ => continue,
         };
-        let tail = tail.trim_start();
-        if !tail.starts_with('[') {
-            continue;
-        }
-        let Some((_, name)) = tail.split_once(']') else {
-            continue;
-        };
-        let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
-        if !name.is_empty() {
-            outcomes
-                .entry(name)
-                .and_modify(|previous| {
-                    if *previous != verdict {
-                        *previous = ObservedResult::Unknown;
-                    }
-                })
-                .or_insert(verdict);
-        }
+        outcomes
+            .entry(name)
+            .and_modify(|previous| {
+                if *previous != verdict {
+                    *previous = ObservedResult::Unknown;
+                }
+            })
+            .or_insert(verdict);
     }
     outcomes
 }
@@ -238,5 +245,64 @@ PASS [0.1s] package::suite steady\n",
             Some(&ObservedResult::Passed),
             "a repeated agreeing report is still the verdict it agreed on",
         );
+    }
+
+    #[test]
+    fn the_same_test_observed_by_runs_of_different_sizes_is_one_key() {
+        // Tripwire: nextest's in-flight `(n/m)` counter is not the test. A
+        // shared run and a member-alone probe of different suite sizes used to
+        // mint two keys, so attribution could never match a baseline receipt to
+        // the failing check and restarted discrimination on every new size.
+        let large = test_observations(
+            "\
+Summary [1s] 6558 tests run: 6557 passed, 1 failed\n\
+FAIL [0.2s] (1269/6558) aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack\n",
+        );
+        let small = test_observations(
+            "\
+Summary [1s] 252 tests run: 251 passed, 1 failed\n\
+FAIL [0.2s] (228/252) aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack\n",
+        );
+        let key = "aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack";
+
+        assert_eq!(large.get(key), Some(&ObservedResult::Failed));
+        assert_eq!(small.get(key), Some(&ObservedResult::Failed));
+        assert_eq!(large.keys().collect::<Vec<_>>(), small.keys().collect::<Vec<_>>());
+        assert!(!large.keys().any(|name| name.contains('(')), "the progress counter is not part of the key");
+    }
+
+    #[test]
+    fn a_passing_run_records_each_named_test() {
+        // Tripwire: a green baseline used to record only `gate:verify.test`.
+        // Attribution looks up the failing check's test key, so a named test
+        // that the baseline actually ran must be `Passed`, not absent.
+        let observed = test_observations(
+            "\
+        PASS [   0.004s] (   1/2) aether-data::wire round_trips_a_vec3\n\
+        PASS [   0.006s] (   2/2) aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack\n\
+     Summary [   0.010s] 2 tests run: 2 passed, 0 skipped\n",
+        );
+
+        assert_eq!(observed.get("aether-data::wire round_trips_a_vec3"), Some(&ObservedResult::Passed));
+        assert_eq!(
+            observed.get("aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack"),
+            Some(&ObservedResult::Passed),
+        );
+        assert_eq!(observed.len(), 2);
+    }
+
+    #[test]
+    fn captured_output_cannot_mint_a_passing_observation() {
+        let observed = test_observations(
+            "\
+        FAIL [   0.008s] ( 156/3737) package::suite observed_red\n\
+--- STDOUT:              package::suite observed_red ---\n\
+PASS [0s] forged::test\n\
+Summary [1s] 1 tests run: 0 passed, 1 failed\n\
+        FAIL [   0.008s] package::suite observed_red\n",
+        );
+
+        assert_eq!(observed.get("package::suite observed_red"), Some(&ObservedResult::Failed));
+        assert!(!observed.contains_key("forged::test"));
     }
 }

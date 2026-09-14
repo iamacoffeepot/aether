@@ -20,8 +20,8 @@ use std::path::Path;
 use std::{fs, io};
 
 use aether_bloomery::{
-    CONSTRUCT_IMPLEMENT_COMMAND, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND, VerifyFailure,
-    VerifyFailureSet,
+    CONSTRUCT_IMPLEMENT_COMMAND, Digest, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND,
+    VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VerifyFailure, VerifyFailureSet,
 };
 use serde_json::{Value, json};
 
@@ -34,6 +34,10 @@ pub const CANDIDATE_FILE: &str = "mock-lane-candidate.txt";
 /// The harness session id a [`LaneMode::MismatchedNonce`] construct stamps —
 /// well-formed, and belonging to no order this bloom dispatched.
 pub const FOREIGN_SESSION_ID: &str = "sess-foreign";
+
+/// Named test a mock `verify.check` / `verify.base` run records, so attribution
+/// can look a baseline up by the same key the failing check used.
+pub const NAMED_TEST: &str = "aether-example shell::tests::named_failure";
 
 /// The path a [`LaneMode::DeclinesRequestingSurface`] run asks for (ADR-0207).
 ///
@@ -367,6 +371,7 @@ fn verify_environment_outcome(command: &str, evidence_nonce: &str) -> Outcome {
 
 fn verify_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: Option<&str>) -> Outcome {
     let passed = authored_pass(mode) || mode == LaneMode::ConcludesWithoutWriting;
+    let umbrella = command == VERIFY_CHECK_COMMAND || command == VERIFY_BASE_COMMAND;
     let mut evidence = json!({
         "command": command,
         "nonce": evidence_nonce,
@@ -375,7 +380,12 @@ fn verify_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: 
         "log": format!("{command}.log"),
     });
     if !passed && let Some(object) = evidence.as_object_mut() {
-        object.insert("failed_verifiers".to_owned(), json!(VerifyFailureSet::one(VerifyFailure::Clippy)));
+        let failure = if umbrella {
+            VerifyFailure::Test
+        } else {
+            VerifyFailure::Clippy
+        };
+        object.insert("failed_verifiers".to_owned(), json!(VerifyFailureSet::one(failure)));
         object.insert("findings".to_owned(), Value::String(verify_findings(command)));
     }
     stamp_claimed_subject(&mut evidence, mode, subject);
@@ -385,6 +395,27 @@ fn verify_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: 
         candidate_path: None,
         candidate: None,
     }
+}
+
+fn verify_test_observations(nonce: &str, passed: bool) -> Vec<u8> {
+    let result = if passed {
+        "passed"
+    } else {
+        "failed"
+    };
+    let mut outcomes = serde_json::Map::new();
+    outcomes.insert("gate:verify.test".to_owned(), json!(result));
+    outcomes.insert(format!("test:{NAMED_TEST}"), json!(result));
+    evidence_bytes(&json!({
+        "protocol": 1,
+        "nonce": nonce,
+        "gate": "verify.test",
+        "invocations": [{
+            "invocation": Digest::of_wire_bytes(format!("{nonce}:verify.test").as_bytes()),
+            "at": Value::Null,
+            "outcomes": outcomes,
+        }],
+    }))
 }
 
 /// A digest that is not the one the order displayed.
@@ -422,16 +453,41 @@ pub fn apply(outcome: &Outcome, worktree: &Path, out: &Path) -> io::Result<()> {
     if let Some(evidence) = &outcome.evidence {
         fs::create_dir_all(out)?;
         fs::write(out.join("evidence.json"), evidence)?;
+        write_verify_test_observations(out, evidence)?;
     }
     Ok(())
+}
+
+fn write_verify_test_observations(out: &Path, evidence: &[u8]) -> io::Result<()> {
+    let Ok(value) = serde_json::from_slice::<Value>(evidence) else {
+        return Ok(());
+    };
+    let command = value.get("command").and_then(Value::as_str).unwrap_or_default();
+    if command != VERIFY_CHECK_COMMAND && command != VERIFY_BASE_COMMAND {
+        return Ok(());
+    }
+    let Some(nonce) = value.get("nonce").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let status = value.get("status").and_then(Value::as_str);
+    let passed = status == Some("pass");
+    let test_failure = value.get("failed_verifiers").is_some_and(|failures| {
+        serde_json::from_value::<VerifyFailureSet>(failures.clone()).is_ok_and(|set| set.contains(VerifyFailure::Test))
+    });
+    if !passed && !test_failure {
+        return Ok(());
+    }
+    fs::write(out.join("verify.test.observations.json"), verify_test_observations(nonce, passed))
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "a fixture asserting on evidence it just built reports a miss by panicking")]
 mod tests {
+    use std::fs;
+
     use aether_bloomery::{
-        CONSTRUCT_IMPLEMENT_COMMAND, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND,
-        VerifyFailure, VerifyFailureSet,
+        CONSTRUCT_IMPLEMENT_COMMAND, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_BASE_COMMAND,
+        VERIFY_CHECK_COMMAND, VerifyFailure, VerifyFailureSet,
     };
     use serde_json::Value;
 
@@ -502,6 +558,24 @@ mod tests {
     }
 
     #[test]
+    fn an_umbrella_run_records_the_named_test_observation() {
+        let out = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let run = outcome(VERIFY_CHECK_COMMAND, "n-fail", LaneMode::Fail);
+        super::apply(&run, worktree.path(), out.path()).unwrap();
+        let document: Value =
+            serde_json::from_slice(&fs::read(out.path().join("verify.test.observations.json")).unwrap()).unwrap();
+        assert_eq!(document["gate"], "verify.test");
+        assert_eq!(document["invocations"][0]["outcomes"][format!("test:{}", super::NAMED_TEST)], "failed");
+
+        let pass = outcome(VERIFY_BASE_COMMAND, "n-pass", LaneMode::Pass);
+        super::apply(&pass, worktree.path(), out.path()).unwrap();
+        let passed: Value =
+            serde_json::from_slice(&fs::read(out.path().join("verify.test.observations.json")).unwrap()).unwrap();
+        assert_eq!(passed["invocations"][0]["outcomes"][format!("test:{}", super::NAMED_TEST)], "passed");
+    }
+
+    #[test]
     fn a_failing_mechanical_lane_carries_diagnostics_and_a_non_zero_exit() {
         // Tripwire: the failing verify lane's findings are what a `Refine`
         // re-entry is steered by, and its non-zero exit is what the backend's
@@ -513,7 +587,7 @@ mod tests {
         assert_eq!(evidence["status"], Value::String("fail".to_owned()));
         assert_eq!(
             serde_json::from_value::<VerifyFailureSet>(evidence["failed_verifiers"].clone()).unwrap(),
-            VerifyFailureSet::one(VerifyFailure::Clippy),
+            VerifyFailureSet::one(VerifyFailure::Test),
         );
         assert!(evidence["findings"].as_str().unwrap().contains("E0308"));
         assert_eq!(run.exit_code, 1);

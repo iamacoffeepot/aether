@@ -46,8 +46,8 @@ pub use containment::{
 #[cfg(feature = "runtime")]
 pub use contextual_facts::{
     ContextualFactError, ContextualProofFactReuse, ContextualProofReuse, ContextualRunnerReport,
-    contextual_bundle_reports, contextual_fact_key, observed_probe_verdict, record_contextual_facts,
-    reuse_contextual_proof,
+    contextual_bundle_reports, contextual_fact_key, observed_failed_tests, observed_probe_verdict,
+    record_contextual_facts, reuse_contextual_proof,
 };
 #[cfg(feature = "runtime")]
 pub use facts::record_proof_facts;

@@ -32,7 +32,7 @@ pub mod evidence;
 pub mod script;
 
 pub use argv::{ArgvError, LaneArgs};
-pub use evidence::{CANDIDATE_FILE, FOREIGN_SESSION_ID, REQUESTED_PATH};
+pub use evidence::{CANDIDATE_FILE, FOREIGN_SESSION_ID, NAMED_TEST, REQUESTED_PATH};
 pub use script::{DispatchIdentity, LaneMode, LaneRun, LaneScript, LaneStep, ScriptSelectError, read_ledger};
 
 const RELEASE_POLL: Duration = Duration::from_millis(5);

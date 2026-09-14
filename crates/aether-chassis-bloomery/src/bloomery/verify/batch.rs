@@ -487,7 +487,7 @@ mod tests {
     fn drive_requests(
         members: &[BatchMember],
         budget: u32,
-        answer: impl Fn(&BatchProbeRequest) -> ProbeVerdict,
+        mut answer: impl FnMut(&BatchProbeRequest) -> ProbeVerdict,
     ) -> BatchReport {
         let plan = Digest::from_bytes([1; 32]);
         let mut receipts = Vec::new();
@@ -550,6 +550,23 @@ mod tests {
         let exhausted = drive(&members, 1, |_| ProbeVerdict::Passed);
         assert!(exhausted.ejected.is_empty());
         assert!(matches!(&exhausted.failures[..], [BatchFailure::Unknown { .. }]));
+    }
+
+    #[test]
+    fn an_unknown_baseline_stops_without_reprobing_the_same_check() {
+        let members = [member("a")];
+        let mut probes = 0_u32;
+        let report = drive_requests(&members, 64, |request| {
+            probes += 1;
+            if request.members.is_empty() {
+                ProbeVerdict::Unknown
+            } else {
+                ProbeVerdict::Failed
+            }
+        });
+        assert_eq!(probes, 1, "an unknown baseline is unresolved; the loop must not keep probing the same check");
+        assert!(report.ejected.is_empty());
+        assert!(matches!(&report.failures[..], [BatchFailure::Unknown { .. }]));
     }
 
     #[test]
