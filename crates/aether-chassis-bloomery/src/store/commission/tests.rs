@@ -626,6 +626,24 @@ fn create_enqueues_a_commission_projection_and_record_round_trips() {
 }
 
 #[test]
+fn the_projection_snapshot_carries_the_rendered_scope() {
+    // The replica used to print the scope-revision digest. The outbox row is
+    // the whole render input, so the store has to snapshot the work-order
+    // markdown or the adapter has only hex to dump.
+    let mut store = memory();
+    seed(&mut store, "wp-1");
+    write(&mut store, "wp-1", None);
+    let latest = decode_projection(store.drain_topic(Topic::Commission).expect("drain").last().expect("row"));
+    let scope = latest.scope.expect("a written revision snapshots its render");
+    assert!(scope.contains("advisory"), "the stored description, not a digest: {scope}");
+    assert!(
+        scope.contains("crates/aether-bloomery/**"),
+        "the surface declaration is rendered from the revision: {scope}"
+    );
+    assert!(!scope.contains(&latest.scope_revision.expect("revision").to_hex()), "the snapshot is not the digest");
+}
+
+#[test]
 fn drain_overlays_the_recorded_number_onto_a_frozen_payload() {
     // Two events enqueue before the first create persists. The later row's
     // payload still says recorded_issue=None. Drain must consult the store
@@ -1116,6 +1134,7 @@ fn frozen_projection(intent: Digest) -> CommissionProjection {
         status: "open".to_owned(),
         recorded_issue: None,
         title: String::new(),
+        scope: None,
     }
 }
 

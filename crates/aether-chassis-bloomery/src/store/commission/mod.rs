@@ -922,6 +922,10 @@ fn snapshot_projection(conn: &Connection, id: &str) -> Result<Vec<u8>, Commissio
     // the head is an index, and a title recomputed from the bytes cannot drift
     // from the intent the commission was created with.
     let title = load_statement(conn, head.intent)?.and_then(|intent| intent_title(&intent.words)).unwrap_or_default();
+    let scope = match head.current_revision {
+        Some(digest) => Some(load_revision(conn, digest)?.ok_or(CommissionError::MalformedCanonical)?.render()),
+        None => None,
+    };
     encode_row(
         &CommissionProjection {
             workpiece: head.id,
@@ -932,6 +936,7 @@ fn snapshot_projection(conn: &Connection, id: &str) -> Result<Vec<u8>, Commissio
             status: head.status.as_str().to_owned(),
             recorded_issue,
             title,
+            scope,
         },
         Some(CommissionProjection::NAME),
     )

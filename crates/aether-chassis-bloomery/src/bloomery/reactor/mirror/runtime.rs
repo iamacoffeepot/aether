@@ -1123,6 +1123,7 @@ mod tests {
                 status: "open".to_owned(),
                 recorded_issue,
                 title: String::new(),
+                scope: None,
             })
             .unwrap(),
             payload_schema: None,
