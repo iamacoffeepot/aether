@@ -133,7 +133,7 @@ pub trait ExecutorPort {
     fn cancel(&self, handle: &WorkHandle) -> Settled<Result<(), ExecutorPortError>>;
 
     /// The tree a construct lane the backend just cancelled left behind
-    /// (#5998) — see [`ExecutorBackend::cancelled_capture`]. A registry read,
+    /// (#5998) — see [`aether_bloomery::ExecutorBackend::cancelled_capture`]. A registry read,
     /// never offloaded: the capture itself already happened inside the cancel
     /// the worker answered, so this is the answer being collected rather than
     /// work being asked for.

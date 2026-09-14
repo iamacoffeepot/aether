@@ -413,11 +413,10 @@ pub trait ExecutorBackend {
     ///
     /// A lane cancelled at its sealed execution limit has usually built for the
     /// better part of that limit, and the slot release behind the cancel resets
-    /// the checkout — so without this the work is gone and the retry lap
-    /// re-derives it from a resumed context, or from nothing. Read once per
-    /// nonce, after a cancel this backend answered `Ok`: the caller threads it
-    /// onto the timeout's [`LaneObservation::candidate`], which is what makes
-    /// the reducer file it as the member checkpoint the retry lap resumes from.
+    /// the checkout — so without this the work is gone. Read once per nonce,
+    /// after a cancel this backend answered `Ok`: the caller publishes it to the
+    /// member's checkpoint ref as a host effect, which is what makes an hour of
+    /// building reachable instead of reset.
     ///
     /// `None` is the ordinary answer: a backend that captures nothing (the
     /// zero-secret Actions lane), a handle that named no construct run, a run
