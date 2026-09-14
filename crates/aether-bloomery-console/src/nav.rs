@@ -13,6 +13,7 @@ pub enum Nav {
     History,
     Journal { bloom: Option<DigestHex> },
     Timeline { bloom: DigestHex },
+    Time { bloom: DigestHex, workpiece: String },
     Days,
     Cost,
     Backlog,
@@ -51,6 +52,11 @@ impl Nav {
     }
 
     #[must_use]
+    pub fn time(bloom: DigestHex, workpiece: impl Into<String>) -> Self {
+        Self::Time { bloom, workpiece: workpiece.into() }
+    }
+
+    #[must_use]
     pub fn days() -> Self {
         Self::Days
     }
@@ -79,6 +85,7 @@ impl Nav {
             Self::Journal { bloom: Some(id) } => format!("journal {}", id.prefix()),
             Self::Journal { bloom: None } => "journal".to_owned(),
             Self::Timeline { bloom } => format!("timeline {}", bloom.prefix()),
+            Self::Time { workpiece, .. } => format!("time {workpiece}"),
             Self::Days => "days".to_owned(),
             Self::Cost => "cost".to_owned(),
             Self::Backlog => "backlog".to_owned(),

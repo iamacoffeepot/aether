@@ -32,7 +32,7 @@ pub use board::{BloomRow, Board, BoardLane, BoardRow, MemberRow, OrderRow, RowId
 pub use coordinator::CoordinatorLog;
 pub use detail::Detail;
 pub use journal::Journal;
-pub use metrics::{Breakdown, Dashboard, Days, Timeline, compose};
+pub use metrics::{Breakdown, Dashboard, Days, Time, Timeline, compose};
 pub use partition::{MemberState, is_history_status, is_live_status, live_blooms};
 pub use quiet::{QuietLine, quiet_lines};
 pub use transcript::{LineBuffer, Transcript};
@@ -72,6 +72,7 @@ pub enum Screen {
     Evidence(Evidence),
     EvidenceFile(EvidenceFile),
     Timeline(Timeline),
+    Time(Time),
     Days(Days),
     Cost(Breakdown),
     Backlog(Backlog),
@@ -106,6 +107,7 @@ impl Screen {
             Nav::History => Self::history(),
             Nav::Journal { bloom } => Self::Journal(Journal::new(bloom)),
             Nav::Timeline { bloom } => Self::Timeline(Timeline::new(bloom)),
+            Nav::Time { bloom, workpiece } => Self::Time(Time::new(bloom, workpiece)),
             Nav::Days => Self::Days(Days::new()),
             Nav::Cost => Self::Cost(Breakdown::new()),
             Nav::Backlog => Self::Backlog(Backlog::new()),
@@ -126,6 +128,7 @@ impl Screen {
             Self::Board(_)
             | Self::Journal(_)
             | Self::Timeline(_)
+            | Self::Time(_)
             | Self::Days(_)
             | Self::Cost(_)
             | Self::Backlog(_)
@@ -155,6 +158,7 @@ impl Screen {
             }
             Self::Journal(journal) => Nav::journal(journal.bloom()).label(),
             Self::Timeline(timeline) => Nav::timeline(timeline.bloom()).label(),
+            Self::Time(time) => Nav::time(time.bloom(), time.workpiece()).label(),
             Self::Days(_) => Nav::days().label(),
             Self::Cost(_) => Nav::cost().label(),
             Self::Backlog(_) => Nav::backlog().label(),
@@ -175,6 +179,7 @@ impl Screen {
             | Self::DispatchList(_)
             | Self::Journal(_)
             | Self::Timeline(_)
+            | Self::Time(_)
             | Self::Days(_)
             | Self::Cost(_)
             | Self::Backlog(_)
@@ -197,6 +202,7 @@ impl Screen {
             | Self::Evidence(_)
             | Self::EvidenceFile(_)
             | Self::Timeline(_)
+            | Self::Time(_)
             | Self::Days(_)
             | Self::Cost(_)
             | Self::Backlog(_)
@@ -220,6 +226,7 @@ impl Screen {
             | Self::Transcript(_)
             | Self::EvidenceFile(_)
             | Self::Timeline(_)
+            | Self::Time(_)
             | Self::Days(_)
             | Self::Cost(_)
             | Self::CoordinatorLog(_) => None,
@@ -239,6 +246,7 @@ impl Screen {
             Self::Evidence(evidence) => evidence.subscriptions(),
             Self::EvidenceFile(file) => file.subscriptions(),
             Self::Timeline(timeline) => timeline.subscriptions(),
+            Self::Time(time) => time.subscriptions(),
             Self::Days(days) => days.subscriptions(),
             Self::Cost(cost) => cost.subscriptions(),
             Self::Backlog(backlog) => backlog.subscriptions(),
@@ -260,6 +268,7 @@ impl Screen {
             Self::Evidence(evidence) => evidence.key_hints(),
             Self::EvidenceFile(_) => EvidenceFile::key_hints(),
             Self::Timeline(_) => Timeline::key_hints(),
+            Self::Time(_) => Time::key_hints(),
             Self::Days(_) => Days::key_hints(),
             Self::Cost(_) => Breakdown::key_hints(),
             Self::Backlog(_) => Backlog::key_hints(),
@@ -279,6 +288,7 @@ impl Screen {
             | Self::Transcript(_)
             | Self::Evidence(_)
             | Self::EvidenceFile(_)
+            | Self::Time(_)
             | Self::Days(_)
             | Self::Cost(_)
             | Self::CoordinatorLog(_) => None,
@@ -296,6 +306,7 @@ impl Screen {
         match self {
             Self::Board(_)
             | Self::Timeline(_)
+            | Self::Time(_)
             | Self::Artifact(_)
             | Self::Journal(_)
             | Self::DispatchList(_)
@@ -326,6 +337,7 @@ impl Screen {
             Self::Backlog(backlog) => backlog.enter_pushes(store),
             Self::Transcript(_) => Transcript::enter_pushes(),
             Self::Timeline(timeline) => timeline.enter_pushes(),
+            Self::Time(_) => Time::enter_pushes(),
             Self::Cost(_) => Breakdown::enter_pushes(),
             Self::Record(_) | Self::Artifact(_) | Self::Days(_) | Self::EvidenceFile(_) | Self::CoordinatorLog(_) => {
                 false
@@ -345,6 +357,7 @@ impl Screen {
             Self::Evidence(evidence) => evidence.handle_key(key, store),
             Self::EvidenceFile(file) => file.handle_key(key, store),
             Self::Timeline(timeline) => timeline.handle_key(key, store),
+            Self::Time(time) => time.handle_key(key, store),
             Self::Days(days) => days.handle_key(key, store),
             Self::Cost(cost) => cost.handle_key(key, store),
             Self::Backlog(backlog) => backlog.handle_key(key, store),
@@ -363,6 +376,7 @@ impl Screen {
             Self::Evidence(evidence) => evidence.reseat(store),
             Self::EvidenceFile(file) => file.reseat(store),
             Self::Timeline(timeline) => timeline.reseat(store),
+            Self::Time(time) => time.reseat(store),
             Self::Cost(cost) => cost.reseat(store),
             Self::Backlog(backlog) => backlog.reseat(store),
             Self::Workpiece(workpiece) => workpiece.reseat(store),
@@ -383,6 +397,7 @@ impl Screen {
             Self::Evidence(evidence) => evidence.render(frame, area, store),
             Self::EvidenceFile(file) => file.render(frame, area, store),
             Self::Timeline(timeline) => timeline.render(frame, area, store),
+            Self::Time(time) => time.render(frame, area, store),
             Self::Days(days) => days.render(frame, area, store),
             Self::Cost(cost) => cost.render(frame, area, store),
             Self::Backlog(backlog) => backlog.render(frame, area, store),
