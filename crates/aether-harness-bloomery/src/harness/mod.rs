@@ -168,6 +168,8 @@ pub struct HarnessBuilder {
     step_budget: Duration,
     authorize_instructions: InstructionAuthorization,
     coordination_policy: Option<CoordinationPolicy>,
+    max_concurrent_lanes: Option<usize>,
+    max_concurrent_provers: Option<usize>,
 }
 
 impl HarnessBuilder {
@@ -196,6 +198,8 @@ impl HarnessBuilder {
             step_budget: Duration::from_secs(20),
             authorize_instructions: InstructionAuthorization::Unique,
             coordination_policy: None,
+            max_concurrent_lanes: None,
+            max_concurrent_provers: None,
         }
     }
 
@@ -224,6 +228,8 @@ impl HarnessBuilder {
             step_budget: Duration::from_mins(2),
             authorize_instructions: InstructionAuthorization::Unique,
             coordination_policy: None,
+            max_concurrent_lanes: None,
+            max_concurrent_provers: None,
         }
     }
 
@@ -254,6 +260,8 @@ impl HarnessBuilder {
             step_budget: Duration::from_secs(30),
             authorize_instructions: InstructionAuthorization::Unique,
             coordination_policy: None,
+            max_concurrent_lanes: None,
+            max_concurrent_provers: None,
         }
     }
 
@@ -356,6 +364,26 @@ impl HarnessBuilder {
     pub fn coordination(mut self, policy: CoordinationPolicy) -> Self {
         assert!(policy.is_valid(), "the harness coordination policy must be valid");
         self.coordination_policy = Some(policy);
+        self
+    }
+
+    /// Cap local model-lane children (`AETHER_BLOOMERY_MAX_CONCURRENT_LANES`).
+    ///
+    /// Unset keeps the compiled default. A scenario that splits model lanes from
+    /// prover slots names both ceilings.
+    #[must_use]
+    pub const fn max_concurrent_lanes(mut self, ceiling: usize) -> Self {
+        self.max_concurrent_lanes = Some(ceiling);
+        self
+    }
+
+    /// Cap local `verify.*` children (`AETHER_BLOOMERY_MAX_CONCURRENT_PROVERS`).
+    ///
+    /// Unset keeps the host-measured default. Set this below the sealed
+    /// member count so ready verifies coalesce onto one shared-run plan.
+    #[must_use]
+    pub const fn max_concurrent_provers(mut self, ceiling: usize) -> Self {
+        self.max_concurrent_provers = Some(ceiling);
         self
     }
 

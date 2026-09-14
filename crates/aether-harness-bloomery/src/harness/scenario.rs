@@ -1104,6 +1104,8 @@ fn in_process_env(
             defaults.operator_email
         },
         host_class: builder.host_class().to_owned(),
+        max_concurrent_lanes: builder.max_concurrent_lanes.unwrap_or(defaults.max_concurrent_lanes),
+        max_concurrent_provers: builder.max_concurrent_provers.unwrap_or(defaults.max_concurrent_provers),
         authority_backend: if builder.authority_path.is_some() {
             "local".to_owned()
         } else {
