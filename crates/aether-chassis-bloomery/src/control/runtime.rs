@@ -83,6 +83,15 @@ const MAX_INFLIGHT_PER_KEY: usize = 64;
 /// set without limit; forgetting costs one repeated `warn` per key.
 const MAX_REPORTED_DUPLICATES: usize = 4_096;
 
+/// Fire-and-forget re-offer prefixes. The admitter retries until the fold shows
+/// the effect, so an [`Outcome::Duplicate`] is by design — not a dropped fact an
+/// operator has to see at `warn` (#5917).
+const EXPECTED_DUPLICATE_PREFIXES: &[&str] = &[
+    "aether.bloomery.lease_observation:",
+    "aether.bloomery.propose_shared_run:",
+    "aether.bloomery.shared_run_started:",
+];
+
 /// An admit awaiting its durable commit reply — the held reply obligation, the
 /// decoded event, and the decisions to apply to the snapshot once the store
 /// confirms the commit landed. Each in-flight admit owns one, held in its key's
@@ -223,14 +232,17 @@ pub struct ControlCoreState {
     /// arrives before the fold would otherwise reduce against the empty boot
     /// snapshot and consume its key as `UnknownOrInactiveBloom`.
     replayed: bool,
-    /// Idempotency keys whose duplicate admission has already been reported.
+    /// Unexpected idempotency keys whose duplicate admission has already been
+    /// reported at `warn`.
     ///
     /// A duplicate is a dropped fact and a fire-and-forget admitter never
-    /// learns it, so the first one per key is a `warn` an operator has to see.
-    /// A repeat is the same fact being re-derived on a poll cadence, and 543
-    /// identical lines in twenty minutes buries the events the `warn` exists to
-    /// surface — so the rest go to `trace` (#5387). Process-local and bounded
-    /// by [`MAX_REPORTED_DUPLICATES`].
+    /// learns it, so the first unexpected one per key is a `warn` an operator
+    /// has to see. A repeat is the same fact being re-derived on a poll cadence,
+    /// and 543 identical lines in twenty minutes buries the events the `warn`
+    /// exists to surface — so the rest go to `trace` (#5387). Expected re-offers
+    /// (lease observation, propose-shared-run, shared-run-started) never enter
+    /// this set: they are [`Outcome::Duplicate`] by design and log below `warn` (#5917).
+    /// Process-local and bounded by [`MAX_REPORTED_DUPLICATES`].
     reported_duplicates: BTreeSet<String>,
     /// The mainline observer's poll-timer sidecar, held for its `Drop` (which
     /// stops and joins the thread on teardown).
@@ -2080,31 +2092,49 @@ fn rejected_repair_tag(error: &OperatorRepairError) -> &'static str {
 /// reactor admits fire-and-forget (`send_envelope_detached`) and never learns the
 /// outcome — so a reactor's discarded fact is otherwise invisible at every layer
 /// and the run simply stops, with no wedge and no evidence (#4722). The `warn`
-/// is the one place that can see it.
+/// is the one place that can see an *unexpected* drop.
 ///
-/// Once per key, though. The first duplicate is the news; a second one under
-/// the same key says only that some admitter is re-deriving a fact the journal
-/// already holds, which at a one-second poll cadence produced 543 identical
-/// lines in twenty minutes and buried everything else in the log (#5387). The
-/// repeats stay observable at `trace`.
+/// Expected re-offers are the other case: lease observation, propose-shared-run,
+/// and shared-run-started retry until the fold shows the effect, so [`Outcome::Duplicate`] is
+/// the success path and the line carries no operator signal. Those log at
+/// `debug` and never occupy the first-warn set, or they bury the warnings an
+/// operator does read (#5917).
+///
+/// Once per unexpected key, though. The first duplicate is the news; a second
+/// one under the same key says only that some admitter is re-deriving a fact the
+/// journal already holds, which at a one-second poll cadence produced 543
+/// identical lines in twenty minutes and buried everything else in the log
+/// (#5387). The repeats stay observable at `trace`.
 fn admit_duplicate(reported: &mut BTreeSet<String>, idempotency_key: &str) -> AdmitResult {
-    if reported.len() >= MAX_REPORTED_DUPLICATES {
-        reported.clear();
-    }
-    if reported.insert(idempotency_key.to_owned()) {
-        tracing::warn!(
+    if is_expected_duplicate(idempotency_key) {
+        tracing::debug!(
             target: "aether_chassis_bloomery::control",
             idempotency_key,
-            "admission reduced to a duplicate; the fact is discarded and a fire-and-forget admitter never learns it",
+            "admission reduced to a duplicate; a fire-and-forget re-offer until the fold shows the effect",
         );
     } else {
-        tracing::trace!(
-            target: "aether_chassis_bloomery::control",
-            idempotency_key,
-            "admission reduced to a duplicate again; an admitter is re-deriving a fact the journal already holds",
-        );
+        if reported.len() >= MAX_REPORTED_DUPLICATES {
+            reported.clear();
+        }
+        if reported.insert(idempotency_key.to_owned()) {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::control",
+                idempotency_key,
+                "admission reduced to a duplicate; the fact is discarded and a fire-and-forget admitter never learns it",
+            );
+        } else {
+            tracing::trace!(
+                target: "aether_chassis_bloomery::control",
+                idempotency_key,
+                "admission reduced to a duplicate again; an admitter is re-deriving a fact the journal already holds",
+            );
+        }
     }
     admit_ok(&Outcome::Duplicate)
+}
+
+fn is_expected_duplicate(idempotency_key: &str) -> bool {
+    EXPECTED_DUPLICATE_PREFIXES.iter().any(|prefix| idempotency_key.starts_with(prefix))
 }
 
 /// Encode a reducer [`Outcome`] into an [`AdmitResult`], mapping an encode failure
@@ -2226,15 +2256,20 @@ mod tests {
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::testing::{manual_dispatch_ctx, test_mailer_and_rx};
     use aether_substrate::{Dispatch, NativeBinding};
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::subscriber::with_default;
+    use tracing::{Event as TracingEvent, Metadata, Subscriber};
 
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::fmt::{Debug, Write as _};
     use std::sync::mpsc::Receiver;
+    use std::sync::{Arc, Mutex};
 
     use super::{
-        ControlCore, ControlCoreState, load_study_records, lowercase_hex, observation_already_admitted,
-        observe_mainline_key, owed_host_fault_resumes, rejected_repair_key, release_response, resume_host_fault_key,
-        retag_rejected_repair, view_document_outbox,
+        ControlCore, ControlCoreState, admit_duplicate, is_expected_duplicate, load_study_records, lowercase_hex,
+        observation_already_admitted, observe_mainline_key, owed_host_fault_resumes, rejected_repair_key,
+        release_response, resume_host_fault_key, retag_rejected_repair, view_document_outbox,
     };
     use crate::artifacts::{ArtifactsCapabilityState, PutResult};
 
@@ -2337,6 +2372,86 @@ mod tests {
             "a hold that missed again under new evidence is a new key and still resumes",
         );
         assert_ne!(key, resume_host_fault_key(&bloom, &workpiece, &digest(10)));
+    }
+
+    // Tripwire (#5917): lease observation, propose-shared-run, and
+    // shared-run-started re-offer until the fold shows the effect. Logging
+    // those Duplicates at warn buries the coordinator warnings an operator
+    // reads. An unexpected key (a repair, an attempt) still warns once.
+    #[test]
+    fn expected_reoffer_duplicates_log_below_warn() {
+        #[derive(Default)]
+        struct RecordedEvents(Mutex<Vec<String>>);
+
+        struct EventRecorder(Arc<RecordedEvents>);
+
+        struct RenderedEvent(String);
+
+        impl Visit for RenderedEvent {
+            fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+                let _ = write!(self.0, " {}={value:?}", field.name());
+            }
+        }
+
+        impl Subscriber for EventRecorder {
+            fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+                true
+            }
+
+            fn new_span(&self, _attributes: &Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+
+            fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+            fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+            fn event(&self, event: &TracingEvent<'_>) {
+                let mut rendered = RenderedEvent(event.metadata().level().to_string());
+                event.record(&mut rendered);
+                self.0.0.lock().expect("recorded events are not poisoned").push(rendered.0);
+            }
+
+            fn enter(&self, _span: &Id) {}
+
+            fn exit(&self, _span: &Id) {}
+        }
+
+        let expected = [
+            "aether.bloomery.lease_observation:dispatch-1:abc",
+            "aether.bloomery.propose_shared_run:aa",
+            "aether.bloomery.shared_run_started:bb",
+        ];
+        for key in expected {
+            assert!(is_expected_duplicate(key), "{key} is a fire-and-forget re-offer");
+        }
+        assert!(!is_expected_duplicate("aether.bloomery.repair:bloom:digest"));
+        assert!(!is_expected_duplicate("aether.bloomery.attempt:n-1"));
+
+        let events = Arc::new(RecordedEvents::default());
+        let mut reported = BTreeSet::new();
+        with_default(EventRecorder(Arc::clone(&events)), || {
+            for key in expected {
+                admit_duplicate(&mut reported, key);
+            }
+            admit_duplicate(&mut reported, "aether.bloomery.repair:bloom:digest");
+            admit_duplicate(&mut reported, "aether.bloomery.repair:bloom:digest");
+        });
+
+        assert!(
+            reported.iter().eq(["aether.bloomery.repair:bloom:digest"]),
+            "expected re-offers must not consume the unexpected-duplicate warn budget: {reported:?}"
+        );
+
+        let rendered = events.0.lock().expect("recorded events are not poisoned").join("\n");
+        let warn_lines = rendered.lines().filter(|line| line.starts_with("WARN")).count();
+        let debug_lines = rendered.lines().filter(|line| line.starts_with("DEBUG")).count();
+        assert_eq!(warn_lines, 1, "only the unexpected first duplicate warns: {rendered}");
+        assert_eq!(debug_lines, 3, "each expected re-offer logs once at debug: {rendered}");
+        assert!(
+            rendered.lines().any(|line| line.starts_with("TRACE")),
+            "a repeat unexpected duplicate stays at trace: {rendered}"
+        );
     }
 
     // Tripwire: a release read that misses must answer the release-shaped miss,
