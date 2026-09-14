@@ -141,10 +141,10 @@ fn test_code_resolving_dist_artifacts_is_classified() {
     // accident, from an unrelated dependent selected alongside it; the
     // narrowing removed the accident and left the property unguarded.
     //
-    // A package whose every change already forces `run_all` is skipped —
-    // `xtask` itself, whose sources hold the marker table this scan reads.
-    // That exemption is derived from `global_screen`, not named, so it
-    // lapses if the screen ever stops covering the package.
+    // A package whose manifest is a screened path is skipped — `xtask`
+    // itself, whose sources hold the marker table this scan reads. That
+    // exemption is derived from `global_screen`, not named, so it lapses
+    // if the screen ever stops covering the package.
     let workspace = Workspace::load();
     let mut violations = Vec::new();
     for package in workspace.packages() {

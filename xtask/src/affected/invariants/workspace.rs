@@ -55,12 +55,10 @@ impl Workspace {
         self.packages().find(|package| path.starts_with(package_root(package).join(TEST_DIR)))
     }
 
-    /// Whether any change inside this package forces the full suite
-    /// before selection runs at all — [`global_screen`] hits on its
-    /// directory. Such a package cannot be under-selected, so the
-    /// dist-consumer checks have nothing to protect it from. `xtask`
-    /// itself is the case: the selection machinery is screened to
-    /// `run_all` precisely so a change to it can never narrow anything.
+    /// Whether [`global_screen`] hits on this package's manifest. The
+    /// dist-consumer checks skip such a package — `xtask` is the case,
+    /// because its sources hold the marker table this scan reads, and a
+    /// change to `xtask/Cargo.toml` still forces `run_all`.
     ///
     /// Derived from the screen rather than named, so the exemption
     /// evaporates the moment the screen stops covering the package.

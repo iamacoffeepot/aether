@@ -19,7 +19,7 @@
 //!
 //! Everything the closure cannot see fails open, and the blind spots are
 //! enumerated rather than assumed: a workspace-level input (lockfile, lint
-//! config, cargo/nextest config, this tool's own crate), a path matching no
+//! config, cargo/nextest config, the selection machinery), a path matching no
 //! package and no rule, a component crate anywhere in the closure, and any
 //! error at all reaching for git or the package graph.
 //!
@@ -557,7 +557,7 @@ mod tests {
             "rust-toolchain.toml",
             ".config/nextest.toml",
             ".cargo/config.toml",
-            "xtask/src/transform/verify/scope.rs",
+            "xtask/src/affected/rules.rs",
             ".github/workflows/ci.yml",
         ] {
             let scope = Scope::over_changed(&strings(&[path])).expect("screen the changed path");
@@ -568,6 +568,14 @@ mod tests {
         assert!(
             verify_screen(&strings(&["crates/aether-math/src/lib.rs"])).is_none(),
             "an ordinary crate source must not be screened",
+        );
+
+        let operator_tooling = Scope::over_changed(&strings(&["xtask/src/bloom/roll/coverage.rs"]))
+            .expect("screen an operator-tooling xtask path");
+        assert!(
+            operator_tooling.packages().is_some(),
+            "an xtask path outside the selection machinery must not force the whole workspace: {}",
+            operator_tooling.receipt(),
         );
     }
 
