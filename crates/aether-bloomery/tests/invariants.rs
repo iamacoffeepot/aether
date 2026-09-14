@@ -24,7 +24,7 @@ use aether_bloomery::{
     OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseError, Outcome, Provenance, Question,
     ResolutionClaim, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, SpendWindow, StageCatalog,
     StageId, StageProgress, Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure,
-    VerifyFailureSet, grade, reduce,
+    VerifyFailureSet, Withdrawal, WithdrawalCause, grade, reduce,
 };
 use aether_bloomery::{BloomRecord, WorkpieceId};
 use aether_data::Kind;
@@ -2221,6 +2221,78 @@ fn a_replayed_journal_reproduces_the_landed_workpiece_refusal() {
             assert_eq!(landed_by, bloom);
         }
         other => panic!("expected WorkpieceAlreadyLanded from the folded journal, got {other:?}"),
+    }
+}
+
+// A withdrawn member never resolved: the sealed spec still lists it, and a
+// land of the remaining claim set used to refuse resealing it at the same
+// revision as if it had landed. Tripwire: the landed-set scan keys on
+// spec.members() of a Landed bloom and treats a withdrawn member as resolved.
+#[test]
+fn seal_admits_a_workpiece_withdrawn_from_a_landed_bloom() {
+    let spec = draft(1, vec![membership("issue-5916", 10), membership("kept", 11)]).seal();
+    let bloom = spec.id();
+    let journal = [
+        event("seal", Fact::Seal(spec)),
+        event(
+            "withdraw",
+            Fact::Withdraw {
+                bloom,
+                withdrawals: vec![Withdrawal {
+                    workpiece: workpiece("issue-5916"),
+                    cause: WithdrawalCause::Operator,
+                    reason: "the scope was wrong".into(),
+                    operator: "ops".into(),
+                }],
+                cascade: false,
+            },
+        ),
+        event("integrate", Fact::Integrate { bloom, claim: claim("kept", 11, 100) }),
+        event("resolve", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }),
+        event(
+            "verify",
+            Fact::AggregateVerifyCompleted {
+                bloom,
+                passed: true,
+                evidence: Evidence { subject: digest(40), kind: EvidenceKind::VerificationResult, detail: digest(204) },
+            },
+        ),
+        event(
+            "review",
+            Fact::AggregateReviewCompleted {
+                bloom,
+                passed: true,
+                evidence: Evidence { subject: digest(40), kind: EvidenceKind::ReviewFinding, detail: digest(203) },
+                implicated: vec![],
+            },
+        ),
+        event("land", Fact::Land { bloom, new_head: digest(50) }),
+    ];
+    let landed =
+        journal.iter().fold(Snapshot::new(digest(1)).with_green_base(digest(1)), |snapshot, ev| step(&snapshot, ev).0);
+    assert_eq!(landed.blooms[&bloom].status, BloomStatus::Landed);
+    assert!(
+        landed.blooms[&bloom].withdrawn.contains_key(&workpiece("issue-5916")),
+        "the landed record still names the withdrawal"
+    );
+
+    let again = draft(50, vec![membership("issue-5916", 10)]).seal();
+    let admitted = reduce(&landed, &event("reseal", Fact::Seal(again)), &compiled_resolved(), &SpendWindow::default());
+    assert!(
+        matches!(admitted.outcome, Outcome::Sealed(_)),
+        "a withdrawn member reseals at the same revision: {:?}",
+        admitted.outcome,
+    );
+
+    let sibling = draft(50, vec![membership("kept", 11)]).seal();
+    let refused =
+        reduce(&landed, &event("reseal-kept", Fact::Seal(sibling)), &compiled_resolved(), &SpendWindow::default());
+    match &refused.outcome {
+        Outcome::SealRejected(SealError::WorkpieceAlreadyLanded { workpiece: wp, bloom: landed_by }) => {
+            assert_eq!(wp, &workpiece("kept"));
+            assert_eq!(*landed_by, bloom);
+        }
+        other => panic!("the resolved sibling still refuses: {other:?}"),
     }
 }
 

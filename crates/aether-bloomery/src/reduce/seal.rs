@@ -75,7 +75,8 @@ pub(super) fn reduce_seal(
     // A land releases the claim, so the workpiece is immediately re-claimable —
     // but the work itself is already on the operating branch. Refuse the same
     // (workpiece, scope_revision) a landed bloom resolved; a fresh revision is
-    // the re-run escape, not a bypass flag.
+    // the re-run escape, not a bypass flag. A withdrawn member never resolved,
+    // so it is not in that set.
     if let Some(error) = landed_conflict(snapshot, spec.members()) {
         return Decisions::rejected(Outcome::SealRejected(error));
     }
@@ -484,11 +485,14 @@ fn membership_conflict(snapshot: &Snapshot, members: &[Membership], exempt: Opti
 /// The key is `(workpiece, scope_revision)`, not workpiece id alone: a fresh
 /// scope revision is the sealed-record escape for rework or revert-then-redo.
 /// The set contains only members of *landed* blooms, so a successor re-proposing
-/// its predecessor's still-unlanded members cannot trip this.
+/// its predecessor's still-unlanded members cannot trip this. A member withdrawn
+/// from a landed bloom never resolved: the sealed spec still lists it, and
+/// `record.withdrawn` is what keeps it out of the set.
 fn landed_conflict(snapshot: &Snapshot, members: &[Membership]) -> Option<SealError> {
     members.iter().find_map(|member| {
         snapshot.blooms.iter().find_map(|(bloom, record)| {
             let already = record.status == BloomStatus::Landed
+                && !record.withdrawn.contains_key(&member.workpiece)
                 && record.spec.members().iter().any(|landed| {
                     landed.workpiece == member.workpiece && landed.scope_revision == member.scope_revision
                 });
@@ -600,7 +604,8 @@ pub(super) fn reduce_supersede(
     // The same landed-set scan seal runs: a fresh successor member that a
     // landed bloom already resolved is refused, while the predecessor's own
     // unlanded members stay admissible — they live on a Sealed or Resolved
-    // record, not a Landed one, so they are not in the set.
+    // record, not a Landed one, so they are not in the set. A withdrawn
+    // member of a landed bloom is exempt the same way: it never resolved.
     if let Some(error) = landed_conflict(snapshot, successor.members()) {
         return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error)));
     }

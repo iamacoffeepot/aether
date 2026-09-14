@@ -799,7 +799,14 @@ fn run_seal(client: &Client<'_>, args: &SealArgs, approval_policy: &Path) -> Res
     let draft = client.open_draft()?;
     client.patch_draft(&draft.draft_id, &patch)?;
     let outcome = client.seal(&draft.draft_id, &plan::seal_request(&args.edges))?;
-    Ok(render_outcome(&outcome.outcome))
+    let rendered = render_outcome(&outcome.outcome);
+    // The REST edge answers 200 with `SealRejected` (an operator-door
+    // refusal is 422; this is the reducer declining pipeline state). Printing
+    // that and exiting 0 lets a scripted seal look like it admitted.
+    if matches!(outcome.outcome, Outcome::SealRejected(_)) {
+        bail!("seal rejected: {}", rendered.trim_end());
+    }
+    Ok(rendered)
 }
 
 /// One `--workpiece`'s commission, or a local refusal that names it.
@@ -1600,6 +1607,41 @@ mod tests {
         assert!(
             !log.iter().any(|entry| entry.method == "POST" && entry.path.starts_with("/drafts")),
             "an unapproved member must not open a draft: {log:?}"
+        );
+    }
+
+    #[test]
+    fn a_rejected_seal_exits_nonzero() {
+        // The door answers 200 with SealRejected. Treating that as success lets
+        // a scripted operator run proceed as if the bloom sealed.
+        let task = temp_task("seal-rejected", "should not look like success");
+        let (error, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", path) if let Some(id) = commission_route(path) => (200, open_approved(id, digest(0xaa))),
+                ("GET", "/view") => (200, empty_view()),
+                ("POST", "/drafts") => (201, draft_reply("3")),
+                ("PATCH", "/drafts/3") => (200, draft_reply("3")),
+                ("POST", "/drafts/3/seal") => (
+                    200,
+                    as_json(&aether_bloomery::OutcomeView {
+                        outcome: aether_bloomery::Outcome::SealRejected(aether_bloomery::SealError::EmptyMembership),
+                    }),
+                ),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &BloomCommand::Seal(seal_args(task.clone(), vec!["wp-rejected".to_owned()])),
+                )
+                .expect_err("a rejected seal is a failed command")
+            },
+        );
+        fs::remove_file(&task).ok();
+        assert!(error.to_string().contains("SealRejected"), "the failure names the door's refusal: {error}");
+        assert!(
+            log.iter().any(|entry| entry.method == "POST" && entry.path == "/drafts/3/seal"),
+            "the seal was sent: {log:?}"
         );
     }
 
