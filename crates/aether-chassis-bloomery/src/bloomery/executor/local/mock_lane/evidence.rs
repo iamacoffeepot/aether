@@ -378,6 +378,11 @@ fn verify_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: 
         "status": if passed { "pass" } else { "fail" },
         "exit_code": i32::from(!passed),
         "log": format!("{command}.log"),
+        "duration_millis": 90,
+        "gates": [
+            {"command": "verify.fmt", "duration_millis": 10},
+            {"command": "verify.test", "duration_millis": 80}
+        ],
     });
     if !passed && let Some(object) = evidence.as_object_mut() {
         let failure = if umbrella {

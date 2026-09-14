@@ -30,7 +30,7 @@ mod row;
 mod source;
 
 pub use executor::{
-    BackendId, Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, LaneObservation,
+    BackendId, Conclusion, EvidenceGateTiming, EvidenceRef, ExecutionStatus, ExecutorBackend, LaneObservation,
     ObservedConstructionCheckpoint, ObservedLaneWrites, WorkHandle, WorkOrder,
 };
 pub use projection::{

@@ -3121,6 +3121,8 @@ fn judged_evidence_ref(
             // empty set, which is what a read with nothing to file also yields.
             retrospect_findings: parse_retrospect_findings(bytes),
             contextual_observations,
+            duration_millis: parse_duration_millis(bytes),
+            gates: parse_gates(bytes),
         },
     }
 }
@@ -4158,6 +4160,30 @@ fn parse_session_reuse_saved(bytes: &[u8]) -> Option<u64> {
 fn parse_peak_resident_bytes(bytes: &[u8]) -> Option<u64> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     value.get("peak_resident_bytes")?.as_u64()
+}
+
+fn parse_duration_millis(bytes: &[u8]) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value.get("duration_millis")?.as_u64()
+}
+
+fn parse_gates(bytes: &[u8]) -> Vec<aether_bloomery::EvidenceGateTiming> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Vec::new();
+    };
+    let Some(gates) = value.get("gates").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    gates
+        .iter()
+        .filter_map(|gate| {
+            Some(aether_bloomery::EvidenceGateTiming {
+                command: gate.get("command")?.as_str()?.to_owned(),
+                duration_millis: gate.get("duration_millis")?.as_u64()?,
+                prepare_millis: gate.get("prepare_millis").and_then(serde_json::Value::as_u64),
+            })
+        })
+        .collect()
 }
 
 /// How a construct lane's `evidence.json` classified (#3596, #5292).

@@ -712,6 +712,12 @@ fn claim_for_carries_the_whole_observation() {
             body: "the ack prefix stops short, so the next tick re-selects it".to_owned(),
             surface: vec!["crates/aether-chassis-bloomery/**".into()],
         }],
+        duration_millis: Some(21),
+        gates: vec![aether_bloomery::EvidenceGateTiming {
+            command: "verify.fmt".into(),
+            duration_millis: 10,
+            prepare_millis: None,
+        }],
     };
     let name = NameEvidenceClaims::attempt_artifact_name(
         &nonce,
