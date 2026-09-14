@@ -68,13 +68,13 @@ use crate::bloomery::executor::OutstandingDispatch;
 use crate::bloomery::executor::{ExecutorPort, ExecutorShell, Settled};
 use crate::bloomery::intake::{
     Admission, AdmissionKey, AdmitDecision, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims,
-    PendingObservation, UploadedEvidence, admit_uploaded, dispatch_and_record, dispatch_nonce, now_unix_millis,
-    run_intake_cycle_now,
+    PendingObservation, RefusedCheckpoint, UploadedEvidence, admit_uploaded, dispatch_and_record, dispatch_nonce,
+    now_unix_millis, run_intake_cycle_now,
 };
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::bloomery::precheck::PrecheckProjection;
-use crate::bloomery::provenance::drain_refusals;
+use crate::bloomery::provenance::{ProvenanceRefusal, drain_refusals, journal_refusal};
 #[cfg(any(test, feature = "testing"))]
 use crate::bloomery::study::{StudyAdmitDecision, UploadedStudyRecord, admit_study, study_evidence_event};
 #[cfg(any(test, feature = "testing"))]
@@ -1253,6 +1253,32 @@ fn hold_overlapping_reconcile(
     Ok(true)
 }
 
+/// Hold a member dispatch while the same member already has a live order.
+/// Held, not acked, so the entry re-drains after the outstanding run admits:
+/// two orders on one workpiece never run beside each other in the same
+/// checkout (#5968). A Reconcile raised while its member's Construct is still
+/// outstanding queues here rather than opening a second lane in that tree.
+fn hold_overlapping_member_dispatch(
+    store: &mut dyn StoreBackend,
+    payload: &DispatchPayload,
+    sequence: u64,
+) -> rusqlite::Result<bool> {
+    for live in store.list_bloom_dispatch_live(payload.bloom.as_bytes())? {
+        if live.workpiece == payload.workpiece.0 {
+            tracing::info!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                bloom = %short_hex(&payload.bloom),
+                workpiece = %payload.workpiece.0,
+                live_nonce = %live.nonce,
+                "member already has an outstanding order; holding this dispatch until it admits",
+            );
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// True when this outbox row already has a *live* dispatch — submitted on
 /// an earlier drain that could not ack past a held sibling. The nonce is the
 /// sequence, so a `submitted` row is the proof this entry reached a worker;
@@ -1730,10 +1756,18 @@ fn submit_dispatch_entry(
 ) -> rusqlite::Result<DispatchSubmit> {
     // The record's axes come from the payload's explicit fields (ADR-0152):
     // the true scope revision always, and the displayed digest — what the
-    // returning evidence must bind to — the candidate tree when the member
-    // has one, else the scope revision. `subject` (inputs[0]) agrees with
-    // the displayed digest by reducer construction.
-    let displayed = payload.candidate.unwrap_or(payload.scope_revision);
+    // returning evidence must bind to. A Construct order always displays the
+    // scope revision: a held candidate is the checkout the lane starts from,
+    // never the subject the evidence binds to (#5968). Every other stage
+    // displays the candidate tree when the member has one, else the scope
+    // revision. `subject` (inputs[0]) must agree with the displayed digest;
+    // a malformed order is refused here, before a worker can bind to the
+    // wrong digest and pay for a candidate intake must discard.
+    let displayed = if payload.stage == StageId::Construct {
+        payload.scope_revision
+    } else {
+        payload.candidate.unwrap_or(payload.scope_revision)
+    };
     let mut record = DispatchRecord {
         nonce: dispatch_nonce(sequence),
         bloom: BloomId(payload.bloom),
@@ -1748,6 +1782,22 @@ fn submit_dispatch_entry(
         instruction_bundle: None,
         prompt_manifest: None,
     };
+    if record.transformation.inputs.first() != Some(&displayed) {
+        let subject = record.transformation.inputs.first().map_or_else(|| "none".to_owned(), Digest::to_hex);
+        let shown = displayed.to_hex();
+        let refusal = ProvenanceRefusal::SubmitRefused(format!(
+            "transformation subject {subject} does not match displayed digest {shown}"
+        ));
+        tracing::error!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            workpiece = %record.workpiece.0,
+            stage = ?record.stage,
+            "dispatch subject does not match displayed digest; refusing the order before a lane binds to it",
+        );
+        journal_refusal(store, &record, &refusal);
+        return Ok(DispatchSubmit::Refused);
+    }
 
     if let Err(error) = overlay_member_advisory(store, &mut record, sequence) {
         if let StoreConfigError::Store(error) = error {
@@ -1898,6 +1948,10 @@ fn drain_and_dispatch(
             break;
         }
         if hold_overlapping_reconcile(store, &payload, entry.sequence)? {
+            held = true;
+            continue;
+        }
+        if hold_overlapping_member_dispatch(store, &payload, entry.sequence)? {
             held = true;
             continue;
         }
@@ -2889,6 +2943,31 @@ fn admitted_candidate_pushes(
     pending
 }
 
+/// Name the member checkpoint ref for each refused Construct capture (#5968).
+/// The same arm a failing construct's capture takes, reached from the refusal
+/// path that never admits: a refused claim is a bookkeeping fault, and the
+/// tree the model built is preserved before any reset discards it.
+fn refused_checkpoint_pushes(
+    refused: &[RefusedCheckpoint],
+    correspondence: Option<&SharedCorrespondence>,
+) -> Vec<PendingPublish> {
+    let mut pending = Vec::new();
+    for checkpoint in refused {
+        let target_ref = member_checkpoint_ref_name(&checkpoint.bloom, &checkpoint.workpiece.0);
+        let Some(commit) = resolve_capture_commit(correspondence, &checkpoint.workpiece, &checkpoint.candidate) else {
+            continue;
+        };
+        pending.push(PendingPublish {
+            bloom: checkpoint.bloom,
+            workpiece: checkpoint.workpiece.clone(),
+            target_ref,
+            commit_hex: commit.to_hex(),
+            kind: "member checkpoint",
+        });
+    }
+    pending
+}
+
 /// Journal every queued publication a worker has answered, reporting each the
 /// way the inline push used to (#5564): an `info` naming the ref it reached, a
 /// `warn` naming the capture that stayed local-only, and the candidate-hash row
@@ -3227,8 +3306,11 @@ fn pull_and_admit<Now: FnMut() -> u64>(
     // Name each admitted passing capture's publication so the caller can queue
     // it: the follow-on stage can be dispatched to a zero-secret Actions runner
     // that must fetch it, so it wants to be reachable on the hosted repo as
-    // soon as the push answers (ADR-0152).
-    let publications = admitted_candidate_pushes(&sink.0, correspondence);
+    // soon as the push answers (ADR-0152). Refused Construct captures ride the
+    // same member checkpoint arm so a bookkeeping refusal never discards the
+    // tree the lane built (#5968).
+    let mut publications = admitted_candidate_pushes(&sink.0, correspondence);
+    publications.extend(refused_checkpoint_pushes(&report.refused_checkpoints, correspondence));
 
     let admits = sink.0.into_iter().map(|admission| admission.admit).chain(timed_out).chain(silenced).collect();
     (admits, publications)

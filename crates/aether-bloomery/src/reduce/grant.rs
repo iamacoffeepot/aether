@@ -97,6 +97,7 @@ pub(super) fn reduce_grant_attempts(
     let candidate = cursor.candidate;
     let fold_checkpoint = cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile);
     let (targets, construct_checkpoint_base) = reconcile_or_line_targets(
+        stage,
         member.scope_revision,
         super::splice::member_construct_base(record, workpiece),
         candidate,
