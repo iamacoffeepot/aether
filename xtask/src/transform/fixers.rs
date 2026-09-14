@@ -314,7 +314,7 @@ fn kill_tree(child: &mut Child) {
 /// keeps every path, which the snapshot uses so a restore cannot miss a
 /// fixer-dirtied file. A git that will not run yields an empty list — the
 /// same absence `apply` already treats as nothing to fix.
-fn dirty_paths(worktree: &Path, out_dir: Option<&Path>) -> Vec<String> {
+pub(super) fn dirty_paths(worktree: &Path, out_dir: Option<&Path>) -> Vec<String> {
     porcelain_dirty(worktree)
         .unwrap_or_default()
         .into_iter()

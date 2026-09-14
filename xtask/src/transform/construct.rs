@@ -56,7 +56,10 @@ const SURFACE_REQUEST_DELIVERABLE: &str = ".bloomery-surface-request";
 /// check that followed those fixers and the one repair turn it may have
 /// bought, always present for the same reason: a lint failure at Verify reads
 /// differently once you can see whether this lane looked, what it found, and
-/// whether the model was given a chance at it.
+/// whether the model was given a chance at it. It carries the crate set the
+/// check ran over in the gate's own words (#6000), so the bar's closure and the
+/// gate's are comparable as text rather than as two red logs a reader has to
+/// correlate.
 /// What a construct run left behind for the host to read, each stamped by the
 /// same presence rule: absent writes no key at all. Grouped because they are
 /// one thing — the deliverables of the run — and travel together from the
@@ -679,9 +682,10 @@ mod tests {
     // tripwire is deliberately blind to it: #5078 is a ban on the *model*
     // volunteering the gates, and what it costs is a model turn spent
     // reproducing a verdict the reducer reads from Verify instead. The check
-    // `lint_check` runs is harness-side, scoped to the packages the run
-    // dirtied, and happens after the model's turn — it spends no model budget
-    // and claims no verdict. This test asserts over the assembled *prompt*, so
+    // `lint_check` runs is harness-side, scoped to the candidate's own
+    // reverse-dependency closure, and happens after the model's turn — it
+    // spends no model budget and claims no verdict. This test asserts over the
+    // assembled *prompt*, so
     // it neither sees that argv nor should: a future edit that put the check
     // back in front of the model is what it still exists to catch.
     #[test]
