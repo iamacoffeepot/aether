@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
-use guppy::graph::PackageGraph;
+use guppy::graph::{DependencyDirection, PackageGraph, PackageMetadata};
 
 use crate::affected::select::{Selection, is_dist_consumer, select};
 use crate::inventory::{discover_behaviors, discover_components};
@@ -61,6 +61,35 @@ impl Workspace {
         self.graph.workspace().iter().map(|package| package.name().to_string()).collect()
     }
 
+    /// The named workspace packages plus every workspace package that links one of them,
+    /// transitively. A name that is not a workspace member is ignored.
+    ///
+    /// This is the reverse-dependency half of the affected-set closure, asked of crate names
+    /// rather than of changed paths. A signature change inside those crates can force an edit in
+    /// a reverse dependency; a same-named definition in a crate that merely sits nearby in the
+    /// workspace is a homonym, not an impl the change touches.
+    pub fn reverse_closure_of(&self, crates: &BTreeSet<String>) -> Result<BTreeSet<String>> {
+        let workspace = self.graph.workspace();
+        let ids: Vec<_> = crates
+            .iter()
+            .filter_map(|name| workspace.member_by_name(name).ok())
+            .map(|package| package.id().clone())
+            .collect();
+        if ids.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+
+        Ok(self
+            .graph
+            .query_reverse(ids.iter())
+            .context("query the reverse-dependency closure")?
+            .resolve()
+            .packages(DependencyDirection::Reverse)
+            .filter(PackageMetadata::in_workspace)
+            .map(|package| package.name().to_string())
+            .collect())
+    }
+
     /// Every workspace crate's root directory, each carrying its trailing
     /// separator so a prefix match names a path *inside* that crate rather
     /// than a sibling whose name merely starts the same way
@@ -100,5 +129,46 @@ impl Workspace {
     /// cross-build.
     pub fn needs_dist_prepare(&self, package: &str) -> bool {
         self.wasm_sources.contains(package) || self.wasm_consumers.contains(package)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::collections::BTreeSet;
+
+    use super::Workspace;
+
+    fn names(crates: &[&str]) -> BTreeSet<String> {
+        crates.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn reverse_closure_keeps_the_adopt_candidate_impls_and_drops_unrelated_crates() {
+        // Tripwire: the scope lane's inverse-search calibration discounts a
+        // definition whose crate sits outside this closure. `adopt_candidate`
+        // (ADR-0208) defines in three crates that must stay in; `Pending` in
+        // `aether-substrate` and `from_config` in `aether-kit-widget` must not.
+        // Taking the forward closure of `aether-chassis-bloomery` would pull
+        // `aether-substrate` in (the chassis depends on it) and keep the homonym.
+        let workspace = Workspace::load().unwrap();
+        let closure = workspace.reverse_closure_of(&names(&["aether-bloomery"])).unwrap();
+
+        assert!(closure.contains("aether-bloomery"), "the queried crate is in its own closure: {closure:?}");
+        assert!(closure.contains("aether-bloomery-git"), "git implements adopt_candidate: {closure:?}");
+        assert!(closure.contains("aether-chassis-bloomery"), "the chassis implements adopt_candidate: {closure:?}");
+        assert!(
+            !closure.contains("aether-substrate"),
+            "substrate does not depend on aether-bloomery; a forward walk would still reach it through the chassis: {closure:?}",
+        );
+        assert!(!closure.contains("aether-kit-widget"), "kit-widget shares no reverse edge: {closure:?}");
+    }
+
+    #[test]
+    fn reverse_closure_ignores_unknown_names_and_an_empty_query() {
+        let workspace = Workspace::load().unwrap();
+        assert!(workspace.reverse_closure_of(&BTreeSet::new()).unwrap().is_empty());
+        assert!(workspace.reverse_closure_of(&names(&["not-a-workspace-crate"])).unwrap().is_empty());
     }
 }
