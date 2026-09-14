@@ -7,8 +7,8 @@ use std::{
 
 use aether_bloomery::{
     Admit, BloomId, CompatibilityPreview, CompositionPlan, CoordinationState, Decision, Digest, Event, Fact,
-    IdempotencyKey, MemberContractPin, MemberVerificationPayload, Nonce, SharedRunMode, SharedRunPlan, Topic,
-    VerificationMode, WorkOrder, decode_recorded_decisions,
+    IdempotencyKey, MemberContractPin, MemberVerificationPayload, Nonce, SharedRunMode, SharedRunPlan, SharedRunRecord,
+    Topic, VerificationMode, WorkOrder, decode_recorded_decisions,
 };
 use aether_data::wire::{from_bytes, to_vec};
 
@@ -404,6 +404,21 @@ fn proposal_event(bytes: &[u8]) -> rusqlite::Result<Event> {
     from_bytes(bytes).map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))
 }
 
+fn terminal_retained_proposal(
+    scheduler: &mut MemberVerificationScheduler,
+    store: &mut dyn StoreBackend,
+    proposal: &[u8],
+) -> rusqlite::Result<Option<bool>> {
+    let event = proposal_event(proposal)?;
+    let Fact::ProposeSharedRun { bloom, plan } = event.fact else {
+        return Ok(Some(false));
+    };
+    let plan = plan.digest();
+    scheduler.confirm(store, move |scheduler| {
+        scheduler.states.get(&bloom).and_then(|state| state.run(plan)).is_some_and(SharedRunRecord::is_terminal)
+    })
+}
+
 fn replay_proposal(
     store: &mut dyn StoreBackend,
     queued: &[QueuedMemberVerificationRow],
@@ -473,8 +488,27 @@ pub(super) fn drain_member_verifications(
         let Some(first) = queued.first() else {
             return Ok(Vec::new());
         };
-        if first.proposal.is_some() {
-            break first;
+        if let Some(proposal) = first.proposal.clone() {
+            match terminal_retained_proposal(scheduler, store, &proposal)? {
+                Some(true) => {
+                    let requests = queued
+                        .iter()
+                        .filter(|row| row.proposal.as_deref() == Some(proposal.as_slice()))
+                        .map(|row| row.request.clone())
+                        .collect::<Vec<_>>();
+                    store.clear_member_verification_proposal(&requests)?;
+                    queued = store.queued_member_verifications()?;
+                    retired = retired.saturating_add(1);
+                    if retired == MAX_STALE_RETIREMENTS_PER_TURN {
+                        return Ok(Vec::new());
+                    }
+                    continue;
+                }
+                // The projection cannot answer this turn, and the proposal is
+                // durable: leave it rather than drop a live plan.
+                None => return Ok(Vec::new()),
+                Some(false) => return replay_proposal(store, &queued, &proposal),
+            }
         }
         let first_payload = from_bytes::<MemberVerificationPayload>(&first.payload)
             .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
@@ -493,9 +527,6 @@ pub(super) fn drain_member_verifications(
             return Ok(Vec::new());
         }
     };
-    if let Some(proposal) = first.proposal.as_deref() {
-        return replay_proposal(store, &queued, proposal);
-    }
     let first_payload = from_bytes::<MemberVerificationPayload>(&first.payload)
         .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
     let Some(state) = scheduler.states.get(&first_payload.request.bloom) else {
@@ -540,9 +571,9 @@ mod tests {
         CompositionContractTemplate, CompositionInput, ConfigRegistry, ConstructContext, ConstructionAdmission,
         ConstructionAdmissionPayload, ConstructionCheckpoint, ContextualAttemptDispatch, ContextualDispatchPayload,
         ContextualInvocationTemplate, CoordinationPolicy, Digest, ExecutionLimits, GenerationMember, Harness,
-        MemberPin, MemberVerifyRequest, NetworkProfile, ObservedLaneWrites, ReasoningEffort, StageId, ToolPolicy,
-        Transformation, VerificationContract, VerificationMode, VerificationObligation, WorkHandle, WorkOrder,
-        WorkpieceId, construction_nonce_digest,
+        MemberPin, MemberVerifyRequest, NetworkProfile, ObservedLaneWrites, ReasoningEffort, SharedRunPhase, StageId,
+        ToolPolicy, Transformation, VerificationContract, VerificationMode, VerificationObligation, WorkHandle,
+        WorkOrder, WorkpieceId, construction_nonce_digest,
     };
 
     use super::*;
@@ -1193,6 +1224,53 @@ mod tests {
         store.ack_topic(Topic::MemberVerification, queued_rows[2].sequence).expect("ack through selected atom");
         let interleaved = store.queued_member_verification(&queued_rows[1].request).expect("lookup").expect("row");
         assert!(!interleaved.scheduled, "interleaved request remains durably selectable after topic ack");
+    }
+
+    #[test]
+    fn a_terminal_retained_proposal_is_not_replayed() {
+        let (mut state, _) = fixture();
+        let bloom = state.integration.generation.bloom;
+        let request = state.requests[1].clone();
+        let plan = build_plan(&state, vec![request.clone()]);
+        let event = Event {
+            idempotency_key: IdempotencyKey(format!("aether.bloomery.propose_shared_run:{}", plan.digest().to_hex())),
+            fact: Fact::ProposeSharedRun { bloom, plan: plan.clone() },
+        };
+        let proposal = to_vec(&event).expect("proposal bytes");
+        state.runs.push(SharedRunRecord {
+            plan: plan.clone(),
+            node: None,
+            phase: SharedRunPhase::Terminal,
+            stale: true,
+            physical_run: None,
+            completed: Vec::new(),
+            unfinished: plan.requests.iter().map(MemberVerifyRequest::digest).collect(),
+            latencies: Vec::new(),
+        });
+        let row = queued(&request, 1);
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        store.enqueue_topic(Topic::MemberVerification, &row.payload, None).expect("enqueue request");
+        store.record_queued_member_verification(&row).expect("queue request");
+        store.record_member_verification_proposal(from_ref(&row.request), &proposal).expect("retain dead proposal");
+
+        let mut scheduler = MemberVerificationScheduler::default();
+        scheduler.states.insert(bloom, state);
+        let capacity = CapacityPort(Cell::new(true));
+        let admits = drain_member_verifications(&mut scheduler, &mut store, &capacity, 20_000)
+            .expect("terminal proposal must not block a fresh selection");
+        assert_eq!(admits.len(), 1, "the still-current request is proposed again once its dead plan is dropped");
+        let fresh = proposal_event(&admits[0].event).expect("fresh proposal event");
+        assert_ne!(fresh, event, "the terminal plan must not be re-submitted");
+        let Fact::ProposeSharedRun { plan: fresh_plan, .. } = fresh.fact else {
+            panic!("expected a replacement shared-run proposal");
+        };
+        assert_eq!(
+            fresh_plan.requests.iter().map(MemberVerifyRequest::digest).collect::<Vec<_>>(),
+            vec![request.digest()]
+        );
+        assert_ne!(fresh_plan.digest(), plan.digest());
+        let retained = store.queued_member_verification(&row.request).expect("lookup").expect("row");
+        assert_eq!(retained.proposal.as_deref(), Some(admits[0].event.as_slice()));
     }
 
     #[test]

@@ -1464,14 +1464,25 @@ pub(super) fn reduce_shared_run_prepared(
         return rejected(CoordinationError::InvalidPlan);
     }
     let mut next = state.clone();
+    {
+        let run = &mut next.runs[index];
+        if !matches!(run.phase, SharedRunPhase::Preparing) || run.node.is_some() {
+            return rejected(CoordinationError::AlreadyIssued);
+        }
+        if run.stale {
+            run.phase = SharedRunPhase::Terminal;
+        }
+    }
+    if next.runs[index].stale {
+        // A run that died before it started never produces SharedRunCompleted, so
+        // unfinished requests have to be requeued here the way a cancellation would.
+        let run_snapshot = next.runs[index].clone();
+        let mut effects = Vec::new();
+        requeue_unfinished(record, &mut next, &run_snapshot, &mut effects);
+        effects.insert(0, record_state(*bloom, next));
+        return accepted(*bloom, plan, effects);
+    }
     let run = &mut next.runs[index];
-    if !matches!(run.phase, SharedRunPhase::Preparing) || run.node.is_some() {
-        return rejected(CoordinationError::AlreadyIssued);
-    }
-    if run.stale {
-        run.phase = SharedRunPhase::Terminal;
-        return accepted(*bloom, plan, alloc::vec![record_state(*bloom, next)]);
-    }
     let mut effects = Vec::new();
     match preparation {
         SharedRunPreparation::Standalone if run.plan.mode != SharedRunMode::Contextual => {
@@ -2157,6 +2168,28 @@ fn apply_failed_outcome(
         FailureScope::Interaction { .. } | FailureScope::Unattributed { .. } => {}
     }
     Ok(())
+}
+
+/// Re-queue unfinished requests so the scheduler can propose them against the
+/// current head. A never-started run has no completion to do this, and
+/// standalone fallback would pin the member to the displaced composition.
+fn requeue_unfinished(
+    record: &BloomRecord,
+    state: &mut CoordinationState,
+    run: &SharedRunRecord,
+    effects: &mut Vec<Decision>,
+) {
+    for digest in &run.unfinished {
+        let Some(request) = run.plan.requests.iter().find(|request| request.digest() == *digest) else {
+            continue;
+        };
+        if !state.requests.iter().any(|current| current.digest() == request.digest())
+            || !exact_request(record, state, request)
+        {
+            continue;
+        }
+        effects.push(Decision::QueueMemberVerification { request: Box::new(request.clone()) });
+    }
 }
 
 fn queue_run_retry(
@@ -4808,6 +4841,36 @@ mod tests {
         state.runs[0].node = None;
         state.runs[0].physical_run = None;
         (snapshot, bloom, plan)
+    }
+
+    #[test]
+    fn a_stale_preparation_requeues_unfinished_requests() {
+        let (mut snapshot, bloom, plan) = preparing_contextual_run();
+        let unfinished = plan.requests.iter().map(MemberVerifyRequest::digest).collect::<Vec<_>>();
+        snapshot.blooms.get_mut(&bloom).expect("record").coordination.as_mut().expect("coordination").runs[0].stale =
+            true;
+
+        let decisions = reduce_shared_run_prepared(
+            &snapshot,
+            &bloom,
+            plan.digest(),
+            &SharedRunPreparation::Refused { detail: digest(80) },
+        );
+
+        let next = recorded(&decisions);
+        assert!(next.runs.iter().any(|run| run.plan.digest() == plan.digest() && run.is_terminal() && run.stale));
+        let queued = decisions
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::QueueMemberVerification { request } => Some(request.digest()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(queued, unfinished);
+        assert!(!decisions.effects.iter().any(|effect| {
+            matches!(effect, Decision::DispatchSharedRun { .. } | Decision::DispatchSharedRunPreparation { .. })
+        }));
     }
 
     #[test]

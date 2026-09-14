@@ -602,6 +602,7 @@ pub trait StoreBackend: Send {
     fn queued_member_verification(&mut self, request: &[u8]) -> rusqlite::Result<Option<QueuedMemberVerificationRow>>;
     fn mark_queued_member_verifications_scheduled(&mut self, requests: &[Vec<u8>]) -> rusqlite::Result<usize>;
     fn record_member_verification_proposal(&mut self, requests: &[Vec<u8>], proposal: &[u8]) -> rusqlite::Result<()>;
+    fn clear_member_verification_proposal(&mut self, requests: &[Vec<u8>]) -> rusqlite::Result<usize>;
     /// Retain cancellation even when its cross-topic dispatch has not reached
     /// the executor reactor yet.
     fn record_shared_run_cancellation(&mut self, plan: &[u8]) -> rusqlite::Result<RecordOutcome>;
@@ -2900,6 +2901,20 @@ impl StoreBackend for SqliteStore {
             )?;
         }
         transaction.commit()
+    }
+
+    fn clear_member_verification_proposal(&mut self, requests: &[Vec<u8>]) -> rusqlite::Result<usize> {
+        let transaction = self.conn.transaction()?;
+        let mut cleared = 0;
+        for request in requests {
+            cleared += transaction.execute(
+                "UPDATE shared_member_verification_queue \
+                 SET proposal = NULL WHERE request = ?1 AND scheduled = 0 AND proposal IS NOT NULL",
+                [request],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(cleared)
     }
 
     fn record_shared_run_cancellation(&mut self, plan: &[u8]) -> rusqlite::Result<RecordOutcome> {
