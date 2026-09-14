@@ -46,6 +46,19 @@ its default. Two of them decide whether the arrangement holds up:
   there, and a full root filesystem fails every later lane before it produces a
   byte of evidence.
 
+Two host ceilings decide how much work this machine runs at once, and they are
+not interchangeable. **`AETHER_BLOOMERY_MAX_CONCURRENT_LANES`** is the
+model-lane pool (construct, review, scope, the bloom-level reader): network-bound,
+cheap to scale sideways. **`AETHER_BLOOMERY_MAX_CONCURRENT_PROVERS`** is the
+`verify.*` pool (`verify.base`, member verify, shared runs, aggregate verify):
+build-bound. Size the prove ceiling to **one concurrent build per eight host
+cores** — the measured width of one `-j8` rustc, the same number
+`AETHER_BLOOMERY_LANE_BUILD_JOBS` already gives each prove. Unset (or `0`) is
+that quotient for this machine, never a copy of the model-lane ceiling. A
+running prove does not take a model slot, and a running model does not take a
+prove slot. With prover slots saturated, ready verifies wait and the existing
+coalescing batches them into the next shared-run plan.
+
 One more knob is worth setting the first time you leave the coordinator
 unattended:
 
@@ -143,4 +156,4 @@ new process starts.
 | `ExecStartPre` fails complaining that `AETHER_LANE_SCRATCH` is not set | The environment file names no scratch root, and the reap refuses to guess one. |
 | Start fails immediately, journal shows a `gh` error | The host's `gh` is not authenticated, or `gh` is not on the `PATH` the environment file sets. |
 | Unit runs, journal warns about missing connection knobs | `AETHER_GITHUB_OWNER` / `AETHER_GITHUB_REPO` are unset — the coordinator boots, but the mirror has no repository. |
-| A lane fails with a linker or `No space left on device` error | The scratch volume filled. Check `AETHER_LANE_SCRATCH` names the roomy disk, and lower `AETHER_BLOOMERY_MAX_CONCURRENT_LANES`. |
+| A lane fails with a linker or `No space left on device` error | The scratch volume filled. Check `AETHER_LANE_SCRATCH` names the roomy disk, and lower `AETHER_BLOOMERY_MAX_CONCURRENT_LANES` or `AETHER_BLOOMERY_MAX_CONCURRENT_PROVERS`. |

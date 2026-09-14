@@ -4,6 +4,7 @@ use std::env;
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
+use std::thread;
 
 #[cfg(feature = "github")]
 use std::fs;
@@ -263,26 +264,42 @@ pub struct CoordinatorConfig {
     /// whether or not a remote is configured at all.
     #[config(env = "AETHER_BLOOMERY_LANE_PROGRAM", default = "")]
     pub local_lane_program: String,
-    /// How many local lane children the executor backend may run at once.
+    /// How many local *model* lane children the executor backend may run at once
+    /// — construct, review, scope, and the bloom-level reader. Network-bound:
+    /// twenty writers are cheap, and a running prove does not take one of these
+    /// slots (ADR-0200).
     ///
-    /// Each construct or verify lane is a whole cargo build with its own throwaway
-    /// target dir, and a seal fans out one dispatch per member, so an uncapped
-    /// backend turns member count directly into simultaneous builds racing the same
-    /// CPU and disk. Dispatches past the ceiling wait in submission order and start
-    /// as running lanes finish — a queue, never a refusal: every dispatch acks as
-    /// submitted either way, so the reducer's view of one is the same whether it
-    /// waited or not.
-    ///
-    /// Per backend rather than per bloom: member lanes, aggregate lanes, and the
-    /// runs re-adopted at boot all count against the same slots. `0` resolves to
-    /// `1`, since a ceiling of zero would start nothing at all.
+    /// Dispatches past the ceiling wait in submission order and start as running
+    /// lanes finish — a queue, never a refusal: every dispatch acks as submitted
+    /// either way, so the reducer's view of one is the same whether it waited or
+    /// not. `0` resolves to `1`, since a ceiling of zero would start nothing at
+    /// all.
     ///
     /// Named `AETHER_BLOOMERY_MAX_CONCURRENT_LANES` rather than under this struct's
     /// `AETHER_GITHUB` prefix, for the reason the lane program and operator knobs
     /// are: how much a host runs at once is a property of the machine, not of the
-    /// GitHub connection.
+    /// GitHub connection. The prove ceiling is
+    /// [`max_concurrent_provers`](Self::max_concurrent_provers), not this knob.
     #[config(env = "AETHER_BLOOMERY_MAX_CONCURRENT_LANES", default = 3)]
     pub max_concurrent_lanes: usize,
+    /// How many local `verify.*` children the executor backend may run at once —
+    /// `verify.base`, member verify, shared runs, and aggregate verify.
+    /// Build-bound: the host cannot run twenty rustc processes, so this ceiling
+    /// is independent of [`max_concurrent_lanes`](Self::max_concurrent_lanes)
+    /// (ADR-0200). With these slots saturated, ADR-0218 coalescing already
+    /// batches every ready request into the next plan up to `max_run_members`.
+    ///
+    /// Unset or `0` is one concurrent prove per eight host cores — the measured
+    /// width of one `-j8` rustc (`spike/build-concurrency`, 2026-08-13; the same
+    /// number as [`lane_build_jobs`](Self::lane_build_jobs)) — never a copy of
+    /// the model-lane ceiling. A positive value is an explicit cap.
+    ///
+    /// Named `AETHER_BLOOMERY_MAX_CONCURRENT_PROVERS` rather than under this
+    /// struct's `AETHER_GITHUB` prefix, for the reason the other host-resource
+    /// knobs are: how many rustc processes a host runs at once is a property of
+    /// the machine. Resolve through [`Self::concurrent_provers`].
+    #[config(env = "AETHER_BLOOMERY_MAX_CONCURRENT_PROVERS", default = 0)]
+    pub max_concurrent_provers: usize,
     /// Where the per-slot cargo target directories live — one `slot-<index>-target`
     /// under this root, handed to the lane that holds that slot as its
     /// `CARGO_TARGET_DIR` (#4912).
@@ -542,6 +559,7 @@ impl Default for CoordinatorConfig {
             local_worktree_base: ".bloomery/local-worktrees".to_owned(),
             local_lane_program: String::new(),
             max_concurrent_lanes: 3,
+            max_concurrent_provers: 0,
             lane_target_base: String::new(),
             lane_target_budget_bytes: 68_719_476_736,
             lane_target_scan_interval_secs: 300,
@@ -562,6 +580,20 @@ impl Default for CoordinatorConfig {
             http_control_token: String::new(),
         }
     }
+}
+
+/// Host cores one concurrent prove occupies. Matches the compiled
+/// [`CoordinatorConfig::lane_build_jobs`] default: a `-j8` rustc already
+/// saturates the crate graph's useful parallelism (`spike/build-concurrency`,
+/// 2026-08-13).
+const CORES_PER_PROVER: usize = 8;
+
+/// One concurrent prove per eight host cores, floored at one.
+///
+/// The prove ceiling is a property of this machine's cores, never a copy of
+/// [`CoordinatorConfig::max_concurrent_lanes`].
+fn default_concurrent_provers() -> usize {
+    thread::available_parallelism().map_or(1, |n| (n.get() / CORES_PER_PROVER).max(1))
 }
 
 /// How many GitHub REST calls one coordinator tick costs, summed over the
@@ -699,6 +731,16 @@ impl CoordinatorConfig {
     pub fn github_poll_interval_secs(&self) -> u64 {
         let per_hour = 3_600 * u64::from(GITHUB_REQUESTS_PER_TICK);
         self.poll_interval_secs.max(1).max(per_hour.div_ceil(u64::from(self.hourly_request_budget.max(1))))
+    }
+
+    /// The resolved prove-slot ceiling: an explicit positive cap, or one
+    /// concurrent prove per eight host cores when the knob is unset or `0`.
+    #[must_use]
+    pub fn concurrent_provers(&self) -> usize {
+        match self.max_concurrent_provers {
+            0 => default_concurrent_provers(),
+            n => n,
+        }
     }
 
     #[must_use]
@@ -1261,5 +1303,17 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         let message = error.to_string();
         assert!(message.contains("AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS"), "{message}");
         assert!(message.contains("nonzero"), "{message}");
+    }
+
+    #[test]
+    fn concurrent_provers_measures_the_host_when_unset_and_honours_an_explicit_cap() {
+        // Unset must not copy the model-lane ceiling: that is the single-pool
+        // bug. `0` is auto (cores / 8). A positive value is the operator's cap.
+        let auto = CoordinatorConfig::default();
+        assert_eq!(auto.max_concurrent_provers, 0, "the compiled default is auto, not the lane ceiling");
+        assert_eq!(auto.concurrent_provers(), super::default_concurrent_provers());
+        assert!(auto.concurrent_provers() >= 1);
+        let pinned = CoordinatorConfig { max_concurrent_provers: 2, ..CoordinatorConfig::default() };
+        assert_eq!(pinned.concurrent_provers(), 2);
     }
 }
