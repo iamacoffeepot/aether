@@ -688,17 +688,17 @@ mod tests {
     #[test]
     fn apply_is_idle_when_there_is_nothing_to_fix() {
         let missing = scratch_dir("no-git");
-        assert_eq!(apply(&missing, Path::new("out")), Report::default());
+        assert_eq!(apply(&missing, Path::new("out"), None), Report::default());
 
         let repo = git_scratch("clean");
         write(&repo, "src/lib.rs", "fn x() {}\n");
         git(&repo, &["add", "src/lib.rs"]);
         git(&repo, &["commit", "-m", "init"]);
-        assert_eq!(apply(&repo, Path::new("out")), Report::default(), "a clean tree is not a fixer input");
+        assert_eq!(apply(&repo, Path::new("out"), None), Report::default(), "a clean tree is not a fixer input");
 
         write(&repo, "README.md", "prose\n");
         assert_eq!(
-            apply(&repo, Path::new("out")),
+            apply(&repo, Path::new("out"), None),
             Report::default(),
             "a prose-only dirty tree must not invoke clippy --fix over the workspace",
         );
