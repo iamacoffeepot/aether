@@ -117,7 +117,11 @@ fn logical_deadline(now_unix_millis: u64, request: &aether_bloomery::MemberVerif
 }
 
 fn contextual_record(dispatch: &aether_bloomery::ContextualAttemptDispatch, nonce: Nonce) -> DispatchRecord {
-    let displayed = dispatch.candidate.unwrap_or(dispatch.scope_revision);
+    let displayed = if dispatch.stage == StageId::Construct {
+        dispatch.scope_revision
+    } else {
+        dispatch.candidate.unwrap_or(dispatch.scope_revision)
+    };
     DispatchRecord {
         nonce,
         bloom: dispatch.bloom,

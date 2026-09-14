@@ -6,7 +6,10 @@ use std::fmt;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aether_bloomery::{Admit, BackendId, ExecutionStatus, LaneObservation, Nonce, StageVerdict, WorkHandle};
+use aether_bloomery::{
+    Admit, BackendId, BloomId, CandidateRef, ExecutionStatus, LaneObservation, Nonce, StageId, StageVerdict,
+    WorkHandle, WorkpieceId,
+};
 use aether_data::wire::to_vec;
 
 use super::admit::{Admission, AdmitDecision, IntakeError, IntakeRefusal, UploadedEvidence, admit_uploaded};
@@ -53,6 +56,17 @@ pub struct PendingObservation {
     pub observed_until_unix_millis: u64,
 }
 
+/// A refused upload that still captured work worth preserving (#5968).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RefusedCheckpoint {
+    /// The bloom the refused order belonged to.
+    pub bloom: BloomId,
+    /// The member workpiece the refused order belonged to.
+    pub workpiece: WorkpieceId,
+    /// The candidate the lane committed before the refusal.
+    pub candidate: CandidateRef,
+}
+
 /// What one [`run_intake_cycle`] observed.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct CycleReport {
@@ -62,6 +76,10 @@ pub struct CycleReport {
     pub admitted: u32,
     /// Uploads refused by the broker.
     pub refused: u32,
+    /// Refused `DigestMismatch` uploads that still captured a Construct
+    /// candidate (#5968). The caller publishes each to the member checkpoint
+    /// ref before any reset discards the tree the model built.
+    pub refused_checkpoints: Vec<RefusedCheckpoint>,
     /// Study rows written this cycle (#4679) — one per admitted attempt that
     /// reported a cost. Always at most `completed`, and below it whenever a
     /// harness reported no usage or no artifacts store was configured.
@@ -255,6 +273,16 @@ pub fn run_intake_cycle_now<Now: FnMut() -> u64>(
                         "attempt evidence refused",
                     );
                     report.refused += 1;
+                    if matches!(refusal, IntakeRefusal::DigestMismatch { .. })
+                        && let Some(checkpoint) =
+                            refused_construct_checkpoint(store, &upload).map_err(CycleError::Intake)?
+                    {
+                        // A refused claim is a bookkeeping fault; the tree the
+                        // model built is the most valuable thing on the host
+                        // (#5968). Preserve a Construct capture to the member
+                        // checkpoint ref before any reset discards it.
+                        report.refused_checkpoints.push(checkpoint);
+                    }
                     // The lane process has already exited (`Completed` above).
                     // DigestMismatch leaves the order live so an honest worker
                     // still in flight can retry; a completed run cannot, and
@@ -299,6 +327,31 @@ fn skip_backend(
     );
     faulted.push(backend);
     report.unobserved.push(handle.nonce.clone());
+}
+
+/// The candidate a refused `DigestMismatch` upload still captured, when the
+/// refused order was a Construct that captured work (#5968). The caller
+/// publishes it to the member checkpoint ref — the same arm a failing
+/// construct's capture takes — before any reset discards the tree. `None`
+/// when the upload captured nothing, the order is gone or corrupt, or the
+/// stage is not Construct.
+fn refused_construct_checkpoint(
+    store: &mut dyn StoreBackend,
+    refused: &UploadedEvidence,
+) -> Result<Option<RefusedCheckpoint>, IntakeError> {
+    let Some(candidate) = refused.observation.candidate else {
+        return Ok(None);
+    };
+    let Some(stored) = store.lookup_order(&refused.nonce.0)? else {
+        return Ok(None);
+    };
+    let Some(record) = DispatchRecord::from_stored(&stored) else {
+        return Ok(None);
+    };
+    if record.stage != StageId::Construct {
+        return Ok(None);
+    }
+    Ok(Some(RefusedCheckpoint { bloom: record.bloom, workpiece: record.workpiece, candidate }))
 }
 
 /// A completed run whose evidence bound the wrong digest cannot retry that
