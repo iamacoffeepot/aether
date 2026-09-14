@@ -1,4 +1,5 @@
 mod closure;
+mod lockfile;
 mod nextest;
 mod observations;
 mod scope;
@@ -3299,6 +3300,7 @@ mod tests {
             packages: packages.iter().map(|name| (*name).to_owned()).collect(),
             skipped: vec![String::from("aether-render")],
             wasm_needed,
+            lock: None,
         }
     }
 

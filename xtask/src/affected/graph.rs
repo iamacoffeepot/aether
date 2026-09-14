@@ -90,6 +90,41 @@ impl Workspace {
             .collect())
     }
 
+    /// The workspace crates depending on any of the named resolved packages,
+    /// transitively — the lockfile half of the verify scope.
+    ///
+    /// Unlike [`Self::reverse_closure_of`], the names need not be workspace
+    /// members: they are usually external crates whose version bump the
+    /// lockfile records. Every version in the graph carrying the name roots
+    /// the query, so a bump between two coexisting majors still reaches both
+    /// dependents. A name the graph does not contain contributes nothing — a
+    /// removed dependency's dependents name their manifest move through the
+    /// path-based closure instead.
+    pub fn reverse_closure_of_external(&self, names: &BTreeSet<String>) -> Result<BTreeSet<String>> {
+        if names.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let ids: Vec<_> = self
+            .graph
+            .packages()
+            .filter(|package| names.contains(package.name()))
+            .map(|package| package.id().clone())
+            .collect();
+        if ids.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+
+        Ok(self
+            .graph
+            .query_reverse(ids.iter())
+            .context("query the reverse-dependency closure")?
+            .resolve()
+            .packages(DependencyDirection::Reverse)
+            .filter(PackageMetadata::in_workspace)
+            .map(|package| package.name().to_string())
+            .collect())
+    }
+
     /// Every workspace crate's root directory, each carrying its trailing
     /// separator so a prefix match names a path *inside* that crate rather
     /// than a sibling whose name merely starts the same way

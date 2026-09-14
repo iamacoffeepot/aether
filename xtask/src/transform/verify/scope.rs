@@ -18,8 +18,9 @@
 //! lands keeps the whole tree.
 //!
 //! Everything the closure cannot see fails open, and the blind spots are
-//! enumerated rather than assumed: a workspace-level input (lockfile, lint
-//! config, cargo/nextest config, the selection machinery), a path matching no
+//! enumerated rather than assumed: a workspace-level input (lint config,
+//! cargo/nextest config, the selection machinery, or a lockfile whose moved
+//! packages cannot be attributed), a path matching no
 //! package and no rule, a component crate anywhere in the closure, and any
 //! error at all reaching for git or the package graph.
 //!
@@ -48,6 +49,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::affected::graph::Workspace;
 use crate::affected::rules::global_screen;
+use crate::transform::verify::lockfile;
 
 /// Workspace-level inputs on top of the ones [`global_screen`] already names.
 ///
@@ -65,6 +67,13 @@ const VERIFY_RUN_ALL_EXACT: &[&str] = &["rustfmt.toml"];
 /// enumerate a docs sweep that moved two hundred files.
 const MAX_NAMED_PATHS: usize = 12;
 
+/// The lockfile path as the diff names it: the one workspace-level input the
+/// scope attributes instead of widening on (issue #5951). A lockfile change is
+/// a workspace-level input only for the crates whose resolved dependency set
+/// actually moved, so the diff's moved packages verify their own
+/// reverse-dependency closure unioned with the path-based one.
+const LOCKFILE_PATH: &str = "Cargo.lock";
+
 /// The crate set a member of the umbrella compiles over.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Scope {
@@ -74,7 +83,8 @@ pub(super) enum Scope {
         /// run's own evidence so a fail-open is read rather than inferred.
         reason: String,
     },
-    /// The candidate diff's reverse-dependency closure.
+    /// The candidate diff's reverse-dependency closure — unioned with the
+    /// lockfile attribution's when the diff touched the lockfile.
     Closure {
         /// The crates the compiling members run over, sorted.
         packages: Vec<String>,
@@ -87,6 +97,11 @@ pub(super) enum Scope {
         /// `wasm_needed`, carried rather than recomputed so the lane and the
         /// gate it predicts cannot answer it two ways.
         wasm_needed: bool,
+        /// What the lockfile half moved and reached, when the diff touched the
+        /// lockfile — the attribution the receipt states alongside the closure
+        /// so a narrowed lockfile run is read rather than inferred.
+        /// `None` for a diff without one.
+        lock: Option<LockAttribution>,
     },
     /// The candidate diff entered no workspace crate at all, so the compiling
     /// members have an empty closure and nothing of the candidate's to build.
@@ -95,6 +110,45 @@ pub(super) enum Scope {
         /// trusted: a reader confirms that none of them is a crate path.
         paths: Vec<String>,
     },
+}
+
+/// What the lockfile half of a narrowed run moved and reached.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct LockAttribution {
+    /// The resolved packages whose version, source, or dependency set moved
+    /// between the base and candidate lockfiles, sorted.
+    changed: Vec<String>,
+    /// The workspace crates depending on one of them, transitively, sorted.
+    reached: Vec<String>,
+}
+
+impl LockAttribution {
+    fn of(changed: &BTreeSet<String>, reached: &BTreeSet<String>) -> Self {
+        Self { changed: changed.iter().cloned().collect(), reached: reached.iter().cloned().collect() }
+    }
+
+    /// The receipt line stating the attribution the way the scope line states
+    /// the closure: which packages moved and which crates that reached.
+    fn receipt_line(&self) -> String {
+        if self.changed.is_empty() {
+            return String::from(
+                "lockfile: Cargo.lock moved no resolved package, so it reached no additional crate.\n",
+            );
+        }
+        let moved = self.changed.join(" ");
+        if self.reached.is_empty() {
+            return format!(
+                "lockfile: Cargo.lock moved package(s) ({}): {moved} reaching no workspace crate.\n",
+                self.changed.len(),
+            );
+        }
+        format!(
+            "lockfile: Cargo.lock moved package(s) ({}): {moved} reaching crate(s) ({}): {}.\n",
+            self.changed.len(),
+            self.reached.len(),
+            self.reached.join(" "),
+        )
+    }
 }
 
 impl Scope {
@@ -126,37 +180,127 @@ impl Scope {
             return Ok(Self::workspace(format!("the candidate diff against {base} is empty")));
         }
 
-        Self::over_changed(&changed)
+        Self::over_changed_at_base(base, &changed)
     }
 
     /// The scope a candidate diff of these paths computes — the whole decision
     /// past the git read, so it is exercisable against a stated diff.
+    ///
+    /// A diff naming the lockfile fail-opens here: without the base and
+    /// candidate lockfile contents no moved package can be attributed, so the
+    /// blunt workspace rule stands. The production path reads both contents
+    /// and narrows through [`Self::over_changed_with_locks`].
     fn over_changed(changed: &[String]) -> Result<Self> {
         if let Some(hit) = global_screen(changed).or_else(|| verify_screen(changed)) {
             return Ok(Self::workspace(format!("a workspace-level input changed: {hit}")));
         }
 
         let workspace = Workspace::load()?;
-        let selection = workspace.select(changed)?;
+        Self::closure_over(&workspace, changed, changed, BTreeSet::new(), None)
+    }
+
+    /// The scope a candidate diff against `base` computes — the lockfile-aware
+    /// entry the production path takes once the diff is known to be non-empty.
+    fn over_changed_at_base(base: &str, changed: &[String]) -> Result<Self> {
+        if !changed.iter().any(|path| path.as_str() == LOCKFILE_PATH) {
+            return Self::over_changed(changed);
+        }
+
+        let base_lock = match lockfile_at(base) {
+            Ok(text) => text,
+            Err(error) => {
+                return Ok(Self::workspace(format!(
+                    "Cargo.lock changed but the base lockfile could not be read for attribution — {error:#}"
+                )));
+            }
+        };
+        let candidate_lock = match lockfile_at("HEAD") {
+            Ok(text) => text,
+            Err(error) => {
+                return Ok(Self::workspace(format!(
+                    "Cargo.lock changed but the candidate lockfile could not be read for attribution — {error:#}"
+                )));
+            }
+        };
+
+        Self::over_changed_with_locks(changed, &base_lock, &candidate_lock)
+    }
+
+    /// The scope a candidate diff touching the lockfile computes from the base
+    /// and candidate lockfile contents — the narrowed rule, exercisable
+    /// against fixture lockfiles.
+    ///
+    /// The moved externals verify their reverse-dependency closure over the
+    /// package graph, unioned with the path-based closure of every other
+    /// changed path. Only an unattributable lockfile widens the run: bytes no
+    /// parser accepts, or a workspace member's own identity moving.
+    fn over_changed_with_locks(changed: &[String], base_lock: &str, candidate_lock: &str) -> Result<Self> {
+        let workspace = Workspace::load()?;
+
+        let members = workspace.members();
+        let attributed = match lockfile::diff(base_lock, candidate_lock, &members) {
+            Ok(attributed) => attributed,
+            Err(error) => {
+                return Ok(Self::workspace(format!(
+                    "Cargo.lock changed but its resolved packages could not be attributed — {error:#}"
+                )));
+            }
+        };
+        if !attributed.members_changed.is_empty() {
+            let moved: Vec<&str> = attributed.members_changed.iter().map(String::as_str).collect();
+            return Ok(Self::workspace(format!("Cargo.lock changed workspace-member package(s): {}", moved.join(" "))));
+        }
+
+        let reached = match workspace.reverse_closure_of_external(&attributed.changed) {
+            Ok(reached) => reached,
+            Err(error) => {
+                let moved: Vec<&str> = attributed.changed.iter().map(String::as_str).collect();
+                return Ok(Self::workspace(format!(
+                    "Cargo.lock moved package(s) {} but their dependents could not be computed — {error:#}",
+                    moved.join(" "),
+                )));
+            }
+        };
+
+        let rest: Vec<String> = changed.iter().filter(|path| path.as_str() != LOCKFILE_PATH).cloned().collect();
+        if let Some(hit) = global_screen(&rest).or_else(|| verify_screen(&rest)) {
+            return Ok(Self::workspace(format!("a workspace-level input changed: {hit}")));
+        }
+
+        let attribution = LockAttribution::of(&attributed.changed, &reached);
+        Self::closure_over(&workspace, &rest, changed, reached, Some(attribution))
+    }
+
+    /// The reverse-dependency closure over `resolved` unioned with the `extra`
+    /// packages the lockfile attribution reached, carrying `lock` for the
+    /// receipt when the diff touched the lockfile.
+    fn closure_over(
+        workspace: &Workspace,
+        resolved: &[String],
+        named: &[String],
+        extra: BTreeSet<String>,
+        lock: Option<LockAttribution>,
+    ) -> Result<Self> {
+        let selection = workspace.select(resolved)?;
         if let Some(reason) = selection.run_all {
             return Ok(Self::workspace(reason));
         }
-        if selection.packages.is_empty() {
-            return Ok(Self::outside(changed, &workspace.crate_roots()));
+
+        let mut packages = selection.packages;
+        packages.extend(extra);
+        if packages.is_empty() {
+            return Ok(Self::outside(named, &workspace.crate_roots()));
         }
-        if let Some(source) = wasm_source_in(&selection.packages, workspace.wasm_sources()) {
+        if let Some(source) = wasm_source_in(&packages, workspace.wasm_sources()) {
             return Ok(Self::workspace(format!(
                 "{source} compiles to component wasm, which tests load by path rather than by linkage"
             )));
         }
 
         let members = workspace.members();
-        let skipped = members.difference(&selection.packages).cloned().collect();
-        Ok(Self::Closure {
-            packages: selection.packages.into_iter().collect(),
-            skipped,
-            wasm_needed: selection.wasm_needed,
-        })
+        let skipped = members.difference(&packages).cloned().collect();
+        let wasm_needed = packages.iter().any(|name| workspace.needs_dist_prepare(name));
+        Ok(Self::Closure { packages: packages.into_iter().collect(), skipped, wasm_needed, lock })
     }
 
     /// The scope a diff the path rules resolved to no package computes.
@@ -266,19 +410,25 @@ impl Scope {
     pub(super) fn receipt(&self) -> String {
         match self {
             Self::Workspace { reason } => format!("verify scope: every workspace crate — {reason}\n"),
-            Self::Closure { packages, skipped, wasm_needed } => format!(
-                "verify scope: the candidate diff's reverse-dependency closure.\n\
-                 crates in ({}): {}\ncrates skipped ({}): {}\ndist pre-build: {}\n",
-                packages.len(),
-                packages.join(" "),
-                skipped.len(),
-                skipped.join(" "),
-                if *wasm_needed {
-                    "needed — a crate in the closure resolves a dist artifact by path"
-                } else {
-                    "not needed — no crate in the closure resolves a dist artifact by path"
-                },
-            ),
+            Self::Closure { packages, skipped, wasm_needed, lock } => {
+                let mut receipt = format!(
+                    "verify scope: the candidate diff's reverse-dependency closure.\n\
+                     crates in ({}): {}\ncrates skipped ({}): {}\ndist pre-build: {}\n",
+                    packages.len(),
+                    packages.join(" "),
+                    skipped.len(),
+                    skipped.join(" "),
+                    if *wasm_needed {
+                        "needed — a crate in the closure resolves a dist artifact by path"
+                    } else {
+                        "not needed — no crate in the closure resolves a dist artifact by path"
+                    },
+                );
+                if let Some(attribution) = lock {
+                    receipt.push_str(&attribution.receipt_line());
+                }
+                receipt
+            }
             Self::Outside { paths } => format!(
                 "verify scope: no workspace crate — every one of the candidate diff's {} path(s) lies outside \
                  every crate root, so the closure is empty and the compiling members record a pass without \
@@ -371,6 +521,26 @@ fn changed_paths(base: &str) -> Result<Vec<String>> {
         .filter(|path| !path.is_empty())
         .map(str::to_owned)
         .collect())
+}
+
+/// The `Cargo.lock` revision `revision` names — the base and candidate inputs
+/// the attribution diffs. The candidate is the committed `HEAD`, matching the
+/// committed `base..HEAD` range the paths came from.
+fn lockfile_at(revision: &str) -> Result<String> {
+    let output = Command::new("git")
+        .args(["show", &format!("{revision}:Cargo.lock")])
+        .output()
+        .with_context(|| format!("spawn git show {revision}:Cargo.lock"))?;
+    if !output.status.success() {
+        bail!(
+            "git show {revision}:Cargo.lock failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    String::from_utf8(output.stdout)
+        .with_context(|| format!("git show {revision}:Cargo.lock produced non-UTF-8 output"))
 }
 
 /// Screen for the workspace-level inputs this lane names beyond the
@@ -549,6 +719,11 @@ mod tests {
         // can reach. A missed entry is a narrowed run whose premise no longer
         // holds — the exact false green the narrowing is only permitted to
         // exist without.
+        //
+        // `Cargo.lock` stays in this list for the paths-only entry: without
+        // the base and candidate contents no moved package can be attributed,
+        // so the blunt rule stands there. An attributable lockfile diff
+        // narrows through `over_changed_with_locks`, covered below.
         for path in [
             "Cargo.toml",
             "Cargo.lock",
@@ -577,6 +752,71 @@ mod tests {
             "an xtask path outside the selection machinery must not force the whole workspace: {}",
             operator_tooling.receipt(),
         );
+    }
+
+    #[test]
+    fn a_lockfile_bump_to_a_single_crate_dependency_scopes_to_that_crates_closure() {
+        // Tripwire for the payoff issue #5951 exists for: a lockfile-only bump
+        // must verify the moved package's reverse-dependency closure, not the
+        // whole workspace. `crossterm` is depended on by exactly one workspace
+        // crate, so its bump is the crisp case — a return to the blunt rule
+        // shows up as this test widening. If the tree moves and `crossterm`
+        // gains dependents or wasm reach, pick another single-user external
+        // rather than weakening this.
+        let base = "version = 4\n\n[[package]]\nname = \"crossterm\"\nversion = \"0.29.0\"\n\
+                    source = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"0.29.0\"\n";
+        let candidate = base.replace("0.29.0", "0.29.1");
+
+        let scope = Scope::over_changed_with_locks(&strings(&["Cargo.lock"]), base, &candidate)
+            .expect("attribute a single-package bump");
+
+        let workspace = Workspace::load().expect("load the workspace graph");
+        let expected: Vec<String> = workspace
+            .reverse_closure_of_external(&string_set(&["crossterm"]))
+            .expect("attribute crossterm")
+            .into_iter()
+            .collect();
+        assert!(
+            !expected.is_empty() && expected.len() < workspace.members().len(),
+            "crossterm must reach a proper non-empty closure, or this fixture no longer exercises narrowing",
+        );
+
+        let packages = scope.packages().expect("an attributable bump narrows").to_vec();
+        assert_eq!(packages, expected, "a bump scopes to its dependents' closure");
+        let first_reached = expected.first().expect("the closure is non-empty by the assertion above");
+        assert!(
+            scope.receipt().contains("crossterm") && scope.receipt().contains(first_reached),
+            "the receipt states which package moved and which crate that reached: {}",
+            scope.receipt(),
+        );
+    }
+
+    #[test]
+    fn an_unparseable_lockfile_widens_to_every_crate() {
+        // Tripwire for the fail-open half of issue #5951: attribution that
+        // guessed over bytes it could not parse would narrow a run whose
+        // inputs it never saw — the false-green direction. A lockfile the
+        // parser rejects runs the whole workspace with the reason stated.
+        let scope = Scope::over_changed_with_locks(&strings(&["Cargo.lock"]), "version = 4\n", "not a lockfile [[[\n")
+            .expect("an unparseable lockfile still resolves");
+
+        assert_eq!(scope.packages(), None, "an unattributable lockfile runs the whole workspace");
+        assert!(scope.receipt().contains("Cargo.lock"), "the receipt names what forced it: {}", scope.receipt());
+    }
+
+    #[test]
+    fn a_lockfile_change_moving_no_package_names_no_crate_to_compile() {
+        // Tripwire for the seam an empty union would fall through: a lockfile
+        // diff that moved no resolved package and arrived with no path input
+        // must resolve the empty closure, never a `Closure` over zero crates —
+        // the narrowing seam trades `--workspace` for one `-p` per crate, and
+        // zero `-p`s reads as the engine default rather than as nothing.
+        let lock = "version = 4\n";
+        let scope = Scope::over_changed_with_locks(&strings(&["Cargo.lock"]), lock, lock)
+            .expect("resolve a lockfile diff that moved nothing");
+
+        assert!(matches!(scope, Scope::Outside { .. }), "a move-nothing lockfile diff reaches no crate: {scope:?}");
+        assert!(scope.empty_closure_verdict().is_some(), "the compiling members record a verdict rather than run");
     }
 
     #[test]
