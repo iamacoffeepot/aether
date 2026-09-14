@@ -1028,6 +1028,10 @@ impl Transformation {
     /// run — `Scope::resolve` of `checkout == diff_base` yields no packages, and
     /// `args_under` would strip `--workspace` while adding no `-p`.
     ///
+    /// Attribution probes that only need the candidate check's closure use
+    /// [`Self::as_attribution_baseline`] instead of this constructor: they never
+    /// mint a whole-workspace receipt (#5944).
+    ///
     /// `binding` is the sealed catalog's `BaseVerify` binding, carrying the
     /// authored wall-clock limit this fan-out runs under. That pairing is
     /// checked rather than assumed, but only in a debug build: the sibling
@@ -1059,6 +1063,30 @@ impl Transformation {
             description: None,
             model: None,
         }
+    }
+
+    /// Bind this `verify.check` candidate invocation to an attribution baseline at `base`.
+    ///
+    /// The probe runs the same fan-out on the base tree, scoped to this candidate's
+    /// reverse-dependency closure by naming the original checkout as
+    /// [`diff_base`](Self::diff_base). The inverted range (`candidate..base`) names
+    /// the same paths as the candidate check's `base..candidate` range. This is not
+    /// a receipt-minting [`VERIFY_BASE_COMMAND`] run: `base..base` would empty the
+    /// closure, and clearing the range would fall open to the whole workspace (#5944).
+    ///
+    /// Returns `None` when this transformation is not a `verify.check` candidate
+    /// with a checkout distinct from `base`, or has no subject input — the caller
+    /// refuses the probe rather than manufacturing a green over nothing.
+    #[must_use]
+    pub fn as_attribution_baseline(&self, base: CandidateRef) -> Option<Self> {
+        if self.command != VERIFY_CHECK_COMMAND || self.checkout == base.checkout {
+            return None;
+        }
+        let mut bound = self.clone();
+        *bound.inputs.first_mut()? = base.tree;
+        bound.diff_base = Some(bound.checkout);
+        bound.checkout = base.checkout;
+        Some(bound)
     }
 
     /// The whole-bloom aggregate-review transformation (ADR-0153): the
@@ -1647,6 +1675,42 @@ mod tests {
             Transformation::for_study_read(&binding(StageId::Study), subject, checkout, base).diff_base,
             Some(base),
             "the reader's subject is the landed range, not a clean checkout's working tree",
+        );
+    }
+
+    #[test]
+    fn an_attribution_baseline_inverts_the_candidate_range_instead_of_falling_open() {
+        // Tripwire: rewriting a baseline to verify.base and clearing
+        // diff_base is what made attribution re-prove the whole workspace
+        // to answer one named test (#5944). The inverted range is the
+        // candidate check's closure.
+        let subject = Digest::from_bytes([7; 32]);
+        let checkout = Digest::from_bytes([9; 32]);
+        let base_checkout = Digest::from_bytes([5; 32]);
+        let base_tree = Digest::from_bytes([4; 32]);
+        let extra = Digest::from_bytes([8; 32]);
+        let mut candidate =
+            Transformation::for_aggregate_verify(&binding(StageId::AggregateVerify), subject, checkout, base_checkout);
+        candidate.inputs.push(extra);
+
+        let Some(bound) = candidate.as_attribution_baseline(CandidateRef { tree: base_tree, checkout: base_checkout })
+        else {
+            panic!("a verify.check candidate with a distinct checkout binds");
+        };
+
+        assert_eq!(bound.command, VERIFY_CHECK_COMMAND, "attribution keeps the candidate check, not verify.base");
+        assert_eq!(bound.checkout, base_checkout, "the probe runs at the composition base");
+        assert_eq!(bound.diff_base, Some(checkout), "the original candidate is the other end of the range");
+        assert_eq!(bound.inputs, alloc::vec![base_tree, extra], "the subject is the base tree; extra inputs stay");
+        assert!(
+            candidate.as_attribution_baseline(CandidateRef { tree: base_tree, checkout }).is_none(),
+            "base..base would empty the closure"
+        );
+        assert!(
+            Transformation::for_base_verify(&binding(StageId::BaseVerify), subject, base_checkout)
+                .as_attribution_baseline(CandidateRef { tree: base_tree, checkout: base_checkout })
+                .is_none(),
+            "a receipt-minting verify.base is not an attribution probe"
         );
     }
 

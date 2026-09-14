@@ -55,8 +55,14 @@ struct ProbePreparation {
 #[test]
 fn a_named_test_failure_attributes_against_a_passing_baseline() {
     let authority = Repo::with_formatted_example_project();
-    let script =
-        LaneScript::all_passing().then(VERIFY_CHECK_COMMAND, LaneMode::Fail).then(VERIFY_CHECK_COMMAND, LaneMode::Fail);
+    // Occurrence 0 is the contextual candidate, 1–2 are the green baseline
+    // pair, 3 is the second independent full-set receipt. Baselines now share
+    // `verify.check` with the candidate (#5944), so they consume occurrences.
+    let script = LaneScript::all_passing()
+        .then(VERIFY_CHECK_COMMAND, LaneMode::Fail)
+        .then(VERIFY_CHECK_COMMAND, LaneMode::Pass)
+        .then(VERIFY_CHECK_COMMAND, LaneMode::Pass)
+        .then(VERIFY_CHECK_COMMAND, LaneMode::Fail);
     let mut harness = HarnessBuilder::local_authority(&authority)
         .coordination(contextual_policy())
         .script(&script)
