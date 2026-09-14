@@ -313,16 +313,13 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         Some(synth)
     };
 
-    // Issue #403: the SDK no longer prepends `ctx.subscribe_input::<K>()`
-    // calls to `init` for the substrate's six fixed input streams (Tick,
-    // Key, KeyRelease, MouseMove, MouseButton, WindowSize). Pre-#403
-    // those calls fired during `Component::instantiate` — i.e. *before*
-    // `try_register_component` published the mailbox — and were rejected
-    // by `validate_subscriber_mailbox`. The substrate now derives those
-    // subscriptions from the component's `aether.kinds.inputs` manifest
-    // post-register. The `Ctx::subscribe_input` runtime API is still
-    // available for components that want to subscribe / unsubscribe at
-    // runtime (e.g. conditional input streams).
+    // The SDK no longer prepends subscribe calls to `init` for window
+    // streams or lifecycle stages. Pre-#403 those calls fired during
+    // `Component::instantiate` — i.e. *before* `try_register_component`
+    // published the mailbox — and were rejected by
+    // `validate_subscriber_mailbox`. Components subscribe from `wire`
+    // (`WindowCapability::subscribe` / `LifecycleCapability::subscribe`)
+    // after the trampoline mailbox is registered.
     let wrapped_init = init_method_emitted;
     let dispatch_body = build_dispatch_body(&handlers, fallback.as_ref(), opts.handler_set.as_ref());
 
