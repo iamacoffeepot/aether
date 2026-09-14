@@ -5,7 +5,7 @@ use std::slice::from_ref;
 use aether_bloomery::{
     Admit, CandidatePreparation, CandidatePreparationPayload, CandidateRef, Checkpoint, CompatibilityPreviewPayload,
     Digest, Event, Fact, IdempotencyKey, IntegrateOutcome, IntegrationAppendPayload, SharedRunPlanPayload,
-    SharedRunPreparation, Topic, Transformation,
+    SharedRunPreparation, StageId, Topic, Transformation,
 };
 use aether_bloomery_github::SourceError;
 use aether_data::wire::from_bytes;
@@ -111,6 +111,52 @@ fn append_refused(
     })
 }
 
+/// Retire `Reconcile` orders a prepared candidate already advances (issue 5980).
+///
+/// A member that leaves its fold-conflict lap via `Fact::CandidatePrepared`
+/// advances without spending a `Reconcile` order: the preparation mints no
+/// order, and the `Reconcile` that produced its candidate was already consumed
+/// through intake. Any `Reconcile` row still outstanding for that workpiece is
+/// a lane the preparation already supersedes — a concurrent second lap, or a
+/// relaunch from before this retire existed — and leaving it `submitted` with
+/// no tracked run relaunches it until the bloom lands. Consuming here puts
+/// those nonces out of relaunch reach. Only `Prepared` retires: a `Refused`
+/// or `Conflict` preparation leaves the member at `Reconcile`, where its
+/// orders are still the work to do.
+fn retire_reconcile_orders_for_prepared_candidate(
+    store: &mut dyn StoreBackend,
+    bloom: &[u8],
+    workpiece: &str,
+) -> rusqlite::Result<()> {
+    for live in store.list_bloom_dispatch_live(bloom)? {
+        if live.workpiece != workpiece {
+            continue;
+        }
+        let Ok(stage) = from_bytes::<StageId>(&live.stage) else {
+            continue;
+        };
+        if stage != StageId::Reconcile {
+            continue;
+        }
+        if store.shared_step_physical_run(&live.nonce)?.is_some() {
+            continue;
+        }
+        if store.partial_head_repair_for_nonce(&live.nonce)? {
+            continue;
+        }
+        if store.consume_order(&live.nonce)? {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::integrate",
+                nonce = %live.nonce,
+                workpiece = %live.workpiece,
+                "prepared candidate already advances this member off its reconcile lap; retiring its reconcile \
+                 order so it is not relaunched",
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn drain_candidate_preparations(
     store: &mut dyn StoreBackend,
     source: &SourceShell,
@@ -176,6 +222,19 @@ pub(super) fn drain_candidate_preparations(
                     return None;
                 }
             };
+            if matches!(preparation, CandidatePreparation::Prepared(_)) {
+                // Retire superseded Reconcile orders (issue 5980). A fault warns
+                // and continues; the preparation admit below is what must not be
+                // lost, and the per-tick accounted pass re-checks orphans next
+                // turn.
+                if let Err(error) = retire_reconcile_orders_for_prepared_candidate(
+                    store,
+                    payload.plan.bloom.0.as_bytes(),
+                    &payload.plan.workpiece.0,
+                ) {
+                    tracing::warn!(%error, "reconcile retire failed; orphans re-check next turn");
+                }
+            }
             Some(Event {
                 idempotency_key: result_key("candidate-prepared", plan_digest),
                 fact: Fact::CandidatePrepared { bloom: payload.plan.bloom, plan: plan_digest, preparation },

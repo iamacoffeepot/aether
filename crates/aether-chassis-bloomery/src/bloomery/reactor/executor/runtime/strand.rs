@@ -108,6 +108,42 @@ const ORDER_BEARING_TOPICS: [Topic; 6] = [
     Topic::DispatchPrecheck,
 ];
 
+/// Retire every outstanding order the journal already accounts for, returning
+/// the nonces put out of relaunch reach.
+///
+/// A completion that reached the journal without spending its order — an
+/// admission path that advanced the member without running the intake consume,
+/// or a second completion for the same nonce reduced to a duplicate — leaves
+/// a `submitted` row with no tracked run behind it. Left alone it relaunches
+/// until the bloom lands: the executor sees a submitted order, starts a lane,
+/// the lane completes, and the completion reduces to a duplicate that retires
+/// nothing. Consuming here retires the nonce so no further lane starts, and
+/// the log names the nonce so a relaunch is never silent.
+///
+/// Runs on every tick as well as at boot, because an orphan can appear at any
+/// time a member advances off a lap through a path that does not consume.
+/// A store fault propagates like [`readopt_stranded_dispatches`]: a recovery
+/// pass that silently recovers nothing is the bug it exists to close.
+pub(super) fn retire_accounted_orders(store: &mut dyn StoreBackend) -> rusqlite::Result<Vec<Nonce>> {
+    let mut retired = Vec::new();
+    for nonce in store.list_outstanding_nonces()? {
+        if !store.journal_holds_any(&AdmissionKey::every_key_for(&nonce))? {
+            continue;
+        }
+        let workpiece = store.lookup_order(&nonce)?.map(|order| order.workpiece);
+        if store.consume_order(&nonce)? {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %nonce,
+                workpiece = ?workpiece,
+                "dispatch already accounted for in the journal; retiring its order so it is not relaunched",
+            );
+            retired.push(Nonce(nonce));
+        }
+    }
+    Ok(retired)
+}
+
 /// Re-queue every acknowledged dispatch whose order was spent without its fact
 /// reaching the journal, returning the nonces put back in flight.
 ///

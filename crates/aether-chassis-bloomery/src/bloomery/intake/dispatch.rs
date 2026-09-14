@@ -330,6 +330,15 @@ pub fn dispatch_and_record(
         Settled::InFlight => Ok(Settled::InFlight),
         Settled::Answered(Ok(handle)) => {
             store.mark_order_submitted(&record.nonce.0).map_err(DispatchError::Store)?;
+            tracing::info!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %record.nonce.0,
+                stage = ?record.stage,
+                reason = "dispatch",
+                command = %record.transformation.command,
+                workpiece = %record.workpiece.0,
+                "dispatch submitted a lane",
+            );
             Ok(Settled::Answered(handle))
         }
         Settled::Answered(Err(error)) => {
@@ -373,6 +382,15 @@ pub fn dispatch_and_record_idle(
         Settled::InFlight => Ok(Settled::InFlight),
         Settled::Answered(Ok(Some(handle))) => {
             store.mark_order_submitted(&record.nonce.0).map_err(DispatchError::Store)?;
+            tracing::info!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %record.nonce.0,
+                stage = ?record.stage,
+                reason = "idle-dispatch",
+                command = %record.transformation.command,
+                workpiece = %record.workpiece.0,
+                "dispatch submitted a lane",
+            );
             Ok(Settled::Answered(Some(handle)))
         }
         Settled::Answered(Ok(None)) => {
@@ -422,6 +440,15 @@ pub fn dispatch_shared_and_record(
         Settled::InFlight => Ok(Settled::InFlight),
         Settled::Answered(Ok(handle)) => {
             store.mark_order_submitted(&record.nonce.0).map_err(DispatchError::Store)?;
+            tracing::info!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %record.nonce.0,
+                stage = ?record.stage,
+                reason = "shared-dispatch",
+                command = %record.transformation.command,
+                workpiece = %record.workpiece.0,
+                "dispatch submitted a lane",
+            );
             Ok(Settled::Answered(handle))
         }
         Settled::Answered(Err(error)) => {
@@ -455,6 +482,15 @@ pub fn dispatch_precheck_idle(
         Settled::InFlight => Ok(Settled::InFlight),
         Settled::Answered(Ok(Some(handle))) => {
             store.mark_order_submitted(&record.nonce.0).map_err(DispatchError::Store)?;
+            tracing::info!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %record.nonce.0,
+                stage = ?record.stage,
+                reason = "precheck-dispatch",
+                command = %record.transformation.command,
+                workpiece = %record.workpiece.0,
+                "dispatch submitted a lane",
+            );
             Ok(Settled::Answered(Some(handle)))
         }
         Settled::Answered(Ok(None)) => {
