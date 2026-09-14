@@ -350,6 +350,34 @@ mod tests {
         assert_eq!(ModelOverride::default().validate(&line), Ok(()), "overriding nothing is always sealable");
     }
 
+    // A scope run may name its seat (issue 5945): a bundle keying Scope
+    // validates, and Scope resolves to the keyed agent while every other stage
+    // falls through to its own calibration. The plausible bug is the old
+    // refusal — Scope judged as a stage that runs no model — which would fail
+    // here rather than as a 400 at the scope-run door.
+    #[test]
+    fn a_bundle_naming_scope_validates_and_resolves_that_seat() {
+        let line = StageCatalog::line();
+        let grok = AgentSelection { harness: Harness::Grok, model: String::from("grok-4.6") };
+        let override_ = ModelOverride {
+            per_stage: BTreeMap::from([(
+                StageId::Scope,
+                StageOverride { agent: Some(grok), reasoning_effort: Some(ReasoningEffort::High) },
+            )]),
+            ..ModelOverride::default()
+        };
+        assert_eq!(override_.validate(&line), Ok(()), "a Scope pin is a seat some dispatch resolves");
+
+        let scope = override_.resolve(StageId::Scope, &StageCatalog::profile_of(StageId::Scope));
+        assert_eq!((scope.harness, scope.model.as_str()), (Harness::Grok, "grok-4.6"));
+        assert_eq!(scope.effort, ReasoningEffort::High);
+
+        let construct = override_.resolve(StageId::Construct, &StageCatalog::profile_of(StageId::Construct));
+        let calibrated = StageCatalog::profile_of(StageId::Construct);
+        assert_eq!((construct.harness, construct.model.as_str()), (calibrated.harness, calibrated.model.as_str()));
+        assert_eq!(construct.effort, calibrated.effort, "an unnamed stage keeps its calibration");
+    }
+
     // Tripwire: the seal door judges an override against the vocabulary the
     // *base* declared, not the one this binary compiled (ADR-0215). A
     // `validate_against` that reached for the compiled disjunction anyway would
@@ -400,7 +428,8 @@ mod tests {
             }
             StageId::BaseVerify => Some(Transformation::for_base_verify(&binding, digest, digest).command),
             StageId::Study => Some(Transformation::for_study_read(&binding, digest, digest, digest).command),
-            StageId::Sketch | StageId::Scope | StageId::Approve | StageId::Integrate | StageId::Land => None,
+            StageId::Scope => Some(Transformation::for_scoping_run(&binding, digest, digest).command),
+            StageId::Sketch | StageId::Approve | StageId::Integrate | StageId::Land => None,
         }
     }
 

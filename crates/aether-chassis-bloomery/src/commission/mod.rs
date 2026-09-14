@@ -221,8 +221,11 @@ fn dispatch(cli: CommissionCli) -> Result<String> {
 
 fn open_scope_run(api: &ControlApi, id: &str) -> Result<String> {
     let view: ViewDocument = api.get_json("/view")?;
-    let opened: ScopeRunOpenedView =
-        api.send_json("POST", &format!("/commissions/{id}/scope-runs"), &ScopeRunRequest { base: view.mainline })?;
+    let opened: ScopeRunOpenedView = api.send_json(
+        "POST",
+        &format!("/commissions/{id}/scope-runs"),
+        &ScopeRunRequest { base: view.mainline, profile: None, model_override: None },
+    )?;
     Ok(format!("{} ordinal {} sequence {} subject {}\n", opened.id, opened.ordinal, opened.sequence, opened.subject))
 }
 

@@ -128,6 +128,10 @@ fn every_route_result_has_a_success_status() {
     assert_eq!(create_response(CreateCommissionResult::Duplicate { id: "wp-1".to_owned() }).status, 409);
     assert_eq!(scope_run_response(EnqueueScopeRunResult::Missing { id: "wp-1".to_owned() }).status, 404);
     assert_eq!(scope_run_response(EnqueueScopeRunResult::AlreadyInFlight { ordinal: 1 }).status, 409);
+    assert_eq!(
+        scope_run_response(EnqueueScopeRunResult::UnknownModelOverride { error: "nope".to_owned() }).status,
+        400
+    );
     assert_eq!(show_response(LoadCommissionResult::Missing { id: "wp-1".to_owned() }).status, 404);
 }
 

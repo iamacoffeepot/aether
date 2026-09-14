@@ -1875,6 +1875,7 @@ fn a_v20_store_gains_an_unpinned_scope_run_column() {
     assert_eq!(rows[0].kind, "enqueued");
     assert_eq!(rows[0].ordinal, 1);
     assert!(rows[0].instructions.is_none(), "migration invents no pin");
+    assert!(rows[0].model_override.is_none(), "migration invents no seat digest");
 
     store
         .enqueue_scope_run(&ScopeRunOpen {
@@ -1884,12 +1885,14 @@ fn a_v20_store_gains_an_unpinned_scope_run_column() {
             base: b"base",
             subject: b"subject",
             instructions: Some(b"pin"),
+            model_override: Some(b"override"),
             payload: b"payload",
         })
         .unwrap();
     let rows = store.list_scope_runs("wp-v20").unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[1].instructions.as_deref(), Some(b"pin".as_slice()));
+    assert_eq!(rows[1].model_override.as_deref(), Some(b"override".as_slice()));
 }
 
 #[test]

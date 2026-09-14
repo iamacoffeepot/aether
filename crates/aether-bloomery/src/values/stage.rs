@@ -122,24 +122,31 @@ pub fn is_model_lane(command: &str) -> bool {
 /// and so does [`ModelOverride::validate`](crate::values::ModelOverride::validate)
 /// — a key the seal door admits is a key some dispatch resolves.
 ///
-/// [`StageId::Scope`] stays `None`: scoping runs before a workpiece qualifies
-/// for a bloom, so a sealed per-member override can never reach it, and
-/// admitting the key would let an operator author a pin that silently never
-/// applies.
+/// [`StageId::Scope`] dispatches [`SCOPE_FILL_COMMAND`] (ADR-0208): the
+/// pre-bloom scoping run, which fills a workpiece's fields before the
+/// workpiece qualifies for a bloom. The pin that reaches it rides the scope
+/// run's own record, never a sealed per-member override — no member dispatch
+/// ever runs Scope, so a Scope entry sealed into a bloom registry resolves
+/// nowhere there — but the key is one [`ModelOverride::validate`] admits, so
+/// the run override and the seal bundles share one vocabulary for which
+/// stages run a model.
 ///
 /// [`StageId::Study`] dispatches [`RETROSPECT_READ_COMMAND`] (ADR-0216): the
 /// bloom-level reader at the tail of the line, whose binding's `process` names
 /// the host position `retrospect` the same way the two review stages' does.
+///
+/// [`ModelOverride::validate`]: crate::values::ModelOverride::validate
 #[must_use]
 pub(super) fn dispatched_command(stage: StageId) -> Option<&'static str> {
     match stage {
         StageId::Construct | StageId::Refine | StageId::Reconcile => Some(CONSTRUCT_IMPLEMENT_COMMAND),
         StageId::Review | StageId::AggregateReview => Some(REVIEW_CRITIC_COMMAND),
+        StageId::Scope => Some(SCOPE_FILL_COMMAND),
         StageId::Verify => Some(VERIFY_MEMBER_COMMAND),
         StageId::AggregateVerify => Some(VERIFY_CHECK_COMMAND),
         StageId::BaseVerify => Some(VERIFY_BASE_COMMAND),
         StageId::Study => Some(RETROSPECT_READ_COMMAND),
-        StageId::Sketch | StageId::Scope | StageId::Approve | StageId::Integrate | StageId::Land => None,
+        StageId::Sketch | StageId::Approve | StageId::Integrate | StageId::Land => None,
     }
 }
 
@@ -675,21 +682,16 @@ impl StageCatalog {
     /// private repository. Naming it in the catalog is what makes that choice
     /// attestable rather than an operator's ambient default.
     const MUSE_MODEL: &'static str = "muse-spark-1.2-contributor";
-    /// The model id the grok-harness stages resolve to. Named once so a
-    /// generation refresh is one edit rather than a sweep over the arms — the
-    /// same reason as [`Self::OPUS_MODEL`].
-    const GROK_MODEL: &'static str = "grok-4.6";
 
     #[must_use]
     pub fn profile_of(stage: StageId) -> AgentProfile {
         // The **dispatched model lanes** — the ones that actually fork an
         // agent CLI — are Construct and its Refine/Reconcile repair re-entries,
         // the two review positions, Scope, and the Study reader. Construct and
-        // review run muse; Scope runs grok (ADR-0208); the reader runs opus
-        // (ADR-0216 §2). That is the whole set `is_model_lane` recognizes, so
-        // this is the calibration that decides what writes the code, what
-        // judges it, what fills a workpiece before freeze, and what reads a
-        // landed batch.
+        // review run muse; Scope and the reader run opus (ADR-0146, ADR-0216
+        // §2). That is the whole set `is_model_lane` recognizes, so this is
+        // the calibration that decides what writes the code, what judges it,
+        // what fills a workpiece before freeze, and what reads a landed batch.
         //
         // The remaining stages keep their Claude calibration and it is inert:
         // Approve is a pre-seal host process and the mechanical stages run a
@@ -713,12 +715,15 @@ impl StageCatalog {
                 (Harness::Muse, Self::MUSE_MODEL, ReasoningEffort::High)
             }
             StageId::Scope => {
-                // Cost-bound deferral from opus (ADR-0208 §The seat): ADR-0146
-                // still holds that scoping is the ladder's most judgement-heavy
-                // task, but the compiled seat is grok-4.6 at high effort rather
-                // than opus so a future reader finds a decision rather than a
-                // discrepancy with that ADR.
-                (Harness::Grok, Self::GROK_MODEL, ReasoningEffort::High)
+                // The ADR-0146 calibration, restored: scoping is the ladder's
+                // most judgement-heavy task, so the compiled seat is opus at
+                // high effort. ADR-0208's cost-bound deferral onto grok-4.6 is
+                // retired — moving every scope run at once is now a per-run
+                // choice instead: a scope run may name its seat through its
+                // run override (issue 5945), resolved at enqueue before this
+                // line is consulted, so a future reader finds a decision
+                // rather than a discrepancy with that ADR.
+                (Harness::Claude, Self::OPUS_MODEL, ReasoningEffort::High)
             }
             StageId::Study => (Harness::Claude, Self::OPUS_MODEL, ReasoningEffort::High),
             StageId::Sketch
@@ -1347,9 +1352,12 @@ mod tests {
                     "{:?} runs under muse, so its model id must be a muse id",
                     binding.stage,
                 ),
+                // No compiled seat runs grok today — Scope's cost-bound
+                // deferral onto `grok-4.6` retired with the per-run seat
+                // (issue 5945) — so this arm pins the id a future grok seat
+                // must carry rather than a constant the line still names.
                 Harness::Grok => assert_eq!(
-                    profile.model,
-                    StageCatalog::GROK_MODEL,
+                    profile.model, "grok-4.6",
                     "{:?} runs under grok, so its model id must be a grok id",
                     binding.stage,
                 ),
@@ -1430,9 +1438,13 @@ mod tests {
     // failures in a row (a sketchless dispatch, a polluted setter value)
     // permanently exhausted seven commissions the authored work never failed
     // in. An intended catalog edit.
+    // Repinned again for issue 5945: the Scope seat recalibrates from
+    // Grok/`grok-4.6` back onto Claude/opus at high effort, restoring the
+    // ADR-0146 calibration now that a scope run may name its own seat per
+    // run. An intended catalog edit — see `profile_of`.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x7d, 0xbd, 0xcb, 0x5c, 0xe4, 0xce, 0x3e, 0x39, 0x92, 0xd7, 0xbb, 0x2b, 0xcc, 0x4c, 0x6e, 0x8a, 0x9b, 0x2c,
-        0xd4, 0x30, 0x64, 0x95, 0x2b, 0xec, 0x5d, 0x37, 0x87, 0x92, 0xe0, 0xd9, 0x9c, 0xe7,
+        0x19, 0xee, 0xf1, 0xb1, 0xa0, 0x02, 0xc7, 0xac, 0xa6, 0x3e, 0x46, 0x83, 0xb8, 0x74, 0x75, 0x9b, 0x16, 0xca,
+        0xd0, 0x6b, 0xe4, 0xd2, 0xb6, 0x02, 0x57, 0x87, 0x49, 0xf7, 0x93, 0x12, 0xbb, 0x59,
     ];
 
     // Tripwire: every command a stage dispatches is classified by exactly one of

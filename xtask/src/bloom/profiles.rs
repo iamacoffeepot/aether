@@ -257,9 +257,9 @@ mod tests {
         );
 
         let override_ = shipped_override("muse-build-sonnet-judge");
-        let catalog_model = StageCatalog::profile_of(StageId::Construct).model;
-        for stage in [StageId::Construct, StageId::Refine, StageId::Reconcile] {
+        for stage in [StageId::Construct, StageId::Refine, StageId::Reconcile, StageId::Scope] {
             let (harness, model) = seat(&override_, stage);
+            let catalog_model = StageCatalog::profile_of(stage).model;
             assert_eq!(harness, Harness::Muse.as_str(), "{stage:?} must sit on muse");
             assert_eq!(
                 model, "muse-spark-1.3-contributor",
@@ -302,12 +302,14 @@ mod tests {
             for stage in &seats {
                 let resolved = override_.resolve(*stage, &StageCatalog::profile_of(*stage));
                 if profile == "muse-build-sonnet-judge"
-                    && matches!(*stage, StageId::Construct | StageId::Refine | StageId::Reconcile)
+                    && matches!(*stage, StageId::Construct | StageId::Refine | StageId::Reconcile | StageId::Scope)
                 {
-                    // Construct-side muse is this profile's point; the 1.3 pin
-                    // test is the omitted-seat equivalent those three cannot
-                    // distinguish by harness. Judge and reader seats still
-                    // must not fall through to the catalog default.
+                    // Construct-side muse is this profile's point, and Scope
+                    // follows the construct side (it fills what those seats
+                    // build); the 1.3 pin test is the omitted-seat equivalent
+                    // those four cannot distinguish by harness. Judge and
+                    // reader seats still must not fall through to the catalog
+                    // default.
                     continue;
                 }
                 assert_ne!(resolved.harness, Harness::Muse, "{profile} still resolves muse at {stage:?}");
