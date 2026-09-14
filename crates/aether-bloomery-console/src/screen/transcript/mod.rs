@@ -30,8 +30,7 @@ use session::{SessionSummary, TAIL_SCAN, summarize_tail};
 const HINTS: &[KeyHint] = &[
     KeyHint { keys: "j/k", action: "select" },
     KeyHint { keys: "Enter", action: "expand" },
-    KeyHint { keys: "f", action: "follow" },
-    KeyHint { keys: "G", action: "tail" },
+    KeyHint { keys: "f/G", action: "follow" },
     KeyHint { keys: "/", action: "search" },
     KeyHint { keys: "n/N", action: "next" },
     KeyHint { keys: "</>", action: "pan" },
