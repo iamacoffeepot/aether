@@ -33,8 +33,8 @@ use crate::bloomery::study::{
 };
 use crate::bloomery::{
     BatchCheck, BatchFailure, BatchMember, BatchProbeReceipt, BatchProbeRequest, BatchProgress, BatchReport,
-    ContextualProofReuse, HostClass, ProbeVerdict, ProofResult, contextual_bundle_reports, contextual_fact_key,
-    dispatch_model, findings::verification_findings_key, next_batch_probe, observed_probe_verdict,
+    ContextualProofReuse, HostClass, ProbeVerdict, contextual_bundle_reports, contextual_fact_key, dispatch_model,
+    findings::verification_findings_key, next_batch_probe, observed_failed_tests, observed_probe_verdict,
     record_contextual_facts, reuse_contextual_proof,
 };
 use crate::store::{
@@ -1654,10 +1654,17 @@ fn declared_failed_checks(dispatch: &SharedRunDispatch, receipt: &SharedStepRece
     let Some(composition) = dispatch.plan.composition.as_ref() else {
         return Vec::new();
     };
-    composition
+    let named = receipt
+        .contextual_observations
+        .as_deref()
+        .and_then(|bytes| observed_failed_tests(bytes, nonce).ok())
+        .unwrap_or_default();
+    let named_gates: BTreeSet<&str> = named.iter().map(|(gate, _)| gate.as_str()).collect();
+    let mut checks: Vec<BatchCheck> = composition
         .contract
         .gate_identities
         .iter()
+        .filter(|identity| !named_gates.contains(identity.as_str()))
         .map(|identity| BatchCheck::Gate { id: identity.clone() })
         .filter(|check| {
             receipt.failed_verifier_names.iter().any(|failed| failed == check.gate())
@@ -1665,7 +1672,9 @@ fn declared_failed_checks(dispatch: &SharedRunDispatch, receipt: &SharedStepRece
                     matches!(observed_probe_verdict(bytes, nonce, check), Ok(ProbeVerdict::Failed))
                 })
         })
-        .collect()
+        .collect();
+    checks.extend(named.into_iter().map(|(gate, id)| BatchCheck::Test { gate, id }));
+    checks
 }
 
 fn contextual_run_passed(verdict: StageVerdict, failed_checks: &[BatchCheck]) -> bool {
@@ -1700,41 +1709,30 @@ fn retained_probe_receipts(
         });
     }
 
-    let (Some(bytes), SharedRunExecution::Contextual { node, .. }, Some(composition)) =
-        (initial_receipt.contextual_observations.as_deref(), &dispatch.execution, dispatch.plan.composition.as_ref())
-    else {
+    let Some(bytes) = initial_receipt.contextual_observations.as_deref() else {
         return Ok(receipts);
     };
-    let Ok(reports) = contextual_bundle_reports(bytes, &initial.nonce, node, &composition.contract) else {
-        return Ok(receipts);
-    };
+    let members: Vec<WorkpieceId> =
+        dispatch.plan.requests.iter().map(|request| request.member.workpiece.clone()).collect();
     for check in checks {
-        let key = check.observation_key();
-        for (repetition, report) in reports
-            .iter()
-            .filter(|report| report.gate == check.gate())
-            .filter_map(|report| {
-                report.report.outcomes().find(|(observed, _)| *observed == key).map(|(_, verdict)| (report, verdict))
-            })
-            .take(2)
-            .enumerate()
-        {
-            receipts.push(BatchProbeReceipt {
-                request: BatchProbeRequest {
-                    plan: dispatch.plan.digest(),
-                    members: dispatch.plan.requests.iter().map(|request| request.member.workpiece.clone()).collect(),
-                    baseline: None,
-                    check: check.clone(),
-                    repetition: u8::try_from(repetition).unwrap_or(1),
-                },
-                invocation: report.0.invocation,
-                verdict: match report.1 {
-                    ProofResult::Green => ProbeVerdict::Passed,
-                    ProofResult::Red => ProbeVerdict::Failed,
-                },
-                evidence: initial_receipt.evidence.detail,
-            });
+        let Ok(verdict) = observed_probe_verdict(bytes, &initial.nonce, check) else {
+            continue;
+        };
+        if matches!(verdict, ProbeVerdict::Unknown | ProbeVerdict::Infrastructure) {
+            continue;
         }
+        receipts.push(BatchProbeReceipt {
+            request: BatchProbeRequest {
+                plan: dispatch.plan.digest(),
+                members: members.clone(),
+                baseline: None,
+                check: check.clone(),
+                repetition: 0,
+            },
+            invocation: initial_receipt.invocation,
+            verdict,
+            evidence: initial_receipt.evidence.detail,
+        });
     }
     Ok(receipts)
 }
@@ -2847,6 +2845,58 @@ mod tests {
 
         assert!(!contextual_run_passed(StageVerdict::VerificationPassed, &raw_red));
         assert!(contextual_run_passed(StageVerdict::VerificationPassed, &[]));
+    }
+
+    fn named_test_bundle(nonce: &str, test: &str, failed: bool) -> Vec<u8> {
+        let result = if failed {
+            "failed"
+        } else {
+            "passed"
+        };
+        let mut outcomes = serde_json::Map::new();
+        outcomes.insert("gate:verify.test".to_owned(), serde_json::json!(result));
+        outcomes.insert(format!("test:{test}"), serde_json::json!(result));
+        serde_json::to_vec(&serde_json::json!({
+            "protocol": 1,
+            "documents": [{
+                "protocol": 1,
+                "nonce": nonce,
+                "gate": "verify.test",
+                "invocations": [{
+                    "invocation": Digest::from_bytes([11; 32]),
+                    "at": serde_json::Value::Null,
+                    "outcomes": outcomes
+                }]
+            }]
+        }))
+        .expect("named test observation fixture encodes")
+    }
+
+    #[test]
+    fn named_failing_tests_replace_the_gate_check() {
+        let dispatch = reducer_shaped_contextual_dispatch();
+        let test = "aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack";
+        let receipt = SharedStepReceipt {
+            invocation: Digest::from_bytes([1; 32]),
+            evidence: Evidence {
+                subject: Digest::from_bytes([2; 32]),
+                kind: EvidenceKind::VerificationResult,
+                detail: Digest::from_bytes([3; 32]),
+            },
+            verdict: StageVerdict::VerificationFailed,
+            failed_verifiers: VerifyFailureSet::one(VerifyFailure::Test),
+            failed_verifier_names: vec!["verify.test".to_owned()],
+            findings: None,
+            cost: None,
+            calls: None,
+            contextual_observations: Some(named_test_bundle("step", test, true)),
+            probe_verdict: None,
+        };
+
+        assert_eq!(
+            declared_failed_checks(&dispatch, &receipt, "step"),
+            vec![BatchCheck::Test { gate: "verify.test".to_owned(), id: test.to_owned() }]
+        );
     }
 
     #[test]
