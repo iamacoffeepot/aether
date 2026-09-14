@@ -20,16 +20,16 @@
 use std::env;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use aether_bloomery::EXECUTION_DEADLINE_ENV;
+use aether_bloomery::{EXECUTION_DEADLINE_ENV, ExecutionLimits};
 
-/// The longest budget the lane will believe.
+/// The longest budget the lane will believe: the sealed ceiling itself.
 ///
-/// The seal door refuses an authored wall clock above one day
-/// ([`ExecutionLimits::MAX_WALL_CLOCK_SECS`](aether_bloomery::ExecutionLimits::MAX_WALL_CLOCK_SECS)),
-/// so a remaining budget past that is a misread number rather than a very
-/// patient coordinator — and believing one would hand every clamp below an
-/// unbounded answer while looking like a bounded lane.
-const LONGEST_CREDIBLE_BUDGET: Duration = Duration::from_days(1);
+/// [`ExecutionLimits::MAX_WALL_CLOCK_SECS`] is what the seal door refuses an
+/// authored wall clock above, so a remaining budget past it is a misread number
+/// rather than a very patient coordinator — and believing one would hand every
+/// clamp below an unbounded answer while the lane looked bounded. Derived from
+/// that constant rather than restating it, so the two cannot drift.
+const LONGEST_CREDIBLE_BUDGET: Duration = Duration::from_secs(ExecutionLimits::MAX_WALL_CLOCK_SECS);
 
 /// How much of the limit the lane keeps clear of the cancel.
 ///
