@@ -1480,6 +1480,19 @@ pub(super) fn reduce_propose_shared_run(snapshot: &Snapshot, bloom: &BloomId, pl
     )
 }
 
+pub(super) fn reduce_hold_shared_run_coalesce(
+    snapshot: &Snapshot,
+    bloom: &BloomId,
+    until_unix_millis: u64,
+    waiting_for: &[WorkpieceId],
+) -> Decisions {
+    let _ = (until_unix_millis, waiting_for);
+    match active_state(snapshot, bloom) {
+        Ok(_) => accepted(*bloom, bloom.0, Vec::new()),
+        Err(error) => rejected(error),
+    }
+}
+
 fn serial_fallbacks(state: &mut CoordinationState, refused: &SharedRunPlan, effects: &mut Vec<Decision>) {
     for request in &refused.requests {
         if request.input.candidate != request.member.candidate {
@@ -3236,6 +3249,7 @@ mod tests {
             max_attribution_probes: 3,
             movement_budget: 2,
             reservation_millis: 1_000,
+            coalesce_millis: None,
             host_class: String::from("test-host"),
         }
     }

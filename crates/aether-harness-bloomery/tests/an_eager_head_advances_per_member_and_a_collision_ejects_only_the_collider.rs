@@ -51,6 +51,7 @@ fn eager_policy() -> CoordinationPolicy {
         movement_budget: 1,
         reservation_millis: 1_000,
         host_class: "harness".to_owned(),
+        coalesce_millis: None,
     }
 }
 

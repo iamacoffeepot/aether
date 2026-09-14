@@ -71,10 +71,17 @@ pub enum VerificationMode {
     Contextual,
 }
 
+/// Default coalescing hold when [`CoordinationPolicy::coalesce_millis`] is
+/// absent: two minutes, long enough for sibling constructs that finish a
+/// minute apart to share one run, short enough that a stuck sibling does not
+/// park a ready request until its deadline.
+pub const DEFAULT_COALESCE_MILLIS: u64 = 120_000;
+
 /// Optional sealed policy for eager integration and shared verification.
 ///
-/// Absence preserves the legacy reducer. The initial policy never waits for an
-/// arrival: bounds limit work already ready when the scheduler is asked.
+/// Absence preserves the legacy reducer. A queued contextual request whose
+/// bloom still has sibling constructs in flight waits up to
+/// [`Self::coalesce_hold_millis`] before the scheduler proposes a shared run.
 #[aether_data::kind(name = "aether.bloomery.coordination_policy", default, eq)]
 pub struct CoordinationPolicy {
     /// Member verification strategy.
@@ -94,6 +101,10 @@ pub struct CoordinationPolicy {
     pub reservation_millis: u64,
     /// Explicit execution class every contextual proof must run on.
     pub host_class: String,
+    /// How long a ready contextual request waits for sibling constructs still
+    /// in flight. `None` is [`DEFAULT_COALESCE_MILLIS`]. `Some(0)` proposes
+    /// as soon as a request is ready — the behaviour before this field existed.
+    pub coalesce_millis: Option<u64>,
 }
 
 impl CoordinationPolicy {
@@ -108,6 +119,14 @@ impl CoordinationPolicy {
             && !self.host_class.is_empty()
             && self.host_class.len() <= 128
             && self.host_class.bytes().all(|byte| byte.is_ascii_graphic())
+    }
+
+    /// The coalescing hold the scheduler applies, in milliseconds.
+    ///
+    /// Absent is [`DEFAULT_COALESCE_MILLIS`]. Zero disables the hold.
+    #[must_use]
+    pub fn coalesce_hold_millis(&self) -> u64 {
+        self.coalesce_millis.unwrap_or(DEFAULT_COALESCE_MILLIS)
     }
 }
 

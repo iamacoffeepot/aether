@@ -91,9 +91,10 @@ use attempt::{reduce_attempt_completed, reduce_member_executor_fault};
 use base_verify::{reduce_base_reverify, reduce_base_verify_completed};
 use coordination::{
     IntegrationConflict, reduce_candidate_prepared, reduce_checkpoint_observed, reduce_compatibility_previewed,
-    reduce_integration_advanced, reduce_integration_conflicted, reduce_integration_refused,
-    reduce_partial_head_repaired, reduce_propose_shared_run, reduce_request_construction_admission,
-    reduce_reservation_expired, reduce_shared_run_completed, reduce_shared_run_prepared, reduce_shared_run_started,
+    reduce_hold_shared_run_coalesce, reduce_integration_advanced, reduce_integration_conflicted,
+    reduce_integration_refused, reduce_partial_head_repaired, reduce_propose_shared_run,
+    reduce_request_construction_admission, reduce_reservation_expired, reduce_shared_run_completed,
+    reduce_shared_run_prepared, reduce_shared_run_started,
 };
 use evidence::{reduce_admit_evidence, reduce_adopt_answer};
 use fold_conflict::reduce_fold_conflict;
@@ -168,6 +169,9 @@ fn reduce_coordination_fact(snapshot: &Snapshot, fact: &Fact) -> Decisions {
         }
         Fact::PartialHeadRepairCompleted { bloom, plan, completion } => {
             reduce_partial_head_repaired(snapshot, bloom, *plan, completion)
+        }
+        Fact::HoldSharedRunCoalesce { bloom, until_unix_millis, waiting_for } => {
+            reduce_hold_shared_run_coalesce(snapshot, bloom, *until_unix_millis, waiting_for)
         }
         _ => unreachable!("only coordination facts are routed through this reducer"),
     }
@@ -324,7 +328,8 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         | Fact::ConstructionCheckpointObserved { .. }
         | Fact::RequestConstructionAdmission { .. }
         | Fact::CompatibilityPreviewed { .. }
-        | Fact::PartialHeadRepairCompleted { .. }) => reduce_coordination_fact(snapshot, fact),
+        | Fact::PartialHeadRepairCompleted { .. }
+        | Fact::HoldSharedRunCoalesce { .. }) => reduce_coordination_fact(snapshot, fact),
         // Retired: the journal holds grants the machinery decided before a
         // widening became an operator's decision, and those records replay
         // through their own recorded decisions (ADR-0190) rather than through

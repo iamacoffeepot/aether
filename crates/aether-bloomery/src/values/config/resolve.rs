@@ -268,9 +268,11 @@ mod tests {
     use aether_data::wire::to_vec;
 
     use super::*;
-    use crate::persisted::MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST;
+    use crate::persisted::{COORDINATION_POLICY_PRE_COALESCE_DIGEST, MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST};
     use crate::values::ModelProcessInstructions;
+    use crate::values::coordination_pre_coalesce::CoordinationPolicyPreCoalesce;
     use crate::values::process_instructions_pre_reader::ModelProcessInstructionsPreReader;
+    use crate::values::{CoordinationPolicy, DEFAULT_COALESCE_MILLIS, VerificationMode};
 
     #[aether_data::kind(name = "aether.bloomery.test_resolve_alpha", eq)]
     struct Alpha {
@@ -437,5 +439,34 @@ mod tests {
             decoded.retrospect.is_empty() && decoded.retrospect_finding_contract.is_empty(),
             "a pre-reader bundle names no reader instructions, and none may be invented for it"
         );
+    }
+
+    #[test]
+    fn a_pre_coalesce_coordination_policy_resolves_through_its_pinned_upcast() {
+        let prior = CoordinationPolicyPreCoalesce {
+            verification: VerificationMode::Contextual,
+            eager_integration: true,
+            max_run_members: 32,
+            max_serial_requests: 8,
+            max_attribution_probes: 64,
+            movement_budget: 3,
+            reservation_millis: 300_000,
+            host_class: String::from("fleet"),
+        };
+
+        let decoded: CoordinationPolicy = decode_config(
+            CoordinationPolicy::NAME,
+            &to_vec(&prior).expect("a pre-coalesce policy encodes"),
+            Some(COORDINATION_POLICY_PRE_COALESCE_DIGEST.as_bytes()),
+        )
+        .expect("a policy stamped 3848558a… decodes through the pre-coalesce upcast");
+
+        assert_eq!(decoded.host_class, prior.host_class);
+        assert_eq!(decoded.max_run_members, prior.max_run_members);
+        assert!(
+            decoded.coalesce_millis.is_none(),
+            "a pre-coalesce policy names no hold, and none may be invented as a sealed zero"
+        );
+        assert_eq!(decoded.coalesce_hold_millis(), DEFAULT_COALESCE_MILLIS);
     }
 }

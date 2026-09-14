@@ -72,6 +72,7 @@ impl Journal {
             max_attribution_probes: 0,
             movement_budget: 1,
             reservation_millis: 1_000,
+            coalesce_millis: None,
             host_class: String::from("test"),
         };
         let mut configs = compiled_resolved();
