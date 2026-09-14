@@ -24,6 +24,13 @@ pub struct SharedProbePreparationRequest {
     pub transformation: Transformation,
     pub profile: AgentProfile,
     pub configs: ConfigRegistry,
+    /// The candidate check's checkout. A baseline probe (empty `inputs`) names
+    /// this as `--diff-base` so the base tree is compiled over the same
+    /// reverse-dependency closure the candidate ran, rather than the whole
+    /// workspace. `None` on subset probes that already have a real range, and
+    /// on rows written before this field existed.
+    #[serde(default)]
+    pub candidate_checkout: Option<Digest>,
 }
 
 /// Exact prepared executor input stored before a probe can be submitted.

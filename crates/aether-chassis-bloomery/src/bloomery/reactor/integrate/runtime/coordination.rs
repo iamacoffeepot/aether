@@ -5,7 +5,7 @@ use std::slice::from_ref;
 use aether_bloomery::{
     Admit, CandidatePreparation, CandidatePreparationPayload, CandidateRef, Checkpoint, CompatibilityPreviewPayload,
     Digest, Event, Fact, IdempotencyKey, IntegrateOutcome, IntegrationAppendPayload, SharedRunPlanPayload,
-    SharedRunPreparation, Topic, Transformation, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND,
+    SharedRunPreparation, Topic, Transformation,
 };
 use aether_bloomery_github::SourceError;
 use aether_data::wire::from_bytes;
@@ -376,25 +376,26 @@ fn probe_transformation(
     request: &SharedProbePreparationRequest,
     candidate: CandidateRef,
 ) -> Result<(CandidateRef, Transformation), String> {
+    if request.inputs.is_empty() {
+        if request.probe.check.gate().is_empty() {
+            return Err("Shared baseline probe cannot derive the candidate check's closure.\n".to_owned());
+        }
+        let mut transformation = request.transformation.clone();
+        if let Some(checkout) = request.candidate_checkout {
+            transformation.checkout = checkout;
+        }
+        let Some(prepared) = transformation.as_attribution_baseline(candidate) else {
+            return Err("Shared baseline probe cannot derive the candidate check's closure.\n".to_owned());
+        };
+        return Ok((candidate, prepared));
+    }
     let mut transformation = request.transformation.clone();
     let Some(subject) = transformation.inputs.first_mut() else {
         return Err("Shared probe transformation has no bound subject input.\n".to_owned());
     };
     *subject = candidate.tree;
     transformation.checkout = candidate.checkout;
-    if request.inputs.is_empty() {
-        if transformation.command != VERIFY_CHECK_COMMAND || request.probe.check.gate().is_empty() {
-            return Err("Shared baseline probe cannot derive the equivalent whole-workspace gate.\n".to_owned());
-        }
-        // `verify.base` and `verify.check` use the same manifest-declared gate
-        // fan-out. The base command is the existing whole-workspace mode and
-        // deliberately carries no diff base; base..base would select an empty
-        // closure and could manufacture a green receipt without running tests.
-        VERIFY_BASE_COMMAND.clone_into(&mut transformation.command);
-        transformation.diff_base = None;
-    } else {
-        transformation.diff_base = Some(request.base.checkout);
-    }
+    transformation.diff_base = Some(request.base.checkout);
     Ok((candidate, transformation))
 }
 
@@ -541,7 +542,7 @@ mod tests {
     use aether_bloomery::testing::digest;
     use aether_bloomery::{
         AgentProfile, ConfigRegistry, ExecutionLimits, Harness, NetworkProfile, ReasoningEffort, ResolvedModel,
-        ToolPolicy, Transformation,
+        ToolPolicy, Transformation, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND,
     };
 
     use super::*;
@@ -584,23 +585,26 @@ mod tests {
                 tools: ToolPolicy::Allow(vec!["read".to_owned()]),
             },
             configs: ConfigRegistry::default(),
+            candidate_checkout: Some(digest(8)),
         }
     }
 
     #[test]
-    fn an_empty_baseline_uses_the_real_whole_workspace_invocation() {
+    fn an_empty_baseline_keeps_the_candidate_check_and_names_its_checkout_as_diff_base() {
         let request = probe_request();
         let candidate = request.base;
         let retained = request.transformation.clone();
 
         let (prepared_candidate, prepared) =
-            probe_transformation(&request, candidate).expect("verify.check has an equivalent base mode");
+            probe_transformation(&request, candidate).expect("verify.check binds an attribution baseline");
 
         assert_eq!(prepared_candidate, candidate);
-        assert_eq!(prepared.command, VERIFY_BASE_COMMAND);
+        assert_eq!(prepared.command, VERIFY_CHECK_COMMAND, "attribution keeps the candidate check, not verify.base");
+        assert_ne!(prepared.command, VERIFY_BASE_COMMAND);
         assert_eq!(prepared.inputs, vec![candidate.tree, digest(7)]);
-        assert_eq!(prepared.checkout, candidate.checkout);
-        assert_eq!(prepared.diff_base, None, "base..base would select the empty closure");
+        assert_eq!(prepared.checkout, candidate.checkout, "the probe runs at the composition base");
+        assert_eq!(prepared.diff_base, Some(retained.checkout), "the inverted range is the candidate check's closure");
+        assert_ne!(prepared.diff_base, Some(prepared.checkout), "base..base would empty the closure");
         assert_eq!(prepared.outputs, retained.outputs);
         assert_eq!(prepared.image, retained.image);
         assert_eq!(prepared.limits, retained.limits);
@@ -610,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn a_baseline_without_an_equivalent_gate_is_refused() {
+    fn a_baseline_that_cannot_name_the_candidate_closure_is_refused() {
         let mut request = probe_request();
         request.transformation.command = "verify.member".to_owned();
 
@@ -619,5 +623,10 @@ mod tests {
         request.transformation.command = VERIFY_CHECK_COMMAND.to_owned();
         request.probe.check = BatchCheck::Gate { id: String::new() };
         assert!(probe_transformation(&request, request.base).is_err());
+
+        request.probe.check = BatchCheck::Gate { id: "verify.clippy".to_owned() };
+        request.candidate_checkout = Some(request.base.checkout);
+        request.transformation.checkout = request.base.checkout;
+        assert!(probe_transformation(&request, request.base).is_err(), "base..base would empty the closure");
     }
 }

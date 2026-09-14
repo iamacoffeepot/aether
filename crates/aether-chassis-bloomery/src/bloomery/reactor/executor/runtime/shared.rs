@@ -1771,6 +1771,7 @@ fn probe_materialization(
         .flat_map(|input| input.members.iter().map(|pin| pin.workpiece.clone()))
         .filter(|workpiece| outstanding.contains(workpiece))
         .collect::<BTreeSet<_>>();
+    let candidate_checkout = probe.members.is_empty().then_some(transformation.checkout);
     let request = SharedProbePreparationRequest {
         run: Digest::from_slice(&row.run)
             .ok_or_else(|| rusqlite::Error::InvalidParameterName("shared run identity is not a digest".to_owned()))?,
@@ -1782,6 +1783,7 @@ fn probe_materialization(
         transformation: (**transformation).clone(),
         profile: profile.clone(),
         configs: configs.clone(),
+        candidate_checkout,
     };
     let descriptor = encode_host(&SharedStepDescriptor::Probe(Box::new(request.clone())))?;
     let prepared = if materialized == selected {
