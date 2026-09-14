@@ -628,6 +628,9 @@ pub(super) fn revision_response(result: WriteScopeRevisionResult) -> HttpServerR
         WriteScopeRevisionResult::SurfaceGap { paths } => {
             error_response(422, &format!("declared surface does not cover {}", paths.join(", ")))
         }
+        WriteScopeRevisionResult::EmptySection { section } => {
+            error_response(422, &format!("scope revision section {section} is empty"))
+        }
     }
 }
 

@@ -123,6 +123,14 @@ impl ScopeFreeze {
         if revision.workpiece.0 != run.commission {
             return Err(format!("the run's revision names workpiece {}", revision.workpiece.0));
         }
+        // The fill lane's own output faces the rule the operator's hand path
+        // faces. Named here as well as refused by the write, because this is
+        // the one caller whose refusal an operator reads as a line rather than
+        // as an HTTP status, and "the run answered and froze nothing" needs to
+        // say which section the lane left empty.
+        if let Some(section) = revision.empty_required_section() {
+            return Err(format!("the run's revision leaves its {section} section empty"));
+        }
         let evidence = RevisionEvidence { scope_verify: verify_input };
         let digest = store
             .freeze_scope_revision(&run.commission, run.ordinal, &revision, &evidence)

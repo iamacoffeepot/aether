@@ -5081,6 +5081,7 @@ fn write_revision_error(error: CommissionError) -> WriteScopeRevisionResult {
         CommissionError::MalformedCanonical => WriteScopeRevisionResult::Malformed,
         CommissionError::NotOpen => WriteScopeRevisionResult::NotOpen,
         CommissionError::SurfaceGap { paths } => WriteScopeRevisionResult::SurfaceGap { paths },
+        CommissionError::EmptySection { section } => WriteScopeRevisionResult::EmptySection { section },
         error => WriteScopeRevisionResult::Err { error: error.to_string() },
     }
 }

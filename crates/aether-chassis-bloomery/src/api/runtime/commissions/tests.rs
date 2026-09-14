@@ -80,6 +80,15 @@ fn a_tampered_or_stale_write_is_not_a_transport_error() {
     assert_eq!(revision_response(WriteScopeRevisionResult::NotOpen).status, 409);
     assert_eq!(revision_response(WriteScopeRevisionResult::Malformed).status, 400);
     assert_eq!(revision_response(WriteScopeRevisionResult::Err { error: "disk".to_owned() }).status, 500);
+    // An empty section is the operator's envelope to fix, not a transport
+    // fault — the same 422 the malformed-surface refusal answers with.
+    let empty = revision_response(WriteScopeRevisionResult::EmptySection { section: "plan".to_owned() });
+    assert_eq!(empty.status, 422);
+    assert!(
+        String::from_utf8_lossy(&empty.body).contains("plan"),
+        "the refusal names the empty section: {:?}",
+        String::from_utf8_lossy(&empty.body)
+    );
     assert_eq!(approval_response(RecordCommissionApprovalResult::Stale).status, 409);
     assert_eq!(approval_response(RecordCommissionApprovalResult::NotOpen).status, 409);
     assert_eq!(approval_response(RecordCommissionApprovalResult::MissingRevision).status, 404);

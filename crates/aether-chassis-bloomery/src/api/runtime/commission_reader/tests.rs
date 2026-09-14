@@ -91,11 +91,17 @@ fn a_verified_row_materializes_the_workpiece_and_the_frozen_projection() {
     assert_eq!(admitted.workpiece.id.0, "wp-1");
     assert_eq!(admitted.workpiece.scope_revision, digest);
     assert_eq!(admitted.projection.declared_surface, ["docs/guide/**"]);
-    // The advisory body is the revision's own, and the surface block under it
-    // is rendered from `declared_surface` rather than trusted from the text: an
-    // amendment widens the field and carries the body forward unchanged, so the
-    // field is what the work order has to state.
-    assert_eq!(admitted.description, "advisory\n\n## Declared surface\n\ndocs/guide/**\n");
+    // Every section is rendered from its own signed field rather than trusted
+    // from the stored body: an amendment widens the surface field and carries
+    // the body forward unchanged, so the fields are what the work order has to
+    // state. The advisory summary is the heading and nothing more.
+    assert_eq!(
+        admitted.description,
+        "# advisory\n\n## Problem statement\n\nproblem\n\n## Design notes\n\ndesign\n\n## Implementation plan\n\nplan\
+         \n\n**Size:** M\n**Implementation model:** construct: test\n**Routing reason:** re-rendered from the stored \
+         revision, which carries no authored reason\n\n## Declared surface\n\ndocs/guide/**\n\n## Dogfood brief\
+         \n\ndogfood\n\n"
+    );
     assert!(admitted.projection.signed_statement.is_none(), "an auto row is not a signed statement");
 }
 
@@ -114,6 +120,32 @@ fn an_empty_description_is_refused_not_dispatched() {
             assert!(refusal.message().contains("empty description"), "{}", refusal.message());
         }
         other => panic!("expected empty description, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_empty_section_is_refused_naming_the_field() {
+    // Tripwire: the seal is the last door a revision written before the
+    // revision door's own check passes through. A member admitted with an empty
+    // section dispatches a lane holding a heading and no work order, which is
+    // the title-only construct run this check exists to stop.
+    let blanks: [(&str, fn(&mut ScopeRevision)); 3] = [
+        ("problem", |revision| revision.problem.clear()),
+        ("design", |revision| revision.design.clear()),
+        ("plan", |revision| revision.plan.clear()),
+    ];
+    for (section, blank) in blanks {
+        let mut incomplete = revision("wp-local", "Need a CLI.");
+        blank(&mut incomplete);
+        let digest = digest_of(&incomplete);
+        let error = admit(digest, loaded("wp-local", &incomplete, vec![auto_approval(digest)]))
+            .expect_err("an empty section must not admit");
+        match error {
+            AdmitError::Refused(refusal @ AdmissionRefusal::EmptySection { .. }) => {
+                assert!(refusal.message().contains(section), "{}", refusal.message());
+            }
+            other => panic!("expected an empty {section}, got {other:?}"),
+        }
     }
 }
 

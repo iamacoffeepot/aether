@@ -51,6 +51,20 @@ fn undirected_entry(workpiece: &str, surface: &[String]) -> Option<String> {
     })
 }
 
+/// The door's non-nullable-section refusal for one empty section.
+///
+/// The third refusal the lane can answer itself. `problem`, `design` and `plan`
+/// are what a construct prompt is rendered from, so every door that admits a
+/// revision refuses one that leaves any of them empty — and a lane that froze
+/// anyway would have spent a model run producing a work order with a heading
+/// and no body.
+pub(super) fn empty_section(workpiece: &str, section: &str) -> String {
+    format!(
+        "member {workpiece} scope revision section {section} is empty, which every door that admits a revision \
+         refuses: author it through the scoping call log so the frozen revision carries it",
+    )
+}
+
 /// A non-empty description for the frozen revision, or the finding that no
 /// source supplied one.
 ///

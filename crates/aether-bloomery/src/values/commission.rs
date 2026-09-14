@@ -137,6 +137,29 @@ pub struct ScopeRevision {
 }
 
 impl ScopeRevision {
+    /// The first section a lane cannot work without that this revision leaves
+    /// empty, named the way a door reports it.
+    ///
+    /// `problem`, `design` and `plan` are the three the construct prompt is
+    /// rendered from, so a revision missing one dispatches a lane with a
+    /// heading and no work order. That is exactly what happened on 2026-09-14:
+    /// the doors admitted revisions carrying a one-line title and nothing else,
+    /// and six members were built from titles before a lane declined rather
+    /// than guess. Checked at every door that admits a revision rather than
+    /// enforced by the type, because the field layout is signed bytes and a
+    /// shape change is a schema bump — the emptiness rule is a door rule, and
+    /// stored revisions keep decoding.
+    ///
+    /// `declared_surface` is not here: it has its own grammar refusal, which
+    /// names the offending glob rather than the empty field.
+    #[must_use]
+    pub fn empty_required_section(&self) -> Option<&'static str> {
+        [("problem", &self.problem), ("design", &self.design), ("plan", &self.plan)]
+            .into_iter()
+            .find(|(_, body)| body.trim().is_empty())
+            .map(|(name, _)| name)
+    }
+
     /// Decode canonical bytes as a version-1 revision.
     ///
     /// The leading `schema` field is read first so a version this binary does
