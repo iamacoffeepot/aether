@@ -127,7 +127,7 @@ mod partial_repair;
 
 mod strand;
 
-use strand::readopt_stranded_dispatches;
+use strand::{readopt_stranded_dispatches, retire_accounted_orders};
 
 mod study;
 use study::drain_and_dispatch_study;
@@ -3437,6 +3437,19 @@ fn observe_construct_work(
     admits
 }
 
+/// Retire orders the journal already accounts for, warning instead of failing
+/// the tick.
+///
+/// Issue 5980: a completion that reached the journal without spending its order,
+/// or a second completion reduced to a duplicate, leaves a submitted row that
+/// relaunches until the bloom lands. Retiring each turn keeps those nonces out
+/// of relaunch reach as new orphans appear; boot covers the ones already there.
+fn retire_accounted_orders_logged(store: &mut dyn StoreBackend) {
+    if let Err(error) = retire_accounted_orders(store) {
+        tracing::warn!(%error, "accounted-order retire failed; orphans re-check next turn");
+    }
+}
+
 /// One turn of the reactor's loop: drain + submit, sweep the lanes' writes,
 /// pull + admit, journal what the publisher answered, and hand every call this
 /// turn asked for to a worker.
@@ -3551,6 +3564,7 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
             Clocks { tick: &clock, now: now_unix_millis },
             correspondence.as_ref(),
         );
+        retire_accounted_orders_logged(store);
         // After the pull, because the verdict this pass reads is one the pull
         // just recorded: a scoping run's verdict lands on the commission store's
         // own ledger and has no `Fact` to ride, so the ledger is what says a run
@@ -3685,6 +3699,13 @@ impl NativeActor for ExecutorReactorCapability {
         // permanently parked. Re-queue those for the ordinary drain. A read
         // fault fails boot for the same reason the two above do.
         let restranded = readopt_stranded_dispatches(&mut store).map_err(|e| BootError::Other(Box::new(e)))?;
+        // Retire orders the journal already accounts for (issue 5980): a
+        // completion that reached the journal without spending its order, or a
+        // second completion reduced to a duplicate, leaves a submitted row with
+        // no tracked run that relaunches until the bloom lands. Consuming here
+        // puts those nonces out of relaunch reach at boot; the per-tick pass
+        // below keeps them retired as new orphans appear.
+        let retired = retire_accounted_orders(&mut store).map_err(|e| BootError::Other(Box::new(e)))?;
         // The fourth leg, and a scoping run's own (ADR-0208): a run that passed
         // while a binary without the freeze was deployed left its commission
         // with no revision, and its evidence is still on disk. A boot that
@@ -3711,6 +3732,7 @@ impl NativeActor for ExecutorReactorCapability {
             readopted = reconciled.readopted.len(),
             reclaimed = reconciled.reclaimed,
             requeued = restranded.len(),
+            retired = retired.len(),
             scopes_frozen = backfilled,
             "executor dispatch reactor mounted; polling the store for dispatch decisions",
         );

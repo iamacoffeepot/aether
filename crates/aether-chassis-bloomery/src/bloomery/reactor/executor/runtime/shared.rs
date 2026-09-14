@@ -2204,6 +2204,51 @@ fn retain_contextual_proof_reuse(
     Ok(Some(admits))
 }
 
+/// Retire scalar `Verify` orders a shared run already advances (issue 5980).
+///
+/// A member verified through a shared physical run advances off its lap via
+/// `Fact::SharedRunCompleted`, which carries no intake order to consume. A
+/// scalar `Verify` dispatched for the same member — the fallback when the
+/// shared request already existed — stays `submitted` with no tracked run
+/// behind it and relaunches until the bloom lands. Consuming those orphans
+/// here puts them out of relaunch reach; the shared steps themselves are
+/// already consumed via their receipt path, so only scalar rows match (shared
+/// steps carry a physical run, partial repairs their own ownership).
+fn retire_scalar_verifies_for_shared_completion(
+    store: &mut dyn StoreBackend,
+    bloom: BloomId,
+    dispatch: &SharedRunDispatch,
+) -> rusqlite::Result<()> {
+    let workpieces = dispatch.plan.requests.iter().map(|request| &request.member.workpiece).collect::<Vec<_>>();
+    for live in store.list_bloom_dispatch_live(bloom.0.as_bytes())? {
+        if !workpieces.iter().any(|workpiece| workpiece.0 == live.workpiece) {
+            continue;
+        }
+        let Ok(stage) = from_bytes::<StageId>(&live.stage) else {
+            continue;
+        };
+        if stage != StageId::Verify {
+            continue;
+        }
+        if store.shared_step_physical_run(&live.nonce)?.is_some() {
+            continue;
+        }
+        if store.partial_head_repair_for_nonce(&live.nonce)? {
+            continue;
+        }
+        if store.consume_order(&live.nonce)? {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %live.nonce,
+                workpiece = %live.workpiece,
+                "shared verification already advances this member; retiring its scalar verify order so it is not \
+                 relaunched",
+            );
+        }
+    }
+    Ok(())
+}
+
 fn replay_completion(
     store: &mut dyn StoreBackend,
     row: &SharedRunRow,
@@ -2239,6 +2284,12 @@ fn replay_completion(
     let completion = SharedRunCompletion { plan: dispatch.plan.digest(), run, outcomes, unfinished, latencies };
     let bloom = dispatch_bloom(&dispatch)
         .ok_or_else(|| rusqlite::Error::InvalidParameterName("shared run requests disagree on bloom".to_owned()))?;
+    // Retire scalar orphans this completion already advances (issue 5980). A
+    // fault warns and continues; the completion admit below is what must not
+    // be lost, and the per-tick accounted pass re-checks orphans next turn.
+    if let Err(error) = retire_scalar_verifies_for_shared_completion(store, bloom, &dispatch) {
+        tracing::warn!(%error, "scalar verify retire failed; orphans re-check next turn");
+    }
     let event = completion_event(bloom, completion);
     if store.journal_holds_any(from_ref(&event.idempotency_key.0))? {
         if matches!(executor.release_physical_run(&run), Settled::Answered(Ok(()))) {

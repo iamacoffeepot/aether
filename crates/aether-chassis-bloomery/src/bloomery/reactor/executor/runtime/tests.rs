@@ -35,7 +35,7 @@ use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::registry::Registry;
 
 use super::scope_freeze::ScopeFreeze;
-use super::strand::readopt_stranded_dispatches;
+use super::strand::{readopt_stranded_dispatches, retire_accounted_orders};
 use super::{
     BACKOFF_CAP, BaseSnapshotPort, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState,
     GitCandidatePush, NameEvidenceClaims, Stores, TickClock, TrackedHandle, admitted_candidate_pushes, backoff_delay,
@@ -3668,6 +3668,54 @@ fn a_dispatch_whose_admission_reached_the_journal_is_left_alone() {
         readopt_stranded_dispatches(&mut store).unwrap().is_empty(),
         "an accounted-for dispatch is complete, not stranded",
     );
+}
+
+// Issue 5980 — a completion that reached the journal without spending its
+// order, or a second completion reduced to a duplicate, leaves a submitted row
+// with no tracked run that relaunches until the bloom lands. Retiring
+// accounted-for orders puts those nonces out of relaunch reach.
+//
+// Catches the relaunch leaving the row behind: the stranding leg above
+// correctly reports an accounted-for dispatch as complete, not stranded — but
+// without this retire the submitted row stays for the next drain to launch
+// again, and the duplicate completion retires nothing.
+#[test]
+fn an_order_the_journal_already_accounts_for_is_retired_not_relaunched() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    let (sequence, _subject) = enqueue_dispatch_at(&mut store, bloom, "wp-reconcile", 5, StageId::Reconcile);
+    let (_handles, ack_through, _transient) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
+
+    let nonce = dispatch_nonce(sequence);
+    // The admission reached the journal without spending the order: the orphan
+    // shape — a path that advanced the member without running the intake
+    // consume, or a duplicate-reduced second completion.
+    store
+        .append_event(&JournalWrite {
+            idempotency_key: &AdmissionKey::Attempt.of(&nonce.0).0,
+            event: &[1],
+            decisions: &[2],
+            decider: "test-build",
+        })
+        .unwrap();
+    // A second, genuinely in-flight order must be left alone.
+    let (sequence_live, _subject) = enqueue_dispatch_at(&mut store, bloom, "wp-verify", 6, StageId::Verify);
+    let (_handles, ack_through, _transient) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    if let Some(through) = ack_through {
+        store.ack_topic(Topic::Dispatch, through).unwrap();
+    }
+    let live_nonce = dispatch_nonce(sequence_live);
+
+    assert_eq!(retire_accounted_orders(&mut store).unwrap(), vec![nonce.clone()], "the accounted-for order is retired");
+    assert!(store.lookup_order(&nonce.0).unwrap().is_none(), "no submitted row remains for relaunch");
+    assert!(
+        store.lookup_order(&live_nonce.0).unwrap().is_some(),
+        "an order the journal does not account for is left in flight",
+    );
+    assert!(readopt_stranded_dispatches(&mut store).unwrap().is_empty(), "the retired orphan is not stranded either");
 }
 
 // A dispatch the drain acked *without* ever submitting it — a retired plan, a
