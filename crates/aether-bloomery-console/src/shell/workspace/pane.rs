@@ -6,6 +6,7 @@ pub enum PaneId {
     Board,
     NeedsYou,
     Quiet,
+    Journal,
 }
 
 impl PaneId {
@@ -14,7 +15,8 @@ impl PaneId {
         match self {
             Self::Board => Self::NeedsYou,
             Self::NeedsYou => Self::Quiet,
-            Self::Quiet => Self::Board,
+            Self::Quiet => Self::Journal,
+            Self::Journal => Self::Board,
         }
     }
 
@@ -24,6 +26,7 @@ impl PaneId {
             Self::Board => "board",
             Self::NeedsYou => "needs you",
             Self::Quiet => "quiet",
+            Self::Journal => "journal",
         }
     }
 }

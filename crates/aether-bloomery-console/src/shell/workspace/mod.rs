@@ -1,4 +1,4 @@
-//! Root workspace: three bordered panes and one Tab-cycled focus ring.
+//! Root workspace: four bordered panes and one Tab-cycled focus ring.
 
 mod pane;
 
@@ -14,7 +14,7 @@ use crate::cursor::Cursor;
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
-use crate::screen::{Board, Dashboard, compose, quiet_lines};
+use crate::screen::{Board, Dashboard, Journal, compose, quiet_lines};
 use crate::store::{ResourceKey, Store};
 use crate::warroom::{self, DismissKey, Focus, NeedsYouRow};
 
@@ -29,9 +29,11 @@ const DISMISS_HINT: KeyHint = KeyHint { keys: "x", action: "dismiss" };
 const REFRESH_HINT: KeyHint = KeyHint { keys: "r", action: "refresh" };
 const QUIT_HINT: KeyHint = KeyHint { keys: "q", action: "quit" };
 
-/// The rest root: board on the left, needs-you over quiet on the right.
+/// The rest root: board on the left, needs-you over quiet on the right,
+/// live journal along the bottom.
 pub struct Workspace {
     board: Board,
+    journal: Journal,
     chrome: Cursor<Focus>,
     focus: PaneId,
     dismissed: HashSet<DismissKey>,
@@ -40,7 +42,13 @@ pub struct Workspace {
 impl Workspace {
     #[must_use]
     pub fn new() -> Self {
-        Self { board: Board::new(), chrome: Cursor::new(), focus: PaneId::Board, dismissed: HashSet::new() }
+        Self {
+            board: Board::new(),
+            journal: Journal::new(None),
+            chrome: Cursor::new(),
+            focus: PaneId::Board,
+            dismissed: HashSet::new(),
+        }
     }
 
     pub fn cycle(&mut self) {
@@ -67,7 +75,13 @@ impl Workspace {
 
     #[must_use]
     pub fn subscriptions(&self) -> Vec<ResourceKey> {
-        self.board.subscriptions()
+        let mut keys = self.board.subscriptions();
+        for key in self.journal.subscriptions() {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        keys
     }
 
     #[must_use]
@@ -76,6 +90,7 @@ impl Workspace {
         match self.focus {
             PaneId::Board => hints.extend_from_slice(self.board.key_hints()),
             PaneId::NeedsYou => hints.extend(self.needs_you_hints(store)),
+            PaneId::Journal => hints.extend_from_slice(Journal::key_hints()),
             PaneId::Quiet => {
                 hints.push(REFRESH_HINT);
                 hints.push(QUIT_HINT);
@@ -85,13 +100,22 @@ impl Workspace {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, store: &Store) -> Outcome {
+        if key.code == KeyCode::Char('l') && self.focus != PaneId::Journal {
+            self.focus = PaneId::Journal;
+            return Outcome::Handled;
+        }
         let outcome = match self.focus {
             PaneId::Board => self.board.handle_key(key, store),
             PaneId::NeedsYou => self.handle_needs_you(key, store),
+            PaneId::Journal => self.journal.handle_key(key, store),
             PaneId::Quiet => Outcome::Ignored,
         };
         match outcome {
             Outcome::Ignored => match key.code {
+                KeyCode::Esc if self.focus == PaneId::Journal => {
+                    self.focus = PaneId::Board;
+                    Outcome::Handled
+                }
                 KeyCode::Char('r') => Outcome::Refresh,
                 KeyCode::Char('q') => Outcome::Quit,
                 _ => Outcome::Ignored,
@@ -102,6 +126,7 @@ impl Workspace {
 
     pub fn reseat(&mut self, store: &Store) {
         self.board.reseat(store);
+        self.journal.reseat(store);
         let rows = needs_you_rows(store);
         self.dismissed.retain(|key| rows.iter().any(|row| row.dismiss_key() == *key));
         if let Some(id) = self.chrome.selected()
@@ -117,6 +142,7 @@ impl Workspace {
         self.render_board(frame, areas.board, store);
         self.render_needs_you(frame, areas.needs_you, store);
         self.render_quiet(frame, areas.quiet, store, &dashboard);
+        self.render_journal(frame, areas.journal, store);
     }
 
     fn handle_needs_you(&mut self, key: KeyEvent, store: &Store) -> Outcome {
@@ -242,24 +268,36 @@ impl Workspace {
         }
         frame.render_widget(chrome::quiet(&rest), chunks[3]);
     }
+
+    fn render_journal(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
+        let block = pane_block(PaneId::Journal.title(), self.focus == PaneId::Journal);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        self.journal.render(frame, inner, store);
+    }
 }
 
 struct PaneAreas {
     board: Rect,
     needs_you: Rect,
     quiet: Rect,
+    journal: Rect,
 }
 
 fn split_panes(area: Rect) -> PaneAreas {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .split(area);
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
+        .split(rows[0]);
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(columns[1]);
-    PaneAreas { board: columns[0], needs_you: right[0], quiet: right[1] }
+    PaneAreas { board: columns[0], needs_you: right[0], quiet: right[1], journal: rows[1] }
 }
 
 fn needs_you_rows(store: &Store) -> Vec<NeedsYouRow> {

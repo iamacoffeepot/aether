@@ -1,4 +1,4 @@
-//! Shell: endpoint, store, fetch lanes, a three-pane workspace, and pushed frames.
+//! Shell: endpoint, store, fetch lanes, a four-pane workspace, and pushed frames.
 //!
 //! Screens receive the store read-only and cannot fetch or mutate it.
 //! The header, rules, and one-line footer are shell chrome; the trail sits in
@@ -500,7 +500,7 @@ mod tests {
     use crate::nav::Nav;
     use crate::palette::{Role, depth};
     use crate::screen::{Dashboard, RowId};
-    use crate::store::{Cell, ResourceKey};
+    use crate::store::{Cell, JournalQuery, ResourceKey};
     use crate::warroom::Focus;
     use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
@@ -629,7 +629,11 @@ mod tests {
         assert!(bulk.contains(&ResourceKey::MetricsDays), "{bulk:?}");
         assert!(bulk.contains(&ResourceKey::MetricsDispatches), "{bulk:?}");
         assert!(bulk.contains(&ResourceKey::Spend), "{bulk:?}");
-        assert_eq!(bulk.len(), 4, "dashboard metrics must each have one inflight: {bulk:?}");
+        assert!(
+            bulk.contains(&ResourceKey::Journal(JournalQuery { live: true, ..JournalQuery::default() })),
+            "{bulk:?}"
+        );
+        assert_eq!(bulk.len(), 5, "dashboard metrics and the live journal each have one inflight: {bulk:?}");
     }
 
     #[test]
@@ -1503,6 +1507,8 @@ mod tests {
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
         assert_eq!(shell.focused_pane(), PaneId::Quiet);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
+        assert_eq!(shell.focused_pane(), PaneId::Journal);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
         assert_eq!(shell.focused_pane(), PaneId::Board);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('j'))), Outcome::Handled);
         assert_ne!(shell.board().cursor().selected().cloned(), board_start);
@@ -1520,6 +1526,7 @@ mod tests {
         assert_eq!(title_role(buffer, "board"), Role::Focus);
         assert_eq!(title_role(buffer, "needs you"), Role::Frames);
         assert_eq!(title_role(buffer, "quiet"), Role::Frames);
+        assert_eq!(title_role(buffer, "journal"), Role::Frames);
 
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
         terminal.draw(|frame| shell.render(frame)).expect("draw");
@@ -1527,6 +1534,7 @@ mod tests {
         assert_eq!(title_role(buffer, "board"), Role::Frames);
         assert_eq!(title_role(buffer, "needs you"), Role::Focus);
         assert_eq!(title_role(buffer, "quiet"), Role::Frames);
+        assert_eq!(title_role(buffer, "journal"), Role::Frames);
     }
 
     #[test]
@@ -1605,13 +1613,13 @@ mod tests {
     }
 
     #[test]
-    fn journal_filter_esc_leaves_edit_not_the_frame() {
+    fn journal_search_esc_leaves_edit_not_the_frame() {
         // The plausible bug: Esc is taken by the shell before the journal, so
-        // a filter edit cannot be cancelled without popping the frame.
+        // a search edit cannot be cancelled without popping the frame.
         let mut shell = Shell::showing(&ViewDocument::default(), None);
         shell.push_nav(Nav::journal(None));
         assert_eq!(shell.stack_depth(), 1);
-        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('f'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('/'))), Outcome::Handled);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Esc)), Outcome::Handled);
         assert_eq!(shell.stack_depth(), 1);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Esc)), Outcome::Handled);
@@ -1702,28 +1710,28 @@ mod tests {
     }
 
     #[test]
-    fn a_question_mark_still_types_into_the_journal_filter() {
+    fn a_question_mark_still_types_into_the_journal_search() {
         // The plausible bug: `?` is taken ahead of the screens, so it cannot
         // be typed into an editor the screen owns.
         let mut shell = Shell::showing(&parked_blooms(3), None);
         shell.push_nav(Nav::journal(None));
-        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('f'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('/'))), Outcome::Handled);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('?'))), Outcome::Handled);
-        assert!(!shell.keys_overlay, "the journal's filter editor owns the key");
+        assert!(!shell.keys_overlay, "the journal's search editor owns the key");
         let text = draw(&mut shell);
-        assert!(text.contains("filter  ?"), "typed ? missing from filter:\n{text}");
+        assert!(text.contains("/?"), "typed ? missing from search:\n{text}");
     }
 
     #[test]
-    fn journal_filter_types_i_while_the_queue_is_loud() {
+    fn journal_search_types_i_while_the_queue_is_loud() {
         // The plausible bug: i is taken by the interrupt band before the
-        // journal, so the letter cannot be typed into a filter.
+        // journal, so the letter cannot be typed into a search.
         let mut shell = Shell::showing(&parked_blooms(3), None);
         shell.push_nav(Nav::journal(None));
-        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('f'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('/'))), Outcome::Handled);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
         let text = draw(&mut shell);
-        assert!(text.contains("filter  i"), "typed i missing from filter:\n{text}");
+        assert!(text.contains("/i"), "typed i missing from search:\n{text}");
     }
 
     fn title_y(text: &str, title: &str) -> usize {
