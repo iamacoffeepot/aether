@@ -409,7 +409,9 @@ pub fn published(root: &Path) -> Vec<Published> {
 }
 
 /// Prune published snapshots down to `in_use` plus the newest `keep`,
-/// returning how many directories actually went.
+/// returning how many directories the store actually returned to the disk —
+/// pruned snapshots plus the transient staging and moved-aside directories an
+/// earlier pass or an abandoned clone left behind.
 ///
 /// The caller decides *when* — the janitor runs this between blooms or under
 /// disk pressure, and never while a bloom walks — and supplies `in_use`, the
@@ -422,7 +424,7 @@ pub fn published(root: &Path) -> Vec<Published> {
 /// directory.
 pub fn prune<S: BuildHasher>(root: &Path, keep: usize, in_use: &HashSet<String, S>) -> usize {
     let mut kept = 0;
-    let mut removed = 0;
+    let mut removed = reclaim_leftovers(root);
     for candidate in published(root) {
         if in_use.contains(&candidate.base) {
             continue;
@@ -443,6 +445,51 @@ pub fn prune<S: BuildHasher>(root: &Path, keep: usize, in_use: &HashSet<String, 
         }
     }
     removed
+}
+
+/// Delete the transient directories an earlier pass or an abandoned clone
+/// left under the snapshots root, returning how many went.
+///
+/// A moved-aside prune and a staged clone are both outside the `<base hex>`
+/// namespace [`published`] lists, so an unswept one is permanent *and*
+/// invisible — a whole target directory's worth of bytes the store cannot
+/// see. Runs at the head of every prune rather than inside the keep test,
+/// because a store already inside its keep bound is exactly the one that
+/// would otherwise hold them forever.
+///
+/// Strict about what it acts on: only a name this module minted, which is a
+/// staging prefix or a base-hex name plus the eviction marker and its stamp.
+/// Safe against a live publish's staging directory because the caller's gate
+/// already excludes one: a publish happens on a passed `verify.base`, which
+/// is an outstanding order, which is not a clear board.
+fn reclaim_leftovers(root: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(root) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !path.is_dir() || !is_own_leftover(name) {
+            continue;
+        }
+        if fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Whether `name` is one of this module's own transient directory names.
+fn is_own_leftover(name: &str) -> bool {
+    if let Some(rest) = name.strip_prefix(STAGING_PREFIX) {
+        return !rest.is_empty();
+    }
+    name.split_once(EVICTING_SUFFIX).is_some_and(|(base, stamp)| {
+        is_base_hex(base) && !stamp.is_empty() && stamp.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 /// The bases the slot targets under `target_base` currently derive from.
@@ -900,6 +947,23 @@ mod tests {
             HashSet::from([bases[0].clone(), bases[4].clone(), bases[3].clone()]),
             "the in-use base survives being the oldest",
         );
+    }
+
+    // A prune that cannot remove a snapshot leaves it moved aside, and a
+    // clone abandoned mid-stage leaves a staging directory. Both are outside
+    // the name space the store lists, so an unswept one is invisible bytes.
+    #[test]
+    fn a_prune_clears_the_stores_own_transient_leavings() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(SNAPSHOTS_DIR);
+        for name in [format!("{BASE}.evicting-1757000000000000000"), format!(".staging-{BASE}-1757000000000000000")] {
+            fs::create_dir_all(root.join(&name).join("debug")).unwrap();
+        }
+        // Not this module's: left alone whatever it is.
+        fs::create_dir_all(root.join("something-else")).unwrap();
+
+        assert_eq!(prune(&root, 3, &HashSet::new()), 2);
+        assert!(root.join("something-else").is_dir(), "the store removes only names it minted");
     }
 
     // The in-use set is read off the slot targets' own provenance.

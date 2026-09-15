@@ -118,8 +118,9 @@ pub struct SweepReport {
     /// measured everything both remove zero directories when the host is over
     /// budget with no free slot.
     pub targets_measured: usize,
-    /// Published target snapshots this pass removed (#6047). Removals, never
-    /// attempts.
+    /// Directories the target snapshot store returned to the disk this pass
+    /// (#6047) — snapshots pruned past the keep bound plus the store's own
+    /// transient leavings. Removals, never attempts.
     pub snapshots: usize,
 }
 
