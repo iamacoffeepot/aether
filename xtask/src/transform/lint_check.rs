@@ -173,7 +173,13 @@ impl Bar {
     /// receipt without a git repository or a package graph.
     fn of(packages: &[&str]) -> Self {
         let packages: Vec<String> = packages.iter().map(|name| (*name).to_owned()).collect();
-        let scope = Scope::Closure { packages: packages.clone(), skipped: Vec::new(), wasm_needed: false };
+        let scope = Scope::Closure {
+            packages: packages.clone(),
+            skipped: Vec::new(),
+            wasm_needed: false,
+            lock: None,
+            note: None,
+        };
         Self { scope, packages }
     }
 }
