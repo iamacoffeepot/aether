@@ -29,6 +29,7 @@ use std::fmt;
 
 use aether_bloomery::{Digest, WorkpieceId};
 
+use super::commission::CommissionError;
 use super::{AdrBackend, CommissionBackend, SqliteStore, StoreBackend, now_unix_millis};
 
 /// Key the point-lookup probes read under. Absent by construction, so each
@@ -283,7 +284,18 @@ impl SqliteStore {
                 tally.probe("commissions", CommissionBackend::load(self, &head.id));
                 tally.probe("commission_projections", CommissionBackend::load_projection(self, &head.id));
                 if let Some(tip) = head.current_revision {
-                    tally.probe("scope_revisions", CommissionBackend::load_revision(self, tip));
+                    // The tip is read the way boot reads it: `load_commission`
+                    // reports a tip whose canonical bytes no longer decode or
+                    // re-encode to their digest as `current_unreadable` rather
+                    // than refusing the commission, so the sweep tolerates the
+                    // same two value errors. Fifty-eight August commissions on
+                    // the fleet store carry such tips (2026-09-15); refusing
+                    // them here would fail a store the coordinator boots on.
+                    let tip_read = match CommissionBackend::load_revision(self, tip) {
+                        Err(CommissionError::MalformedCanonical | CommissionError::UnsupportedSchema(_)) => Ok(None),
+                        other => other,
+                    };
+                    tally.probe("scope_revisions", tip_read);
                     tally.probe("commission_approvals", CommissionBackend::load_approvals(self, tip));
                 }
             }
