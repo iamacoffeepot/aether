@@ -172,6 +172,8 @@ pub fn test_bloom(id: impl Into<Digest>, status: BloomStatus, members: Vec<Membe
         narrowed_compositions: Vec::new(),
         precheck: None,
         coordination: None,
+        recent_completions: Vec::new(),
+        base_verify: None,
     }
 }
 

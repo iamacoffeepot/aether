@@ -289,6 +289,8 @@ impl Default for BloomView {
             narrowed_compositions: Vec::new(),
             precheck: None,
             coordination: None,
+            recent_completions: Vec::new(),
+            base_verify: None,
         }
     }
 }

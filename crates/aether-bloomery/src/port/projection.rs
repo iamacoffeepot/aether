@@ -25,7 +25,7 @@ use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::reduce::{BloomStatus, RecordedRefusal};
 use crate::values::{
     CandidateRef, CompositionFinding, CoordinationState, Evidence, LandingReceipt, OperatorHold, PrecheckState,
-    ResolutionClaim, SpendQuiesce, SurfacePathRequest, VerifyFailureSet, Wedge,
+    ResolutionClaim, SharedRunMode, SpendQuiesce, SurfacePathRequest, VerifyFailureSet, Wedge,
 };
 
 /// The self-contained render input a reconcile pushes outward: the current
@@ -176,6 +176,101 @@ pub struct BloomView {
     /// proof freshness, and physical-run identity are derived from here.
     #[serde(default)]
     pub coordination: Option<CoordinationState>,
+    /// The bloom's recently completed shared-run orders, oldest first, bounded
+    /// to [`MAX_RECENT_COMPLETIONS`]. One row per member outcome of each
+    /// terminal run — the rows the progress channel's verify-step lines and
+    /// the console breakdown read, projected once here so both readers agree.
+    /// Empty for a bloom with no settled shared run. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
+    #[serde(default)]
+    pub recent_completions: Vec<CompletionRecord>,
+    /// The base-verify standing of the head this bloom sits on. `None` while
+    /// the bloom sealed onto a proven base — nothing started on its behalf —
+    /// or when no receipt has been observed yet for a proven one. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
+    #[serde(default)]
+    pub base_verify: Option<BaseVerifyView>,
+}
+
+/// How many completed orders [`BloomView::recent_completions`] retains per
+/// bloom: enough for the progress channel's verify-step lines and the console
+/// breakdown to read the latest runs, small enough that the view document
+/// stays a render input rather than a history.
+pub const MAX_RECENT_COMPLETIONS: usize = 8;
+
+/// One recently completed shared-run order: what one member's verification
+/// learned from one physical run.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct CompletionRecord {
+    /// The run plan's digest — the order's identity, joining the row to the
+    /// run in [`CoordinationState`] it came from.
+    pub nonce: Digest,
+    /// The member the order ran for.
+    pub member: WorkpieceId,
+    /// Which step of its run this order was, 1-based against the run's planned
+    /// request list. Projected here rather than counted off the bounded window
+    /// so a row whose run-mates have aged out of [`MAX_RECENT_COMPLETIONS`]
+    /// still reads — and keys — as the step it actually was.
+    pub step: u32,
+    /// How many steps the run planned, so the line reads "step 2 of 7" even
+    /// once only one of the seven is still in the window.
+    pub steps: u32,
+    /// The stage the order proved.
+    pub stage: StageId,
+    /// The physical shape that ran it — standalone, warm-serial, contextual.
+    pub mode: SharedRunMode,
+    /// The gate identities the order proved, in contract order; the failed
+    /// subset when [`CompletionVerdict::Failed`].
+    pub gates: Vec<String>,
+    /// What the order concluded.
+    pub verdict: CompletionVerdict,
+    /// How long the member's request ran, when the run reported it; `None`
+    /// when the journal carries no duration for the request.
+    pub duration_millis: Option<u64>,
+    /// The tree the order proved or captured, when it produced one.
+    pub tree: Option<Digest>,
+}
+
+/// What one shared-run order concluded.
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum CompletionVerdict {
+    /// The run proved the member's candidate.
+    Passed,
+    /// The run refused it, naming the failing gates.
+    Failed,
+    /// The run could not judge it — a host fault, not a verdict on the work.
+    Faulted,
+}
+
+/// The base-verify standing of the head a bloom sits on (ADR-0200): whether a
+/// `verify.base` run is still in flight, or what it concluded.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct BaseVerifyView {
+    /// The commit the verify ran at.
+    pub base: Digest,
+    /// The tree it peeled to, once observed; `None` while the run that would
+    /// peel it has produced no receipt yet.
+    pub tree: Option<Digest>,
+    /// Still in flight, or what it concluded.
+    pub verdict: BaseVerifyVerdict,
+    /// The gate names that failed together, in canonical identity order.
+    /// Empty unless [`BaseVerifyVerdict::Red`].
+    pub failed: Vec<String>,
+}
+
+/// Whether a base-verify run is still in flight, or what it concluded.
+///
+/// The in-flight arm is [`Self::Running`] rather than the reduced
+/// [`BaseVerdict`](crate::BaseVerdict)'s `Pending`: this is the render input a
+/// channel narrates from, and what it says of the arm is that the run started,
+/// which is the same word [`SharedRunPhase::Running`](crate::SharedRunPhase)
+/// already uses for a run in flight.
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum BaseVerifyVerdict {
+    /// A `verify.base` dispatch is outstanding; member entry is withheld.
+    Running,
+    /// The whole-workspace fan-out passed on this tree.
+    Green,
+    /// The whole-workspace fan-out failed; member entry stays withheld.
+    Red,
 }
 
 impl BloomView {
