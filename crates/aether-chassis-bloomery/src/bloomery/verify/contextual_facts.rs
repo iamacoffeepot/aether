@@ -8,8 +8,8 @@
 //! bound is the address — [`contextual_fact_key`], the exact candidate,
 //! ordered coverage, and complete contract, on the contract's host class — so
 //! one observation can never charge another tree; a later red still runs and
-//! attributes through probes, and [`reuse_contextual_proof`] journals every
-//! reuse as `Fact::ProofReused`.
+//! attributes through probes, and every reuse [`reuse_contextual_proof`]
+//! grants is journaled as `Fact::ProofReused`.
 
 use aether_bloomery::digest::{ContentAddressed, digest_of};
 use aether_bloomery::{CandidateRef, CompositionContract, Digest, MemberPin, SharedRunNode};
