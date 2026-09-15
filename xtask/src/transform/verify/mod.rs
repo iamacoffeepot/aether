@@ -31,6 +31,7 @@ use serde::Serialize;
 
 use crate::affected::graph::Workspace;
 use crate::cargo::{WASM_TARGET, run_captured, write_json_pretty};
+use crate::dist::cache::{self as dist_cache, CacheStatus};
 use crate::fixtures::annotate_findings;
 use crate::transform::peak_memory::{self, PeakMemory};
 use crate::transform::sccache::{self, CompilerCache, Counters};
@@ -2398,10 +2399,12 @@ fn effective_exit_code(passed: bool, exit_code: Option<i32>) -> i32 {
     }
 }
 
-/// Run `invocation`'s prepare step, when it has one. `None` is a member clear to
-/// run; `Some((log, exit_code, outcome))` is a prepare that failed, already framed
-/// as the member's log by [`prepare_failure_log`] and already charged to the
-/// candidate or to the host.
+/// Run `invocation`'s prepare step, when it has one. The failure half is `None`
+/// for a member clear to run and `Some((log, exit_code, outcome))` for a prepare
+/// that failed, already framed as the member's log by [`prepare_failure_log`]
+/// and already charged to the candidate or to the host. The status half is which
+/// side of the shared bundle cache a `cargo xtask dist` prepare landed on, when
+/// it said (#6052).
 fn run_prepare(
     id: &str,
     invocation: &VerifyInvocation,
@@ -2409,9 +2412,9 @@ fn run_prepare(
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
     prepared: bool,
-) -> Result<PrepareFailure> {
+) -> Result<(PrepareFailure, Option<CacheStatus>)> {
     let Some(prepare) = invocation.should_prepare(scope, prepared) else {
-        return Ok(None);
+        return Ok((None, None));
     };
 
     // The prepare cross-builds every component crate for wasm32 — the largest
@@ -2429,11 +2432,14 @@ fn run_prepare(
     // compile, so a prepare that *worked* is exactly the run whose peak the
     // concurrency model wants.
     let stderr = peak.take_report(output.stderr);
+    // Likewise for the cache status the prepare reported: a hit is exactly the
+    // run whose evidence has to say *why* the lane's largest compile was cheap.
+    let mut captured = String::from_utf8_lossy(&output.stdout).into_owned();
+    let bundle_cache = dist_cache::parse_status(&captured);
     if output.status.success() {
-        return Ok(None);
+        return Ok((None, bundle_cache));
     }
 
-    let mut captured = String::from_utf8_lossy(&output.stdout).into_owned();
     captured.push_str(&String::from_utf8_lossy(&stderr));
     // The pre-build is a cargo invocation like any other, and it fails the same
     // two ways: the candidate broke its own build, or a toolchain process under
@@ -2448,7 +2454,7 @@ fn run_prepare(
         Some(condition) => (MemberOutcome::Operational, format!("{}{framed}", host_fault_notice(id, condition))),
         None => (MemberOutcome::Failed, framed),
     };
-    Ok(Some((log, output.status.code().unwrap_or(1), outcome)))
+    Ok((Some((log, output.status.code().unwrap_or(1), outcome)), bundle_cache))
 }
 
 /// Wall-clock milliseconds since `started`, saturating at `u64::MAX` so a
@@ -2461,13 +2467,19 @@ fn elapsed_millis(started: Instant) -> u64 {
 /// charged to. `None` is clear to run.
 type PrepareFailure = Option<(String, i32, MemberOutcome)>;
 
-/// Prepare-step result plus its own wall-clock share.
+/// Prepare-step result plus what the gate receipt records about it.
 ///
-/// `(None, None)` is a member with no prepare to run — either it declares none,
-/// or its scope declined the one it declares. `(Some(log), Some(millis))` is a
-/// prepare that failed. `(None, Some(millis))` is a prepare that ran and left
-/// the member clear to run.
-type TimedPrepare = (PrepareFailure, Option<u64>);
+/// Every field `None` is a member with no prepare to run — either it declares
+/// none, or its scope declined the one it declares. A `millis` without a
+/// `failure` is a prepare that ran and left the member clear to run.
+struct TimedPrepare {
+    failure: PrepareFailure,
+    /// The prepare's own wall-clock share, so the wasm cross-build is not
+    /// lumped into the member it precedes.
+    millis: Option<u64>,
+    /// Which side of the shared bundle cache it landed on, when it said.
+    bundle_cache: Option<CacheStatus>,
+}
 
 /// Run `invocation`'s prepare step when its scope calls for one, and return that
 /// step's own wall-clock share so the gate receipt can split the wasm
@@ -2481,12 +2493,12 @@ fn run_timed_prepare(
     prepared: bool,
 ) -> Result<TimedPrepare> {
     if invocation.should_prepare(scope, prepared).is_none() {
-        return Ok((None, None));
+        return Ok(TimedPrepare { failure: None, millis: None, bundle_cache: None });
     }
 
     let started = Instant::now();
-    let failure = run_prepare(id, invocation, scope, cache, peak, prepared)?;
-    Ok((failure, Some(elapsed_millis(started))))
+    let (failure, bundle_cache) = run_prepare(id, invocation, scope, cache, peak, prepared)?;
+    Ok(TimedPrepare { failure, millis: Some(elapsed_millis(started)), bundle_cache })
 }
 
 /// The single mechanical-verify path: run the mapped command, capture
@@ -2565,7 +2577,10 @@ fn dispatch_single(
     peak: &PeakMemory,
 ) -> Result<MemberRun> {
     let schedule = TestSchedule::from_args(args);
-    if let Some((log, code, outcome)) = run_prepare(&args.command, invocation, scope, cache, peak, schedule.prepared)? {
+    // A lone gate writes no gate receipt, so its prepare's cache status has
+    // nowhere to be stamped; the `dist` run reported it on its own stdout.
+    let (prepare_failure, _) = run_prepare(&args.command, invocation, scope, cache, peak, schedule.prepared)?;
+    if let Some((log, code, outcome)) = prepare_failure {
         return Ok(MemberRun::plain(&args.command, outcome, log.into_bytes(), code));
     }
 
@@ -3043,10 +3058,11 @@ fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTim
     // Ahead of the prepare, not only of the run: `verify.test`'s prepare is the
     // wasm cross-build, the largest single compile in the lane, and a member
     // with an empty closure has nothing to load the wasm for.
-    let (run, prepare_millis) = if let Some(run) = empty_closure_run(id, &invocation, scope) {
-        (run, None)
+    let (run, prepare_millis, bundle_cache) = if let Some(run) = empty_closure_run(id, &invocation, scope) {
+        (run, None, None)
     } else {
-        let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, scope, cache, peak, false)?;
+        let TimedPrepare { failure: prepare_failure, millis: prepare_millis, bundle_cache } =
+            run_timed_prepare(id, &invocation, scope, cache, peak, false)?;
         let mut runner = SpawnRunner::new(id, cache, peak);
         // Read before the member runs, so the triage that follows a failure is
         // deciding against what earlier steps recorded rather than against the
@@ -3064,14 +3080,22 @@ fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTim
             )?,
         };
         runner.close_base();
-        (run, prepare_millis)
+        (run, prepare_millis, bundle_cache)
     };
     let duration_millis = elapsed_millis(gate_started);
 
     let log_path = logs.join(format!("{id}.log"));
     fs::write(&log_path, &run.log).with_context(|| format!("write {}", log_path.display()))?;
 
-    Ok((run, GateTiming { command: id.to_owned(), duration_millis, prepare_millis }))
+    Ok((
+        run,
+        GateTiming {
+            command: id.to_owned(),
+            duration_millis,
+            prepare_millis,
+            prepare_cache: bundle_cache.map(CacheStatus::as_str),
+        },
+    ))
 }
 
 /// What a lane thread carried out of a panic, as a line a caller can report.
@@ -4062,6 +4086,7 @@ mod tests {
                     command: String::from(SUPPRESS_MEMBER),
                     duration_millis: 812,
                     prepare_millis: None,
+                    prepare_cache: None,
                 }])
                 .with_selection(owned(&[SUPPRESS_MEMBER]));
         let rendered = serde_json::to_string(&evidence).expect("the envelope serializes");
@@ -4303,11 +4328,12 @@ mod tests {
         // prepare_millis: 0 on every gate that never prepared, which reads as
         // a free wasm cross-build rather than as "this gate has no prepare".
         let invocation = verify_command("verify.fmt").expect("verify.fmt mapped");
-        let (failure, prepare_millis) =
+        let prepared =
             run_timed_prepare("verify.fmt", &invocation, &Scope::resolve(None), None, &peak_memory::detect(), false)
                 .expect("a member with no prepare is a no-op");
-        assert!(failure.is_none());
-        assert!(prepare_millis.is_none(), "a gate that never prepared must not stamp a prepare share");
+        assert!(prepared.failure.is_none());
+        assert!(prepared.millis.is_none(), "a gate that never prepared must not stamp a prepare share");
+        assert!(prepared.bundle_cache.is_none(), "nor a bundle-cache verdict it never asked for");
     }
 
     #[test]
@@ -4799,7 +4825,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             }
             Ok((
                 MemberRun::plain(id, MemberOutcome::Passed, Vec::new(), 0),
-                GateTiming { command: id.to_owned(), duration_millis: 0, prepare_millis: None },
+                GateTiming { command: id.to_owned(), duration_millis: 0, prepare_millis: None, prepare_cache: None },
             ))
         })
         .expect("the fan-out collects every member");

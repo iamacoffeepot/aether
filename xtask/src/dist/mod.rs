@@ -5,12 +5,13 @@
 //! `target/` tree is still populated identically, so in-process scenario
 //! tests (which read `target/…`) are untouched.
 
+pub mod cache;
 mod freshness;
 mod manifest;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use cargo_metadata::MetadataCommand;
@@ -20,10 +21,12 @@ use crate::cargo::{
     Profile, WASM_TARGET, build_chassis, build_component, copy_artifact, host_binary_filename, wasm_artifact_path,
     write_json_pretty,
 };
+use crate::dist::cache::{BundleCache, CacheStatus};
+use crate::dist::freshness::BuildKey;
 use crate::dist::manifest::Manifest;
 use crate::inventory::{
-    BuildPlan, CHASSIS_BINS, behavior_build_plans, build_plans, discover_behavior_variants, discover_behaviors,
-    discover_components,
+    Behavior, BehaviorVariant, BuildPlan, CHASSIS_BINS, Component, behavior_build_plans, build_plans,
+    discover_behavior_variants, discover_behaviors, discover_components,
 };
 
 #[derive(Args)]
@@ -88,42 +91,25 @@ pub fn run(args: &DistArgs) -> Result<()> {
     // resolve twenty times over to be told so. The key is stamped only after
     // every build below succeeds, and it is cleared before the first one runs,
     // so an interrupted build leaves no stamp to be trusted.
+    //
+    // The same key addresses the host's shared bundle cache (see `cache`), so a
+    // slot with a cold target directory copies in what a sibling slot on the
+    // same tree already built rather than cross-building it a second time.
     let key = freshness::key(&metadata, args.profile, args.no_bins);
-    let fresh = key.as_ref().is_some_and(|key| freshness::is_current(key, &wasm_profile_dir, &built_artifacts));
-    if fresh {
-        println!("dist: sources unchanged since the last build; assembling dist/ from the artifacts on disk");
-    } else {
+    let bundle_cache = BundleCache::from_host();
+    let (fresh, cache_status) =
+        resolve_bundle(key.as_ref(), bundle_cache.as_ref(), target_dir, &wasm_profile_dir, &built_artifacts);
+    if !fresh {
         freshness::invalidate(&wasm_profile_dir);
-
-        // Build host-carrying variants FIRST (issue 2688): the feature build
-        // clobbers `<stem>.wasm`, so we copy it to `<stem>_behavior.wasm` and then
-        // let the stock component loop below rebuild `<stem>.wasm` lean. Only the
-        // behavior-host scenario loads the `_behavior` stem; every other kit
-        // consumer keeps the small stock wasm.
-        for variant in &variants {
-            let plan =
-                BuildPlan { package: variant.package.clone(), examples: false, features: variant.features.clone() };
-            build_component(&plan, args.profile)?;
-            let built = wasm_profile_dir.join(format!("{}.wasm", variant.stem));
-            let variant_stem = wasm_profile_dir.join(format!("{}_behavior.wasm", variant.stem));
-            fs::copy(&built, &variant_stem)
-                .with_context(|| format!("copy {} -> {}", built.display(), variant_stem.display()))?;
-        }
-
-        // Build each component package in its own cargo invocation — never
-        // batch multiple `-p`. See `inventory::build_plans`.
-        for plan in build_plans(&components) {
-            build_component(&plan, args.profile)?;
-        }
-        for plan in behavior_build_plans(&behaviors) {
-            build_component(&plan, args.profile)?;
-        }
-        if !args.no_bins {
-            build_chassis(args.profile)?;
-        }
+        build_bundle(args, &components, &behaviors, &variants, &wasm_profile_dir)?;
 
         if let Some(key) = key.as_ref() {
             freshness::record(key, &wasm_profile_dir);
+            // Published after the stamp, so the slot that paid for the build is
+            // the first one to benefit from it even if the publish is refused.
+            if let Some(bundle_cache) = bundle_cache.as_ref() {
+                bundle_cache.publish(key, target_dir, &built_artifacts);
+            }
         }
     }
 
@@ -179,7 +165,87 @@ pub fn run(args: &DistArgs) -> Result<()> {
         let stems: Vec<&str> = behaviors.iter().map(|b| b.stem.as_str()).collect();
         println!("dist: {} behavior script(s) built into target/: {}", stems.len(), stems.join(", "));
     }
+    // Last, so a caller reading the captured stream takes the marker of the run
+    // that actually decided the artifacts it is about to use.
+    if let Some(status) = cache_status {
+        println!("{}", cache::marker(status));
+    }
     Ok(())
+}
+
+/// Cross-build every component, behavior fixture and behavior-host variant, and
+/// the chassis binaries unless they were waived — the work a fresh key pays for.
+fn build_bundle(
+    args: &DistArgs,
+    components: &[Component],
+    behaviors: &[Behavior],
+    variants: &[BehaviorVariant],
+    wasm_profile_dir: &Path,
+) -> Result<()> {
+    // Build host-carrying variants FIRST (issue 2688): the feature build
+    // clobbers `<stem>.wasm`, so we copy it to `<stem>_behavior.wasm` and then
+    // let the stock component loop below rebuild `<stem>.wasm` lean. Only the
+    // behavior-host scenario loads the `_behavior` stem; every other kit
+    // consumer keeps the small stock wasm.
+    for variant in variants {
+        let plan = BuildPlan { package: variant.package.clone(), examples: false, features: variant.features.clone() };
+        build_component(&plan, args.profile)?;
+        let built = wasm_profile_dir.join(format!("{}.wasm", variant.stem));
+        let variant_stem = wasm_profile_dir.join(format!("{}_behavior.wasm", variant.stem));
+        fs::copy(&built, &variant_stem)
+            .with_context(|| format!("copy {} -> {}", built.display(), variant_stem.display()))?;
+    }
+
+    // Build each component package in its own cargo invocation — never
+    // batch multiple `-p`. See `inventory::build_plans`.
+    for plan in build_plans(components) {
+        build_component(&plan, args.profile)?;
+    }
+    for plan in behavior_build_plans(behaviors) {
+        build_component(&plan, args.profile)?;
+    }
+    if !args.no_bins {
+        build_chassis(args.profile)?;
+    }
+    Ok(())
+}
+
+/// Whether the bundle this run would build is already on disk, and where it came
+/// from — the checkout's own target directory, the host's shared cache, or
+/// nowhere, in which case this run builds it.
+///
+/// `None` for the status is a run the question cannot be asked of: the tree
+/// could not be keyed, so neither the local stamp nor the shared cache can be
+/// consulted and the build is unconditional.
+fn resolve_bundle(
+    key: Option<&BuildKey>,
+    bundle_cache: Option<&BundleCache>,
+    target_dir: &Path,
+    wasm_profile_dir: &Path,
+    built_artifacts: &[PathBuf],
+) -> (bool, Option<CacheStatus>) {
+    let Some(key) = key else {
+        return (false, None);
+    };
+    if freshness::is_current(key, wasm_profile_dir, built_artifacts) {
+        println!("dist: sources unchanged since the last build; assembling dist/ from the artifacts on disk");
+        return (true, Some(CacheStatus::Fresh));
+    }
+    let Some(bundle_cache) = bundle_cache else {
+        return (false, None);
+    };
+
+    // Cleared before the restore rather than after it: a restore that fails
+    // part-way leaves some artifacts from the cached bundle and some from
+    // whatever this target directory held, and no stamp may still vouch for
+    // that mixture. The build path clears it again, which costs nothing.
+    freshness::invalidate(wasm_profile_dir);
+    if !bundle_cache.restore(key, target_dir, built_artifacts) {
+        return (false, Some(CacheStatus::Miss));
+    }
+    println!("dist: restored this tree's wasm + chassis bundle from the shared cache; skipping the build");
+    freshness::record(key, wasm_profile_dir);
+    (true, Some(CacheStatus::Hit))
 }
 
 #[cfg(test)]

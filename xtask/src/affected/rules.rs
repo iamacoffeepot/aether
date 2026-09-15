@@ -12,8 +12,12 @@
 /// The xtask entries are the crate's manifest, the binary entry that
 /// dispatches every command, and the two helpers [`crate::affected`] and
 /// [`crate::dist`] share when they compute `run_all` / `wasm_needed` and
-/// produce the artifacts the suite reads. A change elsewhere in xtask
-/// resolves through the package graph like any other crate (#5928).
+/// produce the artifacts the suite reads. `build_wasm.rs` is the last of
+/// that class: it is [`crate::dist`] with the chassis binaries dropped, so
+/// it builds the component wasm every `require_wasm` gate opens by path and
+/// belongs here beside the `xtask/src/dist/` prefix below (#6055). A change
+/// elsewhere in xtask resolves through the package graph like any other
+/// crate (#5928).
 const RUN_ALL_EXACT: &[&str] = &[
     "Cargo.toml",
     "Cargo.lock",
@@ -24,6 +28,7 @@ const RUN_ALL_EXACT: &[&str] = &[
     "xtask/src/main.rs",
     "xtask/src/cargo.rs",
     "xtask/src/inventory.rs",
+    "xtask/src/build_wasm.rs",
 ];
 
 /// Directory prefixes with the same run-everything force as
@@ -86,6 +91,7 @@ mod tests {
             "xtask/src/inventory.rs",
             "xtask/src/affected/rules.rs",
             "xtask/src/dist/mod.rs",
+            "xtask/src/build_wasm.rs",
         ] {
             assert!(global_screen(&strings(&[path])).is_some(), "{path} must force run_all");
         }

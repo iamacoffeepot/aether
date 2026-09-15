@@ -48,8 +48,9 @@ mod reconcile;
 mod routing;
 
 pub use local::{
-    CaptureIdentity, CapturedObjects, LaneProgram, LocalExecutor, LocalExecutorError, OrphanedRun,
-    ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec, TransformRunner, admits_lane_key, mock_lane,
+    CaptureIdentity, CapturedObjects, CloneMode, LaneProgram, LocalExecutor, LocalExecutorError, OrphanedRun,
+    ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec, SlotWarmth, SnapshotStore, TransformRunner,
+    admits_lane_key, mock_lane, snapshot,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use local::{GroupAbsence, IDENTITY_RECORD, ProcessIdentity, strict_group_absence};
@@ -214,6 +215,10 @@ where
 
     fn release_physical_run(&self, physical_run: &Digest) -> Result<(), Self::Error> {
         self.0.release_physical_run(physical_run).map_err(Into::into)
+    }
+
+    fn reconcile_physical_run_leases(&self, live: &[Digest]) -> Result<(), Self::Error> {
+        self.0.reconcile_physical_run_leases(live).map_err(Into::into)
     }
 
     fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
@@ -420,6 +425,14 @@ impl ExecutorShell {
     /// Release a retained shared-run lane lease.
     pub fn release_physical_run(&self, physical_run: &Digest) -> Result<(), ExecutorPortError> {
         self.backend.release_physical_run(physical_run)
+    }
+
+    /// Release every retained lane lease whose physical run is not in `live`.
+    ///
+    /// # Errors
+    /// The backend's release faulted.
+    pub fn reconcile_physical_run_leases(&self, live: &[Digest]) -> Result<(), ExecutorPortError> {
+        self.backend.reconcile_physical_run_leases(live)
     }
 
     /// Stream the references to the run's uploaded evidence, filtered to the

@@ -74,8 +74,8 @@ pub use error::{
 };
 pub use event::{Event, Fact};
 pub use gate::{
-    AGGREGATE_REVIEW_GATE, AGGREGATE_VERIFY_GATE, DISPATCH_MEMBER_GATE, DRAFT_ADMISSION_GATE, FOLD_GATE, Gate,
-    LAND_GATE, Read, RecordedRead, RecordedRefusal, Refusal,
+    AGGREGATE_REVIEW_GATE, AGGREGATE_VERIFY_GATE, CONSTRUCTION_ADMISSION_GATE, DISPATCH_MEMBER_GATE,
+    DRAFT_ADMISSION_GATE, FOLD_GATE, Gate, LAND_GATE, Read, RecordedRead, RecordedRefusal, Refusal,
 };
 pub use outcome::{Decisions, Outcome};
 pub use seal::is_active_unlanded;

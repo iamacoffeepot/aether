@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 /// Member attempt dispatch: one member's entry into the line.
 ///
-/// The six names below are the operator-visible boundaries ADR-0206 fixes, and
+/// The names below are the operator-visible boundaries ADR-0206 fixes, and
 /// they are spelled once here because three separate readers agree on them —
 /// the boundary that mints a refusal, the fold that files it under its gate,
 /// and the `/why` projection that reads it back. Three string literals in three
@@ -31,6 +31,8 @@ pub const AGGREGATE_REVIEW_GATE: &str = "aggregate_review";
 pub const LAND_GATE: &str = "land";
 /// Draft admission: the pre-seal gate over one workpiece's scope revision.
 pub const DRAFT_ADMISSION_GATE: &str = "draft_admission";
+/// Construction admission: binding one queued authoring intent to a lane slot.
+pub const CONSTRUCTION_ADMISSION_GATE: &str = "construction_admission";
 
 /// One named value a guard consulted.
 #[derive(Clone, PartialEq, Eq, Debug)]

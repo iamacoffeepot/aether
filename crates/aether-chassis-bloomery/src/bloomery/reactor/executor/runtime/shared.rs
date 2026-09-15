@@ -208,16 +208,23 @@ pub(super) fn drain_shared_dispatches(
             .iter()
             .enumerate()
             .map(|(ordinal, request)| {
-                let queued = store.queued_member_verification(request.digest().as_bytes())?.map_or_else(
-                    || (now_unix_millis, logical_deadline(now_unix_millis, request)),
-                    |row| (row.queued_unix_millis, row.deadline_unix_millis),
-                );
+                // Queued when the member first asked to be proven, so latency
+                // still spans every attempt; due `wall_clock_secs` from *now*,
+                // because the sealed limit bounds the run, not the wait in
+                // front of it. Inheriting the queue row's deadline handed a
+                // serial run whatever budget the wait had already spent, and a
+                // request that outwaited its own clock produced a run with no
+                // eligible member at all: no step, no outcome, and a silent
+                // completion (#6053).
+                let queued_unix_millis = store
+                    .queued_member_verification(request.digest().as_bytes())?
+                    .map_or(now_unix_millis, |row| row.queued_unix_millis);
                 Ok(SharedRunMemberRow {
                     run: run.as_bytes().to_vec(),
                     request: request.digest().as_bytes().to_vec(),
                     ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
-                    queued_unix_millis: queued.0,
-                    deadline_unix_millis: queued.1,
+                    queued_unix_millis,
+                    deadline_unix_millis: logical_deadline(now_unix_millis, request),
                     cancelled: false,
                     outcome: None,
                     latency_millis: None,
@@ -414,7 +421,22 @@ pub(super) fn drain_construction_admissions(
     };
     let nonce = super::dispatch_nonce(entry.sequence);
     let dispatch_digest = payload.dispatch.digest();
-    if let Some(retained) = store.construction_admission(dispatch_digest.as_bytes())? {
+    let retained = store.construction_admission(dispatch_digest.as_bytes())?;
+    // A retired row must not outlive the intent that minted it. Coordination
+    // emits `QueueConstructionAdmission` only for a construction it still holds
+    // queued and unadmitted, so a fresh topic row naming a dispatch whose
+    // admission was retired is a live intent meeting a dead row — and acking it
+    // away is the second way a member is stranded in Construct with no order and
+    // no wedge (issue 6051). Reviving is bounded by the same thing that bounds
+    // the first admission: only the reducer mints topic rows, so nothing here
+    // re-asks on its own.
+    let revive = match &retained {
+        Some(retained) if retained.retired => {
+            scheduler.confirm_queued_construction(store, &payload.dispatch)? == Some(true)
+        }
+        _ => false,
+    };
+    if let Some(retained) = retained.filter(|_| !revive) {
         if retained.retired || retained.nonce != nonce.0 {
             // The admitted nonce is the one the journal already carries, so a
             // topic row naming a different one is superseded, not authoritative.
@@ -440,12 +462,21 @@ pub(super) fn drain_construction_admissions(
         }
         let wall_clock_millis = payload.dispatch.transformation.limits.wall_clock_secs.saturating_mul(1_000);
         let deadline_unix_millis = now_unix_millis.saturating_add(wall_clock_millis);
-        store.record_construction_admission(
-            dispatch_digest.as_bytes(),
-            &nonce.0,
-            now_unix_millis,
-            deadline_unix_millis,
-        )?;
+        if revive {
+            store.revive_construction_admission(
+                dispatch_digest.as_bytes(),
+                &nonce.0,
+                now_unix_millis,
+                deadline_unix_millis,
+            )?;
+        } else {
+            store.record_construction_admission(
+                dispatch_digest.as_bytes(),
+                &nonce.0,
+                now_unix_millis,
+                deadline_unix_millis,
+            )?;
+        }
     }
     let event = construction_admission_event(ConstructionAdmission {
         nonce: construction_nonce_digest(&nonce),
@@ -1632,6 +1663,66 @@ fn fold_serial_receipts(
     Ok(())
 }
 
+/// Record a host fault for every serial member whose own deadline passed
+/// without a step ever running for it.
+///
+/// [`next_initial_step`] will not start a member the clock has already run out
+/// on, so without this the run reaches its terminal scan with that member
+/// outcome-less and completes carrying an empty `outcomes` and the request in
+/// `unfinished` — a physical run that answered nothing about the member it was
+/// for, and a member left in `Verify` with no order and no diagnostic (#6053).
+/// [`MemberVerifyOutcome::HostFault`] is what the coordination reducer already
+/// understands for "the machinery, not the candidate, is why this did not
+/// settle": it re-queues inside the stage's retry budget and records a
+/// `CoordinationDiagnostic` once the budget is out. Cancelled members are the
+/// deliberate case and keep their own path.
+fn expire_unrun_serial_members(
+    store: &mut dyn StoreBackend,
+    row: &SharedRunRow,
+    dispatch: &SharedRunDispatch,
+    now_unix_millis: u64,
+) -> rusqlite::Result<()> {
+    let stepped =
+        store.shared_run_steps(&row.run)?.into_iter().filter_map(|step| step.request).collect::<BTreeSet<_>>();
+    for member in store.shared_run_members(&row.run)? {
+        // A member with a step of its own is answered for by that step: either
+        // its receipt is already folded, or `submit_step` writes the expiry
+        // receipt itself. Only a member no step was ever recorded for can reach
+        // the terminal scan with nothing said about it.
+        if member.cancelled
+            || member.outcome.is_some()
+            || stepped.contains(&member.request)
+            || member.deadline_unix_millis > now_unix_millis
+        {
+            continue;
+        }
+        let Some(request) =
+            dispatch.plan.requests.iter().find(|request| member.request.as_slice() == request.digest().as_bytes())
+        else {
+            continue;
+        };
+        let detail = Digest::of_wire_bytes(format!("expired:{}:{}", row.nonce, member.deadline_unix_millis).as_bytes());
+        let outcome = MemberVerifyOutcome::HostFault {
+            request: request.digest(),
+            evidence: Evidence { subject: request.member.candidate.tree, kind: EvidenceKind::ExecutorFault, detail },
+        };
+        tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            nonce = %row.nonce,
+            workpiece = %request.member.workpiece.0,
+            deadline_unix_millis = member.deadline_unix_millis,
+            "shared-run member never started inside its execution limit; recorded as a host fault",
+        );
+        store.record_shared_run_member_outcome(
+            &row.run,
+            &member.request,
+            &to_vec(&outcome).map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?,
+            now_unix_millis.saturating_sub(member.queued_unix_millis),
+        )?;
+    }
+    Ok(())
+}
+
 fn derive_batch_members(requests: &[(&MemberPin, bool)], inputs: &[CompositionInput]) -> Vec<BatchMember> {
     let mut atomic = BTreeMap::<WorkpieceId, BTreeSet<WorkpieceId>>::new();
     for input in inputs {
@@ -1864,12 +1955,22 @@ struct ContextualSettlement {
 /// The extent each member's ownership of a named path is read against
 /// (ADR-0218, amended 2026-09-15).
 ///
-/// The candidate's own delta against the composition base first: it is what the
-/// member actually wrote, so a member whose surface merely covers a path it
-/// never touched is not charged with it. The declared surface is the fallback
-/// for a source that cannot answer — a fixture backend that retains no objects,
-/// an unreadable delta — and the answer says which was used, because the two
-/// are not equally strong evidence.
+/// The candidate's own delta first: it is what the member actually wrote, so a
+/// member whose surface merely covers a path it never touched is not charged
+/// with it. The declared surface is the fallback for a source that cannot
+/// answer — a fixture backend that retains no objects, an unreadable delta —
+/// and the answer says which was used, because the two are not equally strong
+/// evidence.
+///
+/// That delta is read against the member's **own construct base** — the
+/// starting head its lane was handed, carried on the request's
+/// `ConstructContext` — and not against the composition's base (#6054). The
+/// composition base is the product head, which moves every time a sibling
+/// folds; a candidate authored before that fold does not descend from it, so
+/// `changed_paths` answered "changed-path base … is not an ancestor of …" for
+/// every member of every run after the first fold and attribution silently
+/// dropped to the coarse surface reading. The member's construct base is the
+/// tree its verify proves it against in the first place.
 fn member_extents(
     store: &mut dyn StoreBackend,
     source: Option<&SourceShell>,
@@ -1882,12 +1983,15 @@ fn member_extents(
             .requests
             .iter()
             .map(|request| {
+                let base = contextual_delta_base(request, composition);
                 source
-                    .changed_paths(&composition.base.candidate, &request.member.candidate)
+                    .changed_paths(base, &request.member.candidate)
                     .inspect_err(|error| {
                         tracing::info!(
                             target: "aether_chassis_bloomery::executor",
                             workpiece = %request.member.workpiece.0,
+                            base = %base.checkout.to_hex(),
+                            candidate = %request.member.candidate.checkout.to_hex(),
                             %error,
                             "contextual attribution: a candidate delta is unreadable; the declared surfaces stand in",
                         );
@@ -1916,24 +2020,43 @@ fn member_extents(
     Some(MemberExtents { source: ExtentSource::DeclaredSurface, members: surfaces })
 }
 
+/// The revision one member's candidate delta is read from: the head its own
+/// construct lane was handed (#6054).
+///
+/// The composition's base is the product head, and the product head moves every
+/// time a sibling folds. A candidate authored before that fold does not descend
+/// from it, so reading the delta against the composition base asks git for a
+/// range that does not exist and answers "changed-path base … is not an
+/// ancestor of …" — which is what bloom 9680c483 logged on every member of
+/// every run, dropping attribution to the coarse declared-surface reading.
+///
+/// The composition base stands in only for a request that carries no context at
+/// all, where there is nothing better to measure from.
+fn contextual_delta_base<'a>(
+    request: &'a aether_bloomery::MemberVerifyRequest,
+    composition: &'a aether_bloomery::CompositionPlan,
+) -> &'a aether_bloomery::CandidateRef {
+    request.context.as_ref().map_or(&composition.base.candidate, |context| &context.starting_head.candidate)
+}
+
 /// Attribute what the step-0 findings already answer, and hand back the checks
 /// that still need a probe (ADR-0218, amended 2026-09-15).
 ///
 /// Two readings, in order. A gate whose findings name paths that each belong to
-/// exactly one member charges those members and buys nothing. Then a *gate*
-/// red on a run with a single non-inherited member charges that member with
-/// whatever the findings left open: there is no other candidate in the
-/// composition, so a bisection over it can only re-derive the one answer
-/// available.
+/// exactly one member charges those members and buys nothing. Then a run with a
+/// single member charges that member with whatever the findings left open:
+/// there is no other candidate in the composition, so a bisection over it can
+/// only re-derive the one answer available.
 ///
-/// Two shapes are held back from that second reading, and both for the same
-/// reason — they are the shapes where the base, not the member, can be the
-/// cause. An inherited member keeps the bisection because
-/// [`BatchFailure::Inherited`] is the claim that a late member is not
-/// answerable for the head it started on. A named failing *test*
-/// ([`BatchCheck::Test`]) keeps it because a test can be red on the base
-/// already, and its baseline is one cheap exact question rather than a whole
-/// suite — the same reason the flake and legacy-excusal machinery reads it.
+/// That second reading used to hold back an inherited member and a named
+/// failing test, each on the argument that the base rather than the member can
+/// be the cause. Neither survives contact with a composition of one (#6054).
+/// Every contextual request carries a construct context, so "inherited"
+/// excluded every real run and the walk bisected a single member as a matter of
+/// course — bloom 9680c483's two red runs probed until their deadline and were
+/// recorded as expired rather than red. And a base-red test is answered
+/// upstream by the gate's own replay and the excusal ledgers, not by a
+/// whole-suite baseline this run would pay minutes for.
 fn attribute_from_findings(
     dispatch: &SharedRunDispatch,
     receipt: &SharedStepReceipt,
@@ -1942,7 +2065,7 @@ fn attribute_from_findings(
 ) -> (Vec<BatchFailure>, Vec<BatchCheck>, AttributionProvenance) {
     let sections = receipt.findings.as_deref().map(gate_findings).unwrap_or_default();
     let solitary = match dispatch.plan.requests.as_slice() {
-        [request] if request.context.is_none() => Some(request.member.workpiece.clone()),
+        [request] => Some(request.member.workpiece.clone()),
         _ => None,
     };
     let mut failures = Vec::new();
@@ -1970,7 +2093,7 @@ fn attribute_from_findings(
                         "contextual attribution: the findings do not discriminate; this gate bisects",
                     );
                 }
-                let Some(member) = solitary.clone().filter(|_| matches!(check, BatchCheck::Gate { .. })) else {
+                let Some(member) = solitary.clone() else {
                     remaining.push(check.clone());
                     continue;
                 };
@@ -2414,6 +2537,7 @@ fn finish_if_terminal(
     }
 
     fold_serial_receipts(store, row, dispatch, now_unix_millis)?;
+    expire_unrun_serial_members(store, row, dispatch, now_unix_millis)?;
     let members = store.shared_run_members(&row.run)?;
     if members
         .iter()
@@ -2635,6 +2759,18 @@ fn materialize_physical_charge(
     Ok(true)
 }
 
+/// Ask the executor to hand back the lane this terminal run retained.
+///
+/// Asked once, while the run is still uncharged, and never twice in one turn:
+/// the offloading port hands a call's answer to whichever caller asks for it
+/// first, so a second ask in the same turn reads [`Settled::InFlight`] and
+/// [`replay_completion`] — which gates the run's move to
+/// [`SharedRunLifecycle::Completed`] on a settled release — would never see an
+/// answer at all. What that leaves open is a release wanted on a round too
+/// busy to start it: the want is dropped when the round closes and this site
+/// has stopped asking. [`ExecutorPort::reconcile_physical_run_leases`] is the
+/// backstop for exactly that, so the retention is collected on a later turn
+/// rather than standing for the life of the process (#6053).
 fn release_terminal_physical_run(executor: &dyn ExecutorPort, row: &SharedRunRow) -> rusqlite::Result<bool> {
     let run = Digest::from_slice(&row.run)
         .ok_or_else(|| rusqlite::Error::InvalidParameterName("shared run identity is not a digest".to_owned()))?;
@@ -2717,7 +2853,20 @@ pub(super) fn drive_shared_runs(
 ) -> rusqlite::Result<Vec<Admit>> {
     let mut admits = Vec::new();
     let mut artifacts = artifacts;
-    for row in store.list_open_shared_runs()? {
+    let open = store.list_open_shared_runs()?;
+    // Before anything else this turn: a retained lane the store no longer has
+    // an open run for is a slot nobody will come back for, and it counts
+    // against the prover ceiling until it is handed back. Reconciling from the
+    // open set makes a missed release a one-turn delay rather than a stall that
+    // only a restart clears (#6053) — and the first turn after a boot is
+    // exactly the same reconciliation, so a process that came up holding
+    // nothing is the ordinary case of this rule, not an exception to it.
+    if let Err(error) = executor
+        .reconcile_physical_run_leases(&open.iter().filter_map(|row| Digest::from_slice(&row.run)).collect::<Vec<_>>())
+    {
+        tracing::warn!(%error, "retained-lane reconciliation will retry next turn");
+    }
+    for row in open {
         if row.lifecycle == SharedRunLifecycle::Preparing {
             continue;
         }
@@ -3002,9 +3151,9 @@ mod tests {
     use crate::store::{RecordOutcome, SqliteStore};
     use aether_bloomery::{
         AgentProfile, BackendId, CandidateRef, CompositionContract, CompositionInput, CompositionPlan, ConfigRegistry,
-        ContextualInvocationTemplate, ExecutionLimits, Harness, IntegrationHead, MemberContractPin, MemberPin,
-        MemberVerifyRequest, NetworkProfile, ObservedLaneWrites, ReasoningEffort, SharedRunNode, SharedRunPlan,
-        ToolPolicy, Transformation, VerificationContract, VerificationObligation, WorkOrder,
+        ConstructContext, ContextualInvocationTemplate, ExecutionLimits, Harness, IntegrationHead, MemberContractPin,
+        MemberPin, MemberVerifyRequest, NetworkProfile, ObservedLaneWrites, ReasoningEffort, SharedRunNode,
+        SharedRunPlan, ToolPolicy, Transformation, VerificationContract, VerificationObligation, WorkOrder,
     };
 
     struct ReleasePort {
@@ -3165,6 +3314,40 @@ mod tests {
             },
             plan,
         }
+    }
+
+    #[test]
+    fn a_members_delta_is_read_from_its_own_construct_base_not_the_moving_product_head() {
+        // Tripwire (#6054): the composition base is the product head, and a
+        // sibling's fold moves it past the tree this member's lane was given.
+        // Reading the delta from there asks git for a range whose base is not
+        // an ancestor of the candidate, which is the error bloom 9680c483
+        // logged on every member of every run — and the fallback it dropped to,
+        // the declared surface, is a permission rather than a record.
+        let dispatch = reducer_shaped_contextual_dispatch();
+        let composition = dispatch.plan.composition.as_ref().expect("a contextual plan carries its composition");
+        let started_on = CandidateRef {
+            tree: Digest::of_wire_bytes(b"pre-fold-tree"),
+            checkout: Digest::of_wire_bytes(b"pre-fold-checkout"),
+        };
+        let mut request = dispatch.plan.requests[0].clone();
+        request.context = Some(ConstructContext {
+            bloom_base: composition.base.candidate,
+            starting_head: IntegrationHead { candidate: started_on, ..composition.base.clone() },
+        });
+
+        assert_eq!(
+            *contextual_delta_base(&request, composition),
+            started_on,
+            "a member that started before the fold is measured from the head it started on",
+        );
+
+        request.context = None;
+        assert_eq!(
+            *contextual_delta_base(&request, composition),
+            composition.base.candidate,
+            "a request carrying no context has nothing better than the composition base",
+        );
     }
 
     fn step(request: Digest, ordinal: u32, completed: bool) -> SharedRunStepRow {

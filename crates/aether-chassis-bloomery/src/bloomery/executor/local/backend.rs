@@ -18,8 +18,8 @@ use aether_bloomery::{
     ExecutionStatus, ExecutorBackend, FoldContribution, LaneObservation, ModelProcessInstructions, Nonce,
     ObservedConstructionCheckpoint, ObservedLaneWrites, PipelineManifest, PriceTable, ResolvedModel, RetrospectClaim,
     SessionSlug, SharedCorrespondence, StageId, StageVerdict, StudyCost, SuppressionRequest, SurfaceRequest,
-    Transformation, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, config_address, is_model_lane,
-    narrow_composition,
+    Transformation, VERIFY_BASE_COMMAND, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, config_address,
+    is_model_lane, narrow_composition,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_git::source::{candidate_ref_name, partial_head_repair_ref_name};
@@ -47,6 +47,7 @@ use super::session_reuse::{
     MissReason, PredecessorCandidate, ResumeDecision, ReuseArm, SPLICED_RESET_NOTE, decide_predecessor_resume,
     decide_repair_resume, plan_for, usable_session_id,
 };
+use super::snapshot::{CloneMode, SnapshotStore};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::CoordinatorConfig;
 use crate::bloomery::KitReport;
@@ -289,6 +290,9 @@ struct Run {
     // containment gate reads `base..HEAD` from the slot checkout. `None` when
     // the order named none, or a re-adopted run whose base would not resolve.
     diff_base_hex: Option<String>,
+    // The base this run's slot target is published as the warm snapshot for
+    // when it passes (#6047). `Some` on `verify.base` only.
+    snapshot_base_hex: Option<String>,
 }
 
 /// What a failed start has to keep in order to be recorded as a host fault:
@@ -378,6 +382,7 @@ struct StreamedRun {
     slot: Option<usize>,
     affinity: SlotAffinity,
     diff_base_hex: Option<String>,
+    snapshot_base_hex: Option<String>,
 }
 
 struct ConstructionCheckpointTarget {
@@ -499,6 +504,12 @@ struct PendingRun {
     // a lane slot launches with less of its limit left than it was sealed
     // (#5998). `None` for a store-less backend, which has no order row.
     deadline_unix_millis: Option<u64>,
+    // The base commit this dispatch's slot target is published as the warm
+    // snapshot for when it passes (#6047). `Some` on `verify.base` and
+    // nothing else: that lane is the one build in the whole line that is
+    // always a full workspace build of a base, so its target is the only one
+    // worth keeping a copy of.
+    snapshot_base_hex: Option<String>,
 }
 
 impl PendingRun {
@@ -510,6 +521,7 @@ impl PendingRun {
         &'a self,
         worktree_dir: &'a Path,
         target_dir: &'a Path,
+        warm_from: Option<&'a SnapshotStore>,
         build_jobs: usize,
         resume: Option<&'a str>,
     ) -> RunSpec<'a> {
@@ -521,6 +533,7 @@ impl PendingRun {
             judged_tree_hex: self.judged_tree_hex.as_deref(),
             worktree_dir,
             target_dir,
+            warm_from,
             build_jobs,
             evidence_dir: &self.evidence_dir,
             nonce: &self.nonce,
@@ -691,6 +704,36 @@ impl Registry {
         self.leases.remove(&physical_run?)
     }
 
+    // Retain `physical_run`'s slot as a lease, freeing whatever slot the key
+    // already held. A `HashMap::insert` alone drops the displaced index on the
+    // floor: it leaves `slots`, so nothing can ever hand it out again, and the
+    // pool shrinks by one for the life of the process.
+    fn park_lease(&mut self, physical_run: Digest, slot: usize) {
+        if let Some(displaced) = self.leases.insert(physical_run, slot)
+            && displaced != slot
+        {
+            self.slots.remove(&displaced);
+        }
+    }
+
+    // Drop every lease whose physical run is absent from `live`, handing each
+    // slot back. The durable store's open runs are the whole truth about which
+    // retentions are still owed, so anything else here is a retention nobody
+    // will ever come back for.
+    fn reconcile_leases(&mut self, live: &HashSet<Digest>) -> Vec<(Digest, usize)> {
+        let stale = self
+            .leases
+            .iter()
+            .filter(|(physical_run, _)| !live.contains(*physical_run))
+            .map(|(physical_run, slot)| (*physical_run, *slot))
+            .collect::<Vec<_>>();
+        for (physical_run, slot) in &stale {
+            self.leases.remove(physical_run);
+            self.slots.remove(slot);
+        }
+        stale
+    }
+
     fn tracks(&self, nonce: &str) -> bool {
         self.runs.contains_key(nonce)
             || self.cancelling.contains_key(nonce)
@@ -823,6 +866,13 @@ pub struct LocalExecutor {
     // How many build jobs one lane's cargo invocations may run at once, exported
     // as `CARGO_BUILD_JOBS`. `0` leaves cargo's own default (one job per core).
     build_jobs: usize,
+    // The per-base warm target snapshot store (#6047): where a passed
+    // `verify.base` publishes its build, and where every lane start clones the
+    // warmth for its own base out of. `None` turns the store off — the seam
+    // default, and what a host that disables the knob gets; a dispatch then
+    // starts on whatever its slot happened to hold, which is the arrangement
+    // the store replaced.
+    snapshots: Option<SnapshotStore>,
     // The store the captured candidate's commit message is filed in, keyed by the
     // member the run's order names. `None` for a backend built without one (the
     // seam tests), which simply files nothing.
@@ -887,6 +937,7 @@ impl LocalExecutor {
             max_concurrent_lanes: usize::MAX,
             max_concurrent_provers: usize::MAX,
             build_jobs: DEFAULT_LANE_BUILD_JOBS,
+            snapshots: None,
             messages: None,
             sessions: None,
             builders,
@@ -910,6 +961,65 @@ impl LocalExecutor {
         self.target_base = usable_target_base(configured, &self.base_dir);
         self.build_jobs = build_jobs;
         self
+    }
+
+    /// Warm each lane slot from the per-base target snapshot store under the
+    /// lane target base (#6047), keeping `keep` snapshots past the bases the
+    /// slots are standing on and cloning with `mode`.
+    ///
+    /// Call after [`with_lane_build`](Self::with_lane_build): the store lives
+    /// beside the slot targets, so it is placed by whatever that resolved.
+    /// `enabled` false leaves the store off and every dispatch on the warmth
+    /// its slot happened to hold.
+    #[must_use]
+    pub fn with_target_snapshots(mut self, enabled: bool, keep: usize, mode: CloneMode) -> Self {
+        self.snapshots = enabled.then(|| SnapshotStore::new(&self.target_base, keep, mode));
+        self
+    }
+
+    /// Publish a passed base lane's slot target as the warm snapshot for the
+    /// base it built.
+    ///
+    /// Called on the run's terminal path while it still holds its slot, which
+    /// is the only window where the directory is both complete and idle: the
+    /// retire a few lines later hands the slot to the next dispatch, which
+    /// resets the checkout and builds.
+    ///
+    /// Best-effort. A publish that fails costs later dispatches a warm start
+    /// and costs this one nothing — the verdict is already decided, and the
+    /// slot target is never moved.
+    fn publish_base_snapshot(&self, slot: usize, base_hex: &str) {
+        let Some(store) = self.snapshots.as_ref() else {
+            return;
+        };
+        let target_dir = match self.slot_target_dir(slot) {
+            Ok(target_dir) => target_dir,
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    slot,
+                    %error,
+                    "snapshot store: a passed base lane's target directory could not be named; nothing published",
+                );
+                return;
+            }
+        };
+        match store.publish(&target_dir, base_hex) {
+            Ok(mode) => tracing::info!(
+                target: "aether_chassis_bloomery::executor",
+                base = base_hex,
+                slot,
+                ?mode,
+                "snapshot store: published the base's warm target; lanes on this base now start from it",
+            ),
+            Err(error) => tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                base = base_hex,
+                slot,
+                %error,
+                "snapshot store: could not publish the base's warm target; lanes keep their slots' own warmth",
+            ),
+        }
     }
 
     /// Cap how many model-lane children this backend runs at once.
@@ -1030,6 +1140,11 @@ impl LocalExecutor {
         .with_max_concurrent_lanes(config.max_concurrent_lanes)
         .with_max_concurrent_provers(config.concurrent_provers())
         .with_lane_build(&config.lane_target_base, config.lane_build_jobs)
+        .with_target_snapshots(
+            config.lane_snapshots_enabled,
+            config.lane_snapshot_keep,
+            CloneMode::parse(&config.lane_snapshot_clone_mode),
+        )
         .with_kit_gate(true)
         .with_lane_override(lane_override);
         let backend = match super::SessionReuse::from_config(session) {
@@ -1203,7 +1318,7 @@ impl LocalExecutor {
             return;
         };
         if let (Some(physical_run), false, Some(slot)) = (run.lease, run.release_lease, run.slot) {
-            registry.leases.insert(physical_run, slot);
+            registry.park_lease(physical_run, slot);
         } else {
             registry.release_slot(run.slot);
         }
@@ -1305,6 +1420,8 @@ impl LocalExecutor {
         let subject = evidence_subject(&order.transformation);
 
         Ok(PendingRun {
+            // Only the base lane publishes: see the field's own note.
+            snapshot_base_hex: (order.transformation.command == VERIFY_BASE_COMMAND).then(|| checkout_hex.clone()),
             selected_gates: order.selected_gates.clone(),
             entrypoint: self.sealed_entrypoint(&nonce),
             nonce,
@@ -1925,7 +2042,13 @@ impl LocalExecutor {
         }
         let resume = reuse.as_ref().and_then(|plan| plan.resume.clone());
         let affinity = SlotAffinity { preferred: pending.preferred, assigned: slot, reason };
-        let started = self.runner.start(&pending.spec(&worktree_dir, &target_dir, self.build_jobs, resume.as_deref()));
+        let started = self.runner.start(&pending.spec(
+            &worktree_dir,
+            &target_dir,
+            self.snapshots.as_ref(),
+            self.build_jobs,
+            resume.as_deref(),
+        ));
         let (started, reuse) = match (started, resume.as_deref()) {
             (Err(error), Some(_)) if start_failed_as_resume_reject(&error) => {
                 let mut reuse = reuse;
@@ -1935,7 +2058,16 @@ impl LocalExecutor {
                     plan.lease = None;
                     plan.miss = Some(MissReason::ResumeRefused);
                 }
-                (self.runner.start(&pending.spec(&worktree_dir, &target_dir, self.build_jobs, None)), reuse)
+                (
+                    self.runner.start(&pending.spec(
+                        &worktree_dir,
+                        &target_dir,
+                        self.snapshots.as_ref(),
+                        self.build_jobs,
+                        None,
+                    )),
+                    reuse,
+                )
             }
             (started, _) => (started, reuse),
         };
@@ -1963,6 +2095,7 @@ impl LocalExecutor {
                         reuse,
                         affinity,
                         diff_base_hex: pending.diff_base_hex,
+                        snapshot_base_hex: pending.snapshot_base_hex,
                     },
                 );
                 Ok(())
@@ -2044,6 +2177,7 @@ impl LocalExecutor {
                 reuse: None,
                 affinity: SlotAffinity::readopted(None),
                 diff_base_hex: None,
+                snapshot_base_hex: None,
             },
         );
     }
@@ -2118,6 +2252,18 @@ impl LocalExecutor {
         // function the dispatch resolved it with, so a re-adopted run points at
         // the tree its child is actually working in rather than at whichever
         // slot directory the index happens to name.
+        let checkout_hex = self
+            .correspondence
+            .resolve_backend_object(&dispatch.transformation.checkout)
+            .ok()
+            .flatten()
+            .map_or_else(String::new, |object| render_object_hex(&object));
+        // A base lane re-adopted at boot still publishes when it passes: the
+        // dispatch it is, not the process that launched it, is what decides
+        // whether its target is worth keeping (#6047).
+        let snapshot_base_hex = (dispatch.transformation.command == VERIFY_BASE_COMMAND && !checkout_hex.is_empty())
+            .then(|| checkout_hex.clone());
+
         registry.runs.insert(
             nonce.0.clone(),
             Run {
@@ -2125,12 +2271,8 @@ impl LocalExecutor {
                 slot,
                 worktree_dir: slot.and_then(|slot| self.checkout_dir(slug.as_ref(), slot).ok()),
                 starting_checkout: dispatch.transformation.checkout,
-                starting_checkout_hex: self
-                    .correspondence
-                    .resolve_backend_object(&dispatch.transformation.checkout)
-                    .ok()
-                    .flatten()
-                    .map_or_else(String::new, |object| render_object_hex(&object)),
+                starting_checkout_hex: checkout_hex,
+                snapshot_base_hex,
                 checkpoint_observation: 0,
                 last_checkpoint_unix_millis: 0,
                 last_checkpoint: None,
@@ -2785,6 +2927,7 @@ impl LocalExecutor {
             evidence_dir,
             slot,
             diff_base_hex,
+            snapshot_base_hex,
             ..
         } = run;
         let subject = parse_claimed_subject(bytes).unwrap_or(subject);
@@ -2849,6 +2992,14 @@ impl LocalExecutor {
         // the candidate arrive together and a lane that produced nothing cannot
         // leave a message behind for the next one.
         let passed = concluded && (!is_construct || candidate.is_some());
+        // A green whole-workspace build of a sealed base is the one tree the
+        // line produces that every other lane of that base could have started
+        // from (#6047). Publish it here, while the run still holds its slot:
+        // `retire` below hands that slot on, and the next dispatch resets and
+        // builds in it.
+        if let (true, Some(base), Some(slot)) = (passed, snapshot_base_hex.as_deref(), slot) {
+            self.publish_base_snapshot(slot, base);
+        }
         // A bound authored pass or failure keeps that verdict even when the
         // child later exited nonzero or was signalled: the evidence judged the
         // subject. A host observation only wins when the body is not a judgment.
@@ -3310,6 +3461,26 @@ impl ExecutorBackend for LocalExecutor {
         Ok(())
     }
 
+    fn reconcile_physical_run_leases(&self, live: &[Digest]) -> Result<(), Self::Error> {
+        let live = live.iter().copied().collect::<HashSet<_>>();
+        let stale = {
+            let mut registry = self.lock();
+            registry.reconcile_leases(&live)
+        };
+        for (physical_run, slot) in &stale {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                run = %physical_run.to_hex(),
+                slot,
+                "retained lane belonged to no open shared run; its slot is back in the pool",
+            );
+        }
+        if !stale.is_empty() {
+            self.pump();
+        }
+        Ok(())
+    }
+
     fn retain_partial_head_repair(
         &self,
         plan: &Digest,
@@ -3572,6 +3743,7 @@ impl ExecutorBackend for LocalExecutor {
                 slot: run.slot,
                 affinity: run.affinity.clone(),
                 diff_base_hex: run.diff_base_hex.clone(),
+                snapshot_base_hex: run.snapshot_base_hex.clone(),
             }
         };
         let host_fault = HostFaultCause::from_lifecycle(run.lifecycle);
@@ -4421,7 +4593,50 @@ mod tests {
 
     use aether_bloomery::{RETROSPECT_READ_COMMAND, SCOPE_FILL_COMMAND};
 
-    use super::{LaneGates, contextual_observation_bundle, parse_notes, usable_target_base};
+    use std::collections::HashSet;
+
+    use aether_bloomery::Digest;
+
+    use super::{LaneGates, Registry, contextual_observation_bundle, parse_notes, usable_target_base};
+
+    // Tripwire: `occupied` counts leases against the prover ceiling, so a
+    // reconcile that frees a live run's retention would hand its slot to a
+    // second dispatch building in the same checkout, and one that keeps a dead
+    // run's retention shrinks the pool for the life of the process — the
+    // fifteen-minute stall of #6053. The set the reconcile is given is the
+    // store's open runs; everything else is the answer being decided here.
+    #[test]
+    fn reconciling_retentions_frees_only_the_runs_the_store_no_longer_holds() {
+        let live = Digest::of_wire_bytes(b"live");
+        let dead = Digest::of_wire_bytes(b"dead");
+        let mut registry = Registry::default();
+        registry.park_lease(live, 0);
+        registry.park_lease(dead, 1);
+        registry.slots.insert(0);
+        registry.slots.insert(1);
+
+        assert_eq!(registry.reconcile_leases(&HashSet::from([live])), vec![(dead, 1)]);
+        assert_eq!(registry.leases.len(), 1, "the open run keeps the lane it is between steps of");
+        assert_eq!(registry.slots, HashSet::from([0]), "and only the dead run's slot returns to the pool");
+
+        assert!(registry.reconcile_leases(&HashSet::from([live])).is_empty(), "a second pass frees nothing twice");
+    }
+
+    // Tripwire: a step retiring onto a key that already holds a different slot
+    // used to drop the displaced index — out of `leases` by the insert, never
+    // out of `slots` — so the pool silently lost a lane per collision.
+    #[test]
+    fn parking_a_retention_over_another_hands_the_displaced_slot_back() {
+        let run = Digest::of_wire_bytes(b"run");
+        let mut registry = Registry::default();
+        registry.slots.insert(0);
+        registry.slots.insert(1);
+        registry.park_lease(run, 0);
+        registry.park_lease(run, 1);
+
+        assert_eq!(registry.leases.get(&run), Some(&1));
+        assert_eq!(registry.slots, HashSet::from([1]), "the slot the second retention displaced is free again");
+    }
 
     // Tripwire: the review lane writes its operator notes under the evidence's
     // top-level `notes`, and intake reads that channel to tell a critic that

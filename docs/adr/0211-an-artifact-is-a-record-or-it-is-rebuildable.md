@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-08-26
 - **Amended:** 2026-09-09 — status: implemented on `main`; the janitor's archive pass and `evidence_retention_days` are in `crates/aether-chassis-bloomery/src/bloomery/reactor/janitor/` (`1545680c5`).
+- **Amended:** 2026-09-15 — the cache class gains a second member: a per-base **target snapshot store**, published by `verify.base` and cloned into a lane slot before it builds (#6047). See *Amendment: the warm target snapshot store* below.
 
 ## Context
 
@@ -93,6 +94,80 @@ The stranded slot targets are the first application: an explicit
 between-blooms operator removal, clearing the bulk of the working volume's
 pressure, after confirming per-directory that no lane configuration still
 resolves them.
+
+## Amendment: the warm target snapshot store (2026-09-15, #6047)
+
+A slot's cargo target directory is warm for whatever the *previous* dispatch
+in that slot built. Across a fleet running many members against one day head
+that is a coin flip: on 2026-09-15 (bloom `9680c483`) the same nine-crate
+closure compiled in four minutes in a slot whose last build was the same day
+head and in fourteen in a slot whose last build was a stranger's tree, while
+two freshly created slots paid between seven and fourteen. `verify.base` at
+seal already performs the one build in the whole line that is always a full
+workspace build of the day head, and that target was discarded. The owner's
+instruction was *no more cold builds*.
+
+So the class gains a second member, on the same footing as the slot targets
+themselves. Under `<target_base>/snapshots/<base commit>` the coordinator
+keeps one cargo target directory per base:
+
+- **Published** by a passed `verify.base`, on the run's terminal path while it
+  still holds its slot. Publish clones the slot target into a staging
+  directory under the snapshots root and renames it into place; the slot
+  target is never moved, so the lane that produced the tree keeps its warmth.
+- **Cloned** into a slot at the start of every dispatch, between the checkout
+  reset and the `target` symlink — the one window where the build directory is
+  both named and idle. Which snapshot is *this* dispatch's base is answered by
+  git rather than by a digest threaded through the work order: a published
+  base is the right warmth for a checkout exactly when it is an **ancestor** of
+  it, so the resolution is `merge-base --is-ancestor` over the published bases
+  newest-first. A member candidate is committed on top of the sealed base, so
+  its base resolves; a `verify.base` re-run resolves to its own base.
+- **Left alone** when the slot already records that base in its
+  `.snapshot-source` file. A slot that derives from the base and has built
+  since is strictly warmer than the pristine snapshot, and re-cloning would
+  throw that away.
+- **Measured**: each dispatch writes a `snapshot.json` beside its evidence —
+  hit or miss, the base, whether it cloned, the clone's milliseconds, and the
+  mechanism.
+
+The clone is a clone, never a share. Cargo truncates fingerprint files and
+build stamps in place, so a slot that hardlinked its files from the published
+snapshot would rewrite that snapshot underneath every other slot cloning from
+it — the one thing this store must never allow. Reflink extents are
+copy-on-write and are therefore safe, so the default (`auto`) reflinks where
+the filesystem supports it (`cp --reflink=always`, or `cp -c` on APFS) and
+falls back to a **plain byte copy** where it does not, never to `cp -al`.
+`hardlink` remains reachable as an explicit operator setting for a host that
+has established its toolchain never rewrites in place; `reflink` refuses to
+fall back at all, so a cache tier that was supposed to reflink cannot silently
+start paying for hundreds of gigabytes of byte copying.
+
+**Pruning follows the janitor's existing scope, not a new one.** The store is
+a directory of cargo target directories: targets only, never a tree, never a
+session, never a record. Unlike the byte-budget eviction it is bounded by
+*count*, so it waits for a clear board — the prune runs only between blooms
+(`sweep`'s existing `between_blooms` gate), keeps every base a live slot
+target currently records, keeps the newest `lane_snapshot_keep` (default 3)
+beyond those, and removes the rest by the same move-aside-then-delete the slot
+eviction uses. Liveness is read off the slots' own provenance files rather
+than out of the journal, because the store is keyed by git commits while the
+journal's bases are domain digests; what actually predicts the next request
+for a snapshot is a slot standing on it.
+
+Three host knobs, all on the `AETHER_BLOOMERY_` prefix the other
+host-resource knobs use because they describe the machine rather than the
+GitHub connection: `AETHER_BLOOMERY_LANE_SNAPSHOTS` (on by default),
+`AETHER_BLOOMERY_LANE_SNAPSHOT_KEEP` (3), and
+`AETHER_BLOOMERY_LANE_SNAPSHOT_CLONE` (`auto`). Turning the store off restores
+the previous arrangement exactly: a dispatch starts on whatever its slot
+happened to hold.
+
+The cost is disk. A snapshot is the same order of magnitude as a slot target,
+which is why the store is deliberately shallow and why the keep bound is a
+count rather than a fraction of the budget. On a reflink filesystem the cost
+is far smaller than the count suggests, because a snapshot and every slot
+cloned from it share extents until one of them is written.
 
 ## Consequences
 

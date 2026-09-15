@@ -417,6 +417,23 @@ pub trait ExecutorBackend {
         Ok(())
     }
 
+    /// Release every retained warm lane whose physical run is not in `live`.
+    ///
+    /// A retained lane is held against a run the durable store still owns, so
+    /// the store's open runs are the whole truth about which retentions are
+    /// still owed. Reconciling against that set turns a missed release into a
+    /// bounded delay instead of a permanent one: on 2026-09-15 retentions left
+    /// behind by finished runs filled the prover pool and every shared-run
+    /// proposal was refused for capacity until the coordinator was restarted
+    /// (#6053). Backends that do not retain lanes have nothing to reconcile.
+    ///
+    /// # Errors
+    /// Backend-defined release failure.
+    fn reconcile_physical_run_leases(&self, live: &[Digest]) -> Result<(), Self::Error> {
+        let _ = live;
+        Ok(())
+    }
+
     /// Retain the captured result of a composition-owned partial-head repair
     /// under the immutable repair-plan identity before the reducer admits it.
     /// Backends without a private source namespace may leave the candidate in
