@@ -2523,8 +2523,10 @@ fn shared_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SharedRunRow
 /// member's own transformation, so each step already names its member. An
 /// undecodable record answers empty rather than failing the list — the coverage
 /// is a reach hint, and losing it must not blank the board's dispatch page.
-fn shared_run_coverage(record: &[u8]) -> Vec<String> {
-    serde_json::from_slice::<SharedRunDispatch>(record).map(|dispatch| dispatch.covered_members()).unwrap_or_default()
+/// `record` is the wire-encoded [`SharedRunDispatch`] the executor retained.
+#[must_use]
+pub fn shared_run_coverage(record: &[u8]) -> Vec<String> {
+    from_bytes::<SharedRunDispatch>(record).map(|dispatch| dispatch.covered_members()).unwrap_or_default()
 }
 
 fn shared_run_member_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SharedRunMemberRow> {

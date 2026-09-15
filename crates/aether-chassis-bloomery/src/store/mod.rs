@@ -135,7 +135,7 @@ pub use runtime::{
     ConstructionAdmissionRow, FlakeRow, IntakeRefusalRow, JournalOpenError, JournalWrite, OrderLifecycle,
     OutstandingOrder, PartialHeadRepairRow, ProofFactRow, ProofFactWrite, QueuedMemberVerificationRow, RecordOutcome,
     ScopeRunOpen, ScopeRunRow, ScopeVerdictRow, SealOutcome, SharedRunLifecycle, SharedRunMemberRow, SharedRunRow,
-    SharedRunStepRow, SqliteStore, StoreBackend, StoreCapabilityState, StudyRow, now_unix_millis,
+    SharedRunStepRow, SqliteStore, StoreBackend, StoreCapabilityState, StudyRow, now_unix_millis, shared_run_coverage,
 };
 
 #[cfg(all(test, feature = "runtime"))]

@@ -3148,7 +3148,7 @@ mod tests {
 
     use super::*;
     use crate::bloomery::executor::{ExecutorPortError, RunObservation};
-    use crate::store::{RecordOutcome, SqliteStore};
+    use crate::store::{RecordOutcome, SqliteStore, shared_run_coverage};
     use aether_bloomery::{
         AgentProfile, BackendId, CandidateRef, CompositionContract, CompositionInput, CompositionPlan, ConfigRegistry,
         ConstructContext, ContextualInvocationTemplate, ExecutionLimits, Harness, IntegrationHead, MemberContractPin,
@@ -3333,6 +3333,15 @@ mod tests {
         assert!(
             serial.covered_members().is_empty(),
             "a serial run executes each request's own transformation, so every member already has its own row"
+        );
+
+        // Tripwire: the store reads coverage back out of the retained record,
+        // and the two halves are in different modules. A decoder that does not
+        // match this encoder answers "covers nothing" on every row instead of
+        // failing, so the reach disappears silently.
+        assert_eq!(
+            shared_run_coverage(&to_vec(&dispatch).expect("the executor encodes the retained record")),
+            dispatch.covered_members(),
         );
     }
 
