@@ -296,6 +296,38 @@ impl Snapshot {
         self.base_receipts.get(&VerifiedTree { tree, gate_set })
     }
 
+    /// The green receipt that bound a real tree for `base` under `gate_set`,
+    /// when one is on record.
+    ///
+    /// [`Self::base_receipts`] is content-keyed and never pruned, while
+    /// [`Self::base_trees`] is a single-valued commit → tree index that every
+    /// `RecordBaseReceipt` rewrites — the checkout-as-tree spelling a pending
+    /// placeholder or a legacy host receipt files included. So the index can
+    /// point at the checkout digest while the receipt that proved the tree is
+    /// still on record, and a caller resolving a base's tree through the index
+    /// alone would hand out the checkout as the tree. The receipt is the
+    /// authority; the index is only the fast lookup path.
+    #[must_use]
+    pub fn proven_base_receipt(&self, base: Digest, gate_set: Digest) -> Option<&BaseReceipt> {
+        self.base_receipts.values().find(|receipt| {
+            receipt.base == base && receipt.tree != base && receipt.gate_set == gate_set && receipt.is_green()
+        })
+    }
+
+    /// The tree `base` resolves to under `gate_set`: the proven receipt's tree,
+    /// else the commit index, else `base` itself.
+    ///
+    /// The one place that answers "what tree is this base", so a coordinated
+    /// context and the seal that admitted it cannot read different trees for the
+    /// same commit.
+    #[must_use]
+    pub fn base_tree_for(&self, base: Digest, gate_set: Digest) -> Digest {
+        self.proven_base_receipt(base, gate_set)
+            .map(|receipt| receipt.tree)
+            .or_else(|| self.base_trees.get(&base).copied())
+            .unwrap_or(base)
+    }
+
     /// Stamp a green whole-workspace receipt for `base` — the test-and-fixture
     /// door that lets a scenario start from a proven tree without dispatching
     /// `verify.base`.
