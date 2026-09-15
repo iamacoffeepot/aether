@@ -692,6 +692,16 @@ pub struct BloomDispatchView {
     pub cost: Option<u64>,
     /// Whether `{nonce}-evidence` is still on disk.
     pub evidence_retained: bool,
+    /// Every member workpiece this one execution proves besides
+    /// [`workpiece`](Self::workpiece), empty when it proves only its own.
+    ///
+    /// A grouped (contextual) shared run is one dispatch keyed on the
+    /// composition that proves several members at once, so a reader filtering
+    /// this page by "equals my workpiece" finds nothing for the run that is
+    /// actually proving the member. The key is always written, so a reader that
+    /// finds it absent is talking to a coordinator that predates it and cannot
+    /// tell empty coverage from unknown coverage.
+    pub covers: Vec<String>,
 }
 
 /// `GET /dispatches/{nonce}` — one dispatch's evidence header.

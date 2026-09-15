@@ -3,7 +3,6 @@
 
 use aether_bloomery::{BloomId, Digest, MetricDispatch, StageId};
 use aether_bloomery_github::short_hex;
-use aether_data::wire::from_bytes;
 
 use super::proposal::{adjudications, roster, sections_for, title_for};
 use crate::store::StoreBackend;
@@ -54,7 +53,7 @@ fn lead(bloom: &BloomId, previous_base: &Digest, new_head: &Digest) -> String {
 fn stages_walked(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<Option<String>> {
     let mut groups: Vec<(String, Vec<StageId>)> = Vec::new();
     for row in store.list_bloom_dispatch_rollup(bloom.0.as_bytes())? {
-        let Ok(dispatch) = from_bytes::<MetricDispatch>(&row.payload) else {
+        let Ok(dispatch) = MetricDispatch::decode_payload(&row.payload) else {
             continue;
         };
         match groups.iter_mut().find(|(workpiece, _)| *workpiece == dispatch.workpiece) {

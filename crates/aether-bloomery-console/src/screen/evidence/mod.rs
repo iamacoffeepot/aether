@@ -169,7 +169,7 @@ impl Evidence {
 }
 
 fn gates_query(nonce: &str) -> DispatchFileQuery {
-    DispatchFileQuery { nonce: nonce.to_owned(), name: EVIDENCE_JSON.to_owned(), cursor: Some(0) }
+    DispatchFileQuery { nonce: nonce.to_owned(), name: EVIDENCE_JSON.to_owned(), cursor: Some(0), live: false }
 }
 
 fn open_file(nonce: &str, name: &str) -> Outcome {
@@ -311,7 +311,7 @@ mod tests {
         store.apply_dispatch(nonce.clone(), Ok(header));
         if let Some(body) = gates {
             store.apply_dispatch_file(
-                DispatchFileQuery { nonce, name: EVIDENCE_JSON.to_owned(), cursor: Some(0) },
+                DispatchFileQuery { nonce, name: EVIDENCE_JSON.to_owned(), cursor: Some(0), live: false },
                 Ok(DispatchFilePage {
                     lines: vec![body.to_owned()],
                     cursor: 0,
@@ -445,6 +445,7 @@ mod tests {
                     nonce: "dispatch-1".to_owned(),
                     name: EVIDENCE_JSON.to_owned(),
                     cursor: Some(0),
+                    live: false,
                 }),
             ]
         );

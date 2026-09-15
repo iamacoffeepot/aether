@@ -125,10 +125,10 @@ impl DispatchList {
         } else {
             palette::body()
         };
-        let header = Row::new(["NONCE", "STAGE", "ATTEMPT", "VERDICT", "COST", "RETAINED"])
+        let header = Row::new(["NONCE", "STAGE", "ATTEMPT", "VERDICT", "COST", "RETAINED", "PROVES"])
             .style(palette::body().add_modifier(Modifier::BOLD).patch(muted));
         let table_rows = if rows.is_empty() {
-            vec![Row::new(["dispatches  (empty)", "", "", "", "", ""]).style(muted)]
+            vec![Row::new(["dispatches  (empty)", "", "", "", "", "", ""]).style(muted)]
         } else {
             rows.iter()
                 .map(|row| {
@@ -143,11 +143,13 @@ impl DispatchList {
                         } else {
                             "swept"
                         }),
+                        Cell::from(row.coverage_label()),
                     ])
                     .style(muted)
                 })
                 .collect()
         };
+        let proves_width = rows.iter().map(|row| row.coverage_label().chars().count()).max().unwrap_or(0).max(6);
         let table = Table::new(
             table_rows,
             [
@@ -157,6 +159,7 @@ impl DispatchList {
                 Constraint::Length(12),
                 Constraint::Length(10),
                 Constraint::Length(8),
+                Constraint::Length(u16::try_from(proves_width).unwrap_or(u16::MAX)),
             ],
         )
         .style(palette::body())
@@ -174,7 +177,11 @@ impl DispatchList {
         let Some(page) = store.bloom_dispatches(self.bloom).and_then(|cell| cell.value.as_ref()) else {
             return Vec::new();
         };
-        page.dispatches.iter().filter(|row| row.workpiece == self.workpiece).cloned().collect()
+        // "Proves this workpiece", not "is keyed on it": a grouped shared run
+        // is one dispatch keyed on the composition that covers several members,
+        // and filtering on equality is what left every covered member's list
+        // empty while that run was the thing actually running.
+        page.dispatches.iter().filter(|row| row.proves(&self.workpiece)).cloned().collect()
     }
 
     fn selected_row_retained(&self, store: &Store) -> bool {
@@ -251,6 +258,77 @@ mod tests {
         assert!(text.contains("kept"), "{text}");
         assert!(!text.contains("dispatch-other"), "{text}");
         assert!(!text.contains("Verify"), "{text}");
+    }
+
+    fn shared_page(covers: Option<Vec<String>>) -> BloomDispatchesView {
+        BloomDispatchesView {
+            dispatches: vec![
+                BloomDispatchView {
+                    nonce: "dispatch-9".to_owned(),
+                    workpiece: "wp-a".to_owned(),
+                    stage: StageId::Construct,
+                    attempt: 1,
+                    evidence_retained: true,
+                    covers: covers.clone().map(|_| Vec::new()),
+                    ..BloomDispatchView::default()
+                },
+                BloomDispatchView {
+                    nonce: "dispatch-9-step-0".to_owned(),
+                    workpiece: "aether.bloomery.composition".to_owned(),
+                    stage: StageId::AggregateVerify,
+                    attempt: 1,
+                    evidence_retained: true,
+                    covers,
+                    ..BloomDispatchView::default()
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_member_reaches_the_shared_run_proving_it() {
+        // The plausible bug (issue 6071): the list filters on "workpiece equals
+        // mine", so the step dispatch of the grouped verify that is actually
+        // running — keyed on the composition — never appears, and the member's
+        // lane log, gate logs and transcript stay unreachable from the board.
+        let bloom = digest(1);
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_bloom_dispatches(bloom, Ok(shared_page(Some(vec!["wp-a".to_owned(), "wp-b".to_owned()]))));
+        let mut list = DispatchList::new(bloom, "wp-b");
+        list.reseat(&store);
+        assert_eq!(
+            list.handle_key(KeyEvent::from(KeyCode::Enter), &store),
+            Outcome::Push(Nav::evidence("dispatch-9-step-0")),
+            "the covered member opens the run proving it, not its own empty history"
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 8)).expect("test backend");
+        terminal.draw(|frame| list.render(frame, frame.area(), &store)).expect("draw");
+        let text: String = terminal.backend().buffer().content().iter().map(Cell::symbol).collect();
+        assert!(text.contains("wp-a  wp-b"), "the row names what it proves: {text}");
+        assert!(!text.contains("dispatch-9 "), "wp-b does not inherit wp-a's own attempt: {text}");
+    }
+
+    #[test]
+    fn a_coordinator_without_coverage_falls_back_to_equality_and_says_so() {
+        // The plausible bug: a predating coordinator serves no `covers`, and
+        // reading absent coverage as empty coverage silently reports every row
+        // as proving only itself — a claim the console cannot make.
+        let bloom = digest(1);
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_bloom_dispatches(bloom, Ok(shared_page(None)));
+        let mut list = DispatchList::new(bloom, "wp-b");
+        list.reseat(&store);
+        assert_eq!(
+            list.handle_key(KeyEvent::from(KeyCode::Enter), &store),
+            Outcome::Handled,
+            "with coverage unknown the member falls back to its own rows, and it has none"
+        );
+        let mut own = DispatchList::new(bloom, "wp-a");
+        own.reseat(&store);
+        let mut terminal = Terminal::new(TestBackend::new(120, 8)).expect("test backend");
+        terminal.draw(|frame| own.render(frame, frame.area(), &store)).expect("draw");
+        let text: String = terminal.backend().buffer().content().iter().map(Cell::symbol).collect();
+        assert!(text.contains("unknown"), "the row says coverage is unknown: {text}");
     }
 
     #[test]

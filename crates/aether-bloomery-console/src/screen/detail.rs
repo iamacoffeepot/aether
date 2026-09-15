@@ -11,16 +11,29 @@ use ratatui::widgets::{List, ListItem, ListState};
 
 use crate::cursor::Cursor;
 use crate::dto::{
-    BloomStatus, BloomView, CompositionFinding, CompositionView, DigestHex, MemberView, StageId, ViewDocument,
+    BloomStatus, BloomView, CompositionFinding, CompositionView, DigestHex, JournalRecordView, MemberView, StageId,
+    ViewDocument,
 };
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
-use crate::store::{JournalQuery, ResourceKey, Store};
+use crate::store::{DispatchFileQuery, JournalQuery, JournalScope, ResourceKey, Store};
 use crate::warroom::Focus;
 
 use super::board::member_status_state;
 use super::filed::{FiledRow, filings, read_receipt};
+use super::journal_meaning;
+
+/// The lane log a dispatch writes while it runs.
+const LANE_LOG: &str = "lane.log";
+
+/// How many of a member's journal records the detail frame carries. The whole
+/// slice lives one key away on the journal screen; this is the recent history
+/// the derived summary below it has to be read against.
+const JOURNAL_TAIL: usize = 12;
+
+/// How many trailing lane-log lines the detail frame carries.
+const LANE_TAIL: usize = 12;
 
 const HINTS: &[KeyHint] = &[
     KeyHint { keys: "j/k", action: "select" },
@@ -47,6 +60,10 @@ pub enum RowKey {
     Dispatch,
     Transcript(String),
     Filing(String),
+    /// One journal record in the member's slice, keyed on its sequence.
+    Record(u64),
+    /// One line of the proving dispatch's lane log, keyed on its position.
+    Lane(u16),
     Other(u16),
 }
 
@@ -75,6 +92,10 @@ pub struct Detail {
     /// commission list, and only a landed bloom can have been read at all, so
     /// the subscription follows the status rather than the focus.
     landed: bool,
+    /// The dispatch currently proving the member under this frame, learned from
+    /// the last rebuild. The lane-log follow subscribes to it, so the tail can
+    /// only be asked for once the dispatch page naming it has landed.
+    proving: Option<String>,
 }
 
 impl Detail {
@@ -89,6 +110,7 @@ impl Detail {
             last: HashMap::new(),
             flashed: HashSet::new(),
             landed: false,
+            proving: None,
         }
     }
 
@@ -120,6 +142,16 @@ impl Detail {
         {
             keys.push(ResourceKey::Journal(JournalQuery { bloom: Some(*id), ..JournalQuery::default() }));
             keys.push(ResourceKey::Commissions);
+        }
+        // A member frame reads like the journal screen does: the raw records
+        // naming this member, and the log the dispatch proving it is writing
+        // right now. Both follow, so the frame moves while the operator watches.
+        if let Focus::Member { bloom, .. } | Focus::Dispatch { bloom, .. } = &self.focus {
+            keys.push(ResourceKey::Journal(member_journal_query(*bloom)));
+            keys.push(ResourceKey::BloomDispatches(*bloom));
+            if let Some(nonce) = &self.proving {
+                keys.push(ResourceKey::DispatchFile(lane_query(nonce)));
+            }
         }
         keys
     }
@@ -303,10 +335,25 @@ impl Detail {
             | Focus::Workpiece { .. } => false,
         };
 
+        self.proving = match &self.focus {
+            Focus::Member { bloom, workpiece } | Focus::Dispatch { bloom, workpiece } => {
+                proving_dispatch(store, *bloom, workpiece)
+            }
+            Focus::Bloom { .. }
+            | Focus::Composition { .. }
+            | Focus::Seal
+            | Focus::Record { .. }
+            | Focus::Artifact { .. }
+            | Focus::Transcript { .. }
+            | Focus::Evidence { .. }
+            | Focus::EvidenceFile { .. }
+            | Focus::Workpiece { .. } => None,
+        };
+
         self.lines = match &self.focus {
             Focus::Bloom { id } => bloom_lines(view, store, *id),
             Focus::Member { bloom, workpiece } | Focus::Dispatch { bloom, workpiece } => {
-                member_lines(view, *bloom, workpiece)
+                member_lines(view, store, *bloom, workpiece, self.proving.as_deref())
             }
             Focus::Composition { bloom } => composition_lines(view, *bloom),
             Focus::Seal => seal_lines(view),
@@ -516,11 +563,121 @@ fn push_finding(lines: &mut Vec<Line>, finding: &CompositionFinding, index: usiz
     lines.push(digest_line(RowKey::Digest(finding.detail), "  detail", finding.detail));
 }
 
-fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<Line> {
+/// The query the member frame follows this bloom's journal with.
+fn member_journal_query(bloom: DigestHex) -> JournalQuery {
+    JournalQuery { bloom: Some(bloom), live: true, ..JournalQuery::default() }
+}
+
+/// The query the member frame follows one dispatch's lane log with.
+fn lane_query(nonce: &str) -> DispatchFileQuery {
+    DispatchFileQuery { nonce: nonce.to_owned(), name: LANE_LOG.to_owned(), cursor: None, live: true }
+}
+
+/// The dispatch proving this member right now — the newest row on the bloom's
+/// dispatch page that covers it, a grouped shared run's step included.
+fn proving_dispatch(store: &Store, bloom: DigestHex, workpiece: &str) -> Option<String> {
+    store
+        .bloom_dispatches(bloom)?
+        .value
+        .as_ref()?
+        .dispatches
+        .iter()
+        .rev()
+        .find(|row| row.proves(workpiece) && row.evidence_retained)
+        .map(|row| row.nonce.clone())
+}
+
+/// The records in this bloom's loaded journal that name `workpiece`, oldest
+/// first.
+///
+/// `member_name` reads the fact's own member field; a shared-run fact names
+/// several members in its plan and none in that field, so a raw mention of the
+/// workpiece counts too. Both are the record's own text, not a derivation.
+fn member_records<'a>(store: &'a Store, bloom: DigestHex, workpiece: &str) -> Vec<&'a JournalRecordView> {
+    let scope = JournalScope { bloom: Some(bloom), contains: None };
+    let Some(archive) = store.journal_archive(&scope) else {
+        return Vec::new();
+    };
+    archive
+        .rows()
+        .iter()
+        .filter(|record| {
+            journal_meaning::member_name(record) == workpiece
+                || serde_json::to_string(&record.event).is_ok_and(|text| text.contains(workpiece))
+        })
+        .collect()
+}
+
+/// The member's own journal slice, sequence-stamped, above everything derived.
+///
+/// Each row opens its record, so a derived word below can be checked against
+/// the fact it was reduced from without leaving for the journal screen. Empty
+/// until a journal page for this bloom has landed, and the section disappears
+/// entirely rather than rendering an empty heading.
+fn push_journal_slice(lines: &mut Vec<Line>, bloom: DigestHex, records: &[&JournalRecordView]) {
+    if records.is_empty() {
+        return;
+    }
+    lines.push(Line {
+        key: RowKey::Other(500),
+        text: format!("journal  {} loaded records", records.len()),
+        enter: Some(Nav::journal(Some(bloom))),
+        digest: None,
+        openable: false,
+    });
+    for record in records.iter().rev().take(JOURNAL_TAIL).rev() {
+        lines.push(Line {
+            key: RowKey::Record(record.sequence),
+            text: format!("  {}", journal_meaning::rendered_line(record)),
+            enter: Some(Nav::focus(Focus::record(record.sequence))),
+            digest: None,
+            openable: false,
+        });
+    }
+}
+
+/// The tail of the lane log the proving dispatch is writing.
+fn push_lane_tail(lines: &mut Vec<Line>, store: &Store, nonce: Option<&str>) {
+    let Some(nonce) = nonce else {
+        return;
+    };
+    lines.push(Line {
+        key: RowKey::Dispatch,
+        text: format!("proving  {nonce}"),
+        enter: Some(Nav::evidence(nonce)),
+        digest: None,
+        openable: false,
+    });
+    let Some(page) = store.dispatch_file(&lane_query(nonce)).and_then(|cell| cell.value.as_ref()) else {
+        return;
+    };
+    let tail = page.lines.len().saturating_sub(LANE_TAIL);
+    for (row, text) in (0u16..).zip(page.lines[tail..].iter()) {
+        lines.push(label(RowKey::Lane(row), format!("  {text}")));
+    }
+}
+
+/// How the record the derived word was reduced from is named beside it.
+fn derived_from(records: &[&JournalRecordView]) -> String {
+    records.last().map_or_else(String::new, |record| format!("   record {}", record.sequence))
+}
+
+fn member_lines(
+    view: &ViewDocument,
+    store: &Store,
+    bloom: DigestHex,
+    workpiece: &str,
+    proving: Option<&str>,
+) -> Vec<Line> {
     let Some((bloom, member)) = find_member(view, bloom, workpiece) else {
         return Vec::new();
     };
+    let records = member_records(store, bloom.id, workpiece);
+    let derived = derived_from(&records);
+
     let mut lines = Vec::new();
+    push_journal_slice(&mut lines, bloom.id, &records);
+    push_lane_tail(&mut lines, store, proving);
     push_verify_transcript(&mut lines, view, bloom.id, workpiece);
     lines.push(Line {
         key: RowKey::Identity,
@@ -531,7 +688,7 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
     });
     lines.push(label(
         RowKey::Other(0),
-        format!("state  {}", member_status_state(member, view.has_lane(bloom.id, member))),
+        format!("state  {}{derived}", member_status_state(member, view.has_lane(bloom.id, member))),
     ));
     push_member_coordination(&mut lines, bloom, member);
     if let Some(blocked) = member.blocked_by.as_deref().filter(|name| !name.is_empty()) {
@@ -546,8 +703,8 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
     if let Some(cursor) = &member.cursor {
         let stage = cursor.stage.map_or_else(|| "?".to_owned(), |stage| stage.to_string());
         lines.push(Line {
-            key: RowKey::Dispatch,
-            text: format!("cursor  {stage}  ×{}", cursor.attempts),
+            key: RowKey::Other(110),
+            text: format!("stage  {stage}  ×{}{derived}", cursor.attempts),
             enter: Some(Nav::focus(Focus::dispatch(bloom.id, member.workpiece.clone()))),
             digest: None,
             openable: false,
@@ -707,19 +864,21 @@ fn reference_line(key: RowKey, title: &str, digest: DigestHex) -> Line {
 
 #[cfg(test)]
 mod tests {
-    use super::{Detail, RowKey};
+    use super::{Detail, RowKey, lane_query, member_journal_query};
     use crate::dto::{
-        BloomView, CandidateRef, CompositionCursorView, CompositionView, DigestHex, MemberView, OrderView,
-        ReviewParkView, StageId, ViewDocument,
+        BloomDispatchView, BloomDispatchesView, BloomView, CandidateRef, CompositionCursorView, CompositionView,
+        DigestHex, DispatchFilePage, JournalPage, JournalRecordView, MemberView, OrderView, ReviewParkView, StageId,
+        ViewDocument,
     };
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
     use crate::shell::Shell;
-    use crate::store::Store;
+    use crate::store::{ResourceKey, Store};
     use crate::warroom::Focus;
     use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use serde_json::json;
     use std::time::Duration;
 
     fn digest(byte: u8) -> DigestHex {
@@ -742,6 +901,89 @@ mod tests {
             assert_eq!(detail.handle_key(KeyEvent::from(KeyCode::Char('j')), store), Outcome::Handled);
         }
         panic!("never reached digest {}", target.as_hex());
+    }
+
+    #[test]
+    fn a_member_frame_reads_its_journal_slice_and_lane_log_above_what_it_derives() {
+        // The plausible bug (issue 6071): the member frame paints only derived
+        // words, with no path back to the record they were reduced from and no
+        // log text at all, so "idle Verify" cannot be checked without leaving
+        // for the journal screen — and the grouped run writing the lane log
+        // that would explain it is never named.
+        let bloom = digest(1);
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: bloom,
+                members: vec![MemberView { workpiece: "wp-a".to_owned(), ..MemberView::default() }],
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_view(Ok(view));
+        store.apply_journal(
+            &member_journal_query(bloom),
+            Ok(JournalPage {
+                records: vec![JournalRecordView {
+                    sequence: 4_182,
+                    event: json!({ "AttemptCompleted": { "workpiece": "wp-a" } }),
+                    ..JournalRecordView::default()
+                }],
+                ..JournalPage::default()
+            }),
+        );
+        store.apply_bloom_dispatches(
+            bloom,
+            Ok(BloomDispatchesView {
+                dispatches: vec![BloomDispatchView {
+                    nonce: "dispatch-9-step-0".to_owned(),
+                    workpiece: "aether.bloomery.composition".to_owned(),
+                    stage: StageId::AggregateVerify,
+                    attempt: 1,
+                    evidence_retained: true,
+                    covers: Some(vec!["wp-a".to_owned()]),
+                    ..BloomDispatchView::default()
+                }],
+            }),
+        );
+        let mut detail = Detail::new(Focus::member(bloom, "wp-a"));
+        detail.reseat(&store);
+        assert!(
+            detail.subscriptions().contains(&ResourceKey::DispatchFile(lane_query("dispatch-9-step-0"))),
+            "the frame follows the lane log of the dispatch proving this member"
+        );
+        store.apply_dispatch_file(
+            lane_query("dispatch-9-step-0"),
+            Ok(DispatchFilePage {
+                lines: vec!["Compiling aether-bloomery".to_owned(), "Finished dev profile".to_owned()],
+                ..DispatchFilePage::default()
+            }),
+        );
+        detail.reseat(&store);
+
+        let texts: Vec<&str> = detail.lines.iter().map(|line| line.text.as_str()).collect();
+        let journal_row = texts.iter().position(|text| text.contains("4182")).expect("the journal slice is painted");
+        let lane_row =
+            texts.iter().position(|text| text.contains("Finished dev profile")).expect("the lane tail is painted");
+        let state_row =
+            texts.iter().position(|text| text.starts_with("state  ")).expect("the derived state is still painted");
+        assert!(journal_row < state_row, "the raw records sit above the derived summary: {texts:?}");
+        assert!(lane_row < state_row, "so does the log text: {texts:?}");
+        assert!(
+            texts[state_row].contains("record 4182"),
+            "the derived word names the record it can be checked against: {}",
+            texts[state_row]
+        );
+        assert_eq!(
+            detail.lines.iter().find(|line| line.key == RowKey::Record(4_182)).and_then(|line| line.enter.clone()),
+            Some(Nav::focus(Focus::record(4_182))),
+            "a record row opens that record"
+        );
+        assert_eq!(
+            detail.lines.iter().find(|line| line.key == RowKey::Dispatch).and_then(|line| line.enter.clone()),
+            Some(Nav::evidence("dispatch-9-step-0")),
+            "the proving row is one key from the evidence, gate logs included"
+        );
     }
 
     #[test]

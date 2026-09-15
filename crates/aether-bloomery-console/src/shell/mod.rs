@@ -1021,6 +1021,7 @@ mod tests {
                     verdict: Some("pass".to_owned()),
                     cost: Some(1_000_000),
                     evidence_retained: true,
+                    covers: Some(Vec::new()),
                 }],
             },
         );
@@ -1070,6 +1071,7 @@ mod tests {
                     verdict: Some("pass".to_owned()),
                     cost: Some(1_000_000),
                     evidence_retained: true,
+                    covers: Some(Vec::new()),
                 }],
             },
         );
