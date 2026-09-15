@@ -595,6 +595,12 @@ pub struct MemberView {
     /// stays for a projection served off a journal an older binary wrote.
     #[serde(default)]
     pub evicted_by: Option<LeaseEvictionView>,
+    /// The intake refusal standing against this member, when the broker refused
+    /// its upload without touching the reducer. `None` while no refusal is
+    /// recorded. The refusal text names the variant; the member's outstanding
+    /// order rides the `/view` orders list. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
+    #[serde(default)]
+    pub intake_refusal: Option<String>,
 }
 
 /// One transition's answer to "why is this not happening" (#5281).

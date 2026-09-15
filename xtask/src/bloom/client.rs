@@ -9,11 +9,12 @@ use serde_json::Value;
 use super::Endpoint;
 use super::dto::{
     AdminCancelLaneRequest, AdminDropLapRequest, AdminRerunRequest, AdminSessionRequest, AdminSetCandidateRequest,
-    AdminWaiveRequest, ApprovalStoredView, BloomView, CancelCommissionRequest, CommissionCancelledView,
-    CommissionReopenedView, CommissionShowView, ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView,
-    JournalEntry, JournalView, LiveOrderView, OutcomeView, ProposeRequest, ReopenCommissionRequest, RepairRequest,
-    RetryRequest, ReverifyBaseRequest, RevisionEvidence, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest,
-    SealRequest, SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest, WriteRevisionRequest,
+    AdminWaiveRequest, ApprovalStoredView, BloomView, CancelCommissionRequest, CancelOrderRequest, CancelOrderView,
+    CommissionCancelledView, CommissionReopenedView, CommissionShowView, ConfigRequest, ConfigValueView, ConfigView,
+    DraftPatch, DraftView, JournalEntry, JournalView, LiveOrderView, OutcomeView, ProposeRequest,
+    ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest, RevisionEvidence,
+    ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest,
+    SuppressionAnswerRequest, WithdrawRequest, WriteRevisionRequest,
 };
 use super::plan::spec_id;
 use super::{hex, http};
@@ -145,6 +146,11 @@ impl<'a> Client<'a> {
     /// Discard a completed lap's candidate from inside admin mode (ADR-0219).
     pub fn admin_drop_lap(&self, bloom_id: &str, request: &AdminDropLapRequest) -> Result<OutcomeView> {
         self.send("POST", &format!("/blooms/{bloom_id}/admin/drop-lap"), request)
+    }
+
+    /// Drop one outstanding order from the board without faulting its lane.
+    pub fn cancel_order(&self, nonce: &str, request: &CancelOrderRequest) -> Result<CancelOrderView> {
+        self.send("POST", &format!("/orders/{nonce}/cancel"), request)
     }
 
     /// Propose a signed operator change onto the day's branch (ADR-0205).

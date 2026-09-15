@@ -6007,15 +6007,18 @@ fn an_operator_repair_re_enters_a_wedged_member_at_verify_with_the_gates_intact(
         refuse(&wedged, &repair("blank", workpiece("wp"), "   ")),
         Outcome::OperatorRepairRejected(OperatorRepairError::BlankReason),
     ));
-    // A workpiece that is not stopped has nothing to restart, and a stranger to
-    // the membership is work the seal never admitted.
-    assert!(matches!(
-        refuse(&snapshot, &repair("running", workpiece("wp"), "mid-flight")),
-        Outcome::OperatorRepairRejected(OperatorRepairError::NotWedged(_)),
-    ));
+    // The wedge is no longer the gate: any non-terminal member is repairable,
+    // so a repair on a running member is judged now and moves it to Verify. A
+    // stranger to the membership is still work the seal never admitted.
+    let (_, running_repair) = step(&snapshot, &repair("running", workpiece("wp"), "mid-flight"));
+    assert!(
+        matches!(running_repair.outcome, Outcome::OperatorRepairAccepted { .. }),
+        "got {:?}",
+        running_repair.outcome
+    );
     assert!(matches!(
         refuse(&wedged, &repair("stranger", workpiece("ghost"), "not a member")),
-        Outcome::OperatorRepairRejected(OperatorRepairError::NotWedged(_)),
+        Outcome::OperatorRepairRejected(OperatorRepairError::NotAMember(_)),
     ));
 
     let (after, decided) = step(&wedged, &repair("repair", workpiece("wp"), "one-line fix, cheaper than a lap"));
@@ -6590,12 +6593,18 @@ fn no_fact_family_dispatches_a_member_of_a_held_bloom() {
         Outcome::OperatorRepairRejected(OperatorRepairError::Held),
     ));
     let (let_go, _) = step(&granted, &released(bloom, "release", "fixed"));
+    let released_decision = reduce(&let_go, &repair, &compiled_resolved(), &SpendWindow::default());
     assert!(
-        matches!(
-            reduce(&let_go, &repair, &compiled_resolved(), &SpendWindow::default()).outcome,
-            Outcome::OperatorRepairRejected(_)
-        ),
-        "and past the release it is judged on its own terms again",
+        matches!(released_decision.outcome, Outcome::OperatorRepairAccepted { .. }),
+        "and past the release it is judged on its own terms again: got {:?}",
+        released_decision.outcome
+    );
+    assert!(
+        released_decision
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Decision::DispatchAttempt { stage: StageId::Verify, .. })),
+        "the post-release repair re-enters at Verify",
     );
 }
 

@@ -66,6 +66,7 @@ mod configs;
 mod drafts;
 mod evidence;
 mod metrics;
+mod orders;
 mod pipeline;
 mod proposals;
 mod reads;
@@ -80,8 +81,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::store::{
-    ListBloomDispatchesResult, ListOutstandingOrders, ListOutstandingOrdersResult, LiveOrder, LookupDispatchResult,
-    StoreCapability,
+    CancelOrderResult, ListBloomDispatchesResult, ListOutstandingOrders, ListOutstandingOrdersResult, LiveOrder,
+    LookupDispatchResult, StoreCapability,
 };
 use aether_actor::{Manual, runtime};
 use aether_bloomery::{
@@ -1020,6 +1021,20 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, Routed::Reply(response))
     }
 
+    /// `POST /orders/{nonce}/cancel` — drop one outstanding order from the
+    /// board without faulting its lane. The process finishes unobserved; its
+    /// later upload refuses as cancelled and never touches the reducer.
+    #[http::route(Post, "/orders/{nonce}/cancel")]
+    fn on_cancel_order(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        nonce: http::Path<String>,
+    ) -> http::Outcome {
+        let nonce = nonce.0;
+        let routed = orders::cancel_order(&nonce, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
     /// `GET /logs/coordinator` — bounded journald proxy.
     #[http::route(Get, "/logs/coordinator")]
     fn on_get_coordinator_logs(
@@ -1239,6 +1254,15 @@ impl NativeActor for BloomeryApiCapability {
         mail: LookupDispatchResult,
     ) -> HttpServerResponse {
         evidence::header_response(&state.worktree_base, &state.archive_base, mail)
+    }
+
+    #[http::reply]
+    fn on_cancel_order_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: CancelOrderResult,
+    ) -> HttpServerResponse {
+        orders::cancel_response(mail)
     }
 
     #[cfg(feature = "github")]

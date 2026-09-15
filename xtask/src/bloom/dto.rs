@@ -19,11 +19,12 @@ use super::hex;
 pub use aether_bloomery::{
     AdminCancelLaneRequest, AdminDropLapRequest, AdminRerunRequest, AdminSessionRequest, AdminSetCandidateRequest,
     AdminWaiveRequest, ArchiveFailureView, ArchiveListView, ArchivePassView, ArchiveRecordView, BloomSpec, BloomView,
-    CancelCommissionRequest, CandidateRef, CommissionCancelledView, CommissionReopenedView, CommissionShowView,
-    ConfigRegistry, DraftPatch, DraftView, JournalEntry, JournalView, MemberView, ModelOverride, OutcomeView,
-    ProposeRequest, ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest, RevisionEvidence,
-    ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest,
-    SuppressionAnswerRequest, SuppressionVerdict, ViewDocument, WithdrawRequest, WriteRevisionRequest,
+    CancelCommissionRequest, CancelOrderRequest, CancelOrderView, CandidateRef, CommissionCancelledView,
+    CommissionReopenedView, CommissionShowView, ConfigRegistry, DraftPatch, DraftView, JournalEntry, JournalView,
+    MemberView, ModelOverride, OutcomeView, ProposeRequest, ReopenCommissionRequest, RepairRequest, RetryRequest,
+    ReverifyBaseRequest, RevisionEvidence, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest,
+    SupersedeRequest, SuppressionAnswerRequest, SuppressionVerdict, ViewDocument, WithdrawRequest,
+    WriteRevisionRequest,
 };
 
 /// A digest as the REST edge renders it — CLI flags and operator-facing print.
@@ -167,6 +168,7 @@ pub fn test_member(workpiece: &str, revision: impl Into<Digest>) -> MemberView {
         withdrawn: None,
         leases: Vec::new(),
         evicted_by: None,
+        intake_refusal: None,
     }
 }
 

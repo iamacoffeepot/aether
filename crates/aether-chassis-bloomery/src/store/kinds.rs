@@ -461,8 +461,9 @@ pub enum LookupDispatchResult {
 
 /// One live outstanding order as `GET /view` projects it: the host nonce, the
 /// bloom it belongs to (the zero digest for a bloom-less `BaseVerify`), the
-/// workpiece (empty for a bloom-wide or workspace stage), and the dispatched
-/// stage. Submit-intent rows are not live and do not appear.
+/// workpiece (empty for a bloom-wide or workspace stage), the dispatched
+/// stage, the displayed digest the evidence must bind to, and the absolute
+/// deadline. Submit-intent rows are not live and do not appear.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LiveOrder {
     /// The host dispatch nonce (`dispatch-` or `redispatch-`).
@@ -475,6 +476,15 @@ pub struct LiveOrder {
     /// Wire-encoded [`aether_bloomery::StageId`].
     #[serde(with = "aether_data::bytes")]
     pub stage: Vec<u8>,
+    /// The displayed digest the evidence must bind to.
+    #[serde(default, with = "aether_data::bytes")]
+    pub displayed: Vec<u8>,
+    /// The absolute deadline in unix millis.
+    #[serde(default)]
+    pub deadline_unix_millis: u64,
+    /// The intake refusal recorded against this member, when one is standing.
+    #[serde(default)]
+    pub refusal: String,
 }
 
 /// `GET /view` — every live outstanding order, including bloom-less stages.
@@ -490,6 +500,35 @@ pub enum ListOutstandingOrdersResult {
         orders: Vec<LiveOrder>,
     },
     /// The read failed.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}
+
+/// Drop one outstanding order from the board without faulting its lane.
+#[aether_data::kind(name = "aether.store.cancel_order")]
+pub struct CancelOrder {
+    /// The nonce to drop.
+    pub nonce: String,
+    /// Why the order is being dropped.
+    pub reason: String,
+    /// Who decided.
+    pub operator: String,
+}
+
+/// Reply to [`CancelOrder`].
+#[aether_data::kind(name = "aether.store.cancel_order_result")]
+pub enum CancelOrderResult {
+    /// The cancellation was recorded; `removed` names whether an outstanding
+    /// row was dropped.
+    Ok {
+        /// The nonce as the caller spelled it.
+        nonce: String,
+        /// Whether an outstanding order was removed.
+        removed: bool,
+    },
+    /// The write failed.
     Err {
         /// A human-readable failure reason.
         error: String,

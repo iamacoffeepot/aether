@@ -195,6 +195,7 @@ fn member_views(
             withdrawn: record.withdrawn.get(&member.workpiece).map(withdrawn_view),
             leases: snapshot.leases_held(&record.spec.id(), &member.workpiece),
             evicted_by: snapshot.lease_eviction(&record.spec.id(), &member.workpiece).map(lease_eviction_view),
+            intake_refusal: None,
         })
         .collect()
 }

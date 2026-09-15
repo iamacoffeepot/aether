@@ -518,6 +518,33 @@ pub struct ReverifyBaseRequest {
     pub idempotency_key: Option<String>,
 }
 
+/// `POST /orders/{nonce}/cancel` body — drop one outstanding order from the
+/// board without faulting its lane.
+///
+/// The lane process is left alone to finish unobserved; its later upload
+/// refuses as cancelled and never touches the reducer. No host fault is
+/// recorded and no session is reset.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelOrderRequest {
+    /// Why the order is being dropped, in the operator's own words. Required
+    /// and non-blank; a blank one is `422`.
+    pub reason: String,
+    /// Who is deciding. Recorded as the decider; required and non-blank.
+    pub operator: String,
+}
+
+/// `POST /orders/{nonce}/cancel` reply — whether an outstanding row was
+/// dropped. `cancelled: false` names a nonce the board never held (or one an
+/// earlier cancel already dropped); the cancellation is still recorded so a
+/// later upload for it stays ignored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelOrderView {
+    /// The nonce as the caller spelled it.
+    pub nonce: String,
+    /// Whether an outstanding order was removed.
+    pub cancelled: bool,
+}
+
 /// The reply to a write route: the reducer outcome the admitted event resolved
 /// to (decoded from the control core's wire bytes).
 #[derive(Debug, Clone, Serialize, Deserialize)]

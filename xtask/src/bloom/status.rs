@@ -47,6 +47,11 @@ fn render_member(out: &mut String, member: &MemberView) {
     if let Some(park) = &member.park {
         let _ = writeln!(out, "      park         {:?}  evidence {}", park.stage, park.evidence);
     }
+    // The broker refuses an upload without touching the reducer, so this is the
+    // only place a refused member's block is readable from the board (#5969).
+    if let Some(refusal) = &member.intake_refusal {
+        let _ = writeln!(out, "      refused      {refusal}");
+    }
 }
 
 fn status_label(status: BloomStatus) -> &'static str {

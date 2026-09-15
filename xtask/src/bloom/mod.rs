@@ -141,6 +141,9 @@ enum BloomCommand {
     Suppression(SuppressionArgs),
     /// Retire an open commission whose work landed outside its bloom.
     Cancel(CancelArgs),
+    /// Drop one outstanding order from the board without faulting its lane.
+    /// The process finishes unobserved; its later upload is ignored.
+    CancelOrder(CancelOrderArgs),
     /// Put a landed commission whose member never resolved back in the line.
     Reopen(ReopenArgs),
     /// Open a pre-bloom scoping run on a commission.
@@ -185,6 +188,8 @@ struct RetryArgs {
     /// The stage to run again. Defaults to wherever the member is sitting;
     /// naming a different one is refused rather than applied, so a retry aimed
     /// from a stale read of the board does not spend a roll on the wrong stage.
+    /// Naming `Verify` is accepted when the member holds a candidate, moving a
+    /// reconciled capture onto its verify without another construct lap.
     #[arg(long)]
     stage: Option<String>,
 
@@ -329,6 +334,20 @@ struct CancelArgs {
     /// The `KeyId` the coordinator's allowlist names for that seed.
     #[arg(long, default_value = "operator")]
     signer: String,
+}
+
+#[derive(Args, Debug)]
+struct CancelOrderArgs {
+    /// The outstanding order nonce to drop.
+    nonce: String,
+
+    /// Why, in your own words. Required; a blank one is refused at the door.
+    #[arg(long)]
+    reason: String,
+
+    /// Who is deciding. Recorded as the decider.
+    #[arg(long, default_value = "operator")]
+    operator: String,
 }
 
 #[derive(Args, Debug)]
@@ -488,6 +507,7 @@ fn run_on_with_policy(endpoint: &Endpoint, command: &BloomCommand, approval_poli
         BloomCommand::Repair(args) => run_repair(&client, args),
         BloomCommand::Suppression(args) => run_suppression(&client, args),
         BloomCommand::Cancel(args) => run_cancel(&client, args),
+        BloomCommand::CancelOrder(args) => run_cancel_order(&client, args),
         BloomCommand::Reopen(args) => run_reopen(&client, args),
         BloomCommand::ScopeRun(args) => run_scope_run(&client, args),
         BloomCommand::Admin(args) => admin::run(&client, args),
@@ -542,11 +562,16 @@ fn run_retry(client: &Client<'_>, args: &RetryArgs) -> Result<String> {
         .cursor
         .as_ref()
         .with_context(|| format!("{} has never entered the line, so it has no stage to run again", args.workpiece))?;
-    if let Some(named) = &args.stage
-        && !named.eq_ignore_ascii_case(&format!("{:?}", cursor.stage))
-    {
-        bail!("{} is at {:?}, not {named}", args.workpiece, cursor.stage);
-    }
+    let stage = match &args.stage {
+        None => cursor.stage,
+        Some(named) if named.eq_ignore_ascii_case(&format!("{:?}", cursor.stage)) => cursor.stage,
+        Some(named) if named.eq_ignore_ascii_case("Verify") && cursor.candidate.is_some() => {
+            aether_bloomery::StageId::Verify
+        }
+        Some(named) => {
+            bail!("{} is at {:?}, not {named}", args.workpiece, cursor.stage);
+        }
+    };
     if args.reason.trim().is_empty() {
         bail!("retry reason is required");
     }
@@ -555,7 +580,7 @@ fn run_retry(client: &Client<'_>, args: &RetryArgs) -> Result<String> {
     // the scope revision it was admitted at when it is carrying none.
     let subject = cursor.candidate.as_ref().map_or(member.scope_revision, |candidate| candidate.tree);
     let request = dto::RetryRequest {
-        stage: cursor.stage,
+        stage,
         subject,
         reason: args.reason.clone(),
         operator: args.operator.clone(),
@@ -773,6 +798,33 @@ fn run_cancel(client: &Client<'_>, args: &CancelArgs) -> Result<String> {
         &dto::CancelCommissionRequest { statement: key.cancel_of(shown.intent), reason: args.reason.clone() },
     )?;
     Ok(format!("cancelled {} {} ({})\n", args.workpiece, stored.digest, stored.status))
+}
+
+/// Drop one outstanding order from the board without faulting its lane.
+///
+/// No read-first check: the nonce names a host-side dispatch, not a bloom
+/// member, and the coordinator is the authority on whether it is still
+/// outstanding. A nonce the board never held still records the cancellation
+/// so its later upload stays ignored.
+fn run_cancel_order(client: &Client<'_>, args: &CancelOrderArgs) -> Result<String> {
+    if args.nonce.trim().is_empty() {
+        bail!("cancel-order nonce is required");
+    }
+    if args.reason.trim().is_empty() {
+        bail!("cancel-order reason is required");
+    }
+    if args.operator.trim().is_empty() {
+        bail!("cancel-order operator is required");
+    }
+    let stored = client.cancel_order(
+        &args.nonce,
+        &dto::CancelOrderRequest { reason: args.reason.clone(), operator: args.operator.clone() },
+    )?;
+    if stored.cancelled {
+        Ok(format!("cancelled order {}\n", stored.nonce))
+    } else {
+        Ok(format!("order {} was not outstanding; cancellation recorded\n", stored.nonce))
+    }
 }
 
 /// Reopen one commission, naming an unknown or not-landed workpiece locally
