@@ -1,6 +1,8 @@
 //! The Board: bloom/member table. The live table sits in the workspace board pane.
 
+use std::array;
 use std::collections::{HashMap, HashSet};
+use std::iter::once;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -47,6 +49,8 @@ pub struct BloomRow {
     pub id_prefix: String,
     pub status: String,
     pub member_count: usize,
+    /// The selected eager-integration head, when the bloom coordinates one.
+    pub head: String,
     pub precheck: String,
     pub age: String,
 }
@@ -58,7 +62,12 @@ pub struct MemberRow {
     pub workpiece: String,
     pub state: String,
     pub stage: String,
+    /// Where this member stands against the selected head — folded, riding a
+    /// shared run, reconciling, or waiting.
+    pub head: String,
     pub age: String,
+    /// The shared verification that proved this member, or the one running now.
+    pub verify: String,
 }
 
 /// A bloom-less live order (the whole-workspace base verify).
@@ -80,11 +89,53 @@ impl BoardRow {
             Self::Order(row) => RowId::Order { nonce: row.nonce.clone() },
         }
     }
+
+    /// This row's cells in [`COLUMNS`] order. One fact per cell: a reader has
+    /// to be able to say which column a token belongs to without parsing it
+    /// out of a joined string.
+    fn cells(&self) -> [String; COLUMNS] {
+        match self {
+            Self::Bloom(bloom) => [
+                bloom.id_prefix.clone(),
+                format!("{}  {} mem", bloom.status, bloom.member_count),
+                String::new(),
+                bloom.head.clone(),
+                bloom.precheck.clone(),
+                bloom.age.clone(),
+                String::new(),
+            ],
+            Self::Member(member) => [
+                format!("  {}", member.workpiece),
+                member.state.clone(),
+                member.stage.clone(),
+                member.head.clone(),
+                String::new(),
+                member.age.clone(),
+                member.verify.clone(),
+            ],
+            Self::Order(order) => [
+                order.workpiece.clone(),
+                order.state.clone(),
+                order.stage.clone(),
+                String::new(),
+                String::new(),
+                order.age.clone(),
+                String::new(),
+            ],
+        }
+    }
 }
+
+/// How many facts the board paints, one per column.
+const COLUMNS: usize = 7;
+
+/// Column headers past the lane title, which names the tree in column zero.
+const COLUMN_HEADERS: [&str; COLUMNS - 1] = ["STATE", "STAGE", "HEAD", "PRECHECK", "AGE", "VERIFY"];
 
 const LIVE_HINTS: &[KeyHint] = &[
     KeyHint { keys: "j/k", action: "select" },
     KeyHint { keys: "Enter", action: "open" },
+    KeyHint { keys: "v", action: "dispatches" },
     KeyHint { keys: "h", action: "history" },
     KeyHint { keys: "l", action: "journal" },
     KeyHint { keys: "t", action: "timeline" },
@@ -99,6 +150,7 @@ const LIVE_HINTS: &[KeyHint] = &[
 const HISTORY_HINTS: &[KeyHint] = &[
     KeyHint { keys: "j/k", action: "select" },
     KeyHint { keys: "Enter", action: "open" },
+    KeyHint { keys: "v", action: "dispatches" },
     KeyHint { keys: "l", action: "journal" },
     KeyHint { keys: "t", action: "timeline" },
     KeyHint { keys: "d", action: "days" },
@@ -186,6 +238,17 @@ impl Board {
         }
     }
 
+    /// The attempt list for the member under the cursor — every dispatch that
+    /// proves it, a grouped shared run's step included. One key from the board,
+    /// so the evidence proving a member is two: `v` then Enter.
+    #[must_use]
+    pub fn selected_dispatches(&self) -> Option<Nav> {
+        match self.cursor.selected() {
+            Some(RowId::Member { bloom, workpiece }) => Some(Nav::focus(Focus::dispatch(*bloom, workpiece.clone()))),
+            Some(RowId::Bloom { .. } | RowId::Order { .. }) | None => None,
+        }
+    }
+
     #[must_use]
     pub fn enter_pushes(&self) -> bool {
         self.selected_focus().is_some()
@@ -208,6 +271,7 @@ impl Board {
                 Outcome::Handled
             }
             KeyCode::Enter => self.selected_focus().map_or(Outcome::Handled, |focus| Outcome::Push(Nav::focus(focus))),
+            KeyCode::Char('v') => self.selected_dispatches().map_or(Outcome::Handled, Outcome::Push),
             KeyCode::Char('h') if self.lane == BoardLane::Live => Outcome::Push(Nav::History),
             KeyCode::Char('l') => Outcome::Push(Nav::journal(None)),
             KeyCode::Char('t') => {
@@ -278,48 +342,74 @@ impl Board {
             BoardLane::Live => "BLOOM / MEMBER",
             BoardLane::History => "HISTORY (landed · superseded)",
         };
-        let header = Row::new([title, "STATE", "STAGE / HEAD / PRECHECK", "AGE / VERIFY"])
-            .style(palette::body().add_modifier(Modifier::BOLD).patch(muted));
-        let table_rows = rows.iter().map(|row| {
+        let painted: Vec<[String; COLUMNS]> = rows.iter().map(BoardRow::cells).collect();
+        let kept = kept_columns(&painted);
+        let widths = column_widths(&painted, title, kept);
+        let header =
+            Row::new(keep(&headers(title), kept)).style(palette::body().add_modifier(Modifier::BOLD).patch(muted));
+        let table_rows = rows.iter().zip(&painted).map(|(row, cells)| {
             let style = self.row_style(row, dimmed, muted);
-            match row {
-                BoardRow::Bloom(bloom) => Row::new([
-                    Cell::from(bloom.id_prefix.clone()),
-                    Cell::from(format!("{}  {} mem", bloom.status, bloom.member_count)),
-                    Cell::from(bloom.precheck.clone()),
-                    Cell::from(bloom.age.clone()),
-                ])
-                .style(palette::body().add_modifier(Modifier::BOLD).patch(style)),
-                BoardRow::Member(member) => Row::new([
-                    Cell::from(format!("  {}", member.workpiece)),
-                    Cell::from(member.state.clone()),
-                    Cell::from(member.stage.clone()),
-                    Cell::from(member.age.clone()),
-                ])
-                .style(style),
-                BoardRow::Order(order) => Row::new([
-                    Cell::from(order.workpiece.clone()),
-                    Cell::from(order.state.clone()),
-                    Cell::from(order.stage.clone()),
-                    Cell::from(order.age.clone()),
-                ])
-                .style(palette::body().add_modifier(Modifier::BOLD).patch(style)),
-            }
+            let weight = match row {
+                BoardRow::Bloom(_) | BoardRow::Order(_) => palette::body().add_modifier(Modifier::BOLD).patch(style),
+                BoardRow::Member(_) => style,
+            };
+            Row::new(keep(cells, kept).into_iter().map(Cell::from)).style(weight)
         });
-        let table = Table::new(
-            table_rows,
-            [Constraint::Min(14), Constraint::Length(10), Constraint::Length(34), Constraint::Length(12)],
-        )
-        .style(palette::body())
-        .header(header)
-        .row_highlight_style(palette::cursor())
-        .highlight_symbol(super::caret(self.enter_pushes()));
+        let table = Table::new(table_rows, widths)
+            .style(palette::body())
+            .header(header)
+            .row_highlight_style(palette::cursor())
+            .highlight_symbol(super::caret(self.enter_pushes()));
         let mut table_state = TableState::default()
             .with_selected(self.cursor.selected_index(rows, BoardRow::id))
             .with_offset(self.scroll);
         frame.render_stateful_widget(table, area, &mut table_state);
         self.scroll = table_state.offset();
     }
+}
+
+/// The header row: the lane title names column zero's tree, then one header
+/// per fact.
+fn headers(title: &str) -> [String; COLUMNS] {
+    array::from_fn(|index| {
+        index.checked_sub(1).map_or_else(|| title.to_owned(), |past| COLUMN_HEADERS[past].to_owned())
+    })
+}
+
+/// Which columns carry a fact on this screen.
+///
+/// Column zero is the bloom/member tree and always stays. A column every row
+/// on screen leaves blank is dropped rather than painting a header over a
+/// stripe of nothing — `VERIFY` is empty until a bloom coordinates shared runs.
+fn kept_columns(rows: &[[String; COLUMNS]]) -> [bool; COLUMNS] {
+    array::from_fn(|index| index == 0 || rows.iter().any(|cells| !cells[index].is_empty()))
+}
+
+fn keep(cells: &[String; COLUMNS], kept: [bool; COLUMNS]) -> Vec<String> {
+    cells.iter().zip(kept).filter(|(_, keep)| *keep).map(|(cell, _)| cell.clone()).collect()
+}
+
+/// Widths from content: every kept column is as wide as its widest cell or its
+/// own header, so no cell is silently clipped. Column zero absorbs the slack.
+fn column_widths(rows: &[[String; COLUMNS]], title: &str, kept: [bool; COLUMNS]) -> Vec<Constraint> {
+    let headers = headers(title);
+    (0..COLUMNS)
+        .filter(|index| kept[*index])
+        .map(|index| {
+            let width = rows
+                .iter()
+                .map(|cells| cells[index].chars().count())
+                .chain(once(headers[index].chars().count()))
+                .max()
+                .unwrap_or(0);
+            let width = u16::try_from(width).unwrap_or(u16::MAX);
+            if index == 0 {
+                Constraint::Min(width)
+            } else {
+                Constraint::Length(width)
+            }
+        })
+        .collect()
 }
 
 /// The one-word state `scripts/bloomery-operator.py`'s `member_status_state`
@@ -370,29 +460,30 @@ fn rows_of(view: &ViewDocument, lane: BoardLane, dispatches: &[MetricDispatch]) 
             }
             _ => bloom_status_label(bloom.status),
         };
+        let (head, precheck) = bloom.coordination.as_ref().map_or_else(
+            || (String::new(), bloom.precheck.as_ref().map_or_else(String::new, PrecheckView::summary)),
+            |state| {
+                (
+                    state.summary(bloom.members.iter().filter(|member| member.withdrawn.is_none()).count()),
+                    state.precheck_status(bloom.precheck.as_ref()),
+                )
+            },
+        );
         rows.push(BoardRow::Bloom(BloomRow {
             id: bloom.id,
             id_prefix: bloom.id.prefix(),
             status,
             member_count: bloom.members.len(),
-            precheck: bloom.coordination.as_ref().map_or_else(
-                || bloom.precheck.as_ref().map_or_else(String::new, PrecheckView::summary),
-                |state| {
-                    format!(
-                        "{} · {}",
-                        state.summary(bloom.members.iter().filter(|member| member.withdrawn.is_none()).count()),
-                        state.precheck_status(bloom.precheck.as_ref())
-                    )
-                },
-            ),
+            head,
+            precheck,
             age: elapsed_of(dispatches, bloom.id, None),
         }));
         for member in members {
             let order = view.order_for(bloom.id, &member.workpiece);
             let mut row = member_row(bloom.id, member, dispatches, order, view.has_lane(bloom.id, member));
             if let Some(state) = &bloom.coordination {
-                row.stage = format!("{} · {}", row.stage, state.member_summary(member));
-                row.age = shared_age(state, member, dispatches, bloom.id, &member.workpiece, &row.age);
+                row.head = state.member_summary(member);
+                row.verify = member_verify(state, member, dispatches, bloom.id, &member.workpiece);
             }
             rows.push(BoardRow::Member(row));
         }
@@ -422,7 +513,9 @@ fn member_row(
         workpiece: member.workpiece.clone(),
         state: member_status_state(member, has_lane).to_owned(),
         stage: member_stage(member, bloom, dispatches, order),
+        head: String::new(),
         age: elapsed_of(dispatches, bloom, Some(&member.workpiece)),
+        verify: String::new(),
     }
 }
 
@@ -462,23 +555,26 @@ fn elapsed_of(dispatches: &[MetricDispatch], bloom: DigestHex, workpiece: Option
     }
 }
 
-fn shared_age(
+/// The VERIFY cell: how long the shared verification that proved this member
+/// took, or how long the one running now has been going.
+///
+/// Its own fact, not a substitute for AGE — a member with no shared run leaves
+/// the cell blank rather than repeating its dispatch span under a second
+/// heading.
+fn member_verify(
     state: &CoordinationView,
     member: &MemberView,
     dispatches: &[MetricDispatch],
     bloom: DigestHex,
     workpiece: &str,
-    fallback: &str,
 ) -> String {
     if let Some((_, millis)) = state.member_latency(member) {
-        return format!("{} verify", format_duration(millis));
+        return format_duration(millis);
     }
-    if state.live_run_for(member).is_some()
-        && let Some(age) = live_elapsed(dispatches, bloom, workpiece)
-    {
-        return age;
+    if state.live_run_for(member).is_some() {
+        return live_elapsed(dispatches, bloom, workpiece).unwrap_or_else(|| "running".to_owned());
     }
-    fallback.to_owned()
+    String::new()
 }
 
 fn live_elapsed(dispatches: &[MetricDispatch], bloom: DigestHex, workpiece: &str) -> Option<String> {
@@ -497,8 +593,8 @@ fn unix_now_millis() -> Option<u64> {
 
 fn row_fingerprint(row: &BoardRow) -> String {
     match row {
-        BoardRow::Bloom(bloom) => format!("{}|{}", bloom.status, bloom.precheck),
-        BoardRow::Member(member) => format!("{}|{}", member.state, member.stage),
+        BoardRow::Bloom(bloom) => format!("{}|{}|{}", bloom.status, bloom.head, bloom.precheck),
+        BoardRow::Member(member) => format!("{}|{}|{}", member.state, member.stage, member.head),
         BoardRow::Order(order) => format!("{}|{}", order.state, order.stage),
     }
 }
@@ -688,18 +784,65 @@ mod tests {
         let members: Vec<_> = rows
             .iter()
             .filter_map(|row| match row {
-                BoardRow::Member(member) => {
-                    Some((member.workpiece.as_str(), member.state.as_str(), member.stage.as_str()))
-                }
+                BoardRow::Member(member) => Some(member),
                 BoardRow::Bloom(_) | BoardRow::Order(_) => None,
             })
             .collect();
         assert_eq!(members.len(), 2, "{members:?}");
-        assert_eq!(members[0].0, "wp-run");
-        assert_eq!(members[0].1, "running");
-        assert!(members[0].2.contains("shared Running 07070707"), "{}", members[0].2);
-        assert_eq!(members[1].0, "wp-idle");
-        assert_eq!(members[1].1, "idle");
+        assert_eq!(members[0].workpiece, "wp-run");
+        assert_eq!(members[0].state, "running");
+        assert!(members[0].head.contains("shared Running 07070707"), "{}", members[0].head);
+        assert_eq!(members[0].stage, "Verify", "STAGE names the stage and nothing else");
+        assert_eq!(members[1].workpiece, "wp-idle");
+        assert_eq!(members[1].state, "idle");
+    }
+
+    #[test]
+    fn every_board_cell_sits_under_its_own_header() {
+        // The plausible bug (issue 6071): a row joins two facts into one cell —
+        // the stage with the shared-run label, the age with the verify latency —
+        // so the reader cannot tell which token the column header is naming,
+        // and the joined string overruns the width it was allocated.
+        let bloom = digest(1);
+        let covered = pinned("wp-run");
+        let request_id = DigestHex::from_bytes([8; 32]);
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: bloom,
+                status: Some(BloomStatus::Sealed),
+                members: vec![covered.clone()],
+                coordination: Some(CoordinationView {
+                    runs: vec![SharedRunView {
+                        plan: SharedRunPlanView { requests: vec![request_for(&covered, request_id)] },
+                        phase: "Running".to_owned(),
+                        physical_run: Some(DigestHex::from_bytes([7; 32])),
+                        unfinished: vec![request_id],
+                        ..SharedRunView::default()
+                    }],
+                    ..CoordinationView::default()
+                }),
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        let dispatches = [dispatch(bloom, "wp-run", Some(1_000), 1), dispatch(bloom, "wp-run", Some(4_000), 2)];
+        let rows = rows_of(&view, BoardLane::Live, &dispatches);
+        let cells: Vec<_> = rows.iter().map(BoardRow::cells).collect();
+        let kept = super::kept_columns(&cells);
+        let widths = super::column_widths(&cells, "BLOOM / MEMBER", kept);
+        assert_eq!(widths.len(), kept.iter().filter(|keep| **keep).count(), "one width per painted column");
+        for row in &cells {
+            for (index, cell) in row.iter().enumerate() {
+                assert!(kept[index] || cell.is_empty(), "column {index} was dropped while carrying {cell:?}");
+            }
+        }
+        let BoardRow::Member(member) = &rows[1] else {
+            panic!("second row is the member");
+        };
+        assert_eq!(member.stage, "Verify");
+        assert_eq!(member.age, "3s");
+        assert!(member.head.contains("shared Running"), "{}", member.head);
+        assert!(!member.verify.is_empty(), "the live shared run fills VERIFY, not AGE");
     }
 
     #[test]

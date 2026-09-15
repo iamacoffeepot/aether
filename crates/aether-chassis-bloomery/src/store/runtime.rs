@@ -35,8 +35,8 @@ use aether_bloomery::persisted::{DECISIONS, EVENT, kind_named};
 use aether_bloomery::{
     CommissionStatus, Commit, CommitResult, ConfigRecord, Decision, Digest, Event, JournalRecord, LoadConfigs,
     LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, ModelOverride, OutboxPayload, ReplayJournal,
-    ReplayJournalResult, ScopeRevision, StageCatalog, Statement, StoreClass, SuppressionRequest, Topic, WorkpieceId,
-    decode_config, decode_recorded_decisions, decode_recorded_event, schema_digest,
+    ReplayJournalResult, ScopeRevision, SharedRunDispatch, StageCatalog, Statement, StoreClass, SuppressionRequest,
+    Topic, WorkpieceId, decode_config, decode_recorded_decisions, decode_recorded_event, schema_digest,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_kinds::descriptors;
@@ -2515,6 +2515,18 @@ fn shared_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SharedRunRow
     })
 }
 
+/// The member workpieces one retained shared-run dispatch record proves.
+///
+/// Only a contextual run answers with anything: it runs one combined gate over
+/// the composed node, so its step order is keyed on the composition and the
+/// covered members have no order of their own. A serial run dispatches each
+/// member's own transformation, so each step already names its member. An
+/// undecodable record answers empty rather than failing the list — the coverage
+/// is a reach hint, and losing it must not blank the board's dispatch page.
+fn shared_run_coverage(record: &[u8]) -> Vec<String> {
+    serde_json::from_slice::<SharedRunDispatch>(record).map(|dispatch| dispatch.covered_members()).unwrap_or_default()
+}
+
 fn shared_run_member_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SharedRunMemberRow> {
     Ok(SharedRunMemberRow {
         run: row.get(0)?,
@@ -4433,7 +4445,7 @@ impl StoreBackend for SqliteStore {
         let mut matched = None;
         for row in rows {
             let (id, payload) = row?;
-            let Ok(dispatch) = from_bytes::<MetricDispatch>(&payload) else {
+            let Ok(dispatch) = MetricDispatch::decode_payload(&payload) else {
                 continue;
             };
             if dispatch.displayed.as_bytes() == order.displayed_digest.as_slice() {
@@ -4469,9 +4481,16 @@ impl StoreBackend for SqliteStore {
     }
 
     fn list_bloom_dispatch_live(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<BloomDispatchLive>> {
+        // Left-joined onto the shared-run tables rather than read separately:
+        // a step order's coverage is an attribute of the order, and a member
+        // whose Verify is riding a grouped run has no order of its own — the
+        // step row is the only handle on the evidence proving it.
         let mut stmt = self.conn.prepare(
-            "SELECT nonce, workpiece, stage, displayed_digest FROM outstanding_orders \
-             WHERE bloom = ?1 AND lifecycle = ?2 ORDER BY nonce",
+            "SELECT o.nonce, o.workpiece, o.stage, o.displayed_digest, run.dispatch \
+             FROM outstanding_orders AS o \
+             LEFT JOIN shared_run_steps AS step ON step.nonce = o.nonce \
+             LEFT JOIN shared_runs AS run ON run.run = step.run \
+             WHERE o.bloom = ?1 AND o.lifecycle = ?2 ORDER BY o.nonce",
         )?;
         let rows = stmt.query_map(rusqlite::params![bloom, OrderLifecycle::Submitted.as_str()], |row| {
             Ok(BloomDispatchLive {
@@ -4479,6 +4498,7 @@ impl StoreBackend for SqliteStore {
                 workpiece: row.get(1)?,
                 stage: row.get(2)?,
                 displayed: row.get(3)?,
+                covers: row.get::<_, Option<Vec<u8>>>(4)?.as_deref().map(shared_run_coverage).unwrap_or_default(),
             })
         })?;
         rows.collect()

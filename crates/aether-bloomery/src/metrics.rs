@@ -21,6 +21,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use aether_data::wire::{Error as WireError, from_bytes};
 use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
@@ -110,6 +111,8 @@ struct DispatchAcc {
     /// Whether the sealed command is a model lane. Mechanical dispatches stay
     /// on the dispatch rollup; they do not mint a seat.
     model_lane: bool,
+    /// Members this one execution proves besides the workpiece it is keyed on.
+    covers: Vec<String>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -187,6 +190,68 @@ pub struct MetricDispatch {
     /// Study-artifact digest, when one was admitted against this displayed
     /// attempt. Dollars stay on that artifact.
     pub study: Option<Digest>,
+    /// Every member workpiece this one execution proves, when it proves more
+    /// than the workpiece it is keyed on.
+    ///
+    /// A contextual shared run (ADR-0218) runs one combined gate over the
+    /// composed node and is keyed on the composition, so without this list a
+    /// covered member's dispatch history is empty while the run that is
+    /// actually proving it is on screen under another name. Empty means the row
+    /// proves only its own [`workpiece`](Self::workpiece) — a serial shared run
+    /// already folds one row per member.
+    pub covers: Vec<String>,
+}
+
+impl MetricDispatch {
+    /// Decode one persisted rollup payload, tolerating a row written before
+    /// [`covers`](Self::covers) existed.
+    ///
+    /// The wire format is positional and unversioned (ADR-0118), so a payload
+    /// from an older fold ends where `covers` begins. The metrics cache is
+    /// rebuilt from the journal whenever it falls behind, but a row persisted
+    /// by the previous binary stays as it was written until that rebuild — and
+    /// a hard decode failure there would empty a bloom's dispatch list rather
+    /// than lose one field.
+    pub fn decode_payload(bytes: &[u8]) -> Result<Self, WireError> {
+        from_bytes::<Self>(bytes).or_else(|error| {
+            from_bytes::<PreCoverageMetricDispatch>(bytes)
+                .map(PreCoverageMetricDispatch::into_current)
+                .map_err(|_| error)
+        })
+    }
+}
+
+/// [`MetricDispatch`] as the fold wrote it before coverage was recorded.
+#[derive(Deserialize)]
+struct PreCoverageMetricDispatch {
+    id: String,
+    bloom: BloomId,
+    workpiece: String,
+    stage: StageId,
+    displayed: Digest,
+    sequence: u64,
+    recorded_unix_millis: Option<u64>,
+    reconstructed: bool,
+    agent: ResolvedModel,
+    study: Option<Digest>,
+}
+
+impl PreCoverageMetricDispatch {
+    fn into_current(self) -> MetricDispatch {
+        MetricDispatch {
+            id: self.id,
+            bloom: self.bloom,
+            workpiece: self.workpiece,
+            stage: self.stage,
+            displayed: self.displayed,
+            sequence: self.sequence,
+            recorded_unix_millis: self.recorded_unix_millis,
+            reconstructed: self.reconstructed,
+            agent: self.agent,
+            study: self.study,
+            covers: Vec::new(),
+        }
+    }
 }
 
 /// One bloom rollup row.
@@ -618,8 +683,9 @@ impl MetricsLedger {
     fn observe_effect(&mut self, sequence: u64, effect: &Decision, configs: &ResolvedConfigs, envelope: Option<u64>) {
         let dispatched = SeatDispatch::from_effect(effect);
         if !dispatched.is_empty() {
+            let covers = shared_run_coverage(effect);
             for seat in dispatched {
-                self.dispatch(sequence, seat, configs, envelope);
+                self.dispatch(sequence, seat, &covers, configs, envelope);
             }
             return;
         }
@@ -651,6 +717,7 @@ impl MetricsLedger {
         &mut self,
         sequence: u64,
         dispatched: SeatDispatch<'_>,
+        covers: &[String],
         configs: &ResolvedConfigs,
         envelope: Option<u64>,
     ) {
@@ -671,6 +738,7 @@ impl MetricsLedger {
             reconstructed: envelope.is_none(),
             agent,
             model_lane,
+            covers: covers.to_vec(),
         });
         if is_new {
             {
@@ -870,7 +938,16 @@ impl MetricsLedger {
             reconstructed: acc.reconstructed,
             agent: acc.agent.clone(),
             study,
+            covers: acc.covers.clone(),
         }
+    }
+}
+
+/// The member workpieces one dispatched effect proves beyond its own row.
+fn shared_run_coverage(effect: &Decision) -> Vec<String> {
+    match effect {
+        Decision::DispatchSharedRun { dispatch } => dispatch.covered_members(),
+        _ => Vec::new(),
     }
 }
 
@@ -1085,6 +1162,7 @@ mod timeline_cap_tests {
                 reconstructed: false,
                 agent: agent(),
                 model_lane: true,
+                covers: Vec::new(),
             },
         );
     }

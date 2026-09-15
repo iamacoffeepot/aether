@@ -409,6 +409,13 @@ pub struct BloomDispatchLive {
     /// Displayed digest the evidence must bind to.
     #[serde(with = "aether_data::bytes")]
     pub displayed: Vec<u8>,
+    /// Member workpieces this order proves besides
+    /// [`workpiece`](Self::workpiece).
+    ///
+    /// Filled for a shared run's step order, which executes one combined gate
+    /// keyed on the composition while it is the thing actually proving each
+    /// covered member. Empty for an ordinary member order.
+    pub covers: Vec<String>,
 }
 
 /// `GET /blooms/{id}/dispatches` — rollup rows plus live outstanding orders.

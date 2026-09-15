@@ -118,7 +118,7 @@ impl EvidenceFile {
     }
 
     fn query(&self) -> DispatchFileQuery {
-        DispatchFileQuery { nonce: self.nonce.clone(), name: self.name.clone(), cursor: Some(self.have) }
+        DispatchFileQuery { nonce: self.nonce.clone(), name: self.name.clone(), cursor: Some(self.have), live: false }
     }
 
     fn ingest(&mut self, store: &Store) {
@@ -193,7 +193,7 @@ mod tests {
     use std::time::Duration;
 
     fn query(name: &str, cursor: u64) -> DispatchFileQuery {
-        DispatchFileQuery { nonce: "dispatch-1".to_owned(), name: name.to_owned(), cursor: Some(cursor) }
+        DispatchFileQuery { nonce: "dispatch-1".to_owned(), name: name.to_owned(), cursor: Some(cursor), live: false }
     }
 
     fn page(lines: &[&str], cursor: u64, next: Option<u64>) -> DispatchFilePage {

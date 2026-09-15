@@ -704,6 +704,39 @@ pub struct BloomDispatchView {
     pub cost: Option<u64>,
     #[serde(default)]
     pub evidence_retained: bool,
+    /// Member workpieces this one execution proves besides
+    /// [`workpiece`](Self::workpiece).
+    ///
+    /// `None` is a coordinator that predates the field: coverage is unknown,
+    /// which is not the same fact as `Some(vec![])` (this row proves only its
+    /// own workpiece). The two must stay distinguishable — a member reading a
+    /// predating coordinator falls back to matching on equality and says so,
+    /// rather than reporting an empty shared run as proven-by-nothing.
+    #[serde(default)]
+    pub covers: Option<Vec<String>>,
+}
+
+impl BloomDispatchView {
+    /// Whether this row is the execution proving `workpiece`.
+    ///
+    /// Its own row always is. A grouped shared run's step dispatch is keyed on
+    /// the composition and names its members here instead.
+    #[must_use]
+    pub fn proves(&self, workpiece: &str) -> bool {
+        self.workpiece == workpiece || self.covers.iter().flatten().any(|name| name == workpiece)
+    }
+
+    /// The coverage cell: the members named, `—` for a row that proves only
+    /// its own workpiece, `unknown` against a coordinator that does not serve
+    /// coverage at all.
+    #[must_use]
+    pub fn coverage_label(&self) -> String {
+        match &self.covers {
+            None => "unknown".to_owned(),
+            Some(names) if names.is_empty() => "—".to_owned(),
+            Some(names) => names.join("  "),
+        }
+    }
 }
 
 /// `GET /dispatches/{nonce}` — one dispatch's evidence header.

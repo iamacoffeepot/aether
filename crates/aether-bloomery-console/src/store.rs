@@ -240,12 +240,15 @@ impl PromptQuery {
 }
 
 /// One ranged `GET /dispatches/{nonce}/files/{name}` page. `cursor` is the
-/// byte offset; `None` is the tail.
+/// byte offset; `None` is the tail. `live` is cadence only — it is not on the
+/// wire, and a followed tail is a different cell from a one-shot page of the
+/// same bytes so a reader walking the file is not yanked back to the end.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DispatchFileQuery {
     pub nonce: String,
     pub name: String,
     pub cursor: Option<u64>,
+    pub live: bool,
 }
 
 impl DispatchFileQuery {
@@ -564,6 +567,7 @@ impl Store {
             ResourceKey::CoordinatorLogs(query) if query.live => self.view_cadence,
             ResourceKey::Transcript(query) if query.live => self.view_cadence,
             ResourceKey::Journal(query) if query.live => self.view_cadence,
+            ResourceKey::DispatchFile(query) if query.live => self.view_cadence,
             ResourceKey::View
             | ResourceKey::MetricsSummary
             | ResourceKey::MetricsDays
@@ -634,6 +638,12 @@ impl Store {
             ResourceKey::CoordinatorLogs(query) => self.coordinator_logs.get(query).is_none_or(Cell::on_demand_due),
             ResourceKey::Transcript(query) => self.transcripts.get(query).is_none_or(Cell::on_demand_due),
             ResourceKey::Prompt(query) => self.prompts.get(query).is_none_or(Cell::on_demand_due),
+            ResourceKey::DispatchFile(query) if query.live => {
+                let Some(cell) = self.dispatch_files.get(query) else {
+                    return true;
+                };
+                !cell.inflight && cell.completed_at.is_none_or(|at| at.elapsed() >= self.view_cadence)
+            }
             ResourceKey::MetricsSummary => self.polled_due(&self.summary),
             ResourceKey::MetricsDays => self.polled_due(&self.days),
             ResourceKey::Spend => self.polled_due(&self.spend),
@@ -1061,15 +1071,28 @@ mod tests {
         // typo here is a 404 the browser cannot tell from a swept file.
         assert_eq!(ResourceKey::Dispatch("dispatch-1".into()).path(), "/dispatches/dispatch-1");
         assert_eq!(
-            DispatchFileQuery { nonce: "dispatch-1".into(), name: "evidence.json".into(), cursor: Some(0) }.path(),
+            DispatchFileQuery {
+                nonce: "dispatch-1".into(),
+                name: "evidence.json".into(),
+                cursor: Some(0),
+                live: false
+            }
+            .path(),
             "/dispatches/dispatch-1/files/evidence.json?cursor=0"
         );
         assert_eq!(
-            DispatchFileQuery { nonce: "dispatch-1".into(), name: "verify.clippy.log".into(), cursor: None }.path(),
+            DispatchFileQuery {
+                nonce: "dispatch-1".into(),
+                name: "verify.clippy.log".into(),
+                cursor: None,
+                live: true
+            }
+            .path(),
             "/dispatches/dispatch-1/files/verify.clippy.log"
         );
         assert_eq!(
-            DispatchFileQuery { nonce: "dispatch-1".into(), name: "a b.json".into(), cursor: Some(40) }.path(),
+            DispatchFileQuery { nonce: "dispatch-1".into(), name: "a b.json".into(), cursor: Some(40), live: false }
+                .path(),
             "/dispatches/dispatch-1/files/a%20b.json?cursor=40"
         );
     }

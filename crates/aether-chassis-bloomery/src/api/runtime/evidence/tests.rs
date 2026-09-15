@@ -131,6 +131,7 @@ fn cost_is_null_without_a_study_record_and_never_a_synthesized_zero() {
         reconstructed: true,
         agent: ResolvedModel { harness: Harness::Claude, model: "x".to_owned(), effort: ReasoningEffort::Low },
         study: None,
+        covers: Vec::new(),
     })
     .expect("a metric row encodes");
     let view = assemble(
@@ -159,6 +160,7 @@ fn live_outstanding_joins_the_rollup_and_keeps_its_nonce() {
         reconstructed: true,
         agent: ResolvedModel { harness: Harness::Claude, model: "x".to_owned(), effort: ReasoningEffort::Low },
         study: None,
+        covers: Vec::new(),
     })
     .expect("a metric row encodes");
     let view = assemble(
@@ -171,10 +173,81 @@ fn live_outstanding_joins_the_rollup_and_keeps_its_nonce() {
             workpiece: "issue-1".to_owned(),
             stage: to_vec(&StageId::Construct).expect("stage encodes"),
             displayed: Digest::from_bytes([2; 32]).as_bytes().to_vec(),
+            covers: Vec::new(),
         }],
     );
     assert_eq!(view.dispatches.len(), 1, "the live order overlays the fold-id row, it does not duplicate it");
     assert_eq!(view.dispatches[0].nonce, "dispatch-3");
+}
+
+#[test]
+fn a_shared_runs_step_order_is_attributed_to_every_member_it_covers() {
+    // The plausible bug (issue 6071): a grouped verify is one order keyed on
+    // the composition, so a member reading this page for "rows whose workpiece
+    // is mine" finds nothing and the run proving it — its lane log, its gate
+    // logs, its transcript — is unreachable from the board.
+    let dir = tempfile::tempdir().expect("a scratch directory is available");
+    let view = assemble(
+        dir.path(),
+        dir.path(),
+        None,
+        &[],
+        &[BloomDispatchLive {
+            nonce: "dispatch-9-step-0".to_owned(),
+            workpiece: "aether.bloomery.composition".to_owned(),
+            stage: to_vec(&StageId::AggregateVerify).expect("stage encodes"),
+            displayed: Digest::from_bytes([2; 32]).as_bytes().to_vec(),
+            covers: vec!["issue-1".to_owned(), "issue-2".to_owned()],
+        }],
+    );
+    assert_eq!(view.dispatches.len(), 1);
+    assert_eq!(view.dispatches[0].covers, vec!["issue-1".to_owned(), "issue-2".to_owned()]);
+}
+
+#[test]
+fn a_rollup_payload_written_before_coverage_still_decodes() {
+    // Tripwire: the wire format is positional and unversioned, so appending a
+    // field to MetricDispatch ends every payload the previous binary persisted
+    // one field early. A hard decode failure there empties a bloom's whole
+    // dispatch page until the metrics cache is rebuilt from the journal.
+    #[derive(serde::Serialize)]
+    struct PreCoverage {
+        id: String,
+        bloom: BloomId,
+        workpiece: String,
+        stage: StageId,
+        displayed: Digest,
+        sequence: u64,
+        recorded_unix_millis: Option<u64>,
+        reconstructed: bool,
+        agent: ResolvedModel,
+        study: Option<Digest>,
+    }
+
+    let dir = tempfile::tempdir().expect("a scratch directory is available");
+    let payload = to_vec(&PreCoverage {
+        id: "fold:x".to_owned(),
+        bloom: BloomId(Digest::from_bytes([1; 32])),
+        workpiece: "issue-1".to_owned(),
+        stage: StageId::Construct,
+        displayed: Digest::from_bytes([2; 32]),
+        sequence: 3,
+        recorded_unix_millis: None,
+        reconstructed: true,
+        agent: ResolvedModel { harness: Harness::Claude, model: "x".to_owned(), effort: ReasoningEffort::Low },
+        study: None,
+    })
+    .expect("the previous layout encodes");
+    let view = assemble(
+        dir.path(),
+        dir.path(),
+        None,
+        &[BloomDispatchRollup { nonce: "d".to_owned(), sequence: 3, payload }],
+        &[],
+    );
+    assert_eq!(view.dispatches.len(), 1, "a payload one field short is still a row");
+    assert_eq!(view.dispatches[0].workpiece, "issue-1");
+    assert!(view.dispatches[0].covers.is_empty(), "an older payload records no coverage");
 }
 
 #[test]

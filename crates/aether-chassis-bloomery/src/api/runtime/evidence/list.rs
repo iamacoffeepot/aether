@@ -24,7 +24,7 @@ pub fn assemble(
     let mut rows = Vec::new();
 
     for entry in rollup {
-        let Ok(payload) = from_bytes::<MetricDispatch>(&entry.payload) else {
+        let Ok(payload) = MetricDispatch::decode_payload(&entry.payload) else {
             continue;
         };
         let (nonce, live) = overlay_nonce(entry, &payload, outstanding);
@@ -37,6 +37,13 @@ pub fn assemble(
         };
         let verdict = retained_verdict(worktree_base, archive_base, &nonce);
         let retained = evidence_retained(worktree_base, archive_base, &nonce);
+        // A payload the previous binary persisted carries no coverage; the live
+        // order it overlays still does, so the joined row keeps the reach.
+        let covers = if payload.covers.is_empty() {
+            live.and_then(|index| outstanding.get(index)).map(|order| order.covers.clone()).unwrap_or_default()
+        } else {
+            payload.covers
+        };
         rows.push(BloomDispatchView {
             nonce,
             workpiece: payload.workpiece,
@@ -45,6 +52,7 @@ pub fn assemble(
             verdict,
             cost,
             evidence_retained: retained,
+            covers,
         });
     }
 
@@ -63,6 +71,7 @@ pub fn assemble(
             verdict: retained_verdict(worktree_base, archive_base, &live.nonce),
             cost: None,
             evidence_retained: evidence_retained(worktree_base, archive_base, &live.nonce),
+            covers: live.covers.clone(),
         });
     }
 

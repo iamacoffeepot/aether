@@ -3317,6 +3317,26 @@ mod tests {
     }
 
     #[test]
+    fn a_contextual_runs_coverage_names_every_member_it_proves() {
+        // The plausible bug (issue 6071): one contextual run is one dispatch
+        // keyed on the composition, so a coverage read that answers with the
+        // first request — or with nothing — leaves every other member it proves
+        // with no handle on the evidence, and the board reports that member
+        // idle while this run is the thing actually proving it.
+        let mut dispatch = reducer_shaped_contextual_dispatch();
+        let mut second = dispatch.plan.requests[0].clone();
+        second.member.workpiece = WorkpieceId("member-two".to_owned());
+        dispatch.plan.requests.push(second);
+        assert_eq!(dispatch.covered_members(), vec!["member".to_owned(), "member-two".to_owned()]);
+
+        let serial = SharedRunDispatch { execution: SharedRunExecution::Serial, plan: dispatch.plan.clone() };
+        assert!(
+            serial.covered_members().is_empty(),
+            "a serial run executes each request's own transformation, so every member already has its own row"
+        );
+    }
+
+    #[test]
     fn a_members_delta_is_read_from_its_own_construct_base_not_the_moving_product_head() {
         // Tripwire (#6054): the composition base is the product head, and a
         // sibling's fold moves it past the tree this member's lane was given.

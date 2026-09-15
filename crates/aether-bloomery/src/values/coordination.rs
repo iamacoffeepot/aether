@@ -802,6 +802,26 @@ pub struct SharedRunDispatch {
     pub execution: SharedRunExecution,
 }
 
+impl SharedRunDispatch {
+    /// The member workpieces this one execution proves beyond the row it is
+    /// keyed on.
+    ///
+    /// Only a contextual run answers with anything. It runs one combined gate
+    /// over the composed node, so both its fold row and its step order are
+    /// keyed on the composition and every covered member would otherwise have
+    /// no handle on the evidence that is proving it. A serial run executes each
+    /// request's own transformation, so each member already has its own row.
+    #[must_use]
+    pub fn covered_members(&self) -> Vec<String> {
+        match self.execution {
+            SharedRunExecution::Serial => Vec::new(),
+            SharedRunExecution::Contextual { .. } => {
+                self.plan.requests.iter().map(|request| request.member.workpiece.0.clone()).collect()
+            }
+        }
+    }
+}
+
 /// Evidence-backed scope of one group failure.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum FailureScope {
