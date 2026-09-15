@@ -78,7 +78,7 @@ pub use gate::{
 pub use outcome::{Decisions, Outcome};
 pub use seal::is_active_unlanded;
 pub use snapshot::{
-    AggregateReviewFault, AwaitingSurface, BloomRecord, BloomStatus, Excuse, FileLease, FoldedIntegration,
+    AggregateReviewFault, AwaitingSurface, BloomRecord, BloomStatus, Excuse, FileLease, FoldRound, FoldedIntegration,
     HostFaultHold, LeaseEviction, MemberMachineryFault, MemberPark, NarrowedComposition, Snapshot, StageProgress,
 };
 pub use view::view_of;
