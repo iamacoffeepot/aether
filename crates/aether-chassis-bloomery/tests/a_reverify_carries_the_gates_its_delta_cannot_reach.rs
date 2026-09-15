@@ -23,7 +23,7 @@ use common::carry::{carrying, to_the_delta_confirm};
 
 #[test]
 fn a_reverify_carries_the_gates_its_delta_cannot_reach() {
-    let mut harness = FixtureHarness::start("verify-carry-sound");
+    let mut harness = FixtureHarness::start_refining("verify-carry-sound");
     let (bloom, first, repaired, confirm) = to_the_delta_confirm(&mut harness);
 
     assert_eq!(

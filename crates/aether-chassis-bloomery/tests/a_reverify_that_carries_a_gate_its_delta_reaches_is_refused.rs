@@ -26,7 +26,7 @@ use common::carry::{carrying, to_the_delta_confirm};
 
 #[test]
 fn a_reverify_that_carries_a_gate_its_delta_reaches_is_refused() {
-    let mut harness = FixtureHarness::start("verify-carry-unsound");
+    let mut harness = FixtureHarness::start_refining("verify-carry-unsound");
     let (bloom, first, _repaired, confirm) = to_the_delta_confirm(&mut harness);
 
     // The same claim the sibling makes soundly, over a `code` delta — which

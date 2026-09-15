@@ -69,6 +69,10 @@ pub mod carry {
     /// Drive one member to its delta-confirm: construct, a Verify red on
     /// `verify.suppress`, and a refine lap that captures a repaired tree.
     ///
+    /// The harness must have sealed the repair-lap disposition
+    /// (`FixtureHarness::start_refining`): under the default a red Verify
+    /// withdraws the member and there is no lap to confirm.
+    ///
     /// Returns the bloom, the tree the failing Verify judged — what a carry
     /// names as `proved` — the repaired tree the delta-confirm stands on, and
     /// that confirm's order.

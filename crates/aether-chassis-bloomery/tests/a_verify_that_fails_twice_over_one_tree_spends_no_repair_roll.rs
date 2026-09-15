@@ -39,7 +39,7 @@ fn clippy() -> VerifyFailureSet {
 
 #[test]
 fn a_verify_that_fails_twice_over_one_tree_spends_no_repair_roll() {
-    let mut harness = FixtureHarness::start("one-tree-repeat");
+    let mut harness = FixtureHarness::start_refining("one-tree-repeat");
     let bloom = harness.seal_member(WORKPIECE, digest(0x51));
 
     let construct = harness.await_order();
