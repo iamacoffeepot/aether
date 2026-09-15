@@ -978,8 +978,8 @@ mod tests {
     use crate::values::{
         BaseReceipt, BaseVerdict, BloomDraft, BloomSpec, CandidateRef, ConfigKind, ConfigRegistry, CoordinationPolicy,
         Evidence, EvidenceKind, Forecast, MemberDependency, Membership, OperatorProposal, PIPELINE_MANIFEST_PATH,
-        ResolutionClaim, ResolvedConfigs, SpendCeiling, SpendQuiesce, SpendWindow, Unproducible, VerificationMode,
-        VerifyGateSet,
+        RedVerify, ResolutionClaim, ResolvedConfigs, SpendCeiling, SpendQuiesce, SpendWindow, Unproducible,
+        VerificationMode, VerifyGateSet,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -1015,7 +1015,7 @@ mod tests {
             movement_budget: 1,
             reservation_millis: 1_000,
             coalesce_millis: None,
-            red_verify: crate::RedVerify::Refine,
+            red_verify: RedVerify::Refine,
             host_class: String::from("test"),
         }
     }

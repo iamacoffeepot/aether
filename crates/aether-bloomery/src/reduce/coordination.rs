@@ -2326,10 +2326,10 @@ fn apply_failed_outcome(
         // (ADR-0218 §Amendment: low tolerance); under `Refine` this stays the
         // no-op it has always been, and the scheduler re-proposes them.
         FailureScope::Interaction { members, .. } if context.record.red_verify == RedVerify::Eject => {
-            eject_contextual(context, members, failures, &evidence, effects);
+            eject_contextual(context, members, failures, evidence, effects);
         }
         FailureScope::Unattributed { .. } if context.record.red_verify == RedVerify::Eject => {
-            eject_contextual(context, from_ref(&request.member), failures, &evidence, effects);
+            eject_contextual(context, from_ref(&request.member), failures, evidence, effects);
         }
         FailureScope::Interaction { .. } | FailureScope::Unattributed { .. } => {}
     }
@@ -3373,7 +3373,7 @@ mod tests {
             movement_budget: 2,
             reservation_millis: 1_000,
             coalesce_millis: None,
-            red_verify: crate::RedVerify::Refine,
+            red_verify: RedVerify::Refine,
             host_class: String::from("test-host"),
         }
     }
