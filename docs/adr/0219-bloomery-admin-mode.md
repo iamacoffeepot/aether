@@ -51,8 +51,8 @@ already closes composition findings by naming their evidence digests, with
 ## Decision
 
 Add **admin mode**: a per-bloom session, opened and closed by an operator, in
-which the machine dispatches nothing, faults cost nothing, and six repair acts
-are accepted. Every act is journal-first — the REST edge appends a fact and
+which the machine dispatches nothing, faults cost nothing, and five repair acts
+plus a read are accepted. Every act is journal-first — the REST edge appends a fact and
 nothing else, and every state movement is the reducer's, so an admin session
 replays exactly as it happened rather than as the current binary would
 re-decide it (ADR-0190).
@@ -67,6 +67,7 @@ re-decide it (ADR-0190).
 | `admin set-candidate` | `Fact::AdminSetCandidate` | places a candidate at a gate position |
 | `admin rerun` | `Fact::AdminRerun` | aims one workpiece at one stage |
 | `admin waive` | `Fact::AdminWaive` | closes named findings; records the gate's pass |
+| `admin drop-lap` | `Fact::AdminDropLap` | reverts one workpiece's candidate one lap |
 | `admin status` | — | reads `/view`; writes nothing |
 
 ### Enter and exit
@@ -83,7 +84,7 @@ laps the session exists to stop.
 The flag is not redundant with the hold, because the two say different things. A
 hold says *nothing is being dispatched*. The flag says *a person is in there
 changing things*, and that second statement is what makes an executor fault free
-and the six doors open. Both are projected: `BloomView::operator_hold` and
+and the five acts admissible. Both are projected: `BloomView::operator_hold` and
 `BloomView::admin`.
 
 Exiting clears the flag, releases the brake, and re-derives what is due through
@@ -118,17 +119,28 @@ executor already cancels them; nothing kills a model CLI directly.
 
 **`cancel-lane`** records the cancellation and journals it. No cursor moves, no
 attempt or roll is spent. The nonce is *recorded* rather than validated by the
-reducer, which cannot read the host's outstanding-order registry; the REST door
-resolves it there first, so a nonce that reaches the reducer already named a
-live order of this bloom's.
+reducer, which cannot read the host's outstanding-order registry: the check
+belongs where that registry is readable, so the executor drain re-resolves the
+nonce and refuses one whose order names something other than this bloom and
+workpiece. A nonce that no longer resolves is settled rather than re-driven —
+the lap it named is already over, which is what the operator asked for. The
+client resolves it a third time, off the live view, so a mistyped nonce reads as
+"no live order is called that" rather than as a refused act.
 
 **`set-candidate`** is the repair door without its wedge precondition. A member
 lands at `Verify` carrying its spent counters forward — an operator writing the
 candidate buys a lap, never a fresh budget, exactly as `OperatorRepair` does.
 The composition's weave becomes the held integration, its cursor advances, and
-both composite gates fall due. The candidate pair is derived from a commit and
+the composite gates fall due. The candidate pair is derived from a commit and
 its ref pushed with correspondence recorded, exactly as `repair --from-commit`
 does; only the wedge precondition is dropped.
+
+Placing the weave the record *already* holds is the incident's own move — the
+operator putting the composition back on the tree its gates passed, after a
+repair lap replaced it — and it is treated as what it is: a no-op on the fold.
+No `RecordIntegration` is emitted, because that clears the composite-gate join,
+and a gate that passed this exact tree has not stopped having passed it; only
+the gates that have not passed fall due.
 
 **`rerun`** aims one workpiece at one stage and spends nothing. It is not the
 retry door: that one journals an executor fault, which is the operator asserting
@@ -164,7 +176,9 @@ have already judged.
 2. **Adjudicated, not fabricated.** The ledger row is an `Adjudication` — the
    same value #4957 writes — so `open_composition_findings` needs no teaching
    about waivers and the closure sits beside the verdict it closed rather than
-   replacing it.
+   replacing it. The gate pass recorded beside it also clears that gate's
+   deferral, because a gate a person stood in for must not be re-dispatched on
+   the way out.
 3. **A review waiver needs only a reason.** A review waiver is a person
    overruling a *judgment*, which is exactly what an operator is for.
 4. **A verify waiver needs `--i-know-this-lands-unverified-code`.** A verify
@@ -197,11 +211,15 @@ the folds a person stood in for.
 - An operator can repair a broken bloom as a sequence rather than as five
   independent decisions against a live reactor, and pay nothing for the time
   they spend reading it.
-- A bloom in admin mode is visible as such: `BloomView::admin` reaches the
-  notification channel (`admin  bloom … is in admin mode: …`) and the console's
-  interrupt list as its own `Admin` interrupt, distinct from `Hold`. An
+- A bloom in admin mode is visible as such: `BloomView::admin` carries the
+  operator, the reason, and the session's act log, and reaches the notification
+  channel (`admin  bloom … is in admin mode (…): …`) and the console's interrupt
+  list as its own `Admin` interrupt, which wins over the `Hold` it raised. An
   invisible session would be strictly worse than none, because the board would
-  report a bloom as merely braked while a person was moving its cursors.
+  report a bloom as merely braked while a person was moving its cursors. The
+  act log is what `admin status` reads, so an operator mid-repair answers "what
+  has already been done here" from the projection rather than from a journal
+  walk they would stop running.
 - The reducer grows one module (`reduce/admin.rs`) and two one-`if` hooks in
   files it does not own. Everything else it reuses: the dispatch choke, the
   deferral tables, the release's owed-dispatch helpers, the adjudication ledger,
