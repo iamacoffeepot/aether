@@ -39,9 +39,9 @@ use super::strand::{readopt_stranded_dispatches, retire_accounted_orders};
 use super::{
     BACKOFF_CAP, BaseSnapshotPort, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState,
     GitCandidatePush, NameEvidenceClaims, Stores, TickClock, TrackedHandle, admitted_candidate_pushes, backoff_delay,
-    candidate_push_at, default_candidate_push, dispatch_origin, drain_and_cancel, fold_drain_backoff, is_silent,
-    is_stale, journal_publications, next_backoff, observe_heartbeat, seed_dispatches, seed_tracked,
-    select_stale_handles, silence_from, timeout_verdict,
+    candidate_push_at, default_candidate_push, dispatch_origin, drain_and_cancel, drain_and_cancel_lane,
+    fold_drain_backoff, is_silent, is_stale, journal_publications, next_backoff, observe_heartbeat, seed_dispatches,
+    seed_tracked, select_stale_handles, silence_from, timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -4379,9 +4379,9 @@ mod offloaded_adapter_calls {
 
     use aether_bloomery::testing::digest;
     use aether_bloomery::{
-        BloomId, CancelDispatchPayload, ConfigRegistry, EvidenceRef, ExecutionStatus, ExecutorBackend,
-        MembershipMutation, Nonce, ObservedLaneWrites, StageCatalog, StageId, Topic, Transformation, WorkHandle,
-        WorkOrder, WorkpieceId,
+        BloomId, CancelDispatchPayload, CancelLanePayload, ConfigRegistry, EvidenceRef, ExecutionStatus,
+        ExecutorBackend, MembershipMutation, Nonce, ObservedLaneWrites, StageCatalog, StageId, Topic, Transformation,
+        WorkHandle, WorkOrder, WorkpieceId,
     };
     use aether_data::wire::to_vec;
     use aether_data::{MailId, MailboxId, Source};
@@ -4392,8 +4392,8 @@ mod offloaded_adapter_calls {
     use super::super::offload::{AdapterOffload, MAX_IN_FLIGHT};
     use super::{
         CandidatePush, CapturingBackend, NOW_UNIX_MILLIS, NameEvidenceClaims, RecordingPush, Stores, drain_and_cancel,
-        drain_and_dispatch, drain_and_dispatch_aggregate_verify, enqueue_aggregate_verify, enqueue_construct_dispatch,
-        pull_and_admit, tick_clock_at, track,
+        drain_and_cancel_lane, drain_and_dispatch, drain_and_dispatch_aggregate_verify, enqueue_aggregate_verify,
+        enqueue_construct_dispatch, pull_and_admit, tick_clock_at, track,
     };
     use crate::bloomery::outbox::TopicOutbox;
     use crate::bloomery::{ExecutorPort, ExecutorPortError, ExecutorShell, Settled};
@@ -4673,6 +4673,54 @@ mod offloaded_adapter_calls {
             lifecycle: OrderLifecycle::Submitted,
             prompt_manifest: None,
         }
+    }
+
+    /// An admin lane cancel must settle whether or not the lane is still there,
+    /// and must never reach past the one nonce it names (ADR-0219).
+    ///
+    /// Both halves come from the live incident. A model process that died
+    /// without writing its evidence leaves an order the board still lists and a
+    /// lane that is already gone; a cancel that stopped its ack prefix on the
+    /// missing handle would re-drive that entry every tick forever, and the
+    /// operator would be told the act succeeded while nothing settled. And the
+    /// nonce is what the operator read off a board — if it has since been
+    /// consumed and re-minted for a sibling, cancelling on the nonce alone
+    /// would stop that sibling's lane instead.
+    #[test]
+    fn an_admin_lane_cancel_settles_a_gone_lane_and_spares_a_sibling() {
+        let mut store = SqliteStore::open(":memory:").unwrap();
+        let bloom = BloomId(digest(1));
+        let backend = Arc::new(CapturingBackend::default());
+        let shell = ExecutorShell::new(Arc::clone(&backend));
+
+        store.record_order(&live_order("n-live", bloom, "wp-live", u64::MAX / 2)).unwrap();
+        for (nonce, workpiece) in [("n-gone", "wp-gone"), ("n-live", "wp-typo")] {
+            store
+                .enqueue_topic(
+                    Topic::CancelLane,
+                    &to_vec(&CancelLanePayload {
+                        bloom: bloom.0,
+                        workpiece: WorkpieceId(workpiece.to_owned()),
+                        nonce: nonce.to_owned(),
+                    })
+                    .unwrap(),
+                    None,
+                )
+                .unwrap();
+        }
+
+        let acked = drain_and_cancel_lane(&mut store, &shell).unwrap();
+
+        assert!(acked.is_some(), "both entries settle rather than re-driving a lane nobody can reach");
+        assert!(
+            backend.cancelled().is_empty(),
+            "neither a gone order nor a sibling's is killed, got {:?}",
+            backend.cancelled(),
+        );
+        assert!(
+            store.lookup_order("n-live").unwrap().is_some(),
+            "the sibling's order is still outstanding: a mistyped nonce settles nothing",
+        );
     }
 
     /// The remaining #5564 failure: a submit a worker holds must not count as a

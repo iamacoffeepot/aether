@@ -7,6 +7,7 @@
 //! configs by digest, and carries each member's scope revision so the
 //! workpiece claim transfers.
 
+mod admin;
 mod amend;
 mod archive;
 mod client;
@@ -144,6 +145,9 @@ enum BloomCommand {
     Reopen(ReopenArgs),
     /// Open a pre-bloom scoping run on a commission.
     ScopeRun(ScopeRunArgs),
+    /// Take a bloom out of the machine's hands, repair it, and hand it back
+    /// (ADR-0219).
+    Admin(admin::AdminArgs),
 }
 
 #[derive(Args, Debug)]
@@ -486,6 +490,7 @@ fn run_on_with_policy(endpoint: &Endpoint, command: &BloomCommand, approval_poli
         BloomCommand::Cancel(args) => run_cancel(&client, args),
         BloomCommand::Reopen(args) => run_reopen(&client, args),
         BloomCommand::ScopeRun(args) => run_scope_run(&client, args),
+        BloomCommand::Admin(args) => admin::run(&client, args),
     }
 }
 

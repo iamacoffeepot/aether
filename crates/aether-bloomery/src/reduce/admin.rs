@@ -597,3 +597,526 @@ pub(super) fn absorbed_fault(bloom: BloomId, workpiece: Option<&WorkpieceId>, ev
         effects: alloc::vec![Decision::RecordEvidence { bloom, evidence: evidence.clone() }],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::{String, ToString as _};
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use super::{AdminError, reduce_admin_enter};
+    use crate::digest::Digest;
+    use crate::ids::{BloomId, StageId, WorkpieceId};
+    use crate::reduce::{Decision, Decisions, Fact, Outcome, Snapshot, StageProgress};
+    use crate::testing::{draft, event, membership, step};
+    use crate::values::{
+        AdminCandidate, AdminLaneCancel, AdminLapDrop, AdminNote, AdminRerun, AdminWaiver, CandidateRef, Evidence,
+        EvidenceKind, OperatorHold,
+    };
+
+    fn digest(seed: u8) -> Digest {
+        Digest::from_bytes([seed; 32])
+    }
+
+    fn workpiece(name: &str) -> WorkpieceId {
+        WorkpieceId(name.into())
+    }
+
+    fn note() -> AdminNote {
+        AdminNote {
+            reason: "the review named members that were already withdrawn".to_string(),
+            operator: "ops".to_string(),
+        }
+    }
+
+    fn candidate(seed: u8) -> CandidateRef {
+        CandidateRef { tree: digest(seed), checkout: digest(seed.wrapping_add(1)) }
+    }
+
+    /// A sealed two-member bloom, walking.
+    fn sealed() -> (Snapshot, BloomId) {
+        let spec = draft(0, vec![membership("wp-a", 1), membership("wp-b", 2)]).seal();
+        let bloom = spec.id();
+        (step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", Fact::Seal(spec))).0, bloom)
+    }
+
+    /// The same bloom with an open admin session.
+    fn in_admin() -> (Snapshot, BloomId) {
+        let (snapshot, bloom) = sealed();
+        (step(&snapshot, &event("enter", Fact::AdminEnter { bloom, note: note() })).0, bloom)
+    }
+
+    fn admit(snapshot: &Snapshot, key: &str, fact: Fact) -> (Snapshot, Decisions) {
+        step(snapshot, &event(key, fact))
+    }
+
+    fn effects_name(decisions: &Decisions, predicate: impl Fn(&Decision) -> bool) -> bool {
+        decisions.effects.iter().any(predicate)
+    }
+
+    #[test]
+    fn entering_raises_the_brake_and_exiting_drops_it() {
+        // The plausible bug: a session that sets its own flag and forgets the
+        // hold. Admin mode has no dispatch choke of its own — it reuses the one
+        // `SealedLine` carries — so a flag without a hold would open the six
+        // doors over a bloom the reactor was still dispatching.
+        let (snapshot, bloom) = sealed();
+
+        let (entered, decided) = admit(&snapshot, "enter", Fact::AdminEnter { bloom, note: note() });
+        assert_eq!(decided.outcome, Outcome::AdminEntered { bloom });
+        assert!(entered.blooms[&bloom].admin.is_some(), "the session flag is set");
+        assert!(entered.blooms[&bloom].operator_hold.is_some(), "and the brake it rides on is raised");
+
+        let (exited, decided) = admit(&entered, "exit", Fact::AdminExit { bloom, note: note() });
+        assert!(matches!(decided.outcome, Outcome::AdminExited { .. }), "{:?}", decided.outcome);
+        assert!(exited.blooms[&bloom].admin.is_none(), "the flag clears");
+        assert!(exited.blooms[&bloom].operator_hold.is_none(), "and so does the brake");
+    }
+
+    #[test]
+    fn entering_a_braked_bloom_leaves_the_existing_hold_alone() {
+        // The plausible bug: entering over an operator's own brake re-records
+        // the hold, overwriting the reason they gave — which is the one thing
+        // whoever finds the frozen bloom is reading it for.
+        let (snapshot, bloom) = sealed();
+        let held = OperatorHold { reason: "it is spending on nonsense".to_string(), operator: "owner".to_string() };
+        let (braked, _) = admit(&snapshot, "hold", Fact::OperatorHold { bloom, hold: held.clone() });
+
+        let (entered, decided) = admit(&braked, "enter", Fact::AdminEnter { bloom, note: note() });
+        assert!(
+            !effects_name(&decided, |effect| matches!(effect, Decision::RecordOperatorHold { .. })),
+            "a second hold is not recorded: {:?}",
+            decided.effects
+        );
+        assert_eq!(entered.blooms[&bloom].operator_hold.as_ref(), Some(&held), "the first operator's words stand");
+    }
+
+    #[test]
+    fn a_second_enter_is_refused_and_journals_nothing() {
+        let (snapshot, bloom) = in_admin();
+        let (_, decided) = admit(&snapshot, "enter-again", Fact::AdminEnter { bloom, note: note() });
+        assert_eq!(decided.outcome, Outcome::AdminRejected(AdminError::AlreadyInAdmin));
+        assert!(decided.effects.is_empty(), "a refusal emits nothing: {:?}", decided.effects);
+    }
+
+    #[test]
+    fn every_act_is_refused_while_the_session_is_closed() {
+        // The plausible bug, and the whole reason admin mode is a session
+        // rather than five more verbs: an act that worked outside one would let
+        // an operator place a candidate, waive a finding, or revert a lap
+        // against a bloom the reactor is still dispatching.
+        let (snapshot, bloom) = sealed();
+        let acts = [
+            (
+                "cancel",
+                Fact::AdminCancelLane {
+                    bloom,
+                    cancel: AdminLaneCancel {
+                        workpiece: workpiece("wp-a"),
+                        nonce: "dispatch-1".to_string(),
+                        note: note(),
+                    },
+                },
+            ),
+            (
+                "set",
+                Fact::AdminSetCandidate {
+                    bloom,
+                    set: AdminCandidate { workpiece: workpiece("wp-a"), candidate: candidate(10), note: note() },
+                },
+            ),
+            (
+                "rerun",
+                Fact::AdminRerun {
+                    bloom,
+                    rerun: AdminRerun {
+                        workpiece: workpiece("wp-a"),
+                        stage: StageId::Verify,
+                        now: false,
+                        note: note(),
+                    },
+                },
+            ),
+            (
+                "waive",
+                Fact::AdminWaive {
+                    bloom,
+                    waiver: AdminWaiver {
+                        gate: StageId::AggregateReview,
+                        findings: vec![digest(50)],
+                        acknowledged_unverified: false,
+                        note: note(),
+                    },
+                },
+            ),
+            (
+                "drop",
+                Fact::AdminDropLap {
+                    bloom,
+                    drop: AdminLapDrop { workpiece: workpiece("wp-a"), nonce: "dispatch-1".to_string(), note: note() },
+                },
+            ),
+        ];
+
+        for (key, fact) in acts {
+            let (_, decided) = admit(&snapshot, key, fact);
+            assert_eq!(decided.outcome, Outcome::AdminRejected(AdminError::NotInAdmin), "{key} outside a session");
+            assert!(decided.effects.is_empty(), "{key} journals nothing: {:?}", decided.effects);
+        }
+    }
+
+    #[test]
+    fn a_blank_reason_and_a_blank_operator_each_refuse() {
+        // The plausible bug: the door defaults the audit trail, which is the
+        // whole product of an act no verdict produced.
+        let (snapshot, bloom) = sealed();
+
+        let blank_reason = AdminNote { reason: "   ".to_string(), ..note() };
+        assert_eq!(
+            reduce_admin_enter(&snapshot, &bloom, &blank_reason).outcome,
+            Outcome::AdminRejected(AdminError::BlankReason)
+        );
+
+        let blank_operator = AdminNote { operator: String::new(), ..note() };
+        assert_eq!(
+            reduce_admin_enter(&snapshot, &bloom, &blank_operator).outcome,
+            Outcome::AdminRejected(AdminError::BlankOperator)
+        );
+    }
+
+    #[test]
+    fn a_placed_candidate_moves_the_cursor_to_verify_and_defers_its_dispatch() {
+        // Two plausible bugs in one move. A candidate placed without the
+        // deferral is a cursor nothing ever dispatches from — the bloom would
+        // sit at Verify forever, because exit walks the deferral set and not
+        // the cursors. A candidate placed *with* a dispatch would put a worker
+        // on a bloom an operator is still repairing.
+        let (snapshot, bloom) = in_admin();
+        let set = AdminCandidate { workpiece: workpiece("wp-a"), candidate: candidate(20), note: note() };
+
+        let (placed, decided) = admit(&snapshot, "set", Fact::AdminSetCandidate { bloom, set });
+        assert!(matches!(decided.outcome, Outcome::AdminActed { .. }), "{:?}", decided.outcome);
+        assert!(
+            !effects_name(&decided, |effect| matches!(effect, Decision::DispatchAttempt { .. })),
+            "a session dispatches nothing: {:?}",
+            decided.effects
+        );
+        assert!(effects_name(&decided, |effect| matches!(effect, Decision::DeferDispatch { .. })));
+
+        let record = &placed.blooms[&bloom];
+        let cursor = record.progress[&workpiece("wp-a")];
+        assert_eq!(cursor.stage, StageId::Verify);
+        assert_eq!(cursor.candidate, Some(candidate(20)));
+        assert!(record.deferred_dispatches.contains(&workpiece("wp-a")), "and exit owes it a work order");
+    }
+
+    #[test]
+    fn a_placed_composition_weave_becomes_the_held_fold_and_owes_both_gates() {
+        // The plausible bug: placing a weave that does not become the held
+        // integration. The composite gates judge the *fold*, so a weave that
+        // only moved the cursor would be dispatched against the tree the
+        // operator was replacing.
+        let (snapshot, bloom) = in_admin();
+        let weave = candidate(30);
+        let set = AdminCandidate { workpiece: WorkpieceId::composition(), candidate: weave, note: note() };
+
+        let (placed, _) = admit(&snapshot, "weave", Fact::AdminSetCandidate { bloom, set });
+        let record = &placed.blooms[&bloom];
+        let integration = record.integration.as_ref().expect("the operator's weave is held");
+        assert_eq!((integration.tree, integration.head), (weave.tree, weave.checkout));
+        assert_eq!(
+            record.deferred_aggregates.iter().copied().collect::<Vec<_>>(),
+            vec![StageId::AggregateVerify, StageId::AggregateReview],
+            "both gates fall due, so exit judges the operator's tree"
+        );
+    }
+
+    #[test]
+    fn a_waiver_over_an_unraised_finding_is_refused() {
+        // The honesty rule this door exists to keep: a waiver voids evidence,
+        // so it cannot name a digest the bloom never raised. Without the check
+        // an operator could type any 32 bytes and record a gate pass over it.
+        let (snapshot, bloom) = in_admin();
+        let waiver = AdminWaiver {
+            gate: StageId::AggregateReview,
+            findings: vec![digest(0x5a)],
+            acknowledged_unverified: false,
+            note: note(),
+        };
+
+        let (_, decided) = admit(&snapshot, "waive", Fact::AdminWaive { bloom, waiver });
+        assert_eq!(decided.outcome, Outcome::AdminRejected(AdminError::UnknownFinding(digest(0x5a))));
+        assert!(decided.effects.is_empty());
+    }
+
+    #[test]
+    fn a_verify_waiver_needs_the_operator_to_say_what_it_lands() {
+        // The one place an operator can outrun a *fact* rather than a judgment.
+        // A review waiver needs only a reason; a mechanical one lands code no
+        // gate proved, and the request has to say so in as many words.
+        let (snapshot, bloom) = parked_on_a_red_review();
+        let findings = vec![red_verdict()];
+        let unacknowledged = AdminWaiver {
+            gate: StageId::AggregateVerify,
+            findings: findings.clone(),
+            acknowledged_unverified: false,
+            note: note(),
+        };
+
+        let (_, decided) = admit(&snapshot, "waive-verify", Fact::AdminWaive { bloom, waiver: unacknowledged });
+        assert_eq!(
+            decided.outcome,
+            Outcome::AdminRejected(AdminError::UnacknowledgedVerifyWaiver(StageId::AggregateVerify))
+        );
+
+        let acknowledged =
+            AdminWaiver { gate: StageId::AggregateVerify, findings, acknowledged_unverified: true, note: note() };
+        let (_, decided) = admit(&snapshot, "waive-verify-ack", Fact::AdminWaive { bloom, waiver: acknowledged });
+        assert!(matches!(decided.outcome, Outcome::AdminActed { .. }), "{:?}", decided.outcome);
+    }
+
+    #[test]
+    fn a_waiver_closes_the_finding_as_an_adjudication_and_never_as_a_verdict() {
+        // The honesty rule, stated as effects: what the ledger gets is an
+        // operator adjudication over the named evidence plus the gate's pass.
+        // A `RecordEvidence` here would be a synthesized green verdict nobody
+        // produced, which is exactly what a waiver must not become.
+        let (snapshot, bloom) = parked_on_a_red_review();
+        let waiver = AdminWaiver {
+            gate: StageId::AggregateReview,
+            findings: vec![red_verdict()],
+            acknowledged_unverified: false,
+            note: note(),
+        };
+
+        let (waived, decided) = admit(&snapshot, "waive", Fact::AdminWaive { bloom, waiver });
+        assert!(effects_name(&decided, |effect| matches!(effect, Decision::RecordAdjudication { .. })));
+        assert!(effects_name(&decided, |effect| matches!(
+            effect,
+            Decision::RecordAggregateGatePass { stage: StageId::AggregateReview, .. }
+        )));
+        assert!(
+            !effects_name(&decided, |effect| matches!(effect, Decision::RecordEvidence { .. })),
+            "no verdict is minted: {:?}",
+            decided.effects
+        );
+
+        let record = &waived.blooms[&bloom];
+        assert_eq!(record.open_composition_findings().count(), 0, "the finding is closed");
+        assert!(record.aggregate_passed.contains(&StageId::AggregateReview), "and the gate counts as passed");
+    }
+
+    #[test]
+    fn a_dropped_lap_reverts_the_candidate_and_spends_nothing() {
+        // The plausible bug: a drop that resets the cursor's counters along
+        // with its candidate, handing back a repair budget the member already
+        // spent. The lap is discarded; what it cost is not refunded.
+        let (snapshot, bloom) = in_admin();
+        let first = AdminCandidate { workpiece: workpiece("wp-a"), candidate: candidate(40), note: note() };
+        let (placed, _) = admit(&snapshot, "set-1", Fact::AdminSetCandidate { bloom, set: first });
+        let second = AdminCandidate { workpiece: workpiece("wp-a"), candidate: candidate(50), note: note() };
+        let (relapsed, _) = admit(&placed, "set-2", Fact::AdminSetCandidate { bloom, set: second });
+
+        let before = relapsed.blooms[&bloom].progress[&workpiece("wp-a")];
+        let drop = AdminLapDrop { workpiece: workpiece("wp-a"), nonce: "dispatch-9".to_string(), note: note() };
+        let (dropped, decided) = admit(&relapsed, "drop", Fact::AdminDropLap { bloom, drop });
+        assert!(matches!(decided.outcome, Outcome::AdminActed { .. }), "{:?}", decided.outcome);
+
+        let after = dropped.blooms[&bloom].progress[&workpiece("wp-a")];
+        assert_eq!(after.candidate, Some(candidate(40)), "the cursor reverts to the candidate before the lap");
+        assert_eq!(
+            (after.stage, after.attempts, after.repair_rolls),
+            (before.stage, before.attempts, before.repair_rolls)
+        );
+    }
+
+    #[test]
+    fn a_drop_with_no_lap_behind_it_is_refused() {
+        // The plausible bug: a drop that invents a revert target — clearing the
+        // candidate, or reverting to whatever the request named. Either would
+        // put the member on a tree nothing in the record says it ever held.
+        let (snapshot, bloom) = in_admin();
+        let drop = AdminLapDrop { workpiece: workpiece("wp-a"), nonce: "dispatch-9".to_string(), note: note() };
+
+        let (_, decided) = admit(&snapshot, "drop", Fact::AdminDropLap { bloom, drop });
+        assert!(
+            matches!(decided.outcome, Outcome::AdminRejected(AdminError::NoCursor(_) | AdminError::NoLapToDrop(_))),
+            "{:?}",
+            decided.outcome
+        );
+        assert!(decided.effects.is_empty());
+    }
+
+    #[test]
+    fn a_member_cannot_be_rerun_at_an_aggregate_gate() {
+        // The plausible bug: a re-run that takes any stage the catalog binds.
+        // A member aimed at AggregateVerify would dispatch the whole-workspace
+        // gate against one member's candidate.
+        let (snapshot, bloom) = in_admin();
+        let rerun =
+            AdminRerun { workpiece: workpiece("wp-a"), stage: StageId::AggregateVerify, now: false, note: note() };
+
+        let (_, decided) = admit(&snapshot, "rerun", Fact::AdminRerun { bloom, rerun });
+        assert_eq!(decided.outcome, Outcome::AdminRejected(AdminError::StageNotRunnable(StageId::AggregateVerify)));
+    }
+
+    #[test]
+    fn a_rerun_asked_for_now_dispatches_despite_the_session_brake() {
+        // The escape hatch, and the proof it is one: the default defers, and
+        // `now` lifts the session's own brake for exactly one order. Without
+        // the lift an operator asking for an immediate re-run would get a
+        // deferral and no work order, and be told the act succeeded.
+        let (snapshot, bloom) = in_admin();
+        let deferred = AdminRerun { workpiece: workpiece("wp-a"), stage: StageId::Verify, now: false, note: note() };
+        let (_, decided) = admit(&snapshot, "rerun-later", Fact::AdminRerun { bloom, rerun: deferred });
+        assert!(effects_name(&decided, |effect| matches!(effect, Decision::DeferDispatch { .. })));
+
+        let immediate = AdminRerun { workpiece: workpiece("wp-a"), stage: StageId::Verify, now: true, note: note() };
+        let (_, decided) = admit(&snapshot, "rerun-now", Fact::AdminRerun { bloom, rerun: immediate });
+        assert!(
+            effects_name(&decided, |effect| matches!(effect, Decision::DispatchAttempt { .. })),
+            "`--now` writes the work order: {:?}",
+            decided.effects
+        );
+    }
+
+    #[test]
+    fn a_cancelled_lane_spends_no_budget_and_moves_no_cursor() {
+        // Tripwire: an admin cancellation must never reach the attempt
+        // vocabulary. An AdvanceStage or a RecordWedge here would make it a
+        // failed lap wearing a different name, which is exactly what killing a
+        // model CLI by hand already does.
+        let (snapshot, bloom) = in_admin();
+        let cancel = AdminLaneCancel { workpiece: workpiece("wp-a"), nonce: "dispatch-7265".to_string(), note: note() };
+        let before = snapshot.blooms[&bloom].progress.clone();
+
+        let (cancelled, decided) = admit(&snapshot, "cancel", Fact::AdminCancelLane { bloom, cancel });
+        assert!(effects_name(&decided, |effect| matches!(effect, Decision::CancelLane { .. })));
+        assert!(
+            !effects_name(&decided, |effect| matches!(
+                effect,
+                Decision::AdvanceStage { .. } | Decision::RecordWedge { .. } | Decision::RecordMemberMachinery { .. }
+            )),
+            "{:?}",
+            decided.effects
+        );
+        assert_eq!(cancelled.blooms[&bloom].progress, before, "no cursor moved");
+    }
+
+    #[test]
+    fn an_executor_fault_inside_a_session_charges_nothing() {
+        // The hook in `reduce_member_executor_fault`, from the outside: a host
+        // that cannot run is the expected condition while an operator repairs a
+        // bloom by hand, and charging it would wedge the member they are fixing.
+        let (snapshot, bloom) = in_admin();
+        let member = snapshot.blooms[&bloom].progress[&workpiece("wp-a")];
+        let evidence = Evidence { subject: digest(1), kind: EvidenceKind::ExecutorFault, detail: digest(0x66) };
+
+        let (faulted, decided) = admit(
+            &snapshot,
+            "fault",
+            Fact::MemberExecutorFault {
+                bloom,
+                workpiece: workpiece("wp-a"),
+                stage: member.stage,
+                evidence: evidence.clone(),
+            },
+        );
+        assert_eq!(
+            decided.outcome,
+            Outcome::AdminFaultAbsorbed { bloom, workpiece: Some(workpiece("wp-a")), evidence: evidence.detail }
+        );
+        assert!(
+            !effects_name(&decided, |effect| matches!(
+                effect,
+                Decision::RecordMemberMachinery { .. } | Decision::RecordWedge { .. }
+            )),
+            "no roll is spent and nothing wedges: {:?}",
+            decided.effects
+        );
+        assert!(faulted.member_machinery(&bloom, &workpiece("wp-a")).is_none(), "no machinery series opened");
+    }
+
+    #[test]
+    fn a_composition_rerun_judges_the_held_fold_from_whatever_cursor_it_has() {
+        // The live shape of `0f16e207`: a red aggregate review left the fold
+        // held and sent the composition to Refine, and the repair the operator
+        // wants is to re-judge that same fold. The plausible bug is reading the
+        // gate's subject off the cursor — from Refine there is no aggregate
+        // position to read, so the re-run would refuse (or worse, dispatch
+        // against the repair lap's candidate) exactly where it is needed.
+        let (snapshot, bloom) = refining_over_a_held_fold();
+        let held = snapshot.blooms[&bloom].integration.clone().expect("the red review kept the fold");
+        assert_eq!(
+            snapshot.blooms[&bloom].progress[&WorkpieceId::composition()].stage,
+            StageId::Refine,
+            "the fixture is the incident's cursor, not a convenient one"
+        );
+
+        for (key, stage) in [("verify", StageId::AggregateVerify), ("review", StageId::AggregateReview)] {
+            let rerun = AdminRerun { workpiece: WorkpieceId::composition(), stage, now: true, note: note() };
+            let (_, decided) = admit(&snapshot, key, Fact::AdminRerun { bloom, rerun });
+            let subject = decided.effects.iter().find_map(|effect| match effect {
+                Decision::DispatchAggregateVerify { transformation, .. }
+                | Decision::DispatchAggregateReview { transformation, .. } => Some(transformation.checkout),
+                _ => None,
+            });
+            assert_eq!(subject, Some(held.head), "{stage:?} runs over the held fold");
+            assert!(
+                !effects_name(&decided, |effect| matches!(effect, Decision::AdvanceStage { .. })),
+                "and moves no cursor: {:?}",
+                decided.effects
+            );
+        }
+    }
+
+    /// A bloom in admin mode whose red aggregate review left the fold held and
+    /// bounced the composition into a repair lap — the state bloom `0f16e207`
+    /// was actually in when the operator reached for admin mode.
+    fn refining_over_a_held_fold() -> (Snapshot, BloomId) {
+        let (mut snapshot, bloom) = parked_on_a_red_review();
+        let weave = snapshot.blooms[&bloom].integration.clone().expect("the weave the review refused");
+        let record = snapshot.blooms.get_mut(&bloom).expect("the sealed bloom");
+        record.progress.insert(
+            WorkpieceId::composition(),
+            StageProgress {
+                stage: StageId::Refine,
+                attempts: 1,
+                candidate: Some(CandidateRef { tree: weave.tree, checkout: weave.head }),
+                repair_rolls: 0,
+                seen_verify_failures: Default::default(),
+                fold_checkpoint: None,
+                fold_conflict_evidence: None,
+                reconcile_assembles_base: false,
+            },
+        );
+
+        (snapshot, bloom)
+    }
+
+    /// The verdict digest a scripted red aggregate review would have bound.
+    fn red_verdict() -> Digest {
+        digest(0x7d)
+    }
+
+    /// A bloom in admin mode holding a fold whose review came back red — the
+    /// shape the `0f16e207` incident left behind, minus the members.
+    fn parked_on_a_red_review() -> (Snapshot, BloomId) {
+        let (snapshot, bloom) = in_admin();
+        let weave = candidate(60);
+        let set = AdminCandidate { workpiece: WorkpieceId::composition(), candidate: weave, note: note() };
+        let (mut snapshot, _) = admit(&snapshot, "weave", Fact::AdminSetCandidate { bloom, set });
+
+        // The finding channel is journal-derived, so it is seeded the way a
+        // refusing verdict seeds it rather than by editing the record: one
+        // recorded finding naming the tree the fold is holding.
+        let record = snapshot.blooms.get_mut(&bloom).expect("the sealed bloom");
+        record.composition_findings.push(crate::values::CompositionFinding {
+            subject: weave.tree,
+            detail: red_verdict(),
+            implicated: Vec::new(),
+        });
+
+        (snapshot, bloom)
+    }
+}

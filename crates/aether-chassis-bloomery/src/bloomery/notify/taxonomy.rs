@@ -173,7 +173,7 @@ fn push_bloom_events(events: &mut Vec<NotifyEvent>, bloom: &BloomView) {
     // was told the session opened is owed the news that it is still going.
     if let Some(admin) = &bloom.admin {
         events.push(NotifyEvent::loud(
-            format!("admin:{id}:{}", admin.acts),
+            format!("admin:{id}:{}", admin.acts.len()),
             format!("admin  bloom {id} is in admin mode ({}): {}", admin.operator, admin.reason),
         ));
     } else if let Some(hold) = &bloom.operator_hold {

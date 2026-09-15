@@ -91,14 +91,15 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
 /// The open admin session as the board renders it (ADR-0219), or `None` while
 /// the machine is running the bloom.
 ///
-/// The count is saturating rather than exact past `u32::MAX` for the reason
-/// every other count on this document is: a projection that can panic on a
-/// long-lived record is a projection that takes the board down.
+/// The whole act log rides on the open session, so `admin status` answers
+/// "what has already been done to this bloom" from the projection rather than
+/// from a second journal read. It goes when the session closes; what a closed
+/// session leaves behind is [`BloomView::waivers`].
 fn admin_view(record: &BloomRecord) -> Option<AdminView> {
     record.admin.as_ref().map(|note| AdminView {
         operator: note.operator.clone(),
         reason: note.reason.clone(),
-        acts: u32::try_from(record.admin_acts.len()).unwrap_or(u32::MAX),
+        acts: record.admin_acts.clone(),
     })
 }
 

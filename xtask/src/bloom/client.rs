@@ -8,11 +8,12 @@ use serde_json::Value;
 
 use super::Endpoint;
 use super::dto::{
-    ApprovalStoredView, BloomView, CancelCommissionRequest, CommissionCancelledView, CommissionReopenedView,
-    CommissionShowView, ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView,
-    OutcomeView, ProposeRequest, ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest,
-    RevisionEvidence, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest,
-    SuppressionAnswerRequest, WithdrawRequest, WriteRevisionRequest,
+    AdminCancelLaneRequest, AdminDropLapRequest, AdminRerunRequest, AdminSessionRequest, AdminSetCandidateRequest,
+    AdminWaiveRequest, ApprovalStoredView, BloomView, CancelCommissionRequest, CommissionCancelledView,
+    CommissionReopenedView, CommissionShowView, ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView,
+    JournalEntry, JournalView, LiveOrderView, OutcomeView, ProposeRequest, ReopenCommissionRequest, RepairRequest,
+    RetryRequest, ReverifyBaseRequest, RevisionEvidence, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest,
+    SealRequest, SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest, WriteRevisionRequest,
 };
 use super::http;
 use super::plan::spec_id;
@@ -100,6 +101,57 @@ impl<'a> Client<'a> {
     /// ordinary gates judge it (#4957).
     pub fn repair(&self, bloom_id: &str, workpiece: &str, request: &RepairRequest) -> Result<OutcomeView> {
         self.send("POST", &format!("/blooms/{bloom_id}/members/{workpiece}/repair"), request)
+    }
+
+    /// The live projection plus the outstanding orders `GET /view` renders
+    /// beside it (ADR-0219).
+    ///
+    /// Two deserializations of one body rather than one flattened type: the
+    /// orders are not a [`ViewDocument`] field — that document is wire-encoded
+    /// into the outbox, where a trailing optional would break queued payloads —
+    /// so the route flattens them in beside it. Reading the body once as
+    /// [`Value`] and shaping it twice keeps this client honest about that
+    /// without teaching the projection a field the coordinator does not have.
+    pub fn live_view(&self) -> Result<(ViewDocument, Vec<LiveOrderView>)> {
+        let body: Value = self.get("/view")?;
+        let document = serde_json::from_value(body.clone()).context("decode the live view document")?;
+        let orders = body
+            .get("orders")
+            .cloned()
+            .map_or_else(|| Ok(Vec::new()), serde_json::from_value)
+            .context("decode the live view's outstanding orders")?;
+        Ok((document, orders))
+    }
+
+    /// Open or close one bloom's admin session (ADR-0219). `edge` is `enter` or
+    /// `exit`, which are the same body at two doors.
+    pub fn admin_session(&self, bloom_id: &str, edge: &str, request: &AdminSessionRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/admin/{edge}"), request)
+    }
+
+    /// Cancel one running dispatch from inside admin mode (ADR-0219).
+    pub fn admin_cancel_lane(&self, bloom_id: &str, request: &AdminCancelLaneRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/admin/cancel-lane"), request)
+    }
+
+    /// Hand a workpiece a candidate from inside admin mode (ADR-0219).
+    pub fn admin_set_candidate(&self, bloom_id: &str, request: &AdminSetCandidateRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/admin/set-candidate"), request)
+    }
+
+    /// Run one stage again from inside admin mode (ADR-0219).
+    pub fn admin_rerun(&self, bloom_id: &str, request: &AdminRerunRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/admin/rerun"), request)
+    }
+
+    /// Void a red verdict's findings from inside admin mode (ADR-0219).
+    pub fn admin_waive(&self, bloom_id: &str, request: &AdminWaiveRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/admin/waive"), request)
+    }
+
+    /// Discard a completed lap's candidate from inside admin mode (ADR-0219).
+    pub fn admin_drop_lap(&self, bloom_id: &str, request: &AdminDropLapRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/admin/drop-lap"), request)
     }
 
     /// Propose a signed operator change onto the day's branch (ADR-0205).

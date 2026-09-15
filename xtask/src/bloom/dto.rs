@@ -6,9 +6,10 @@
 
 use std::fmt;
 
+pub use aether_bloomery::WorkpieceId;
 #[cfg(test)]
 use aether_bloomery::{BloomId, BloomStatus};
-use aether_bloomery::{Digest, Evidence, EvidenceKind, Membership, WorkpieceId};
+use aether_bloomery::{Digest, Evidence, EvidenceKind, Membership, StageId};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -16,7 +17,8 @@ use serde_json::Value;
 use super::hex;
 
 pub use aether_bloomery::{
-    ArchiveFailureView, ArchiveListView, ArchivePassView, ArchiveRecordView, BloomSpec, BloomView,
+    AdminCancelLaneRequest, AdminDropLapRequest, AdminRerunRequest, AdminSessionRequest, AdminSetCandidateRequest,
+    AdminWaiveRequest, ArchiveFailureView, ArchiveListView, ArchivePassView, ArchiveRecordView, BloomSpec, BloomView,
     CancelCommissionRequest, CandidateRef, CommissionCancelledView, CommissionReopenedView, CommissionShowView,
     ConfigRegistry, DraftPatch, DraftView, JournalEntry, JournalView, MemberView, ModelOverride, OutcomeView,
     ProposeRequest, ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest, RevisionEvidence,
@@ -75,6 +77,20 @@ impl<'de> Deserialize<'de> for DigestHex {
         let value = Value::deserialize(deserializer)?;
         hex::from_json(&value, "digest").map(Self).map_err(D::Error::custom)
     }
+}
+
+/// One live outstanding order as `GET /view` flattens it beside the projection
+/// (ADR-0219's reader, the shape `blooms.rs` writes).
+///
+/// Spelled here rather than reused from `aether_bloomery` because it is not a
+/// [`ViewDocument`] field: the route renders it as a sibling of the document,
+/// so the only place its shape exists is the JSON contract this mirrors.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LiveOrderView {
+    pub nonce: String,
+    pub bloom: Digest,
+    pub workpiece: String,
+    pub stage: StageId,
 }
 
 /// `GET /configs/{digest}` — a stored configuration, decoded through its kind's
@@ -172,6 +188,8 @@ pub fn test_bloom(id: impl Into<Digest>, status: BloomStatus, members: Vec<Membe
         narrowed_compositions: Vec::new(),
         precheck: None,
         coordination: None,
+        admin: None,
+        waivers: Vec::new(),
     }
 }
 

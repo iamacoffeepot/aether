@@ -24,8 +24,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::reduce::{BloomStatus, RecordedRefusal};
 use crate::values::{
-    CandidateRef, CompositionFinding, CoordinationState, Evidence, LandingReceipt, OperatorHold, PrecheckState,
-    ResolutionClaim, SpendQuiesce, SurfacePathRequest, VerifyFailureSet, Wedge,
+    AdminAct, CandidateRef, CompositionFinding, CoordinationState, Evidence, LandingReceipt, OperatorHold,
+    PrecheckState, ResolutionClaim, SpendQuiesce, SurfacePathRequest, VerifyFailureSet, Wedge,
 };
 
 /// The self-contained render input a reconcile pushes outward: the current
@@ -64,18 +64,20 @@ pub struct ViewDocument {
 /// One bloom's open admin session as the outward view carries it (ADR-0219):
 /// who has it, why, and what they have done so far.
 ///
-/// The act count rather than the acts: a reader of the board is deciding
-/// whether to look, and the log itself is a journal read. `waived` is carried
-/// separately on the bloom because it is the one part of a session that
-/// outlives it.
+/// The acts themselves rather than a count, because the question an operator
+/// asks of an open session is "what has already been done to this bloom" and
+/// answering it from the journal would mean a second read keyed by a fact
+/// vocabulary the board does not otherwise speak. A session is short-lived and
+/// its log is a handful of rows. What outlives it is carried separately, on
+/// [`BloomView::waivers`].
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AdminView {
     /// Who opened the session.
     pub operator: String,
     /// Why, in their own words.
     pub reason: String,
-    /// How many acts have been journaled inside it.
-    pub acts: u32,
+    /// Every act journaled inside it, in admission order.
+    pub acts: Vec<AdminAct>,
 }
 
 /// The day-level stop a red base receipt raises: which tree failed, and which

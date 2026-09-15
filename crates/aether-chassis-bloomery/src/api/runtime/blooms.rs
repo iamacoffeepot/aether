@@ -17,6 +17,7 @@ use aether_http::HttpServerResponse;
 use aether_substrate::actor::native::NativeCtx;
 
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use super::hex::{self, digest_from_hex, hex_encode};
 use super::response::{error_response, json};
@@ -991,11 +992,7 @@ fn derive_repair_candidate(
 /// Five of the six act routes open with exactly these two steps and differ only
 /// in the body type, so they share the parse rather than each spelling out the
 /// same two matches under a different route name.
-fn admin_body<T: serde::de::DeserializeOwned>(
-    id: &str,
-    body: &[u8],
-    route: &str,
-) -> Result<(BloomId, T), HttpServerResponse> {
+fn admin_body<T: DeserializeOwned>(id: &str, body: &[u8], route: &str) -> Result<(BloomId, T), HttpServerResponse> {
     let Some(digest) = digest_from_hex(id) else {
         return Err(error_response(400, "bloom id is not a 32-byte hex bloom id"));
     };

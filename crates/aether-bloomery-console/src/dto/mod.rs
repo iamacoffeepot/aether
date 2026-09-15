@@ -348,8 +348,10 @@ pub struct AdminSessionView {
     pub operator: String,
     #[serde(default)]
     pub reason: String,
+    /// Presence markers only: the board renders how many acts a session has
+    /// taken, and the act vocabulary itself belongs to the coordinator.
     #[serde(default)]
-    pub acts: u32,
+    pub acts: Vec<Present>,
 }
 
 /// Only the pre-check fields the board renders. The full state remains in the

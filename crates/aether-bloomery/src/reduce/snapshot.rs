@@ -1805,6 +1805,10 @@ impl Snapshot {
             | Decision::DispatchOrphanClaimRelease { .. }
             | Decision::DispatchBaseVerify { .. }
             | Decision::CancelDispatch { .. }
+            // Snapshot-inert for the reason `CancelDispatch` is: what an admin
+            // lane cancellation does happens at the executor, and the record of
+            // it is the admin act journaled beside this row.
+            | Decision::CancelLane { .. }
             | Decision::ReleaseMemberClaimRef { .. }
             | Decision::RecordRefusal { .. }
             | Decision::DispatchProposal { .. }
@@ -1861,10 +1865,6 @@ impl Snapshot {
             | Decision::DeferDispatch { .. }
             | Decision::DeferAggregate { .. } => self.apply_operator_hold_effect(effect),
             Decision::RecordAdminMode { .. } | Decision::RecordAdminAct { .. } => self.apply_admin_effect(effect),
-            // Snapshot-inert for the reason `CancelDispatch` is: what a lane
-            // cancellation does happens at the executor, and the record of it
-            // is the admin act journaled beside this row.
-            Decision::CancelLane { .. } => {}
             Decision::RecordSpendQuiesce { quiesce } => {
                 self.spend_quiesce.clone_from(quiesce);
             }
