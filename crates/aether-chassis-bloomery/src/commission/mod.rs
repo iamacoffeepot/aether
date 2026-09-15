@@ -257,15 +257,9 @@ fn open_scope_run(
     let opened: ScopeRunOpenedView = api.send_json(
         "POST",
         &format!("/commissions/{id}/scope-runs"),
-        &scope_run_request(view.mainline, profile, model_override),
+        &ScopeRunRequest { base: view.mainline, profile, model_override },
     )?;
     Ok(render_opened(&opened))
-}
-
-/// The scope-run request body: the observed mainline plus the run's seat, so
-/// the flags the operator named are what the door resolves.
-fn scope_run_request(base: Digest, profile: Option<String>, model_override: Option<Digest>) -> ScopeRunRequest {
-    ScopeRunRequest { base, profile, model_override }
 }
 
 /// The opened run as the operator reads it: the run's address, then the seat
@@ -717,17 +711,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn scope_run_request_carries_the_seat_flags_to_the_door() {
-        // The flags the operator named are what the door resolves: a request
-        // that dropped either would file the run on a seat nobody chose.
-        let digest = Digest::from_bytes([0xdd; 32]);
-        let body = super::scope_run_request(digest, Some("opus-high".to_owned()), Some(digest));
-        assert_eq!(body.base, digest);
-        assert_eq!(body.profile.as_deref(), Some("opus-high"));
-        assert_eq!(body.model_override, Some(digest));
     }
 
     #[test]

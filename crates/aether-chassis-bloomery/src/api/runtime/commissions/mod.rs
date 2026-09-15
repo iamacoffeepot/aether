@@ -824,7 +824,7 @@ pub(super) fn scope_run_response(result: EnqueueScopeRunResult) -> HttpServerRes
                             commission = %id,
                             ordinal,
                             harness = %seat.harness.as_str(),
-                            model = %seat.model.as_str(),
+                            model = %seat.model,
                             "{}",
                             scope_run_opened_line(ordinal, seat, model_override)
                         );

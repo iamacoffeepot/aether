@@ -146,7 +146,7 @@ pub struct OutstandingOrder {
     /// registry over the bloom's, and a replay cannot reconstruct that from the
     /// remaining columns.
     pub configs: Vec<u8>,
-    /// The [`AgentProfile`](aether_bloomery::AgentProfile) the bloom's sealed
+    /// The [`AgentProfile`] the bloom's sealed
     /// stage catalog calibrates this stage at (ADR-0174) as its canonical
     /// `aether_data::wire` bytes, on the same reasoning as `configs`: the reducer
     /// resolved it from a catalog no host-side column carries, so a replay cannot

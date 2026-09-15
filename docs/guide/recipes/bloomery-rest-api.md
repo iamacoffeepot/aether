@@ -248,7 +248,7 @@ description, and approval from the store.
 ## Scoping runs and their seat
 
 `POST /commissions/{id}/scope-runs` opens a pre-bloom scoping run on an open
-commission. **Bearer [REDACTED]** The body names the tree the run reads code at
+commission. **Bearer required.** The body names the tree the run reads code at
 plus the seat it dispatches under:
 
 - `base` (required): the observed mainline head, as `GET /view` reports it
@@ -274,7 +274,8 @@ latest run's `scope_model_override` and `scope_seat` — the same pair the
 console's commission screen renders, so the model that filled the workpiece
 is named where the work was filed. `xtask bloom scope-run` and
 `bloomery-commission scope-run` both take `--profile` / `--model-override`
-(one of the two) and file the run on the resolved seat.
+(one of the two), file the run on the resolved seat, and print the seat the
+reply echoed beside the run's address.
 
 ## A curl walkthrough
 

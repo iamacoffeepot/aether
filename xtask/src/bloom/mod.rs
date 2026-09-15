@@ -22,6 +22,7 @@ mod status;
 mod upgrade;
 
 use std::env;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use aether_bloomery::{BackendObjectId, DEFAULT_HTTP_PORT, Digest, KeyId, OperatorProposal, Outcome, digest_of};
@@ -887,7 +888,21 @@ fn run_scope_run(client: &Client<'_>, args: &ScopeRunArgs) -> Result<String> {
         (Some(_), Some(_)) => unreachable!("scope-run refuses --profile with --model-override above"),
     };
     let opened = client.scope_run(&args.workpiece, &dto::ScopeRunRequest { base, profile, model_override })?;
-    Ok(format!("{} ordinal {} sequence {} subject {}\n", opened.id, opened.ordinal, opened.sequence, opened.subject))
+    Ok(render_opened_run(&opened))
+}
+
+/// The opened run as the operator reads it: the run's address, then the seat
+/// the coordinator echoed it dispatched under, so the model that fills the
+/// workpiece is named where the run was filed. A coordinator that predates
+/// the seat echo names none, and the line stays the pre-seat one.
+fn render_opened_run(opened: &dto::ScopeRunOpenedView) -> String {
+    let mut line =
+        format!("{} ordinal {} sequence {} subject {}", opened.id, opened.ordinal, opened.sequence, opened.subject);
+    if let Some(seat) = &opened.seat {
+        write!(line, " seat {} {}", seat.harness.as_str(), seat.model).expect("writing to a String is infallible");
+    }
+    line.push('\n');
+    line
 }
 
 fn run_seal(client: &Client<'_>, args: &SealArgs, approval_policy: &Path) -> Result<String> {
@@ -1194,6 +1209,8 @@ mod tests {
                 parents: Vec::new(),
             }],
             scope_verify: None,
+            scope_model_override: None,
+            scope_seat: None,
         })
     }
 
@@ -1921,6 +1938,13 @@ mod tests {
                         ordinal: 1,
                         sequence: 7,
                         subject: digest(0x59),
+                        model_override: Some(digest(0xc1)),
+                        seat: Some(aether_bloomery::AgentProfile {
+                            harness: aether_bloomery::Harness::Grok,
+                            model: "grok-4.6".to_owned(),
+                            effort: aether_bloomery::ReasoningEffort::High,
+                            tools: aether_bloomery::ToolPolicy::Full,
+                        }),
                     }),
                 ),
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
@@ -1943,6 +1967,10 @@ mod tests {
         assert_eq!(body["profile"], "grok-build-sonnet-judge", "the profile name rides for the record: {body}");
         assert_eq!(body["model_override"], override_digest, "the authored digest is the run's seat: {body}");
         assert!(output.contains("ordinal 1"), "the opened run is printed: {output}");
+        assert!(
+            output.contains("seat grok grok-4.6"),
+            "the seat the coordinator echoed is printed where the run was filed: {output}",
+        );
     }
 
     #[test]
@@ -1960,6 +1988,8 @@ mod tests {
                         ordinal: 1,
                         sequence: 7,
                         subject: digest(0x59),
+                        model_override: None,
+                        seat: None,
                     }),
                 ),
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
@@ -1979,6 +2009,7 @@ mod tests {
         assert!(body.get("profile").is_none(), "no profile name without --profile: {body}");
         assert!(body.get("model_override").is_none(), "no seat digest without --profile: {body}");
         assert!(output.contains("ordinal 1"), "the opened run is printed: {output}");
+        assert!(!output.contains("seat "), "a coordinator that echoes no seat prints none: {output}");
     }
 
     #[test]

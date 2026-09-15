@@ -20,7 +20,7 @@ use aether_bloomery::{
     AgentProfile, AgentSelection, Digest, Harness, ModelOverride, Observation, Provenance, ReasoningEffort,
     StageCatalog, StageId, StageOverride, Statement, Transformation, WorkpieceId,
 };
-use aether_chassis_bloomery::bloomery::{open_scope_run, open_scope_run_with_override};
+use aether_chassis_bloomery::bloomery::open_scope_run_with_override;
 use aether_chassis_bloomery::store::{CommissionBackend, OutstandingOrder, StoreBackend};
 use aether_data::wire::from_bytes;
 use aether_harness_bloomery::{HarnessBuilder, HarnessRoots, ScenarioHarness};
@@ -90,8 +90,16 @@ fn scope_runs_dispatch_their_named_seat_or_the_compiled_line() {
             Some(digest),
         )
         .expect("the seated run opens");
-        open_scope_run(&mut store, &WorkpieceId(PLAIN.to_owned()), plain_intent, base, "scope sketch")
-            .expect("the seatless run opens");
+        open_scope_run_with_override(
+            &mut store,
+            &WorkpieceId(PLAIN.to_owned()),
+            plain_intent,
+            base,
+            "scope sketch",
+            &ModelOverride::default(),
+            None,
+        )
+        .expect("the seatless run opens");
     }
 
     let order = await_scope_order(&mut harness, SEATED);

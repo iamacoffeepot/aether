@@ -56,6 +56,8 @@ fn commission(tip: Digest) -> CommissionShowView {
         current_unreadable: None,
         approvals: Vec::new(),
         scope_verify: None,
+        scope_model_override: None,
+        scope_seat: None,
     }
 }
 
