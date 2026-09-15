@@ -190,6 +190,8 @@ pub fn test_bloom(id: impl Into<Digest>, status: BloomStatus, members: Vec<Membe
         coordination: None,
         admin: None,
         waivers: Vec::new(),
+        recent_completions: Vec::new(),
+        base_verify: None,
     }
 }
 

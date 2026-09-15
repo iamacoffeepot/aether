@@ -288,7 +288,13 @@ fn claim_release_setup(
 
 #[cfg(feature = "github")]
 fn notify_setup(notify: &NotifyConfig, store_path: String, poll_interval_secs: u64) -> NotifyReactorSetup {
-    NotifyReactorSetup { sink: webhook_sink(notify), store_path, milestones: notify.milestones, poll_interval_secs }
+    NotifyReactorSetup {
+        sink: webhook_sink(notify),
+        store_path,
+        milestones: notify.milestones,
+        progress: notify.progress,
+        poll_interval_secs,
+    }
 }
 
 #[cfg(feature = "github")]

@@ -35,4 +35,19 @@ pub struct NotifyConfig {
     /// the next transition rather than replaying the day.
     #[config(default = false)]
     pub milestones: bool,
+    /// Whether the channel also carries progress — lane starts and captures,
+    /// verify-step rows, shared-run starts and completions, head advances,
+    /// reconcile laps, base-verify transitions, and member cursor moves
+    /// (#5978).
+    ///
+    /// Off by default, because progress is the noisiest volume by an order of
+    /// magnitude: a healthy bloom that milestones narrate in nine lines
+    /// produces dozens of progress lines. On, an operator watching a bloom
+    /// walk sees each step land without opening the journal.
+    ///
+    /// Forward-only like [`Self::milestones`]: the ledger records progress
+    /// keys whether or not they were posted, so enabling the knob starts the
+    /// stream from the next transition rather than replaying the day.
+    #[config(default = false)]
+    pub progress: bool,
 }

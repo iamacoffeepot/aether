@@ -83,6 +83,8 @@ fn one_bloom(id: BloomId, members: Vec<MemberView>) -> ViewDocument {
         coordination: None,
         admin: None,
         waivers: Vec::new(),
+        recent_completions: Vec::new(),
+        base_verify: None,
     };
     ViewDocument {
         mainline: digest(0),

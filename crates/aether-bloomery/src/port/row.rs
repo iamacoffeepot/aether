@@ -268,6 +268,8 @@ impl From<BloomViewPrePrecheck> for BloomView {
             coordination: None,
             admin: None,
             waivers: Vec::new(),
+            recent_completions: Vec::new(),
+            base_verify: None,
         }
     }
 }
@@ -333,6 +335,8 @@ impl From<BloomViewPreCoordination> for BloomView {
             coordination: None,
             admin: None,
             waivers: Vec::new(),
+            recent_completions: Vec::new(),
+            base_verify: None,
         }
     }
 }
@@ -349,23 +353,47 @@ impl From<ViewDocumentPreCoordination> for ViewDocument {
     }
 }
 
-// The exact bloom element written before ADR-0219 added the admin session and
-// its waiver trail. Kept separate for the reason its two siblings are: a
-// defaulted field inside `Vec<BloomView>` gives positional rows no additive
-// encoding window, so a queued row written by the previous binary decodes
-// through this shape or not at all.
+impl ViewDocument {
+    /// Decode current, pre-progress, pre-coordination, or pre-precheck view
+    /// outbox rows, preserving their blooms in both storage and positional
+    /// forms.
+    ///
+    /// # Errors
+    /// Returns the current decoder's refusal if neither supported shape decodes.
+    pub fn decode_row(bytes: &[u8], schema: Option<&str>) -> Result<Self, RowSchemaError> {
+        decode_row(bytes, schema).or_else(|current_error| {
+            decode_row::<ViewDocumentPreProgress>(bytes, schema)
+                .map(Self::from)
+                .or_else(|_| {
+                    decode_row::<ViewDocumentPreCoordination>(bytes, schema)
+                        .map(Self::from)
+                        .or_else(|_| decode_row::<ViewDocumentPrePrecheck>(bytes, schema).map(Self::from))
+                })
+                .map_err(|_| current_error)
+        })
+    }
+}
+
+// The exact bloom element written between the coordination projection and this
+// batch: coordination present, and every field appended after it absent — the
+// progress channel's `recent_completions` / `base_verify` and ADR-0219's
+// `admin` / `waivers` alike, since both appends first ship together and no
+// binary ever wrote a row carrying one pair without the other. Keep this shape
+// separate for the reason `ViewDocumentPreCoordination` states: a defaulted
+// field inside `Vec<BloomView>` does not give positional rows an additive
+// encoding window.
 #[derive(aether_data::Storage, Clone, Serialize, Deserialize)]
 #[kind(name = "aether.bloomery.view_document")]
-struct ViewDocumentPreAdmin {
+struct ViewDocumentPreProgress {
     mainline: Digest,
     observed: Digest,
     spend_quiesce: Option<SpendQuiesce>,
-    blooms: Vec<BloomViewPreAdmin>,
+    blooms: Vec<BloomViewPreProgress>,
     base_alert: Option<BaseAlertView>,
 }
 
 #[derive(aether_data::Schema, Clone, Serialize, Deserialize)]
-struct BloomViewPreAdmin {
+struct BloomViewPreProgress {
     id: BloomId,
     status: BloomStatus,
     superseded_by: Option<BloomId>,
@@ -382,8 +410,8 @@ struct BloomViewPreAdmin {
     coordination: Option<CoordinationState>,
 }
 
-impl From<BloomViewPreAdmin> for BloomView {
-    fn from(prior: BloomViewPreAdmin) -> Self {
+impl From<BloomViewPreProgress> for BloomView {
+    fn from(prior: BloomViewPreProgress) -> Self {
         Self {
             id: prior.id,
             status: prior.status,
@@ -401,12 +429,14 @@ impl From<BloomViewPreAdmin> for BloomView {
             coordination: prior.coordination,
             admin: None,
             waivers: Vec::new(),
+            recent_completions: Vec::new(),
+            base_verify: None,
         }
     }
 }
 
-impl From<ViewDocumentPreAdmin> for ViewDocument {
-    fn from(prior: ViewDocumentPreAdmin) -> Self {
+impl From<ViewDocumentPreProgress> for ViewDocument {
+    fn from(prior: ViewDocumentPreProgress) -> Self {
         Self {
             mainline: prior.mainline,
             observed: prior.observed,
@@ -417,29 +447,15 @@ impl From<ViewDocumentPreAdmin> for ViewDocument {
     }
 }
 
-impl ViewDocument {
-    /// Decode current, pre-coordination, or pre-precheck view outbox rows,
-    /// preserving their blooms in both storage and positional forms.
-    ///
-    /// # Errors
-    /// Returns the current decoder's refusal if neither supported shape decodes.
-    pub fn decode_row(bytes: &[u8], schema: Option<&str>) -> Result<Self, RowSchemaError> {
-        decode_row(bytes, schema).or_else(|current_error| {
-            decode_row::<ViewDocumentPreAdmin>(bytes, schema)
-                .map(Self::from)
-                .or_else(|_| decode_row::<ViewDocumentPreCoordination>(bytes, schema).map(Self::from))
-                .or_else(|_| decode_row::<ViewDocumentPrePrecheck>(bytes, schema).map(Self::from))
-                .map_err(|_| current_error)
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{POSITIONAL_ROW_SCHEMA, decode_row, encode_row};
-    use crate::{BaseAlertView, BloomView, Digest, SpendQuiesce, ViewDocument};
+    use crate::{
+        BaseAlertView, BaseVerifyVerdict, BaseVerifyView, BloomId, BloomStatus, BloomView, CompletionRecord,
+        CompletionVerdict, Digest, SharedRunMode, SpendQuiesce, StageId, ViewDocument, WorkpieceId,
+    };
     use aether_data::Kind;
     use serde::{Deserialize, Serialize};
 
@@ -509,5 +525,43 @@ mod tests {
         let bytes = encode_row(&value, Some(POSITIONAL_ROW_SCHEMA)).unwrap();
         let decoded = decode_row::<ViewDocument>(&bytes, None).unwrap();
         assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn positional_bloom_elements_carry_the_progress_fields() {
+        // Tripwire: the new bloom-element tail (`recent_completions`,
+        // `base_verify`) rides the positional wire inside `Vec<BloomView>`.
+        // A field the `Schema` derive cannot encode, or one written in the
+        // wrong slot, fails this round trip rather than corrupting a queued
+        // row the upcast then refuses.
+        let mut value = sample();
+        value.blooms.push(BloomView {
+            id: BloomId(Digest::from_bytes([9; 32])),
+            status: BloomStatus::Sealed,
+            members: Vec::new(),
+            recent_completions: vec![CompletionRecord {
+                nonce: Digest::from_bytes([10; 32]),
+                member: WorkpieceId(String::from("issue-1")),
+                step: 1,
+                steps: 2,
+                stage: StageId::Verify,
+                mode: SharedRunMode::Contextual,
+                gates: vec![String::from("check")],
+                verdict: CompletionVerdict::Passed,
+                duration_millis: Some(84_000),
+                tree: Some(Digest::from_bytes([11; 32])),
+            }],
+            base_verify: Some(BaseVerifyView {
+                base: Digest::from_bytes([12; 32]),
+                tree: None,
+                verdict: BaseVerifyVerdict::Running,
+                failed: Vec::new(),
+            }),
+            ..BloomView::default()
+        });
+        for schema in [None, Some(POSITIONAL_ROW_SCHEMA), Some(ViewDocument::NAME)] {
+            let bytes = encode_row(&value, schema).unwrap();
+            assert_eq!(decode_row::<ViewDocument>(&bytes, schema).unwrap(), value);
+        }
     }
 }

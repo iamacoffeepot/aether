@@ -33,14 +33,18 @@
 //! topic, or a producer — the projection already carries the whole answer, and
 //! the same document produces the same keys forever.
 //!
-//! # Two volumes over one walk
+//! # Three volumes over one walk
 //!
 //! A **loud** event is an unanswered condition: something has stopped and a
 //! person is owed the news. A **milestone** is the line working — a bloom
-//! entering the line, a member integrating. Both are read off the same
-//! document in the same pass and both carry the same stable-key discipline;
+//! entering the line, a member integrating. A **progress** event is the line
+//! working step by step — lane starts and captures, verify-step rows,
+//! shared-run starts and completions, head advances, reconcile laps,
+//! base-verify transitions, cursor moves. All three are read off the same
+//! document in the same pass and all carry the same stable-key discipline;
 //! they differ only in whether an unconfigured operator hears them, which is
-//! [`NotifyConfig::milestones`](super::NotifyConfig)'s single job.
+//! [`NotifyConfig::milestones`](super::NotifyConfig) and
+//! [`NotifyConfig::progress`](super::NotifyConfig)'s single job each.
 //!
 //! Bloom lifecycle (sealed, landed, superseded, withdrawn) stays [`Volume::Loud`]
 //! even though it reads like a milestone: those four are the terminal facts
@@ -48,11 +52,14 @@
 //! who has turned milestones off still wants to be told that the thing he
 //! sealed has landed.
 
-use aether_bloomery::{BloomStatus, BloomView, MemberView, SpendQuiesce, ViewDocument};
+use aether_bloomery::{
+    BaseVerifyVerdict, BloomStatus, BloomView, CompletionVerdict, CoordinationState, MemberVerifyOutcome, MemberView,
+    SharedRunMode, SharedRunPhase, SharedRunRecord, SpendQuiesce, StageId, ViewDocument,
+};
 use aether_bloomery_github::short_hex;
 
 /// How much of the taxonomy an event belongs to — the axis the operator's
-/// milestone knob selects on.
+/// knobs select on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Volume {
     /// An unanswered condition: something has stopped and a person is owed the
@@ -61,6 +68,11 @@ pub enum Volume {
     /// The line working. Posted only when the operator has asked for
     /// milestones.
     Milestone,
+    /// The line working, step by step — lane starts and captures, verify-step
+    /// rows, shared-run starts and completions, head advances, reconcile laps,
+    /// base-verify transitions, cursor moves. Posted only when the operator
+    /// has asked for progress (#5978).
+    Progress,
 }
 
 /// One reportable fact, with the key that identifies it across polls, the
@@ -90,6 +102,10 @@ impl NotifyEvent {
 
     fn milestone(key: String, message: String) -> Self {
         Self { key, message, volume: Volume::Milestone }
+    }
+
+    fn progress(key: String, message: String) -> Self {
+        Self { key, message, volume: Volume::Progress }
     }
 }
 
@@ -223,6 +239,7 @@ fn push_bloom_events(events: &mut Vec<NotifyEvent>, bloom: &BloomView) {
     for member in &bloom.members {
         push_member_events(events, &id, member, progress, member_is_resolved(bloom, member));
     }
+    push_progress_events(events, bloom, &id);
 }
 
 fn member_is_resolved(bloom: &BloomView, member: &MemberView) -> bool {
@@ -336,6 +353,257 @@ fn push_member_events(
                 progress.resolved, progress.total
             ),
         ));
+    }
+}
+
+/// Every progress fact in `bloom`, in walk order: per-member lane and cursor
+/// lines, then the completion rows, then the shared-run starts and
+/// completions, then the head advance, then the base-verify standing.
+///
+/// The order is the order messages post in, so a bloom walked by mock lanes
+/// reads as a narrative: the lane starts, its captures, each verify step, the
+/// run that proved them, and the head that moved. A declined lane posts no
+/// progress line of its own — the loud park line already names it, and a
+/// second line would page twice for one transition. A faulted lane is the
+/// mirror case: the loud set has no machinery-rolls line, so progress carries
+/// it.
+fn push_progress_events(events: &mut Vec<NotifyEvent>, bloom: &BloomView, id: &str) {
+    for member in &bloom.members {
+        push_member_progress(events, bloom, id, member);
+    }
+    push_completion_progress(events, bloom, id);
+    if let Some(coordination) = bloom.coordination.as_ref() {
+        push_run_progress(events, id, coordination);
+        push_head_progress(events, id, coordination);
+    }
+    push_base_progress(events, bloom, id);
+}
+
+fn push_member_progress(events: &mut Vec<NotifyEvent>, bloom: &BloomView, id: &str, member: &MemberView) {
+    // Withdrawn members left the line; their cursors are history, not news —
+    // the same silence the loud walk keeps.
+    if member.withdrawn.is_some() {
+        return;
+    }
+    let workpiece = &member.workpiece.0;
+    if let Some(admission) = bloom.coordination.as_ref().and_then(|state| state.admitted_construction.get(workpiece)) {
+        let dispatch = &admission.dispatch;
+        let nonce = short_hex(&admission.nonce);
+        events.push(NotifyEvent::progress(
+            format!("lane_start:{id}:{workpiece}:{:?}:{}:{nonce}", dispatch.stage, dispatch.attempt),
+            format!(
+                "lane  {workpiece} {:?} started ({nonce}, {}, attempt {})",
+                dispatch.stage, dispatch.profile.model, dispatch.attempt
+            ),
+        ));
+    }
+    if let Some(cursor) = member.cursor.as_ref() {
+        if let Some(candidate) = cursor.candidate.as_ref() {
+            let tree = short_hex(&candidate.tree);
+            events.push(NotifyEvent::progress(
+                format!("lane_capture:{id}:{workpiece}:{:?}:{}:{tree}", cursor.stage, cursor.attempts),
+                format!("lane  {workpiece} {:?} captured {tree} (attempt {})", cursor.stage, cursor.attempts),
+            ));
+        }
+        if member.machinery_rolls > 0 {
+            events.push(NotifyEvent::progress(
+                format!("lane_fault:{id}:{workpiece}:{}", member.machinery_rolls),
+                format!(
+                    "lane  {workpiece} {:?} faulted (machinery roll {} of {})",
+                    cursor.stage, member.machinery_rolls, member.machinery_budget
+                ),
+            ));
+        }
+        if cursor.stage == StageId::Reconcile {
+            // The reconcile line below names the tree this lap must place
+            // onto, so the bare cursor arrival stays quiet here rather than
+            // posting a vaguer line beside it.
+            push_reconcile_progress(events, bloom, id, member, cursor.attempts);
+        } else {
+            events.push(NotifyEvent::progress(
+                format!("cursor:{id}:{workpiece}:{:?}", cursor.stage),
+                format!("cursor  {workpiece} in bloom {id} at {:?} (attempt {})", cursor.stage, cursor.attempts),
+            ));
+        }
+    }
+}
+
+/// A member newly sitting at Reconcile: the lap the fold conflict raised, and
+/// the tree it must place onto — the in-flight append's parent while an
+/// append is out, else the current head.
+fn push_reconcile_progress(
+    events: &mut Vec<NotifyEvent>,
+    bloom: &BloomView,
+    id: &str,
+    member: &MemberView,
+    attempts: u32,
+) {
+    let workpiece = &member.workpiece.0;
+    let onto = bloom.coordination.as_ref().map(|state| {
+        state.integration.in_flight.as_ref().map_or_else(
+            || short_hex(&state.integration.head.candidate.tree),
+            |plan| short_hex(&plan.expected_parent.node),
+        )
+    });
+    let message = onto.map_or_else(
+        || format!("reconcile  {workpiece} in bloom {id} raised (attempt {attempts})"),
+        |onto| format!("reconcile  {workpiece} in bloom {id} placing onto {onto} (attempt {attempts})"),
+    );
+    events.push(NotifyEvent::progress(format!("reconcile:{id}:{workpiece}:{attempts}"), message));
+}
+
+/// One line per recently completed order, oldest first: which member, which
+/// step of its run, which gates, what verdict, how long.
+///
+/// Both the ordinal in the message and the ordinal in the key come off the
+/// row, which the reducer numbered against the run's planned request list.
+/// Counting them here instead would count over a bounded window: once a run's
+/// earlier rows age out of [`MAX_RECENT_COMPLETIONS`](aether_bloomery::MAX_RECENT_COMPLETIONS),
+/// its survivors would renumber, and a renumbered key is a key the ledger has
+/// never seen — the same step posts a second time under a wrong ordinal.
+fn push_completion_progress(events: &mut Vec<NotifyEvent>, bloom: &BloomView, id: &str) {
+    for row in &bloom.recent_completions {
+        let nonce = short_hex(&row.nonce);
+        let verdict = match row.verdict {
+            CompletionVerdict::Passed => "green",
+            CompletionVerdict::Failed => "red",
+            CompletionVerdict::Faulted => "faulted",
+        };
+        let gates = row.gates.join("+");
+        let step = if gates.is_empty() {
+            format!("verify  {} step {} of {} {verdict}", row.member.0, row.step, row.steps)
+        } else {
+            format!("verify  {} step {} of {} {gates} {verdict}", row.member.0, row.step, row.steps)
+        };
+        let duration =
+            row.duration_millis.map(|millis| format!(" in {}", fmt_duration_millis(millis))).unwrap_or_default();
+        events.push(NotifyEvent::progress(
+            format!("completion:{id}:{nonce}:{}:{}", row.member.0, row.step),
+            format!("{step}{duration} ({nonce})"),
+        ));
+    }
+}
+
+fn push_run_progress(events: &mut Vec<NotifyEvent>, id: &str, coordination: &CoordinationState) {
+    for run in &coordination.runs {
+        let plan = short_hex(&run.plan.digest());
+        let names: Vec<&str> = run.plan.requests.iter().map(|request| request.member.workpiece.0.as_str()).collect();
+        let mode = run_mode_word(run.plan.mode);
+        if run.phase == SharedRunPhase::Running {
+            events.push(NotifyEvent::progress(
+                format!("run_start:{id}:{plan}"),
+                format!("run  {mode} verify over {} member(s) started ({plan}): {}", names.len(), names.join(" ")),
+            ));
+        }
+        if run.is_terminal() {
+            let (verdict, gates) = run_verdict(run);
+            let failures = if gates.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", gates.join("+"))
+            };
+            let duration = if run.latencies.is_empty() {
+                String::new()
+            } else {
+                let total = run.latencies.iter().map(|latency| latency.latency_millis).sum::<u64>();
+                format!(" in {}", fmt_duration_millis(total))
+            };
+            let head = short_hex(&coordination.integration.head.candidate.tree);
+            let message =
+                format!("run  {mode} verify over {} member(s) {verdict}{failures}{duration}; head {head}", names.len());
+            events.push(NotifyEvent::progress(format!("run_done:{id}:{plan}"), message));
+        }
+    }
+}
+
+/// What one settled run concluded: green when every reached request passed,
+/// red naming the failing gates when any failed, faulted when the host — not
+/// the work — stopped it, partial when requests never reached a verdict.
+fn run_verdict(run: &SharedRunRecord) -> (&'static str, Vec<String>) {
+    let mut gates = Vec::new();
+    let mut faulted = false;
+    for outcome in &run.completed {
+        match outcome {
+            MemberVerifyOutcome::Failed { failures, .. } => {
+                gates.extend(failures.iter().map(|failure| failure.as_str().to_owned()));
+            }
+            MemberVerifyOutcome::HostFault { .. } => faulted = true,
+            MemberVerifyOutcome::PassedStandalone { .. }
+            | MemberVerifyOutcome::PassedIn { .. }
+            | MemberVerifyOutcome::Survived { .. }
+            | MemberVerifyOutcome::Pending { .. } => {}
+        }
+    }
+    if !gates.is_empty() {
+        ("red", gates)
+    } else if faulted {
+        ("faulted", Vec::new())
+    } else if !run.unfinished.is_empty() || run.completed.is_empty() {
+        ("partial", Vec::new())
+    } else {
+        ("green", Vec::new())
+    }
+}
+
+fn run_mode_word(mode: SharedRunMode) -> &'static str {
+    match mode {
+        SharedRunMode::Standalone => "standalone",
+        SharedRunMode::WarmSerial => "warm-serial",
+        SharedRunMode::Contextual => "contextual",
+    }
+}
+
+/// The integration head advancing: the new tree, how many members it carries,
+/// and which generation moved. The empty-coverage genesis head is not an
+/// advance — it is where every bloom starts — so it stays quiet.
+fn push_head_progress(events: &mut Vec<NotifyEvent>, id: &str, coordination: &CoordinationState) {
+    let head = &coordination.integration.head;
+    if head.coverage.is_empty() {
+        return;
+    }
+    events.push(NotifyEvent::progress(
+        format!("head:{id}:{}", short_hex(&head.digest())),
+        format!(
+            "head  bloom {id} advanced to {} carrying {} member(s) (generation {})",
+            short_hex(&head.candidate.tree),
+            head.coverage.len(),
+            short_hex(&head.generation)
+        ),
+    ));
+}
+
+/// The base verify for the head this bloom sits on starting and completing.
+/// A bloom sealed onto a proven base carries no line — no run started on its
+/// behalf — which is why [`BloomView::base_verify`] is `None` there.
+fn push_base_progress(events: &mut Vec<NotifyEvent>, bloom: &BloomView, id: &str) {
+    let Some(base) = bloom.base_verify.as_ref() else {
+        return;
+    };
+    let short = short_hex(&base.base);
+    let (verdict, message) = match &base.verdict {
+        BaseVerifyVerdict::Running => ("Running", format!("base  {short} verify started")),
+        BaseVerifyVerdict::Green => ("Green", format!("base  {short} verify green")),
+        BaseVerifyVerdict::Red => {
+            let gates = base.failed.join("+");
+            ("Red", format!("base  {short} verify red ({gates})"))
+        }
+    };
+    events.push(NotifyEvent::progress(format!("base:{id}:{short}:{verdict}"), message));
+}
+
+/// A journal-observed duration in the channel's words: seconds under a minute
+/// and a half, minutes under an hour and a half, hours above that.
+fn fmt_duration_millis(millis: u64) -> String {
+    let secs = millis / 1000;
+    if secs < 90 {
+        format!("{secs} s")
+    } else {
+        let mins = secs / 60;
+        if mins < 90 {
+            format!("{mins} min")
+        } else {
+            format!("{} h {} min", mins / 60, mins % 60)
+        }
     }
 }
 
