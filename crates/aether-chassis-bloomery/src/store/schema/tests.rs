@@ -235,7 +235,7 @@ fn frozen_snapshots_carry_their_pinned_digest() {
 /// `SCHEMA_VERSION` and writing its guarded migration. Refuses to overwrite:
 /// snapshots are frozen once committed.
 #[test]
-#[ignore = "writes src/store/schema/v<version>.sql; run with AETHER_WRITE_SCHEMA_SNAPSHOT=1"]
+#[ignore = "snapshot writer; run on demand with AETHER_WRITE_SCHEMA_SNAPSHOT=1"] // aether-suppression-request: the test writes its checked-in snapshot file, so it must never run in a normal pass
 fn regenerate_the_schema_snapshot_for_the_current_version() {
     let write = env::vars_os()
         .find_map(|(key, value)| (key == "AETHER_WRITE_SCHEMA_SNAPSHOT").then_some(value))
