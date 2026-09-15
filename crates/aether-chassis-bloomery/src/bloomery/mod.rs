@@ -140,13 +140,17 @@ pub use verify::{
     CoverageMap, CoverageStatus, KNOWN_FLAKE_CANDIDATES, Land, LandProbe, MissingCoverage, ProbeVerdict, RepairBoard,
     RollDecision, RollHold, SweepContext, SweepDecision, SweepOutcome, TaintSet, TestClosure, UnknownFact,
     attribute_gate_failure, bisect_land_order, bloom_disposition, consult_proof_fact, coverage_map, decide_roll,
-    decide_sweep, next_batch_probe, record_proof_facts, repair_landed, run_sweep, unknowns,
+    decide_sweep, next_batch_probe, record_proof_facts, repair_landed, run_sweep, settle_batch_report, unknowns,
 };
 #[cfg(feature = "runtime")]
 pub use verify::{
     ContextualFactError, ContextualProofFactReuse, ContextualProofReuse, ContextualRunnerReport,
     contextual_bundle_reports, contextual_fact_key, observed_failed_tests, observed_probe_verdict,
     record_contextual_facts, record_green_contextual_facts, reuse_contextual_proof,
+};
+#[cfg(feature = "github")]
+pub use verify::{
+    ExtentSource, GateAttribution, GateFindings, MemberExtents, PathOwner, attribute_gate, gate_findings,
 };
 
 pub use verify::{

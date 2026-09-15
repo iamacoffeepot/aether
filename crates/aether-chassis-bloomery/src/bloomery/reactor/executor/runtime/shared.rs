@@ -33,9 +33,11 @@ use crate::bloomery::study::{
 };
 use crate::bloomery::{
     BatchCheck, BatchFailure, BatchMember, BatchProbeReceipt, BatchProbeRequest, BatchProgress, BatchReport,
-    ContextualProofReuse, HostClass, KNOWN_FLAKE_CANDIDATES, ProbeVerdict, contextual_bundle_reports,
-    contextual_fact_key, dispatch_model, findings::verification_findings_key, next_batch_probe, observed_failed_tests,
+    ContextualProofReuse, ExtentSource, GateAttribution, HostClass, KNOWN_FLAKE_CANDIDATES, MemberExtents,
+    ProbeVerdict, SourceShell, attribute_gate, contextual_bundle_reports, contextual_fact_key, dispatch_model,
+    findings::verification_findings_key, gate_findings, next_batch_probe, observed_failed_tests,
     observed_probe_verdict, record_contextual_facts, record_green_contextual_facts, reuse_contextual_proof,
+    settle_batch_report,
 };
 use crate::store::{
     CommissionBackend, ConstructionAdmissionRow, OrderLifecycle, PartialHeadRepairRow, SharedRunLifecycle,
@@ -1151,6 +1153,7 @@ fn record_exact_member_findings(
     sequence: u64,
     member: &MemberPin,
     evidence: Digest,
+    provenance: Option<&str>,
 ) -> rusqlite::Result<()> {
     let Some(findings) = store.lookup_review_findings(bloom.0.as_bytes(), &verification_findings_key(evidence))? else {
         return Ok(());
@@ -1158,6 +1161,12 @@ fn record_exact_member_findings(
     if findings.trim().is_empty() {
         return Ok(());
     }
+    // How this member came to be named, ahead of what it was named for. A
+    // repair lap reads this row, and "you were charged because the suppression
+    // scanner named a file only you changed" is a different instruction from
+    // "you were charged because a bisection cornered you" (ADR-0218, amended
+    // 2026-09-15).
+    let findings = provenance.map_or_else(|| findings.clone(), |provenance| format!("{provenance}\n\n{findings}"));
 
     let guard_key = shared_member_findings_guard_key(&member.workpiece);
     if store
@@ -1180,6 +1189,7 @@ fn project_attributed_member_findings(
     row: &SharedRunRow,
     dispatch: &SharedRunDispatch,
     outcome: &MemberVerifyOutcome,
+    provenance: &AttributionProvenance,
 ) -> rusqlite::Result<()> {
     let Some(request) = dispatch.plan.requests.iter().find(|request| request.digest() == outcome.request()) else {
         return Ok(());
@@ -1193,7 +1203,14 @@ fn project_attributed_member_findings(
     let Some(sequence) = shared_run_dispatch_sequence(row) else {
         return Ok(());
     };
-    record_exact_member_findings(store, bloom, sequence, &request.member, evidence)
+    record_exact_member_findings(
+        store,
+        bloom,
+        sequence,
+        &request.member,
+        evidence,
+        provenance.get(&request.member.workpiece).map(String::as_str),
+    )
 }
 
 fn complete_observed_step(
@@ -1583,7 +1600,7 @@ fn fold_serial_receipts(
             && let Some(bloom) = dispatch_bloom(dispatch)
             && let Some(sequence) = shared_run_dispatch_sequence(row)
         {
-            record_exact_member_findings(store, bloom, sequence, &request.member, receipt.evidence.detail)?;
+            record_exact_member_findings(store, bloom, sequence, &request.member, receipt.evidence.detail, None)?;
         }
         let queued_unix_millis = store
             .shared_run_members(&row.run)?
@@ -1797,6 +1814,160 @@ fn retained_probe_receipts(
         });
     }
     Ok(receipts)
+}
+
+/// How each attributed member was named, keyed by workpiece. Carried alongside
+/// the outcomes so the projected member findings can open with it.
+type AttributionProvenance = BTreeMap<WorkpieceId, String>;
+
+/// A settled contextual run: what each member's Verify became, and how each
+/// attributed one came to be named.
+struct ContextualSettlement {
+    outcomes: Vec<MemberVerifyOutcome>,
+    provenance: AttributionProvenance,
+}
+
+/// The extent each member's ownership of a named path is read against
+/// (ADR-0218, amended 2026-09-15).
+///
+/// The candidate's own delta against the composition base first: it is what the
+/// member actually wrote, so a member whose surface merely covers a path it
+/// never touched is not charged with it. The declared surface is the fallback
+/// for a source that cannot answer — a fixture backend that retains no objects,
+/// an unreadable delta — and the answer says which was used, because the two
+/// are not equally strong evidence.
+fn member_extents(
+    store: &mut dyn StoreBackend,
+    source: Option<&SourceShell>,
+    dispatch: &SharedRunDispatch,
+) -> Option<MemberExtents> {
+    let composition = dispatch.plan.composition.as_ref()?;
+    let changed = source.and_then(|source| {
+        dispatch
+            .plan
+            .requests
+            .iter()
+            .map(|request| {
+                source
+                    .changed_paths(&composition.base.candidate, &request.member.candidate)
+                    .inspect_err(|error| {
+                        tracing::info!(
+                            target: "aether_chassis_bloomery::executor",
+                            workpiece = %request.member.workpiece.0,
+                            %error,
+                            "contextual attribution: a candidate delta is unreadable; the declared surfaces stand in",
+                        );
+                    })
+                    .map(|paths| (request.member.workpiece.clone(), paths))
+                    .ok()
+            })
+            .collect::<Option<Vec<_>>>()
+    });
+    if let Some(members) = changed {
+        return Some(MemberExtents { source: ExtentSource::ChangedPaths, members });
+    }
+
+    let surfaces = dispatch
+        .plan
+        .requests
+        .iter()
+        .map(|request| {
+            store
+                .load_revision(request.member.scope_revision)
+                .ok()
+                .flatten()
+                .map(|revision| (request.member.workpiece.clone(), revision.declared_surface))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(MemberExtents { source: ExtentSource::DeclaredSurface, members: surfaces })
+}
+
+/// Attribute what the step-0 findings already answer, and hand back the checks
+/// that still need a probe (ADR-0218, amended 2026-09-15).
+///
+/// Two readings, in order. A gate whose findings name paths that each belong to
+/// exactly one member charges those members and buys nothing. Then a *gate*
+/// red on a run with a single non-inherited member charges that member with
+/// whatever the findings left open: there is no other candidate in the
+/// composition, so a bisection over it can only re-derive the one answer
+/// available.
+///
+/// Two shapes are held back from that second reading, and both for the same
+/// reason — they are the shapes where the base, not the member, can be the
+/// cause. An inherited member keeps the bisection because
+/// [`BatchFailure::Inherited`] is the claim that a late member is not
+/// answerable for the head it started on. A named failing *test*
+/// ([`BatchCheck::Test`]) keeps it because a test can be red on the base
+/// already, and its baseline is one cheap exact question rather than a whole
+/// suite — the same reason the flake and legacy-excusal machinery reads it.
+fn attribute_from_findings(
+    dispatch: &SharedRunDispatch,
+    receipt: &SharedStepReceipt,
+    checks: &[BatchCheck],
+    extents: Option<&MemberExtents>,
+) -> (Vec<BatchFailure>, Vec<BatchCheck>, AttributionProvenance) {
+    let sections = receipt.findings.as_deref().map(gate_findings).unwrap_or_default();
+    let solitary = match dispatch.plan.requests.as_slice() {
+        [request] if request.context.is_none() => Some(request.member.workpiece.clone()),
+        _ => None,
+    };
+    let mut failures = Vec::new();
+    let mut remaining = Vec::new();
+    let mut provenance = AttributionProvenance::new();
+    for check in checks {
+        let named = extents
+            .zip(sections.iter().find(|section| section.gate == check.gate()))
+            .map(|(extents, section)| (attribute_gate(section, extents), extents.source, section.paths.join(", ")));
+        let (owners, note) = match named {
+            Some((GateAttribution::Attributed(owners), source, paths)) => (
+                owners,
+                format!(
+                    "Attributed from the step-0 findings by {}: {} names {paths}.",
+                    source.describe(),
+                    check.gate(),
+                ),
+            ),
+            other => {
+                if let Some((GateAttribution::Inconclusive(reason), _, _)) = other {
+                    tracing::info!(
+                        target: "aether_chassis_bloomery::executor",
+                        gate = %check.gate(),
+                        %reason,
+                        "contextual attribution: the findings do not discriminate; this gate bisects",
+                    );
+                }
+                let Some(member) = solitary.clone().filter(|_| matches!(check, BatchCheck::Gate { .. })) else {
+                    remaining.push(check.clone());
+                    continue;
+                };
+                (
+                    vec![member],
+                    format!("Attributed as the sole member of this run: {} failed over it alone.", check.gate()),
+                )
+            }
+        };
+        for member in owners {
+            provenance.entry(member.clone()).or_insert_with(|| note.clone());
+            failures.push(BatchFailure::Attributed {
+                member,
+                check: check.clone(),
+                evidence: vec![receipt.evidence.detail],
+            });
+        }
+    }
+    (failures, remaining, provenance)
+}
+
+/// Every member a probe walk attributed, noted as such so the evidence tells
+/// the two paths apart.
+fn probe_provenance(report: &BatchReport, provenance: &mut AttributionProvenance) {
+    for failure in &report.failures {
+        if let BatchFailure::Attributed { member, check, .. } = failure {
+            provenance
+                .entry(member.clone())
+                .or_insert_with(|| format!("Attributed by probe: {} failed over this member alone.", check.gate()));
+        }
+    }
 }
 
 fn probe_materialization(
@@ -2022,17 +2193,18 @@ fn pending_contextual_outcomes(dispatch: &SharedRunDispatch, observation: Digest
 
 fn contextual_terminal_outcomes(
     store: &mut dyn StoreBackend,
+    source: Option<&SourceShell>,
     row: &SharedRunRow,
     dispatch: &SharedRunDispatch,
     steps: &[SharedRunStepRow],
-) -> rusqlite::Result<Option<Vec<MemberVerifyOutcome>>> {
+) -> rusqlite::Result<Option<ContextualSettlement>> {
     let SharedRunExecution::Contextual { node, .. } = &dispatch.execution else {
         return Ok(None);
     };
     if let Some(reuse) =
         store.shared_run_proof_reuse(&row.run)?.map(|bytes| decode_host::<ReusedContextualProof>(&bytes)).transpose()?
     {
-        return Ok(Some(
+        return Ok(Some(settled(
             dispatch
                 .plan
                 .requests
@@ -2043,7 +2215,7 @@ fn contextual_terminal_outcomes(
                     receipt: reuse.evidence.clone(),
                 })
                 .collect(),
-        ));
+        )));
     }
     let Some(step) = steps.iter().find(|step| {
         matches!(decode_host::<SharedStepDescriptor>(&step.descriptor), Ok(SharedStepDescriptor::ContextualFull { .. }))
@@ -2056,7 +2228,7 @@ fn contextual_terminal_outcomes(
     };
     let checks = declared_failed_checks(dispatch, &receipt, &step.nonce, &excused_flakes(store, node, &receipt)?);
     if contextual_run_passed(receipt.verdict, &checks) {
-        return Ok(Some(
+        return Ok(Some(settled(
             dispatch
                 .plan
                 .requests
@@ -2067,10 +2239,10 @@ fn contextual_terminal_outcomes(
                     receipt: receipt.evidence.clone(),
                 })
                 .collect(),
-        ));
+        )));
     }
     if receipt.verdict == StageVerdict::ExecutorFault {
-        return Ok(Some(
+        return Ok(Some(settled(
             dispatch
                 .plan
                 .requests
@@ -2080,44 +2252,62 @@ fn contextual_terminal_outcomes(
                     evidence: receipt.evidence.clone(),
                 })
                 .collect(),
-        ));
+        )));
     }
     if checks.is_empty() {
-        return Ok(Some(pending_contextual_outcomes(dispatch, receipt.evidence.detail)));
+        return Ok(Some(settled(pending_contextual_outcomes(dispatch, receipt.evidence.detail))));
     }
-    let receipts = retained_probe_receipts(store, row, dispatch, step, &receipt, &checks)?;
-    Ok(
-        match next_batch_probe(
-            dispatch.plan.digest(),
-            &batch_members(dispatch),
-            &checks,
-            &receipts,
-            dispatch.plan.probe_budget,
-        ) {
-            BatchProgress::Probe(probe) => {
-                let next = probe_materialization(row, dispatch, probe)?;
-                store.record_shared_run_step(&next)?;
-                store.update_shared_run(&row.run, SharedRunLifecycle::Running, next.ordinal)?;
-                None
-            }
-            BatchProgress::Complete(report) => Some(contextual_outcomes(dispatch, &report, &receipt, &checks)),
-            BatchProgress::Invalid(reason) => {
-                let observation = Digest::of_wire_bytes(reason.as_bytes());
-                Some(pending_contextual_outcomes(dispatch, observation))
-            }
-        },
-    )
+
+    let extents = member_extents(store, source, dispatch);
+    let (attributed, remaining, mut provenance) =
+        attribute_from_findings(dispatch, &receipt, &checks, extents.as_ref());
+    let members = batch_members(dispatch);
+    if remaining.is_empty() {
+        let report = settle_batch_report(&members, attributed);
+        return Ok(Some(ContextualSettlement {
+            outcomes: contextual_outcomes(dispatch, &report, &receipt, &checks),
+            provenance,
+        }));
+    }
+
+    let receipts = retained_probe_receipts(store, row, dispatch, step, &receipt, &remaining)?;
+    Ok(match next_batch_probe(dispatch.plan.digest(), &members, &remaining, &receipts, dispatch.plan.probe_budget) {
+        BatchProgress::Probe(probe) => {
+            let next = probe_materialization(row, dispatch, probe)?;
+            store.record_shared_run_step(&next)?;
+            store.update_shared_run(&row.run, SharedRunLifecycle::Running, next.ordinal)?;
+            None
+        }
+        BatchProgress::Complete(report) => {
+            let report =
+                settle_batch_report(&members, attributed.into_iter().chain(report.failures).collect::<Vec<_>>());
+            probe_provenance(&report, &mut provenance);
+            Some(ContextualSettlement {
+                outcomes: contextual_outcomes(dispatch, &report, &receipt, &checks),
+                provenance,
+            })
+        }
+        BatchProgress::Invalid(reason) => {
+            let observation = Digest::of_wire_bytes(reason.as_bytes());
+            Some(settled(pending_contextual_outcomes(dispatch, observation)))
+        }
+    })
+}
+
+/// A settlement whose members were never attributed, so nothing names how.
+fn settled(outcomes: Vec<MemberVerifyOutcome>) -> ContextualSettlement {
+    ContextualSettlement { outcomes, provenance: AttributionProvenance::new() }
 }
 
 fn record_contextual_member_outcomes(
     store: &mut dyn StoreBackend,
     row: &SharedRunRow,
     dispatch: &SharedRunDispatch,
-    outcomes: &[MemberVerifyOutcome],
+    settlement: &ContextualSettlement,
     now_unix_millis: u64,
 ) -> rusqlite::Result<()> {
     let members = store.shared_run_members(&row.run)?;
-    for outcome in outcomes {
+    for outcome in &settlement.outcomes {
         if members.iter().any(|member| member.request == outcome.request().as_bytes() && member.cancelled) {
             continue;
         }
@@ -2131,7 +2321,7 @@ fn record_contextual_member_outcomes(
         } else {
             outcome.clone()
         };
-        project_attributed_member_findings(store, row, dispatch, &outcome)?;
+        project_attributed_member_findings(store, row, dispatch, &outcome, &settlement.provenance)?;
         let latency = members
             .iter()
             .find(|member| member.request == outcome.request().as_bytes())
@@ -2148,6 +2338,7 @@ fn record_contextual_member_outcomes(
 
 fn finish_if_terminal(
     store: &mut dyn StoreBackend,
+    source: Option<&SourceShell>,
     executor: &dyn ExecutorPort,
     row: &SharedRunRow,
     dispatch: &SharedRunDispatch,
@@ -2164,10 +2355,10 @@ fn finish_if_terminal(
         if steps.iter().any(|step| step.receipt.is_none()) {
             return Ok(Vec::new());
         }
-        let Some(outcomes) = contextual_terminal_outcomes(store, row, dispatch, &steps)? else {
+        let Some(settlement) = contextual_terminal_outcomes(store, source, row, dispatch, &steps)? else {
             return Ok(Vec::new());
         };
-        record_contextual_member_outcomes(store, row, dispatch, &outcomes, now_unix_millis)?;
+        record_contextual_member_outcomes(store, row, dispatch, &settlement, now_unix_millis)?;
         store.update_shared_run(&row.run, SharedRunLifecycle::Completing, row.next_ordinal)?;
         return replay_completion(store, row, executor);
     }
@@ -2468,6 +2659,7 @@ fn pending_prepared_step(steps: &[SharedRunStepRow]) -> Option<&SharedRunStepRow
 pub(super) fn drive_shared_runs(
     store: &mut dyn StoreBackend,
     artifacts: Option<&mut ArtifactsCapabilityState>,
+    source: Option<&SourceShell>,
     executor: &dyn ExecutorPort,
     claims: NameEvidenceClaims,
     host_class: &HostClass,
@@ -2532,7 +2724,7 @@ pub(super) fn drive_shared_runs(
             }
             complete_observed_step(store, executor, claims, host_class, &dispatch, &step)?;
         }
-        admits.extend(finish_if_terminal(store, executor, &row, &dispatch, now_unix_millis)?);
+        admits.extend(finish_if_terminal(store, source, executor, &row, &dispatch, now_unix_millis)?);
         let Some(current) = store.lookup_shared_run(&row.run)? else {
             continue;
         };
@@ -2551,7 +2743,7 @@ pub(super) fn drive_shared_runs(
             retain_contextual_proof_reuse(store, artifacts.as_deref_mut(), &current, &dispatch, host_class)?
         {
             admits.extend(reused);
-            admits.extend(finish_if_terminal(store, executor, &current, &dispatch, now_unix_millis)?);
+            admits.extend(finish_if_terminal(store, source, executor, &current, &dispatch, now_unix_millis)?);
             continue;
         }
         let steps = store.shared_run_steps(&row.run)?;
@@ -3379,9 +3571,9 @@ mod tests {
             .record_review_findings(bloom.0.as_bytes(), &verification_findings_key(newer_evidence), "newer finding")
             .expect("newer exact finding");
 
-        record_exact_member_findings(&mut store, bloom, 20, &newer, newer_evidence).expect("newer projection");
-        record_exact_member_findings(&mut store, bloom, 20, &newer, newer_evidence).expect("newer replay");
-        record_exact_member_findings(&mut store, bloom, 10, &older, older_evidence).expect("stale replay");
+        record_exact_member_findings(&mut store, bloom, 20, &newer, newer_evidence, None).expect("newer projection");
+        record_exact_member_findings(&mut store, bloom, 20, &newer, newer_evidence, None).expect("newer replay");
+        record_exact_member_findings(&mut store, bloom, 10, &older, older_evidence, None).expect("stale replay");
 
         assert_eq!(
             store.lookup_review_findings(bloom.0.as_bytes(), &newer.workpiece.0).expect("member advisory").as_deref(),
@@ -3553,7 +3745,7 @@ mod tests {
         store.record_shared_run(&sibling, from_ref(&participant)).expect("sibling run");
 
         let executor = ReleasePort { releases: Cell::new(0) };
-        drive_shared_runs(&mut store, None, &executor, NameEvidenceClaims, &HostClass::new("fleet"), 1_000)
+        drive_shared_runs(&mut store, None, None, &executor, NameEvidenceClaims, &HostClass::new("fleet"), 1_000)
             .expect("one unreadable row cannot fail the pass");
 
         let members = store.shared_run_members(&sibling.run).expect("sibling membership");

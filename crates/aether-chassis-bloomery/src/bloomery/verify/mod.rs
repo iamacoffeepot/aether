@@ -35,6 +35,8 @@ mod containment;
 #[cfg(feature = "runtime")]
 mod contextual_facts;
 mod facts;
+#[cfg(feature = "github")]
+mod ownership;
 #[cfg(feature = "runtime")]
 mod roll;
 #[cfg(feature = "runtime")]
@@ -48,7 +50,7 @@ pub use attribution::{
 #[cfg(feature = "runtime")]
 pub use batch::{
     BatchCheck, BatchFailure, BatchMember, BatchProbeReceipt, BatchProbeRequest, BatchProgress, BatchReport,
-    ProbeVerdict, next_batch_probe,
+    ProbeVerdict, next_batch_probe, settle_batch_report,
 };
 pub use closure::{ClosureKey, ClosureKeyError, closure_key};
 pub use containment::{
@@ -63,6 +65,10 @@ pub use contextual_facts::{
 #[cfg(feature = "runtime")]
 pub use facts::record_proof_facts;
 pub use facts::{DiscriminatedFact, DiscriminatedFacts, ProofResult, ProofSource, RunnerReport, discriminate};
+#[cfg(feature = "github")]
+pub use ownership::{
+    ExtentSource, GateAttribution, GateFindings, MemberExtents, PathOwner, attribute_gate, gate_findings,
+};
 
 #[cfg(feature = "runtime")]
 pub use roll::{

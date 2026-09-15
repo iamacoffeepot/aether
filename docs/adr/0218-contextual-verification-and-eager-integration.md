@@ -381,7 +381,14 @@ the application after the full path is implemented.
 - Distribute a composed green as standalone parent proofs: proves untested
   trees and makes later ejection unsound.
 - Attribute by a diagnostic's path owner: identifies a suspect, not a cause,
-  and loses independent or interaction failures.
+  and loses independent or interaction failures. **Amended 2026-09-15** — the
+  findings' paths are now read first and bisection is the fallback. The
+  objection was right about the cases it named and wrong about how often they
+  occur: a path several members changed, a path no member changed, and a
+  finding naming no path are exactly the three shapes that still buy probes,
+  so nothing the bisection used to catch is lost. What changed is that the
+  common case — a diagnostic pointing at a file exactly one member's candidate
+  touched — stopped paying for a bisection to rediscover it.
 - Reuse a mutable old group after ejection: can retain removed code through
   the branch or inherited ancestry.
 - Restart young builds for arrivals: wastes completed work and changes the
@@ -453,3 +460,56 @@ and its completion admits outcomes for the members that stay. A run that is
 retired keeps its siblings' logical requests, so the re-proposal reuses the
 exact request identities its recorded per-step rows are addressed by rather
 than re-deriving them from a cold dispatch.
+
+## Amendment: attribution reads the findings first (2026-09-15)
+
+Attribution treated a gate as a black box that answers only red or green for a
+set, so the only way to name a member was to re-run the gate over subsets. Two
+runs in bloom 0f16e207 measured what that costs when the gate had already said
+who was responsible.
+
+Run 84DB66FF verified issue-6023 and issue-6026 together and came back red on
+`verify.suppress`. Its step-0 findings read, in full, two lines — one naming
+`crates/aether-chassis-bloomery/src/store/schema/tests.rs:238`, one naming
+`xtask/src/bloom/roll/mod.rs:144`. The planner then spent nine probes and 37.6
+minutes — the base tree twice, `{6026, 6023}`, `{6026}` twice, `{6023}` twice,
+and issue-6023's inherited head twice — to conclude that issue-6023 was the
+cause. issue-6026's own gates had been green since 09:10; it integrated at
+10:01. Run A05DA0B9 verified issue-6024 alone, came back red on `verify.docs`
+naming `crates/aether-chassis-bloomery/src/store/read_everything.rs:52:30`, and
+spent five probes and 21 minutes attributing a one-member run to its only
+member.
+
+The findings are now the primary signal. Before any probe is requested, the
+step-0 receipt's findings are split into their `### verify.<gate>` sections and
+each section is read for the paths its findings name. Each member's ownership
+is decided against the paths its candidate changed between the composition base
+and its own tree — the delta, not the declared surface, so a member whose
+surface merely *covers* a file it never touched is not charged with it. The
+declared-surface globs stand in only when no candidate delta is readable, and
+the run's evidence says which reading was used.
+
+A red gate whose findings name only paths that each belong to exactly one
+member charges those members and buys nothing. The gate falls back to
+`next_batch_probe` — that gate alone, over the same members — when the findings
+carry a finding that names no path, name a path no member of the composition
+changed (the base or an inherited head carries it), or name a path several
+members changed. A single-member run charges its member with a red *gate*
+directly, because no other candidate in the composition could have caused it.
+Two shapes are held back from that, both because the base rather than the
+member can be the cause: an inherited member, whose baseline probe is what
+separates its own defect from the head it started on, and a named failing test,
+which can be red on the base already and whose baseline is one exact question
+rather than a whole suite.
+
+Probes also stopped taking two invocations each. The second repetition existed
+to survive a flake, and since #5999 the gate's own same-input replay already
+does that and reports the excused tests on the receipt, so an experiment is now
+one invocation. Receipts recorded under the old rule still validate, so a
+journal carrying repetition-1 rows replays unchanged.
+
+Each attributed member's projected findings now open with a line saying how it
+was named — from the step-0 findings by changed path, by declared surface, as
+the sole member of its run, or by probe. A repair lap reads that row, and being
+told which file named it is a different instruction from being told a bisection
+cornered it.
