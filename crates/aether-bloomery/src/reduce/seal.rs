@@ -235,11 +235,14 @@ fn enqueue_base_verify_if_needed(
         if receipt.tree != receipt.base {
             return true;
         }
-        let proven_tree_on_record = snapshot
-            .base_receipts
-            .values()
-            .any(|other| other.base == base && other.tree != base && other.gate_set == gate_set && other.is_green());
-        if proven_tree_on_record {
+        // The lookup landed on a checkout-as-tree spelling only because the
+        // commit index points there; the receipt that proved the real tree may
+        // still be on record. Accept it — the whole-workspace run is already
+        // spent — but re-point the index at it, or the contexts this seal seeds
+        // would carry the checkout as their tree, which is the exact state
+        // `require_exact_tree` exists to refuse.
+        if let Some(proven) = snapshot.proven_base_receipt(base, gate_set) {
+            effects.push(Decision::RecordBaseReceipt { receipt: proven.clone() });
             return true;
         }
     }
@@ -2148,6 +2151,50 @@ mod tests {
         assert_eq!(decisions.outcome, Outcome::Sealed(spec.id()));
         assert!(!decisions.effects.iter().any(|effect| matches!(effect, Decision::DispatchBaseVerify { .. })));
         assert!(decisions.effects.iter().any(|effect| matches!(effect, Decision::QueueConstructionAdmission { .. })));
+    }
+
+    // The plausible bug: the host-tree-spelling escape accepts on a proven
+    // receipt whose tree it never reads. The contexts the same seal seeds
+    // resolve their tree through `base_trees`, which the checkout-as-tree
+    // spelling has already re-pointed at the checkout digest — so the escape
+    // admits precisely the state `require_exact_tree` exists to refuse, and
+    // every coordinated member is handed `tree == base`.
+    #[test]
+    fn a_host_tree_spelling_seeds_contexts_with_the_proven_tree() {
+        let (spec, configs) = coordinated_seal(1, digest(0), "wp");
+        let mut snapshot = Snapshot::new(digest(0));
+        stamp_green_receipt(&mut snapshot, digest(0), digest(100));
+        let host_spelling = BaseReceipt {
+            base: digest(0),
+            tree: digest(0),
+            gate_set: VerifyGateSet::base().digest(),
+            verdict: BaseVerdict::Green {
+                evidence: Evidence { subject: digest(0), kind: EvidenceKind::VerificationResult, detail: digest(1) },
+            },
+        };
+        snapshot.base_trees.insert(digest(0), digest(0));
+        snapshot.base_receipts.insert(host_spelling.verified(), host_spelling);
+
+        let decisions =
+            reduce(&snapshot, &event("coordinated-seal", Fact::Seal(spec.clone())), &configs, &SpendWindow::default());
+
+        assert_eq!(decisions.outcome, Outcome::Sealed(spec.id()));
+        assert!(
+            decisions.effects.iter().any(|effect| {
+                matches!(effect, Decision::QueueConstructionAdmission { dispatch }
+                    if dispatch.context.bloom_base == CandidateRef { tree: digest(100), checkout: digest(0) })
+            }),
+            "the admitted context carries the tree the green receipt bound, not the checkout: {:?}",
+            decisions.effects,
+        );
+        assert!(
+            snapshot
+                .apply(&event("coordinated-seal", Fact::Seal(spec)), &decisions, &configs)
+                .base_trees
+                .get(&digest(0))
+                == Some(&digest(100)),
+            "and the commit index is re-pointed at it, so a later dispatch reads the same tree",
+        );
     }
 
     // The plausible bug: a coordinated seal rejects a landed receipt because

@@ -132,7 +132,7 @@ pub(super) fn initialized_effects(
     }
     let bloom = spec.id();
     let base = CandidateRef {
-        tree: snapshot.base_trees.get(&spec.base()).copied().unwrap_or_else(|| spec.base()),
+        tree: snapshot.base_tree_for(spec.base(), VerifyGateSet::base_of(manifest).digest()),
         checkout: spec.base(),
     };
     let members = spec
@@ -496,7 +496,8 @@ fn request_for_dispatch(
     let context = state.contexts.get(workpiece_key(workpiece)).cloned();
     let head_base = context.as_ref().map_or_else(
         || CandidateRef {
-            tree: snapshot.base_trees.get(&record.spec.base()).copied().unwrap_or_else(|| record.spec.base()),
+            tree: snapshot
+                .base_tree_for(record.spec.base(), VerifyGateSet::base_of(&record.pipeline_manifest).digest()),
             checkout: record.spec.base(),
         },
         |context| context.starting_head.candidate,
