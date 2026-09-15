@@ -493,3 +493,56 @@ finished their `verify.check` and were cancelled at the exact instant of an
 integration (22:03:07 and 23:28:37 UTC): 64 prover-minutes of finished proof
 thrown away, and four members re-proposed from scratch against a head their
 completed runs would have folded onto anyway.
+
+## Amendment: reconcile is scoped to the merge (2026-09-15)
+
+A Reconcile lap is a merge, and it is ordered and priced as one.
+
+Bloom `0f16e207` paid for the other reading twice in one member. Issue-5978
+finished construction at 09:28:58 UTC; siblings 5963 and 6022 had integrated
+at 09:25, so its candidate could not be placed onto the moved head and the
+preparation reported `SharedRunPreparation::Conflict` (§Amendment: composition
+conflicts at shared-run preparation). The reducer sent the member to Reconcile,
+and §Verify the prepared repair and bound head movement resumed its whole
+author session: `dispatch-7168`, 225 model calls, 15.0 minutes, all before its
+verify could start. Then the verify that followed was minted as a first proof
+over the composition base, so the mechanical closure re-proved the member's
+entire change on its way to learning what the merge had done. The change had
+been proved once already. Only the merge was new.
+
+**The order names the merge.** Every collision path that can send a member to
+Reconcile — the legacy fold, the eager append, the reconcile preparation, and
+the shared-run placement — composes one overlay: the situational line naming
+what could not be placed onto which head, a standing merge-only contract, the
+colliding paths under `## Conflicting paths`, and the member's own contribution
+under `## Conflicted candidate`. The contract tells the resumed session that
+its change is already verified as it stands, that the conflicting paths are the
+only places the two sides disagree, and that every other file of its change
+stays byte-identical. The session resumption itself is unchanged: the lap still
+carries the author's context, because resolving a merge in unfamiliar code is
+what that context is for.
+
+The overlay is also read by machine — the executor drain recovers the paths
+from `## Conflicting paths` to hold a Reconcile whose seam a sibling is already
+rebuilding — so the three collision paths that previously wrote a bare
+`Conflicting paths:` line were invisible to that hold. One renderer fixes both
+the prose and the parse.
+
+**The confirming verify diffs against the proof it already has.** When a member
+reaches `Verify` from `Reconcile` and this bloom holds a green verdict for the
+candidate the lap started from — the record's verify memo on the plain line, a
+standalone or `PassedIn` claim under coordination, neither of which a fold
+conflict disturbs — that candidate's checkout becomes the verify
+transformation's `diff_base` and the contract's, in place of the composition
+base or the head the merge landed on. The verdict's artifact digest rides as a
+second transformation input, so the chain reads as what it is: proved node N,
+then delta N to P. A member with no such proof behind it keeps today's range.
+
+The saving is bounded by the closure's granularity, and the honest statement of
+it is narrow. `verify.check` selects by changed *crate*, not by changed hunk,
+so a merge that lands in the same crates the member changed selects exactly the
+gates the full range would have and costs exactly what it cost before. What the
+narrower range buys is the case where the merge is narrower than the change —
+common, because a conflict is usually a few files, but not guaranteed. The
+amendment removes the *re-authoring*, which was unconditional; it makes the
+re-proving conditional rather than free.

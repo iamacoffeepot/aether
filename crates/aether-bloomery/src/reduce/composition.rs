@@ -100,6 +100,7 @@ pub(super) fn composition_line(record: &BloomRecord) -> SealedLine<'_> {
         base: record.spec.base(),
         held: record.operator_hold.is_some(),
         base_proven: record.base_proven,
+        proved: None,
     }
 }
 

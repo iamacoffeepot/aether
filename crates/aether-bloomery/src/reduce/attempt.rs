@@ -115,6 +115,19 @@ pub(super) fn move_effects_with_checkpoint(
     {
         transformation.diff_base = Some(base);
     }
+    // A Verify that follows a Reconcile is a delta-confirm, not a first proof:
+    // the candidate the lap started from is already green, so the range the
+    // mechanical lane narrows against starts there rather than at the member's
+    // construct base, and the whole change is not re-proved to learn what the
+    // merge did (ADR-0218). The receipt that proved it rides as a second input
+    // so the journal reads "proved N, then delta N to P" rather than leaving a
+    // reader to infer the proof from the range's left end.
+    if progress.stage == StageId::Verify
+        && let Some(proved) = sealed.proved
+    {
+        transformation.diff_base = Some(proved.candidate.checkout);
+        transformation.inputs.push(proved.proof);
+    }
     let candidate = if progress.stage == StageId::Construct {
         None
     } else {
@@ -173,6 +186,32 @@ pub(super) struct SealedLine<'a> {
     /// (ADR-0200). Independent of [`Self::held`]: releasing one brake must not
     /// lift the other.
     pub base_proven: bool,
+    /// The proved candidate a `Verify` on this line confirms a delta against,
+    /// displacing [`Self::base`] as the mechanical lane's range start
+    /// (ADR-0218 §Amendment: reconcile is scoped to the merge).
+    ///
+    /// `None` on every ordinary line: a first pass has nothing proved behind
+    /// it, so the range is the member's own construct base. Set only by
+    /// [`SealedLine::proving_delta_from`], and only for the lap after a
+    /// Reconcile — the one case where the tree being judged is a *merge* of a
+    /// tree this bloom already proved.
+    pub proved: Option<ProvedPredecessor>,
+}
+
+/// One proved predecessor of a delta-confirm `Verify`: the candidate an earlier
+/// pass judged green, and the digest of the receipt that judged it.
+///
+/// Carried together because neither half is usable alone — the candidate names
+/// the range the lane narrows against, the receipt names the proof that range
+/// is honest about standing on, and a dispatch that shipped one without the
+/// other would either narrow against an unproven tree or record a proof it did
+/// not use.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct ProvedPredecessor {
+    /// The candidate the prior pass proved.
+    pub candidate: CandidateRef,
+    /// The artifact digest of the verdict that proved it.
+    pub proof: Digest,
 }
 
 impl<'a> SealedLine<'a> {
@@ -186,7 +225,19 @@ impl<'a> SealedLine<'a> {
             base: member_construct_base(record, &member.workpiece),
             held: record.operator_hold.is_some(),
             base_proven: record.base_proven,
+            proved: None,
         }
+    }
+
+    /// The same line, read as a delta-confirm over `proved` (ADR-0218
+    /// §Amendment: reconcile is scoped to the merge).
+    ///
+    /// Takes an `Option` rather than a value so the one caller that can produce
+    /// a proved predecessor reads as a single chained expression instead of a
+    /// branch that rebuilds the line: `None` is the ordinary line, unchanged.
+    pub(super) fn proving_delta_from(mut self, proved: Option<ProvedPredecessor>) -> Self {
+        self.proved = proved;
+        self
     }
 
     /// Whether either brake is on: the operator hold, or an unproven base.
@@ -597,12 +648,43 @@ fn advance_after_pass(
         &progress,
         (targets, construct_checkpoint_base),
         displayed,
-        SealedLine::of(record, member),
+        SealedLine::of(record, member).proving_delta_from(delta_confirm_predecessor(record, cursor, next)),
     ));
     Decisions {
         outcome: Outcome::AttemptAdvanced { bloom, workpiece: workpiece.clone(), from: cursor.stage, to: next },
         effects,
     }
+}
+
+/// The proved candidate the `Verify` after a Reconcile confirms a delta against
+/// (ADR-0218 §Amendment: reconcile is scoped to the merge).
+///
+/// A fold collision sends a member back to Reconcile carrying the candidate it
+/// collided with, and that candidate's green verdict stays in the record's
+/// verify memo — the revoked claim is about resolution, not about whether the
+/// tree built. So the merge is the only thing about the reconciled candidate
+/// this bloom has never judged, and the range the mechanical lane narrows
+/// against starts at the proved candidate rather than at the member's construct
+/// base, which would carry the member's whole change into the closure a second
+/// time.
+///
+/// `None` for every other advance: any stage but Reconcile → Verify, a
+/// base-assembly Reconcile (which returns to Construct), and a lap whose
+/// starting candidate this bloom holds no verdict for. The caller then keeps
+/// the construct base it already used.
+///
+/// The saving is bounded by the closure's granularity, not the diff's:
+/// `verify.check` narrows to the reverse-dependency closure of the changed
+/// *crates*, so a merge landing in the same crates the member changed selects
+/// exactly the gates the full range would have. It is the merge that is
+/// cheaper, never the confirmation of a merge that touches everything.
+fn delta_confirm_predecessor(record: &BloomRecord, cursor: &StageProgress, next: StageId) -> Option<ProvedPredecessor> {
+    if cursor.stage != StageId::Reconcile || next != StageId::Verify {
+        return None;
+    }
+    let candidate = cursor.candidate?;
+    let proof = record.verify_proof_for(StageId::Verify, candidate.tree)?;
+    Some(ProvedPredecessor { candidate, proof: proof.evidence.detail })
 }
 
 fn retry_or_wedge(

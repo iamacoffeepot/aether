@@ -68,6 +68,7 @@ use aether_bloomery_github::candidate_ref_name;
 mod compatibility;
 mod coordination;
 mod eager;
+mod overlay;
 mod precheck;
 mod projection;
 use coordination::{
@@ -226,33 +227,6 @@ fn fold_conflict_key(
     key.push(':');
     key.push_str(&attempted.to_hex());
     IdempotencyKey(key)
-}
-
-/// The reconcile work-order overlay: the standing contract, the colliding
-/// paths, and the conflicted candidate's own diff. The lane checks out the
-/// folded head, so the member's work lives here rather than in the tree.
-fn fold_conflict_overlay(paths: &[String], diff: &str) -> String {
-    use core::fmt::Write;
-    let mut overlay = String::from(
-        "## Fold conflict\n\nReproduce this member's intent on top of what the fold now contains; stay inside the \
-         declared surface.\n",
-    );
-    if !paths.is_empty() {
-        overlay.push_str("\n## Conflicting paths\n\n");
-        for path in paths {
-            let _ = writeln!(overlay, "- {path}");
-        }
-    }
-    let trimmed = diff.trim();
-    if !trimmed.is_empty() {
-        overlay.push_str("\n## Conflicted candidate\n\n```diff\n");
-        overlay.push_str(trimmed);
-        if !trimmed.ends_with('\n') {
-            overlay.push('\n');
-        }
-        overlay.push_str("```\n");
-    }
-    overlay
 }
 
 /// The idempotency key a bloom's resolve admits under.
@@ -682,7 +656,7 @@ fn conflicted_member(
     checkpoint: Digest,
     checkout: Digest,
 ) -> Conflicted {
-    let overlay = fold_conflict_overlay(&collision.paths, &collision.diff);
+    let overlay = overlay::fold_conflict_overlay(None, &collision.paths, &collision.diff);
     let evidence = Evidence {
         subject: checkpoint,
         kind: EvidenceKind::FoldConflict,

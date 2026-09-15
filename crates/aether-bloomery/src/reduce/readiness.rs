@@ -58,7 +58,14 @@ pub(super) fn entry_line<'a>(
     base: Digest,
     base_proven: bool,
 ) -> SealedLine<'a> {
-    SealedLine { configs: member.configs.layered_over(bloom_configs), catalog, base, held: false, base_proven }
+    SealedLine {
+        configs: member.configs.layered_over(bloom_configs),
+        catalog,
+        base,
+        held: false,
+        base_proven,
+        proved: None,
+    }
 }
 
 /// Seed `member` at the entry stage and dispatch its first construct (or defer
@@ -164,6 +171,7 @@ pub(super) fn reduce_splice_assembled(
             base: head,
             held: record.operator_hold.is_some(),
             base_proven: record.base_proven,
+            proved: None,
         },
     )
     .to_vec();
@@ -306,6 +314,7 @@ pub(super) fn newly_ready_entries(
             base,
             held: record.operator_hold.is_some(),
             base_proven: record.base_proven,
+            proved: None,
         };
         effects.extend(
             EffectBoundary::new(DISPATCH_MEMBER_GATE, bloom, Some(workpiece.clone()))
