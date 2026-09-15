@@ -14,9 +14,9 @@ use aether_bloomery::{
     WorkpieceId,
 };
 use aether_bloomery_github::{
-    CommissionProjectionApi, GithubError, GithubProjection, HttpRequest, HttpResponse, HttpTransport, Marker, NewIssue,
-    ReqwestGithub, StaticTokenSource, commission_floor_title, fixture::FakeGithub, issue_title_is_valid,
-    landing_branch, marker::render_marker, short_hex,
+    CommissionProjectionApi, GithubError, GithubProjection, HttpRequest, HttpResponse, HttpTransport,
+    MAX_COMMISSION_BODY_CHARS, Marker, NewIssue, ReqwestGithub, StaticTokenSource, commission_floor_title,
+    fixture::FakeGithub, issue_title_is_valid, landing_branch, marker::render_marker, short_hex,
 };
 
 /// The two issue numbers the view's members address — objects the repository
@@ -636,4 +636,73 @@ fn a_commission_with_no_github_home_still_gets_its_replica() {
     assert_eq!(created, Some(projection.client().issue_numbers()[0]));
     assert_eq!(projection.client().issue_count(), 1);
     assert_eq!(projection.client().created_issue_count(), 1);
+}
+
+#[test]
+fn an_over_limit_scope_stays_under_the_cap_and_keeps_its_surface() {
+    // Retrospect e3278777 / issue 5960: the whole scope revision rendered
+    // verbatim, so an over-long revision 422ed the replica on every drain.
+    // The bound cuts the prose, keeps the declared-surface block the seal door
+    // checks, and names the stored revision the rest can be read from.
+    const SURFACE_GLOB: &str = "crates/aether-bloomery-github/**";
+    let projection = GithubProjection::new(FakeGithub::new());
+    let mut open = commission("wp-long", None);
+    open.scope_revision = Some(digest(2));
+    open.scope =
+        Some(format!("## Problem statement\n\n{}\n\n## Declared surface\n\n{SURFACE_GLOB}\n", "prose ".repeat(14_000)));
+
+    let number = projection.project_commission(&open).expect("create").expect("owns a replica");
+    let body = projection.client().issue_body(number).expect("the replica exists");
+    let chars = body.chars().count();
+    assert!(chars <= MAX_COMMISSION_BODY_CHARS, "the replica stays under the mirror cap: {chars} chars");
+    assert!(body.contains(SURFACE_GLOB), "the authoritative block survives the cut: {body}");
+    assert!(body.contains("… truncated; read the stored revision"), "the cut is explicit: {body}");
+    assert!(body.contains(&short_hex(&digest(2))), "the cut names its revision: {body}");
+}
+
+#[test]
+fn an_over_limit_scope_comment_stays_under_the_cap_and_keeps_its_surface() {
+    // The same bound on the source-comment path: a canonical `issue-N`
+    // commission owns no replica, so its over-long work order would 422 the
+    // comment instead. Multibyte filler pins the cut to a character boundary.
+    const SURFACE_GLOB: &str = "crates/aether-bloomery-github/**";
+    let fake = FakeGithub::new();
+    fake.seed_issue(42, "human");
+    let projection = GithubProjection::new(fake);
+    let mut open = commission("issue-42", None);
+    open.scope_revision = Some(digest(2));
+    open.scope =
+        Some(format!("## Problem statement\n\n{}\n\n## Declared surface\n\n{SURFACE_GLOB}\n", "é".repeat(70_000)));
+
+    projection.project_commission(&open).expect("comment on the named source");
+
+    let comments = projection.client().comments_on(42);
+    assert_eq!(comments.len(), 1);
+    let comment = &comments[0];
+    let chars = comment.chars().count();
+    assert!(chars <= MAX_COMMISSION_BODY_CHARS, "the comment stays under the mirror cap: {chars} chars");
+    assert!(comment.contains(SURFACE_GLOB), "the authoritative block survives the cut: {comment}");
+    assert!(comment.contains("… truncated; read the stored revision"), "the cut is explicit: {comment}");
+    assert!(comment.contains(&short_hex(&digest(2))), "the cut names its revision: {comment}");
+}
+
+#[test]
+fn an_over_limit_intent_stays_under_the_cap_and_names_its_digest() {
+    // A retrospect commission has an intent but no scope revision (#6022), so
+    // a long finding alone could 422 the replica the same way. With no
+    // revision to name, the cut points at the stored intent statement, and the
+    // footer still states the lifecycle the mirror owes.
+    let projection = GithubProjection::new(FakeGithub::new());
+    let mut open = commission("retrospect-eb725152c84c", None);
+    open.scope_revision = None;
+    open.title = "A leak in the landing path".to_owned();
+    open.intent_text = Some(format!("# A leak in the landing path\n\n{}\n", "finding ".repeat(10_000)));
+
+    let number = projection.project_commission(&open).expect("create").expect("owns a replica");
+    let body = projection.client().issue_body(number).expect("the replica exists");
+    let chars = body.chars().count();
+    assert!(chars <= MAX_COMMISSION_BODY_CHARS, "the replica stays under the mirror cap: {chars} chars");
+    assert!(body.contains("… truncated; read the stored intent"), "the cut is explicit: {body}");
+    assert!(body.contains(&short_hex(&digest(1))), "the cut names its intent: {body}");
+    assert!(body.contains("- Workpiece: `retrospect-eb725152c84c`"), "the footer survives the cut: {body}");
 }
