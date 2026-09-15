@@ -2662,3 +2662,28 @@ mod outbox_results {
         assert!(error.contains("persisted value did not decode"), "{error}");
     }
 }
+
+#[test]
+fn check_store_refuses_a_current_stamp_missing_the_scope_run_seat_column() {
+    // The 2026-09-15 incident proof: `scope_runs` without `model_override`
+    // (the v25 table shape) in a store stamped current, so opening runs no
+    // migration and the boot-path `list_scope_runs` fails with `no such
+    // column`. The decode pass cannot see it — no journal row names the
+    // column — so without the sweep this copy reports CLEAN while the same
+    // binary refuses to boot on it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("current-without-seat.db").to_str().unwrap().to_owned();
+    let store = SqliteStore::open(&path).unwrap();
+    store.conn.execute_batch("ALTER TABLE scope_runs DROP COLUMN model_override;").unwrap();
+    assert_eq!(
+        store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(),
+        26,
+        "the copy is stamped current, so open performs no repair"
+    );
+    drop(store);
+
+    let check = super::check_store(&path).unwrap();
+    let refusals = &check.refusals;
+    assert!(!check.is_clean(), "a missing boot column is a refusal, not CLEAN");
+    assert!(refusals.iter().any(|line| line.contains("model_override")), "the refusal names the column: {refusals:?}");
+}

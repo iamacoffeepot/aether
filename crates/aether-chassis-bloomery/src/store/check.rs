@@ -9,6 +9,12 @@
 //! migrations, exactly as boot would, which is why the input must be a copy.
 //! This is a decode proof over the boot-fatal surface, not a full boot: config
 //! rows decode lazily at their point of use and are only counted here.
+//!
+//! The decode pass alone missed the 2026-09-15 incident: a column the boot
+//! readers name but the store lacks (`scope_runs.model_override`) is
+//! invisible to a decoder, so the sweep runs [`SqliteStore::read_everything`]
+//! after the journal pass and folds its tally and refusals into the same
+//! report and the same clean verdict.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -33,7 +39,10 @@ pub struct StoreCheck {
     pub event_stamps: BTreeMap<String, usize>,
     /// Rows per recorded decisions stamp (`"absent"` for pre-column rows).
     pub decisions_stamps: BTreeMap<String, usize>,
-    /// One line per row that refused to decode, in journal order.
+    /// Rows per table the boot-path sweep read back.
+    pub reads: BTreeMap<String, usize>,
+    /// One line per row that refused to decode, in journal order, followed by
+    /// one line per backend read the sweep refused.
     pub refusals: Vec<String>,
 }
 
@@ -56,6 +65,9 @@ impl StoreCheck {
         }
         for (stamp, count) in &self.decisions_stamps {
             let _ = writeln!(out, "decisions {stamp}  x{count}");
+        }
+        for (table, count) in &self.reads {
+            let _ = writeln!(out, "read      {table}  x{count}");
         }
         for refusal in &self.refusals {
             let _ = writeln!(out, "REFUSED: {refusal}");
@@ -98,6 +110,16 @@ pub fn check_store(path: &str) -> rusqlite::Result<StoreCheck> {
         if let Err(error) = decode_recorded_decisions(&record.decisions, record.decisions_schema_digest.as_deref()) {
             check.refusals.push(format!("record {} ({}): {error}", record.sequence, record.idempotency_key));
         }
+    }
+    // The boot-path sweep: every table the journal pass never reads. A
+    // refusal here is a boot refusal, so it joins the same report lines and
+    // the same clean verdict a decode refusal carries.
+    match store.read_everything() {
+        Ok(tally) => {
+            check.reads = tally.rows;
+            check.refusals.extend(tally.refusals);
+        }
+        Err(error) => check.refusals.push(format!("read sweep: {error}")),
     }
     Ok(check)
 }
