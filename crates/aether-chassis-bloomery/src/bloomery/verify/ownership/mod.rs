@@ -110,9 +110,24 @@ pub fn gate_findings(findings: &str) -> Vec<GateFindings> {
     sections.iter().map(|(gate, records)| read_records(gate, records)).collect()
 }
 
+/// The markers rustc puts where the snippet gutter meets the source: `|` on a
+/// plain line, and `~` / `+` / `-` on the lines of a structured suggestion,
+/// where the marker says what the suggestion does to that line.
+const GUTTER_MARKERS: [char; 4] = ['|', '~', '+', '-'];
+
+/// The column-zero headers of a sub-diagnostic. rustc opens a diagnostic with a
+/// severity word and elaborates it with these, so they always belong to the
+/// diagnostic above them and never start one of their own.
+const SUBDIAGNOSTIC_OPENERS: [&str; 2] = ["help:", "note:"];
+
+/// rustc's marker for the middle of a multi-line span it elided. It is written
+/// bare as often as it is written into the gutter (`...   |`); the bare form is
+/// what a `match_same_arms` span renders.
+const ELISION: &str = "...";
+
 /// Whether `line` belongs to the record above it rather than opening its own.
 ///
-/// Blank and indented lines do, which is the ordinary case. Two column-zero
+/// Blank and indented lines do, which is the ordinary case. Three column-zero
 /// shapes do as well:
 ///
 /// - **rustc's source-snippet gutter.** The line number is right-aligned in a
@@ -120,23 +135,28 @@ pub fn gate_findings(findings: &str) -> Vec<GateFindings> {
 ///   at column zero — `110 |         let recorded = …`. It is the source the
 ///   diagnostic's own `-->` already located, and reading it as a finding of its
 ///   own manufactures a finding that names no path out of every snippet rustc
-///   prints.
-/// - **The elision marker** rustc writes in that same gutter — `...   |` —
-///   where a multi-line span skips the middle of a function.
+///   prints. A structured suggestion renders the same gutter with `~` / `+` /
+///   `-` in place of the pipe — `1886 ~     | Foo | Bar => {}` — so keying on
+///   the pipe alone read every replacement line of every clippy suggestion as a
+///   finding that named nothing.
+/// - **The elision marker**, in the gutter (`...   |`) or bare (`...`), where a
+///   multi-line span skips the middle of a function.
+/// - **A sub-diagnostic header.** `help:` and `note:` sit at column zero when
+///   rustc has a whole block to render under them — a suggestion's replacement
+///   text, most often — and that block is part of the diagnostic above.
 fn continues_a_record(line: &str) -> bool {
     if line.trim().is_empty() || line.starts_with(char::is_whitespace) {
         return true;
     }
-    // rustc writes a diagnostic's secondary spans as unindented `note:` /
-    // `help:` lines under the primary one. They are the same diagnostic — the
-    // definition a mismatch disagrees with, the import it suggests — so a
-    // reader that starts a new record at them splits one finding into two and
-    // loses the only signal that says the two locations belong together.
-    if line.starts_with("note: ") || line.starts_with("help: ") {
+    if SUBDIAGNOSTIC_OPENERS.iter().any(|opener| line.starts_with(opener)) || line.trim_end() == ELISION {
         return true;
     }
-    line.split_once('|')
-        .is_some_and(|(gutter, _)| gutter.trim_end().chars().all(|column| column.is_ascii_digit() || column == '.'))
+    // The pipe alone still reads as a gutter, as it did before the suggestion
+    // markers were recognized. They need the line number ahead of them, because
+    // a bare `-` at column zero is a prose bullet far more often than it is a
+    // deletion in a suggestion.
+    let source = line.trim_start_matches(|column: char| column.is_ascii_digit() || column == '.').trim_start();
+    source.starts_with('|') || (source.len() < line.len() && source.starts_with(GUTTER_MARKERS))
 }
 
 /// One section's records folded into the paths they name.
