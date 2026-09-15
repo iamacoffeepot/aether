@@ -20,6 +20,8 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use aether_bloomery::{Fact, MemberVerifyRequest, SharedRunMode};
 use aether_harness_bloomery::support::chain::{
     FOLLOWING, LAGGING, LEADING, grouping_policy, parking_script, plans_for, proposed_plans,
@@ -60,9 +62,11 @@ fn two_members_on_different_heads_that_merge_cleanly_share_one_run() {
     assert_eq!(lagging_plans.len(), 1, "the lagging member is planned once: {lagging_plans:?}");
     let plan = lagging_plans.into_iter().next().expect("the lagging member was planned");
 
+    // Which of the two captures lands in the queue first is a race between two
+    // real lanes, so the group's membership is asserted as a set.
     assert_eq!(
-        plan.requests.iter().map(|request| request.member.workpiece.0.clone()).collect::<Vec<_>>(),
-        vec![LAGGING.to_owned(), FOLLOWING.to_owned()],
+        plan.requests.iter().map(|request| request.member.workpiece.0.clone()).collect::<BTreeSet<_>>(),
+        BTreeSet::from([LAGGING.to_owned(), FOLLOWING.to_owned()]),
         "the two members built one head apart are in one run, not two"
     );
     assert_eq!(plan.mode, SharedRunMode::Contextual);
@@ -72,8 +76,12 @@ fn two_members_on_different_heads_that_merge_cleanly_share_one_run() {
     assert_eq!(request_base(&plan, LAGGING), Some(earlier), "the lagging member's request still names its own head");
     assert_eq!(request_base(&plan, FOLLOWING), Some(later));
     assert_eq!(
-        composition.admissions().iter().map(|admission| admission.carried_forward).collect::<Vec<_>>(),
-        vec![true, false],
+        composition
+            .admissions()
+            .into_iter()
+            .map(|admission| (admission.workpiece.0, admission.carried_forward))
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(LAGGING.to_owned(), true), (FOLLOWING.to_owned(), false)]),
         "and the plan says which of the two was carried forward, so a console can show why each is here"
     );
 
