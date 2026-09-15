@@ -72,7 +72,10 @@ docs) cannot decide:
 3. **Test integrity** — does each test catch a plausible bug in code this
    change owns? A test that restates a declaration, roundtrips a plain derive,
    or can only fail by editing the test is a finding, not coverage. Promised
-   coverage that is absent is a finding.
+   coverage that is absent is a finding. Decide this by running the revert
+   experiment in `## The handoff tables`, not by reading the test and believing
+   it: the recurring defect is a test that passes on exactly the input that
+   would expose the bug, and it reads as coverage right up until you run it.
 4. **Economy** — the fewest characters that still make sense. Dead code,
    speculative generality, a hand-rolled copy of an existing primitive, or a
    change that could be half the size at the same clarity is a finding.
@@ -80,6 +83,64 @@ docs) cannot decide:
    `## Conventions` section's naming/layout/visibility rules, the ADR governing
    the touched subsystem, and neighboring-code idiom. Cite the rule or ADR when
    you flag this.
+
+## The handoff tables
+
+The construct lane is required to hand back three things with its candidate, in
+the body of the commit message it wrote — a `Readers:` table, a `Claims:` table,
+and a `Reverted:` line. Read the message with `git log -1 --format=%B` for a
+committed candidate, or find it in the candidate's own commit for a working-tree
+one; the lane writes it to `.bloomery-commit-message` and the broker captures it
+as the candidate's subject.
+
+**A candidate missing either table is refused before its diff is judged.**
+`report_finding` with `class: "defect"` naming the absent table and stop the
+pillar pass — an unstated readers table is the exact condition under which the
+defect this step exists to catch goes unnoticed, so there is nothing to gain
+from reviewing the diff as though the table were there. A table that is present
+and empty is a claim you check like any other.
+
+Then verify both, by running commands rather than by reading:
+
+- **The readers table** claims a set of other readers for each value the change
+  alters. Re-run the greps yourself for the symbols, field names, and literals
+  the diff touches. A reader the table does not list is a finding, and the
+  finding is the missing reader, not the missing row. The shape to hunt for is
+  the sibling that resolves the same value down a different path — one module
+  admitting a whole crate as an atom while another still resolves over the
+  declared surface — because that is the one a diff-reading pass cannot see.
+- **The claims table** points each stated guarantee at the test or code that
+  makes it true. Grep for every symbol it names. A claim whose test does not
+  exist in the tree, or whose named code does not do what the prose says, is a
+  finding against the prose: the fix is to delete the sentence or to build the
+  machinery, and saying which is the lane's call, not yours.
+- **The revert experiment.** Do it yourself; do not take the lane's word. Check
+  out the candidate, revert the non-test half of its diff, and run the tests the
+  candidate adds or changes. **Any of them that still passes is a finding** —
+  that test does not cover this change. If the reverted tree does not compile,
+  that is a weak signal and you must judge it rather than accept it: a test that
+  cannot be compiled without the change may be genuinely bound to a new symbol,
+  or it may be a test file that merely mentions one. Say in the detail which it
+  is, and when you cannot tell, reduce the revert to the production lines the
+  test actually exercises and run it again. Never report a compile failure as if
+  it were a passing revert check.
+
+**Sibling findings.** Any finding this prompt carries that was filed by another
+lane against the surface this candidate touches must be answered in your
+verdict. Answering means one of two things: it is fixed in the candidate, and
+you say where; or it is refuted, and the refutation names the code path that
+makes it wrong. A sibling finding you neither confirm nor refute is itself a
+finding against this candidate — file it. An observation two lanes made
+independently, in the same bloom, about the same surface, is the strongest
+signal available at this stage, and it costs a fold when it is passed over.
+
+Today that means the findings already in front of you: the `## Frozen findings`
+a delta-confirm review carries, and — on a composition review — what the other
+members' `## Task` sections say they were told to do, which is how you tell a
+seam edit that broke a sibling's promise from one that kept it. A standing
+channel for a member lane's finding about a *sibling's* code does not exist yet;
+until it does, the rule binds on what the dispatch hands you, not on what you
+wish it had.
 
 ## Report through the tools
 

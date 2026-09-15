@@ -35,7 +35,7 @@ after the shared work order so sibling lanes share a prompt-cache prefix.
    that the order does not authorize is scope creep, not initiative — keep the
    candidate to the promised surface. Edits outside the declared surface fail
    Verify; when a change ripples into files the surface does not cover, refuse
-   and name the missing surface in `.bloomery-surface-request` (step 8) so the
+   and name the missing surface in `.bloomery-surface-request` (step 9) so the
    operator can widen it — never a silent edit.
    Re-derive any protocol literal the order pins against the code at the subject
    commit before relying on it; if the order's value and the code's symbol
@@ -97,7 +97,56 @@ The config files are the set. Observed trip-lints, not an enumeration — add a 
    `AETHER_LANE_SCRATCH` is for scratch that is not a cargo build — scratch files,
    generated inputs, a checkout you are comparing against; the lane clears it when
    the run ends, so anything you leave there costs nothing.
-6. **Write the commit message.** Before you finish, write the message for the
+6. **Prove the change before you hand it back.** The failure shapes this lane
+   keeps producing are all invisible at the statement level: a change made to one
+   reader of a value while a sibling reader still resolves the old shape; a doc
+   comment or a commit paragraph asserting a guarantee the diff does not
+   implement; a test that passes on exactly the input that would expose the bug.
+   Re-reading the diff does not catch any of them, so this step is not a re-read.
+   It is two tables you produce by running commands, plus one experiment.
+
+   **The readers table.** Every value, field, flag, constant, or invariant this
+   change alters, and for each one every *other* place that reads it, with what
+   happened to that reader — `updated`, or `unaffected because …`. Find the
+   readers by grepping the workspace for the symbol, the field name, and the
+   literal; do not list what you remember using it. The row that matters is the
+   sibling that reaches the same value down a different path: a containment check
+   and a tier resolution that both read a declared surface are two readers, and
+   changing one of them is precisely the defect this table exists to surface. An
+   empty table asserts that nothing else in the tree reads what you touched —
+   write it only when the grep says so, and say which grep.
+
+   **The claims table.** Every guarantee this change *states* — in a doc comment,
+   in the commit message you are about to write, in ADR or guide text the diff
+   adds — and beside each one the test or the code that makes it true, named by
+   path and symbol. "Covered by a test" is not a row. `crates/…/store/tests.rs`
+   `a_read_of_everything_sees_every_column` is a row, and if that function does
+   not exist in the tree then the claim comes out of the prose instead. A
+   guarantee you cannot point at is one you delete: saying nothing is free, and a
+   false guarantee costs a later reader an afternoon of looking for machinery
+   that was never built.
+
+   **The revert experiment.** Run the tests this change adds or changes against a
+   tree carrying your *test* edits and none of your production ones, and report
+   what happened. Copy the tree under `AETHER_LANE_SCRATCH` and restore the
+   production files there, or stash that half and restore it after — the
+   mechanics are yours, but leaving the working tree as you found it is not
+   optional. A test that still passes with your change reverted is not coverage
+   of this change: it was already true before you arrived, and it is rewritten or
+   removed. So is a test whose fixture is empty — an assertion that coarsening a
+   neutral crate moves no tier proves nothing when the policy it runs against
+   holds no tiers at all. Report which tests you reverted against and that they
+   failed. If the reverted tree does not compile, report that instead, and name
+   the test you could not run: a compile failure is a weaker signal than a red
+   test, and the reviewer has to judge it rather than accept it.
+
+   Write all three — the two tables and the revert result — into the body of
+   `.bloomery-commit-message` (step 7), under the headings `Readers:`, `Claims:`,
+   and `Reverted:`. They belong in the message rather than in a file of their
+   own, because the message is what the capture keeps and what the review lane
+   reads. A candidate that arrives without them is refused before its diff is
+   judged.
+7. **Write the commit message.** Before you finish, write the message for the
    change you just made to `.bloomery-commit-message` in the root of your working
    directory. This is a required deliverable, not an optional extra: it is the
    subject the candidate is captured under and the title the landing proposal is
@@ -110,12 +159,12 @@ The config files are the set. Observed trip-lints, not an enumeration — add a 
      changed and why, in prose, at the altitude the diff cannot state itself.
    - Write the file and nothing else about it — the lane reads it back and
      deletes it, so it never becomes part of the candidate you are producing.
-7. **Stop at the candidate.** Leave the change in the working tree. You do not
+8. **Stop at the candidate.** Leave the change in the working tree. You do not
    open a pull request, push, merge, or touch git history — the broker collects
    your candidate and evidence. Do not delete or rewrite files outside the work
    order's surface: Verify fails those edits with the violating paths named, and
-   the honest move is the refusal in step 8.
-8. **Refusing for want of surface.** When — and only when — the reason you
+   the honest move is the refusal in step 9.
+9. **Refusing for want of surface.** When — and only when — the reason you
    cannot finish is that the work needs files the declared surface does not
    cover, write the request to `.bloomery-surface-request` in the root of your
    working directory and produce no candidate. The file is the whole request:
