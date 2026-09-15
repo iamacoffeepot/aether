@@ -3105,6 +3105,7 @@ fn judged_evidence_ref(
         observation: LaneObservation {
             candidate,
             findings: overlay.findings,
+            notes: parse_notes(bytes),
             failed_verifiers: overlay.failed_verifiers,
             failed_verifier_names,
             cost,
@@ -3997,6 +3998,19 @@ fn parse_findings(bytes: &[u8]) -> Option<String> {
     value.get("findings").and_then(serde_json::Value::as_str).map(str::to_owned)
 }
 
+/// The evidence's top-level `notes` prose — what a review critic recorded for
+/// the operator beside its verdict. Presence-driven like [`parse_findings`], and
+/// blank-rejecting like [`parse_commit_message`]: a whitespace-only note names
+/// nothing that was reviewed, so it is the same absence as no note at all.
+fn parse_notes(bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value
+        .get("notes")
+        .and_then(serde_json::Value::as_str)
+        .map(|notes| notes.trim().to_owned())
+        .filter(|notes| !notes.is_empty())
+}
+
 /// The evidence's top-level `commit_message` prose — what the construct/refine
 /// lane's agent wrote for the change it just made. Presence-driven like
 /// [`parse_findings`]: a lane that wrote none yields `None`, and so does a blank
@@ -4252,7 +4266,23 @@ mod tests {
 
     use aether_bloomery::{RETROSPECT_READ_COMMAND, SCOPE_FILL_COMMAND};
 
-    use super::{LaneGates, contextual_observation_bundle, usable_target_base};
+    use super::{LaneGates, contextual_observation_bundle, parse_notes, usable_target_base};
+
+    // Tripwire: the review lane writes its operator notes under the evidence's
+    // top-level `notes`, and intake reads that channel to tell a critic that
+    // judged the fold from one whose report tools never connected. Reading the
+    // wrong key — or accepting a whitespace-only note as a note — decides every
+    // aggregate review in the fleet, in one direction or the other.
+    #[test]
+    fn a_reviews_notes_are_read_off_the_evidences_own_channel_and_a_blank_one_is_none() {
+        assert_eq!(
+            parse_notes(br#"{"status":"pass","notes":"  read the fold and checked the seam  "}"#).as_deref(),
+            Some("read the fold and checked the seam"),
+        );
+        assert_eq!(parse_notes(br#"{"status":"pass","notes":"   "}"#), None, "a blank note names nothing reviewed");
+        assert_eq!(parse_notes(br#"{"status":"pass","findings":"a defect"}"#), None, "findings are not notes");
+        assert_eq!(parse_notes(b"{not json"), None);
+    }
 
     #[test]
     fn contextual_observations_are_bundled_only_when_bound_to_the_order_and_gate_file() {

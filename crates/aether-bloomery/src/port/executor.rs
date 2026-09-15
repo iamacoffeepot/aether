@@ -132,6 +132,18 @@ pub struct LaneObservation {
     /// and from every lane that stamps none. Host-recorded state riding the
     /// reference, like `candidate` — never part of the artifact-name contract.
     pub findings: Option<String>,
+    /// The review critic's operator-facing notes, read by the local backend off
+    /// the evidence's top-level `notes`; `None` from the name-only Actions lane
+    /// and from every lane that stamps none.
+    ///
+    /// Its own channel rather than part of `findings`, because the two answer
+    /// different questions and only one of them decides a verdict: findings
+    /// charge the candidate, notes say what the critic read. That distinction is
+    /// what makes an empty review detectable at all — a clean pass stamps no
+    /// findings by definition, so the note naming what was reviewed is the only
+    /// evidence that a review happened, and a completion carrying neither is a
+    /// lane that never judged anything.
+    pub notes: Option<String>,
     /// The exact failed members of a `verify.check` result (ADR-0178). The
     /// local backend decodes this from the evidence body; the name-only Actions
     /// backend decodes the equivalent mask from the artifact name. Empty on a

@@ -58,6 +58,7 @@ pub fn verdict(order: &OutstandingOrder, verdict: ScriptedVerdict) -> ScriptedUp
         detail: super::digest(0xDE),
         candidate: None,
         findings: None,
+        notes: None,
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
@@ -71,6 +72,23 @@ pub fn verdict(order: &OutstandingOrder, verdict: ScriptedVerdict) -> ScriptedUp
 #[must_use]
 pub fn passed(order: &OutstandingOrder) -> ScriptedUpload {
     verdict(order, ScriptedVerdict::VerificationPassed)
+}
+
+/// The note a scripted critic leaves behind — what every real review files
+/// beside its verdict, and what a passing aggregate review must carry for
+/// intake to read it as a review at all.
+pub const REVIEW_NOTE: &str = "read the fold and checked each member's intent against the weave.";
+
+/// A passing review that says what it read — what a critic uploads when it
+/// judged the fold and found nothing.
+///
+/// Distinct from [`passed`] because a mechanical gate has nothing to say and a
+/// critic does: a passing review carrying neither a finding nor a note is
+/// refused at intake as a lane that never judged anything, so a scenario that
+/// means "the review passed" has to script the note too.
+#[must_use]
+pub fn reviewed(order: &OutstandingOrder) -> ScriptedUpload {
+    ScriptedUpload { notes: Some(REVIEW_NOTE.to_owned()), ..passed(order) }
 }
 
 /// A failing mechanical verdict naming `failed`.

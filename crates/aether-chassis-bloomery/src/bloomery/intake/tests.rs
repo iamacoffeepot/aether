@@ -674,6 +674,7 @@ fn claim_for_carries_the_whole_observation() {
         contextual_observations: Some(br#"{"protocol":1,"documents":[]}"#.to_vec()),
         candidate: Some(CandidateRef { tree: Digest::from_bytes([5; 32]), checkout: Digest::from_bytes([6; 32]) }),
         findings: Some("critic findings".into()),
+        notes: Some("read the whole candidate".into()),
         failed_verifiers: VerifyFailureSet::one(VerifyFailure::Fmt),
         failed_verifier_names: vec!["verify.fmt".into()],
         cost: Some(StudyCost {
@@ -1554,7 +1555,9 @@ fn an_aggregate_review_verdict_admits_a_bloom_level_completion() {
         subject: tree,
         verdict: StageVerdict::Approved,
         detail: Digest::from_bytes([8; 32]),
-        observation: LaneObservation::default(),
+        // A clean pass stamps no findings, so the note naming what was read is
+        // what makes it a review rather than an empty verdict.
+        observation: LaneObservation { notes: Some("re-read the tick-order seam".to_owned()), ..Default::default() },
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &passing).unwrap() else {
         panic!("the passing aggregate verdict is admitted");
@@ -1676,6 +1679,77 @@ fn an_aggregate_review_executor_fault_admits_its_own_fact_and_touches_no_finding
         admit_uploaded(&mut store, &fault).unwrap(),
         AdmitDecision::Refused(IntakeRefusal::UnknownNonce(_))
     ));
+}
+
+// A passing aggregate review carrying neither a finding nor a note never judged
+// the fold. It is the shape a critic leaves when its report server was dropped
+// at launch: the tools that write the findings file were unreachable, so the
+// file is empty — and an empty file is also what a clean review leaves, which is
+// how four weeks of unreviewed folds landed as reviewed.
+//
+// Two tripwires in opposite directions. Reading the findings channel alone
+// cannot separate the two, so the note is what makes the empty verdict
+// detectable at all; and folding a *noted* clean pass as a fault would wedge
+// every bloom on its review budget, because a clean review stamps no findings by
+// definition. The frozen findings are untouched either way, for the reason the
+// sibling fault above leaves them alone.
+#[test]
+fn a_passing_review_with_no_findings_and_no_notes_folds_as_a_fault() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let tree = Digest::from_bytes([30; 32]);
+    store.record_review_findings(bloom.0.as_bytes(), "", "pillar 2: the members disagree").unwrap();
+
+    let admit = |store: &mut SqliteStore, nonce: &str, notes: Option<&str>| {
+        let mut record = dispatch_record(nonce, bloom, &WorkpieceId(String::new()), tree, tree);
+        record.stage = StageId::AggregateReview;
+        record_dispatch(store, &record).unwrap();
+        let upload = UploadedEvidence {
+            nonce: Nonce(nonce.to_owned()),
+            subject: tree,
+            verdict: StageVerdict::Approved,
+            detail: Digest::from_bytes([9; 32]),
+            observation: LaneObservation { notes: notes.map(str::to_owned), ..Default::default() },
+        };
+        let AdmitDecision::Admitted(admission) = admit_uploaded(store, &upload).unwrap() else {
+            panic!("a matching aggregate verdict is admitted");
+        };
+        admission.event.fact
+    };
+
+    let empty = admit(&mut store, "n-empty", None);
+    // Tripwire: `normalize_stage_result` kinds a passing verdict `Approval`,
+    // and the reducer's fault series folds on the kind — an `Approval` here
+    // files the fact and derives nothing, leaving the bloom rendering as an
+    // ordinary one sitting quietly between dispatches.
+    if let Fact::AggregateReviewExecutorFault { evidence, .. } = &empty {
+        assert_eq!(evidence.kind, EvidenceKind::ExecutorFault, "the empty verdict is re-kinded as the fault it is");
+        assert_eq!(evidence.subject, tree, "and still binds the tree the order displayed");
+    }
+    assert!(
+        matches!(&empty, Fact::AggregateReviewExecutorFault { bloom: faulted, .. } if *faulted == bloom),
+        "a verdict with nothing in it is a lane that never judged the fold, got {empty:?}",
+    );
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), "").unwrap().as_deref(),
+        Some("pillar 2: the members disagree"),
+        "the empty verdict neither appends to the frozen findings nor clears them",
+    );
+    assert!(
+        matches!(admit(&mut store, "n-blank", Some("   ")), Fact::AggregateReviewExecutorFault { .. }),
+        "a whitespace-only note names nothing reviewed",
+    );
+
+    let noted = admit(&mut store, "n-noted", Some("read the whole fold; every member's intent survives the weave"));
+    assert!(
+        matches!(&noted, Fact::AggregateReviewCompleted { passed: true, .. }),
+        "a clean review that says what it read is a pass, got {noted:?}",
+    );
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), "").unwrap(),
+        None,
+        "and that pass clears the bloom row, exactly as a passing review always did",
+    );
 }
 
 // ADR-0195 admits ExecutorFault for dispatched member stages as its own fact,

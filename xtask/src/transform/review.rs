@@ -13,6 +13,7 @@ use anyhow::Result;
 use crate::transform::claude::assemble_construct_prompt;
 use crate::transform::lane::Resumed;
 use crate::transform::messages::bound_assistant_text;
+use crate::transform::review_mcp;
 use crate::transform::review_reports::{
     FindingClass, Reports, findings_path, load_notes, load_reports, notes_path, render_reports,
 };
@@ -325,6 +326,69 @@ fn completed_clean(record: &serde_json::Value) -> bool {
         .is_some_and(|result| result.get("is_error").and_then(serde_json::Value::as_bool) == Some(false))
 }
 
+/// Whether the harness reported the injected report server as connected.
+///
+/// The Claude arm's whole verdict channel is that server's two tools, so a run
+/// whose server never came up did not review anything — it produced an empty
+/// findings file for a reason that has nothing to do with the candidate. The
+/// CLI states the answer in its `system` / `init` record, which the shared
+/// result-record derivation retains; absence is not connected, because a
+/// transcript that never reported an init record never reported a live server
+/// either.
+fn report_server_connected(record: &serde_json::Value) -> bool {
+    report_server(record).and_then(|server| server.get("status")).and_then(serde_json::Value::as_str)
+        == Some("connected")
+}
+
+fn report_server(record: &serde_json::Value) -> Option<&serde_json::Value> {
+    record
+        .get("mcp_servers")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .find(|server| server.get("name").and_then(serde_json::Value::as_str) == Some(review_mcp::SERVER_NAME))
+}
+
+/// The report the lane stamps when the critic's tools were never reachable —
+/// an executor fault, not a verdict.
+///
+/// This is the whole point of reading the init record. The findings file is
+/// empty either way, and the empty file used to stamp `pass`: a run that never
+/// had `report_finding` was admitted as a clean review of a candidate nobody
+/// could file a defect against. Framed the way every other `environment` report
+/// is, so the reader of the fault is told the host could not judge rather than
+/// handed a defect nobody found.
+fn unreachable_server_findings(record: &serde_json::Value) -> String {
+    let reported = report_server(record)
+        .and_then(|server| server.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(|| "no server status at all".to_owned(), |status| format!("`{status}`"));
+    environment_findings(&format!(
+        "The `{}` report server did not connect, so `report_finding` and `report_note` were never available to the \
+         critic and no finding it reached could be recorded. The harness reported {reported} for it.",
+        review_mcp::SERVER_NAME,
+    ))
+}
+
+/// Stamp the executor-fault envelope for a critic whose report server never
+/// connected. `environment` rather than `fail` for the ADR-0176 reason: no
+/// candidate was judged, so charging one a repair lap spends a model attempt to
+/// learn nothing.
+fn stamp_unreachable_server_evidence(
+    nonce: Option<&str>,
+    record: &serde_json::Value,
+    measured: Measurements,
+) -> serde_json::Value {
+    let mut evidence = serde_json::json!({
+        "command": REVIEW_CRITIC,
+        "nonce": nonce,
+        "status": "environment",
+        "findings": unreachable_server_findings(record),
+        "result_record": record,
+    });
+    measured.stamp(&mut evidence);
+    evidence
+}
+
 /// Derive the Claude-path verdict from the findings file. A cleanly finished
 /// run that reported nothing is a pass; a defect charges the candidate; only
 /// environment reports mean the critic could not judge; a malformed file is a
@@ -468,13 +532,22 @@ pub(super) fn run_review(args: &TransformArgs, bundle: &ModelProcessInstructions
     // Claude injects the report tools and the findings file is the verdict
     // channel. Muse / grok have no injection and keep the text parse.
     let evidence = if matches!(resolve_harness(args.harness.as_deref())?, Harness::Claude) {
-        stamp_reports_evidence(
-            args.nonce.as_deref(),
-            &run.record,
-            run.measured,
-            &load_reports(&findings_path(&args.out)),
-            load_notes(&notes_path(&args.out)),
-        )
+        // Prove the channel before reading it. An empty findings file means
+        // "the critic reported no defect" only when the tools that write it
+        // were reachable; without that the same empty file is a server the CLI
+        // dropped at launch, and reading it as a pass is what admitted four
+        // weeks of unreviewed folds.
+        if report_server_connected(&run.record) {
+            stamp_reports_evidence(
+                args.nonce.as_deref(),
+                &run.record,
+                run.measured,
+                &load_reports(&findings_path(&args.out)),
+                load_notes(&notes_path(&args.out)),
+            )
+        } else {
+            stamp_unreachable_server_evidence(args.nonce.as_deref(), &run.record, run.measured)
+        }
     } else {
         stamp_review_evidence(args.nonce.as_deref(), review_conclusion(&run.record), &run.record, run.measured)
     };
@@ -485,7 +558,8 @@ pub(super) fn run_review(args: &TransformArgs, bundle: &ModelProcessInstructions
 mod tests {
     use super::{
         Measurements, ReviewVerdict, candidate_section, composition_contract, conclude_from_reports,
-        parse_review_verdict, review_conclusion, stamp_reports_evidence, stamp_review_evidence,
+        parse_review_verdict, report_server_connected, review_conclusion, stamp_reports_evidence,
+        stamp_review_evidence, stamp_unreachable_server_evidence,
     };
     use crate::transform::instructions::fixture_bundle;
     use crate::transform::messages::{MAX_ASSISTANT_TEXT_BYTES, derive_result_record};
@@ -1076,6 +1150,61 @@ mod tests {
         let reports = Reports::Clean { findings: Vec::new() };
         assert_ne!(conclude_from_reports(&record, &reports), ReviewVerdict::Pass);
         assert_eq!(stamp_reports_evidence(None, &record, Measurements::default(), &reports, None)["status"], "fail",);
+    }
+
+    fn init(servers: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"type": "system", "subtype": "init", "mcp_servers": servers})
+    }
+
+    #[test]
+    fn only_a_connected_report_server_earns_the_reports_path() {
+        // Tripwire: the observed failure. The CLI speaks newline-delimited MCP
+        // and reported `failed` for this server on every review from
+        // 2026-08-17 on, while the lane read the empty findings file it could
+        // not help but leave and stamped `pass`. Anything short of a live
+        // `connected` must not reach that read.
+        let connected = derive_result_record(&transcript(&[init(&serde_json::json!([{
+            "name": "review", "status": "connected"
+        }]))]));
+        assert!(report_server_connected(&connected));
+
+        for absent in [
+            serde_json::json!([{"name": "review", "status": "failed"}]),
+            serde_json::json!([{"name": "review", "status": "needs-auth"}]),
+            serde_json::json!([{"name": "other", "status": "connected"}]),
+            serde_json::json!([]),
+        ] {
+            let record = derive_result_record(&transcript(&[init(&absent)]));
+            assert!(!report_server_connected(&record), "{absent} is not a connected report server");
+        }
+        assert!(
+            !report_server_connected(&derive_result_record("")),
+            "a transcript that reported no init record reported no live server either",
+        );
+    }
+
+    #[test]
+    fn an_unreachable_report_server_stamps_an_executor_fault_naming_the_server() {
+        // Tripwire: the evidence a dropped server produces. `fail` would charge
+        // the candidate a repair lap for a host fault, and `pass` is the bug
+        // itself — only `environment` says no candidate was judged.
+        let record = derive_result_record(&transcript(&[
+            init(&serde_json::json!([{"name": "review", "status": "failed"}])),
+            result("no defects found"),
+        ]));
+
+        let evidence = stamp_unreachable_server_evidence(Some("n-mcp"), &record, Measurements::default());
+
+        assert_eq!(evidence["status"], "environment");
+        assert_eq!(evidence["nonce"], "n-mcp");
+        let findings = evidence["findings"].as_str().expect("an unreachable server stamps findings");
+        assert!(findings.contains("`review` report server did not connect"), "the server is named: {findings}");
+        assert!(findings.contains("`failed`"), "the harness's own status is quoted: {findings}");
+        assert!(
+            findings.contains("not the same as the candidate failing"),
+            "the reader is told this is a host fault: {findings}",
+        );
+        assert!(!findings.contains("no defects found"), "the critic's prose is not the fault report: {findings}");
     }
 
     #[test]

@@ -11,8 +11,9 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_bloomery::BloomId;
-use aether_harness_bloomery::{FixtureHarness, captured, digest, passed};
+use aether_bloomery::{BloomId, StageId};
+use aether_data::wire::from_bytes;
+use aether_harness_bloomery::{FixtureHarness, captured, digest, passed, reviewed};
 
 /// The workpiece the single sealed member covers.
 const WORKPIECE: &str = "wp";
@@ -42,7 +43,15 @@ fn a_committed_land_decision_nudges_the_reactor() {
     let mut keys = Vec::new();
     for order in &orders {
         assert!(order.workpiece.is_empty(), "a bloom-level order carries no member axis");
-        keys.push(harness.upload_admitted(&passed(order)));
+        // A passing review has to say what it read, or intake folds it as an
+        // empty verdict; a compiler's pass has nothing to say.
+        let is_review = from_bytes::<StageId>(&order.stage).is_ok_and(|stage| stage == StageId::AggregateReview);
+        let upload = if is_review {
+            reviewed(order)
+        } else {
+            passed(order)
+        };
+        keys.push(harness.upload_admitted(&upload));
     }
     for gate in ["aether.bloomery.aggregate_review:", "aether.bloomery.aggregate_verify:"] {
         assert!(keys.iter().any(|key| key.starts_with(gate)), "the {gate} gate ran: {keys:?}");

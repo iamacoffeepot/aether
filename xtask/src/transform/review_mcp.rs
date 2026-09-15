@@ -2,6 +2,14 @@
 //!
 //! No crate beyond what xtask already links: JSON-RPC 2.0 over stdin/stdout,
 //! two append-only tools. Paths come from `--out`; the parent chose them.
+//!
+//! The wire framing is **newline-delimited JSON**, one object per line, in both
+//! directions. That is the MCP stdio transport the Claude CLI implements, and
+//! the reason this file exists in its current shape: the server used to frame
+//! every reply with a `Content-Length:` header, which the CLI never parses, so
+//! it reported `CONNECT_TIMEOUT` and dropped the server before the critic's
+//! first turn. Every judge since 2026-08-17 ran without the tools its
+//! instructions name.
 
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -15,6 +23,11 @@ use crate::transform::review_reports::{
     findings_path, notes_path,
 };
 
+/// The name the injected server answers to. The critic's tool names
+/// (`mcp__review__report_finding`) and the CLI's own connection report both key
+/// on it, so it is stated once and read wherever either is checked.
+pub(super) const SERVER_NAME: &str = "review";
+
 /// Write the Claude `--mcp-config` that injects this server, and empty report
 /// files so a reviewer that reports nothing leaves a well-defined empty file
 /// rather than an absent one.
@@ -27,7 +40,7 @@ pub(super) fn prepare(out: &Path) -> Result<PathBuf> {
     let exe = env::current_exe().context("current xtask executable")?;
     let config = json!({
         "mcpServers": {
-            "review": {
+            (SERVER_NAME): {
                 "command": exe,
                 "args": ["transform", REVIEW_REPORT, "--out", &out],
             }
@@ -41,11 +54,15 @@ pub(super) fn prepare(out: &Path) -> Result<PathBuf> {
 /// Serve `report_finding` / `report_note` on stdio until stdin closes.
 pub(super) fn serve(out: &Path) -> Result<()> {
     let stdin = io::stdin();
-    let mut input = io::BufReader::new(stdin.lock());
-    let mut output = io::stdout().lock();
-    while let Some(request) = read_message(&mut input)? {
+    serve_streams(&mut io::BufReader::new(stdin.lock()), &mut io::stdout().lock(), out)
+}
+
+/// [`serve`] over explicit streams — production wires stdin and stdout; the
+/// framing tests drive a scripted request buffer and read the bytes back.
+fn serve_streams(input: &mut impl BufRead, output: &mut impl Write, out: &Path) -> Result<()> {
+    while let Some(request) = read_message(input)? {
         if let Some(response) = handle(&request, out) {
-            write_message(&mut output, &response)?;
+            write_message(output, &response)?;
         }
     }
     Ok(())
@@ -159,40 +176,27 @@ fn rpc_error(id: &Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+/// One request per line. A blank line is framing whitespace, not a message, so
+/// it is skipped rather than parsed; end of input ends the session.
 fn read_message(input: &mut impl BufRead) -> Result<Option<Value>> {
-    let mut header = String::new();
-    let read = input.read_line(&mut header)?;
-    if read == 0 {
-        return Ok(None);
-    }
-    if let Some(rest) =
-        header.split_once(':').and_then(|(name, rest)| name.eq_ignore_ascii_case("content-length").then_some(rest))
-    {
-        let length: usize = rest.trim().parse().context("Content-Length")?;
-        loop {
-            let mut line = String::new();
-            if input.read_line(&mut line)? == 0 {
-                break;
-            }
-            if line.trim().is_empty() {
-                break;
-            }
+    loop {
+        let mut line = String::new();
+        if input.read_line(&mut line)? == 0 {
+            return Ok(None);
         }
-        let mut body = vec![0; length];
-        input.read_exact(&mut body).context("read MCP body")?;
-        return Ok(Some(serde_json::from_slice(&body).context("parse MCP body")?));
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        return Ok(Some(serde_json::from_str(trimmed).context("parse MCP line")?));
     }
-    let trimmed = header.trim();
-    if trimmed.is_empty() {
-        return read_message(input);
-    }
-    Ok(Some(serde_json::from_str(trimmed).context("parse MCP line")?))
 }
 
+/// One reply per line, flushed immediately: the client reads a line at a time
+/// and a buffered reply is a hung handshake.
 fn write_message(output: &mut impl Write, message: &Value) -> Result<()> {
-    let body = serde_json::to_vec(message)?;
-    write!(output, "Content-Length: {}\r\n\r\n", body.len())?;
-    output.write_all(&body)?;
+    serde_json::to_writer(&mut *output, message)?;
+    output.write_all(b"\n")?;
     output.flush()?;
     Ok(())
 }
@@ -209,8 +213,23 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    use super::{handle, mcp_argv, prepare};
+    use super::{handle, mcp_argv, prepare, serve_streams};
     use crate::transform::review_reports::{FindingClass, Reports, load_reports};
+
+    /// Drive the server over the newline-delimited transport the Claude CLI
+    /// speaks and return the raw reply bytes, exactly as a client would read
+    /// them off the pipe.
+    fn converse(requests: &[Value], out: &Path) -> String {
+        let mut scripted = String::new();
+        for request in requests {
+            scripted.push_str(&request.to_string());
+            scripted.push('\n');
+        }
+
+        let mut replies = Vec::new();
+        serve_streams(&mut scripted.as_bytes(), &mut replies, out).expect("the server serves to end of input");
+        String::from_utf8(replies).expect("replies are utf-8")
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -270,6 +289,79 @@ mod tests {
         assert_eq!(argv[0], "--mcp-config");
         assert_eq!(argv[1], "/tmp/review-mcp.json");
         assert_eq!(argv[2], "--strict-mcp-config");
+    }
+
+    // Tripwire: the transport. A `Content-Length:`-framed reply is what the
+    // Claude CLI never parses — it reports `CONNECT_TIMEOUT`, drops the server,
+    // and the critic runs its whole turn without `report_finding`. One
+    // newline-delimited `initialize` must come back as exactly one line of JSON
+    // with no header bytes anywhere in the stream.
+    #[test]
+    fn an_initialize_is_answered_as_one_line_of_json_with_no_header() {
+        let replies = converse(
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05"},
+            })],
+            Path::new("."),
+        );
+
+        assert!(!replies.contains("Content-Length"), "the reply carries no header framing: {replies:?}");
+        assert!(replies.ends_with('\n'), "the reply line is terminated: {replies:?}");
+        let lines: Vec<&str> = replies.lines().collect();
+        assert_eq!(lines.len(), 1, "one request is answered by one line: {lines:?}");
+        let reply: Value = serde_json::from_str(lines[0]).expect("the line is a whole JSON object");
+        assert_eq!(reply["id"], json!(1));
+        assert_eq!(reply["result"]["protocolVersion"], "2024-11-05", "the client's protocol version is echoed");
+    }
+
+    // The client's whole session in one conversation: handshake, tool
+    // discovery, and a finding that has to reach the file the reducer reads.
+    // A notification carries no id and must draw no reply — an extra line there
+    // desynchronizes every later response.
+    #[test]
+    fn a_full_session_lists_the_tools_and_lands_one_finding_in_the_file() {
+        let out = scratch("session");
+        let replies = converse(
+            &[
+                json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+                json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "report_finding",
+                        "arguments": {
+                            "summary": "empty input panics",
+                            "detail": "src/lib.rs: unguarded index",
+                            "class": "defect",
+                        },
+                    },
+                }),
+            ],
+            &out,
+        );
+
+        let lines: Vec<Value> = replies
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("every reply line is a whole JSON object"))
+            .collect();
+        assert_eq!(lines.len(), 3, "the notification draws no reply: {lines:?}");
+        assert_eq!(lines.iter().map(|reply| reply["id"].clone()).collect::<Vec<_>>(), [json!(1), json!(2), json!(3)]);
+        assert_eq!(lines[1]["result"]["tools"][0]["name"], "report_finding");
+        assert_eq!(lines[2]["result"]["isError"], json!(null), "the tool call is accepted");
+
+        match load_reports(&out.join("review-findings.jsonl")) {
+            Reports::Clean { findings } => {
+                assert_eq!(findings.len(), 1, "one call over the wire lands one line");
+                assert_eq!(findings[0].summary, "empty input panics");
+            }
+            Reports::Malformed { reason } => panic!("the served call must land a parseable line: {reason}"),
+        }
     }
 
     #[test]

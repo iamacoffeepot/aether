@@ -124,6 +124,21 @@ fn schema_rejected(block: &serde_json::Value) -> bool {
     block.get("content").and_then(serde_json::Value::as_str).is_some_and(|text| text.contains("InputValidationError"))
 }
 
+/// The MCP server statuses the CLI states in its `system` / `init` event — the
+/// harness's own answer to "did the injected servers come up".
+///
+/// The review lane injects a report server whose tools are its verdict channel,
+/// and a server that failed to connect is invisible from every other field the
+/// transcript carries: the run completes, the terminal result is clean, and the
+/// findings file is empty because nothing could write to it. Retaining the list
+/// is what lets the lane tell that from a genuinely clean review.
+fn init_mcp_servers(event: &serde_json::Value) -> Option<serde_json::Value> {
+    if event.get("subtype").and_then(serde_json::Value::as_str) != Some("init") {
+        return None;
+    }
+    event.get("mcp_servers").filter(|servers| servers.is_array()).cloned()
+}
+
 fn or_zero(value: &serde_json::Value, key: &str) -> serde_json::Value {
     value.get(key).cloned().unwrap_or_else(|| serde_json::json!(0))
 }
@@ -139,6 +154,7 @@ fn assemble_result_record(
     calls: Vec<serde_json::Value>,
     texts: &[String],
     report_findings: Option<serde_json::Value>,
+    mcp_servers: Option<serde_json::Value>,
 ) -> serde_json::Value {
     use serde_json::{Map, Value, json};
 
@@ -185,6 +201,7 @@ fn assemble_result_record(
             .filter(|findings| findings.as_array().is_some_and(|items| !items.is_empty()))
             .unwrap_or(Value::Null),
     );
+    record.insert("mcp_servers".to_owned(), mcp_servers.unwrap_or(Value::Null));
 
     let Some(result) = result else {
         // A run that died before the terminal record — legible, cost unknown.
@@ -218,7 +235,9 @@ fn assemble_result_record(
 /// non-side-model messages ride `assistant_text` so a review can retain findings
 /// that never reached the terminal result (#5056). The last schema-accepted
 /// `ReportFindings` `tool_use` rides `report_findings` so a review that filed
-/// its findings through the harness tool still freezes them (#5118). A
+/// its findings through the harness tool still freezes them (#5118). The
+/// `system` / `init` event's `mcp_servers` list rides `mcp_servers` so the review
+/// lane can tell a clean review from one whose report tools never connected. A
 /// transcript with no terminal `result` (a run that died early) yields a
 /// `no_result` record rather than an error, so evidence is never dropped.
 pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
@@ -230,6 +249,7 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
     let mut texts = Vec::new();
     let mut pending_report_findings = Vec::new();
     let mut report_findings = None;
+    let mut mcp_servers = None;
     for line in transcript.lines() {
         if line.trim().is_empty() {
             continue;
@@ -239,6 +259,10 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
         };
         match event.get("type").and_then(Value::as_str) {
             Some("result") => result = Some(event),
+            // The first init record is the launch this transcript is about; a
+            // later one belongs to a re-initialised session and cannot retract
+            // what the launch reported.
+            Some("system") if mcp_servers.is_none() => mcp_servers = init_mcp_servers(&event),
             Some("user") => settle_report_findings(&event, &mut pending_report_findings, &mut report_findings),
             Some("assistant") => {
                 let message = event.get("message").cloned().unwrap_or(Value::Null);
@@ -270,7 +294,7 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
         }
     }
 
-    assemble_result_record(result, first_main.as_ref(), calls, &texts, report_findings)
+    assemble_result_record(result, first_main.as_ref(), calls, &texts, report_findings, mcp_servers)
 }
 
 #[cfg(test)]
@@ -387,6 +411,32 @@ mod tests {
         assert!(text.ends_with(tail), "the most recent finding survives: {text}");
         assert!(text.starts_with('…'), "omission of the opening narration is marked");
         assert!(!text.contains(&prefix), "the opening pad does not survive whole");
+    }
+
+    #[test]
+    fn the_init_records_mcp_server_statuses_survive_into_the_record() {
+        // Tripwire: this list is the only place the transcript says whether the
+        // review lane's report server came up. Dropping it here leaves a run
+        // whose tools never connected indistinguishable from a clean review —
+        // the shape that admitted a zero-finding pass in every bloom from
+        // 2026-08-17 on.
+        let record = derive_result_record(&transcript(&[
+            serde_json::json!({
+                "type": "system",
+                "subtype": "init",
+                "session_id": "s",
+                "mcp_servers": [{"name": "review", "status": "failed"}],
+            }),
+            serde_json::json!({"type": "result", "is_error": false, "result": "done"}),
+        ]));
+
+        assert_eq!(record["mcp_servers"], serde_json::json!([{"name": "review", "status": "failed"}]));
+        assert!(
+            derive_result_record(&transcript(&[serde_json::json!({"type": "result", "is_error": false})]))
+                ["mcp_servers"]
+                .is_null(),
+            "a transcript with no init record states no server status",
+        );
     }
 
     #[test]
