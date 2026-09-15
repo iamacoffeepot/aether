@@ -268,6 +268,7 @@ impl From<MemberViewPreIntakeRefusal> for MemberView {
             leases: prior.leases,
             evicted_by: prior.evicted_by,
             intake_refusal: None,
+            awaiting_suppression: None,
         }
     }
 }

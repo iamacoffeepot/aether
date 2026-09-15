@@ -2486,9 +2486,15 @@ fn settle_suppression_hold(
             .map(|request| {
                 let request_id = request.digest();
                 if held.contains(&request.member.workpiece) {
+                    // The requests ride the outcome because the reducer, not
+                    // the host, decides whether they are a park: the host
+                    // reports what the candidate asks for, and the journal is
+                    // the only place a reviewer's answer lives.
                     MemberVerifyOutcome::AwaitingSuppression {
                         request: request_id,
-                        observation: receipt.evidence.detail,
+                        node,
+                        receipt: receipt.evidence.clone(),
+                        requests: receipt.suppression_requests.clone(),
                     }
                 } else {
                     MemberVerifyOutcome::PassedIn { request: request_id, node, receipt: receipt.evidence.clone() }

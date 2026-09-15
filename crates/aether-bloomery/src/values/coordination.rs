@@ -11,7 +11,7 @@ use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::{BloomId, Nonce, WorkpieceId};
 use crate::values::{
     AgentProfile, CandidateRef, ConfigRegistry, Evidence, ExecutionLimits, NetworkProfile, ResolvedModel,
-    Transformation, VerifyFailureSet, VerifyProof,
+    SuppressionRequest, Transformation, VerifyFailureSet, VerifyProof,
 };
 
 #[derive(Serialize)]
@@ -854,17 +854,23 @@ pub enum MemberVerifyOutcome {
         request: Digest,
         observation: Digest,
     },
-    /// The run's suppress gate surfaced stated requests and nothing else, so
-    /// the member parks awaiting a reviewer's sign-off instead of passing or
-    /// failing (issue 6032). Appended last so every prior outcome keeps its
-    /// wire discriminant.
+    /// The run's suppress gate surfaced stated requests and nothing else
+    /// (issue 6032). Appended last so every prior outcome keeps its wire
+    /// discriminant.
     ///
-    /// Not a proof and not a regroup: the member holds no claim, spends no
-    /// budget, and is re-queued only by the grant that answers
-    /// [`Fact::SuppressionHold`](crate::Fact::SuppressionHold).
+    /// This reports *what the candidate asks for*, not what it is owed: the
+    /// host settles it off the lane's own evidence, and the lane restates
+    /// every request its tree still carries on every run, grant or no grant.
+    /// Whether that reads as a park or as the pass the composed step earned is
+    /// the reducer's question, because only the journal knows who has already
+    /// answered. It therefore carries everything a pass needs — the node it
+    /// was judged in and the step's receipt — beside the requests the answer
+    /// is checked against.
     AwaitingSuppression {
         request: Digest,
-        observation: Digest,
+        node: Digest,
+        receipt: Evidence,
+        requests: Vec<SuppressionRequest>,
     },
 }
 

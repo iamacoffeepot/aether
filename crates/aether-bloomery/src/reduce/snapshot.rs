@@ -22,7 +22,8 @@ use crate::values::{
     ConfigScopes, CoordinationState, DispatchKey, Evidence, EvidenceKind, MemberDependency, OperatorHold,
     OperatorProposal, OperatorRepair, OrphanClaimReleaseRecord, PipelineManifest, PrecheckState, RedVerify,
     ResolutionClaim, ResolvedConfigs, SpendQuiesce, StageCatalog, SuppressionDisposition, SuppressionRequest,
-    SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
+    SuppressionVerdict, SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
+    Withdrawal,
 };
 // Only [`Snapshot::with_green_base`] names it, and that door is behind the same cfg.
 // A plain import would be an unused one on a lib-scoped build, where the fixture
@@ -359,6 +360,39 @@ impl Snapshot {
     #[must_use]
     pub fn awaiting_suppression(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<&AwaitingSuppression> {
         self.suppression_holds.get(bloom)?.get(workpiece)
+    }
+
+    /// Whether every one of `requests` already carries a reviewer's grant for
+    /// `workpiece` in `bloom` (issue 6032).
+    ///
+    /// This is what terminates the hold. The lane restates every suppression
+    /// its tree still carries on every run — the attribute is still there, so
+    /// the scanner still reports it — so the settlement after a grant states
+    /// exactly what the settlement before it stated, and without this read the
+    /// grant would re-queue a verification that parked again forever.
+    ///
+    /// Matched by digest rather than by position, the way a disposition names
+    /// its subjects: a reviewer granted *these* requests, so a request whose
+    /// path, lint, or reason moved under the answer is a different request and
+    /// is held afresh. An empty request set is not granted — there is nothing
+    /// for an answer to have covered.
+    #[must_use]
+    pub fn suppression_granted(
+        &self,
+        bloom: &BloomId,
+        workpiece: &WorkpieceId,
+        requests: &[SuppressionRequest],
+    ) -> bool {
+        let Some(answers) = self.suppression_dispositions.get(bloom).and_then(|members| members.get(workpiece)) else {
+            return false;
+        };
+        !requests.is_empty()
+            && requests.iter().map(digest_of).all(|request| {
+                answers
+                    .iter()
+                    .filter(|answer| answer.verdict == SuppressionVerdict::Granted)
+                    .any(|answer| answer.requests.contains(&request))
+            })
     }
 
     /// Who holds the write lease on `path` in `bloom` (ADR-0204).
@@ -1008,6 +1042,9 @@ excuse_vocabulary! {
     /// Awaiting a surface amendment (ADR-0207). Redeemed by a later passing
     /// attempt, integration, or verify failure.
     AwaitingSurface,
+    /// Awaiting suppression sign-off (issue 6032). Redeemed by the reviewer's
+    /// answer, or overtaken when the member moves another way.
+    AwaitingSuppression,
     /// Evicted off a contended file (ADR-0204). Redeemed by the evicting
     /// member's integration.
     LeaseEviction,
@@ -1027,6 +1064,7 @@ impl Excuse {
             Self::HostFault => "Fact::ResumeHostFault",
             Self::Park => "Fact::AttemptCompleted { passed: true } or Fact::Integrate",
             Self::AwaitingSurface => "Fact::AttemptCompleted { passed: true }, Fact::Integrate, or Fact::VerifyFailed",
+            Self::AwaitingSuppression => "Fact::SuppressionDisposition",
             Self::LeaseEviction => "the evicting member's Fact::Integrate",
             Self::Withdrawal => "never: a withdrawal is one-way",
         }
@@ -1043,11 +1081,11 @@ impl Excuse {
     /// rather than terminal. A claim is a successful stop, a withdrawal is
     /// one-way and done, and an eviction waits on a sibling the bloom
     /// already folded; none of those keep a sealed bloom from reading as
-    /// finished. A wedge, host-fault, park, or surface wait is a recorded
-    /// reason the bloom has not finished.
+    /// finished. A wedge, host-fault, park, surface wait, or suppression wait
+    /// is a recorded reason the bloom has not finished.
     #[must_use]
     pub fn keeps_quiescence_wedged(self) -> bool {
-        matches!(self, Self::Wedge | Self::HostFault | Self::Park | Self::AwaitingSurface)
+        matches!(self, Self::Wedge | Self::HostFault | Self::Park | Self::AwaitingSurface | Self::AwaitingSuppression)
     }
 }
 

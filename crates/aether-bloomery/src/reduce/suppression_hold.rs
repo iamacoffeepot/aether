@@ -19,11 +19,18 @@ use crate::values::{Evidence, SuppressionRequest};
 /// [`reduce_surface_requested`](super::surface_request::reduce_surface_requested)'s:
 /// an unknown or non-`Sealed` bloom, a workpiece that is not a member, a
 /// member with no cursor, a cursor that has left `Verify`, a hold recording
-/// nothing, and evidence bound to a subject other than the member's current
-/// one. Empty effects beyond recording the evidence: the snapshot folds the
-/// hold straight off [`Fact::SuppressionHold`](crate::Fact::SuppressionHold),
-/// the way a surface request is folded from its own fact, so no new
-/// [`Decision`] enters the wire-frozen decisions graph.
+/// nothing, a hold restating requests a reviewer has already granted, and
+/// evidence bound to a subject other than the member's current one. Empty
+/// effects beyond recording the evidence: the snapshot folds the hold straight
+/// off [`Fact::SuppressionHold`](crate::Fact::SuppressionHold), the way a
+/// surface request is folded from its own fact, so no new [`Decision`] enters
+/// the wire-frozen decisions graph.
+///
+/// The already-granted rung is what stops the loop (issue 6032). The lane
+/// restates every suppression its tree still carries on every run, so the run
+/// a grant re-queues states exactly what the run before it stated; refusing
+/// the restated hold is what lets the completion beside it land the member on
+/// the answer instead of parking it again.
 pub(super) fn reduce_suppression_hold(
     snapshot: &Snapshot,
     bloom: &BloomId,
@@ -51,6 +58,9 @@ pub(super) fn reduce_suppression_hold(
     }
     if requests.is_empty() {
         return Decisions::rejected(Outcome::SuppressionHoldRejected(SuppressionHoldError::ClosesNothing));
+    }
+    if snapshot.suppression_granted(bloom, workpiece, requests) {
+        return Decisions::rejected(Outcome::SuppressionHoldRejected(SuppressionHoldError::AlreadyAnswered));
     }
     if !evidence.validates(&member_subject(member.scope_revision, &cursor)) {
         return Decisions::rejected(Outcome::SuppressionHoldRejected(SuppressionHoldError::EvidenceNotBound {

@@ -2,14 +2,15 @@
 //! render without querying back into the store (ADR-0149 §The boundary).
 
 use super::readiness::blocking_ancestor;
-use super::{AwaitingSurface, BloomRecord, BloomStatus, LeaseEviction, Snapshot};
+use super::{AwaitingSuppression, AwaitingSurface, BloomRecord, BloomStatus, LeaseEviction, Snapshot};
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::port::{
-    AdminView, AwaitingSurfaceView, BaseAlertView, BaseVerifyVerdict, BaseVerifyView, BloomView, CompletionRecord,
-    CompletionVerdict, CompositionCursorView, CompositionView, ExecutorFaultView, HostFaultView, LandingBlock,
-    LeaseEvictionView, LeaseView, MAX_RECENT_COMPLETIONS, MemberView, NarrowedCompositionView, PendingDecisionView,
-    ReviewParkView, ViewDocument, WedgeCause, WithdrawnView,
+    AdminView, AwaitingSuppressionView, AwaitingSurfaceView, BaseAlertView, BaseVerifyVerdict, BaseVerifyView,
+    BloomView, CompletionRecord, CompletionVerdict, CompositionCursorView, CompositionView, ExecutorFaultView,
+    HostFaultView, LandingBlock, LeaseEvictionView, LeaseView, MAX_RECENT_COMPLETIONS, MemberView,
+    NarrowedCompositionView, PendingDecisionView, ReviewParkView, SuppressionRequestView, ViewDocument, WedgeCause,
+    WithdrawnView,
 };
 use crate::values::BaseVerdict;
 use crate::values::{AdminAct, MemberVerifyOutcome, MemberVerifyRequest, SharedRunRecord, VerificationObligation};
@@ -192,6 +193,9 @@ fn member_views(
             awaiting_surface: snapshot
                 .awaiting_surface(&record.spec.id(), &member.workpiece)
                 .map(awaiting_surface_view),
+            awaiting_suppression: snapshot
+                .awaiting_suppression(&record.spec.id(), &member.workpiece)
+                .map(awaiting_suppression_view),
             withdrawn: record.withdrawn.get(&member.workpiece).map(withdrawn_view),
             leases: snapshot.leases_held(&record.spec.id(), &member.workpiece),
             evicted_by: snapshot.lease_eviction(&record.spec.id(), &member.workpiece).map(lease_eviction_view),
@@ -236,6 +240,24 @@ fn awaiting_surface_view(awaiting: &AwaitingSurface) -> AwaitingSurfaceView {
         paths: awaiting.request.paths.clone(),
         summary: awaiting.request.summary.clone(),
         requests: awaiting.requests,
+    }
+}
+
+/// Render a member's suppression sign-off hold so a reviewer reads what to
+/// grant without opening the journal (issue 6032).
+fn awaiting_suppression_view(awaiting: &AwaitingSuppression) -> AwaitingSuppressionView {
+    AwaitingSuppressionView {
+        evidence: awaiting.evidence,
+        requests: awaiting
+            .requests
+            .iter()
+            .map(|request| SuppressionRequestView {
+                path: request.path.clone(),
+                line: request.line,
+                lint: request.lint.clone(),
+                reason: request.reason.clone(),
+            })
+            .collect(),
     }
 }
 

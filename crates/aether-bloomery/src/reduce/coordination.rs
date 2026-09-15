@@ -2041,8 +2041,10 @@ fn validate_contextual_pass(
     request: &MemberVerifyRequest,
     outcome: &MemberVerifyOutcome,
 ) -> bool {
-    let MemberVerifyOutcome::PassedIn { request: request_id, node, receipt } = outcome else {
-        return false;
+    let (request_id, node, receipt) = match outcome {
+        MemberVerifyOutcome::PassedIn { request, node, receipt }
+        | MemberVerifyOutcome::AwaitingSuppression { request, node, receipt, .. } => (request, node, receipt),
+        _ => return false,
     };
     let (Some(actual_node), Some(composition)) = (run.node.as_ref(), run.plan.composition.as_ref()) else {
         return false;
@@ -2088,11 +2090,12 @@ fn validates_immutable_run_outcome(
             run.plan.mode == SharedRunMode::Contextual
                 && run.node.as_ref().is_some_and(|current| current.digest() == *node)
         }
-        // A hold parks rather than proves, the way a pending outcome reports
-        // rather than proves: the reducer's apply arm requires the journaled
-        // hold beside it, so validation only checks the shape the host can
-        // vouch for — the request is this run's own.
-        MemberVerifyOutcome::Pending { .. } | MemberVerifyOutcome::AwaitingSuppression { .. } => true,
+        // Validated exactly as a pass is, because it may become one: a
+        // granted hold takes the claim the composed step earned, so the node
+        // and the receipt it would claim on must bind this run's own
+        // composition before the grant can be honoured.
+        MemberVerifyOutcome::AwaitingSuppression { .. } => validate_contextual_pass(run, request, outcome),
+        MemberVerifyOutcome::Pending { .. } => true,
     }
 }
 
@@ -2511,21 +2514,7 @@ fn apply_run_outcome(
             queue_input(state, request.input.clone());
         }
         MemberVerifyOutcome::PassedIn { receipt, .. } => {
-            let node = context.run.node.as_ref().expect("validated contextual node");
-            let contract = context.run.plan.composition.as_ref().expect("validated composition").contract.digest();
-            state.claims.insert(
-                request.member.workpiece.0.clone(),
-                ContextualResolutionClaim {
-                    member: request.member.clone(),
-                    proof: ResolutionProof::InComposition {
-                        node: node.digest(),
-                        receipt: receipt.clone(),
-                        plan: context.run.plan.digest(),
-                        request: request.digest(),
-                        contract,
-                    },
-                },
-            );
+            claim_in_composition(context, state, request, receipt);
         }
         MemberVerifyOutcome::Failed { scope, failures, evidence, .. } => {
             apply_failed_outcome(
@@ -2543,20 +2532,57 @@ fn apply_run_outcome(
         MemberVerifyOutcome::Survived { .. } => {
             effects.push(Decision::QueueMemberVerification { request: Box::new(request.clone()) });
         }
-        MemberVerifyOutcome::AwaitingSuppression { .. } => {
-            // A hold, not a verdict: the member keeps its cursor, spends no
-            // budget, takes no claim, and is re-queued by nothing here. The
-            // journaled hold beside this completion is what parks it — without
-            // the recorded requests there is nothing for a reviewer to answer,
-            // so a completion naming a hold nobody recorded is incoherent
-            // rather than charitable.
-            if context.snapshot.awaiting_suppression(&context.bloom, &request.member.workpiece).is_none() {
+        MemberVerifyOutcome::AwaitingSuppression { receipt, requests, .. } => {
+            // The lane reported what its candidate asks for; whether that is a
+            // park or a pass is decided here, because only the journal knows
+            // who has answered. A reviewer who already granted every one of
+            // these requests has answered the run's one open question, so the
+            // member takes the claim the composed step earned — the grant
+            // lands it, and the lane is never asked the same question twice.
+            // Otherwise it parks: the cursor, the attempt count, and the
+            // repair ledger stay where they are, nothing is re-queued here,
+            // and the journaled hold beside this completion is what records
+            // the case. A hold nobody recorded leaves a reviewer nothing to
+            // answer, so it is incoherent rather than charitable.
+            if context.snapshot.suppression_granted(&context.bloom, &request.member.workpiece, requests) {
+                claim_in_composition(context, state, request, receipt);
+            } else if context.snapshot.awaiting_suppression(&context.bloom, &request.member.workpiece).is_none() {
                 return Err(CoordinationError::InvalidPlan);
             }
         }
         MemberVerifyOutcome::Pending { .. } => queue_run_retry(state, context.run, request, effects),
     }
     Ok(())
+}
+
+/// Take `request`'s in-composition claim on `receipt` — what a member that
+/// passed inside the node the run judged is owed.
+///
+/// Shared by the pass itself and by a hold a reviewer has already granted
+/// (issue 6032): both name the same node, the same plan, and the same
+/// contract, and the second is the first with a person's answer standing
+/// where the suppress gate's question was.
+fn claim_in_composition(
+    context: &SharedCompletionContext<'_>,
+    state: &mut CoordinationState,
+    request: &MemberVerifyRequest,
+    receipt: &Evidence,
+) {
+    let node = context.run.node.as_ref().expect("validated contextual node");
+    let contract = context.run.plan.composition.as_ref().expect("validated composition").contract.digest();
+    state.claims.insert(
+        request.member.workpiece.0.clone(),
+        ContextualResolutionClaim {
+            member: request.member.clone(),
+            proof: ResolutionProof::InComposition {
+                node: node.digest(),
+                receipt: receipt.clone(),
+                plan: context.run.plan.digest(),
+                request: request.digest(),
+                contract,
+            },
+        },
+    );
 }
 
 fn validate_shared_completion(
@@ -4843,6 +4869,24 @@ mod tests {
         )
     }
 
+    fn grant() -> SuppressionDisposition {
+        SuppressionDisposition {
+            requests: hold_requests().iter().map(digest_of).collect(),
+            verdict: SuppressionVerdict::Granted,
+            reason: String::from("operator tooling, not cap config"),
+            operator: String::from("owner"),
+        }
+    }
+
+    fn held_outcome(request: &MemberVerifyRequest, node: &SharedRunNode, receipt: &Evidence) -> MemberVerifyOutcome {
+        MemberVerifyOutcome::AwaitingSuppression {
+            request: request.digest(),
+            node: node.digest(),
+            receipt: receipt.clone(),
+            requests: hold_requests(),
+        }
+    }
+
     fn held_snapshot(snapshot: &Snapshot, bloom: BloomId, request: &MemberVerifyRequest) -> Snapshot {
         let hold = hold_event(bloom, request);
         let decided = reduce(snapshot, &hold, &compiled_resolved(), &SpendWindow::default());
@@ -4870,7 +4914,7 @@ mod tests {
             plan: plan.digest(),
             run: digest(62),
             outcomes: alloc::vec![
-                MemberVerifyOutcome::AwaitingSuppression { request: held.digest(), observation: digest(81) },
+                held_outcome(&held, &node, &receipt),
                 MemberVerifyOutcome::PassedIn { request: passing.digest(), node: node.digest(), receipt },
             ],
             unfinished: Vec::new(),
@@ -4928,14 +4972,15 @@ mod tests {
         // The hold beside the completion is what parks the member: without the
         // recorded requests there is nothing for a reviewer to answer, so a
         // completion naming a hold nobody recorded is incoherent.
-        let (snapshot, bloom, plan, _) = active_contextual_run();
+        let (snapshot, bloom, plan, node) = active_contextual_run();
         let completion = SharedRunCompletion {
             plan: plan.digest(),
             run: digest(62),
-            outcomes: alloc::vec![MemberVerifyOutcome::AwaitingSuppression {
-                request: plan.requests[0].digest(),
-                observation: digest(81),
-            }],
+            outcomes: alloc::vec![held_outcome(
+                &plan.requests[0],
+                &node,
+                &Evidence { subject: node.candidate.tree, kind: EvidenceKind::VerificationResult, detail: digest(82) },
+            )],
             unfinished: plan.requests.iter().skip(1).map(MemberVerifyRequest::digest).collect(),
             latencies: alloc::vec![MemberVerifyLatency {
                 request: plan.requests[0].digest(),
@@ -4967,12 +5012,7 @@ mod tests {
             Fact::SuppressionDisposition {
                 bloom,
                 workpiece: held.member.workpiece.clone(),
-                disposition: SuppressionDisposition {
-                    requests: alloc::vec![digest(99)],
-                    verdict: SuppressionVerdict::Granted,
-                    reason: String::from("operator tooling, not cap config"),
-                    operator: String::from("owner"),
-                },
+                disposition: grant(),
             },
         );
         let decided = reduce(&snapshot, &answer, &compiled_resolved(), &SpendWindow::default());
@@ -4993,6 +5033,97 @@ mod tests {
 
         let snapshot = snapshot.apply(&answer, &decided, &compiled_resolved());
         assert!(snapshot.awaiting_suppression(&bloom, &held.member.workpiece).is_none(), "the answer clears the hold");
+    }
+
+    #[test]
+    fn a_re_run_restating_granted_requests_lands_the_member_rather_than_parking_it_again() {
+        // Issue 6032's termination. The lane restates every suppression its
+        // tree still carries on every run — the attribute is still there, so
+        // the scanner still reports it — so the run a grant re-queued settles
+        // exactly what the run before it settled. Reading the answer here is
+        // what turns that second settlement into the claim the composed step
+        // earned; without it the grant re-queues a verification that parks
+        // again, forever, and "the grant lands it" is never true.
+        let (snapshot, bloom, plan, node) = active_contextual_run();
+        let held = plan.requests[0].clone();
+        let snapshot = held_snapshot(&snapshot, bloom, &held);
+        let answer = event(
+            "suppression-answer",
+            Fact::SuppressionDisposition {
+                bloom,
+                workpiece: held.member.workpiece.clone(),
+                disposition: grant(),
+            },
+        );
+        let decided = reduce(&snapshot, &answer, &compiled_resolved(), &SpendWindow::default());
+        let snapshot = snapshot.apply(&answer, &decided, &compiled_resolved());
+        assert!(snapshot.awaiting_suppression(&bloom, &held.member.workpiece).is_none(), "the grant cleared the hold");
+
+        let receipt =
+            Evidence { subject: node.candidate.tree, kind: EvidenceKind::VerificationResult, detail: digest(82) };
+        let completion = SharedRunCompletion {
+            plan: plan.digest(),
+            run: digest(62),
+            outcomes: alloc::vec![held_outcome(&held, &node, &receipt)],
+            unfinished: plan.requests.iter().skip(1).map(MemberVerifyRequest::digest).collect(),
+            latencies: alloc::vec![MemberVerifyLatency {
+                request: held.digest(),
+                member: held.member.clone(),
+                latency_millis: 10,
+            }],
+        };
+        let decided = reduce_shared_run_completed(&snapshot, &bloom, &completion);
+        assert!(
+            matches!(decided.outcome, Outcome::CoordinationAdvanced { .. }),
+            "the answered settlement is coherent: {:?}",
+            decided.outcome
+        );
+
+        let snapshot = snapshot.apply(
+            &event("shared-completed", Fact::SharedRunCompleted { bloom, completion }),
+            &decided,
+            &compiled_resolved(),
+        );
+        let state = snapshot.blooms[&bloom].coordination.as_deref().expect("coordination still owns the line");
+        assert!(state.has_exact_claim(&held.member), "the grant landed the member on the step it was held at");
+        assert!(
+            snapshot.awaiting_suppression(&bloom, &held.member.workpiece).is_none(),
+            "an answered member is not parked again",
+        );
+    }
+
+    #[test]
+    fn a_hold_restating_granted_requests_is_refused_rather_than_re_parking() {
+        // The other half of the termination, at the hold door: the host admits
+        // one hold per held member per run and cannot know what a reviewer has
+        // answered, so the re-queued run offers the same hold again. Accepting
+        // it would re-plant the park the completion beside it is about to
+        // land.
+        let (snapshot, bloom, plan, _) = active_contextual_run();
+        let held = plan.requests[0].clone();
+        let snapshot = held_snapshot(&snapshot, bloom, &held);
+        let answer = event(
+            "suppression-answer",
+            Fact::SuppressionDisposition {
+                bloom,
+                workpiece: held.member.workpiece.clone(),
+                disposition: grant(),
+            },
+        );
+        let decided = reduce(&snapshot, &answer, &compiled_resolved(), &SpendWindow::default());
+        let snapshot = snapshot.apply(&answer, &decided, &compiled_resolved());
+
+        let hold = hold_event(bloom, &held);
+        let decided = reduce(&snapshot, &hold, &compiled_resolved(), &SpendWindow::default());
+        assert!(
+            matches!(decided.outcome, Outcome::SuppressionHoldRejected(SuppressionHoldError::AlreadyAnswered)),
+            "{:?}",
+            decided.outcome
+        );
+        assert!(
+            snapshot.apply(&hold, &decided, &compiled_resolved()).awaiting_suppression(&bloom, &held.member.workpiece).is_none(),
+            "a refused hold plants no park",
+        );
     }
 
     #[test]

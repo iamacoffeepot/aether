@@ -318,6 +318,7 @@ impl Default for MemberView {
             leases: Vec::new(),
             evicted_by: None,
             intake_refusal: None,
+            awaiting_suppression: None,
         }
     }
 }

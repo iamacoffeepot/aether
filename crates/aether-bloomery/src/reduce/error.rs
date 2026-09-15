@@ -1013,6 +1013,12 @@ pub enum SuppressionHoldError {
     /// the journal never carries a hold that parks a member with nothing for a
     /// reviewer to answer.
     ClosesNothing,
+    /// A reviewer has already granted every request the hold restates. The
+    /// lane restates what its tree still carries on every run, so this is the
+    /// ordinary shape of the run a grant re-queued: the member is landing on
+    /// that grant, and parking it again would ask the same answered question
+    /// forever.
+    AlreadyAnswered,
     /// The hold's evidence binds a tree other than the member's current
     /// subject — a stale step over a superseded candidate, never acted on.
     EvidenceNotBound {

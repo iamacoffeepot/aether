@@ -25,7 +25,8 @@ use crate::values::{
     PrecheckNode, PrecheckPlan, PrecheckPolicy, PrecheckResult, PrecheckState, PreparedCandidate, ReasoningEffort,
     RedVerify, ResolutionClaim, ResolutionProof, ResolvedBloom, ResolvedModel, SharedRunDispatch, SharedRunExecution,
     SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunRecord, SpendQuiesce, StableHeadReservation,
-    StageBinding, StageCatalog, SurvivorGroup, ToolPolicy, Transformation, VerificationContract, VerificationMode,
+    StageBinding, StageCatalog, SuppressionRequest, SurvivorGroup, ToolPolicy, Transformation, VerificationContract,
+    VerificationMode,
     VerificationObligation, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
     Withdrawal, WithdrawalCause,
 };
@@ -344,7 +345,17 @@ fn coordination_run(fixture: &CoordinationGolden) -> SharedRunRecord {
                 observation: digest(97),
             },
             MemberVerifyOutcome::Pending { request: fixture.request.digest(), observation: digest(98) },
-            MemberVerifyOutcome::AwaitingSuppression { request: fixture.request.digest(), observation: digest(46) },
+            MemberVerifyOutcome::AwaitingSuppression {
+                request: fixture.request.digest(),
+                node: fixture.node.digest(),
+                receipt: fixture.verification.clone(),
+                requests: vec![SuppressionRequest {
+                    path: String::from("crates/example-a/src/lib.rs"),
+                    line: 46,
+                    lint: String::from("allow(clippy::disallowed_methods)"),
+                    reason: String::from("operator tooling reading the coordinator's own setting, not cap config"),
+                }],
+            },
         ],
         unfinished: vec![fixture.request.digest()],
         latencies: vec![MemberVerifyLatency {

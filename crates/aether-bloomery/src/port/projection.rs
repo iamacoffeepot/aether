@@ -601,6 +601,14 @@ pub struct MemberView {
     /// order rides the `/view` orders list. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub intake_refusal: Option<String>,
+    /// The suppression sign-off this member is waiting on (issue 6032). `None`
+    /// while it is working, wedged, or resolved. Distinct from
+    /// [`Self::awaiting_surface`] (a boundary to widen) the way the hold is
+    /// distinct from a surface request: this member stated its case on the
+    /// suppression line itself, and a reviewer answers it through the
+    /// suppression door. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
+    #[serde(default)]
+    pub awaiting_suppression: Option<AwaitingSuppressionView>,
 }
 
 /// One transition's answer to "why is this not happening" (#5281).
@@ -712,6 +720,31 @@ pub struct WithdrawnView {
     pub reason: String,
     /// Who decided.
     pub operator: String,
+}
+
+/// A member awaiting suppression sign-off (issue 6032), rendered so a reviewer
+/// reads what to grant without opening an evidence file.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AwaitingSuppressionView {
+    /// The shared-run verdict that judged the composition the member parked
+    /// in, bound to the composed tree it was judged over.
+    pub evidence: Digest,
+    /// The standing requests the hold parks on, each with the lane's reason
+    /// beside the path, lint, and reported line it describes.
+    pub requests: Vec<SuppressionRequestView>,
+}
+
+/// One standing suppression request, rendered where the reviewer answers it.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct SuppressionRequestView {
+    /// The repository-relative path the suppression sits in.
+    pub path: String,
+    /// The line the scanner reported it on, for reading only.
+    pub line: u32,
+    /// The lint the attribute allows, as the scanner tokenized it.
+    pub lint: String,
+    /// The lane's one line stating why the policy blesses this write.
+    pub reason: String,
 }
 
 /// A member awaiting a surface amendment (ADR-0207), rendered so an operator
