@@ -342,3 +342,78 @@ fn the_declared_surface_fallback_reads_globs_rather_than_exact_paths() {
     assert_eq!(extents.owner("crates/a/src/deep/nested.rs"), PathOwner::One(member("issue-6023")));
     assert_eq!(extents.owner("crates/c/src/lib.rs"), PathOwner::Unowned);
 }
+
+/// A rustc `E0308` with both of its spans, the shape a cross-member type
+/// change produces: the mismatch is reported at the call site and the
+/// definition it disagrees with is pointed at on a `note:` continuation.
+///
+/// Unlike the fixtures above this is not a captured section — bloom 9680c483's
+/// two red runs were each single-member, so no production section this
+/// repository has kept names two members at once. The lines are rustc's own
+/// rendering of a two-span diagnostic, which is what the reader has to survive.
+const TWO_SPAN: &str = "\
+### verify.clippy
+
+error[E0308]: mismatched types
+   --> crates/aether-chassis-bloomery/src/bloomery/coordination.rs:88:31
+    |
+ 88 |     let plan = build_plan(state, requests);
+    |                               ^^^^^^^^ expected `Vec<MemberVerifyRequest>`, found `&[MemberVerifyRequest]`
+    |
+note: function defined here
+   --> crates/aether-bloomery/src/reduce/coordination.rs:274:4
+";
+
+// The plausible bug: a red shared run whose finding sits in one member's file
+// because *another* member changed the definition it disagrees with is read as
+// the first member's lone defect, and that member is ejected while the pair
+// that actually disagree is never named. The annotation does not change
+// attribution — it records the pair so the bounce can be classified.
+#[test]
+fn a_finding_naming_two_members_writes_records_the_pair() {
+    let extents = changed(&[
+        ("issue-1", &["crates/aether-chassis-bloomery/src/bloomery/coordination.rs"]),
+        ("issue-2", &["crates/aether-bloomery/src/reduce/coordination.rs"]),
+    ]);
+    let mentions = super::semantic_mentions(&only(TWO_SPAN, "verify.clippy"), &extents);
+
+    assert_eq!(mentions.len(), 1, "one diagnostic names both writes: {mentions:?}");
+    assert_eq!(mentions[0].site, member("issue-1"), "the site is where the diagnostic was reported");
+    assert_eq!(mentions[0].implicated, vec![member("issue-2")], "the definition's owner is implicated, not charged");
+}
+
+// Tripwire: the annotation must stay silent on the ordinary case. Two findings
+// in two members' files are two independent defects, and reporting them as a
+// mutual conflict would make every multi-member red run look like one.
+#[test]
+fn independent_findings_in_two_members_files_record_no_pair() {
+    let extents =
+        changed(&[("issue-1", &["xtask/src/bloom/amend/tests.rs"]), ("issue-2", &["xtask/src/bloom/mod.rs"])]);
+
+    assert!(
+        super::semantic_mentions(&only(MISSING_FIELDS, "verify.test"), &extents).is_empty(),
+        "each E0063 names one path, so no finding names two writes",
+    );
+}
+
+// Bloom 0c5a157ecbe4's dispatch-8311 (retrospect-6a1fe13e6695) is this shape:
+// the candidate added two fields to `CommissionShowView` in `aether-bloomery`
+// and left xtask's initializers — inside its own reverse-dependency closure —
+// unrepaired. It ran alone, and no sibling in the bloom wrote an xtask path.
+//
+// The plausible bug: an annotation eager enough to implicate whoever happens to
+// be in the run would name a member here, turning a candidate's own miss of a
+// reader in its closure into a fabricated two-member conflict and sending an
+// innocent sibling to reconcile.
+#[test]
+fn a_candidates_own_miss_in_its_closure_implicates_nobody() {
+    let extents = changed(&[
+        ("retrospect-6a1fe13e6695", &["crates/aether-bloomery/src/values/api.rs"]),
+        ("issue-6031", &["xtask/src/transform/verify/mod.rs"]),
+    ]);
+
+    assert!(
+        super::semantic_mentions(&only(MISSING_FIELDS, "verify.test"), &extents).is_empty(),
+        "the findings name only paths no member wrote, so there is no pair to record",
+    );
+}

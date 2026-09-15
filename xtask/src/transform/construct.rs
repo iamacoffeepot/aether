@@ -15,6 +15,7 @@ use crate::transform::claude::assemble_construct_prompt;
 use crate::transform::fixers::{self, Report as FixerReport};
 use crate::transform::lane::Resumed;
 use crate::transform::lint_check::{self, Report as LintReport};
+use crate::transform::package_closure::PackageClosure;
 use crate::transform::{Measurements, TransformArgs, heartbeat, run_model_lane, write_evidence_json};
 
 /// The typed id of the model-driven construct lane (#3511). Recognized here so
@@ -73,16 +74,28 @@ struct Deliverables<'a> {
     surface_request: Option<&'a serde_json::Value>,
 }
 
+/// What the lane's own post-model passes recorded about the tree they ran over:
+/// what the mechanical fixers did to it, what the scoped lint check then found,
+/// and which packages the candidate wrote and reaches. Grouped because they are
+/// one thing — the harness-side reading of the candidate, taken in one window
+/// after the model's turn — and they travel together into the envelope.
+#[derive(Default)]
+struct Receipts {
+    fixers: FixerReport,
+    lint: LintReport,
+    closure: PackageClosure,
+}
+
 fn stamp_construct_evidence(
     nonce: Option<&str>,
     produced_candidate: bool,
     deliverables: Deliverables<'_>,
     record: &serde_json::Value,
     measured: Measurements,
-    fixers: FixerReport,
-    lint: LintReport,
+    receipts: Receipts,
 ) -> serde_json::Value {
     let Deliverables { commit_message, surface_request } = deliverables;
+    let Receipts { fixers, lint, closure } = receipts;
     let mut evidence = serde_json::json!({
         "command": CONSTRUCT_IMPLEMENT,
         "nonce": nonce,
@@ -91,6 +104,7 @@ fn stamp_construct_evidence(
     });
     fixers.stamp(&mut evidence);
     lint.stamp(&mut evidence);
+    closure.stamp(&mut evidence);
     measured.stamp(&mut evidence);
     // Presence-driven, like the review lane's `findings`: a run that wrote no
     // deliverable stamps no key at all, so the host reads absence as "this run
@@ -242,6 +256,10 @@ pub(super) fn run_construct(args: &TransformArgs, bundle: &ModelProcessInstructi
     // diff is nothing to review. Captured after the child is reaped so it reflects
     // the run's final tree.
     let produced_candidate = capture_produced_candidate(&args.out);
+    // Read in the same window and from the same tree as the candidate signal:
+    // the host stages the worktree once this process exits, so this is the last
+    // point at which the candidate's own changed set is nameable at all.
+    let closure = PackageClosure::resolve(Path::new("."), &args.out);
 
     write_evidence_json(
         &args.out,
@@ -251,8 +269,7 @@ pub(super) fn run_construct(args: &TransformArgs, bundle: &ModelProcessInstructi
             Deliverables { commit_message: commit_message.as_deref(), surface_request: surface_request.as_ref() },
             &run.record,
             run.measured,
-            fixers,
-            lint.report,
+            Receipts { fixers, lint: lint.report, closure },
         ),
     )
 }
@@ -266,7 +283,7 @@ mod tests {
     use aether_bloomery::{LANE_WORKPIECE_HEADER, pin_workpiece_description};
 
     use super::{
-        Budget, COMMIT_MESSAGE_DELIVERABLE, CONSTRUCT_IMPLEMENT, Deliverables, FixerReport, LintReport, Measurements,
+        Budget, COMMIT_MESSAGE_DELIVERABLE, CONSTRUCT_IMPLEMENT, Deliverables, FixerReport, Measurements, Receipts,
         SURFACE_REQUEST_DELIVERABLE, porcelain_signals_candidate, stamp_construct_evidence, take_commit_message,
         take_surface_request,
     };
@@ -307,8 +324,7 @@ mod tests {
             Deliverables::default(),
             &record,
             Measurements::default(),
-            FixerReport::default(),
-            LintReport::default(),
+            Receipts::default(),
         );
         assert_eq!(evidence["command"], CONSTRUCT_IMPLEMENT);
         assert_eq!(evidence["nonce"], "nonce-7", "the broker-matched nonce binds the evidence");
@@ -334,8 +350,7 @@ mod tests {
             Deliverables::default(),
             &serde_json::json!({ "no_result": true }),
             Measurements::default(),
-            FixerReport::default(),
-            LintReport::default(),
+            Receipts::default(),
         );
         assert!(no_nonce["nonce"].is_null());
         assert_eq!(no_nonce["produced_candidate"], false, "an empty-candidate run stamps false");
@@ -355,10 +370,30 @@ mod tests {
             Deliverables { commit_message: Some(message), surface_request: None },
             &serde_json::json!({}),
             Measurements::default(),
-            FixerReport::default(),
-            LintReport::default(),
+            Receipts::default(),
         );
         assert_eq!(evidence["commit_message"], message, "the message is carried verbatim, body included");
+    }
+
+    // Tripwire: the package-closure record must be present on every construct
+    // envelope, including the empty one. A key that appears only when the lane
+    // computed something makes "nobody looked" and "this candidate reaches
+    // nothing" the same absence, and the coordinator derives member edges off
+    // exactly that distinction.
+    #[test]
+    fn the_package_closure_record_rides_every_evidence_envelope() {
+        let evidence = stamp_construct_evidence(
+            Some("n-1"),
+            true,
+            Deliverables::default(),
+            &serde_json::json!({}),
+            Measurements::default(),
+            Receipts::default(),
+        );
+        let closure = &evidence["package_closure"];
+        assert!(closure.is_object(), "the record is always stamped: {evidence}");
+        assert!(closure["changed_packages"].is_array(), "the written packages are always named");
+        assert!(closure["closure"].is_null(), "a record with nothing resolved states an unbounded closure");
     }
 
     // Tripwire: a reader that has to infer whether fmt / clippy --fix ran
@@ -373,8 +408,7 @@ mod tests {
             Deliverables::default(),
             &serde_json::json!({}),
             Measurements::default(),
-            FixerReport { ran: true, changed: true },
-            LintReport::default(),
+            Receipts { fixers: FixerReport { ran: true, changed: true }, ..Receipts::default() },
         );
         assert_eq!(evidence["fixers"]["ran"], true);
         assert_eq!(evidence["fixers"]["changed"], true);
@@ -420,8 +454,7 @@ mod tests {
             Deliverables::default(),
             &serde_json::json!({}),
             Measurements::default(),
-            FixerReport::default(),
-            LintReport::default(),
+            Receipts::default(),
         );
         assert!(evidence.get("surface_request").is_none());
     }

@@ -61,9 +61,9 @@ pub use api::{
     CommissionHeadView, CommissionReopenedView, CommissionShowView, CommissionsView, Completeness, CoordinatorLogEntry,
     CoordinatorLogsView, CreateCommissionRequest, DEFAULT_HTTP_PORT, DispatchEvidenceView, DispatchFilePage,
     DispatchProcessView, DraftPatch, DraftView, DraftsView, ErrorView, GrantRequest, HTTP_READ_TIMEOUT, HoldRequest,
-    JournalEntry, JournalView, MemberProjection, OutcomeView, ProposeRequest, ReleaseAcceptedView, ReleaseRequest,
-    ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest, RevisionEvidence,
-    ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest,
+    JournalEntry, JournalView, MemberProjection, OutcomeView, PackageClosureView, ProposeRequest, ReleaseAcceptedView,
+    ReleaseRequest, ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest, RevisionEvidence,
+    ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SemanticEdgeView, SupersedeRequest,
     SuppressionAnswerRequest, WithdrawRequest, WorkpiecesView, WriteRevisionRequest, http_success,
 };
 pub use approval::{

@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result};
 use guppy::graph::{DependencyDirection, PackageGraph, PackageMetadata};
 
+use crate::affected::owners::owning_packages;
 use crate::affected::select::{Selection, is_dist_consumer, select};
 use crate::inventory::{discover_behaviors, discover_components};
 
@@ -54,6 +55,12 @@ impl Workspace {
     /// Map `changed` onto the graph and take the reverse-dependency closure.
     pub fn select(&self, changed: &[String]) -> Result<Selection> {
         select(&self.graph, changed, &self.wasm_sources, &self.wasm_consumers)
+    }
+
+    /// The workspace packages `changed` writes into — the closure's other half,
+    /// see [`owning_packages`](crate::affected::owners::owning_packages).
+    pub fn owning_packages(&self, changed: &[String]) -> BTreeSet<String> {
+        owning_packages(&self.graph, changed)
     }
 
     /// Every workspace crate, by name.

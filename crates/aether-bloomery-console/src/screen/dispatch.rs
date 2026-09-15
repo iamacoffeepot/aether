@@ -282,6 +282,7 @@ mod tests {
                     ..BloomDispatchView::default()
                 },
             ],
+            semantic_edges: Vec::new(),
         }
     }
 
@@ -389,6 +390,7 @@ mod tests {
                     evidence_retained: true,
                     ..BloomDispatchView::default()
                 }],
+                semantic_edges: Vec::new(),
             }),
         );
         let mut list = DispatchList::new(bloom, "wp-a");

@@ -944,6 +944,7 @@ mod tests {
                     covers: Some(vec!["wp-a".to_owned()]),
                     ..BloomDispatchView::default()
                 }],
+                semantic_edges: Vec::new(),
             }),
         );
         let mut detail = Detail::new(Focus::member(bloom, "wp-a"));

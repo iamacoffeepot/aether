@@ -4,6 +4,7 @@
 //! fleet-host filesystem; only this process can tell a swept nonce from one
 //! that never existed. Every response is buffered and bounded.
 
+mod closure;
 mod header;
 mod list;
 mod logs;

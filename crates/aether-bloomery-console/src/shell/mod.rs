@@ -1022,7 +1022,9 @@ mod tests {
                     cost: Some(1_000_000),
                     evidence_retained: true,
                     covers: Some(Vec::new()),
+                    closure: None,
                 }],
+                semantic_edges: Vec::new(),
             },
         );
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
@@ -1072,7 +1074,9 @@ mod tests {
                     cost: Some(1_000_000),
                     evidence_retained: true,
                     covers: Some(Vec::new()),
+                    closure: None,
                 }],
+                semantic_edges: Vec::new(),
             },
         );
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
