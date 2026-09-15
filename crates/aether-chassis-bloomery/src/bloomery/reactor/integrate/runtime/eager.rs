@@ -169,6 +169,11 @@ fn conflict_diagnostic(plan: &IntegrationAppendPlan, input: &CompositionInput, p
 /// Mechanically prepare a reconcile result against the immutable head recorded
 /// on its order. A conflict is evidence about that exact head and never reaches
 /// member Verify. A clean result names P, the commit/tree pair Verify may judge.
+///
+/// Retained for the decisions a bloom could still be carrying: the reducer no
+/// longer issues a preparation, because a member's Verify proves the candidate
+/// the member authored and the merge onto the product happens at the append
+/// (ADR-0218 §Amendment: eager integration assembles the product).
 pub(super) fn prepare_candidate(source: &SourceShell, plan: &CandidatePreparationPlan) -> CandidatePreparationResult {
     let namespace = preparation_namespace(plan);
     let base = &plan.context.starting_head.candidate;

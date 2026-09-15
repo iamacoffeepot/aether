@@ -125,28 +125,20 @@ use withdraw::reduce_withdraw;
 fn reduce_coordination_fact(snapshot: &Snapshot, fact: &Fact) -> Decisions {
     match fact {
         Fact::IntegrationAdvanced { bloom, plan, head } => reduce_integration_advanced(snapshot, bloom, *plan, head),
-        Fact::IntegrationAppendConflicted {
-            bloom,
-            plan,
-            generation,
-            expected_parent,
-            input,
-            at,
-            evidence,
-            observed_at_unix_millis,
-        } => reduce_integration_conflicted(
-            snapshot,
-            IntegrationConflict {
-                bloom,
-                plan: *plan,
-                generation: *generation,
-                expected_parent: *expected_parent,
-                input,
-                at: *at,
-                evidence,
-                observed_at_unix_millis: *observed_at_unix_millis,
-            },
-        ),
+        Fact::IntegrationAppendConflicted { bloom, plan, generation, expected_parent, input, at, evidence, .. } => {
+            reduce_integration_conflicted(
+                snapshot,
+                IntegrationConflict {
+                    bloom,
+                    plan: *plan,
+                    generation: *generation,
+                    expected_parent: *expected_parent,
+                    input,
+                    at: *at,
+                    evidence,
+                },
+            )
+        }
         Fact::IntegrationAppendRefused { bloom, plan, generation, expected_parent, detail } => {
             reduce_integration_refused(snapshot, bloom, *plan, *generation, *expected_parent, *detail)
         }

@@ -95,9 +95,13 @@ pub struct CoordinationPolicy {
     pub max_serial_requests: u32,
     /// Maximum dependency-preserving attribution probes for one red node.
     pub max_attribution_probes: u32,
-    /// Head movements tolerated in one repair episode before reservation.
+    /// Retained for decode only. It rationed how often the product could grow
+    /// under a member that was about to merge onto it; nothing merges onto the
+    /// product any more, so there is nothing to ration (ADR-0218 §Amendment:
+    /// eager integration assembles the product).
     pub movement_budget: u32,
-    /// Duration of a stable-head reservation.
+    /// Retained for decode only. The lifetime of the reservation
+    /// [`Self::movement_budget`] used to arm.
     pub reservation_millis: u64,
     /// Explicit execution class every contextual proof must run on.
     pub host_class: String,
@@ -114,8 +118,6 @@ impl CoordinationPolicy {
         self.max_run_members > 0
             && self.max_serial_requests > 0
             && (self.verification != VerificationMode::Contextual || self.max_attribution_probes > 0)
-            && self.movement_budget > 0
-            && self.reservation_millis > 0
             && !self.host_class.is_empty()
             && self.host_class.len() <= 128
             && self.host_class.bytes().all(|byte| byte.is_ascii_graphic())
@@ -257,8 +259,14 @@ impl ConstructContext {
     }
 }
 
-/// Source request that mechanically places an authored reconcile result onto
-/// the head its order recorded before Verify can judge it.
+/// Retained for decode only: the source request that used to place an authored
+/// reconcile result onto a recorded head before Verify could judge it.
+///
+/// No reducer issues one any more. A member's Verify proves the candidate the
+/// member authored, and the merge onto the product happens at the append, after
+/// that proof, never before it (ADR-0218 §Amendment: eager integration assembles
+/// the product). The shape, its `Decision`, and its `Fact` stay so a bloom that
+/// had a preparation in flight across the change still settles it.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct CandidatePreparationPlan {
     pub bloom: BloomId,
@@ -900,7 +908,14 @@ impl SharedRunRecord {
     }
 }
 
-/// Durable reservation after repeated repair displacement.
+/// Retained for decode only: the durable pin that used to hold one product tree
+/// still while a displaced member merged onto it.
+///
+/// No member merges onto the product any more — each proves the candidate it
+/// authored and the product absorbs it — so nothing is pinned and no reducer
+/// writes one (ADR-0218 §Amendment: eager integration assembles the product).
+/// The shape stays so sealed journals and `Fact::StableHeadReservationExpired`
+/// keep decoding.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct StableHeadReservation {
     pub owner: WorkpieceId,
@@ -926,8 +941,9 @@ pub struct EagerIntegrationState {
     /// green that may clear `known_red`: a verdict established anywhere else
     /// stays red until repair and promotion clear it (ADR-0218).
     pub unproved_repair: Option<Digest>,
+    /// Retained for decode only; see [`StableHeadReservation`].
     pub reservation: Option<StableHeadReservation>,
-    /// Head moves in the current repair episode.
+    /// Retained for decode only; the movement counter that armed the reservation.
     pub movement_count: u32,
 }
 
@@ -943,7 +959,9 @@ pub struct CoordinationState {
     pub requests: Vec<MemberVerifyRequest>,
     pub runs: Vec<SharedRunRecord>,
     pub claims: BTreeMap<String, ContextualResolutionClaim>,
+    /// Retained for decode only; see [`CandidatePreparationPlan`].
     pub prepared: BTreeMap<String, PreparedCandidate>,
+    /// Retained for decode only; see [`CandidatePreparationPlan`].
     pub preparations: Vec<CandidatePreparationPlan>,
     pub contexts: BTreeMap<String, ConstructContext>,
     pub checkpoints: BTreeMap<String, ConstructionCheckpoint>,
