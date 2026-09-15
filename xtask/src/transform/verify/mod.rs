@@ -670,21 +670,97 @@ pub(super) struct SuppressionRequest {
 /// all-of-them rule is what decides the verdict, and this reader only has to
 /// name what it can.
 fn parse_suppression_requests(log: &str) -> Vec<SuppressionRequest> {
-    log.lines()
-        .filter_map(|line| {
-            let (location, rest) = line.split_once(" — ")?;
-            let (path, number) = location.rsplit_once(':')?;
-            let (lint, source) = rest.split_once(" — ")?;
-            let reason = source.split_once(REQUEST_MARKER)?.1.trim();
-            let line_number = number.parse().ok()?;
-            (!path.is_empty() && !reason.is_empty()).then(|| SuppressionRequest {
-                path: path.to_owned(),
-                line: line_number,
-                lint: lint.trim().to_owned(),
-                reason: reason.to_owned(),
-            })
-        })
-        .collect()
+    log.lines().filter_map(parse_suppression_finding).collect()
+}
+
+/// Parse one scanner output line as the suppression request it states, or
+/// `None` when the line is not a `path:line — token — source` finding or
+/// states no request with a non-empty reason.
+///
+/// One parser for both readers: [`parse_suppression_requests`] builds the
+/// reviewer-bound ledger from it and [`distil_suppression_findings`] reads
+/// each finding's requested state off it, so what the lane must repair and
+/// what the record says it asked for cannot disagree about which lines count.
+fn parse_suppression_finding(line: &str) -> Option<SuppressionRequest> {
+    let (location, rest) = line.split_once(" — ")?;
+    let (path, number) = location.rsplit_once(':')?;
+    let (token, source) = rest.split_once(" — ")?;
+    let reason = source.split_once(REQUEST_MARKER)?.1.trim();
+    let line_number = number.parse().ok()?;
+    (!path.is_empty() && !reason.is_empty()).then(|| SuppressionRequest {
+        path: path.to_owned(),
+        line: line_number,
+        lint: token.trim().to_owned(),
+        reason: reason.to_owned(),
+    })
+}
+
+/// The remedy a `verify.suppress` finding without a request hands the lane:
+/// state the request on the suppression's own line, where the scanner reads
+/// it.
+const UNREQUESTED_SUPPRESSION_REMEDY: &str =
+    "unrequested — add \"// aether-suppression-request: <reason>\" on this line";
+
+/// The remedy a `verify.suppress` finding that already states a request hands
+/// the lane: nothing. The grant is the operator's, so a repair lap directed
+/// at this line either strips a correct suppression or resubmits unchanged.
+const REQUESTED_SUPPRESSION_REMEDY: &str = "requested — awaiting the operator's answer; nothing to change here";
+
+/// The state and remedy one `verify.suppress` finding hands the lane, read
+/// off the finding's own line (#6031).
+///
+/// A mixed scan lists requested and unrequested suppressions side by side,
+/// and rendered without a state the lane cannot tell which lines want a
+/// marker and which want to be left alone — the undifferentiated list that
+/// spent bloom 0f16e207's nine serial attribution steps before either member
+/// could act.
+fn suppression_remedy(line: &str) -> &'static str {
+    if parse_suppression_finding(line).is_some() {
+        REQUESTED_SUPPRESSION_REMEDY
+    } else {
+        UNREQUESTED_SUPPRESSION_REMEDY
+    }
+}
+
+/// Render the `verify.suppress` findings in `log` with each finding's state
+/// and remedy, or `None` when the log holds no suppression finding at all.
+///
+/// Each scanner line rides intact on its own line with its remedy indented
+/// beneath it, inside the same line budget every other member's findings
+/// keep, so a repair lap is directed at the lines that lack a marker and
+/// told to leave the ones that carry one.
+fn distil_suppression_findings(log: &str) -> Option<String> {
+    let blocks: Vec<Vec<&str>> = log
+        .lines()
+        .filter(|line| opens_a_suppression_finding(line))
+        .map(|line| vec![line, suppression_remedy(line)])
+        .collect();
+    (!blocks.is_empty()).then(|| render_finding_blocks(&blocks))
+}
+
+/// Open a `verify.suppress` run's own log with its verdict when the scanner
+/// left by [`SUPPRESSION_REQUESTED_EXIT`] — every finding stated a request
+/// (#6031).
+///
+/// That exit passes — no `failed_verifiers` identity, no findings for a
+/// repair lap — but a bare pass over a log that still lists suppressions
+/// reads as a clean scan. A lane re-reading it cannot tell "nothing was
+/// introduced" from "everything introduced already states its case", and only
+/// the second wants no repair: the grant is the operator's, and the requests
+/// themselves ride the suppression-requests evidence channel beside this log.
+/// Stating the verdict where the findings are keeps the two apart without
+/// sending the lane work it cannot do.
+fn stamp_suppression_awaiting(log: Vec<u8>, requests: &[SuppressionRequest]) -> Vec<u8> {
+    let noun = if requests.len() == 1 {
+        "suppression"
+    } else {
+        "suppressions"
+    };
+    let mut stamped =
+        format!("verify.suppress: {} requested {noun} — awaiting sign-off; nothing to change here.\n", requests.len())
+            .into_bytes();
+    stamped.extend(log);
+    stamped
 }
 
 /// Whether a clippy run that was *not* asked to deny warnings should count as a
@@ -1835,6 +1911,11 @@ impl MemberRun {
         } else {
             Vec::new()
         };
+        let log = if id == SUPPRESS_MEMBER && exit_code == SUPPRESSION_REQUESTED_EXIT {
+            stamp_suppression_awaiting(log, &requests)
+        } else {
+            log
+        };
 
         Self {
             id: id.to_owned(),
@@ -2720,11 +2801,22 @@ fn opens_a_block(line: &str) -> bool {
 /// error inside a test target produces, and that one *is* a rustc diagnostic
 /// arriving on the channel the openers were written for.
 ///
+/// A suppression finding is not a rustc diagnostic either: it is a
+/// `path:line — token — source` line whose remedy depends on whether that
+/// source states a request (#6031). So `verify.suppress` reads its own log
+/// first too, and falls through the same way when the log holds no finding
+/// at all — an operational failure, whose notice the generic distiller keeps.
+///
 /// The classification is against no closure here (#4895): this is the path a
 /// member takes when the umbrella has nothing to discriminate with — a single
 /// `verify.test` invocation, or a log the classifier already read — and a run
 /// that cannot see the candidate's diff must blame the candidate.
 fn distil_member(id: &str, log: &str) -> Option<String> {
+    if id == SUPPRESS_MEMBER
+        && let Some(findings) = distil_suppression_findings(log)
+    {
+        return Some(findings);
+    }
     if id == "verify.test"
         && let Some(failures) = nextest::classify(log, None).as_ref().and_then(nextest::ClassifiedRun::findings)
     {
@@ -3222,14 +3314,14 @@ fn check_pass(args: &TransformArgs, logs: &Path, position: Position, members: &[
 mod tests {
     use super::{
         BASE_SET_SUBJECT, BUILD_LANE_MEMBERS, Captured, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun,
-        MemberRunner, Memo, Position, SUPPRESS_MEMBER, Scope, SpawnRunner, TestSchedule, TriageInputs, VERIFY_BASE,
-        VERIFY_CHECK, VERIFY_MEMBER, VerifyInvocation, builds_artifacts, clippy_verdict, closure, distil_diagnostics,
-        effective_exit_code, empty_closure_run, environment_observations, failed_verifiers, failed_verifiers_of,
-        fan_out, gate_target_dir, gate_target_suffix, host_fault_in, member_diff_base, member_outcome,
-        member_scope_notice, operational_failure_notice, package_name, preflight_tools, prepare_failure_log,
-        render_diagnostics, replay_args, required_targets, required_tools, run_member, run_member_discriminated,
-        run_timed_prepare, selected_members, spawnable_runs, stated_selection, umbrella_status, unjudged_notice,
-        verify_check_members, verify_command, verify_findings, workflow,
+        MemberRunner, Memo, Position, SUPPRESS_MEMBER, SUPPRESSION_REQUESTED_EXIT, Scope, SpawnRunner, TestSchedule,
+        TriageInputs, VERIFY_BASE, VERIFY_CHECK, VERIFY_MEMBER, VerifyInvocation, builds_artifacts, clippy_verdict,
+        closure, distil_diagnostics, effective_exit_code, empty_closure_run, environment_observations,
+        failed_verifiers, failed_verifiers_of, fan_out, gate_target_dir, gate_target_suffix, host_fault_in,
+        member_diff_base, member_outcome, member_scope_notice, operational_failure_notice, package_name,
+        preflight_tools, prepare_failure_log, render_diagnostics, replay_args, required_targets, required_tools,
+        run_member, run_member_discriminated, run_timed_prepare, selected_members, spawnable_runs, stated_selection,
+        umbrella_status, unjudged_notice, verify_check_members, verify_command, verify_findings, workflow,
     };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4594,6 +4686,43 @@ mod tests {
     }
 
     #[test]
+    fn suppress_findings_tell_the_lane_which_lines_need_a_marker() {
+        // #6031: bloom 0f16e207 failed verify.suppress on a mixed list — one
+        // bare `#[ignore]` and one correctly requested `#[allow]` — rendered
+        // with no state on either, so the lane either stripped the requested
+        // allow or resubmitted unchanged. Each finding now carries the remedy
+        // its own line declares.
+        let log = "crates/aether-chassis-bloomery/src/store/schema/tests.rs:238 — ignore — #[ignore]\n\
+                   xtask/src/bloom/roll/mod.rs:144 — allow(clippy::disallowed_methods) — #[allow(clippy::disallowed_methods)] // aether-suppression-request: xtask reads the coordinator's own repository setting; not cap config\n";
+
+        let findings = verify_findings(&[member(SUPPRESS_MEMBER, MemberOutcome::Failed, log)])
+            .and_then(|channel| channel.text().map(str::to_owned))
+            .expect("a failing suppress run yields findings");
+
+        assert!(
+            findings.contains("crates/aether-chassis-bloomery/src/store/schema/tests.rs:238 — ignore"),
+            "the unrequested finding rides intact: {findings}"
+        );
+        assert!(
+            findings.contains("xtask/src/bloom/roll/mod.rs:144 — allow(clippy::disallowed_methods)"),
+            "and so does the requested one: {findings}"
+        );
+        assert!(
+            findings.contains("unrequested — add \"// aether-suppression-request: <reason>\" on this line"),
+            "the bare ignore is told what it needs: {findings}"
+        );
+        assert!(
+            findings.contains("requested — awaiting the operator's answer; nothing to change here"),
+            "the stated allow is told it needs nothing: {findings}"
+        );
+        assert_eq!(
+            findings.matches("aether-suppression-request: <reason>").count(),
+            1,
+            "the marker remedy is aimed at the one line that lacks it: {findings}"
+        );
+    }
+
+    #[test]
     fn a_failing_test_member_names_the_test_rather_than_the_runner_summary() {
         // Tripwire for #4712 at the seam: `distil_member` has to route
         // verify.test through the nextest reader. Routed to the generic
@@ -5482,6 +5611,45 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         assert!(run.findings().is_none(), "the refusal is not a finding a Refine is handed");
         assert!(verify_findings(&[run]).is_none(), "so the umbrella dispatches no refine");
         assert_eq!(umbrella_status(&[MemberOutcome::Environment]), "environment");
+    }
+
+    #[test]
+    fn an_all_requested_suppress_scan_waits_for_sign_off_instead_of_failing() {
+        // #6031: a scan whose every finding states a request leaves by the
+        // requested exit, and that exit passes carrying the requests — it is
+        // never a finding a repair lap is dispatched for, because the lane
+        // has nothing to change on a line whose only remaining reader is the
+        // operator.
+        let suppress = verify_command(SUPPRESS_MEMBER).expect("verify.suppress mapped");
+        assert_eq!(
+            member_outcome(&suppress, true, Some(SUPPRESSION_REQUESTED_EXIT)),
+            MemberOutcome::Passed,
+            "an all-requested scan passes"
+        );
+        assert_eq!(
+            member_outcome(&suppress, true, Some(1)),
+            MemberOutcome::Failed,
+            "while one unrequested finding still fails"
+        );
+
+        let log = "xtask/src/bloom/roll/mod.rs:144 — allow(clippy::disallowed_methods) — #[allow(clippy::disallowed_methods)] // aether-suppression-request: xtask reads the coordinator's own repository setting; not cap config\n";
+        let run = MemberRun::plain(
+            SUPPRESS_MEMBER,
+            MemberOutcome::Passed,
+            log.as_bytes().to_vec(),
+            SUPPRESSION_REQUESTED_EXIT,
+        );
+
+        assert!(run.findings().is_none(), "a requested scan hands no repair work to a Refine");
+        assert_eq!(run.suppression_requests().len(), 1, "and the stated request still rides its own channel");
+        let stored = String::from_utf8_lossy(&run.log);
+        assert!(stored.contains("awaiting sign-off"), "the log states the distinct verdict: {stored}");
+        assert!(stored.contains("nothing to change here"), "and that the lane owes it nothing: {stored}");
+        assert!(verify_findings(&[run]).is_none(), "so the umbrella dispatches no refine");
+        assert!(
+            failed_verifiers([(SUPPRESS_MEMBER, MemberOutcome::Passed)]).is_empty(),
+            "charging no verifier identity, so it cannot spend a repair roll"
+        );
     }
 
     #[test]
