@@ -323,6 +323,60 @@ pub struct CoordinatorConfig {
     /// the GitHub connection.
     #[config(env = "AETHER_BLOOMERY_LANE_TARGET_BASE", default = "")]
     pub lane_target_base: String,
+    /// Whether a lane slot is warmed from the per-base target snapshot store
+    /// before it builds (#6047).
+    ///
+    /// On by default. A slot's cargo target directory is otherwise warm for
+    /// whatever the *previous* dispatch in that slot built, which on a fleet
+    /// running many members against one day head means a lane is as likely to
+    /// inherit a stranger's tree as its own base: the same nine-crate closure
+    /// measured four minutes warm and fourteen cold on 2026-09-15. With the
+    /// store on, `verify.base` publishes the day head's whole-workspace build
+    /// under `<lane target base>/snapshots/<base>` and every later lane clones
+    /// it into its slot — a reflink copy on a cache tier that supports one.
+    ///
+    /// Off leaves the store unwritten and unread, and every dispatch starts on
+    /// whatever its slot happened to hold.
+    ///
+    /// Named `AETHER_BLOOMERY_LANE_SNAPSHOTS` rather than under this struct's
+    /// `AETHER_GITHUB` prefix, for the reason the other host-resource knobs
+    /// are: whether a host keeps a second copy of a build tree is a property
+    /// of the machine.
+    #[config(env = "AETHER_BLOOMERY_LANE_SNAPSHOTS", default = true)]
+    pub lane_snapshots_enabled: bool,
+    /// How many published target snapshots the janitor keeps past the bases
+    /// the slots are currently standing on.
+    ///
+    /// A snapshot is a whole cargo target directory — the same order of
+    /// magnitude as a slot's, hundreds of gigabytes on a large workspace — so
+    /// the store is deliberately shallow. The bases in use are kept whatever
+    /// their age; this is the depth of history behind them, which is what
+    /// lets a bloom that seals against yesterday's head still start warm.
+    /// `0` keeps only the in-use bases.
+    ///
+    /// Named `AETHER_BLOOMERY_LANE_SNAPSHOT_KEEP` rather than under this
+    /// struct's `AETHER_GITHUB` prefix: how much cache a host retains is a
+    /// property of the machine.
+    #[config(env = "AETHER_BLOOMERY_LANE_SNAPSHOT_KEEP", default = 3)]
+    pub lane_snapshot_keep: usize,
+    /// How a snapshot is copied: `auto` (the default), `reflink`, `hardlink`,
+    /// or `copy`. Anything else resolves to `auto` with a warning.
+    ///
+    /// `auto` reflinks where the filesystem supports it and falls back to a
+    /// plain byte copy where it does not. It deliberately does **not** fall
+    /// back to hardlinks: cargo truncates fingerprint and build-stamp files in
+    /// place, so a slot sharing inodes with a published snapshot would rewrite
+    /// that snapshot underneath every other slot cloning from it. A host that
+    /// knows its cache tier reflinks (XFS with `reflink=1`, APFS, btrfs) can
+    /// state `reflink` so a silent fall back to a multi-hundred-gigabyte byte
+    /// copy is impossible; `hardlink` is for an operator who has established
+    /// that their toolchain never rewrites in place.
+    ///
+    /// Named `AETHER_BLOOMERY_LANE_SNAPSHOT_CLONE` rather than under this
+    /// struct's `AETHER_GITHUB` prefix: which copy mechanism works is a
+    /// property of the machine's filesystem.
+    #[config(env = "AETHER_BLOOMERY_LANE_SNAPSHOT_CLONE", default = "auto")]
+    pub lane_snapshot_clone_mode: String,
     /// Combined size ceiling, in bytes, across every per-slot cargo target
     /// directory (`<base>/slot-<index>-target`). The janitor sweeps those dirs
     /// only when this total is crossed *and* no lane is running — a cold rebuild
@@ -561,6 +615,9 @@ impl Default for CoordinatorConfig {
             max_concurrent_lanes: 3,
             max_concurrent_provers: 0,
             lane_target_base: String::new(),
+            lane_snapshots_enabled: true,
+            lane_snapshot_keep: 3,
+            lane_snapshot_clone_mode: "auto".to_owned(),
             lane_target_budget_bytes: 68_719_476_736,
             lane_target_scan_interval_secs: 300,
             evidence_retention_days: 7,

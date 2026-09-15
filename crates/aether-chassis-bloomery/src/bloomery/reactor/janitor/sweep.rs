@@ -32,6 +32,7 @@ use crate::bloomery::config::JANITOR_REF_PRUNES_PER_TICK;
 use crate::bloomery::coordination::{
     generation_namespace, preparation_namespace, shared_probe_namespace, shared_run_namespace,
 };
+use crate::bloomery::executor::snapshot;
 use crate::bloomery::reactor::shared_run::SharedStepDescriptor;
 use crate::store::{SharedRunLifecycle, SharedRunRow, StoreBackend, membership};
 
@@ -62,6 +63,9 @@ pub struct JanitorPolicy {
     /// an archive pass will move it. The tick no longer deletes evidence; the
     /// field stays on the policy so the pass and the sweep share one struct.
     pub evidence_retention_days: u64,
+    /// How many published target snapshots survive a prune past the bases the
+    /// slot targets are currently standing on (#6047).
+    pub lane_snapshot_keep: usize,
 }
 
 /// What one pass leaves the next: the free-slot set the last measurement was
@@ -114,6 +118,9 @@ pub struct SweepReport {
     /// measured everything both remove zero directories when the host is over
     /// budget with no free slot.
     pub targets_measured: usize,
+    /// Published target snapshots this pass removed (#6047). Removals, never
+    /// attempts.
+    pub snapshots: usize,
 }
 
 /// The prune seam one janitor tick talks to. [`SourceShell`] is the production
@@ -221,7 +228,22 @@ pub fn sweep(request: &mut SweepRequest<'_>, scan: &mut TargetScan) -> rusqlite:
     let interval = Duration::from_secs(request.policy.target_scan_interval_secs);
     let now = request.now;
     let (target_dirs, targets_measured) = sweep_targets(request, scan, interval, now);
-    Ok(SweepReport { worktrees, refs, target_dirs, targets_measured })
+    // The snapshot store is a cache of target directories and prunes on the
+    // same footing as the slot targets themselves: never a tree, never a
+    // session, never a record. It is bounded by count rather than by bytes,
+    // so unlike the budget eviction it waits for a clear board — a snapshot
+    // whose base no slot is standing on is still the base the bloom that is
+    // walking right now seals against.
+    let snapshots = if between_blooms {
+        snapshot::prune(
+            &request.target_base.join(snapshot::SNAPSHOTS_DIR),
+            request.policy.lane_snapshot_keep,
+            &snapshot::bases_in_use(request.target_base),
+        )
+    } else {
+        0
+    };
+    Ok(SweepReport { worktrees, refs, target_dirs, targets_measured, snapshots })
 }
 
 /// Reclaim only namespaces named by retained immutable plans. Current

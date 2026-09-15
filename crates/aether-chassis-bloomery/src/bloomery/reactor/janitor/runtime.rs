@@ -114,6 +114,7 @@ impl NativeActor for JanitorReactorCapability {
                 lane_target_budget_bytes: config.lane_target_budget_bytes,
                 target_scan_interval_secs: config.target_scan_interval_secs,
                 evidence_retention_days: config.evidence_retention_days,
+                lane_snapshot_keep: config.lane_snapshot_keep,
             },
             scan: TargetScan::default(),
             pruned: HashSet::new(),
