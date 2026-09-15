@@ -103,7 +103,7 @@ impl Journal {
 
     #[must_use]
     pub fn subscriptions(&self) -> Vec<ResourceKey> {
-        vec![ResourceKey::Journal(self.query())]
+        vec![ResourceKey::Journal(self.subscription_key())]
     }
 
     #[must_use]
@@ -192,12 +192,19 @@ impl Journal {
         frame.render_widget(Paragraph::new(self.status_line()).style(palette::body()), chunks[2]);
     }
 
-    fn query(&self) -> JournalQuery {
-        JournalQuery { bloom: self.bloom, from_sequence: self.have, descending: self.have.is_none(), live: self.follow }
+    /// What the shell polls for. A live tail subscribes a stable key and the
+    /// follow cursor rides the request path; a paused screen keeps a one-shot
+    /// cursor page that eviction releases when the cursor moves on.
+    fn subscription_key(&self) -> JournalQuery {
+        if self.follow {
+            JournalQuery { bloom: self.bloom, from_sequence: None, descending: true, live: true }
+        } else {
+            JournalQuery { bloom: self.bloom, from_sequence: self.have, descending: self.have.is_none(), live: false }
+        }
     }
 
     fn ingest(&mut self, store: &Store) {
-        let query = self.query();
+        let query = self.subscription_key();
         let Some(cell) = store.journal(query) else {
             return;
         };
@@ -647,9 +654,12 @@ mod tests {
         let ResourceKey::Journal(next) = view.subscriptions().pop().expect("one subscription") else {
             panic!("the journal subscribes to the journal route");
         };
-        assert!(!next.descending);
-        assert_eq!(next.from_sequence, Some(3));
-        assert_eq!(next.path(), "/journal?from_sequence=3&order=asc");
+        assert_eq!(next, JournalQuery { live: true, ..JournalQuery::default() });
+        assert_eq!(
+            store.request_path(&ResourceKey::Journal(next)),
+            "/journal?from_sequence=3&order=asc",
+            "the follow cursor rides the request, not the subscription key"
+        );
 
         store.apply_journal(
             live(Some(3)),
