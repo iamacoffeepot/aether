@@ -88,6 +88,11 @@ pub struct DispatchRecord {
 impl DispatchRecord {
     /// The [`WorkOrder`] this record dispatches: the record *is* the order plus
     /// its reducer context, so the two cannot name different nonces or lanes.
+    ///
+    /// The whole fan-out, always: a record is a *stage*, and every stage a
+    /// record dispatches answers a complete gate obligation. Only an ADR-0218
+    /// attribution probe narrows, and it does so at the submit that knows it is
+    /// one — see `dispatch_shared_and_record`.
     #[must_use]
     pub fn to_order(&self) -> WorkOrder {
         WorkOrder {
@@ -97,6 +102,7 @@ impl DispatchRecord {
             prompt_manifest: self.prompt_manifest,
             physical_run: None,
             release_physical_run: true,
+            selected_gates: Vec::new(),
         }
     }
 
@@ -404,21 +410,44 @@ pub fn dispatch_and_record_idle(
     }
 }
 
+/// What one step of a shared physical run adds to the ordinary dispatch context.
+///
+/// Held as a value rather than four parameters because the four are one fact
+/// about the *physical step*, while the [`DispatchRecord`] beside them is the
+/// durable stage context — a reader who has to tell the two apart at the call
+/// site has to count arguments to do it.
+pub struct SharedStepDispatch {
+    /// The physical identity a local executor retains its slot and target under.
+    pub physical_run: Digest,
+    /// Release that retained lane once this step settles.
+    pub release_physical_run: bool,
+    /// The absolute instant this step is cancelled at, in Unix milliseconds.
+    pub deadline_unix_millis: u64,
+    /// Gates this step's umbrella narrows its fan-out to (ADR-0218 amendment):
+    /// empty for a step that owes the whole gate set, and the one check an
+    /// attribution probe asked for. It rides the order rather than the record
+    /// because the record is the durable stage context and this is a property
+    /// of the physical step — the caller derives it from that step's own
+    /// descriptor, so it restates the sealed check instead of storing a second
+    /// copy of it.
+    pub selected_gates: Vec<String>,
+}
+
 /// Record and submit one step of a durable shared physical run.
 ///
 /// The ordinary dispatch context remains the nonce trust boundary, while the
 /// order's physical identity tells a local executor which slot and target to
 /// retain between serial steps. The caller records the shared step first, so a
 /// restart can recover this association before the executor sees the order.
+///
 pub fn dispatch_shared_and_record(
     port: &dyn ExecutorPort,
     store: &mut dyn StoreBackend,
     artifacts: Option<&mut ArtifactsCapabilityState>,
     record: &DispatchRecord,
-    physical_run: Digest,
-    release_physical_run: bool,
-    deadline_unix_millis: u64,
+    step: SharedStepDispatch,
 ) -> Result<Settled<WorkHandle>, DispatchError> {
+    let SharedStepDispatch { physical_run, release_physical_run, deadline_unix_millis, selected_gates } = step;
     let mut record = record.clone();
     if gated(&record.transformation.command) {
         match admit_model_dispatch(store, &record) {
@@ -436,6 +465,7 @@ pub fn dispatch_shared_and_record(
     let mut order = record.to_order();
     order.physical_run = Some(physical_run);
     order.release_physical_run = release_physical_run;
+    order.selected_gates = selected_gates;
     match port.submit(&order) {
         Settled::InFlight => Ok(Settled::InFlight),
         Settled::Answered(Ok(handle)) => {

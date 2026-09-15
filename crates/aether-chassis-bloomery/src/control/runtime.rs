@@ -39,16 +39,16 @@ use aether_substrate::mail::mailer::Mailer;
 
 use aether_bloomery::control::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, CancelDispatchPayload,
-    CandidatePreparationPayload, ClaimResult, ClaimSeal, Commit, CommitResult, CompatibilityPreviewPayload,
-    CompleteReleaseResult, ConstructionAdmissionPayload, ContextualDispatchPayload, CoordinationCancelPayload,
-    DispatchPayload, EnumerateClaims, EnumerateClaimsResult, HealOp, IntegratePayload, IntegrationAppendPayload,
-    LandPayload, LoadConfigs, LoadConfigsResult, MemberClaimReleasePayload, MemberVerificationPayload,
-    MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView, ObserveMainline, ObserveMainlineResult,
-    OrphanClaimReleasePayload, OutboxPayload, PartialHeadRepairPayload, PrecheckNodePayload, PrecheckPayload,
-    ProposalPayload, Query, QueryResult, QuerySelector, QueuePrecheckPlanPayload, ReconcileOp, RedispatchPayload,
-    ReplayJournal, ReplayJournalResult, ReviewPass, SharedRunDispatchPayload, SharedRunPlanPayload, SpendQuery,
-    SpendQueryResult, SplicePayload, StudyPayload, Topic, TransferSeal, held_to_seal_error, held_to_supersede_error,
-    plan_heals, reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
+    CancelLanePayload, CandidatePreparationPayload, ClaimResult, ClaimSeal, Commit, CommitResult,
+    CompatibilityPreviewPayload, CompleteReleaseResult, ConstructionAdmissionPayload, ContextualDispatchPayload,
+    CoordinationCancelPayload, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, HealOp, IntegratePayload,
+    IntegrationAppendPayload, LandPayload, LoadConfigs, LoadConfigsResult, MemberClaimReleasePayload,
+    MemberVerificationPayload, MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView, ObserveMainline,
+    ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, PartialHeadRepairPayload, PrecheckNodePayload,
+    PrecheckPayload, ProposalPayload, Query, QueryResult, QuerySelector, QueuePrecheckPlanPayload, ReconcileOp,
+    RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, SharedRunDispatchPayload, SharedRunPlanPayload,
+    SpendQuery, SpendQueryResult, SplicePayload, StudyPayload, Topic, TransferSeal, held_to_seal_error,
+    held_to_supersede_error, plan_heals, reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
 };
 use aether_bloomery::{
     BloomId, BloomStatus, CalibrationDocument, CalibrationLedger, CandidatePreparationPlan, ClaimRefKind,
@@ -1466,6 +1466,7 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::ResumeHostFault { bloom, .. }
         | Fact::SpliceAssembled { bloom, .. }
         | Fact::MemberExecutorFault { bloom, .. }
+        | Fact::MemberDeadlineExpired { bloom, .. }
         | Fact::FoldRefused { bloom, .. }
         | Fact::ContainmentRefused { bloom, .. }
         | Fact::SurfaceRequested { bloom, .. }
@@ -1476,7 +1477,14 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::SurfaceGranted { bloom, .. }
         | Fact::StudyCompleted { bloom, .. }
         | Fact::ProofReused { bloom, .. }
-        | Fact::HoldSharedRunCoalesce { bloom, .. } => Some(*bloom),
+        | Fact::HoldSharedRunCoalesce { bloom, .. }
+        | Fact::AdminEnter { bloom, .. }
+        | Fact::AdminExit { bloom, .. }
+        | Fact::AdminCancelLane { bloom, .. }
+        | Fact::AdminSetCandidate { bloom, .. }
+        | Fact::AdminRerun { bloom, .. }
+        | Fact::AdminWaive { bloom, .. }
+        | Fact::AdminDropLap { bloom, .. } => Some(*bloom),
         Fact::ConstructionCheckpointObserved { checkpoint } => Some(checkpoint.bloom),
         Fact::RequestConstructionAdmission { admission } => Some(admission.dispatch.bloom),
         Fact::ObserveMainline { .. }
@@ -1563,6 +1571,7 @@ fn collect_decision_blooms(effect: &Decision, into: &mut BTreeSet<BloomId>) {
         | Decision::RecordVerifyProof { bloom, .. }
         | Decision::RecordVerifyReuse { bloom, .. }
         | Decision::RecordStageCatalog { bloom, .. }
+        | Decision::RecordRedVerify { bloom, .. }
         | Decision::RecordPipelineManifest { bloom, .. }
         | Decision::RecordCompositionFinding { bloom, .. }
         | Decision::RecordAdjudication { bloom, .. }
@@ -1578,6 +1587,9 @@ fn collect_decision_blooms(effect: &Decision, into: &mut BTreeSet<BloomId>) {
         | Decision::RecordMemberMachinery { bloom, .. }
         | Decision::RecordWithdrawal { bloom, .. }
         | Decision::CancelDispatch { bloom, .. }
+        | Decision::CancelLane { bloom, .. }
+        | Decision::RecordAdminMode { bloom, .. }
+        | Decision::RecordAdminAct { bloom, .. }
         | Decision::ReleaseMemberClaimRef { bloom, .. }
         | Decision::MarkBloomWithdrawn { bloom, .. }
         | Decision::RecordAggregateGatePass { bloom, .. }
@@ -1777,6 +1789,7 @@ fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError>
         | Decision::DispatchBaseVerify { .. }
         | Decision::DispatchProposal { .. }
         | Decision::CancelDispatch { .. }
+        | Decision::CancelLane { .. }
         | Decision::ReleaseMemberClaimRef { .. } => direct_outbox_payload_bytes(effect)?,
         Decision::DispatchAttempt { .. } => dispatch_attempt_outbox(effect)?,
         Decision::DispatchIntegration { .. } => integration_outbox(effect)?,
@@ -1823,6 +1836,7 @@ fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError>
         | Decision::AdvanceMainline { .. }
         | Decision::RecordObservation { .. }
         | Decision::RecordStageCatalog { .. }
+        | Decision::RecordRedVerify { .. }
         | Decision::RecordPipelineManifest { .. }
         | Decision::RecordCompositionFinding { .. }
         | Decision::RecordAdjudication { .. }
@@ -1844,7 +1858,9 @@ fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError>
         | Decision::RecordPrecheckState { .. }
         | Decision::RecordCoordinationState { .. }
         | Decision::QueueProposal { .. }
-        | Decision::DequeueProposal { .. } => None,
+        | Decision::DequeueProposal { .. }
+        | Decision::RecordAdminMode { .. }
+        | Decision::RecordAdminAct { .. } => None,
     })
 }
 
@@ -1879,6 +1895,9 @@ fn direct_outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, Wir
         }
         Decision::CancelDispatch { bloom, workpiece } => {
             Some(to_vec(&CancelDispatchPayload { bloom: bloom.0, workpiece: workpiece.clone() })?)
+        }
+        Decision::CancelLane { bloom, workpiece, nonce } => {
+            Some(to_vec(&CancelLanePayload { bloom: bloom.0, workpiece: workpiece.clone(), nonce: nonce.clone() })?)
         }
         Decision::ReleaseMemberClaimRef { bloom, workpiece } => {
             Some(to_vec(&MemberClaimReleasePayload { bloom: bloom.0, workpiece: workpiece.clone() })?)

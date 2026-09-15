@@ -56,8 +56,8 @@ use crate::control::ControlCore;
 #[cfg(feature = "github")]
 use crate::source::SourceCapability;
 use crate::store::{
-    CreateCommission, EnqueueScopeRun, ListBloomDispatches, ListCommissions, LoadCommission, LoadCommissionResult,
-    LookupDispatch, PageJournal, RecordConfig, StoreCapability, WriteScopeRevision,
+    CancelOrder, CreateCommission, EnqueueScopeRun, ListBloomDispatches, ListCommissions, LoadCommission,
+    LoadCommissionResult, LookupDispatch, PageJournal, RecordConfig, StoreCapability, WriteScopeRevision,
 };
 
 /// Per-process ceilings on the pre-seal shaping maps. Staged workpieces and
@@ -461,6 +461,8 @@ pub(super) enum Routed {
     GetRange(GetRange),
     /// Relay to the store; its `RecordConfigResult` answers.
     RecordConfig(RecordConfig),
+    /// Relay to the store; its `CancelOrderResult` answers.
+    CancelOrder(CancelOrder),
     /// Relay to the source cap; its `EnumerateClaimsResult` answers (ADR-0179).
     #[cfg(feature = "github")]
     EnumerateClaims(EnumerateClaims),
@@ -615,6 +617,7 @@ pub(super) fn finish(
         Routed::LookupDispatch(request) => ctx.defer(&request).to::<StoreCapability>(),
         Routed::GetRange(request) => ctx.defer(&request).to::<ArtifactsCapability>(),
         Routed::RecordConfig(request) => ctx.defer(&request).to::<StoreCapability>(),
+        Routed::CancelOrder(request) => ctx.defer(&request).to::<StoreCapability>(),
         #[cfg(feature = "github")]
         Routed::EnumerateClaims(request) => ctx.defer(&request).to::<SourceCapability>(),
         #[cfg(feature = "github")]

@@ -289,6 +289,10 @@ impl Default for BloomView {
             narrowed_compositions: Vec::new(),
             precheck: None,
             coordination: None,
+            admin: None,
+            waivers: Vec::new(),
+            recent_completions: Vec::new(),
+            base_verify: None,
         }
     }
 }
@@ -313,6 +317,7 @@ impl Default for MemberView {
             withdrawn: None,
             leases: Vec::new(),
             evicted_by: None,
+            intake_refusal: None,
         }
     }
 }
@@ -329,6 +334,7 @@ impl Default for CommissionProjection {
             recorded_issue: None,
             title: String::new(),
             scope: None,
+            intent_text: None,
         }
     }
 }

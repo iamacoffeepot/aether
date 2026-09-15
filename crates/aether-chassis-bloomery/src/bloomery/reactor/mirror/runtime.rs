@@ -1124,6 +1124,7 @@ mod tests {
                 recorded_issue,
                 title: String::new(),
                 scope: None,
+                intent_text: None,
             })
             .unwrap(),
             payload_schema: None,

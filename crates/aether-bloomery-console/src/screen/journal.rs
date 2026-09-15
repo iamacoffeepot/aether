@@ -10,11 +10,11 @@ use std::time::Instant;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
-use serde_json::Value;
 
+use super::journal_meaning;
 use crate::cursor::Cursor;
 use crate::dto::{DigestHex, JournalPage, JournalRecordView};
 use crate::keys::{KeyHint, Outcome};
@@ -103,7 +103,7 @@ impl Journal {
 
     #[must_use]
     pub fn subscriptions(&self) -> Vec<ResourceKey> {
-        vec![ResourceKey::Journal(self.query())]
+        vec![ResourceKey::Journal(self.subscription_key())]
     }
 
     #[must_use]
@@ -192,12 +192,19 @@ impl Journal {
         frame.render_widget(Paragraph::new(self.status_line()).style(palette::body()), chunks[2]);
     }
 
-    fn query(&self) -> JournalQuery {
-        JournalQuery { bloom: self.bloom, from_sequence: self.have, descending: self.have.is_none(), live: self.follow }
+    /// What the shell polls for. A live tail subscribes a stable key and the
+    /// follow cursor rides the request path; a paused screen keeps a one-shot
+    /// cursor page that eviction releases when the cursor moves on.
+    fn subscription_key(&self) -> JournalQuery {
+        if self.follow {
+            JournalQuery { bloom: self.bloom, from_sequence: None, descending: true, live: true }
+        } else {
+            JournalQuery { bloom: self.bloom, from_sequence: self.have, descending: self.have.is_none(), live: false }
+        }
     }
 
     fn ingest(&mut self, store: &Store) {
-        let query = self.query();
+        let query = self.subscription_key();
         let Some(cell) = store.journal(query) else {
             return;
         };
@@ -351,22 +358,20 @@ impl Journal {
             }
         }
         let end = self.scroll.saturating_add(height).min(self.records.len());
-        let mut items = Vec::new();
-        for record in self.records.get(self.scroll..end).unwrap_or_default() {
-            items.push(ListItem::new(truncate(&collapse_record(record), width)));
-        }
-        if items.is_empty() {
-            items.push(ListItem::new(self.empty_label()));
-        }
         let highlight = self
             .cursor
             .selected_index(&self.records, |record| record.sequence)
             .filter(|index| *index >= self.scroll && *index < end)
             .map(|index| index - self.scroll);
-        let list = List::new(items)
-            .style(palette::body())
-            .highlight_style(palette::cursor())
-            .highlight_symbol(super::caret(self.enter_pushes()));
+        let mut items = Vec::new();
+        for (offset, record) in self.records.get(self.scroll..end).unwrap_or_default().iter().enumerate() {
+            let selected = highlight.is_some_and(|at| at == offset);
+            items.push(ListItem::new(row_line(record, selected, width)));
+        }
+        if items.is_empty() {
+            items.push(ListItem::new(self.empty_label()));
+        }
+        let list = List::new(items).style(palette::body()).highlight_symbol(super::caret(self.enter_pushes()));
         let mut state = ListState::default().with_selected(highlight);
         frame.render_stateful_widget(list, area, &mut state);
     }
@@ -462,6 +467,8 @@ impl Record {
             Some(record) => {
                 lines.push(plain(format!("key  {}", record.idempotency_key)));
                 lines.push(plain(format!("decider  {}", record.decider)));
+                let mean = journal_meaning::meaning(record);
+                lines.push(plain(format!("meaning  {mean}")));
                 lines.push(plain("event"));
                 lines.extend(super::json::present(&record.event));
                 lines.push(plain("outcome"));
@@ -483,95 +490,79 @@ fn plain(text: impl Into<String>) -> Line<'static> {
     Line::from(Span::styled(text.into(), palette::body()))
 }
 
-/// One-line collapse: sequence, fact kind, bloom prefix, member, outcome.
-fn collapse_record(record: &JournalRecordView) -> String {
-    let fact = variant_name(&record.event, "fact");
-    let bits = fact_bits(&record.event);
-    let outcome = variant_name(&record.outcome, "outcome");
-    let mut parts = vec![record.sequence.to_string(), fact];
-    if let Some(bloom) = bits.bloom {
-        parts.push(bloom);
-    }
-    if let Some(member) = bits.member {
-        parts.push(member);
-    }
-    if !outcome.is_empty() && outcome != "null" {
-        parts.push(outcome);
-    }
-    parts.join("  ")
-}
-
 fn record_matches(record: &JournalRecordView, needle: &str) -> bool {
-    collapse_record(record).contains(needle) || record.idempotency_key.contains(needle)
+    journal_meaning::rendered_line(record).contains(needle) || record.idempotency_key.contains(needle)
 }
 
-fn variant_name(value: &Value, field: &str) -> String {
-    let Some(obj) = value.as_object() else {
-        return value.to_string();
+/// One fixed-column row. The selected row paints whole in the cursor style so
+/// the selection stays visible; other rows tint the fact by class and refused
+/// or failed outcomes in the warning colour.
+fn row_line(record: &JournalRecordView, selected: bool, width: usize) -> Line<'static> {
+    if selected {
+        let text = journal_meaning::truncate_ellipsis(&journal_meaning::rendered_line(record), width.max(1));
+        return Line::from(Span::styled(text, palette::cursor()));
+    }
+    truncate_line(full_line(record), width.max(1))
+}
+
+fn full_line(record: &JournalRecordView) -> Line<'static> {
+    use journal_meaning::{
+        BLOOM_WIDTH, FACT_WIDTH, MEMBER_WIDTH, OUTCOME_WIDTH, SEQ_WIDTH, TIME_WIDTH, bloom_prefix, fact_name,
+        fact_role, format_cell, format_cell_right, meaning, member_name, outcome_is_warning, outcome_name,
+        recorded_time,
     };
-    if let Some(inner) = obj.get(field) {
-        if let Some(name) = inner.as_object().and_then(|map| map.keys().next()) {
-            return name.clone();
+    let fact = fact_name(record);
+    let outcome = outcome_name(record);
+    let sequence = format_cell_right(&record.sequence.to_string(), SEQ_WIDTH);
+    let time = format_cell(&recorded_time(record), TIME_WIDTH);
+    let fact_cell = format_cell(&fact, FACT_WIDTH);
+    let bloom = format_cell(&bloom_prefix(record), BLOOM_WIDTH);
+    let member = format_cell(&member_name(record), MEMBER_WIDTH);
+    let outcome_cell = format_cell(&outcome, OUTCOME_WIDTH);
+    let mean = meaning(record);
+    let fact_style = Style::default().fg(palette::color(fact_role(&fact)));
+    let outcome_style = if outcome_is_warning(&outcome) {
+        Style::default().fg(palette::color(palette::Role::Loud))
+    } else {
+        palette::body()
+    };
+    Line::from(vec![
+        Span::styled(format!("{sequence} "), palette::body()),
+        Span::styled(format!("{time} "), palette::body()),
+        Span::styled(format!("{fact_cell} "), fact_style),
+        Span::styled(format!("{bloom} "), palette::body()),
+        Span::styled(format!("{member} "), palette::body()),
+        Span::styled(format!("{outcome_cell} "), outcome_style),
+        Span::styled(mean, palette::body()),
+    ])
+}
+
+/// Clip a multi-span line to `width` characters, keeping each span's style.
+fn truncate_line(line: Line<'static>, width: usize) -> Line<'static> {
+    let mut kept = 0;
+    let mut spans = Vec::new();
+    for span in line.spans {
+        if kept >= width {
+            break;
         }
-        if let Some(name) = inner.as_str() {
-            return name.to_owned();
+        let count = span.content.chars().count();
+        let room = width.saturating_sub(kept);
+        if count <= room {
+            kept += count;
+            spans.push(span);
+        } else {
+            let content: String = span.content.chars().take(room).collect();
+            spans.push(Span::styled(content, span.style));
+            kept += room;
         }
     }
-    obj.keys().next().cloned().unwrap_or_else(|| value.to_string())
-}
-
-struct FactBits {
-    bloom: Option<String>,
-    member: Option<String>,
-}
-
-fn fact_bits(event: &Value) -> FactBits {
-    let mut bits = FactBits { bloom: None, member: None };
-    walk_fact(event, 0, &mut bits);
-    bits
-}
-
-fn walk_fact(value: &Value, depth: usize, bits: &mut FactBits) {
-    if depth > 6 {
-        return;
-    }
-    match value {
-        Value::Array(items) => {
-            for item in items {
-                walk_fact(item, depth.saturating_add(1), bits);
-            }
-        }
-        Value::Object(obj) => {
-            for (key, val) in obj {
-                match key.as_str() {
-                    "bloom" if bits.bloom.is_none() => bits.bloom = hex_prefix(val),
-                    "workpiece" | "member" if bits.member.is_none() => {
-                        if let Some(name) = val.as_str().filter(|name| !name.is_empty()) {
-                            bits.member = Some(name.to_owned());
-                        } else {
-                            walk_fact(val, depth.saturating_add(1), bits);
-                        }
-                    }
-                    _ => walk_fact(val, depth.saturating_add(1), bits),
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn hex_prefix(value: &Value) -> Option<String> {
-    let hex = value.as_str()?;
-    (hex.len() == 64).then(|| hex.chars().take(8).collect())
-}
-
-fn truncate(text: &str, width: usize) -> String {
-    text.chars().take(width.max(1)).collect()
+    Line::from(spans)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Journal, Record, collapse_record};
+    use super::super::journal_meaning;
+    use super::{Journal, Record};
     use crate::dto::{DigestHex, JournalPage, JournalRecordView};
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
@@ -600,6 +591,27 @@ mod tests {
             event: json!({ "idempotency_key": format!("{fact}:{sequence}"), "fact": { fact: body } }),
             outcome: json!({ "outcome": "Applied" }),
             decider: "test".to_owned(),
+            recorded_unix_millis: None,
+        }
+    }
+
+    fn land_record(sequence: u64, bloom: DigestHex, previous: DigestHex, new: DigestHex) -> JournalRecordView {
+        JournalRecordView {
+            sequence,
+            idempotency_key: format!("Land:{sequence}"),
+            event: json!({
+                "idempotency_key": format!("Land:{sequence}"),
+                "fact": { "Land": { "bloom": bloom.as_hex(), "new_head": new.as_hex() } },
+            }),
+            outcome: json!({
+                "Landed": {
+                    "bloom": bloom.as_hex(),
+                    "previous_base": previous.as_hex(),
+                    "new_head": new.as_hex(),
+                },
+            }),
+            decider: "test".to_owned(),
+            recorded_unix_millis: Some(3_723_000),
         }
     }
 
@@ -642,9 +654,12 @@ mod tests {
         let ResourceKey::Journal(next) = view.subscriptions().pop().expect("one subscription") else {
             panic!("the journal subscribes to the journal route");
         };
-        assert!(!next.descending);
-        assert_eq!(next.from_sequence, Some(3));
-        assert_eq!(next.path(), "/journal?from_sequence=3&order=asc");
+        assert_eq!(next, JournalQuery { live: true, ..JournalQuery::default() });
+        assert_eq!(
+            store.request_path(&ResourceKey::Journal(next)),
+            "/journal?from_sequence=3&order=asc",
+            "the follow cursor rides the request, not the subscription key"
+        );
 
         store.apply_journal(
             live(Some(3)),
@@ -680,15 +695,53 @@ mod tests {
     }
 
     #[test]
-    fn collapse_names_the_fact_bloom_and_member() {
+    fn fixed_columns_name_the_fact_bloom_and_member() {
         // The plausible bug: the row is sequence-only, or it prints the full
         // hex, so the tail cannot be scanned for the bloom and member the
         // operator is watching.
         let row = record(9, "AttemptCompleted", Some(digest(0xab)), Some("issue-5932"));
-        let line = collapse_record(&row);
-        assert!(line.starts_with("9  AttemptCompleted  "), "{line}");
+        let line = journal_meaning::rendered_line(&row);
+        assert!(line.contains("AttemptCompleted"), "{line}");
         assert!(line.contains(&digest(0xab).prefix()), "{line}");
         assert!(line.contains("issue-5932"), "{line}");
         assert!(!line.contains(&digest(0xab).as_hex()), "full hex crowds the row: {line}");
+    }
+
+    #[test]
+    fn land_renders_the_landed_template_with_both_heads() {
+        // The plausible bug: the row says what happened only in the
+        // coordinator's vocabulary (`Land Landed`) with no statement of what
+        // it means for the bloom.
+        let row = land_record(11, digest(1), digest(0xf5), digest(0x1e));
+        let mean = journal_meaning::meaning(&row);
+        assert!(mean.contains(&digest(0xf5).prefix()), "previous head missing: {mean}");
+        assert!(mean.contains(&digest(0x1e).prefix()), "new head missing: {mean}");
+        assert!(mean.contains("landed"), "{mean}");
+        let line = journal_meaning::rendered_line(&row);
+        assert!(line.contains(&mean), "search matches the rendered line including the meaning: {line}");
+        assert!(line.contains("01:02:03"), "recorded time column reads HH:MM:SS: {line}");
+    }
+
+    #[test]
+    fn unknown_fact_renders_the_outcome_name() {
+        // The plausible bug: a new fact blanks the meaning column because no
+        // template names it yet.
+        let row = record(12, "Frobnicate", Some(digest(2)), None);
+        assert_eq!(journal_meaning::meaning(&row), "Applied");
+    }
+
+    #[test]
+    fn bloom_column_starts_at_the_same_column_for_different_length_members() {
+        // Tripwire: fixed columns keep the bloom at one offset no matter how
+        // long the member name runs; variable separators let it drift.
+        let short = record(13, "AttemptCompleted", Some(digest(3)), Some("wp-a"));
+        let long = record(14, "AttemptCompleted", Some(digest(3)), Some("a-much-longer-workpiece-name"));
+        let short_line = journal_meaning::rendered_line(&short);
+        let long_line = journal_meaning::rendered_line(&long);
+        let prefix = digest(3).prefix();
+        let short_at = short_line.find(&prefix).expect("bloom prefix renders");
+        let long_at = long_line.find(&prefix).expect("bloom prefix renders");
+        assert_eq!(short_at, long_at, "bloom drifted: {short_line} vs {long_line}");
+        assert_eq!(short_at, 5 + 1 + 8 + 1 + 30 + 1, "bloom follows the fixed sequence, time, and fact columns");
     }
 }

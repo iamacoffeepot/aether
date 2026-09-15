@@ -9,6 +9,7 @@ mod dispatch;
 mod evidence;
 mod filed;
 mod journal;
+mod journal_meaning;
 mod json;
 mod metrics;
 mod partition;

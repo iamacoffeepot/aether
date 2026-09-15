@@ -32,6 +32,7 @@ const MEMBERS: [(&str, &str, &str); 3] = [
 
 fn coalescing_policy() -> CoordinationPolicy {
     CoordinationPolicy {
+        red_verify: aether_bloomery::RedVerify::Refine,
         verification: VerificationMode::Contextual,
         eager_integration: true,
         max_run_members: 3,

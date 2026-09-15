@@ -83,7 +83,8 @@
 //! can re-attach, the [`orphan`] stand-in for a child inherited across a
 //! coordinator restart, the [`priority`] band that decides which waiting
 //! dispatch takes a slot as it frees, the [`quarantine`] a slot takes when that
-//! child cannot be killed, and the [`backend`] registry +
+//! child cannot be killed, the per-base warm-target [`snapshot`] store a slot
+//! is cloned from before it builds, and the [`backend`] registry +
 //! [`ExecutorBackend`](aether_bloomery::ExecutorBackend) impl over them.
 
 mod affinity;
@@ -101,6 +102,7 @@ mod process_runner;
 mod quarantine;
 mod runner;
 mod session_reuse;
+pub mod snapshot;
 mod task_argv;
 
 pub use backend::LocalExecutor;
@@ -115,6 +117,7 @@ pub use orphan::OrphanedRun;
 pub use process_runner::{CaptureIdentity, ProcessTransformRunner};
 pub use runner::{CapturedObjects, RunLifecycle, RunProcess, RunSpec, TransformRunner};
 pub use session_reuse::{ReusePlan, SessionReuse};
+pub use snapshot::{CloneMode, SlotWarmth, SnapshotStore};
 
 #[cfg(test)]
 pub mod testing;

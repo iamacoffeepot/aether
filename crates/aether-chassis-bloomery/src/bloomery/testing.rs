@@ -37,8 +37,8 @@
 //! [`admit_uploaded`]: crate::bloomery::admit_uploaded
 
 use aether_bloomery::{
-    CandidateRef, CompositionParents, Digest, LaneObservation, Nonce, RetrospectClaim, StageVerdict, StudyCall,
-    StudyCost, VerifyFailureSet,
+    CandidateRef, CarriedCoverage, CompositionParents, Digest, LaneObservation, Nonce, RetrospectClaim, StageVerdict,
+    StudyCall, StudyCost, VerifyFailureSet,
 };
 use serde::{Deserialize, Serialize};
 
@@ -140,6 +140,17 @@ pub struct ScriptedUpload {
     /// the trust boundary refuse the whole set.
     #[serde(default)]
     pub retrospect_findings: Vec<RetrospectClaim>,
+    /// The coverage claim a delta-confirm makes about the gates it did not run
+    /// (ADR-0200's 2026-09-15 amendment).
+    ///
+    /// Scripted rather than classified, for the reason
+    /// [`narrowing`](Self::narrowing) is: the classifier reads a git diff and a
+    /// scripted lane has no worktree. The scenario this drives is about what
+    /// the coordinator does with a claim — take it, or refuse the receipt as
+    /// incomplete and re-dispatch — which is the half no unit test over the
+    /// classifier can reach.
+    #[serde(default)]
+    pub carried: Option<CarriedCoverage>,
 }
 
 impl ScriptedUpload {
@@ -160,6 +171,7 @@ impl ScriptedUpload {
                 calls: self.calls,
                 narrowing: self.narrowing,
                 retrospect_findings: self.retrospect_findings,
+                carried: self.carried,
                 ..LaneObservation::default()
             },
         }

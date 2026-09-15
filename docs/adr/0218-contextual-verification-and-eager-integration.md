@@ -34,16 +34,19 @@ survivor groups, and eager integration in the same coordinated change.
 
 `CoordinationPolicy` is absent for legacy blooms. It selects `Standalone`,
 `WarmSerial`, or `Contextual` verification and independently enables eager
-integration. It seals positive bounds for group size, serial lease service,
-head movement, and reservation lifetime, and a finite attribution-probe
-budget. These are resource and liveness limits, not learned timing estimates.
+integration. It seals positive bounds for group size and serial lease service,
+and a finite attribution-probe budget. These are resource and liveness limits,
+not learned timing estimates. Its `movement_budget` and `reservation_millis`
+are retained for decode and gate nothing (§Amendment: eager integration
+assembles the product).
 The policy also names the expected host class. The executor independently
 supplies its configured class; shared work refuses a mismatch. There is no
 implicit execution class for an enabled policy.
 
 Ready requests are coalesced when a prover can serve them. There is no
-deliberate wait for an arrival and no two-member ceiling. A running plan is
-immutable; subsequent arrivals belong to the next plan. A warm serial lease
+two-member ceiling (§Amendment: shared runs wait for siblings qualifies the
+arrival wait). A running plan is immutable; subsequent arrivals belong to
+the next plan. A warm serial lease
 retains one existing private slot target while running each member's own
 tree and gates. Admission is reassessed between requests, preserving service
 for older work and each order's original deadline.
@@ -169,10 +172,12 @@ Passing, empty, or executor-fault observations cannot seed code-repair findings.
 Cancellation withdraws unstarted logical work while preserving completed
 receipts and other still-needed work. An already-running composition retains
 its immutable input until it finishes or is explicitly cancelled as a
-physical operation. A later head does not itself cancel that composition
-when every fold between its composition base and the current head is
-closure-disjoint from the run's members (#5938); a closure-intersecting
-move, a generation change, or an explicit physical cancel still retires it.
+physical operation. A fold never cancels a composition, whatever it folded
+(§Amendment: eager integration assembles the product): the run is proving the
+node it prepared, and the product growing cannot make that node's proof wrong.
+Only a product tree the bloom *abandoned* — one that dropped coverage the
+composition had already folded in, which is what a generation reset produces —
+strands the run, and an explicit physical cancel still retires it.
 Joining a required final gate preserves the original deadline and uses the
 existing outstanding-order lifecycle.
 
@@ -271,12 +276,15 @@ by that head. Known-red heads block new inheritance. A pending head is
 explicitly unproven context; failures inherited from it require baseline
 diagnosis, not automatic blame on the new member.
 
-Construction admission has two durable steps. A queued request can be refreshed
-while lanes are busy; when capacity is available, the host asks the reducer to
-admit that exact request against the current eligible head. Only the journaled
-admission may dispatch the author order. Replayed admissions retain their nonce
-and original clocks, and a stale request cannot submit an order against an old
-head. Running author orders retain their immutable inherited context.
+Construction admission has two durable steps. When capacity is available, the
+host asks the reducer to admit a queued request against the current eligible
+product, and that admission is where an unstarted construction picks up the
+latest tree. A fold does not push one onto it: a queued order is not re-pinned
+and an admitted one is never relabelled under its lane (§Amendment: eager
+integration assembles the product). Only the journaled admission may dispatch
+the author order. Replayed admissions retain their nonce and original clocks, and
+a stale request cannot submit an order against an abandoned tree. Running author
+orders retain their immutable inherited context.
 
 If withdrawal or replacement invalidates a contribution already present in an
 admitted Construct order's inherited head, the reducer holds the bloom and
@@ -294,21 +302,20 @@ plan retains its exact parent inputs, including previous interaction repairs,
 and the resulting candidate must be verified before promotion. A repair cannot
 make progress by silently reconstructing unrepaired leaves.
 
-### Verify the prepared repair and bound head movement
+### Verify the candidate the member authored
 
-Reconcile resumes the member's own journaled author session. Before Verify,
-`CandidatePreparationPlan` merges its returned authored candidate `R` onto
-the recorded target head `H`, producing `PreparedCandidate P`. A residual
-merge conflict returns to reconciliation without a false Verify pass.
-`Standalone(P)` proves the prepared tree; `R` never receives `P`'s evidence.
-A different final root `Q` still needs its aggregate proof.
+Reconcile resumes the member's own journaled author session, and what it returns
+is verified as it stands. There is no preparation step: the authored candidate
+`R` is the tree Verify judges, on the context the member was constructed on, and
+`R` carries `R`'s evidence. The merge onto the product happens afterwards, at the
+append, and its failure is a fold conflict rather than a failed proof
+(§Amendment: eager integration assembles the product). A different final root `Q`
+still needs its aggregate proof.
 
-Repair displacement is counted separately from code failure. After the
-sealed movement bound, a durable `StableHeadReservation` pins one head
-through preparation, verification, and promotion. New author work can
-continue while append promotions wait. The reservation records its owner,
-generation, head, original deadline, and named hold. A durable wakeup expires
-it; one quiet poll or an in-memory lock is not a stability guarantee.
+`CandidatePreparationPlan`, `PreparedCandidate`, `Fact::CandidatePrepared` and
+`StableHeadReservation` remain in the sealed vocabulary so a bloom carrying one
+across the change still settles it and every journal still decodes. No reducer
+issues them.
 
 ### Coalesced feedback, previews, and visibility
 
@@ -340,9 +347,10 @@ does not bypass source preparation.
 Live plans, outstanding orders, and retained successors keep their pins until
 cleanup can prove they are no longer needed.
 
-The board and API expose the selected head and coverage, each member's
-folded/collided/reconciling state and target head, reservation, pre-check
-freshness, shared physical identity, and member latency.
+The board and API expose the assembled product and its coverage, each member's
+folded/collided/reconciling state, pre-check freshness, shared physical
+identity, and member latency. No member has a target head to show, and the
+reservation row is a decode-only remnant.
 
 **Membership remains atomic at Resolve.** The selected root must cover every
 active member's current contribution. Eager folding does not land members
@@ -381,7 +389,14 @@ the application after the full path is implemented.
 - Distribute a composed green as standalone parent proofs: proves untested
   trees and makes later ejection unsound.
 - Attribute by a diagnostic's path owner: identifies a suspect, not a cause,
-  and loses independent or interaction failures.
+  and loses independent or interaction failures. **Amended 2026-09-15** — the
+  findings' paths are now read first and bisection is the fallback. The
+  objection was right about the cases it named and wrong about how often they
+  occur: a path several members changed, a path no member changed, and a
+  finding naming no path are exactly the three shapes that still buy probes,
+  so nothing the bisection used to catch is lost. What changed is that the
+  common case — a diagnostic pointing at a file exactly one member's candidate
+  touched — stopped paying for a bisection to rediscover it.
 - Reuse a mutable old group after ejection: can retain removed code through
   the branch or inherited ancestry.
 - Restart young builds for arrivals: wastes completed work and changes the
@@ -398,15 +413,23 @@ A contextual shared-run preparation that collides while folding its inputs
 is a fold conflict, not a host or contract refusal. The source reports
 `SharedRunPreparation::Conflict` naming the colliding input, the parent it
 could not place onto, and FoldConflict evidence that carries the conflicting
-paths and contribution diff. The reducer sends those members straight to
-`Reconcile` against the plan's recorded head — the same dispatch
-`Fact::IntegrationAppendConflicted` already uses — and keeps the Standalone
-fallback for `SharedRunPreparation::Refused` (host-class mismatch, invalid
-contract, unreadable delta). Spending a standalone proof on a candidate that
-cannot append is discarded work: the later append rediscovers the same
-collision and drops the claim once Reconcile authors a new tree.
+paths and contribution diff.
+
+This amendment routed those members straight to `Reconcile`, and that half is
+retired (§Amendment: eager integration assembles the product). None of the
+plan's members has been verified at that point, so the collision is not a merge
+anyone can be asked to resolve — there is no proof behind it to merge from, and
+sending an unjudged member to an author lap is what cost issue-5978 75 minutes.
+The refusal is a statement about the *composition*, so every member of the
+refused plan, the collider included, takes the same Standalone fallback
+`SharedRunPreparation::Refused` (host-class mismatch, invalid contract,
+unreadable delta) takes. The collision is real and it is rediscovered at the
+append, on a member that is green by then and can reconcile the merge alone.
 
 ## Amendment: closure-disjoint head movement (2026-09-14, #5938)
+
+**Retired by §Amendment: eager integration assembles the product.** No fold
+retires a run, so there is no tolerance to compute. Kept for the record.
 
 Contextual proof is head-exact up to closure-disjoint deltas. A running
 composition is retired on a head move only when the folds between its
@@ -453,3 +476,376 @@ and its completion admits outcomes for the members that stay. A run that is
 retired keeps its siblings' logical requests, so the re-proposal reuses the
 exact request identities its recorded per-step rows are addressed by rather
 than re-deriving them from a cold dispatch.
+
+## Amendment: proofs survive head movement (2026-09-15)
+
+**Absorbed into §Amendment: eager integration assembles the product**, which
+keeps the conclusion and the evidence and drops the head-relative framing below.
+
+A proof is never discarded because the head moved. A running composition keeps
+running against the node it prepared, and head movement alone — closure-disjoint
+or closure-intersecting — retires nothing.
+
+The closure-disjoint rule above was the wrong axis. A run's proof is over its
+own node, never over the head, so the folds between its composition base and
+the current head cannot make that proof wrong; they only make it *behind*. The
+one head move that does strand a run is a head that **dropped** a pin the
+composition had already folded in: the node's tree then carries ancestry the
+bloom has abandoned, which is the removed-code carry this decision forbids. A
+generation reset is that same case seen from the namespace side — it re-derives
+the head from the bloom base with the invalidated coverage gone — so an epoch
+bump retires exactly the runs that stood on a head carrying the invalidated
+member and leaves a sibling standing on the untouched base alone, which is what
+#5997 already says invalidation may reach. The generation's *base* is fixed for
+a bloom's life, so a genuinely new bloom base is a successor seal rather than a
+live head move.
+
+A `PassedIn` outcome from a run the head overtook is therefore not accepted
+head-exact. It is accepted as a proof of its node, and that node is queued onto
+the *current* head through the ordinary append the closure-disjoint rebase
+already used: a clean fold advances the head with the proved candidate intact,
+and a collision is `Fact::IntegrationAppendConflicted`, which sends exactly the
+members the head does not already carry to Reconcile and on to their
+delta-confirm Verify. Nothing re-runs Construct, the candidate that was proved
+stays the member's candidate, and the receipt keeps naming the node it proved,
+so the evidence stays honest — the merged head earns its own aggregate proof
+rather than inheriting one, because aggregate reuse still matches candidate and
+ordered coverage exactly.
+
+The evidence is measured. In bloom 7a2ff988 on 2026-09-14 runs E57A2F45
+(21 min), BD230801 (14 min), B99A2D0D (6 min) and 95CA8BE6 (23 min) had each
+finished their `verify.check` and were cancelled at the exact instant of an
+integration (22:03:07 and 23:28:37 UTC): 64 prover-minutes of finished proof
+thrown away, and four members re-proposed from scratch against a head their
+completed runs would have folded onto anyway.
+
+## Amendment: reconcile is scoped to the merge (2026-09-15)
+
+A Reconcile lap is a merge, and it is ordered and priced as one.
+
+Bloom `0f16e207` paid for the other reading twice in one member. Issue-5978
+finished construction at 09:28:58 UTC; siblings 5963 and 6022 had integrated
+at 09:25, so its candidate could not be placed onto the moved head and the
+preparation reported `SharedRunPreparation::Conflict` (§Amendment: composition
+conflicts at shared-run preparation). The reducer sent the member to Reconcile,
+and the preparation step this decision then carried resumed its whole
+author session: `dispatch-7168`, 225 model calls, 15.0 minutes, all before its
+verify could start. Then the verify that followed was minted as a first proof
+over the composition base, so the mechanical closure re-proved the member's
+entire change on its way to learning what the merge had done. The change had
+been proved once already. Only the merge was new.
+
+**The order names the merge.** Every collision path that can send a member to
+Reconcile — the legacy fold, the eager append, the reconcile preparation, and
+the shared-run placement — composes one overlay: the situational line naming
+what could not be placed onto which head, a standing merge-only contract, the
+colliding paths under `## Conflicting paths`, and the member's own contribution
+under `## Conflicted candidate`. The contract tells the resumed session that
+its change is already verified as it stands, that the conflicting paths are the
+only places the two sides disagree, and that every other file of its change
+stays byte-identical. The session resumption itself is unchanged: the lap still
+carries the author's context, because resolving a merge in unfamiliar code is
+what that context is for.
+
+The overlay is also read by machine — the executor drain recovers the paths
+from `## Conflicting paths` to hold a Reconcile whose seam a sibling is already
+rebuilding — so the three collision paths that previously wrote a bare
+`Conflicting paths:` line were invisible to that hold. One renderer fixes both
+the prose and the parse.
+
+**The confirming verify diffs against the proof it already has.** When a member
+reaches `Verify` from `Reconcile` and this bloom holds a green verdict for the
+candidate the lap started from — the record's verify memo on the plain line, a
+standalone or `PassedIn` claim under coordination, neither of which a fold
+conflict disturbs — that candidate's checkout becomes the verify
+transformation's `diff_base` and the contract's, in place of the composition
+base or the head the merge landed on. The verdict's artifact digest rides as a
+second transformation input, so the chain reads as what it is: proved node N,
+then delta N to P. A member with no such proof behind it keeps today's range.
+
+The saving is bounded by the closure's granularity, and the honest statement of
+it is narrow. `verify.check` selects by changed *crate*, not by changed hunk,
+so a merge that lands in the same crates the member changed selects exactly the
+gates the full range would have and costs exactly what it cost before. What the
+narrower range buys is the case where the merge is narrower than the change —
+common, because a conflict is usually a few files, but not guaranteed. The
+amendment removes the *re-authoring*, which was unconditional; it makes the
+re-proving conditional rather than free.
+
+## Amendment: a probe runs the check it asks for (2026-09-15)
+
+An attribution probe names exactly one check — `BatchProbeRequest.check` — and
+reads exactly one check back. It nonetheless materialized as an unqualified
+`verify.check`, and the umbrella fans out to every gate the position declares,
+so each probe paid for clippy, docs and test to answer a question none of them
+reports on. Measured on bloom `0f16e207`: run `84DB66FF` planned nine probes
+asking only `verify.suppress` — a scanner that answers in under a second — and
+each ran clippy for 46 to 185 s, docs for 19 to 140 s and test for 49 to 366 s,
+4 to 6 minutes per probe and 37.6 minutes for the batch. Run `A05DA0B9` asked
+`verify.docs` five times and ran clippy and test behind each of them, 21 minutes.
+
+A work order therefore carries a **gate selection**: the gates its umbrella
+fans out to, empty for the whole fan-out. The lane reads it as one `--gate <id>`
+per gate; only the selected gates spawn, the host is preflighted for their
+prerequisites alone, and `evidence.json` records `selected_gates` beside
+`gates`, `failed_verifiers` and the mask derived from them — which then describe
+exactly what ran. A gate that was not selected appears nowhere in the receipt,
+so it can never be read as passed, and a selection naming a gate the position
+does not fan out to is refused rather than filtered to an empty run.
+
+The selection is not a sealed fact. It is not a `Transformation` field and no
+receipt is checked against it: it is the probe's own `BatchCheck` restated for
+the lane, derived at submit time from the step's durable descriptor, so it
+cannot name a check the sealed contract did not ask about — a stored second copy
+could. Only a probe step narrows. The contextual full node and `verify.member`
+select nothing and keep every gate, which is what preserves "subset and baseline
+probes cannot pose as full-node reports" and "ledger admission accepts only
+exact gate obligations declared by the sealed contract": a narrowed run answers
+a subset of the obligation and is admitted only as the probe receipt it is.
+Per-gate observation documents are already written per spawned gate, so a
+narrowed probe's own check reports exactly as before and the gates that did not
+run contribute nothing rather than contributing an absence.
+
+Slot warmth is untouched: the probe runs in the same slot, against the same
+per-gate target directories, under the same sccache keys. What changes is how
+many of those gates it starts.
+
+## Amendment: attribution reads the findings first (2026-09-15)
+
+Attribution treated a gate as a black box that answers only red or green for a
+set, so the only way to name a member was to re-run the gate over subsets. Two
+runs in bloom 0f16e207 measured what that costs when the gate had already said
+who was responsible.
+
+Run 84DB66FF verified issue-6023 and issue-6026 together and came back red on
+`verify.suppress`. Its step-0 findings read, in full, two lines — one naming
+`crates/aether-chassis-bloomery/src/store/schema/tests.rs:238`, one naming
+`xtask/src/bloom/roll/mod.rs:144`. The planner then spent nine probes and 37.6
+minutes — the base tree twice, `{6026, 6023}`, `{6026}` twice, `{6023}` twice,
+and issue-6023's inherited head twice — to conclude that issue-6023 was the
+cause. issue-6026's own gates had been green since 09:10; it integrated at
+10:01. Run A05DA0B9 verified issue-6024 alone, came back red on `verify.docs`
+naming `crates/aether-chassis-bloomery/src/store/read_everything.rs:52:30`, and
+spent five probes and 21 minutes attributing a one-member run to its only
+member.
+
+The findings are now the primary signal. Before any probe is requested, the
+step-0 receipt's findings are split into their `### verify.<gate>` sections and
+each section is read for the paths its findings name. Each member's ownership
+is decided against the paths its candidate changed between the composition base
+and its own tree — the delta, not the declared surface, so a member whose
+surface merely *covers* a file it never touched is not charged with it. The
+declared-surface globs stand in only when no candidate delta is readable, and
+the run's evidence says which reading was used.
+
+A red gate whose findings name only paths that each belong to exactly one
+member charges those members and buys nothing. The gate falls back to
+`next_batch_probe` — that gate alone, over the same members — when the findings
+carry a finding that names no path, name a path no member of the composition
+changed (the base or an inherited head carries it), or name a path several
+members changed. A single-member run charges its member with a red *gate*
+directly, because no other candidate in the composition could have caused it.
+Two shapes are held back from that, both because the base rather than the
+member can be the cause: an inherited member, whose baseline probe is what
+separates its own defect from the head it started on, and a named failing test,
+which can be red on the base already and whose baseline is one exact question
+rather than a whole suite.
+
+Probes also stopped taking two invocations each. The second repetition existed
+to survive a flake, and since #5999 the gate's own same-input replay already
+does that and reports the excused tests on the receipt, so an experiment is now
+one invocation. Receipts recorded under the old rule still validate, so a
+journal carrying repetition-1 rows replays unchanged.
+
+Each attributed member's projected findings now open with a line saying how it
+was named — from the step-0 findings by changed path, by declared surface, as
+the sole member of its run, or by probe. A repair lap reads that row, and being
+told which file named it is a different instruction from being told a bisection
+cornered it.
+
+## Amendment: eager integration assembles the product; there is no head (2026-09-15)
+
+The owner's definition, verbatim:
+
+> eager integration was meant to be a way for RECONCILE to be EAGERLY EXECUTED
+> ON MEMBERS THAT WERE COMPLETED not CHANGE THE HEAD OF OTHER MEMBERS SO THAT
+> THEY BECOME INVALIDATED it was essentially a means of FINALIZING THE FINAL
+> TREE PRODUCT WHILE THINGS WERE MOVING INSTEAD OF WAITING UNTIL THE END TO GET
+> THAT GOING. I dont know where you got this conception of breaking things in
+> progress and strongly linking the "HEAD" of the bloom when there is NO head
+> its just virtual and mean to be the final product
+
+What this decision called the integration head is the **product**: the final
+tree, assembled out of green candidates as they arrive instead of all at once at
+the end. It is virtual. No member stands on it, and it exists so that the
+integration and its proof are finished while the bloom is still moving. Four
+rules follow, and they replace every part of this decision that treated the
+product as a head members were pinned to.
+
+**A member's Verify proves its own candidate.** Standalone, warm serial, or
+contextual node, the verification runs over the tree the member authored, on the
+`ConstructContext` it was constructed on. Nothing is merged onto anything before
+that proof. `CandidatePreparationPlan` is not issued: a Reconcile is never a
+member's first stage after Construct, and a member whose candidate cannot be
+placed has not thereby been judged.
+
+**A green member folds into the product immediately.** Its proved candidate is
+offered as soon as it is proved and folded as soon as an append slot is free.
+The product then earns its own proof eagerly — the delta-confirm range of
+§Amendment: reconcile is scoped to the merge where a proved predecessor stands
+behind it, the aggregate verify otherwise — so the tree that lands is verified as
+it grows rather than only at the end. That is the whole point of doing this
+early.
+
+**A conflicting fold reconciles that one completed member.** The member that
+authored the candidate is green already, so the only thing the collision
+establishes is the merge, and the merge-only order of §Amendment: reconcile is
+scoped to the merge is the honest instruction. The lap resumes that member's own
+session and its output folds again. A composition that will not assemble at
+shared-run preparation is not this case: none of its members has been verified
+yet, so there is no proof to merge from, and each falls back to proving the tree
+it authored. The collision is rediscovered at the append, where it belongs.
+
+**Nothing in flight is invalidated by a fold.** A fold retires no run, cancels no
+composition, re-contexts no author, and re-prepares no candidate. A running
+member is proving a node the fold cannot make wrong. An author holding a lane
+keeps the exact tree it was handed; a construction that has not started takes the
+latest product at the moment the reducer admits it, which is where §Eager
+immutable heads already put that read, and never by being re-pinned under a lane.
+The single event that does reach unstarted work is a product tree the bloom has
+*abandoned* — a repaired root that reset the generation, or an invalidation that
+derived a fresh one — because that tree carries ancestry the bloom no longer
+owns, which is the removed-code carry §Eager immutable heads forbids and the
+one-way reach §Amendment: invalidation carries one way already describes.
+
+These rules retire four pieces of reasoning outright.
+
+*Head-exact proof* (the preparation step §Verify the candidate the member
+authored used to describe) is
+retired. A proof was never over a head; a member's Verify answers for the tree
+the member wrote, and the merge onto the product is a separate, later operation
+whose failure is a merge conflict rather than a failed proof.
+
+*Closure-disjoint head movement* (§Amendment: closure-disjoint head movement,
+#5938) is retired. It asked which folds a running composition could tolerate. No
+fold needs tolerating: the run's node is fixed and its proof stands whatever the
+product does.
+
+*The movement budget* (the reservation §Verify the candidate the member
+authored used to describe) is
+retired. `StableHeadReservation`, `movement_budget`, `reservation_millis` and
+`EagerIntegrationState.movement_count` rationed how often the product could grow
+under a member about to merge onto it. Nothing merges onto the product any more,
+so there is nothing to ration and no repair to steady. The fields stay in the
+sealed vocabulary so existing policies, journals and the
+`StableHeadReservationExpired` fact keep decoding; no reducer writes one and no
+scheduling decision reads one.
+
+*Proofs survive head movement* (§Amendment: proofs survive head movement) is
+absorbed rather than retired. Its conclusion — a proof is never discarded because
+the product grew — is the fourth rule above, and its evidence still stands: in
+bloom `7a2ff988` on 2026-09-14, runs E57A2F45, BD230801, B99A2D0D and 95CA8BE6
+had each finished their `verify.check` and were cancelled at the instant of an
+integration, 64 prover-minutes of finished proof thrown away. What is dropped is
+its framing of a `PassedIn` outcome as a proof accepted *against* a head, and the
+stranding rule it kept: a product tree the bloom abandoned strands a run because
+the tree is gone, not because a head moved under it.
+
+The cost of the retired conception is measured twice. Bloom `0f16e207`,
+2026-09-15: issue-5978 finished construction at 09:28:58 UTC; siblings 5963 and
+6022 had folded at 09:25, so its candidate could not be placed onto the moved
+head, and it was sent to Reconcile *before its first verify* — `dispatch-7168`,
+225 model calls, 15.0 minutes, followed by a 60-minute verify that produced no
+outcome. Nothing about the member's change was in question at any point in those
+75 minutes. Bloom `7a2ff988` paid the other half in cancelled prover time.
+
+The receipt stays honest throughout. A member's evidence names the candidate the
+member proved; the product's evidence names the product tree; and the aggregate
+proof at landing still requires the final product to be proved under matching
+candidate and ordered coverage. Membership remains atomic at Resolve: folding
+early does not land members early.
+
+## Amendment: low tolerance, a red or slow verify ejects (2026-09-15)
+
+A member verification is fifteen minutes of a compiler or it is not a
+verification. `Verify` and `AggregateVerify` recalibrate from one hour to a
+900-second ceiling; the stages a model builds in keep their hour, because an
+hour is a budget to author something and a gate authors nothing. The limit
+remains sealed catalog calibration under ADR-0177 — refinable per stage, still
+nonzero and finite — so a bloom that wants a different ceiling authors one.
+
+A member whose `Verify` does not go green leaves the bloom. `CoordinationPolicy`
+gains `red_verify: RedVerify::{Eject, Refine}`, default `Eject`, and every seal
+records the resolved disposition on its bloom record so a bloom that sealed no
+policy answers it too; a policy sealed before the field upcasts to `Eject`,
+because the disposition is a standing instruction rather than a reconstruction
+of what a bloom once ran under. Under `Eject` three verdicts end the same way —
+a red verdict, a run the host cancelled at the sealed wall clock, and an
+attribution that never resolved which member owed the failure — and the ending
+is the ADR-0149 withdrawal an operator's `xtask bloom withdraw` performs: the
+lane is cancelled, the claim ref and the membership are released, the member is
+skipped by every completeness fold, and **the candidate stays on its ref**. No
+`Refine` is dispatched, no repair roll is spent, and no ADR-0178 verifier
+identity is recorded, because the accounting those ledgers do is about a next
+lap that is not coming. `Refine` seals today's repair loop unchanged for a bloom
+that asks for it.
+
+The departure carries its evidence. `Fact::VerifyFailed` gains `findings`
+alongside its typed `failed_verifiers` — advisory prose, never an accounting
+input, exactly as ADR-0178 requires — and the reducer composes both plus the
+evidence digest into the withdrawal's reason, which is what the GitHub mirror
+renders on the member. Someone picking the candidate up reads what stopped it
+without opening the journal. `WithdrawalCause` gains `Verify`, one cause for all
+three verdicts, because the three answer the same question for a reader: this
+member's work did not pass and nobody is repairing it inside this bloom.
+
+An aggregate verify that comes back red or dies on its wall clock has no member
+to eject, so the bloom parks instead: the finding is filed on the composition's
+channel, the fold is held as the owner's decision context, and an operator hold
+names the aggregate and its evidence so "why did nothing else go out" is
+answerable without the journal. Nothing further is dispatched and the ADR-0191
+re-weave is not spent. A bloom already on an operator's own hold keeps it.
+
+The evidence. On 2026-09-15, bloom `0f16e207`: member issue-5978 spent sixty
+minutes inside one verify run — a thirteen-minute red step plus five attribution
+probes — produced no outcome at all, and was re-run; issue-5969 failed its member
+verify at 09:47 and sat. Refine laps cost seven minutes of model time each plus a
+fresh full verify. The owner's instruction was fifteen minutes, low tolerance,
+and eject rather than wait.
+
+The cost is deliberate. A member that would have gone green on its second lap now
+leaves and is re-scoped into a later bloom, which is more human attention per
+member and fewer members landed per bloom. That trade is the decision: a lap is
+only worth its price when the bloom can tell that the next one will converge, and
+nothing in the journal has ever been able to tell that.
+
+## Amendment: shared runs wait for siblings (2026-09-15, #6027)
+
+A ready contextual request waits for sibling constructs still in flight before
+the scheduler proposes its shared run. The decision's "no deliberate wait for
+an arrival" is retired: a plan proposed the moment its first request is ready
+verifies one member alone, and a sibling construct finishing a minute later
+then pays for a second whole run over nearly the same tree.
+
+The hold triggers only where waiting can change the plan: contextual
+verification, a selected plan that is not a complete survivor group, idle
+prover capacity, and at least one sibling construct still in flight — queued
+or admitted construction on a workpiece outside the selected plan. Warm serial
+and standalone requests never hold, and a plan the survivors already fixed
+proposes at once.
+
+`CoordinationPolicy::coalesce_millis` bounds the wait. `None` is
+`DEFAULT_COALESCE_MILLIS` (two minutes, long enough for sibling constructs
+that finish a minute apart to share one run, short enough that a stuck
+sibling does not park a ready request until its deadline). `Some(0)` proposes
+as soon as a request is ready — the behaviour before this field existed — and
+`Some(n)` waits up to `n` millis from the earliest queued request. The hold
+is capped at the request deadline: it ends at the earlier of the queued time
+plus the bound and the selected requests' earliest deadline, and there is no
+hold at all once that instant has passed.
+
+While the hold stands the scheduler journals
+`Fact::HoldSharedRunCoalesce { bloom, until_unix_millis, waiting_for }`,
+naming the bloom, the instant the hold lifts, and the in-flight sibling
+workpieces it is waiting for — so "why did nothing go out" is answerable
+without re-deriving the scheduler's state.

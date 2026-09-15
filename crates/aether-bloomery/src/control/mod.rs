@@ -313,6 +313,17 @@ topic_vocabulary! {
     ConstructionAdmission,
     ContextualDispatch,
     PartialHeadRepair,
+    /// One named lane an operator cancelled from inside admin mode
+    /// (reducer-minted, from [`Decision::CancelLane`], ADR-0219), drained by
+    /// the executor reactor, which cancels and consumes that one nonce.
+    ///
+    /// Its own topic beside [`Self::CancelDispatch`] rather than a widened
+    /// payload on it: that payload is embedded in the frozen decision mirrors,
+    /// and the two cancellations differ in scope anyway — a withdrawal retires
+    /// every order a member holds, and this stops one lap of a member that is
+    /// staying. Appended so the prior topics' display spellings and ordering
+    /// are unchanged.
+    CancelLane,
 }
 
 impl Topic {
@@ -360,6 +371,7 @@ impl Topic {
             Self::ConstructionAdmission => "topic:construction_admission",
             Self::ContextualDispatch => "topic:contextual_dispatch",
             Self::PartialHeadRepair => "topic:partial_head_repair",
+            Self::CancelLane => "topic:cancel_lane",
         }
     }
 
@@ -387,6 +399,7 @@ impl Topic {
             Decision::DispatchProposal { .. } => Some(Self::Proposal),
             Decision::DispatchStudy { .. } => Some(Self::Study),
             Decision::CancelDispatch { .. } => Some(Self::CancelDispatch),
+            Decision::CancelLane { .. } => Some(Self::CancelLane),
             Decision::ReleaseMemberClaimRef { .. } => Some(Self::MemberClaimRelease),
             Decision::QueuePrecheckPlan { .. } => Some(Self::QueuePrecheckPlan),
             Decision::OfferPrecheck { .. } => Some(Self::OfferPrecheck),
@@ -444,6 +457,7 @@ impl Topic {
             // vocabulary its base declared, are folded onto the bloom record.
             // Nothing is dispatched from either.
             | Decision::RecordStageCatalog { .. }
+            | Decision::RecordRedVerify { .. }
             | Decision::RecordPipelineManifest { .. }
             // Snapshot-only: the composition's findings channel is a record an
             // operator and the weave repair read, and the repair reaches the
@@ -502,6 +516,11 @@ impl Topic {
             // dispatches nothing at all.
             | Decision::RecordWithdrawal { .. }
             | Decision::MarkBloomWithdrawn { .. }
+            // Snapshot-only: the session flag and its log are what `/view` and
+            // the console read. Everything an admin act actually *does* reaches
+            // the host through the ordinary decisions emitted beside it.
+            | Decision::RecordAdminMode { .. }
+            | Decision::RecordAdminAct { .. }
             // Snapshot-only: the composite-gate join is read off the record by
             // the sibling verdict that arrives second. The landing it leads to
             // reaches the reactor through the `DispatchLand` emitted beside it,
@@ -1018,6 +1037,23 @@ pub struct CancelDispatchPayload {
     pub bloom: Digest,
     /// The withdrawn member whose outstanding orders are cancelled and consumed.
     pub workpiece: WorkpieceId,
+}
+
+/// The admin lane-cancel outbox payload (ADR-0219): the bloom, the workpiece,
+/// and the one host dispatch nonce the executor reactor must kill. The control
+/// core enqueues it under [`Topic::CancelLane`] from a
+/// [`Decision::CancelLane`]. Defined here (always compiled) so the host reactor
+/// can decode it inward, cycle-free — like [`CancelDispatchPayload`], whose
+/// member-wide scope it deliberately narrows.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CancelLanePayload {
+    /// The bloom the cancelled order was dispatched under.
+    pub bloom: Digest,
+    /// The workpiece the order belongs to — what the drain checks the resolved
+    /// order against, so a stale nonce cannot cancel a sibling's lane.
+    pub workpiece: WorkpieceId,
+    /// The host dispatch nonce to cancel and consume.
+    pub nonce: String,
 }
 
 /// The withdrawn-member claim-ref release outbox payload (#5327): the bloom

@@ -123,6 +123,7 @@ fn verdict_token(verdict: StageVerdict) -> &'static str {
         StageVerdict::ExecutorFault => "fault",
         StageVerdict::Declined => "declined",
         StageVerdict::SurfaceRequested => "surface",
+        StageVerdict::DeadlineExpiry => "expired",
     }
 }
 
@@ -137,6 +138,7 @@ fn verdict_from_token(token: &str) -> Option<StageVerdict> {
         "fault" => StageVerdict::ExecutorFault,
         "declined" => StageVerdict::Declined,
         "surface" => StageVerdict::SurfaceRequested,
+        "expired" => StageVerdict::DeadlineExpiry,
         _ => return None,
     })
 }

@@ -88,7 +88,9 @@ impl ExecutorReactorCapability {
     /// #3664) — all three submit through the same executor shell and ride the
     /// same intake cycle. It also drains [`Topic::CancelDispatch`] (#5327),
     /// which is the same shell in the other direction: a withdrawn member's
-    /// running lane is killed and its order consumed. And it drains the
+    /// running lane is killed and its order consumed — and [`Topic::CancelLane`]
+    /// (ADR-0219), the same move narrowed to one nonce for an operator stopping
+    /// a single lap of a member that is staying. And it drains the
     /// host-minted [`Topic::ScopeDispatch`] (ADR-0208, #5304) — a pre-bloom
     /// scoping run, submitted through the same shell under an order record
     /// that names no bloom. Last, it is both producer and drainer of the
@@ -105,6 +107,7 @@ impl ExecutorReactorCapability {
         Topic::AggregateVerify,
         Topic::Redispatch,
         Topic::CancelDispatch,
+        Topic::CancelLane,
         Topic::ScopeDispatch,
         Topic::BaseVerify,
         Topic::RefusedDispatch,

@@ -33,7 +33,7 @@ use crate::transform::conventions;
 
 /// Assemble the bundle. Validation is the caller's, so a field left empty by a
 /// bad edit is reported as the named field rather than silently recorded.
-pub(super) fn imported() -> ModelProcessInstructions {
+pub fn imported() -> ModelProcessInstructions {
     ModelProcessInstructions {
         conventions: conventions::section(&source("src/transform/lane_context.md")),
         construct: source("src/transform/construct_instructions.md"),

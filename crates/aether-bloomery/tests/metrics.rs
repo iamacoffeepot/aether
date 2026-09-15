@@ -13,12 +13,13 @@ use aether_data::wire::to_vec;
 
 use aether_bloomery::{
     AgentSelection, BloomId, BloomStatus, CandidateRef, ConfigKind, ConstructionAdmission, CoordinationPolicy,
-    Decision, Decisions, Event, Evidence, EvidenceKind, Fact, Harness, MemberDependency, MemberVerifyLatency,
-    MemberVerifyOutcome, MetricBloom, MetricDispatch, MetricsLedger, ModelOverride, Nonce, Outcome, ReasoningEffort,
-    ResolvedConfigs, SPAN_OUTCOME_RETIRED, SPAN_SUBSTAGE_PREPARE, SealError, SharedRunCompletion, SharedRunMode,
-    SharedRunPlan, SharedRunPreparation, Snapshot, SpendWindow, StageId, StageOverride, StudyCost, StudyRecord,
-    SupersedeError, TimelineGateTiming, TimelineTimings, VerificationMode, VerifyFailureSet, Withdrawal,
-    WithdrawalCause, WorkpieceId, construction_nonce_digest, reduce,
+    Decision, Decisions, Event, Evidence, EvidenceKind, Fact, Harness, IntegrationHead, MemberDependency, MemberPin,
+    MemberVerifyLatency, MemberVerifyOutcome, MetricBloom, MetricDispatch, MetricsLedger, ModelOverride, Nonce,
+    Outcome, ReasoningEffort, RedVerify, ResolvedConfigs, SPAN_OUTCOME_INTEGRATED, SPAN_OUTCOME_RETIRED,
+    SPAN_SUBSTAGE_PREPARE, SealError, SharedRunCompletion, SharedRunMode, SharedRunPlan, SharedRunPreparation,
+    Snapshot, SpendWindow, StageId, StageOverride, StudyCost, StudyRecord, SupersedeError, TimelineGateTiming,
+    TimelineTimings, VerificationMode, VerifyFailureSet, Withdrawal, WithdrawalCause, WorkpieceId,
+    construction_nonce_digest, reduce,
 };
 use common::{claim, compiled_resolved, digest, draft, draft_with_member_override, event, membership, workpiece};
 
@@ -73,6 +74,7 @@ impl Journal {
             movement_budget: 1,
             reservation_millis: 1_000,
             coalesce_millis: None,
+            red_verify: RedVerify::Refine,
             host_class: String::from("test"),
         };
         let mut configs = compiled_resolved();
@@ -1036,5 +1038,72 @@ fn gate_substages_under_an_integrated_run_sum_to_the_run_duration() {
         timeline.spans.iter().any(|span| span.substage.as_deref() == Some(SPAN_SUBSTAGE_PREPARE)),
         "source preparation is a verify substage: {:?}",
         timeline.spans
+    );
+}
+
+/// The plausible bug: a workpiece id recurs across blooms after a withdraw or
+/// supersede, so an `IntegrationAdvanced` for the older bloom must mark only
+/// that bloom's verify span — not the re-bloomed workpiece's in-flight span,
+/// which carries the higher sequence.
+#[test]
+fn integration_advanced_marks_only_the_named_bloom_verify_span() {
+    let mut journal = Journal::coordinated();
+    let plan_old = prepared_shared_run(&mut journal);
+    let run_old = digest(80);
+    journal.admit(
+        &event(
+            "run-started-old",
+            Fact::SharedRunStarted { bloom: journal.bloom, plan: plan_old.digest(), run: run_old },
+        ),
+        Some(6_000),
+    );
+
+    let bloom_new = BloomId(digest(201));
+    let mut plan_new = plan_old;
+    plan_new.requests[0].bloom = bloom_new;
+    let run_new = digest(81);
+    journal.admit(
+        &event("propose-run-new", Fact::ProposeSharedRun { bloom: bloom_new, plan: plan_new.clone() }),
+        Some(6_100),
+    );
+    journal.admit(
+        &event("run-started-new", Fact::SharedRunStarted { bloom: bloom_new, plan: plan_new.digest(), run: run_new }),
+        Some(6_200),
+    );
+
+    let candidate = CandidateRef { tree: digest(TREE), checkout: digest(TREE + 1) };
+    let head = IntegrationHead {
+        generation: digest(70),
+        node: digest(71),
+        candidate,
+        plan: digest(72),
+        coverage: vec![MemberPin { workpiece: workpiece(MEMBER), scope_revision: digest(REVISION), candidate }],
+    };
+    journal.admit(
+        &event("integration-advanced-old", Fact::IntegrationAdvanced { bloom: journal.bloom, plan: digest(72), head }),
+        Some(9_000),
+    );
+
+    let old = journal.ledger.timeline(journal.bloom).spans.into_iter().find(|span| {
+        span.stage == StageId::Verify
+            && span.workpiece == MEMBER
+            && span.run == Some(run_old)
+            && span.substage.is_none()
+    });
+    assert!(
+        old.as_ref().is_some_and(|span| {
+            span.ended_unix_millis == Some(9_000) && span.outcome.as_deref() == Some(SPAN_OUTCOME_INTEGRATED)
+        }),
+        "the named bloom's span is marked integrated: {old:?}"
+    );
+    let new = journal.ledger.timeline(bloom_new).spans.into_iter().find(|span| {
+        span.stage == StageId::Verify
+            && span.workpiece == MEMBER
+            && span.run == Some(run_new)
+            && span.substage.is_none()
+    });
+    assert!(
+        new.as_ref().is_some_and(|span| span.ended_unix_millis.is_none() && span.outcome.is_none()),
+        "the re-bloomed workpiece's span stays in flight: {new:?}"
     );
 }

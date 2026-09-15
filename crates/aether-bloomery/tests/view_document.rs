@@ -10,8 +10,8 @@
 mod common;
 
 use aether_bloomery::{
-    BloomStatus, Evidence, EvidenceKind, Fact, Question, Snapshot, SpendQuiesce, SpendWindow, StageId, VerifyFailure,
-    VerifyFailureSet, ViewDocument, WorkpieceId, decode_row, encode_row, reduce, view_of,
+    BloomStatus, Evidence, EvidenceKind, Fact, Question, RedVerify, Snapshot, SpendQuiesce, SpendWindow, StageId,
+    VerifyFailure, VerifyFailureSet, ViewDocument, WorkpieceId, decode_row, encode_row, reduce, view_of,
 };
 use aether_data::Kind;
 use common::{compiled_resolved, digest, draft, event, membership, observing, sealed_and_resolved};
@@ -213,6 +213,10 @@ fn a_verify_wedge_projects_only_terminal_repeated_identities() {
         &reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default()),
         &compiled_resolved(),
     );
+    // The wedge this case projects is the repair loop's ceiling, which the
+    // default disposition no longer reaches (ADR-0218 §Amendment: low
+    // tolerance): a red verdict ejects instead of spending a roll.
+    snapshot.blooms.get_mut(&bloom).expect("the seal folded").red_verify = RedVerify::Refine;
 
     let construct = event(
         "construct",
@@ -251,6 +255,7 @@ fn a_verify_wedge_projects_only_terminal_repeated_identities() {
                     detail: digest(80 + index),
                 },
                 failed_verifiers,
+                findings: String::new(),
             },
         );
         snapshot = snapshot.apply(

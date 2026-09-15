@@ -1,9 +1,15 @@
 //! Bounded, replayable attribution of failures in an immutable composition.
 //!
-//! A diagnostic supplies a failing check, never a guilty member. The host
-//! executes each requested dependency-closed subset in its retained prover
-//! slot and persists the receipt before asking for the next step. No mutable
-//! composer, arrival timer, or standalone proof is hidden in this policy.
+//! The fallback half of attribution since ADR-0218's amendment of 2026-09-15:
+//! a gate whose findings name a path exactly one member changed is settled by
+//! [`ownership`](super::ownership) without buying anything here, and what
+//! reaches this walk is the residue — a diagnostic naming no path, a path the
+//! base or an inherited head carries, a path several members share. For that
+//! residue a diagnostic still supplies a failing check and never a guilty
+//! member, so the host executes each requested dependency-closed subset in its
+//! retained prover slot and persists the receipt before asking for the next
+//! step. No mutable composer, arrival timer, or standalone proof is hidden in
+//! this policy.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::iter::once;
@@ -62,7 +68,15 @@ pub struct BatchProbeRequest {
     pub baseline: Option<WorkpieceId>,
     /// Exact verifier or test whose result is sought.
     pub check: BatchCheck,
-    /// Independent repetition, zero or one. Replaying a receipt is not a run.
+    /// Which repetition of the experiment this is.
+    ///
+    /// Always zero since the ADR-0218 amendment of 2026-09-15: one invocation
+    /// answers one experiment, because the flake the second repetition existed
+    /// to survive is caught upstream by the gate's own same-input replay
+    /// (`replayed_flakes`, #5999) and a second whole `verify.check` costs four
+    /// to six minutes to re-derive an answer already held. The field stays,
+    /// and `validate_inputs` still admits a one, so a journal carrying
+    /// repetition-1 receipts from before the amendment still replays.
     pub repetition: u8,
 }
 
@@ -149,45 +163,30 @@ impl ProbeHistory<'_> {
         self.discriminated_at(members, check, None)
     }
 
+    /// The verdict this experiment already has, or the one invocation that
+    /// would produce it.
+    ///
+    /// One invocation, not two: see [`BatchProbeRequest::repetition`].
     fn discriminated_at(
         &self,
         members: &[WorkpieceId],
         check: &BatchCheck,
         baseline: Option<&WorkpieceId>,
     ) -> Discrimination {
-        let mut accepted = Vec::new();
-        for repetition in 0..2 {
-            let request = BatchProbeRequest {
-                plan: self.plan,
-                members: members.to_vec(),
-                baseline: baseline.cloned(),
-                check: check.to_owned(),
-                repetition,
-            };
-            let Some(receipt) = self.receipts.iter().find(|receipt| receipt.request == request) else {
-                if self.retained_count < self.budget {
-                    return Discrimination::Next(request);
-                }
-                return Discrimination::Observed(
-                    ProbeVerdict::Unknown,
-                    accepted.iter().map(|receipt: &&BatchProbeReceipt| receipt.evidence).collect(),
-                );
-            };
-            if receipt.verdict == ProbeVerdict::Infrastructure {
-                return Discrimination::Observed(ProbeVerdict::Infrastructure, vec![receipt.evidence]);
-            }
-            if receipt.verdict == ProbeVerdict::Unknown {
-                return Discrimination::Observed(ProbeVerdict::Unknown, vec![receipt.evidence]);
-            }
-            accepted.push(receipt);
-        }
-        let verdict = if accepted[0].invocation != accepted[1].invocation && accepted[0].verdict == accepted[1].verdict
-        {
-            accepted[0].verdict
-        } else {
-            ProbeVerdict::Unknown
+        let request = BatchProbeRequest {
+            plan: self.plan,
+            members: members.to_vec(),
+            baseline: baseline.cloned(),
+            check: check.to_owned(),
+            repetition: 0,
         };
-        Discrimination::Observed(verdict, accepted.iter().map(|receipt| receipt.evidence).collect())
+        let Some(receipt) = self.receipts.iter().find(|receipt| receipt.request == request) else {
+            if self.retained_count < self.budget {
+                return Discrimination::Next(request);
+            }
+            return Discrimination::Observed(ProbeVerdict::Unknown, Vec::new());
+        };
+        Discrimination::Observed(receipt.verdict, vec![receipt.evidence])
     }
 }
 
@@ -291,6 +290,15 @@ fn discriminate_check(
 /// Both halves are examined, preserving independent A/C failures and an
 /// interaction witness when both halves pass. Dependencies close each subset;
 /// an unsplittable dependency group remains an interaction, never scalar blame.
+///
+/// A composition of one is answered without any experiment at all (#6054). A
+/// bisection separates candidates, and there is no second candidate here to
+/// separate the one from: every subset the walk could ask for is either the
+/// member alone or the base, and neither can name an owner the run does not
+/// already have. Measured on bloom 9680c483, where two single-member runs each
+/// bought a baseline and a singleton `verify.check` — minutes apiece — and
+/// then expired against their deadline without recording the red they had held
+/// since step 0.
 #[must_use]
 pub fn next_batch_probe(
     plan: Digest,
@@ -301,6 +309,9 @@ pub fn next_batch_probe(
 ) -> BatchProgress {
     if let Err(reason) = validate_inputs(plan, members, receipts) {
         return BatchProgress::Invalid(reason);
+    }
+    if let [solitary] = members {
+        return BatchProgress::Complete(settle_batch_report(members, sole_member_failures(solitary, failing_checks)));
     }
     let ordered: Vec<WorkpieceId> = members.iter().map(|member| member.workpiece.clone()).collect();
     let history = ProbeHistory {
@@ -319,17 +330,28 @@ pub fn next_batch_probe(
             return BatchProgress::Probe(request);
         }
     }
-    let ejected: BTreeSet<WorkpieceId> = report
-        .failures
+    BatchProgress::Complete(settle_batch_report(members, report.failures))
+}
+
+/// Close a set of narrow failure claims into the report a caller settles on:
+/// who is ejected, and which members carry none of the blocked contributions.
+///
+/// Separate from [`next_batch_probe`] because attribution no longer has one
+/// producer. A gate the step-0 findings name by path is decided without any
+/// probe at all (ADR-0218, amended 2026-09-15), and the two sources' claims
+/// have to be folded into the same ejection and survivor arithmetic — the same
+/// function, not a second copy of it.
+#[must_use]
+pub fn settle_batch_report(members: &[BatchMember], failures: Vec<BatchFailure>) -> BatchReport {
+    let ordered: Vec<WorkpieceId> = members.iter().map(|member| member.workpiece.clone()).collect();
+    let ejected: BTreeSet<WorkpieceId> = failures
         .iter()
         .filter_map(|failure| match failure {
             BatchFailure::Attributed { member, .. } => Some(member.clone()),
             _ => None,
         })
         .collect();
-    report.ejected = ordered.iter().filter(|member| ejected.contains(*member)).cloned().collect();
-    let blocked: BTreeSet<WorkpieceId> = report
-        .failures
+    let blocked: BTreeSet<WorkpieceId> = failures
         .iter()
         .flat_map(|failure| match failure {
             BatchFailure::Attributed { member, .. } | BatchFailure::Inherited { member: Some(member), .. } => {
@@ -340,15 +362,35 @@ pub fn next_batch_probe(
         })
         .cloned()
         .collect();
-    // Inherited or unresolved contributions wait without being ejected or
-    // charged a repair. Their dependents and atomic peers cannot silently
-    // carry the same blocked code into the fresh survivor node.
-    report.survivors = ordered
+
+    BatchReport {
+        ejected: ordered.iter().filter(|member| ejected.contains(*member)).cloned().collect(),
+        // Inherited or unresolved contributions wait without being ejected or
+        // charged a repair. Their dependents and atomic peers cannot silently
+        // carry the same blocked code into the fresh survivor node.
+        survivors: ordered
+            .iter()
+            .filter(|member| dependency_closure(members, from_ref(member)).iter().all(|pin| !blocked.contains(pin)))
+            .cloned()
+            .collect(),
+        failures,
+    }
+}
+
+/// The sole member of a composition of one, charged with each distinct failing
+/// check. The evidence is empty because no probe produced it: the caller folds
+/// the step's own receipt in where a probe digest would have gone.
+fn sole_member_failures(solitary: &BatchMember, failing_checks: &[BatchCheck]) -> Vec<BatchFailure> {
+    failing_checks
         .iter()
-        .filter(|member| dependency_closure(members, from_ref(member)).iter().all(|pin| !blocked.contains(pin)))
-        .cloned()
-        .collect();
-    BatchProgress::Complete(report)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|check| BatchFailure::Attributed {
+            member: solitary.workpiece.clone(),
+            check: check.clone(),
+            evidence: Vec::new(),
+        })
+        .collect()
 }
 
 fn unresolved(
@@ -553,8 +595,29 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_baseline_stops_without_reprobing_the_same_check() {
+    fn a_composition_of_one_is_attributed_without_any_probe() {
+        // Tripwire (#6054): a bisection separates candidates, and a run with
+        // one member has nothing to separate it from. Bloom 9680c483 bought a
+        // baseline and a singleton `verify.check` on two such runs, then
+        // expired against the deadline without recording the red it had held
+        // since step 0.
         let members = [member("a")];
+        let mut probes = 0_u32;
+        let report = drive_requests(&members, 64, |_| {
+            probes += 1;
+            ProbeVerdict::Failed
+        });
+        assert_eq!(probes, 0, "the sole member is the only answer a probe could return");
+        assert_eq!(report.ejected, [members[0].workpiece.clone()]);
+        assert!(report.survivors.is_empty());
+        assert!(
+            matches!(&report.failures[..], [BatchFailure::Attributed { member, .. }] if *member == members[0].workpiece)
+        );
+    }
+
+    #[test]
+    fn an_unknown_baseline_stops_without_reprobing_the_same_check() {
+        let members = [member("a"), member("b")];
         let mut probes = 0_u32;
         let report = drive_requests(&members, 64, |request| {
             probes += 1;
@@ -626,8 +689,42 @@ mod tests {
             verdict: ProbeVerdict::Passed,
             evidence: Digest::from_bytes([3; 32]),
         };
-        let result = next_batch_probe(plan, &[member("a")], &[check()], &[receipt.clone(), receipt], 2);
-        assert!(matches!(result, BatchProgress::Probe(BatchProbeRequest { repetition: 1, .. })));
+        // One retained experiment delivered twice is one spend. Counted twice
+        // against a budget of two, the composition below is never reached and
+        // its members settle as unresolved with a whole probe still unspent.
+        let members = [member("a"), member("b")];
+        let result = next_batch_probe(plan, &members, &[check()], &[receipt.clone(), receipt], 2);
+        assert!(
+            matches!(result, BatchProgress::Probe(BatchProbeRequest { ref members, .. }) if members == &[WorkpieceId("a".to_owned()), WorkpieceId("b".to_owned())]),
+            "the second retained copy must not consume the composition's probe: {result:?}",
+        );
+    }
+
+    #[test]
+    fn one_receipt_settles_an_experiment() {
+        // Tripwire for the ADR-0218 amendment of 2026-09-15. Each experiment
+        // took two independent invocations, so attributing one failing member
+        // against a green base cost twice as many whole `verify.check` runs —
+        // twenty-odd minutes to answer a question the gate's own flake replay
+        // already protects. Four experiments here, one invocation each: the
+        // baseline, the pair, and each half.
+        let members = [member("a"), member("b")];
+        let mut probes = Vec::new();
+        let report = drive_requests(&members, 64, |request| {
+            probes.push(request.clone());
+            if request.members.contains(&WorkpieceId("a".to_owned())) {
+                ProbeVerdict::Failed
+            } else {
+                ProbeVerdict::Passed
+            }
+        });
+        assert_eq!(probes.len(), 4, "the baseline, the pair and both halves: {probes:?}");
+        assert_eq!(
+            probes.iter().map(BatchProbeRequest::digest).collect::<BTreeSet<_>>().len(),
+            4,
+            "no experiment is invoked twice: {probes:?}",
+        );
+        assert_eq!(report.ejected, [members[0].workpiece.clone()]);
     }
 
     #[test]
@@ -650,58 +747,45 @@ mod tests {
     }
 
     #[test]
-    fn replaying_one_invocation_twice_is_not_independent_discrimination() {
+    fn a_journal_holding_a_pre_amendment_repetition_still_replays() {
+        // Repetition-1 receipts sit in journals written before one invocation
+        // per experiment became the rule. They must still validate — a plan
+        // that refused them would wedge every run recorded under the old rule —
+        // while contributing nothing to a walk that no longer asks for them.
         let plan = Digest::from_bytes([1; 32]);
-        let members = [member("a")];
+        let members = [member("a"), member("b")];
         let receipts: Vec<_> = (0..2)
             .map(|repetition| BatchProbeReceipt {
                 request: BatchProbeRequest { plan, members: vec![], baseline: None, check: check(), repetition },
-                invocation: Digest::from_bytes([2; 32]),
+                invocation: Digest::from_bytes([repetition + 2; 32]),
                 verdict: ProbeVerdict::Passed,
                 evidence: Digest::from_bytes([3; 32]),
             })
             .collect();
-        let BatchProgress::Complete(report) = next_batch_probe(plan, &members, &[check()], &receipts, 64) else {
-            panic!("duplicate invocation must remain unknown");
-        };
-        assert!(report.ejected.is_empty());
-        assert!(matches!(&report.failures[..], [BatchFailure::Unknown { .. }]));
+        let result = next_batch_probe(plan, &members, &[check()], &receipts, 64);
+        assert!(
+            matches!(result, BatchProgress::Probe(BatchProbeRequest { ref members, repetition: 0, .. }) if members == &[WorkpieceId("a".to_owned()), WorkpieceId("b".to_owned())]),
+            "the retained baseline answers and the walk moves on: {result:?}",
+        );
     }
 
     #[test]
     fn a_late_member_is_not_blamed_for_its_unverified_inherited_head() {
-        let plan = Digest::from_bytes([1; 32]);
-        let mut late = member("late");
-        late.inherited = true;
-        let mut receipts = Vec::new();
-        loop {
-            match next_batch_probe(plan, from_ref(&late), &[check()], &receipts, 16) {
-                BatchProgress::Probe(request) => {
-                    let verdict = if request.members.is_empty() && request.baseline.is_none() {
-                        ProbeVerdict::Passed
-                    } else {
-                        ProbeVerdict::Failed
-                    };
-                    receipts.push(BatchProbeReceipt {
-                        invocation: Digest::from_bytes(
-                            [u8::try_from(receipts.len() + 2).expect("probe fixture fits a byte"); 32],
-                        ),
-                        evidence: request.digest(),
-                        request,
-                        verdict,
-                    });
-                }
-                BatchProgress::Complete(report) => {
-                    assert!(report.ejected.is_empty());
-                    assert!(report.survivors.is_empty());
-                    assert!(
-                        matches!(&report.failures[..], [BatchFailure::Inherited { member: Some(member), .. }] if *member == late.workpiece)
-                    );
-                    break;
-                }
-                BatchProgress::Invalid(reason) => panic!("{reason}"),
+        let mut members = [member("late"), member("b")];
+        members[0].inherited = true;
+        let report = drive_requests(&members, 16, |request| {
+            if request.baseline.is_some() || request.members.contains(&members[0].workpiece) {
+                ProbeVerdict::Failed
+            } else {
+                ProbeVerdict::Passed
             }
-        }
+        });
+
+        assert!(report.ejected.is_empty(), "the head the late member started on is what repeats the failure");
+        assert_eq!(report.survivors, [members[1].workpiece.clone()]);
+        assert!(
+            matches!(&report.failures[..], [BatchFailure::Inherited { member: Some(member), .. }] if *member == members[0].workpiece)
+        );
     }
 
     #[test]

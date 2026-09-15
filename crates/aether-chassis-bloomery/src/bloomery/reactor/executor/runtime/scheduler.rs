@@ -20,15 +20,84 @@ const JOURNAL_PAGE_ROWS: u32 = 256;
 const MAX_PAGES_PER_TURN: usize = 8;
 const MAX_STALE_RETIREMENTS_PER_TURN: usize = 256;
 
+/// Why a turn with queued requests proposed no shared run.
+///
+/// An empty board and a full queue read the same from outside, and on
+/// 2026-09-15 that cost fifteen minutes of a live bloom (#6053): the scheduler
+/// declined every turn and the only observable was that nothing happened.
+/// Each variant names one refusal in [`drain_member_verifications`], and the
+/// scheduler logs a reason the first turn it holds and again whenever it
+/// changes, so a stall says what it is waiting for without spamming the log at
+/// poll cadence.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ProposalDeclined {
+    /// The projection is still paging the journal and cannot answer whether the
+    /// head request is current.
+    ProjectionBehind,
+    /// The sealed selection policy chose no request from a non-empty queue.
+    EmptySelection,
+    /// The plan carries no request to derive a capacity order from.
+    NoCapacityOrder,
+    /// A scenario gate is holding proposals.
+    #[cfg(any(test, feature = "testing"))]
+    Held,
+    /// The executor reports no idle lane in the plan's pool.
+    PoolFull,
+    /// Coalescing is waiting for a sibling construct before grouping.
+    CoalesceHold,
+}
+
+impl ProposalDeclined {
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::ProjectionBehind => "the coordination projection is still replaying the journal",
+            Self::EmptySelection => "the sealed selection policy chose nothing from the queue",
+            Self::NoCapacityOrder => "the selected plan carries no request to size capacity against",
+            #[cfg(any(test, feature = "testing"))]
+            Self::Held => "a scenario gate is holding proposals",
+            Self::PoolFull => "the executor reports no idle lane in this plan's pool",
+            Self::CoalesceHold => "coalescing is waiting for a sibling construct",
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct MemberVerificationScheduler {
     cursor: u64,
     states: BTreeMap<BloomId, CoordinationState>,
+    /// The refusal already logged, so a steady decline says itself once rather
+    /// than once per poll.
+    declined: Option<ProposalDeclined>,
     #[cfg(any(test, feature = "testing"))]
     proposals_held: bool,
 }
 
 impl MemberVerificationScheduler {
+    /// Note a refusal, logging it the first turn it holds and again whenever
+    /// the reason changes.
+    fn decline(&mut self, declined: ProposalDeclined, queued: usize) {
+        if self.declined != Some(declined) {
+            self.declined = Some(declined);
+            tracing::info!(
+                target: "aether_chassis_bloomery::executor",
+                queued,
+                reason = declined.reason(),
+                "shared-run scheduler is not proposing",
+            );
+        }
+    }
+
+    /// Note that this turn got past every refusal, so the next decline logs.
+    fn proposing(&mut self) {
+        if let Some(declined) = self.declined.take() {
+            tracing::info!(
+                target: "aether_chassis_bloomery::executor",
+                cleared = declined.reason(),
+                "shared-run scheduler is proposing again",
+            );
+        }
+    }
+
     #[cfg(any(test, feature = "testing"))]
     pub(super) fn set_proposals_held(&mut self, held: bool) {
         self.proposals_held = held;
@@ -100,6 +169,31 @@ impl MemberVerificationScheduler {
         self.states.get(&bloom).is_some_and(|state| current_request(state, row).is_some())
     }
 
+    /// Whether coordination still holds `dispatch` queued and unadmitted — the
+    /// intent a `QueueConstructionAdmission` row names, not the admission a
+    /// physical nonce was bound to.
+    ///
+    /// The same journal-read window as
+    /// [`confirm_construction_admission`](Self::confirm_construction_admission),
+    /// and the same reason for it: a stale projection would read a live queued
+    /// intent as spent, and the caller acts on `true` by reviving a retired
+    /// admission row, which must never resurrect an intent coordination has
+    /// moved on from.
+    pub(super) fn confirm_queued_construction(
+        &mut self,
+        store: &mut dyn StoreBackend,
+        dispatch: &aether_bloomery::ContextualAttemptDispatch,
+    ) -> rusqlite::Result<Option<bool>> {
+        self.confirm(store, |scheduler| scheduler.holds_queued_construction(dispatch))
+    }
+
+    fn holds_queued_construction(&self, dispatch: &aether_bloomery::ContextualAttemptDispatch) -> bool {
+        self.states.get(&dispatch.bloom).is_some_and(|state| {
+            state.queued_construction.get(&dispatch.workpiece.0) == Some(dispatch)
+                && !state.admitted_construction.contains_key(&dispatch.workpiece.0)
+        })
+    }
+
     /// Whether coordination still names `row`'s request the current one to
     /// verify, answered from a journal read no older than the caller's own.
     ///
@@ -158,6 +252,7 @@ fn proposal_capacity_order(plan: &SharedRunPlan) -> Option<WorkOrder> {
         prompt_manifest: None,
         physical_run: Some(plan.digest()),
         release_physical_run: false,
+        selected_gates: Vec::new(),
     })
 }
 
@@ -560,7 +655,10 @@ pub(super) fn drain_member_verifications(
                 }
                 // The projection cannot answer this turn, and the proposal is
                 // durable: leave it rather than drop a live plan.
-                None => return Ok(Vec::new()),
+                None => {
+                    scheduler.decline(ProposalDeclined::ProjectionBehind, queued.len());
+                    return Ok(Vec::new());
+                }
                 Some(false) => return replay_proposal(store, &queued, &proposal),
             }
         }
@@ -570,7 +668,10 @@ pub(super) fn drain_member_verifications(
             Some(true) => break first,
             // The projection cannot answer this turn, and the queue row is
             // durable: leave it un-acked rather than retire a live request.
-            None => return Ok(Vec::new()),
+            None => {
+                scheduler.decline(ProposalDeclined::ProjectionBehind, queued.len());
+                return Ok(Vec::new());
+            }
             Some(false) => {}
         }
         store.mark_queued_member_verifications_scheduled(from_ref(&first.request))?;
@@ -583,40 +684,78 @@ pub(super) fn drain_member_verifications(
     };
     let first_payload = from_bytes::<MemberVerificationPayload>(&first.payload)
         .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
-    let Some(state) = scheduler.states.get(&first_payload.request.bloom) else {
+    // Every read of the projection is confined here so the refusal it produces
+    // can be logged against `scheduler` afterwards rather than borrowed against
+    // it mid-decision.
+    let settled = settle_proposal(scheduler, executor, &queued, first_payload.request.bloom, now_unix_millis)?;
+    match settled {
+        ProposalOutcome::Declined(declined) => {
+            scheduler.decline(declined, queued.len());
+            Ok(Vec::new())
+        }
+        ProposalOutcome::Hold(hold) => {
+            scheduler.decline(ProposalDeclined::CoalesceHold, queued.len());
+            Ok(vec![hold])
+        }
+        ProposalOutcome::Propose { plan, requests } => {
+            scheduler.proposing();
+            let event = Event {
+                idempotency_key: IdempotencyKey(format!(
+                    "aether.bloomery.propose_shared_run:{}",
+                    plan.digest().to_hex()
+                )),
+                fact: Fact::ProposeSharedRun { bloom: first_payload.request.bloom, plan: *plan },
+            };
+            let proposal = to_vec(&event).map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
+            store.record_member_verification_proposal(&requests, &proposal)?;
+            let queued = store.queued_member_verifications()?;
+            replay_proposal(store, &queued, &proposal)
+        }
+    }
+}
+
+/// What this turn's selection came to: one plan to propose, one coalescing
+/// hold, or the reason nothing was proposed.
+enum ProposalOutcome {
+    Declined(ProposalDeclined),
+    Hold(Admit),
+    Propose { plan: Box<SharedRunPlan>, requests: Vec<Vec<u8>> },
+}
+
+fn settle_proposal(
+    scheduler: &MemberVerificationScheduler,
+    executor: &dyn ExecutorPort,
+    queued: &[QueuedMemberVerificationRow],
+    bloom: BloomId,
+    now_unix_millis: u64,
+) -> rusqlite::Result<ProposalOutcome> {
+    let Some(state) = scheduler.states.get(&bloom) else {
         return Err(rusqlite::Error::InvalidParameterName(
             "current member verification lost its coordination state".to_owned(),
         ));
     };
-    let indices = SealedPolicySelection.select(state, &queued);
+    let indices = SealedPolicySelection.select(state, queued);
     if indices.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ProposalOutcome::Declined(ProposalDeclined::EmptySelection));
     }
     let rows = indices.iter().map(|index| &queued[*index]).collect::<Vec<_>>();
     let selected = rows.iter().filter_map(|row| current_request(state, row)).collect::<Vec<_>>();
     let plan = build_plan(state, selected);
     let Some(capacity_order) = proposal_capacity_order(&plan) else {
-        return Ok(Vec::new());
+        return Ok(ProposalOutcome::Declined(ProposalDeclined::NoCapacityOrder));
     };
     #[cfg(any(test, feature = "testing"))]
     if scheduler.proposals_held {
-        return Ok(Vec::new());
+        return Ok(ProposalOutcome::Declined(ProposalDeclined::Held));
     }
     if !executor.has_idle_capacity(&capacity_order) {
-        return Ok(Vec::new());
+        return Ok(ProposalOutcome::Declined(ProposalDeclined::PoolFull));
     }
     if let Some(hold) = coalesce_hold(state, &plan.requests, &rows, now_unix_millis)? {
-        return Ok(vec![hold]);
+        return Ok(ProposalOutcome::Hold(hold));
     }
-    let event = Event {
-        idempotency_key: IdempotencyKey(format!("aether.bloomery.propose_shared_run:{}", plan.digest().to_hex())),
-        fact: Fact::ProposeSharedRun { bloom: first_payload.request.bloom, plan },
-    };
-    let proposal = to_vec(&event).map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
     let requests = rows.iter().map(|row| row.request.clone()).collect::<Vec<_>>();
-    store.record_member_verification_proposal(&requests, &proposal)?;
-    let queued = store.queued_member_verifications()?;
-    replay_proposal(store, &queued, &proposal)
+    Ok(ProposalOutcome::Propose { plan: Box::new(plan), requests })
 }
 
 #[cfg(test)]
@@ -629,7 +768,7 @@ mod tests {
         ConstructionAdmissionPayload, ConstructionCheckpoint, ContextualAttemptDispatch, ContextualDispatchPayload,
         ContextualInvocationTemplate, CoordinationPolicy, Digest, ExecutionLimits, GenerationMember, Harness,
         IntegrationHead, MemberPin, MemberVerifyRequest, NetworkProfile, ObservedLaneWrites, ReasoningEffort,
-        SharedRunPhase, StageId, ToolPolicy, Transformation, VerificationContract, VerificationMode,
+        RedVerify, SharedRunPhase, StageId, ToolPolicy, Transformation, VerificationContract, VerificationMode,
         VerificationObligation, WorkHandle, WorkOrder, WorkpieceId, construction_nonce_digest,
     };
 
@@ -743,6 +882,7 @@ mod tests {
                 movement_budget: 2,
                 reservation_millis: 1_000,
                 coalesce_millis: None,
+                red_verify: RedVerify::Refine,
                 host_class: "test-host".to_owned(),
             },
             CompositionContractTemplate {

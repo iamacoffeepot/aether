@@ -95,6 +95,7 @@ fn obligation_fact(view: &ViewDocument, focus: &Focus, kind: InterruptKind) -> O
         InterruptKind::Decision => pending_question(view, focus),
         InterruptKind::Park => park_question(view, focus),
         InterruptKind::Hold => hold_identity(view, focus),
+        InterruptKind::Admin => admin_identity(view, focus),
         InterruptKind::BaseRed => base_identity(view),
         InterruptKind::Findings => findings_identity(view, focus),
         InterruptKind::Wedge => wedge_evidence(view, focus),
@@ -128,6 +129,15 @@ fn hold_identity(view: &ViewDocument, focus: &Focus) -> Option<String> {
     bloom_view(view, *id)
         .and_then(|bloom| bloom.operator_hold.as_ref())
         .map(|hold| tagged("hold", [&hold.operator, &hold.reason]))
+}
+
+fn admin_identity(view: &ViewDocument, focus: &Focus) -> Option<String> {
+    let Focus::Bloom { id } = focus else {
+        return None;
+    };
+    bloom_view(view, *id)
+        .and_then(|bloom| bloom.admin.as_ref())
+        .map(|admin| tagged("admin", [&admin.operator, &admin.reason]))
 }
 
 fn base_identity(view: &ViewDocument) -> Option<String> {
@@ -190,6 +200,7 @@ fn action_clause(kind: InterruptKind) -> &'static str {
         InterruptKind::Quiesce => "raise the ceiling or stand down",
         InterruptKind::Hold => "release",
         InterruptKind::BaseRed => "re-verify or repair the base",
+        InterruptKind::Admin => "finish the repair and exit admin",
     }
 }
 

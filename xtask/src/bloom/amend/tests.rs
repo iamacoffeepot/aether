@@ -204,6 +204,41 @@ fn a_file_entry_the_current_surface_carries_is_coarsened_too() {
     );
 }
 
+// Tripwire: `src` and `tests` are one compilation unit, so a lane blocked on a
+// `tests/` file whose revision declares `src/**` needs the crate, not a second
+// sub-crate glob. The amendment admits the subtree as the whole crate and
+// prints the ask beside the grant, the way it already does for files
+// (issue 6030).
+#[test]
+fn a_sub_crate_subtree_is_coarsened_to_its_crate() {
+    let widening = surface::widen(
+        &policy(&[]),
+        &["crates/example-a/src/**".to_owned()],
+        &["crates/example-a/tests/lib.rs".to_owned(), "crates/example-b/src/**".to_owned()],
+    )
+    .expect("every request is inside the grammar");
+
+    assert_eq!(widening.widened, ["crates/example-a/**", "crates/example-b/**"]);
+    assert_eq!(
+        widening.coarsened,
+        [
+            ("crates/example-a/tests/lib.rs".to_owned(), "crates/example-a/**".to_owned()),
+            ("crates/example-b/src/**".to_owned(), "crates/example-b/**".to_owned()),
+        ],
+        "the plan shows the ask beside the grant",
+    );
+    assert_eq!(
+        widening.inherited,
+        [("crates/example-a/src/**".to_owned(), "crates/example-a/**".to_owned())],
+        "the current surface is admitted as the crate it already meant",
+    );
+    assert_eq!(
+        policy(&[]).unnamed_file_entries(&widening.widened),
+        Vec::<String>::new(),
+        "the surface the successor declares is one the seal door admits",
+    );
+}
+
 // Tripwire: this command advances the tip itself, so a run that failed after
 // the revision write leaves the tip ahead of the sealed revision through no
 // human's doing. Reading that as a re-scope refuses every re-run, and the

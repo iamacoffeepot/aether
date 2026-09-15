@@ -52,6 +52,11 @@ fn a_verify_whose_checkout_lost_its_candidate_is_refused_rather_than_judged() {
     let roots = HarnessRoots::create();
     let mut harness = HarnessBuilder::local_authority(&authority)
         .roots(&roots)
+        // The drift arrives through a member that spent its repair ceiling, so
+        // the bloom seals the repair-lap disposition: under the default a red
+        // Verify withdraws the member on its first verdict and there is no
+        // ceiling, no held candidate, and no repair door to drift through.
+        .refining()
         .script(&failing_verify())
         .cas_land(false)
         .start("stale-candidate-checkout");

@@ -124,6 +124,18 @@ impl Default for JournalQuery {
 }
 
 impl JournalQuery {
+    /// Stable identity for a live tail. The follow cursor rides the request
+    /// path, not the key, so the tail owns one cell however far it advances.
+    /// A one-shot page keeps its full key.
+    #[must_use]
+    pub fn stable_key(self) -> Self {
+        if self.live {
+            Self { bloom: self.bloom, from_sequence: None, descending: true, live: true }
+        } else {
+            self
+        }
+    }
+
     #[must_use]
     pub fn path(self) -> String {
         let mut parts = Vec::new();
@@ -339,6 +351,7 @@ pub struct Store {
     view: Cell<ViewDocument>,
     view_cadence: Duration,
     journals: HashMap<JournalQuery, Cell<JournalPage>>,
+    journal_cursors: HashMap<Option<DigestHex>, u64>,
     artifacts: HashMap<DigestHex, Cell<DecodedArtifact>>,
     transcripts: HashMap<TranscriptQuery, Cell<DispatchFilePage>>,
     prompts: HashMap<PromptQuery, Cell<DispatchFilePage>>,
@@ -366,6 +379,7 @@ impl Store {
             view: Cell::default(),
             view_cadence,
             journals: HashMap::new(),
+            journal_cursors: HashMap::new(),
             artifacts: HashMap::new(),
             transcripts: HashMap::new(),
             prompts: HashMap::new(),
@@ -394,7 +408,7 @@ impl Store {
 
     #[must_use]
     pub fn journal(&self, query: JournalQuery) -> Option<&Cell<JournalPage>> {
-        self.journals.get(&query)
+        self.journals.get(&query.stable_key())
     }
 
     #[must_use]
@@ -519,6 +533,16 @@ impl Store {
             ResourceKey::MetricsDispatches => {
                 format!("{}?from_sequence={}&limit={}", key.path(), self.dispatch_cursor, METRICS_MAX_LIMIT)
             }
+            ResourceKey::Journal(query) if query.live => {
+                let stable = query.stable_key();
+                self.journal_cursors.get(&stable.bloom).copied().map_or_else(
+                    || stable.path(),
+                    |cursor| {
+                        JournalQuery { bloom: stable.bloom, from_sequence: Some(cursor), descending: false, live: true }
+                            .path()
+                    },
+                )
+            }
             _ => key.path(),
         }
     }
@@ -533,7 +557,7 @@ impl Store {
                 self.view.completed_at.is_none_or(|at| at.elapsed() >= self.view_cadence)
             }
             ResourceKey::Journal(query) if query.live => {
-                let Some(cell) = self.journals.get(query) else {
+                let Some(cell) = self.journals.get(&query.stable_key()) else {
                     return true;
                 };
                 !cell.inflight && cell.completed_at.is_none_or(|at| at.elapsed() >= self.view_cadence)
@@ -589,7 +613,7 @@ impl Store {
     pub fn is_inflight(&self, key: &ResourceKey) -> bool {
         match key {
             ResourceKey::View => self.view.inflight,
-            ResourceKey::Journal(query) => self.journals.get(query).is_some_and(|cell| cell.inflight),
+            ResourceKey::Journal(query) => self.journals.get(&query.stable_key()).is_some_and(|cell| cell.inflight),
             ResourceKey::Artifact(digest) => self.artifacts.get(digest).is_some_and(|cell| cell.inflight),
             ResourceKey::Transcript(query) => self.transcripts.get(query).is_some_and(|cell| cell.inflight),
             ResourceKey::Prompt(query) => self.prompts.get(query).is_some_and(|cell| cell.inflight),
@@ -611,7 +635,7 @@ impl Store {
     pub fn mark_inflight(&mut self, key: &ResourceKey) {
         match key {
             ResourceKey::View => self.view.inflight = true,
-            ResourceKey::Journal(query) => self.journals.entry(*query).or_default().inflight = true,
+            ResourceKey::Journal(query) => self.journals.entry(query.stable_key()).or_default().inflight = true,
             ResourceKey::Artifact(digest) => self.artifacts.entry(*digest).or_default().inflight = true,
             ResourceKey::Transcript(query) => self.transcripts.entry(query.clone()).or_default().inflight = true,
             ResourceKey::Prompt(query) => self.prompts.entry(query.clone()).or_default().inflight = true,
@@ -640,11 +664,43 @@ impl Store {
     }
 
     pub fn apply_journal(&mut self, query: JournalQuery, result: Result<JournalPage, String>) {
-        let cell = self.journals.entry(query).or_default();
+        if query.live
+            && let Ok(page) = &result
+        {
+            self.advance_journal_cursor(query.bloom, page);
+        }
+        let cell = self.journals.entry(query.stable_key()).or_default();
         match result {
             Ok(page) => cell.apply_ok(page),
             Err(error) => cell.apply_err(error),
         }
+    }
+
+    /// The follow cursor is the furthest sequence the tail has seen: the
+    /// server's continuation when the page truncated, else the highest shown
+    /// record. An empty caught-up page carries neither and keeps the old cursor.
+    fn advance_journal_cursor(&mut self, bloom: Option<DigestHex>, page: &JournalPage) {
+        let furthest =
+            page.next_from_sequence.into_iter().chain(page.records.iter().map(|record| record.sequence)).max();
+        if let Some(furthest) = furthest {
+            let cursor = self.journal_cursors.entry(bloom).or_default();
+            *cursor = (*cursor).max(furthest);
+        }
+    }
+
+    /// Drop journal cells no screen subscribes to. The followed tail keeps its
+    /// one stable cell; a popped screen's one-shot page — and a released live
+    /// cursor — goes with it, so a fresh follower reopens newest-first.
+    pub fn evict_unsubscribed_journals(&mut self, subscribed: &[ResourceKey]) {
+        self.journals.retain(|query, _| subscribed.contains(&ResourceKey::Journal(*query)));
+        let live: Vec<Option<DigestHex>> = subscribed
+            .iter()
+            .filter_map(|key| match key {
+                ResourceKey::Journal(query) if query.live => Some(query.bloom),
+                _ => None,
+            })
+            .collect();
+        self.journal_cursors.retain(|bloom, _| live.contains(bloom));
     }
 
     pub fn apply_artifact(&mut self, digest: DigestHex, result: Result<DecodedArtifact, String>) {
@@ -746,7 +802,7 @@ impl Store {
     pub fn apply_err(&mut self, key: &ResourceKey, error: impl Display) {
         match key {
             ResourceKey::View => self.view.apply_err(error),
-            ResourceKey::Journal(query) => self.journals.entry(*query).or_default().apply_err(error),
+            ResourceKey::Journal(query) => self.journals.entry(query.stable_key()).or_default().apply_err(error),
             ResourceKey::Artifact(digest) => self.artifacts.entry(*digest).or_default().apply_err(error),
             ResourceKey::Transcript(query) => self.transcripts.entry(query.clone()).or_default().apply_err(error),
             ResourceKey::Prompt(query) => self.prompts.entry(query.clone()).or_default().apply_err(error),
@@ -797,7 +853,7 @@ mod tests {
         CommissionCapability, CoordinatorLogQuery, DispatchFileQuery, JournalQuery, Lane, LogLevel, PromptQuery,
         ResourceKey, Store,
     };
-    use crate::dto::{BloomView, DigestHex, MemberView, MetricDispatch, ViewDocument};
+    use crate::dto::{BloomView, DigestHex, JournalPage, JournalRecordView, MemberView, MetricDispatch, ViewDocument};
     use aether_bloomery::METRICS_MAX_LIMIT;
     use std::thread;
     use std::time::Duration;
@@ -953,6 +1009,61 @@ mod tests {
         assert!(store.due(&once));
         store.mark_inflight(&live);
         assert!(!store.due(&live));
+    }
+
+    #[test]
+    fn the_live_tail_keeps_one_cell_as_the_cursor_advances() {
+        // The plausible bug (issue 5956): the follow poll keys the store by
+        // cursor, so every page that brings records leaves a cell behind and
+        // a console left open on the root grows one page per poll.
+        let mut store = Store::new(Duration::from_secs(1));
+        let tail = JournalQuery { live: true, ..JournalQuery::default() };
+        for sequence in 1..=8u64 {
+            let poll = JournalQuery { from_sequence: Some(sequence), descending: false, live: true, bloom: None };
+            let page = JournalPage {
+                records: vec![JournalRecordView { sequence, ..JournalRecordView::default() }],
+                ..JournalPage::default()
+            };
+            store.apply_journal(poll, Ok(page));
+        }
+        assert_eq!(store.journals.len(), 1);
+        assert!(store.journal(tail).is_some());
+        assert!(store.record(8).is_some());
+        assert_eq!(
+            store.request_path(&ResourceKey::Journal(tail)),
+            "/journal?from_sequence=8&order=asc",
+            "the next poll resumes from the furthest seen sequence"
+        );
+        store.apply_journal(tail, Ok(JournalPage::default()));
+        assert_eq!(store.journals.len(), 1);
+        assert_eq!(
+            store.request_path(&ResourceKey::Journal(tail)),
+            "/journal?from_sequence=8&order=asc",
+            "an empty caught-up page keeps the old cursor"
+        );
+    }
+
+    #[test]
+    fn a_released_journal_page_is_evicted_with_the_next_subscriptions() {
+        // The plausible bug: a popped screen's one-shot page lingers, so every
+        // drill-in leaves a cell behind for as long as the console runs.
+        let mut store = Store::new(Duration::from_secs(1));
+        let live = JournalQuery { live: true, ..JournalQuery::default() };
+        let paged = JournalQuery { bloom: Some(digest(1)), ..JournalQuery::default() };
+        store.apply_journal(live, Ok(JournalPage::default()));
+        store.apply_journal(paged, Ok(JournalPage::default()));
+        assert_eq!(store.journals.len(), 2);
+        store.evict_unsubscribed_journals(&[ResourceKey::Journal(live)]);
+        assert!(store.journal(paged).is_none());
+        assert!(store.journal(live).is_some());
+        store.evict_unsubscribed_journals(&[]);
+        assert!(store.journal(live).is_none());
+        assert_eq!(store.journals.len(), 0);
+        assert_eq!(
+            store.request_path(&ResourceKey::Journal(live)),
+            "/journal",
+            "a released tail drops its cursor, so a fresh follower reopens newest-first"
+        );
     }
 
     #[test]

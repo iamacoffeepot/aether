@@ -126,13 +126,15 @@ fn add_steps(log: &str, total: &mut Usage) {
         // so the cache read is subtracted to leave the uncached input the other
         // arms report — pricing the two apart is the point of the split, and
         // folding them would bill every cached token at the uncached rate.
-        // `reasoning_tokens` is left alone: it is a subset of `output_tokens`,
-        // so adding it would double-count.
+        // `reasoning_tokens` is billed as output on top of `output_tokens`:
+        // the vendor meter for 2026-09-14 read 3.6M against 2.2M output plus
+        // 1.36M reasoning in that day's logs, so the billed output is their
+        // sum and `output_tokens` alone under-prices every reasoning run.
         let call = Call {
             input: count("input_tokens").saturating_sub(count("cache_read_tokens")),
             cache_read: count("cache_read_tokens"),
             cache_write: count("cache_write_tokens"),
-            output: count("output_tokens"),
+            output: count("output_tokens").saturating_add(count("reasoning_tokens")),
         };
 
         total.input += call.input;
@@ -178,7 +180,8 @@ mod tests {
     // Tripwire: the arithmetic over a real pair of `model_completed` steps.
     // Muse's `input_tokens` includes the cached tokens, so `input` must be the
     // uncached remainder — 20475 + (21450 - 20465) — and not the raw sum, which
-    // would price 20465 cached tokens at the uncached rate.
+    // would price 20465 cached tokens at the uncached rate. And reasoning is
+    // billed as output on top, so `output` must be (955 + 474) + (289 + 63).
     #[test]
     fn a_steps_cached_input_is_not_counted_as_uncached_input() {
         let log = concat!(
@@ -196,7 +199,7 @@ mod tests {
 
         assert_eq!(total.input, 21460, "uncached input only: 20475 + (21450 - 20465)");
         assert_eq!(total.cache_read, 20465);
-        assert_eq!(total.output, 1244, "955 + 289, with reasoning left out as a subset of output");
+        assert_eq!(total.output, 1781, "(955 + 474) + (289 + 63): reasoning is billed as output on top");
         assert_eq!(total.cache_write, 0, "a reported zero is a zero");
     }
 
@@ -206,11 +209,12 @@ mod tests {
     // b7f0e4568d4a, every Muse dispatch logged "result record has no per-call
     // usage; skipping session deposit" and every lap ran the pool arm `fresh`.
     // So the breakdown has to survive the aggregation, in call order, with the
-    // same cached-input split the totals use.
+    // same cached-input split the totals use — and each call's billed output,
+    // reasoning included, since the price table bands per call.
     #[test]
     fn each_model_step_is_kept_as_its_own_call_so_a_lap_can_be_deposited() {
         let log = concat!(
-            r#"{"payload":{"event":{"kind":"model_completed","usage":{"input_tokens":20475,"output_tokens":955,"cache_read_tokens":0}}}}"#,
+            r#"{"payload":{"event":{"kind":"model_completed","usage":{"input_tokens":20475,"output_tokens":955,"cache_read_tokens":0,"reasoning_tokens":120}}}}"#,
             "\n",
             r#"{"payload":{"event":{"kind":"model_completed","usage":{"input_tokens":21450,"output_tokens":289,"cache_read_tokens":20465,"cache_write_tokens":7}}}}"#,
             "\n",
@@ -224,8 +228,8 @@ mod tests {
             total.calls.iter().map(|call| (call.input, call.cache_read, call.cache_write, call.output)).collect();
         assert_eq!(
             columns,
-            vec![(20475, 0, 0, 955), (985, 20465, 7, 289)],
-            "one entry per model step, in log order, uncached input split out of each",
+            vec![(20475, 0, 0, 1075), (985, 20465, 7, 289)],
+            "one entry per model step, in log order, uncached input split out of each and reasoning billed into output",
         );
         assert_eq!(total.calls.len(), 2, "the attribution row is bookkeeping over the steps, not a call");
     }

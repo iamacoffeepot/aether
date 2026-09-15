@@ -7,9 +7,9 @@ use std::fmt;
 use std::slice::from_ref;
 
 use aether_bloomery::{
-    Admit, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, LaneObservation, Nonce, PipelineManifest,
-    ResolutionClaim, StageCatalog, StageId, StageResult, StageVerdict, SurfaceRequest, VerifyFailure, VerifyFailureSet,
-    WorkpieceId, classify_findings, normalize_stage_result,
+    Admit, BloomId, CarryRefusal, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, LaneObservation, Nonce,
+    PipelineManifest, ResolutionClaim, StageCatalog, StageId, StageResult, StageVerdict, SurfaceRequest, VerifyFailure,
+    VerifyFailureSet, WorkpieceId, classify_findings, normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 use std::fmt::Write as _;
@@ -20,7 +20,7 @@ use super::retrospect::file_retrospect_findings;
 use crate::bloomery::findings::{FindingsDecomposition, decompose_findings, verification_findings_key};
 use crate::bloomery::precheck::findings_key;
 use crate::bloomery::triage::{TriageVerdict, triage_note, triage_repair};
-use crate::store::{OutstandingOrder, StoreBackend};
+use crate::store::{IntakeRefusalRow, OutstandingOrder, StoreBackend};
 
 /// What a worker uploaded as an attempt result: the nonce it claims to answer,
 /// the digest its evidence is about (what the observation *claims*), the
@@ -118,6 +118,10 @@ pub enum IntakeRefusal {
     /// unratified semantics by admission. The refusal precedes the consume, so
     /// the order stays live.
     SurfaceRequestOutOfStage(StageId),
+    /// The nonce was cancelled by the operator. The lane process was left to
+    /// finish unobserved; its later upload is ignored and never touches the
+    /// reducer.
+    CancelledByOperator(Nonce),
 }
 
 /// An accepted attempt result: the reducer [`Event`] the upload normalized to
@@ -344,10 +348,21 @@ fn unreadable(address: Digest, why: &str) -> PipelineManifest {
 }
 
 /// Decompose a failing aggregate verdict's findings against the bloom's
-/// persisted work-order roster — exactly the workpiece ids the critic's
-/// `## Task — {workpiece}` prompt sections named, so the tag vocabulary is
-/// self-consistent with what the critic was shown. `None` for a passing
+/// persisted work-order roster — the workpiece ids the critic's
+/// `## Task — {workpiece}` prompt sections named. `None` for a passing
 /// verdict or one carrying no findings.
+///
+/// The roster is deliberately the *whole* persisted one, including members an
+/// operator withdrew, even though the prompt now renders only the live ones
+/// (`live_member_orders`). The two are not the same question. This one is
+/// vocabulary: a tag the roster does not know leaves its block unattributed,
+/// which makes the decomposition incomplete and empties the implication — and
+/// an empty implication is the fail-closed over-route the reducer answers by
+/// refusing nothing and re-weaving the whole seam. Keeping a withdrawn id
+/// readable here means a stale in-flight verdict that still names one arrives
+/// at the reducer *labelled*, which is what lets the reducer drop it as a
+/// judgment about work the fold never carried (bloom 0f16e207). Attribution
+/// here, routing there.
 fn aggregate_decomposition(
     store: &mut dyn StoreBackend,
     record: &DispatchRecord,
@@ -596,7 +611,7 @@ fn reviewed_nothing(upload: &UploadedEvidence) -> bool {
 /// places that branch on it, so the fact the admission files and the findings it
 /// persists cannot disagree about what happened.
 fn aggregate_review_faulted(upload: &UploadedEvidence) -> bool {
-    upload.verdict == StageVerdict::ExecutorFault || reviewed_nothing(upload)
+    reached_no_verdict(upload.verdict) || reviewed_nothing(upload)
 }
 
 /// Re-kind an empty verdict's evidence as the fault the admission files it as.
@@ -639,6 +654,25 @@ fn aggregate_review_executor_fault_event(record: &DispatchRecord, evidence: Evid
 /// The idempotency key is its own, so a replayed fault is a no-op against the
 /// journal rather than colliding with the completion key a later real verdict
 /// on the same order would carry.
+/// The admission event for a member stage the host cancelled at its sealed wall
+/// clock (ADR-0177, ADR-0218 §Amendment: low tolerance) — the narrow sibling of
+/// [`member_executor_fault_event`].
+///
+/// Same evidence, same shape, different fact: only the reducer decides what an
+/// expiry costs the member, and it can only decide it if intake says which of
+/// the two the sweep observed.
+fn member_deadline_expired_event(record: &DispatchRecord, evidence: Evidence) -> Event {
+    Event {
+        idempotency_key: AdmissionKey::MemberDeadlineExpired.of(&record.nonce.0),
+        fact: Fact::MemberDeadlineExpired {
+            bloom: record.bloom,
+            workpiece: record.workpiece.clone(),
+            stage: record.stage,
+            evidence,
+        },
+    }
+}
+
 fn member_executor_fault_event(record: &DispatchRecord, evidence: Evidence) -> Event {
     Event {
         idempotency_key: AdmissionKey::MemberExecutorFault.of(&record.nonce.0),
@@ -655,6 +689,20 @@ fn member_executor_fault_event(record: &DispatchRecord, evidence: Evidence) -> E
 /// executor-fault lifecycle.
 fn admits_member_executor_fault(stage: StageId) -> bool {
     stage == StageId::Verify || admits_as_attempt_completed(stage)
+}
+
+/// Whether a claimed verdict says the lane reached no judgment about its
+/// subject at all.
+///
+/// Two verdicts do — [`StageVerdict::ExecutorFault`] and
+/// [`StageVerdict::DeadlineExpiry`] — and everything in this module that asks
+/// "did this run render a verdict" has to accept both. They differ only in what
+/// the *reducer* does with the member afterwards (ADR-0218 §Amendment: low
+/// tolerance); at intake they are one shape, and asking for one of them by name
+/// is how an expiry would silently start refusing at a boundary that had always
+/// admitted its sibling.
+fn reached_no_verdict(verdict: StageVerdict) -> bool {
+    matches!(verdict, StageVerdict::ExecutorFault | StageVerdict::DeadlineExpiry)
 }
 
 /// Whether a claimed [`StageVerdict::ExecutorFault`] has a fact to become.
@@ -727,7 +775,7 @@ fn thread_triage_note(
 /// so the stage ladder in [`admit_uploaded`] reads as one arm per stage.
 fn aggregate_verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
     if record.is_precheck() {
-        let completion = if upload.verdict == StageVerdict::ExecutorFault {
+        let completion = if reached_no_verdict(upload.verdict) {
             aether_bloomery::PrecheckCompletion::HostFault(evidence)
         } else if verdict_passed(upload.verdict) {
             aether_bloomery::PrecheckCompletion::Passed(evidence)
@@ -793,6 +841,26 @@ fn base_verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidenc
 /// `ContainmentRefused` (ADR-0209), and every other failing set is a
 /// candidate `VerifyFailed`.
 fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
+    // Ahead of the verdict, because an unsound carry poisons a pass as much as
+    // a failure: the gates the run did not execute were judged over a different
+    // tree, so a green receipt on that footing is the false green the whole
+    // mechanism exists not to produce (ADR-0200's 2026-09-15 amendment).
+    //
+    // Routed as a host fault on the `Preflight` arm's own reasoning below: the
+    // candidate did nothing wrong and owes no repair roll, and the hold that
+    // fact takes re-dispatches the same member Verify — the full umbrella,
+    // since a refused claim is not one the next lane may carry from either.
+    if let Some(refusal) = incomplete_coverage(upload) {
+        return Event {
+            idempotency_key: AdmissionKey::VerifyFailed.of(&record.nonce.0),
+            fact: Fact::VerifyHostFault {
+                bloom: record.bloom,
+                workpiece: record.workpiece.clone(),
+                evidence,
+                findings: refusal,
+            },
+        };
+    }
     if verdict_passed(upload.verdict) {
         let claim = ResolutionClaim {
             workpiece: record.workpiece.clone(),
@@ -844,9 +912,25 @@ fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Ev
                 workpiece: record.workpiece.clone(),
                 evidence,
                 failed_verifiers: upload.observation.failed_verifiers,
+                findings: upload.observation.findings.clone().unwrap_or_default(),
             }
         },
     }
+}
+
+/// Why this receipt's carried-coverage claim does not stand, or `None` when it
+/// carried nothing or carried soundly.
+///
+/// Only the ledger-free half of the rule
+/// ([`CarriedCoverage::self_consistent`](aether_bloomery::CarriedCoverage::self_consistent)):
+/// intake reads the store's order registry, never the reducer's proof memo, so
+/// "receipt R is on record for exactly tree T" is not a question it is in a
+/// position to ask. What it can ask is whether the claim refutes itself against
+/// the shared delta table — a gate carried that the stated classes reach, an
+/// identity that is not a gate at all, an entry pointing at some other receipt
+/// — and a claim that does is refused here rather than folded into a verdict.
+fn incomplete_coverage(upload: &UploadedEvidence) -> Option<String> {
+    upload.observation.carried.as_ref()?.self_consistent().err().map(CarryRefusal::reason)
 }
 
 /// Every refusal a claimed verdict earns by naming a stage that cannot carry
@@ -868,7 +952,7 @@ fn out_of_stage_refusal(record: &DispatchRecord, upload: &UploadedEvidence) -> O
     // A fault claimed against a stage with no fact to carry it is refused
     // rather than routed — see [`admits_executor_fault`] for the three that
     // have one.
-    if upload.verdict == StageVerdict::ExecutorFault && !admits_executor_fault(stage) && !record.is_precheck() {
+    if reached_no_verdict(upload.verdict) && !admits_executor_fault(stage) && !record.is_precheck() {
         return Some(IntakeRefusal::ExecutorFaultOutOfStage(stage));
     }
     // ADR-0207's two decline verdicts belong to the construct family alone.
@@ -934,20 +1018,56 @@ fn record_scope_verdict(
     Ok(AdmitDecision::Recorded)
 }
 
+/// Answer with `refusal`, recorded against the member whose order it refused.
+///
+/// The broker refuses without touching the reducer, so the refusal reaches no
+/// journal and no projection — before #5969 it landed only in the host log,
+/// where the operator watching `bloom view` never saw it. Standing it on the
+/// member beside its still-outstanding order is what makes the block readable
+/// from the board. A refusal with no order to hang it on (a fabricated or
+/// already-consumed nonce) has no member to stand against and stays a log line.
+fn refused(
+    store: &mut dyn StoreBackend,
+    stored: &OutstandingOrder,
+    refusal: IntakeRefusal,
+) -> Result<AdmitDecision, IntakeError> {
+    store.record_intake_refusal(&IntakeRefusalRow {
+        bloom: stored.bloom.clone(),
+        workpiece: stored.workpiece.clone(),
+        nonce: stored.nonce.clone(),
+        stage: stored.stage.clone(),
+        displayed_digest: stored.displayed_digest.clone(),
+        deadline_unix_millis: stored.deadline_unix_millis,
+        refusal: format!("{refusal:?}"),
+    })?;
+    Ok(AdmitDecision::Refused(refusal))
+}
+
+/// Why a nonce that names no live order is refused: an operator dropped it,
+/// or it is fabricated or already consumed (a replay). The two are separated
+/// because only the first is a thing the operator did, and an upload answering
+/// a cancelled order should say so rather than read as a forgery.
+fn missing_order_refusal(store: &mut dyn StoreBackend, nonce: &Nonce) -> Result<IntakeRefusal, IntakeError> {
+    if store.is_order_cancelled(&nonce.0)? {
+        Ok(IntakeRefusal::CancelledByOperator(nonce.clone()))
+    } else {
+        Ok(IntakeRefusal::UnknownNonce(nonce.clone()))
+    }
+}
+
 pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -> Result<AdmitDecision, IntakeError> {
     let Some(stored) = store.lookup_order(&upload.nonce.0)? else {
-        // Fabricated, or the order was already consumed (a replay).
-        return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
+        return Ok(AdmitDecision::Refused(missing_order_refusal(store, &upload.nonce)?));
     };
     let Some(record) = DispatchRecord::from_stored(&stored) else {
-        return Ok(AdmitDecision::Refused(IntakeRefusal::CorruptOrder(upload.nonce.clone())));
+        return refused(store, &stored, IntakeRefusal::CorruptOrder(upload.nonce.clone()));
     };
     if let Some(refusal) = out_of_stage_refusal(&record, upload) {
-        return Ok(AdmitDecision::Refused(refusal));
+        return refused(store, &stored, refusal);
     }
     let interned = intern_and_bind(store, &record, upload)?;
     let (upload, evidence) = match interned.as_ref() {
-        Err(refusal) => return Ok(AdmitDecision::Refused(refusal.clone())),
+        Err(refusal) => return refused(store, &stored, refusal.clone()),
         Ok((upload, evidence)) => (upload, evidence.clone()),
     };
     // A pre-bloom scoping run (ADR-0208, #5304) routes before the member-stage
@@ -1040,7 +1160,9 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
             idempotency_key: AdmissionKey::Park.of(&record.nonce.0),
             fact: Fact::AdmitEvidence { bloom: record.bloom, evidence },
         }
-    } else if upload.verdict == StageVerdict::ExecutorFault && admits_member_executor_fault(record.stage) {
+    } else if upload.verdict == StageVerdict::DeadlineExpiry && admits_member_executor_fault(record.stage) {
+        member_deadline_expired_event(&record, evidence)
+    } else if reached_no_verdict(upload.verdict) && admits_member_executor_fault(record.stage) {
         member_executor_fault_event(&record, evidence)
     } else if record.stage == StageId::Verify {
         verify_event(&record, upload, evidence)
@@ -1081,7 +1203,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
         // An out-of-line stage never comes from a well-formed dispatch; refuse it
         // rather than folding a non-line result into the member's resolution. The
         // order stays live (unconsumed) — the refusal precedes the consume below.
-        return Ok(AdmitDecision::Refused(IntakeRefusal::OutOfLineStage(record.stage)));
+        return refused(store, &stored, IntakeRefusal::OutOfLineStage(record.stage));
     };
     let admit = Admit { event: to_vec(&event)? };
     // A parked attempt's order is re-filed under the question it raised, *before*
@@ -1104,6 +1226,9 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     if !store.consume_order(&record.nonce.0)? {
         return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
     }
+    // The order is spent, so whatever refusal stood against this member is
+    // over — the next dispatch is a fresh question.
+    store.clear_intake_refusal(&stored.bloom, &stored.workpiece)?;
     persist_consumed(store, &record, upload, &triage, aggregate_findings.as_ref())?;
 
     Ok(AdmitDecision::Admitted(Box::new(Admission { admit, event })))
@@ -1138,7 +1263,7 @@ fn persist_precheck_findings(
     upload: &UploadedEvidence,
 ) -> rusqlite::Result<()> {
     if !verdict_passed(upload.verdict)
-        && upload.verdict != StageVerdict::ExecutorFault
+        && !reached_no_verdict(upload.verdict)
         && let Some(findings) = &upload.observation.findings
         && !findings.trim().is_empty()
     {
@@ -1200,7 +1325,7 @@ fn persist_consumed(
             thread_triage_note(store, record, &finding, named)?;
         }
     }
-    if record.stage == StageId::Verify && upload.verdict != StageVerdict::ExecutorFault {
+    if record.stage == StageId::Verify && !reached_no_verdict(upload.verdict) {
         if verdict_passed(upload.verdict) {
             store.clear_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0)?;
         } else if let Some(findings) = &upload.observation.findings {
@@ -1224,7 +1349,7 @@ fn persist_consumed(
         persist_aggregate_verify_findings(store, record, upload)?;
     } else if record.stage == StageId::AggregateReview && !aggregate_review_faulted(upload) {
         persist_aggregate_findings(store, record, upload, aggregate_findings)?;
-    } else if record.stage == StageId::Study && upload.verdict != StageVerdict::ExecutorFault {
+    } else if record.stage == StageId::Study && !reached_no_verdict(upload.verdict) {
         // A faulted read reached no verdict, so whatever rode its observation is
         // not a judgement about anything — the same reason an aggregate review's
         // fault writes no findings and clears none.

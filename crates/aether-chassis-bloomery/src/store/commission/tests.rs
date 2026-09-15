@@ -19,7 +19,7 @@ use super::{
     CommissionBackend, CommissionError, RecordCommissionApproval, RecordCommissionApprovalResult, RevisionEvidence,
 };
 use crate::bloomery::{ScopeRunRefusal, TopicOutbox, open_scope_run};
-use crate::store::runtime::{SqliteStore, StoreBackend, StoreCapabilityState};
+use crate::store::runtime::{SCHEMA_VERSION, SqliteStore, StoreBackend, StoreCapabilityState};
 use crate::store::{JournalWrite, OutboxEntry, now_unix_millis};
 
 fn memory() -> SqliteStore {
@@ -219,7 +219,7 @@ fn a_v6_store_gains_empty_commission_tables() {
     let mut store = SqliteStore::open(path).expect("a v6 store migrates");
     assert!(store.list(None).expect("list").is_empty(), "migration invents no commissions");
     let flags: i64 = store.conn.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("user_version");
-    assert_eq!(flags, 25, "the open stamps the current schema");
+    assert_eq!(flags, SCHEMA_VERSION, "the open stamps the current schema");
     assert!(
         store.load_projection(&workpiece("wp-1")).expect("load").is_none(),
         "migration invents no replica-issue numbers"
@@ -905,6 +905,44 @@ fn the_projection_snapshot_carries_the_intents_own_heading() {
 }
 
 #[test]
+fn the_projection_snapshot_carries_the_intent_text_until_a_revision_lands() {
+    // #6022: a mirrored commission with an intent but no scope revision
+    // rendered as bookkeeping only — the finding text never reached the
+    // replica. The snapshot carries the verbatim words so the mirror reads
+    // like an issue a person would file.
+    let mut store = memory();
+    let words = "# A leak in the landing path\n\nThe reader saw it and will not fix it.\n";
+    let finding = Statement {
+        words: words.as_bytes().to_vec(),
+        provenance: Provenance::ObservationAttestation(Observation { source: "test".to_owned() }),
+        parents: Vec::new(),
+    };
+    store.create(&workpiece("retrospect-eb725152c84c"), &finding).expect("create commission");
+
+    let entries = store.drain_topic(Topic::Commission).expect("drain");
+    let payload = decode_projection(&entries[0]);
+    assert_eq!(payload.intent_text.as_deref(), Some(words), "the mirror text is the verbatim intent");
+    assert_eq!(payload.scope, None, "no revision yet, so no work order");
+    assert_eq!(payload.title, "A leak in the landing path");
+
+    let raw = Statement {
+        words: vec![0xff, 0xfe, b'#', b' ', b'x'],
+        provenance: Provenance::ObservationAttestation(Observation { source: "test".to_owned() }),
+        parents: Vec::new(),
+    };
+    store.create(&workpiece("wp-raw"), &raw).expect("create commission");
+    // A drain acks nothing, so the finding above is still at the head of the
+    // topic: the raw one is found by the workpiece it names.
+    let entries = store.drain_topic(Topic::Commission).expect("drain");
+    let projected = entries
+        .iter()
+        .filter_map(|entry| decode_row::<CommissionProjection>(&entry.payload, entry.payload_schema.as_deref()).ok())
+        .find(|payload| payload.workpiece == workpiece("wp-raw"))
+        .expect("the raw commission projects");
+    assert_eq!(projected.intent_text, None, "words that are not UTF-8 project as no text");
+}
+
+#[test]
 fn a_listed_head_carries_the_read_that_filed_it() {
     // The plausible bug: the head list decodes each intent statement to
     // recompute its digest and then throws the statement away, so a reader's
@@ -1135,6 +1173,7 @@ fn frozen_projection(intent: Digest) -> CommissionProjection {
         recorded_issue: None,
         title: String::new(),
         scope: None,
+        intent_text: None,
     }
 }
 
@@ -1151,6 +1190,39 @@ fn overlay_over_a_null_stamped_row_stays_positional() {
     let decoded = decode_row::<CommissionProjection>(&bytes, None).expect("positional decode");
     assert_eq!(decoded.recorded_issue, Some(9));
     from_bytes::<CommissionProjection>(&bytes).expect("overlay left positional bytes");
+}
+
+#[test]
+fn a_queued_row_from_before_intent_text_still_decodes() {
+    // Tripwire: the mirror stalls its topic on an undecodable row, so a
+    // stamped row a previous binary queued — carrying every record but the
+    // new field's — must decode with the field absent. The old shape is
+    // restated record-for-record at the storage layer, so the test breaks if
+    // the prefix it pins drifts.
+    use aether_data::storage::{RecordWriter, StorageLeaves, field_path_root, fold_path_segment};
+
+    fn contribute_field<T: StorageLeaves>(sink: &mut RecordWriter, root: u64, name: &[u8], value: &T) {
+        value.contribute(fold_path_segment(root, name, 0), 1, sink).expect("field contributes");
+    }
+
+    let root = field_path_root();
+    let mut sink = RecordWriter::new();
+    contribute_field(&mut sink, root, b"workpiece", &workpiece("wp-1"));
+    contribute_field(&mut sink, root, b"intent", &Digest::from_bytes([1; 32]));
+    contribute_field(&mut sink, root, b"scope_revision", &None::<Digest>);
+    contribute_field(&mut sink, root, b"approval_signer", &None::<String>);
+    contribute_field(&mut sink, root, b"approval_digest", &None::<Digest>);
+    contribute_field(&mut sink, root, b"status", &"open".to_owned());
+    contribute_field(&mut sink, root, b"recorded_issue", &None::<u64>);
+    contribute_field(&mut sink, root, b"title", &"A leak in the landing path".to_owned());
+    contribute_field(&mut sink, root, b"scope", &None::<String>);
+    let bytes = sink.finish().expect("the old shape encodes");
+
+    let decoded = decode_row::<CommissionProjection>(&bytes, Some(CommissionProjection::NAME))
+        .expect("a pre-field row still decodes");
+    assert_eq!(decoded.intent_text, None, "the absent trailing field decodes as none");
+    assert_eq!(decoded.title, "A leak in the landing path", "the pinned prefix survives");
+    assert_eq!(decoded.workpiece, workpiece("wp-1"));
 }
 
 #[test]

@@ -6,11 +6,13 @@ use super::{AwaitingSurface, BloomRecord, BloomStatus, LeaseEviction, Snapshot};
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::port::{
-    AwaitingSurfaceView, BaseAlertView, BloomView, CompositionCursorView, CompositionView, ExecutorFaultView,
-    HostFaultView, LandingBlock, LeaseEvictionView, LeaseView, MemberView, NarrowedCompositionView,
-    PendingDecisionView, ReviewParkView, ViewDocument, WedgeCause, WithdrawnView,
+    AdminView, AwaitingSurfaceView, BaseAlertView, BaseVerifyVerdict, BaseVerifyView, BloomView, CompletionRecord,
+    CompletionVerdict, CompositionCursorView, CompositionView, ExecutorFaultView, HostFaultView, LandingBlock,
+    LeaseEvictionView, LeaseView, MAX_RECENT_COMPLETIONS, MemberView, NarrowedCompositionView, PendingDecisionView,
+    ReviewParkView, ViewDocument, WedgeCause, WithdrawnView,
 };
 use crate::values::BaseVerdict;
+use crate::values::{AdminAct, MemberVerifyOutcome, MemberVerifyRequest, SharedRunRecord, VerificationObligation};
 use crate::values::{Question, VerifyGateSet, Withdrawal, WithdrawalCause};
 
 /// Assemble a self-contained [`ViewDocument`] from a snapshot — the pure
@@ -74,6 +76,10 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                 narrowed_compositions: narrowed_composition_views(record, snapshot),
                 precheck: record.precheck.clone(),
                 coordination: record.coordination.as_deref().cloned(),
+                admin: admin_view(record),
+                waivers: record.admin_acts.iter().flat_map(AdminAct::waived).copied().collect(),
+                recent_completions: recent_completions(record),
+                base_verify: base_verify_view(record, snapshot),
             }
         })
         .collect();
@@ -84,6 +90,21 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
         blooms,
         base_alert: base_alert_of(snapshot),
     }
+}
+
+/// The open admin session as the board renders it (ADR-0219), or `None` while
+/// the machine is running the bloom.
+///
+/// The whole act log rides on the open session, so `admin status` answers
+/// "what has already been done to this bloom" from the projection rather than
+/// from a second journal read. It goes when the session closes; what a closed
+/// session leaves behind is [`BloomView::waivers`].
+fn admin_view(record: &BloomRecord) -> Option<AdminView> {
+    record.admin.as_ref().map(|note| AdminView {
+        operator: note.operator.clone(),
+        reason: note.reason.clone(),
+        acts: record.admin_acts.clone(),
+    })
 }
 
 /// The red receipt whose base is the sealed bloom's base, or — with no sealed
@@ -174,6 +195,7 @@ fn member_views(
             withdrawn: record.withdrawn.get(&member.workpiece).map(withdrawn_view),
             leases: snapshot.leases_held(&record.spec.id(), &member.workpiece),
             evicted_by: snapshot.lease_eviction(&record.spec.id(), &member.workpiece).map(lease_eviction_view),
+            intake_refusal: None,
         })
         .collect()
 }
@@ -223,6 +245,7 @@ fn withdrawn_view(withdrawal: &Withdrawal) -> WithdrawnView {
     let (cause, depends_on) = match &withdrawal.cause {
         WithdrawalCause::Operator => ("operator", None),
         WithdrawalCause::Dependency { on } => ("dependency", Some(on.clone())),
+        WithdrawalCause::Verify => ("verify", None),
     };
     WithdrawnView {
         cause: cause.into(),
@@ -302,6 +325,117 @@ fn narrowed_composition_views(record: &BloomRecord, snapshot: &Snapshot) -> Vec<
         .collect()
 }
 
+/// The bloom's recently completed shared-run orders, oldest first and bounded
+/// to [`MAX_RECENT_COMPLETIONS`]: one row per settled member outcome of each
+/// terminal run, in plan order. Non-terminal runs contribute nothing — their
+/// story is told by the run's own phase, not by rows — and regroupable
+/// outcomes (`Survived`, `Pending`) are not completions, so they stay out.
+/// Pure like the rest of the projection: reads the record, allocates rows,
+/// mutates nothing.
+fn recent_completions(record: &BloomRecord) -> Vec<CompletionRecord> {
+    let Some(state) = record.coordination.as_deref() else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for run in &state.runs {
+        if !run.is_terminal() {
+            continue;
+        }
+        for outcome in &run.completed {
+            if let Some(row) = completion_row(run, outcome) {
+                rows.push(row);
+            }
+        }
+    }
+    if rows.len() > MAX_RECENT_COMPLETIONS {
+        rows.drain(..rows.len() - MAX_RECENT_COMPLETIONS);
+    }
+    rows
+}
+
+/// One member's row of one terminal run: the order's identity, which step of
+/// its run it was, what it proved, and what it concluded. `None` for an
+/// outcome that settled nothing.
+///
+/// The step ordinal is read off the run's planned request list rather than
+/// counted over the rows, because the rows are a bounded window: a reader that
+/// numbered them itself would renumber a run's survivors as its earlier rows
+/// aged out, and renumber the key with them.
+fn completion_row(run: &SharedRunRecord, outcome: &MemberVerifyOutcome) -> Option<CompletionRecord> {
+    let request_id = outcome.request();
+    let index = run.plan.requests.iter().position(|candidate| candidate.digest() == request_id)?;
+    let request = &run.plan.requests[index];
+    let duration_millis =
+        run.latencies.iter().find(|latency| latency.request == request_id).map(|latency| latency.latency_millis);
+    let (verdict, gates, tree) = match outcome {
+        MemberVerifyOutcome::PassedStandalone { proof, .. } => {
+            (CompletionVerdict::Passed, request_gates(request), Some(proof.verified().tree))
+        }
+        MemberVerifyOutcome::PassedIn { node, .. } => {
+            let tree = run.node.as_ref().filter(|exact| exact.digest() == *node).map(|exact| exact.candidate.tree);
+            (CompletionVerdict::Passed, request_gates(request), tree)
+        }
+        MemberVerifyOutcome::Failed { failures, .. } => {
+            let gates = failures.iter().map(|failure| failure.as_str().to_owned()).collect();
+            (CompletionVerdict::Failed, gates, None)
+        }
+        MemberVerifyOutcome::HostFault { .. } => (CompletionVerdict::Faulted, request_gates(request), None),
+        MemberVerifyOutcome::Survived { .. } | MemberVerifyOutcome::Pending { .. } => return None,
+    };
+    Some(CompletionRecord {
+        nonce: run.plan.digest(),
+        member: request.member.workpiece.clone(),
+        step: u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX),
+        steps: u32::try_from(run.plan.requests.len()).unwrap_or(u32::MAX),
+        stage: StageId::Verify,
+        mode: run.plan.mode,
+        gates,
+        verdict,
+        duration_millis,
+        tree,
+    })
+}
+
+/// The gate identities one member request's contract proves, in contract
+/// order. Deltas name no gate — they ride the run's own invocation — so only
+/// `Gate` obligations render.
+fn request_gates(request: &MemberVerifyRequest) -> Vec<String> {
+    request
+        .contract
+        .obligations
+        .iter()
+        .filter_map(|obligation| match obligation {
+            VerificationObligation::Gate { identity } => Some(identity.clone()),
+            VerificationObligation::MemberDelta { .. } => None,
+        })
+        .collect()
+}
+
+/// The base-verify standing of the head `record` sits on: the receipt under
+/// the bloom's own manifest when one has been observed, an in-flight line
+/// while an unproven base is still waiting on its run, and nothing for a bloom
+/// that sealed onto a proven base — no run started on its behalf.
+fn base_verify_view(record: &BloomRecord, snapshot: &Snapshot) -> Option<BaseVerifyView> {
+    let base = record.spec.base();
+    match snapshot.base_receipt_under(base, VerifyGateSet::base_of(&record.pipeline_manifest).digest()) {
+        Some(receipt) => Some(BaseVerifyView {
+            base: receipt.base,
+            tree: Some(receipt.tree),
+            verdict: match &receipt.verdict {
+                BaseVerdict::Pending => BaseVerifyVerdict::Running,
+                BaseVerdict::Green { .. } => BaseVerifyVerdict::Green,
+                BaseVerdict::Red { .. } => BaseVerifyVerdict::Red,
+            },
+            failed: match &receipt.verdict {
+                BaseVerdict::Red { failed, .. } => failed.iter().map(|failure| failure.as_str().to_owned()).collect(),
+                BaseVerdict::Pending | BaseVerdict::Green { .. } => Vec::new(),
+            },
+        }),
+        None if record.base_proven => None,
+        None => Some(BaseVerifyView { base, tree: None, verdict: BaseVerifyVerdict::Running, failed: Vec::new() }),
+    }
+}
+
 /// The operator-facing cursor: stage, attempts, candidate. `None` until the
 /// workpiece has been dispatched — dependents waiting on an ancestor stay off
 /// [`BloomRecord::progress`] until they enter the line.
@@ -319,14 +453,23 @@ mod tests {
 
     use aether_data::wire::{from_bytes, to_vec};
 
-    use super::view_of;
+    use alloc::boxed::Box;
+
+    use super::{BloomRecord, view_of};
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
-    use crate::port::{BloomView, ViewDocument, WedgeCause};
+    use crate::port::{
+        BaseVerifyVerdict, BloomView, CompletionVerdict, MAX_RECENT_COMPLETIONS, ViewDocument, WedgeCause,
+    };
     use crate::reduce::{BloomStatus, Event, Fact, Outcome, RecordedRead, RecordedRefusal, Snapshot, reduce};
     use crate::values::{
-        BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, OperatorHold,
-        Question, ResolutionClaim, SpendWindow, VerifyFailureSet, Wedge,
+        AgentProfile, BaseReceipt, BaseVerdict, BloomDraft, CandidateRef, CompositionContractTemplate,
+        CompositionInput, ConfigRegistry, ContextualInvocationTemplate, CoordinationPolicy, CoordinationState,
+        Evidence, EvidenceKind, ExecutionLimits, FailureScope, GenerationMember, Harness, MemberDependency, MemberPin,
+        MemberVerifyLatency, MemberVerifyOutcome, MemberVerifyRequest, Membership, NetworkProfile, OperatorHold,
+        Question, ReasoningEffort, RedVerify, ResolutionClaim, SharedRunMode, SharedRunPhase, SharedRunPlan,
+        SharedRunRecord, SpendWindow, ToolPolicy, Transformation, VerificationContract, VerificationMode,
+        VerificationObligation, VerifiedTree, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, Wedge,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -599,6 +742,10 @@ mod tests {
             narrowed_compositions: Vec::new(),
             precheck: None,
             coordination: None,
+            admin: None,
+            waivers: Vec::new(),
+            recent_completions: Vec::new(),
+            base_verify: None,
         }
     }
 
@@ -832,6 +979,10 @@ mod tests {
         let bloom = spec.id();
         let mut snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         snapshot = step(&snapshot, &event("seal", Fact::Seal(spec))).0;
+        // The composition re-weave this case drives to its ceiling runs only
+        // for a bloom that sealed it: the default disposition parks a red fold
+        // instead (ADR-0218 §Amendment: low tolerance).
+        snapshot.blooms.get_mut(&bloom).expect("the seal folded").red_verify = RedVerify::Refine;
         snapshot = step(&snapshot, &event("integrate", Fact::Integrate { bloom, claim: claim("wp", 1, 10) })).0;
         snapshot = step(
             &snapshot,
@@ -1044,5 +1195,307 @@ mod tests {
         // The stage is the holder's cursor, not the stage the observation
         // carried: the operator question is where the holder stands now.
         assert_eq!(leases[0].stage, observed.blooms[&bloom].progress.get(&WorkpieceId("wp".into())).map(|c| c.stage));
+    }
+
+    fn progress_policy() -> CoordinationPolicy {
+        CoordinationPolicy {
+            verification: VerificationMode::Contextual,
+            eager_integration: true,
+            max_run_members: 4,
+            max_serial_requests: 4,
+            max_attribution_probes: 3,
+            movement_budget: 2,
+            reservation_millis: 1_000,
+            coalesce_millis: None,
+            host_class: "test-host".into(),
+            red_verify: RedVerify::Refine,
+        }
+    }
+
+    fn progress_template() -> CompositionContractTemplate {
+        CompositionContractTemplate {
+            gate_set: digest(1),
+            gate_identities: vec!["check".into()],
+            invocation: ContextualInvocationTemplate {
+                command: "check".into(),
+                extra_inputs: Vec::new(),
+                diff_base: None,
+                outputs: Vec::new(),
+                image: "img".into(),
+                limits: ExecutionLimits { wall_clock_secs: 60 },
+                network: NetworkProfile::None,
+                description: None,
+                model: None,
+                profile: AgentProfile {
+                    harness: Harness::Muse,
+                    model: "grok-4.6".into(),
+                    effort: ReasoningEffort::Medium,
+                    tools: ToolPolicy::Full,
+                },
+                configs: ConfigRegistry::default(),
+            },
+            environment: digest(2),
+            host_class: digest(3),
+        }
+    }
+
+    fn progress_request(bloom: BloomId, tree: u8) -> MemberVerifyRequest {
+        let candidate = CandidateRef { tree: digest(tree), checkout: digest(tree.saturating_add(1)) };
+        MemberVerifyRequest {
+            bloom,
+            member: MemberPin { workpiece: WorkpieceId("wp".into()), scope_revision: digest(10), candidate },
+            input: CompositionInput { node: digest(60), candidate, members: Vec::new() },
+            attempt: 1,
+            context: None,
+            contract: VerificationContract {
+                gate_set: digest(1),
+                obligations: vec![VerificationObligation::Gate { identity: "check".into() }],
+                diff_base: CandidateRef { tree: digest(100), checkout: digest(101) },
+                invocation: digest(4),
+                environment: digest(2),
+                host_class: digest(3),
+            },
+            transformation: Transformation {
+                command: "build".into(),
+                inputs: Vec::new(),
+                checkout: digest(50),
+                diff_base: None,
+                outputs: Vec::new(),
+                image: "img".into(),
+                limits: ExecutionLimits { wall_clock_secs: 60 },
+                network: NetworkProfile::None,
+                description: None,
+                model: None,
+            },
+            profile: AgentProfile {
+                harness: Harness::Muse,
+                model: "grok-4.6".into(),
+                effort: ReasoningEffort::Medium,
+                tools: ToolPolicy::Full,
+            },
+            configs: ConfigRegistry::default(),
+        }
+    }
+
+    fn passed(request: &MemberVerifyRequest, tree: u8) -> MemberVerifyOutcome {
+        MemberVerifyOutcome::PassedStandalone {
+            request: request.digest(),
+            proof: VerifyProof {
+                gate_set: digest(1),
+                stage: StageId::Verify,
+                evidence: Evidence {
+                    subject: digest(tree),
+                    kind: EvidenceKind::VerificationResult,
+                    detail: digest(tree.saturating_add(3)),
+                },
+            },
+        }
+    }
+
+    fn terminal_run(requests: Vec<MemberVerifyRequest>, completed: Vec<MemberVerifyOutcome>) -> SharedRunRecord {
+        let latencies = requests
+            .iter()
+            .map(|request| MemberVerifyLatency {
+                request: request.digest(),
+                member: request.member.clone(),
+                latency_millis: 84_000,
+            })
+            .collect();
+        SharedRunRecord {
+            plan: SharedRunPlan {
+                mode: SharedRunMode::Contextual,
+                requests,
+                composition: None,
+                probe_budget: 0,
+                execution_attempt: 0,
+            },
+            node: None,
+            phase: SharedRunPhase::Terminal,
+            stale: false,
+            physical_run: Some(digest(210)),
+            completed,
+            unfinished: Vec::new(),
+            latencies,
+        }
+    }
+
+    fn coordinated(bloom: BloomId, runs: Vec<SharedRunRecord>) -> CoordinationState {
+        let mut state = CoordinationState::new(
+            progress_policy(),
+            progress_template(),
+            bloom,
+            CandidateRef { tree: digest(100), checkout: digest(101) },
+            vec![GenerationMember { workpiece: WorkpieceId("wp".into()), scope_revision: digest(10) }],
+        );
+        state.runs = runs;
+        state
+    }
+
+    // The plausible bug: the projection reads the runs but mints the wrong
+    // rows — a verdict that says green over a failure, gates that name the
+    // contract instead of the failure, a tree for an order that proved
+    // nothing, or rows for a run that never settled. The console breakdown
+    // reads these same rows, so a wrong row here lies in two places at once.
+    #[test]
+    fn terminal_runs_project_verdict_gate_tree_and_duration_rows() {
+        let spec = with_compiled_manifest(BloomDraft {
+            proposals: vec![membership("wp", 1)],
+            base: digest(0),
+            ..BloomDraft::default()
+        })
+        .seal();
+        let bloom = spec.id();
+        let green = progress_request(bloom, 30);
+        let red = progress_request(bloom, 31);
+        let faulted = progress_request(bloom, 32);
+        let regrouped = progress_request(bloom, 33);
+        let running = progress_request(bloom, 34);
+        let evidence = |tree: u8| Evidence {
+            subject: digest(tree),
+            kind: EvidenceKind::VerificationResult,
+            detail: digest(tree.saturating_add(3)),
+        };
+        let settled = terminal_run(
+            vec![green.clone(), red.clone(), faulted.clone(), regrouped.clone()],
+            vec![
+                passed(&green, 30),
+                MemberVerifyOutcome::Failed {
+                    request: red.digest(),
+                    scope: FailureScope::Unattributed { evidence: digest(31) },
+                    failures: VerifyFailureSet::one(VerifyFailure::Clippy),
+                    evidence: evidence(31),
+                },
+                MemberVerifyOutcome::HostFault { request: faulted.digest(), evidence: evidence(32) },
+                MemberVerifyOutcome::Survived {
+                    request: regrouped.digest(),
+                    node: digest(61),
+                    observation: digest(62),
+                },
+            ],
+        );
+        let mut in_flight = terminal_run(vec![running.clone()], vec![passed(&running, 34)]);
+        in_flight.phase = SharedRunPhase::Running;
+        let mut record = BloomRecord::empty(spec);
+        record.coordination = Some(Box::new(coordinated(bloom, vec![settled, in_flight])));
+        let mut snapshot = Snapshot::new(digest(0));
+        snapshot.blooms.insert(bloom, record);
+
+        let rows = &view_of(&snapshot, |_| None).blooms[0].recent_completions;
+        assert_eq!(rows.len(), 3, "the regrouped outcome and the running run contribute no rows");
+        assert_eq!(rows[0].verdict, CompletionVerdict::Passed);
+        assert_eq!(rows[0].gates, ["check"]);
+        assert_eq!(rows[0].tree, Some(digest(30)));
+        assert_eq!(rows[0].duration_millis, Some(84_000));
+        assert_eq!(rows[0].member.0, "wp");
+        assert_eq!(
+            (rows[0].steps, rows[2].step),
+            (4, 3),
+            "the ordinal counts the run's planned requests, not the rows that settled",
+        );
+        assert_eq!(rows[1].verdict, CompletionVerdict::Failed);
+        assert_eq!(rows[1].gates, ["verify.clippy"], "a failure names the failing gates, not the contract");
+        assert_eq!(rows[1].tree, None, "a refused order proved no tree");
+        assert_eq!(rows[2].verdict, CompletionVerdict::Faulted);
+        assert_eq!(rows[2].tree, None, "a faulted order judged no work");
+        assert_eq!(
+            wire_round_trip(&view_of(&snapshot, |_| None)).blooms[0].recent_completions.len(),
+            3,
+            "the rows must survive the positional wire",
+        );
+    }
+
+    // The plausible bug: an unbounded history rides the view document, so a
+    // long-lived bloom's every run pays render and wire cost on every poll.
+    //
+    // And the bug the bound then invites: numbering a row by counting the rows
+    // that survive rather than the run that planned them. The first run here
+    // loses two of its three rows to the drain, so a counted ordinal would
+    // renumber its survivor "1 of 1" — a fresh key to a ledger that has
+    // already reported it as step 3, which posts the same step twice.
+    #[test]
+    fn recent_completions_keeps_only_the_newest_bounded_rows_without_renumbering_them() {
+        let spec = with_compiled_manifest(BloomDraft {
+            proposals: vec![membership("wp", 1)],
+            base: digest(0),
+            ..BloomDraft::default()
+        })
+        .seal();
+        let bloom = spec.id();
+        let wide: Vec<MemberVerifyRequest> = (40..43).map(|tree| progress_request(bloom, tree)).collect();
+        let mut runs = vec![terminal_run(
+            wide.clone(),
+            wide.iter().zip(40..43).map(|(request, tree)| passed(request, tree)).collect(),
+        )];
+        runs.extend((0..MAX_RECENT_COMPLETIONS - 1).map(|index| {
+            let tree = u8::try_from(index).expect("the bound is tiny");
+            let request = progress_request(bloom, tree);
+            terminal_run(vec![request.clone()], vec![passed(&request, tree)])
+        }));
+        let mut record = BloomRecord::empty(spec);
+        record.coordination = Some(Box::new(coordinated(bloom, runs)));
+        let mut snapshot = Snapshot::new(digest(0));
+        snapshot.blooms.insert(bloom, record);
+
+        let rows = &view_of(&snapshot, |_| None).blooms[0].recent_completions;
+        assert_eq!(rows.len(), MAX_RECENT_COMPLETIONS);
+        assert_eq!(rows[0].tree, Some(digest(42)), "oldest first, with the overflow drained off the front");
+        assert_eq!((rows[0].step, rows[0].steps), (3, 3), "the survivor keeps the ordinal its run gave it");
+        assert_eq!((rows[1].step, rows[1].steps), (1, 1));
+    }
+
+    // The plausible bug: a bloom sealed onto an unproven base renders no
+    // base-verify line, so the withheld entry reads as an idle bloom; or a
+    // bloom sealed onto a proven base renders a stale pending line, so a
+    // settled base reads as still running.
+    #[test]
+    fn base_verify_names_the_waiting_base_and_stays_quiet_on_a_proven_one() {
+        let spec = with_compiled_manifest(BloomDraft {
+            proposals: vec![membership("wp", 1)],
+            base: digest(0),
+            ..BloomDraft::default()
+        })
+        .seal();
+        let bloom = spec.id();
+        let view_of_record = |record: BloomRecord| {
+            let mut snapshot = Snapshot::new(digest(0));
+            snapshot.blooms.insert(bloom, record);
+            view_of(&snapshot, |_| None).blooms[0].base_verify.clone()
+        };
+
+        let waiting =
+            view_of_record(BloomRecord::empty(spec.clone())).expect("an unproven base without a receipt is waiting");
+        assert_eq!(waiting.verdict, BaseVerifyVerdict::Running);
+        assert_eq!(waiting.tree, None);
+
+        let mut proven = BloomRecord::empty(spec.clone());
+        proven.base_proven = true;
+        assert!(view_of_record(proven).is_none(), "no run started on a proven base's behalf");
+
+        let mut record = BloomRecord::empty(spec);
+        let gate_set = VerifyGateSet::base_of(&record.pipeline_manifest).digest();
+        let mut snapshot = Snapshot::new(digest(0));
+        snapshot.base_trees.insert(digest(0), digest(70));
+        snapshot.base_receipts.insert(
+            VerifiedTree { tree: digest(70), gate_set },
+            BaseReceipt {
+                base: digest(0),
+                tree: digest(70),
+                gate_set,
+                verdict: BaseVerdict::Red {
+                    evidence: Evidence {
+                        subject: digest(70),
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(71),
+                    },
+                    failed: VerifyFailureSet::one(VerifyFailure::Clippy),
+                },
+            },
+        );
+        record.base_proven = true;
+        snapshot.blooms.insert(bloom, record);
+        let red = view_of(&snapshot, |_| None).blooms[0].base_verify.clone().expect("the red receipt renders");
+        assert_eq!(red.verdict, BaseVerifyVerdict::Red);
+        assert_eq!(red.tree, Some(digest(70)));
+        assert_eq!(red.failed, ["verify.clippy"]);
     }
 }

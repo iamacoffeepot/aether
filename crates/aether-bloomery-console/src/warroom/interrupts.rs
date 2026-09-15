@@ -29,6 +29,7 @@ pub enum InterruptKind {
     Quiesce,
     Hold,
     BaseRed,
+    Admin,
 }
 
 impl InterruptKind {
@@ -45,6 +46,7 @@ impl InterruptKind {
             Self::Quiesce => "quiesce",
             Self::Hold => "hold",
             Self::BaseRed => "base",
+            Self::Admin => "admin",
         }
     }
 }
@@ -149,7 +151,18 @@ fn push_bloom_interrupts(entries: &mut Vec<Interrupt>, bloom: &BloomView) {
             stage: None,
         });
     }
-    if bloom.operator_hold.is_some() {
+    // An admin session is also an operator hold, so the two would otherwise
+    // both light and the board would say a bloom is merely frozen when a person
+    // is inside it moving cursors. The session wins: it is the thing another
+    // operator must not walk into.
+    if let Some(admin) = &bloom.admin {
+        entries.push(Interrupt {
+            kind: InterruptKind::Admin,
+            detail: format!("{prefix}  {}", admin.operator),
+            focus: Focus::bloom(bloom.id),
+            stage: None,
+        });
+    } else if bloom.operator_hold.is_some() {
         entries.push(Interrupt {
             kind: InterruptKind::Hold,
             detail: prefix.clone(),

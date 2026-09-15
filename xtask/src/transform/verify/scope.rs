@@ -22,10 +22,10 @@
 //! cargo/nextest config, the gate code itself, or a lockfile whose moved
 //! packages cannot be attributed), a path matching no
 //! package and no rule, a component crate anywhere in the closure, and any
-//! error at all reaching for git or the package graph. The one xtask path that
-//! is *not* such an input is the tool around the gate — see
-//! [`super::inputs`] for where that line is drawn and what a tool change
-//! compiles instead.
+//! error at all reaching for git or the package graph. Most of xtask is *not*
+//! such an input — only the transform tree that decides a verdict and the dist
+//! builder whose artifacts the suites open by path are. See [`super::inputs`]
+//! for where that line is drawn and what a tool change compiles instead.
 //!
 //! The one direction that does not widen is a diff that entered no crate at
 //! all — [`Scope::Outside`]. There the whole tree is not the safe answer but
@@ -786,6 +786,11 @@ mod tests {
         // the base and candidate contents no moved package can be attributed,
         // so the blunt rule stands there. An attributable lockfile diff
         // narrows through `over_changed_with_locks`, covered below.
+        //
+        // The three xtask entries are the whole of what #6055 left on this
+        // side: the transform tree that decides a member's verdict, the dist
+        // builder, and its `build-wasm` front. Everything else under
+        // `xtask/src/` narrows — the test below holds that half.
         for path in [
             "Cargo.toml",
             "Cargo.lock",
@@ -795,11 +800,15 @@ mod tests {
             ".config/nextest.toml",
             ".cargo/config.toml",
             "xtask/src/transform/verify/mod.rs",
+            "xtask/src/transform/mod.rs",
+            "xtask/src/dist/mod.rs",
+            "xtask/src/build_wasm.rs",
             ".github/workflows/ci.yml",
         ] {
             let scope = Scope::over_changed(&strings(&[path])).expect("screen the changed path");
             assert_eq!(scope.packages(), None, "{path} must run the whole workspace");
             assert!(scope.receipt().contains(path), "the receipt names what forced it: {}", scope.receipt());
+            assert!(scope.wasm_needed(), "{path} keeps the dist pre-build the whole tree needs");
         }
 
         assert!(
@@ -829,6 +838,49 @@ mod tests {
         let gate = Scope::over_changed(&strings(&["xtask/src/transform/verify/scope.rs"]))
             .expect("compute the scope over a gate change");
         assert_eq!(gate.packages(), None, "the gate code still runs every crate: {}", gate.receipt());
+    }
+
+    #[test]
+    fn a_bloom_cli_change_narrows_to_xtask_without_a_dist_prepare() {
+        // Tripwire for #6055, and for the pair of facts that make the narrowing
+        // sound rather than convenient. Nothing in the workspace links xtask, so
+        // the operator CLI's reverse-dependency closure is xtask itself; and
+        // nothing under `bloom/` builds an artifact a test opens by path, so the
+        // `cargo xtask dist` prepare has nothing to produce for the run. Reading
+        // it as a workspace-level input instead ran 6871 tests across 301
+        // binaries plus that prepare — the 15-to-18-minute shared runs beside
+        // 5.5-minute closure-scoped ones.
+        //
+        // The receipt is asserted alongside the argv because the widening was
+        // only ever legible through it: the run that took the whole tree said so
+        // in one line naming the path that forced it, and a regression here
+        // would put that line back.
+        let scope =
+            Scope::over_changed(&strings(&["xtask/src/bloom/mod.rs"])).expect("compute the scope over a CLI change");
+
+        let packages = scope.packages().expect("the operator CLI narrows");
+        assert!(packages.contains(&"xtask".to_owned()), "the CLI's own crate is compiled: {packages:?}");
+        assert!(!scope.wasm_needed(), "nothing under bloom/ feeds the dist prepare: {}", scope.receipt());
+        assert!(scope.receipt().contains("dist pre-build: not needed"), "{}", scope.receipt());
+        assert!(
+            !scope.receipt().contains("a workspace-level input changed"),
+            "the CLI is not a workspace-level input: {}",
+            scope.receipt(),
+        );
+
+        // The half that must not move with it. A verify-transform change still
+        // takes the whole tree, and still names the path that forced it, so the
+        // one line a reader greps for keeps meaning what it meant.
+        let gate = Scope::over_changed(&strings(&["xtask/src/transform/verify/mod.rs"]))
+            .expect("compute the scope over a verify-transform change");
+        assert_eq!(gate.packages(), None, "the verify transforms keep every crate");
+        assert!(gate.wasm_needed(), "and the prepare that feeds the suites they run");
+        assert!(
+            gate.receipt()
+                .contains("every workspace crate — a workspace-level input changed: xtask/src/transform/verify/mod.rs"),
+            "{}",
+            gate.receipt(),
+        );
     }
 
     #[test]

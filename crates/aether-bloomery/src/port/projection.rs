@@ -24,8 +24,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::reduce::{BloomStatus, RecordedRefusal};
 use crate::values::{
-    CandidateRef, CompositionFinding, CoordinationState, Evidence, LandingReceipt, OperatorHold, PrecheckState,
-    ResolutionClaim, SpendQuiesce, SurfacePathRequest, VerifyFailureSet, Wedge,
+    AdminAct, CandidateRef, CompositionFinding, CoordinationState, Evidence, LandingReceipt, OperatorHold,
+    PrecheckState, ResolutionClaim, SharedRunMode, SpendQuiesce, SurfacePathRequest, VerifyFailureSet, Wedge,
 };
 
 /// The self-contained render input a reconcile pushes outward: the current
@@ -59,6 +59,25 @@ pub struct ViewDocument {
     /// A red whole-workspace base receipt, when one is holding the day
     /// (ADR-0200).
     pub base_alert: Option<BaseAlertView>,
+}
+
+/// One bloom's open admin session as the outward view carries it (ADR-0219):
+/// who has it, why, and what they have done so far.
+///
+/// The acts themselves rather than a count, because the question an operator
+/// asks of an open session is "what has already been done to this bloom" and
+/// answering it from the journal would mean a second read keyed by a fact
+/// vocabulary the board does not otherwise speak. A session is short-lived and
+/// its log is a handful of rows. What outlives it is carried separately, on
+/// [`BloomView::waivers`].
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AdminView {
+    /// Who opened the session.
+    pub operator: String,
+    /// Why, in their own words.
+    pub reason: String,
+    /// Every act journaled inside it, in admission order.
+    pub acts: Vec<AdminAct>,
 }
 
 /// The day-level stop a red base receipt raises: which tree failed, and which
@@ -176,6 +195,121 @@ pub struct BloomView {
     /// proof freshness, and physical-run identity are derived from here.
     #[serde(default)]
     pub coordination: Option<CoordinationState>,
+    /// The admin session open on this bloom (ADR-0219); `None` while the
+    /// machine is running it.
+    ///
+    /// Beside [`Self::operator_hold`] rather than folded into it, because they
+    /// answer different questions and an operator reading a stopped bloom needs
+    /// both: the hold says nothing is being dispatched, and this says a person
+    /// is in there changing things. Without it an admin session and an ordinary
+    /// brake render identically, and the console would paint HOLD over a bloom
+    /// nobody should touch.
+    #[serde(default)]
+    pub admin: Option<AdminView>,
+    /// Every verdict artifact an admin waiver voided on this bloom (ADR-0219),
+    /// in the order the waivers were journaled.
+    ///
+    /// Outlives [`Self::admin`] on purpose: the session closes and the waiver
+    /// is still the reason this bloom landed, so a reader after the fact can
+    /// still see which red verdicts a person stood in for. Empty for every
+    /// bloom nobody waived anything on.
+    #[serde(default)]
+    pub waivers: Vec<Digest>,
+    /// The bloom's recently completed shared-run orders, oldest first, bounded
+    /// to [`MAX_RECENT_COMPLETIONS`]. One row per member outcome of each
+    /// terminal run — the rows the progress channel's verify-step lines and
+    /// the console breakdown read, projected once here so both readers agree.
+    /// Empty for a bloom with no settled shared run. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
+    #[serde(default)]
+    pub recent_completions: Vec<CompletionRecord>,
+    /// The base-verify standing of the head this bloom sits on. `None` while
+    /// the bloom sealed onto a proven base — nothing started on its behalf —
+    /// or when no receipt has been observed yet for a proven one. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
+    #[serde(default)]
+    pub base_verify: Option<BaseVerifyView>,
+}
+
+/// How many completed orders [`BloomView::recent_completions`] retains per
+/// bloom: enough for the progress channel's verify-step lines and the console
+/// breakdown to read the latest runs, small enough that the view document
+/// stays a render input rather than a history.
+pub const MAX_RECENT_COMPLETIONS: usize = 8;
+
+/// One recently completed shared-run order: what one member's verification
+/// learned from one physical run.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct CompletionRecord {
+    /// The run plan's digest — the order's identity, joining the row to the
+    /// run in [`CoordinationState`] it came from.
+    pub nonce: Digest,
+    /// The member the order ran for.
+    pub member: WorkpieceId,
+    /// Which step of its run this order was, 1-based against the run's planned
+    /// request list. Projected here rather than counted off the bounded window
+    /// so a row whose run-mates have aged out of [`MAX_RECENT_COMPLETIONS`]
+    /// still reads — and keys — as the step it actually was.
+    pub step: u32,
+    /// How many steps the run planned, so the line reads "step 2 of 7" even
+    /// once only one of the seven is still in the window.
+    pub steps: u32,
+    /// The stage the order proved.
+    pub stage: StageId,
+    /// The physical shape that ran it — standalone, warm-serial, contextual.
+    pub mode: SharedRunMode,
+    /// The gate identities the order proved, in contract order; the failed
+    /// subset when [`CompletionVerdict::Failed`].
+    pub gates: Vec<String>,
+    /// What the order concluded.
+    pub verdict: CompletionVerdict,
+    /// How long the member's request ran, when the run reported it; `None`
+    /// when the journal carries no duration for the request.
+    pub duration_millis: Option<u64>,
+    /// The tree the order proved or captured, when it produced one.
+    pub tree: Option<Digest>,
+}
+
+/// What one shared-run order concluded.
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum CompletionVerdict {
+    /// The run proved the member's candidate.
+    Passed,
+    /// The run refused it, naming the failing gates.
+    Failed,
+    /// The run could not judge it — a host fault, not a verdict on the work.
+    Faulted,
+}
+
+/// The base-verify standing of the head a bloom sits on (ADR-0200): whether a
+/// `verify.base` run is still in flight, or what it concluded.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct BaseVerifyView {
+    /// The commit the verify ran at.
+    pub base: Digest,
+    /// The tree it peeled to, once observed; `None` while the run that would
+    /// peel it has produced no receipt yet.
+    pub tree: Option<Digest>,
+    /// Still in flight, or what it concluded.
+    pub verdict: BaseVerifyVerdict,
+    /// The gate names that failed together, in canonical identity order.
+    /// Empty unless [`BaseVerifyVerdict::Red`].
+    pub failed: Vec<String>,
+}
+
+/// Whether a base-verify run is still in flight, or what it concluded.
+///
+/// The in-flight arm is [`Self::Running`] rather than the reduced
+/// [`BaseVerdict`](crate::BaseVerdict)'s `Pending`: this is the render input a
+/// channel narrates from, and what it says of the arm is that the run started,
+/// which is the same word [`SharedRunPhase::Running`](crate::SharedRunPhase)
+/// already uses for a run in flight.
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum BaseVerifyVerdict {
+    /// A `verify.base` dispatch is outstanding; member entry is withheld.
+    Running,
+    /// The whole-workspace fan-out passed on this tree.
+    Green,
+    /// The whole-workspace fan-out failed; member entry stays withheld.
+    Red,
 }
 
 impl BloomView {
@@ -461,6 +595,12 @@ pub struct MemberView {
     /// stays for a projection served off a journal an older binary wrote.
     #[serde(default)]
     pub evicted_by: Option<LeaseEvictionView>,
+    /// The intake refusal standing against this member, when the broker refused
+    /// its upload without touching the reducer. `None` while no refusal is
+    /// recorded. The refusal text names the variant; the member's outstanding
+    /// order rides the `/view` orders list. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
+    #[serde(default)]
+    pub intake_refusal: Option<String>,
 }
 
 /// One transition's answer to "why is this not happening" (#5281).
@@ -677,6 +817,16 @@ pub struct CommissionProjection {
     /// revision yet. Trailing optional so a queued row that predates the
     /// field decodes as none.
     pub scope: Option<String>,
+    /// The intent statement's words as UTF-8, when they are UTF-8.
+    ///
+    /// The adapter renders this verbatim so a commission with an intent but
+    /// no scope revision still mirrors something a person would file, rather
+    /// than bookkeeping only. `None` when the stored words are not UTF-8.
+    /// Trailing optional so a queued stamped row that predates the field
+    /// decodes with it absent, for the same reason [`Self::scope`] is: the
+    /// storage shape keys records by field name, so missing records read as
+    /// none rather than shifting the bytes that follow.
+    pub intent_text: Option<String>,
 }
 
 /// The first markdown heading of an intent statement's words, or `None`.
@@ -705,6 +855,28 @@ pub fn intent_title(words: &[u8]) -> Option<String> {
 /// GitHub refuses an issue title past 256; this leaves room for the ` — status`
 /// suffix beside it with margin, and a heading this long is a paragraph anyway.
 pub const MAX_TITLE_CHARS: usize = 180;
+
+/// A readable replica title from an intent heading the issue-title gate would
+/// refuse: `chore(bloomery): ` followed by the heading with its first
+/// character lowercased, capped so the whole stays within [`MAX_TITLE_CHARS`].
+///
+/// A sentence is not a name, but a lowercased one under a conventional prefix
+/// still reads as one in an issue list — which the id floor does not. The
+/// caller decides validity and reserves the floor for an intent with no
+/// heading at all; an empty heading here yields the bare prefix, which no
+/// gate accepts, so the caller must not pass one.
+#[must_use]
+pub fn readable_title(heading: &str) -> String {
+    const PREFIX: &str = "chore(bloomery): ";
+    let mut lowered = String::with_capacity(heading.len() + PREFIX.len());
+    let mut chars = heading.chars();
+    if let Some(first) = chars.next() {
+        lowered.extend(first.to_lowercase());
+    }
+    lowered.extend(chars);
+    let title = format!("{PREFIX}{lowered}");
+    title.chars().take(MAX_TITLE_CHARS).collect()
+}
 
 /// A landing receipt together with the landed bloom's membership — the whole
 /// render input a receipt projection needs.
@@ -759,7 +931,7 @@ pub trait ProjectionBackend {
 mod tests {
     use alloc::string::ToString;
 
-    use super::{MAX_TITLE_CHARS, intent_title};
+    use super::{MAX_TITLE_CHARS, intent_title, readable_title};
 
     #[test]
     fn the_first_heading_names_the_commission() {
@@ -798,5 +970,40 @@ mod tests {
     #[test]
     fn intent_bytes_that_are_not_text_have_no_title() {
         assert_eq!(intent_title(&[0xff, 0xfe, b'#', b' ', b'x']), None);
+    }
+
+    #[test]
+    fn a_refused_heading_reads_as_a_conventional_title() {
+        // The plausible bug: a retrospect reader's finding heading ("a leak")
+        // is not conventional-commit shaped, so the replica fell back to the
+        // id floor and every retrospect commission was indistinguishable in an
+        // issue list. The fallback keeps the heading under a conventional
+        // prefix instead.
+        assert_eq!(readable_title("A leak in the landing path"), "chore(bloomery): a leak in the landing path");
+        assert_eq!(
+            readable_title("already lowercase"),
+            "chore(bloomery): already lowercase",
+            "a heading that starts lowercase gains only the prefix",
+        );
+    }
+
+    #[test]
+    fn a_long_refused_heading_is_capped_with_the_prefix_inside_the_cap() {
+        // The prefix is part of the title the gate measures, so the cap covers
+        // the whole rather than the heading — and slicing bytes out of a
+        // multi-byte heading would panic.
+        let title = readable_title(&"é".repeat(MAX_TITLE_CHARS * 2));
+
+        assert_eq!(title.chars().count(), MAX_TITLE_CHARS);
+        let Some(stripped) = title.strip_prefix("chore(bloomery): ") else {
+            panic!("the cap keeps the prefix: {title}");
+        };
+        assert!(stripped.chars().all(|character| character == 'é'), "the capped tail is whole characters: {title}");
+    }
+
+    #[test]
+    fn a_refused_heading_lowercases_only_its_first_character() {
+        assert_eq!(readable_title("Refactor WEEKLY Jobs"), "chore(bloomery): refactor WEEKLY Jobs");
+        assert_eq!(readable_title("Élan vital"), "chore(bloomery): élan vital");
     }
 }

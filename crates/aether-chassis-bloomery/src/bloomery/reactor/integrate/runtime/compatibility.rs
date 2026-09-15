@@ -9,6 +9,7 @@ use aether_bloomery::{
 };
 use aether_bloomery_github::SourceError;
 
+use super::overlay::fold_conflict_overlay;
 use crate::bloomery::SourceShell;
 use crate::bloomery::coordination::compatibility_namespace;
 use crate::bloomery::coordination::shared_run_namespace;
@@ -350,6 +351,16 @@ fn conflict_diagnostic_for(kind: &str, plan: Digest, observation: u64, paths: &[
     diagnostic
 }
 
+/// The shared-run placement collision's Reconcile overlay.
+///
+/// `drain_shared_run_preparations` records this string against the
+/// `SharedRunPreparation::Conflict` it reports. It is a *diagnostic*: none of
+/// the plan's members has been verified yet, so the reducer answers this
+/// collision by proving each member's own candidate standalone rather than
+/// handing anyone a merge (ADR-0218 §Amendment: eager integration assembles the
+/// product). It is composed by the one overlay renderer anyway, so a reader who
+/// finds it in the artifact store reads the same sections as a real lap's order.
+/// This is the collision path bloom `0f16e207` took, when it did buy a lap.
 fn shared_run_conflict_diagnostic(
     plan: &SharedRunPlan,
     input: &CompositionInput,
@@ -357,26 +368,13 @@ fn shared_run_conflict_diagnostic(
     paths: &[String],
     diff: &str,
 ) -> String {
-    use core::fmt::Write;
-
-    let mut diagnostic = format!(
-        "Shared run {} could not place composition {} onto head {}.\n",
+    let situation = format!(
+        "Shared run {} could not place composition {} onto head {}.",
         plan.digest().to_hex(),
         input.node.to_hex(),
         head.to_hex(),
     );
-    if !paths.is_empty() {
-        diagnostic.push_str("\nConflicting paths:\n");
-        for path in paths {
-            let _ = writeln!(diagnostic, "- {path}");
-        }
-    }
-    if !diff.trim().is_empty() {
-        diagnostic.push_str("\nConflicted contribution:\n\n");
-        diagnostic.push_str(diff.trim());
-        diagnostic.push('\n');
-    }
-    diagnostic
+    fold_conflict_overlay(Some(&situation), paths, diff)
 }
 
 #[cfg(test)]
@@ -703,9 +701,12 @@ mod tests {
         assert_eq!(input, requests[1].input);
         assert_eq!(evidence.kind, EvidenceKind::FoldConflict);
         assert_eq!(evidence.subject, at.tree);
-        assert!(diagnostic.contains("Conflicting paths"), "{diagnostic}");
-        assert!(diagnostic.contains("a.txt"), "{diagnostic}");
-        assert!(diagnostic.contains("Conflicted contribution"), "{diagnostic}");
+        // The diagnostic is also the member's Reconcile work order, so it is
+        // the merge-only overlay in the sections the executor drain parses,
+        // not a prose paragraph the lane has to interpret (ADR-0218).
+        assert!(diagnostic.contains("\n## Conflicting paths\n\n- a.txt\n"), "{diagnostic}");
+        assert!(diagnostic.contains("Resolve the merge, and only the merge."), "{diagnostic}");
+        assert!(diagnostic.contains("\n## Conflicted candidate\n"), "{diagnostic}");
     }
 
     #[test]

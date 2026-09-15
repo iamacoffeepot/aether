@@ -204,6 +204,42 @@ impl Invariant {
             Self::NoKnownFlake => no_known_flake(live),
         }
     }
+
+    /// Whether a divergence on this pass is observer lag rather than a
+    /// violation (#6025). Only the two live-pointer checks can lag: they
+    /// compare a journal pointer against the fleet ref, and a hand land moves
+    /// the ref between the observer's polls. Every other invariant reads one
+    /// source, so nothing about it can be "not yet folded".
+    fn observe_lag(self, live: &LiveState<'_>) -> bool {
+        let journaled = match self {
+            Self::ViewMainlineCorresponds => live.snapshot.mainline,
+            Self::ObservedHeadEqualsDailyHead => live.snapshot.observed,
+            _ => return false,
+        };
+        observe_lag_within_budget(live, journaled)
+    }
+}
+
+/// Whether a live-head mismatch is a ref that moved rather than an observer
+/// that stopped (#6025).
+///
+/// Three readings, in order. No live head, or a head that already agrees, is
+/// not a mismatch at all. A journal pointer the live head does not descend
+/// from is a force-move, never lag — ancestry that cannot answer stays
+/// fail-closed beside it. And a descendant past twice the observe interval is
+/// an observer that had its chance and did not fold. Only a young descendant
+/// waits: the next observe poll folds it, the way the hand push of 9dd10de5
+/// folded ten seconds later, and alerting inside that window trains the
+/// operator to ignore the row that names a real divergence.
+fn observe_lag_within_budget(live: &LiveState<'_>, journaled: Digest) -> bool {
+    let Some(actual) = live.actual_head else {
+        return false;
+    };
+    if actual == journaled {
+        return false;
+    }
+    let descendant = live.ancestry.as_ref().is_some_and(|ancestry| ancestry(&journaled, &actual) == Some(true));
+    descendant && live.last_observe_age.is_some_and(|age| age <= live.observe_interval.saturating_mul(2))
 }
 
 /// One invariant's verdict in a doctor pass.
@@ -215,6 +251,14 @@ pub struct CheckResult {
     pub statement: String,
     /// Whether the property held on this pass.
     pub passed: bool,
+    /// Whether the check is waiting on the observer rather than reporting a
+    /// divergence (#6025). Pending implies [`passed`](Self::passed) is false
+    /// and the [`divergences`](Self::divergences) still name the lag; it is
+    /// not a violation — [`DoctorReport::violations`] and the alert path skip
+    /// it — and `/view` renders it distinctly from a pass and a violation.
+    /// Omitted when false, so an ordinary `/view` is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
     /// Concrete divergent values when [`passed`](Self::passed) is false.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub divergences: Vec<String>,
@@ -228,15 +272,18 @@ pub struct DoctorReport {
 }
 
 impl DoctorReport {
-    /// Whether every invariant passed.
+    /// Whether no invariant is violated. A pending row (#6025) is waiting on
+    /// the observer, not a divergence, so it neither dirties the report nor
+    /// alerts — the alert path only ever sees [`violations`](Self::violations).
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        self.checks.iter().all(|check| check.passed)
+        self.checks.iter().all(|check| check.passed || check.pending)
     }
 
-    /// The failing rows, in report order.
+    /// The violated rows, in report order. Pending rows are not violations:
+    /// they render in the view and never alert.
     pub fn violations(&self) -> impl Iterator<Item = &CheckResult> {
-        self.checks.iter().filter(|check| !check.passed)
+        self.checks.iter().filter(|check| !check.passed && !check.pending)
     }
 
     /// The named row, if this pass evaluated it.
@@ -245,7 +292,8 @@ impl DoctorReport {
         self.checks.iter().find(|check| check.name == name)
     }
 
-    /// A stable fingerprint of the failing set, for change-driven notify.
+    /// A stable fingerprint of the violated set, for change-driven notify.
+    /// Pending rows are outside the set, so waiting and then catching up is silent.
     #[must_use]
     pub fn fingerprint(&self) -> String {
         self.violations()
@@ -340,6 +388,17 @@ pub struct LiveState<'a> {
     /// How long this process has seen the live daily sha without a
     /// correspondence. `None` when the head is resolved or there is no sha.
     pub unresolved_head_age: Option<Duration>,
+    /// The observe cadence the lag budget is measured against: this reactor's
+    /// poll interval, on the same coordinator cadence the mainline observer
+    /// polls the fleet ref on. A mismatch younger than twice this is a ref
+    /// the observer has not yet folded — pending, not violated (#6025).
+    pub observe_interval: Duration,
+    /// How long this process has seen the current live daily sha. A mismatch
+    /// against a sha first seen inside twice [`Self::observe_interval`] is a
+    /// ref that moved; one seen longer is an observer that stopped. `None`
+    /// when there is no live sha, which is fail-closed: without an age there
+    /// is no lag reading, and the mismatch is the violation it always was.
+    pub last_observe_age: Option<Duration>,
     /// The tree each member's candidate ref carries, as the source read it,
     /// keyed by bloom then workpiece.
     ///
@@ -361,10 +420,12 @@ pub fn evaluate(live: &LiveState<'_>) -> DoctorReport {
         .copied()
         .map(|invariant| {
             let divergences = invariant.divergences(live);
+            let pending = !divergences.is_empty() && invariant.observe_lag(live);
             CheckResult {
                 name: invariant.name().to_owned(),
                 statement: invariant.statement().to_owned(),
                 passed: divergences.is_empty(),
+                pending,
                 divergences,
             }
         })
@@ -696,9 +757,23 @@ fn replica_topic_age(live: &LiveState<'_>) -> Vec<String> {
         .collect()
 }
 
-fn nonterminal_member_has_lane_or_dispatch(live: &LiveState<'_>) -> Vec<String> {
+/// Every member the estate has left standing: at a non-terminal stage, in a
+/// bloom that is running, carrying none of the [`Excuse`]s that explain a
+/// still cursor, with no pending dispatch and no lane in flight.
+///
+/// The set [`Invariant::NonterminalMemberHasLaneOrDispatch`] reports, named
+/// separately because the doctor reactor acts on it as well as alerting on it
+/// (#5969): a member that stays in this set across a full poll interval is one
+/// the host lost a dispatch for, and the reactor re-dispatches it. Alerting and
+/// acting must read the same members, or the doctor would re-dispatch something
+/// it never reported — or report something it silently left standing.
+#[must_use]
+pub fn undispatched_members(live: &LiveState<'_>) -> Vec<(BloomId, WorkpieceId)> {
+    if live.lanes_running {
+        return Vec::new();
+    }
     let pending: BTreeSet<&str> = live.outstanding.iter().map(|open| open.workpiece).collect();
-    let mut divergences = Vec::new();
+    let mut standing = Vec::new();
     for (bloom, record) in &live.snapshot.blooms {
         if record.status != BloomStatus::Sealed
             || record.operator_hold.is_some()
@@ -715,17 +790,26 @@ fn nonterminal_member_has_lane_or_dispatch(live: &LiveState<'_>) -> Vec<String> 
             if Excuse::ALL.iter().copied().any(|excuse| member_carries_excuse(excuse, live, bloom, record, workpiece)) {
                 continue;
             }
-            if pending.contains(workpiece.0.as_str()) || live.lanes_running {
+            if pending.contains(workpiece.0.as_str()) {
                 continue;
             }
-            divergences.push(format!(
+            standing.push((*bloom, workpiece.clone()));
+        }
+    }
+    standing
+}
+
+fn nonterminal_member_has_lane_or_dispatch(live: &LiveState<'_>) -> Vec<String> {
+    undispatched_members(live)
+        .into_iter()
+        .map(|(bloom, workpiece)| {
+            format!(
                 "member {} on bloom {} is at a non-terminal stage with no live lane and no pending dispatch",
                 workpiece.0,
                 hex_of(&bloom.0)
-            ));
-        }
-    }
-    divergences
+            )
+        })
+        .collect()
 }
 
 fn member_carries_excuse(
@@ -892,7 +976,9 @@ mod tests {
     use std::time::Duration;
 
     use aether_bloomery::testing::{claim, digest, draft, membership, splice_bloom};
-    use aether_bloomery::{BloomId, BloomStatus, ClaimHolder, ClaimRefKind, ClaimRefState, Snapshot, WorkpieceId};
+    use aether_bloomery::{
+        BackendObjectId, BloomId, BloomStatus, ClaimHolder, ClaimRefKind, ClaimRefState, Snapshot, WorkpieceId,
+    };
 
     use super::{
         DETERMINISTIC_RETRY_BOUND, Invariant, LiveState, OpenDispatch, ReplicaObservation, SURFACE_PARK_AGE_BOUND,
@@ -917,6 +1003,11 @@ mod tests {
             lanes_running: false,
             evidence_nonces: &[],
             unresolved_head_age: None,
+            observe_interval: Duration::from_secs(5),
+            // No sighting age: without one there is no lag reading, so every
+            // mismatch stays the violation it always was — which is what keeps
+            // the older tests below on their existing expectations.
+            last_observe_age: None,
             candidate_ref_trees: &[],
             known_flakes: &[],
         }
@@ -963,6 +1054,103 @@ mod tests {
         let named = check.divergences.join(" ");
         assert!(named.contains(&hex_of(&digest(1))), "the observed digest is named: {named}");
         assert!(named.contains(&hex_of(&actual)), "the actual daily head is named: {named}");
+    }
+
+    #[test]
+    fn a_head_mismatch_younger_than_twice_the_observe_interval_is_pending() {
+        // Tripwire: #6025. A hand land moves the fleet ref between the
+        // observer's polls, and the doctor pass inside that window reported
+        // the designed lag as a violation. A young descendant waits instead:
+        // it renders, and never alerts.
+        let snapshot = Snapshot { mainline: digest(9), observed: digest(9), ..Snapshot::default() };
+        let correspondence = [(digest(9), BackendObjectId::new(vec![9]))];
+        let ancestry = current_era_chain();
+        let mut state = live(&snapshot, &[]);
+        state.actual_head = Some(digest(10));
+        state.actual_head_sha = Some("hand-pushed");
+        state.correspondence = &correspondence;
+        state.ancestry = Some(&ancestry);
+        state.last_observe_age = Some(Duration::from_secs(3));
+
+        let report = evaluate(&state);
+        for name in [Invariant::ViewMainlineCorresponds.name(), Invariant::ObservedHeadEqualsDailyHead.name()] {
+            let check = report.named(name).expect("the seed list includes the head check");
+            assert!(!check.passed, "a lagging pointer has not passed ({name}): {check:?}");
+            assert!(check.pending, "a young descendant waits on the observer ({name}): {check:?}");
+            let named = check.divergences.join(" ");
+            assert!(named.contains(&hex_of(&digest(9))), "the journal pointer is named ({name}): {named}");
+            assert!(named.contains(&hex_of(&digest(10))), "the live head is named ({name}): {named}");
+        }
+        assert!(report.is_clean(), "pending rows neither dirty the report nor alert: {report:?}");
+        assert!(report.fingerprint().is_empty(), "pending rows stay out of the alert fingerprint: {report:?}");
+
+        state.last_observe_age = Some(state.observe_interval.saturating_mul(2));
+        let report = evaluate(&state);
+        for name in [Invariant::ViewMainlineCorresponds.name(), Invariant::ObservedHeadEqualsDailyHead.name()] {
+            let check = report.named(name).expect("the seed list includes the head check");
+            assert!(check.pending, "the budget edge is still the lag reading ({name}): {check:?}");
+        }
+    }
+
+    #[test]
+    fn a_head_mismatch_older_than_twice_the_observe_interval_is_a_violation() {
+        // The other side of #6025: the observer had its chance and did not
+        // fold. A descendant the pointers still miss past the budget is an
+        // observer that stopped, not a ref that moved.
+        let snapshot = Snapshot { mainline: digest(9), observed: digest(9), ..Snapshot::default() };
+        let ancestry = current_era_chain();
+        let mut state = live(&snapshot, &[]);
+        state.actual_head = Some(digest(10));
+        state.actual_head_sha = Some("unfolded");
+        state.ancestry = Some(&ancestry);
+        state.last_observe_age = Some(state.observe_interval.saturating_mul(2) + Duration::from_secs(1));
+
+        let report = evaluate(&state);
+        assert!(!report.is_clean(), "a stale descendant dirties the report: {report:?}");
+        for name in [Invariant::ViewMainlineCorresponds.name(), Invariant::ObservedHeadEqualsDailyHead.name()] {
+            let check = report.named(name).expect("the seed list includes the head check");
+            assert!(!check.passed, "a stale descendant is a violation ({name}): {check:?}");
+            assert!(!check.pending, "the wait is over past the budget ({name}): {check:?}");
+        }
+    }
+
+    #[test]
+    fn a_head_mismatch_that_is_not_a_descendant_is_a_violation_inside_the_budget() {
+        // A force-move is never lag, however young: the observer will never
+        // fold this head by fast-forward, so waiting would hide a rewrite.
+        let snapshot = Snapshot { mainline: digest(3), observed: digest(3), ..Snapshot::default() };
+        let ancestry = current_era_chain();
+        let mut state = live(&snapshot, &[]);
+        state.actual_head = Some(digest(10));
+        state.actual_head_sha = Some("force-moved");
+        state.ancestry = Some(&ancestry);
+        state.last_observe_age = Some(Duration::from_secs(1));
+
+        let report = evaluate(&state);
+        for name in [Invariant::ViewMainlineCorresponds.name(), Invariant::ObservedHeadEqualsDailyHead.name()] {
+            let check = report.named(name).expect("the seed list includes the head check");
+            assert!(!check.passed, "a non-descendant is a violation ({name}): {check:?}");
+            assert!(!check.pending, "a force-move never waits ({name}): {check:?}");
+        }
+    }
+
+    #[test]
+    fn an_unanswerable_ancestry_stays_fail_closed_inside_the_budget() {
+        // The plausible bug the other way: the ancestry probe errors, the lag
+        // reading treats "cannot answer" as "descendant", and a real
+        // divergence waits out its budget in silence.
+        let snapshot = Snapshot { mainline: digest(9), observed: digest(9), ..Snapshot::default() };
+        let mut state = live(&snapshot, &[]);
+        state.actual_head = Some(digest(10));
+        state.actual_head_sha = Some("unanswerable");
+        state.last_observe_age = Some(Duration::from_secs(1));
+
+        let report = evaluate(&state);
+        for name in [Invariant::ViewMainlineCorresponds.name(), Invariant::ObservedHeadEqualsDailyHead.name()] {
+            let check = report.named(name).expect("the seed list includes the head check");
+            assert!(!check.passed, "an unanswerable mismatch is a violation ({name}): {check:?}");
+            assert!(!check.pending, "unknown ancestry never waits ({name}): {check:?}");
+        }
     }
 
     #[test]

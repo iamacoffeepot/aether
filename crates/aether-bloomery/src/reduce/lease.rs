@@ -187,6 +187,7 @@ pub(super) fn resume_entries(
             base: just_checkout,
             held: record.operator_hold.is_some(),
             base_proven: record.base_proven,
+            proved: None,
         };
         effects.extend(move_effects(
             bloom,

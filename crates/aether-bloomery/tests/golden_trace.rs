@@ -21,10 +21,11 @@ use aether_bloomery::{
 use aether_data::wire::{from_bytes, to_vec};
 use common::{claim, compiled_resolved, digest, draft, event, membership};
 
-/// The canonical bloom, as the journal of admitted events: seal → integrate
-/// each member → resolve (the fold, which dispatches the aggregate verify) →
-/// the passing verify verdict (which dispatches the aggregate review) → the
-/// passing review verdict (which resolves) → land (ADR-0153).
+/// The canonical bloom, as the journal of admitted events: seal → one member's
+/// red Verify, which ejects it (ADR-0218 §Amendment: low tolerance) → integrate
+/// the member that stayed → resolve (the fold, which dispatches the aggregate
+/// verify) → the passing verify verdict (which dispatches the aggregate review)
+/// → the passing review verdict (which resolves) → land (ADR-0153).
 fn script() -> Vec<Event> {
     let members = vec![membership("alpha", 10), membership("beta", 11)];
     let spec = draft(1, members).seal();
@@ -49,25 +50,11 @@ fn script() -> Vec<Event> {
                 workpiece: WorkpieceId("alpha".into()),
                 evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(49) },
                 failed_verifiers: VerifyFailureSet::one(VerifyFailure::Fmt),
+                findings: String::new(),
             },
         ),
-        event(
-            "refine-alpha",
-            Fact::AttemptCompleted {
-                bloom,
-                workpiece: WorkpieceId("alpha".into()),
-                stage: StageId::Refine,
-                passed: true,
-                evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(50) },
-                candidate: None,
-            },
-        ),
-        event("integrate-alpha", Fact::Integrate { bloom, claim: claim("alpha", 10, 20) }),
         event("integrate-beta", Fact::Integrate { bloom, claim: claim("beta", 11, 21) }),
-        event(
-            "resolve",
-            Fact::Resolve { bloom, tree: digest(30), head: digest(40), lineage: vec![digest(20), digest(21)] },
-        ),
+        event("resolve", Fact::Resolve { bloom, tree: digest(30), head: digest(40), lineage: vec![digest(21)] }),
         event(
             "aggregate-verify",
             Fact::AggregateVerifyCompleted {
@@ -112,20 +99,20 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 
     assert!(matches!(decisions[0].outcome, Outcome::Sealed(_)));
     assert!(matches!(decisions[1].outcome, Outcome::AttemptAdvanced { to: StageId::Verify, .. }));
-    assert!(matches!(decisions[2].outcome, Outcome::RefineReentered { rolls: 0, .. }));
-    assert!(matches!(decisions[3].outcome, Outcome::AttemptAdvanced { to: StageId::Verify, .. }));
-    assert!(matches!(decisions[4].outcome, Outcome::Integrated { .. }));
-    assert!(matches!(decisions[5].outcome, Outcome::Integrated { .. }));
+    // The red verdict ejects rather than re-entering Refine, and the bloom goes
+    // on to land with the member that stayed (ADR-0218 §Amendment).
+    assert!(matches!(decisions[2].outcome, Outcome::MembersWithdrawn { terminal: false, .. }));
+    assert!(matches!(decisions[3].outcome, Outcome::Integrated { .. }));
     // The fold dispatches the compiler, not the critic: a fold that does not
     // build must never reach a model lane, and the review is what a *passing*
     // verify hands off to.
-    assert!(matches!(decisions[6].outcome, Outcome::AggregateVerifyDispatched { roll: 1, .. }));
-    assert!(matches!(decisions[7].outcome, Outcome::AggregateVerifyPassed { rolls: 1, .. }));
-    match &decisions[8].outcome {
-        Outcome::Resolved(resolved) => assert_eq!(resolved.resolution_claims.len(), 2),
+    assert!(matches!(decisions[4].outcome, Outcome::AggregateVerifyDispatched { roll: 1, .. }));
+    assert!(matches!(decisions[5].outcome, Outcome::AggregateVerifyPassed { rolls: 1, .. }));
+    match &decisions[6].outcome {
+        Outcome::Resolved(resolved) => assert_eq!(resolved.resolution_claims.len(), 1),
         other => panic!("expected Resolved, got {other:?}"),
     }
-    assert!(matches!(decisions[9].outcome, Outcome::Landed(_)));
+    assert!(matches!(decisions[7].outcome, Outcome::Landed(_)));
     assert_eq!(snapshot.mainline, digest(40));
 }
 
@@ -330,9 +317,19 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // `Decision::RecordStageCatalog` carries by value moves with it. The scripted
 // draft configures nothing, so the compiled line's bytes are in the stream.
 // An intended catalog edit, recomputed.
+// Repinned for ADR-0218 §Amendment: low tolerance. Three independent reasons at
+// once, all intended. The compiled catalog recalibrates `Verify` and
+// `AggregateVerify` from an hour to fifteen minutes, so the
+// `Decision::RecordStageCatalog` the seal carries and every work order copied
+// off those bindings move. The scripted journal's red member Verify now ejects
+// the member instead of re-entering Refine, so that step decides a withdrawal
+// set rather than a repair lap, and the script loses the repair completion and
+// the ejected member's integration. And `Withdrawal` gains a third cause, which
+// moves the decisions column's own schema — as does the seal's new
+// `Decision::RecordRedVerify`, which every seal now decides. Recomputed.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0xfb, 0x34, 0xbf, 0x71, 0xe0, 0x75, 0xaa, 0x3c, 0xf9, 0xdd, 0xe6, 0x20, 0x6a, 0x1f, 0x29, 0xda, 0xf5, 0xd5, 0xe2,
-    0xc3, 0x39, 0x86, 0x45, 0x81, 0x9e, 0xa6, 0x7b, 0x52, 0xd5, 0xdd, 0x96, 0x7f,
+    0xde, 0x30, 0x5d, 0x02, 0x28, 0x2a, 0x85, 0x92, 0x95, 0x62, 0xdc, 0x86, 0x22, 0x09, 0xa0, 0xb5, 0x87, 0xeb, 0xa6,
+    0x2a, 0x3d, 0x64, 0x98, 0x06, 0x5d, 0x4a, 0x79, 0x39, 0xc4, 0x65, 0x89, 0x5d,
 ];
 
 #[test]

@@ -60,6 +60,15 @@ pub struct RunSpec<'a> {
     /// target directory in there would be deleted once per lap and the warm
     /// dependency tree lost with it.
     pub target_dir: &'a Path,
+    /// The per-base warm target snapshot store this dispatch may clone from
+    /// before it builds (#6047), or `None` on a host that has it turned off.
+    ///
+    /// Not a property of the slot the way
+    /// [`target_dir`](Self::target_dir) is: the store is host-wide and every
+    /// slot warms out of the same one. It rides the spawn request because the
+    /// clone has to happen between the checkout reset and the lane's first
+    /// build, which is exactly where this request is consumed.
+    pub warm_from: Option<&'a super::snapshot::SnapshotStore>,
     /// How many build jobs this lane's cargo invocations may run at once
     /// (`CARGO_BUILD_JOBS`, #4912) — the cap that lets several lanes coexist in
     /// one host's memory. `0` leaves cargo's own default of one job per core.
@@ -116,6 +125,10 @@ pub struct RunSpec<'a> {
     /// [`aether_bloomery::EXECUTION_DEADLINE_ENV`] rather than as a flag. `None`
     /// on a mechanical lane and on a store-less backend.
     pub deadline_unix_millis: Option<u64>,
+    /// Gates the umbrella narrows its fan-out to (`--gate`, ADR-0218
+    /// amendment) — one entry per gate the dispatch asked for. Empty is the
+    /// whole fan-out, which every lane but an attribution probe runs.
+    pub selected_gates: &'a [String],
 }
 
 /// A running (or finished) transform child — the lifecycle the backend maps onto

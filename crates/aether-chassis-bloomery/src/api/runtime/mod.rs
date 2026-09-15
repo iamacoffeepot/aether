@@ -66,6 +66,7 @@ mod configs;
 mod drafts;
 mod evidence;
 mod metrics;
+mod orders;
 mod pipeline;
 mod proposals;
 mod reads;
@@ -80,8 +81,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::store::{
-    ListBloomDispatchesResult, ListOutstandingOrders, ListOutstandingOrdersResult, LiveOrder, LookupDispatchResult,
-    StoreCapability,
+    CancelOrderResult, ListBloomDispatchesResult, ListOutstandingOrders, ListOutstandingOrdersResult, LiveOrder,
+    LookupDispatchResult, StoreCapability,
 };
 use aether_actor::{Manual, runtime};
 use aether_bloomery::{
@@ -658,6 +659,98 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `POST /blooms/{id}/admin/enter` — take the bloom out of the machine's
+    /// hands: no dispatch, no fault charges, and the six repair doors open
+    /// (ADR-0219).
+    #[http::route(Post, "/blooms/{id}/admin/enter")]
+    fn on_admin_enter(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = ApiCapabilityState::admin_enter(&id, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /blooms/{id}/admin/exit` — hand the bloom back, dispatching what
+    /// the cursors now owe and completing a waived join (ADR-0219).
+    #[http::route(Post, "/blooms/{id}/admin/exit")]
+    fn on_admin_exit(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = ApiCapabilityState::admin_exit(&id, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /blooms/{id}/admin/cancel-lane` — stop one running dispatch
+    /// without charging anyone for it (ADR-0219).
+    #[http::route(Post, "/blooms/{id}/admin/cancel-lane")]
+    fn on_admin_cancel_lane(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = ApiCapabilityState::admin_cancel_lane(&id, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /blooms/{id}/admin/set-candidate` — hand a workpiece a candidate
+    /// without the repair door's wedged precondition (ADR-0219).
+    #[http::route(Post, "/blooms/{id}/admin/set-candidate")]
+    fn on_admin_set_candidate(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.admin_set_candidate(&id, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /blooms/{id}/admin/rerun` — run one stage again on the candidate
+    /// the workpiece already holds, spending nothing (ADR-0219).
+    #[http::route(Post, "/blooms/{id}/admin/rerun")]
+    fn on_admin_rerun(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = ApiCapabilityState::admin_rerun(&id, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /blooms/{id}/admin/waive` — void a red verdict's findings so the
+    /// gate counts as passed for landing (ADR-0219).
+    #[http::route(Post, "/blooms/{id}/admin/waive")]
+    fn on_admin_waive(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = ApiCapabilityState::admin_waive(&id, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /blooms/{id}/admin/drop-lap` — discard a completed lap's captured
+    /// candidate, reverting the cursor to the one before it (ADR-0219).
+    #[http::route(Post, "/blooms/{id}/admin/drop-lap")]
+    fn on_admin_drop_lap(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = ApiCapabilityState::admin_drop_lap(&id, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
     /// `POST /blooms/{id}/hold` — freeze the bloom's dispatch — member laps and
     /// the two aggregate gates — while the laps already running finish and
     /// journal normally (#4976 / #5100).
@@ -928,6 +1021,20 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, Routed::Reply(response))
     }
 
+    /// `POST /orders/{nonce}/cancel` — drop one outstanding order from the
+    /// board without faulting its lane. The process finishes unobserved; its
+    /// later upload refuses as cancelled and never touches the reducer.
+    #[http::route(Post, "/orders/{nonce}/cancel")]
+    fn on_cancel_order(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        nonce: http::Path<String>,
+    ) -> http::Outcome {
+        let nonce = nonce.0;
+        let routed = orders::cancel_order(&nonce, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
     /// `GET /logs/coordinator` — bounded journald proxy.
     #[http::route(Get, "/logs/coordinator")]
     fn on_get_coordinator_logs(
@@ -1147,6 +1254,15 @@ impl NativeActor for BloomeryApiCapability {
         mail: LookupDispatchResult,
     ) -> HttpServerResponse {
         evidence::header_response(&state.worktree_base, &state.archive_base, mail)
+    }
+
+    #[http::reply]
+    fn on_cancel_order_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: CancelOrderResult,
+    ) -> HttpServerResponse {
+        orders::cancel_response(mail)
     }
 
     #[cfg(feature = "github")]

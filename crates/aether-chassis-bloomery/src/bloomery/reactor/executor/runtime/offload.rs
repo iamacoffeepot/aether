@@ -573,6 +573,14 @@ impl ExecutorPort for OffloadedPort<'_> {
         }
     }
 
+    fn reconcile_physical_run_leases(&self, live: &[Digest]) -> Result<(), ExecutorPortError> {
+        // Straight to the shell, like `cancelled_capture`: this is a registry
+        // read and a local free, not work to hand a worker. Offloading it would
+        // put the fix for a full pool behind the same round that the full pool
+        // is already starving.
+        self.shell.reconcile_physical_run_leases(live)
+    }
+
     fn retain_partial_head_repair(
         &self,
         plan: &Digest,
@@ -631,6 +639,7 @@ mod tests {
             prompt_manifest: None,
             physical_run: None,
             release_physical_run: true,
+            selected_gates: Vec::new(),
         }
     }
 

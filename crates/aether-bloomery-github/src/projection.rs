@@ -54,7 +54,7 @@ use std::fmt::Write as _;
 
 use aether_bloomery::{
     AwaitingSurfaceView, BloomId, CommissionProjection, Digest, LandingReceipt, MemberView, PendingDecisionView,
-    ProjectedReceipt, ProjectionBackend, ViewDocument, WorkpieceId,
+    ProjectedReceipt, ProjectionBackend, ViewDocument, WorkpieceId, readable_title,
 };
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
@@ -309,32 +309,56 @@ fn commission_key(workpiece: &str) -> String {
 }
 
 fn render_commission_title(projection: &CommissionProjection) -> String {
-    // The replica title is the repository's issue-title rule or a floor that
+    // The replica title is the repository's issue-title rule, a readable
+    // rendering of the intent heading under that rule, or a floor that
     // satisfies it. Lifecycle lives in the issue's open/closed state; a
     // ` — {status}` suffix would rewrite the title on every transition and
     // re-run the label workflow for nothing.
     let title = projection.title.trim();
-    if issue_title_is_valid(title) {
+    if title.is_empty() {
+        commission_floor_title(&projection.workpiece.0)
+    } else if issue_title_is_valid(title) {
         title.to_owned()
     } else {
-        commission_floor_title(&projection.workpiece.0)
+        readable_title(title)
     }
 }
 
 fn render_commission_body(projection: &CommissionProjection) -> String {
-    format!(
+    let mut body = String::new();
+    body.push_str(
         "**Bloomery replica** — do not edit this issue. It is an outbound projection of a local \
-         commission (ADR-0199). Edits here are overwritten and are never read as input.\n\n{}",
-        render_commission_fields(projection)
-    )
+         commission (ADR-0199). Edits here are overwritten and are never read as input.\n",
+    );
+    push_commission_content(&mut body, projection);
+    body
 }
 
 fn render_source_comment(projection: &CommissionProjection) -> String {
-    render_commission_fields(projection)
+    let mut body = String::new();
+    push_commission_content(&mut body, projection);
+    body
 }
 
-fn render_commission_fields(projection: &CommissionProjection) -> String {
-    let mut body = String::new();
+/// The commission itself as a person would file it: the intent text verbatim,
+/// then — when a current revision exists — a rule and the rendered work
+/// order, then a short footer beside the store marker the caller appends.
+fn push_commission_content(body: &mut String, projection: &CommissionProjection) {
+    if let Some(intent) = projection.intent_text.as_deref().filter(|intent| !intent.trim().is_empty()) {
+        body.push('\n');
+        body.push_str(intent);
+        if !intent.ends_with('\n') {
+            body.push('\n');
+        }
+    }
+    if let Some(scope) = projection.scope.as_deref().map(str::trim).filter(|scope| !scope.is_empty()) {
+        body.push_str("\n---\n\n");
+        body.push_str(scope);
+        if !scope.ends_with('\n') {
+            body.push('\n');
+        }
+    }
+    body.push('\n');
     let _ = writeln!(body, "- Workpiece: `{}`", projection.workpiece.0);
     match projection.approval_signer.as_deref() {
         Some(signer) => {
@@ -345,19 +369,6 @@ fn render_commission_fields(projection: &CommissionProjection) -> String {
         }
     }
     let _ = writeln!(body, "- State: {}", projection.status);
-    match projection.scope.as_deref().map(str::trim).filter(|scope| !scope.is_empty()) {
-        Some(scope) => {
-            let _ = writeln!(body);
-            body.push_str(scope);
-            if !scope.ends_with('\n') {
-                body.push('\n');
-            }
-        }
-        None => {
-            let _ = writeln!(body, "- Scope: _none_");
-        }
-    }
-    body
 }
 
 fn member_key(bloom: BloomId, workpiece: &str) -> String {
@@ -552,8 +563,8 @@ mod tests {
     use super::{GithubProjection, addressed_object, commission_key};
     use crate::client::{CommissionProjectionApi, NewIssue};
     use crate::fixture::FakeGithub;
-    use crate::landing::commission_floor_title;
-    use crate::marker::{Marker, render_marker};
+    use crate::landing::{commission_floor_title, issue_title_is_valid};
+    use crate::marker::{Marker, parse_marker, render_marker};
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
@@ -570,6 +581,7 @@ mod tests {
             recorded_issue,
             title: String::new(),
             scope: None,
+            intent_text: None,
         }
     }
 
@@ -727,6 +739,88 @@ mod tests {
         landed.status = "landed".to_owned();
         projection.project_owned_commission(&landed).expect("close");
         assert_eq!(projection.client().issue_is_closed(number), Some(true), "terminal close of a recorded replica");
+    }
+
+    #[test]
+    fn a_commission_with_intent_but_no_revision_mirrors_the_intent_not_bookkeeping() {
+        // #6022: a retrospect commission has an intent but no scope revision,
+        // and rendered as bookkeeping only. The replica carries the verbatim
+        // intent above the footer, and the title falls back to a readable
+        // rendering of the non-conventional heading rather than the id floor.
+        let projection = GithubProjection::new(FakeGithub::new());
+        let mut open = commission("retrospect-eb725152c84c", None);
+        open.scope_revision = None;
+        open.title = "A leak in the landing path".to_owned();
+        open.intent_text = Some("# A leak in the landing path\n\nThe reader saw it and will not fix it.\n".to_owned());
+
+        let number = projection.project_owned_commission(&open).expect("create").expect("owns a replica");
+        let title = projection.client().issue_title(number).expect("the replica exists");
+        let body = projection.client().issue_body(number).expect("the replica exists");
+        assert_eq!(title, "chore(bloomery): a leak in the landing path");
+        assert!(issue_title_is_valid(&title), "{title}");
+        assert!(
+            body.contains("# A leak in the landing path\n\nThe reader saw it and will not fix it.\n"),
+            "the finding text: {body}",
+        );
+        assert!(!body.contains("Scope: _none_"), "no bookkeeping placeholder: {body}");
+        assert!(body.contains("- Workpiece: `retrospect-eb725152c84c`"), "the footer: {body}");
+    }
+
+    #[test]
+    fn a_canonical_commissions_comment_reads_the_same_minus_the_banner() {
+        // A canonical `issue-N` commission's comment on its own issue renders
+        // the same content minus the banner.
+        let fake = FakeGithub::new();
+        fake.seed_issue(42, "human");
+        let projection = GithubProjection::new(fake);
+        let mut open = commission("issue-42", None);
+        open.scope_revision = None;
+        open.title = "A leak in the landing path".to_owned();
+        open.intent_text = Some("# A leak in the landing path\n\nThe reader saw it and will not fix it.\n".to_owned());
+
+        projection.project_owned_commission(&open).expect("comment on the named source");
+
+        let comments = projection.client().comments_on(42);
+        assert_eq!(comments.len(), 1);
+        let comment = &comments[0];
+        assert!(comment.contains("The reader saw it and will not fix it."), "the finding text: {comment}");
+        assert!(!comment.contains("do not edit"), "no replica preamble on a human issue: {comment}");
+    }
+
+    #[test]
+    fn intent_text_joins_the_change_detection_digest() {
+        // The digest covers the new field: `Some("")` renders no words, so
+        // the human content is identical — yet the stored marker must differ,
+        // and the re-drive must settle rather than flap. Every existing
+        // replica therefore re-renders exactly once after the upgrade.
+        let fake = FakeGithub::new();
+        fake.seed_issue(42, "human");
+        let projection = GithubProjection::new(fake);
+        let mut open = commission("issue-42", None);
+        open.scope_revision = None;
+
+        projection.project_owned_commission(&open).expect("baseline comment");
+        let baseline = projection.client().comments_on(42);
+        assert_eq!(baseline.len(), 1);
+        let baseline_marker = parse_marker(&baseline[0]).expect("the comment carries a marker");
+
+        projection.project_owned_commission(&open).expect("identical re-drive");
+        assert_eq!(projection.client().comments_on(42), baseline, "a matching digest is a no-op");
+
+        open.intent_text = Some(String::new());
+        projection.project_owned_commission(&open).expect("re-render");
+        let rerendered = projection.client().comments_on(42);
+        assert_eq!(rerendered.len(), 1, "the change edits the comment in place");
+        let rerendered_marker = parse_marker(&rerendered[0]).expect("the comment carries a marker");
+        assert_ne!(rerendered_marker.digest, baseline_marker.digest, "the new field joins the digest");
+        assert_eq!(
+            rerendered[0].replace(&render_marker(&rerendered_marker), ""),
+            baseline[0].replace(&render_marker(&baseline_marker), ""),
+            "the human content is unchanged: only the digest moved",
+        );
+
+        projection.project_owned_commission(&open).expect("settle");
+        assert_eq!(projection.client().comments_on(42), rerendered, "the second pass is a no-op");
     }
 
     #[test]

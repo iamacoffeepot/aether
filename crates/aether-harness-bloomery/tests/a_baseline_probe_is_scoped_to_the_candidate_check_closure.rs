@@ -6,40 +6,90 @@
 //! crate to answer one named test. The inverted range (candidate checkout as
 //! `--diff-base`, composition base as HEAD) is the same reverse-dependency
 //! closure the candidate check already ran.
+//!
+//! The composition is two members because a bisection is only ever bought for
+//! one (#6054): a run with a single member is attributed from its findings and
+//! issues no probe at all, so a single-member fixture could not reach the
+//! preparation this scenario is about.
 
 #![allow(clippy::unwrap_used)]
 
+use std::fs;
+use std::path::Path;
+use std::slice::from_ref;
+
 use aether_bloomery::{
-    CandidateRef, CoordinationPolicy, Digest, FakeKeyProvider, KeyId, SharedRunDispatch, SharedRunExecution,
-    SharedRunMode, Transformation, VERIFY_CHECK_COMMAND, VerificationMode, signed_approval,
+    CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CoordinationPolicy, Digest, FakeKeyProvider, KeyId, SharedRunDispatch,
+    SharedRunExecution, SharedRunMode, Transformation, VERIFY_CHECK_COMMAND, VerificationMode, signed_approval,
 };
 use aether_chassis_bloomery::bloomery::BatchProbeRequest;
-use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneScript};
-use aether_chassis_bloomery::store::{CommissionBackend, StoreBackend};
+use aether_chassis_bloomery::bloomery::mock_lane::{CANDIDATE_FILE, LaneMode, LaneScript};
+use aether_chassis_bloomery::store::{CommissionBackend, OutstandingOrder, StoreBackend};
 use aether_data::wire::from_bytes;
 use aether_harness_bloomery::{HarnessBuilder, Repo, ScenarioHarness};
 use serde::Deserialize;
 
-const MEMBER: &str = "wp-a";
+const MEMBERS: [(&str, &str, &str); 2] = [
+    ("wp-a", "crates/example-a/**", "crates/example-a/src/contextual.rs"),
+    ("wp-b", "crates/example-b/**", "crates/example-b/src/contextual.rs"),
+];
 
 fn contextual_policy() -> CoordinationPolicy {
     CoordinationPolicy {
+        red_verify: aether_bloomery::RedVerify::Refine,
         verification: VerificationMode::Contextual,
         eager_integration: false,
-        max_run_members: 1,
-        max_serial_requests: 1,
+        max_run_members: 2,
+        max_serial_requests: 2,
         max_attribution_probes: 8,
         movement_budget: 1,
         reservation_millis: 1_000,
         host_class: "harness".to_owned(),
-        coalesce_millis: None,
+        coalesce_millis: Some(0),
     }
 }
 
-fn approve_scope(harness: &ScenarioHarness, scope_revision: Digest) {
+fn approve_scopes(harness: &ScenarioHarness, scope_revisions: &[Digest]) {
     let mut store = harness.commission_store();
-    let approval = signed_approval(KeyId(String::from("baseline-closure harness")), &[0x0A; 32], scope_revision);
-    store.insert_approval(&approval, &FakeKeyProvider).expect("the member scope retains its signed approval");
+    for scope_revision in scope_revisions {
+        let approval = signed_approval(KeyId(String::from("baseline-closure harness")), &[0x0A; 32], *scope_revision);
+        store.insert_approval(&approval, &FakeKeyProvider).expect("the member scope retains its signed approval");
+    }
+}
+
+/// Park both members in Construct and give each the file its own surface
+/// covers, so the two candidates fold into one node without colliding.
+fn park_constructs(harness: &mut ScenarioHarness) -> Vec<OutstandingOrder> {
+    harness.hold_member_verification(true);
+    harness.pump_until("both members receive their parked Construct orders", |harness| {
+        let orders = harness.orders();
+        assert!(orders.len() <= 2, "only the two sealed members can be dispatched: {orders:?}");
+        orders.len() == 2
+    });
+    let constructs = harness.orders();
+    harness.pump_until("both parked Construct children reached their real worktrees", |harness| {
+        let runs = harness.ledger();
+        constructs.iter().all(|order| runs.iter().any(|run| run.nonce == order.nonce))
+    });
+
+    let runs = harness.ledger();
+    for (workpiece, _, path) in MEMBERS {
+        let order = constructs.iter().find(|order| order.workpiece == workpiece).expect("sealed member Construct");
+        let worktree = runs
+            .iter()
+            .find(|run| run.nonce == order.nonce)
+            .and_then(|run| run.worktree.as_deref())
+            .map(Path::new)
+            .expect("the parked local Construct recorded its real worktree");
+        fs::remove_file(worktree.join(CANDIDATE_FILE)).expect("the mock's generic candidate is removed");
+        fs::write(worktree.join(path), format!("pub const MEMBER: &str = \"{workpiece}\";\n"))
+            .expect("the parked Construct writes inside its own approved surface");
+    }
+    constructs
+}
+
+fn queued_verifies(harness: &ScenarioHarness) -> usize {
+    harness.commission_store().queued_member_verifications().expect("logical verification requests read").len()
 }
 
 #[derive(Deserialize)]
@@ -67,15 +117,30 @@ struct PreparedBody {
 #[test]
 fn a_baseline_probe_is_scoped_to_the_candidate_check_closure() {
     let authority = Repo::with_formatted_example_project();
-    let script = LaneScript::all_passing().then(VERIFY_CHECK_COMMAND, LaneMode::Fail);
+    // Unkeyed steps: both constructs park so each member writes its own file,
+    // then the first contextual `verify.check` fails. The canned findings name
+    // `crates/mock/src/lib.rs`, which no member changed, so the gate does not
+    // discriminate and the walk buys the baseline this scenario inspects.
+    let script = LaneScript::all_passing()
+        .then(CONSTRUCT_IMPLEMENT_COMMAND, LaneMode::NeverExits)
+        .then(CONSTRUCT_IMPLEMENT_COMMAND, LaneMode::NeverExits)
+        .then(VERIFY_CHECK_COMMAND, LaneMode::Fail);
     let mut harness = HarnessBuilder::local_authority(&authority)
         .coordination(contextual_policy())
+        .max_concurrent_provers(2)
         .script(&script)
         .start("baseline-probe-closure");
-    let scope = harness
-        .author_scope_revision(MEMBER, &["mock-lane-candidate.txt", "crates/example-a/**", "crates/example-shared/**"]);
-    approve_scope(&harness, scope);
-    let bloom = harness.seal_member(MEMBER, scope);
+    let scopes = MEMBERS
+        .iter()
+        .map(|(workpiece, surface, _)| (*workpiece, harness.author_scope_revision(workpiece, from_ref(surface))))
+        .collect::<Vec<_>>();
+    approve_scopes(&harness, &scopes.iter().map(|(_, revision)| *revision).collect::<Vec<_>>());
+    let bloom = harness.seal_members(&scopes);
+
+    let constructs = park_constructs(&mut harness);
+    harness.release_parked_lanes(&constructs);
+    harness.pump_until("both captured candidates queue a member verification", |harness| queued_verifies(harness) == 2);
+    harness.hold_member_verification(false);
 
     harness.pump_until("the baseline probe is prepared over the candidate check's closure", |harness| {
         let mut store = harness.commission_store();
@@ -116,7 +181,7 @@ fn a_baseline_probe_is_scoped_to_the_candidate_check_closure() {
     };
     let base = dispatch.plan.composition.as_ref().expect("a contextual plan has a composition").base.candidate;
 
-    let mut scoped = 0;
+    let mut inspected = 0;
     for step in store.shared_run_steps(&run.run).expect("shared steps read") {
         let Ok(Descriptor::Probe(request)) = serde_json::from_slice(&step.descriptor) else {
             continue;
@@ -151,8 +216,8 @@ fn a_baseline_probe_is_scoped_to_the_candidate_check_closure() {
             Some(prepared.transformation.checkout),
             "base..base would empty the closure"
         );
-        scoped += 1;
+        inspected += 1;
     }
-    assert!(scoped >= 1, "attribution issued a baseline probe over the candidate check's closure");
-    assert_eq!(harness.bloom(bloom).members.len(), 1);
+    assert!(inspected >= 1, "attribution issued a baseline probe over the candidate check's closure");
+    assert_eq!(harness.bloom(bloom).members.len(), 2);
 }

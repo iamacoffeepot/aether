@@ -73,12 +73,15 @@ pub struct MemberLife {
     pub bar: String,
     pub rows: Vec<LifeRow>,
     pub rollup: Vec<RollupRow>,
+    /// The timeline was cut at the ledger cap, so totals and the rollup are a
+    /// partial read — never a complete one.
+    pub truncated: bool,
 }
 
 /// Fold `spans` into the selected member's life. Substage spans nest; they do
 /// not add to the parent stage's total.
 #[must_use]
-pub fn compose(spans: &[TimelineSpan], workpiece: &str) -> MemberLife {
+pub fn compose(spans: &[TimelineSpan], workpiece: &str, truncated: bool) -> MemberLife {
     let totals = stage_totals(spans, workpiece);
     let total_millis = totals.iter().map(|(_, millis)| *millis).sum();
     let rows = member_rows(spans, workpiece, &totals, total_millis);
@@ -88,6 +91,7 @@ pub fn compose(spans: &[TimelineSpan], workpiece: &str) -> MemberLife {
         bar: labelled_bar(&totals, total_millis),
         rows,
         rollup: bloom_rollup(spans),
+        truncated,
     }
 }
 

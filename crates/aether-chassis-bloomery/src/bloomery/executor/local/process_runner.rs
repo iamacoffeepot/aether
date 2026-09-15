@@ -275,6 +275,15 @@ impl TransformRunner for ProcessTransformRunner {
         // mark the file skip-worktree so the edit neither shows as a candidate nor
         // can be committed.
         neutralize_hooks(spec.worktree_dir)?;
+        // Bring the slot's cargo target directory to the base this dispatch
+        // stands on before anything in the lane builds (#6047). A slot whose
+        // last build was a stranger's tree is a cold build the day head has
+        // already paid for once; cloning the published snapshot for this
+        // checkout's nearest published ancestor makes every lane warm against
+        // the day instead of against whoever held the slot last. Best-effort
+        // and silent about a miss: the store is an optimization, and a
+        // dispatch that cannot be warmed runs on whatever the slot had.
+        warm_slot_target(spec, &self.repo);
         // The reset above scrubbed untracked state, the symlink included; put
         // the slot's target pairing back before anything in the lane builds,
         // and keep it out of the subject's git view so a candidate capture
@@ -496,7 +505,7 @@ fn append_work_order_args(
 }
 
 /// The argv tail after the lane program: command, `--out`, `--nonce`, and the
-/// optional range / model / seeded flags.
+/// optional range / gate-selection / model / seeded flags.
 ///
 /// A Construct checkpoint is `--seeded <checkout>` and never `--diff-base`
 /// (#5052): the marker on the work order is provenance, not a range the
@@ -507,6 +516,11 @@ fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) 
     task_argv::push_value_flag(&mut args, "--nonce", spec.nonce);
     if let Some(diff_base) = diff_base {
         task_argv::push_value_flag(&mut args, "--diff-base", diff_base);
+    }
+    // One flag per gate the umbrella was narrowed to (ADR-0218 amendment).
+    // Empty adds nothing, so an unnarrowed lane's argv is exactly what it was.
+    for gate in spec.selected_gates {
+        task_argv::push_value_flag(&mut args, "--gate", gate.as_str());
     }
     if is_model_lane(spec.command) {
         task_argv::push_value_flag(&mut args, "--subject", checkout);
@@ -591,6 +605,40 @@ fn export_execution_deadline(lane: &mut Command, spec: &RunSpec<'_>) {
     if let Some(deadline_unix_millis) = spec.deadline_unix_millis {
         lane.env(aether_bloomery::EXECUTION_DEADLINE_ENV, deadline_unix_millis.to_string());
     }
+}
+
+/// Clone this dispatch's base snapshot into its slot target, recording what
+/// happened beside the dispatch's evidence.
+///
+/// Runs after the checkout reset and before the `target` symlink, which is
+/// the one window where the slot's target directory is idle and named: the
+/// dispatch holds the slot, and nothing in the lane has opened the build
+/// directory yet. A host with no store configured records nothing and does
+/// nothing.
+fn warm_slot_target(spec: &RunSpec<'_>, repo: &Path) {
+    let Some(store) = spec.warm_from else {
+        return;
+    };
+    let warmth = store.warm(repo, spec.target_dir, spec.checkout_hex);
+    if let Some(detail) = warmth.detail.as_deref() {
+        tracing::debug!(
+            target: "aether_chassis_bloomery::executor",
+            slot_target = %spec.target_dir.display(),
+            checkout = spec.checkout_hex,
+            detail,
+            "snapshot store: this dispatch starts on the warmth its slot already had",
+        );
+    } else {
+        tracing::info!(
+            target: "aether_chassis_bloomery::executor",
+            slot_target = %spec.target_dir.display(),
+            base = warmth.base.as_deref().unwrap_or_default(),
+            cloned = warmth.cloned,
+            clone_millis = warmth.clone_millis,
+            "snapshot store: slot warmed against this dispatch's base",
+        );
+    }
+    warmth.record(spec.evidence_dir);
 }
 
 fn export_build_env(lane: &mut Command, spec: &RunSpec<'_>) {
@@ -1123,7 +1171,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::super::lane_program::LaneProgram;
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     use super::super::runner::RunProcess;
     use super::super::runner::{RunLifecycle, RunSpec};
     #[cfg(unix)]
@@ -1201,6 +1249,36 @@ mod tests {
     }
 
     #[test]
+    fn a_narrowed_umbrella_names_each_selected_gate_on_the_lane_argv() {
+        // Tripwire for the ADR-0218 amendment: the selection reaches the lane
+        // CLI as `--gate <id>` per gate, beside the range it already names. A
+        // selection dropped here leaves the lane running the full fan-out —
+        // which is what bloom 0f16e207 measured (runs 84DB66FF / A05DA0B9):
+        // fourteen single-check probes, 58 minutes of clippy, docs and test.
+        let evidence = Path::new("/tmp/evidence");
+        let worktree = Path::new("/tmp/slot");
+        let target = Path::new("/tmp/target");
+        let checkout = "abc123def456";
+        let selection = [String::from("verify.suppress")];
+
+        let mut probe = spec("verify.check", checkout, Some("base000"), None, evidence, worktree, target);
+        probe.selected_gates = &selection;
+        let args = work_order_args(&probe, checkout, Some("base000")).expect("work-order args assemble");
+
+        assert!(args.windows(2).any(|pair| pair == ["--gate", "verify.suppress"]), "the gate is named: {args:?}");
+        assert_eq!(args.iter().filter(|arg| *arg == "--gate").count(), 1, "one flag per selected gate: {args:?}");
+        assert!(args.windows(2).any(|pair| pair == ["--diff-base", "base000"]), "the range still rides too: {args:?}");
+
+        let full = work_order_args(
+            &spec("verify.check", checkout, Some("base000"), None, evidence, worktree, target),
+            checkout,
+            Some("base000"),
+        )
+        .expect("work-order args assemble");
+        assert!(!full.iter().any(|arg| arg == "--gate"), "an unnarrowed umbrella names no gate: {full:?}");
+    }
+
+    #[test]
     fn a_reader_dispatch_names_the_bloom_and_the_receipt() {
         // Tripwire: the reader's prompt context slots are `--bloom` and
         // `--receipt`. Dropping them here leaves the lane with an empty
@@ -1247,6 +1325,7 @@ mod tests {
             judged_tree_hex: None,
             worktree_dir,
             target_dir,
+            warm_from: None,
             build_jobs: 1,
             evidence_dir,
             nonce: "n-1",
@@ -1263,6 +1342,7 @@ mod tests {
             instruction_bundle: None,
             instruction_bundle_digest: None,
             deadline_unix_millis: None,
+            selected_gates: &[],
         }
     }
 

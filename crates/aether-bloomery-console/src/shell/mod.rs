@@ -312,6 +312,7 @@ impl Shell {
 
     fn request_due(&mut self) {
         let keys = self.subscribed();
+        self.store.evict_unsubscribed_journals(&keys);
         for key in keys {
             if !self.store.due(&key) {
                 continue;

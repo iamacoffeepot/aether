@@ -330,6 +330,28 @@ pub struct BloomView {
     /// Optional shared verification and eager-head state.
     #[serde(default)]
     pub coordination: Option<CoordinationView>,
+    /// The admin session open on this bloom (ADR-0219). Absent when the
+    /// coordinator predates the field or nobody is inside the bloom.
+    #[serde(default)]
+    pub admin: Option<AdminSessionView>,
+    /// Verdict artifacts an operator voided on this bloom (ADR-0219). Absent
+    /// from an older coordinator and empty when nothing was waived; it outlives
+    /// the session, so a landed bloom still shows what a person stood in for.
+    #[serde(default)]
+    pub waivers: Vec<DigestHex>,
+}
+
+/// The open admin session on a bloom, when the coordinator serves it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AdminSessionView {
+    #[serde(default)]
+    pub operator: String,
+    #[serde(default)]
+    pub reason: String,
+    /// Presence markers only: the board renders how many acts a session has
+    /// taken, and the act vocabulary itself belongs to the coordinator.
+    #[serde(default)]
+    pub acts: Vec<Present>,
 }
 
 /// Only the pre-check fields the board renders. The full state remains in the
@@ -745,6 +767,11 @@ pub struct JournalRecordView {
     pub outcome: Value,
     #[serde(default)]
     pub decider: String,
+    /// Host-clock stamp the `GET /journal` route renders beside the decoded
+    /// event. `None` is a pre-column row or a coordinator that predates the
+    /// field; the time column then reads blank rather than inventing a time.
+    #[serde(default)]
+    pub recorded_unix_millis: Option<u64>,
 }
 
 /// `GET /artifacts/{digest}/decoded` — a known kind, or a raw range.

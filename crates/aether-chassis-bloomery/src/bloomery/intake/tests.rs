@@ -720,6 +720,7 @@ fn claim_for_carries_the_whole_observation() {
             duration_millis: 10,
             prepare_millis: None,
         }],
+        carried: None,
     };
     let name = NameEvidenceClaims::attempt_artifact_name(
         &nonce,

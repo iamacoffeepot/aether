@@ -5,9 +5,9 @@
 mod common;
 
 use aether_bloomery::{
-    AttemptCompletedError, BloomId, CandidateRef, CompositionParents, Decision, Decisions, Event, Evidence,
-    EvidenceKind, Fact, Outcome, Snapshot, StageId, VerifyFailure, VerifyFailureSet, Withdrawal, WithdrawalCause,
-    WorkpieceId,
+    AttemptCompletedError, BloomId, CandidateRef, CompositionParents, Decision, Decisions, Digest, Event, Evidence,
+    EvidenceKind, Fact, Outcome, ResolutionClaim, Snapshot, StageId, Transformation, VerifyFailure, VerifyFailureSet,
+    Withdrawal, WithdrawalCause, WorkpieceId,
 };
 use common::{claim, compiled_resolved, digest, draft, event, membership, step, workpiece};
 
@@ -209,6 +209,109 @@ fn a_passing_reconcile_rejoins_verify_with_the_new_candidate() {
         "the fold round outlives the stage: the reconciled candidate has not folded yet (#4952)",
     );
     assert_eq!(progress.fold_conflict_evidence, None, "the wedge attachment belongs to the stage that just passed");
+    let dispatched = verify_dispatch(&decided);
+    assert_eq!(
+        dispatched.diff_base,
+        Some(digest(1)),
+        "with no proof behind it the delta-confirm still starts at the member's construct base",
+    );
+    assert_eq!(dispatched.inputs.len(), 1, "and carries no receipt it does not have: {:?}", dispatched.inputs);
+}
+
+/// `two_member_with_claims`, but beta's integration carries the verdict that
+/// judged its tree, so the bloom's verify memo holds a proof for the candidate
+/// the collision is about to displace.
+///
+/// `claim` files an `EvidenceKind::ResolutionClaim`, which mints no proof — the
+/// memo only records a `VerificationResult`. That difference is the whole point
+/// of this fixture: it is the presence of the proof, not the presence of the
+/// claim, that lets the confirming Verify diff against the merge alone.
+fn beta_proved_then_collided(head: Digest) -> (Snapshot, BloomId) {
+    let (snapshot, bloom) = two_member_with_claims();
+    let (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "verify-beta",
+            Fact::Integrate {
+                bloom,
+                claim: ResolutionClaim {
+                    evidence: Evidence {
+                        subject: digest(21),
+                        kind: EvidenceKind::VerificationResult,
+                        detail: beta_verdict(),
+                    },
+                    ..claim("beta", 11, 21)
+                },
+            },
+        ),
+    );
+    let (collided, _) = step(
+        &snapshot,
+        &event(
+            "fold-conflict-beta",
+            Fact::FoldConflict {
+                bloom,
+                workpiece: workpiece("beta"),
+                checkpoint: digest(30),
+                head,
+                evidence: conflict_evidence(30, 90),
+            },
+        ),
+    );
+    (collided, bloom)
+}
+
+/// The artifact digest of the verdict that proved beta's pre-collision tree.
+fn beta_verdict() -> Digest {
+    digest(85)
+}
+
+fn verify_dispatch(decisions: &Decisions) -> &Transformation {
+    decisions
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            Decision::DispatchAttempt { stage: StageId::Verify, transformation, .. } => Some(transformation),
+            _ => None,
+        })
+        .expect("the advance dispatches a Verify")
+}
+
+// ADR-0218 §Amendment: reconcile is scoped to the merge. The plausible bug is
+// the one bloom 0f16e207 paid for — the Verify after a Reconcile is minted as a
+// first proof, so its range starts at the member's construct base and the
+// mechanical closure re-proves the member's whole change on the way to learning
+// what the merge did. The range must start at the candidate the collision
+// displaced, which this bloom already holds a green verdict for.
+#[test]
+fn a_verify_after_a_reconcile_confirms_the_delta_from_the_proved_candidate() {
+    let head = digest(31);
+    let (snapshot, bloom) = beta_proved_then_collided(head);
+
+    let captured = CandidateRef { tree: digest(41), checkout: digest(42) };
+    let (_, decided) = step(&snapshot, &pass_reconcile(bloom, "beta", "reconcile-pass", captured));
+
+    match decided.outcome {
+        Outcome::AttemptAdvanced { from, to, .. } => {
+            assert_eq!(from, StageId::Reconcile);
+            assert_eq!(to, StageId::Verify);
+        }
+        other => panic!("expected AttemptAdvanced onto Verify, got {other:?}"),
+    }
+
+    let dispatched = verify_dispatch(&decided);
+    assert_eq!(dispatched.checkout, captured.checkout, "the lane still judges the reconciled candidate");
+    assert_eq!(
+        dispatched.diff_base,
+        Some(digest(23)),
+        "the range starts at the proved candidate's checkout, not at the construct base {:?}",
+        digest(1),
+    );
+    assert_eq!(
+        dispatched.inputs,
+        vec![captured.tree, beta_verdict()],
+        "the subject, then the receipt the range's left end stands on",
+    );
 }
 
 // Exhausting Reconcile's budget wedges with the collision evidence, not the
@@ -850,12 +953,13 @@ fn stale_composition_waiters_are_not_resumed() {
                 workpiece: workpiece("epsilon"),
                 evidence: Evidence { subject: digest(24), kind: EvidenceKind::VerificationResult, detail: digest(61) },
                 failed_verifiers: VerifyFailureSet::one(VerifyFailure::Test),
+                findings: String::new(),
             },
         ),
     );
     assert!(
-        matches!(&failed.outcome, Outcome::RefineReentered { .. }),
-        "epsilon left Verify for Refine: {:?}",
+        matches!(&failed.outcome, Outcome::MembersWithdrawn { .. }),
+        "epsilon's red verify ejected it under the default disposition: {:?}",
         failed.outcome,
     );
 
@@ -871,10 +975,9 @@ fn stale_composition_waiters_are_not_resumed() {
     let record = after.blooms.get(&bloom).expect("the sealed bloom is still in the snapshot");
     assert!(record.withdrawn.contains_key(&workpiece("gamma")), "the withdrawn waiter stays withdrawn");
     assert!(record.claims.contains_key(&workpiece("delta")), "the resolved waiter keeps its claim");
-    assert_eq!(
-        record.progress.get(&workpiece("epsilon")).map(|progress| progress.stage),
-        Some(StageId::Refine),
-        "the non-Verify waiter is not pulled back to Verify",
+    assert!(
+        !record.progress.contains_key(&workpiece("epsilon")),
+        "the waiter whose red verify ejected it has no cursor to be pulled back to Verify",
     );
     assert_eq!(
         record.progress.get(&workpiece("zeta")).map(|progress| progress.candidate),

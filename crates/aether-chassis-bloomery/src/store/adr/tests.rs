@@ -9,7 +9,7 @@ use aether_bloomery::{
 use ed25519_dalek::{Signer, SigningKey};
 
 use super::{AdrBackend, AdrError};
-use crate::store::runtime::SqliteStore;
+use crate::store::runtime::{SCHEMA_VERSION, SqliteStore};
 
 fn memory() -> SqliteStore {
     SqliteStore::open(":memory:").expect("in-memory store opens")
@@ -87,7 +87,7 @@ fn a_v8_store_gains_empty_adr_tables() {
     let mut store = SqliteStore::open(path).expect("a v8 store migrates");
     assert!(store.list().expect("list").is_empty(), "migration invents no ADRs");
     let flags: i64 = store.conn.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("user_version");
-    assert_eq!(flags, 25, "the open stamps the current schema");
+    assert_eq!(flags, SCHEMA_VERSION, "the open stamps the current schema");
 }
 
 #[test]

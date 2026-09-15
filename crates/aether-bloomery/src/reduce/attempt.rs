@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use super::composition::reduce_composition_attempt;
 use super::coordination::carried_head_pin;
+use super::eject::{eject, ejection_reason};
 use super::integrate::claim_effects;
 use super::splice::member_construct_base;
 use super::verify_memo::reuse_of;
@@ -15,8 +16,8 @@ use super::{
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
-    CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Membership, ResolutionClaim, StageBinding, StageCatalog,
-    Transformation, VerifyFailureSet, Wedge,
+    CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Membership, RedVerify, ResolutionClaim, StageBinding,
+    StageCatalog, Transformation, VerifyFailureSet, Wedge,
 };
 
 /// The move-and-dispatch effect pair every cursor move of
@@ -115,6 +116,19 @@ pub(super) fn move_effects_with_checkpoint(
     {
         transformation.diff_base = Some(base);
     }
+    // A Verify that follows a Reconcile is a delta-confirm, not a first proof:
+    // the candidate the lap started from is already green, so the range the
+    // mechanical lane narrows against starts there rather than at the member's
+    // construct base, and the whole change is not re-proved to learn what the
+    // merge did (ADR-0218). The receipt that proved it rides as a second input
+    // so the journal reads "proved N, then delta N to P" rather than leaving a
+    // reader to infer the proof from the range's left end.
+    if progress.stage == StageId::Verify
+        && let Some(proved) = sealed.proved
+    {
+        transformation.diff_base = Some(proved.candidate.checkout);
+        transformation.inputs.push(proved.proof);
+    }
     let candidate = if progress.stage == StageId::Construct {
         None
     } else {
@@ -173,6 +187,32 @@ pub(super) struct SealedLine<'a> {
     /// (ADR-0200). Independent of [`Self::held`]: releasing one brake must not
     /// lift the other.
     pub base_proven: bool,
+    /// The proved candidate a `Verify` on this line confirms a delta against,
+    /// displacing [`Self::base`] as the mechanical lane's range start
+    /// (ADR-0218 §Amendment: reconcile is scoped to the merge).
+    ///
+    /// `None` on every ordinary line: a first pass has nothing proved behind
+    /// it, so the range is the member's own construct base. Set only by
+    /// [`SealedLine::proving_delta_from`], and only for the lap after a
+    /// Reconcile — the one case where the tree being judged is a *merge* of a
+    /// tree this bloom already proved.
+    pub proved: Option<ProvedPredecessor>,
+}
+
+/// One proved predecessor of a delta-confirm `Verify`: the candidate an earlier
+/// pass judged green, and the digest of the receipt that judged it.
+///
+/// Carried together because neither half is usable alone — the candidate names
+/// the range the lane narrows against, the receipt names the proof that range
+/// is honest about standing on, and a dispatch that shipped one without the
+/// other would either narrow against an unproven tree or record a proof it did
+/// not use.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct ProvedPredecessor {
+    /// The candidate the prior pass proved.
+    pub candidate: CandidateRef,
+    /// The artifact digest of the verdict that proved it.
+    pub proof: Digest,
 }
 
 impl<'a> SealedLine<'a> {
@@ -186,7 +226,19 @@ impl<'a> SealedLine<'a> {
             base: member_construct_base(record, &member.workpiece),
             held: record.operator_hold.is_some(),
             base_proven: record.base_proven,
+            proved: None,
         }
+    }
+
+    /// The same line, read as a delta-confirm over `proved` (ADR-0218
+    /// §Amendment: reconcile is scoped to the merge).
+    ///
+    /// Takes an `Option` rather than a value so the one caller that can produce
+    /// a proved predecessor reads as a single chained expression instead of a
+    /// branch that rebuilds the line: `None` is the ordinary line, unchanged.
+    pub(super) fn proving_delta_from(mut self, proved: Option<ProvedPredecessor>) -> Self {
+        self.proved = proved;
+        self
     }
 
     /// Whether either brake is on: the operator hold, or an unproven base.
@@ -428,6 +480,47 @@ pub(super) fn reduce_attempt_completed(
 /// current stage and, while the sealed stage budget allows, redispatches the
 /// *same* artifact under a fresh order through [`reconcile_or_line_targets`].
 /// At the ceiling it records a wedge whose cause the projection reads as
+/// Reduce one admitted member-stage deadline expiry
+/// ([`Fact::MemberDeadlineExpired`](crate::Fact::MemberDeadlineExpired)).
+///
+/// One question, then a delegation. A `Verify` the host cancelled at its sealed
+/// wall clock had its whole allowance and did not finish, which is the member's
+/// own answer about its own work, so a bloom on the `Eject` disposition
+/// withdraws it (ADR-0218 §Amendment: low tolerance). Everything else — another
+/// stage, or a bloom that sealed `Refine` — is the machinery ledger's, and goes
+/// to [`reduce_member_executor_fault`] unchanged, because an expiry that is not
+/// being acted on is exactly a fault that reached no verdict.
+///
+/// Delegating rather than inlining keeps the fault's retry accounting in one
+/// place: the guards, the series, the budget and the wedge are decided once, and
+/// an expiry cannot drift into a second copy of them.
+pub(super) fn reduce_member_deadline_expired(
+    snapshot: &Snapshot,
+    bloom: &BloomId,
+    workpiece: &WorkpieceId,
+    stage: StageId,
+    evidence: &Evidence,
+) -> Decisions {
+    let ejecting = snapshot.blooms.get(bloom).is_some_and(|record| {
+        record.status == BloomStatus::Sealed
+            && record.red_verify == RedVerify::Eject
+            && record.progress.get(workpiece).is_some_and(|cursor| cursor.stage == stage)
+    });
+    if !(ejecting && stage == StageId::Verify) {
+        return reduce_member_executor_fault(snapshot, bloom, workpiece, stage, evidence);
+    }
+    let record = snapshot.blooms.get(bloom).expect("the ejecting check read this record");
+
+    eject(
+        snapshot,
+        record,
+        bloom,
+        workpiece,
+        &ejection_reason("its verify exceeded the sealed wall clock", VerifyFailureSet::EMPTY, evidence, ""),
+        alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }],
+    )
+}
+
 /// machinery.
 pub(super) fn reduce_member_executor_fault(
     snapshot: &Snapshot,
@@ -436,45 +529,25 @@ pub(super) fn reduce_member_executor_fault(
     stage: StageId,
     evidence: &Evidence,
 ) -> Decisions {
-    let Some(record) = snapshot.blooms.get(bloom) else {
-        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(
-            MemberExecutorFaultError::UnknownOrInactiveBloom,
-        ));
+    let ctx = match FaultCtx::admissible(snapshot, bloom, workpiece, stage, evidence) {
+        Ok(ctx) => ctx,
+        Err(refusal) => return Decisions::rejected(Outcome::MemberExecutorFaultRejected(refusal)),
     };
-    if record.status != BloomStatus::Sealed {
-        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(
-            MemberExecutorFaultError::UnknownOrInactiveBloom,
-        ));
-    }
-    let Some(member) = record.spec.members().iter().find(|member| member.workpiece == *workpiece) else {
-        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(MemberExecutorFaultError::NotAMember(
-            workpiece.clone(),
-        )));
-    };
-    let Some(cursor) = record.progress.get(workpiece).copied() else {
-        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(MemberExecutorFaultError::NotDispatched(
-            workpiece.clone(),
-        )));
-    };
-    if cursor.stage != stage {
-        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(MemberExecutorFaultError::StageMismatch {
-            expected: cursor.stage,
-            got: stage,
-        }));
-    }
-    let subject = cursor.candidate.map_or_else(|| member.scope_revision, |current| current.tree);
-    if !evidence.validates(&subject) {
-        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(MemberExecutorFaultError::EvidenceNotBound {
-            expected: subject,
-            got: evidence.subject,
-        }));
+
+    // ADR-0219 hook. A host that cannot run is the expected condition while an
+    // operator is repairing the bloom by hand, so a fault inside an admin
+    // session files its evidence and stops — charging one would wedge the very
+    // member the operator is fixing. Placed after the binding checks so a
+    // malformed fault is still refused as a malformed fault.
+    if super::admin::absorbs_faults(ctx.record) {
+        return super::admin::absorbed_fault(*bloom, Some(workpiece), evidence);
     }
 
     let rolls = match snapshot.member_machinery(bloom, workpiece) {
         Some(fault) if fault.stage == stage => fault.rolls.saturating_add(1),
         _ => 1,
     };
-    let budget = record.stage_catalog.retry_budget_of(stage).unwrap_or(1);
+    let budget = ctx.record.stage_catalog.retry_budget_of(stage).unwrap_or(1);
     let mut effects = alloc::vec![
         Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() },
         Decision::RecordMemberMachinery {
@@ -498,13 +571,95 @@ pub(super) fn reduce_member_executor_fault(
         };
     }
 
-    let fold_checkpoint = cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile);
-    let (targets, construct_checkpoint_base) = reconcile_or_line_targets(
+    effects.extend(if ctx.cursor.stage == stage {
+        redispatch_current_stage(&ctx)
+    } else {
+        hand_held_candidate_to_stage(&ctx)
+    });
+    Decisions {
+        outcome: Outcome::MachineryRetried { bloom: *bloom, workpiece: workpiece.clone(), stage, rolls, budget },
+        effects,
+    }
+}
+
+/// Everything the two redispatch shapes read, resolved once by
+/// [`FaultCtx::admissible`].
+#[derive(Clone, Copy)]
+struct FaultCtx<'a> {
+    snapshot: &'a Snapshot,
+    record: &'a BloomRecord,
+    bloom: &'a BloomId,
+    workpiece: &'a WorkpieceId,
+    member: &'a Membership,
+    /// The member's cursor as the fault found it. `cursor.stage` is the stage
+    /// the member sits at; [`Self::stage`] is the stage the fault names, and
+    /// the two differ only on the held-candidate hand-off.
+    cursor: StageProgress,
+    stage: StageId,
+}
+
+impl<'a> FaultCtx<'a> {
+    /// Resolve the fault against the snapshot, or name the refusal that keeps
+    /// it out.
+    ///
+    /// The stage gate is the door #5969 opens: ordinarily a fault must name the
+    /// stage the cursor sits at, because a fault aimed from a stale read of the
+    /// board would otherwise spend a roll on the wrong stage. A member *holding
+    /// a candidate* is the one shape where that is demonstrably not a stale
+    /// read — the capture exists, and `Verify` is the only stage that judges it
+    /// — so naming `Verify` over a held candidate is accepted and hands the
+    /// capture to its verify rather than wedging the member behind another
+    /// construct lap.
+    fn admissible(
+        snapshot: &'a Snapshot,
+        bloom: &'a BloomId,
+        workpiece: &'a WorkpieceId,
+        stage: StageId,
+        evidence: &Evidence,
+    ) -> Result<Self, MemberExecutorFaultError> {
+        let record = snapshot
+            .blooms
+            .get(bloom)
+            .filter(|record| record.status == BloomStatus::Sealed)
+            .ok_or(MemberExecutorFaultError::UnknownOrInactiveBloom)?;
+        let member = record
+            .spec
+            .members()
+            .iter()
+            .find(|member| member.workpiece == *workpiece)
+            .ok_or_else(|| MemberExecutorFaultError::NotAMember(workpiece.clone()))?;
+        let cursor = record
+            .progress
+            .get(workpiece)
+            .copied()
+            .ok_or_else(|| MemberExecutorFaultError::NotDispatched(workpiece.clone()))?;
+
+        let holds_a_capture_to_verify = stage == StageId::Verify && cursor.candidate.is_some();
+        if cursor.stage != stage && !holds_a_capture_to_verify {
+            return Err(MemberExecutorFaultError::StageMismatch { expected: cursor.stage, got: stage });
+        }
+
+        let subject = cursor.candidate.map_or_else(|| member.scope_revision, |current| current.tree);
+        if !evidence.validates(&subject) {
+            return Err(MemberExecutorFaultError::EvidenceNotBound { expected: subject, got: evidence.subject });
+        }
+
+        Ok(Self { snapshot, record, bloom, workpiece, member, cursor, stage })
+    }
+}
+
+/// Redispatch the member's current stage over the same artifact under a fresh
+/// order: nothing about the cursor moves, so the cursor itself is the progress
+/// the move carries. A Construct order displays no candidate — the lane is
+/// building one — while every later stage displays the capture it judges.
+fn redispatch_current_stage(ctx: &FaultCtx<'_>) -> [Decision; 2] {
+    let FaultCtx { snapshot, record, bloom, workpiece, member, cursor, stage } = *ctx;
+    let targets = reconcile_or_line_targets(
         stage,
         member.scope_revision,
         member_construct_base(record, workpiece),
         cursor.candidate,
-        fold_checkpoint,
+        cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile),
         snapshot.member_checkpoint(bloom, workpiece),
     );
     let displayed = if stage == StageId::Construct {
@@ -512,19 +667,56 @@ pub(super) fn reduce_member_executor_fault(
     } else {
         cursor.candidate.map(|current| current.tree)
     };
-    effects.extend(move_effects_with_checkpoint(
+
+    move_effects_with_checkpoint(
         *bloom,
         workpiece,
         member.scope_revision,
         &cursor,
-        (targets, construct_checkpoint_base),
+        targets,
         displayed,
         SealedLine::of(record, member),
-    ));
-    Decisions {
-        outcome: Outcome::MachineryRetried { bloom: *bloom, workpiece: workpiece.clone(), stage, rolls, budget },
-        effects,
-    }
+    )
+}
+
+/// Move the cursor to `ctx.stage` carrying the capture it already holds — the
+/// hand-off [`FaultCtx::admissible`] lets through.
+///
+/// A fresh stage entry, so `attempts` restarts at one, and the fold round
+/// outlives the stage exactly as it does on a passing advance (#4952): the
+/// checkpoint the capture was reconciled onto rides along until the fold either
+/// takes the candidate or moves, while the conflict evidence does not — that
+/// was the wedge attachment of the Reconcile stage this capture has left.
+fn hand_held_candidate_to_stage(ctx: &FaultCtx<'_>) -> [Decision; 2] {
+    let FaultCtx { snapshot, record, bloom, workpiece, member, cursor, stage } = *ctx;
+    let progress = StageProgress {
+        stage,
+        attempts: 1,
+        candidate: cursor.candidate,
+        repair_rolls: cursor.repair_rolls,
+        seen_verify_failures: cursor.seen_verify_failures,
+        fold_checkpoint: cursor.fold_checkpoint,
+        fold_conflict_evidence: None,
+        reconcile_assembles_base: false,
+    };
+    let targets = reconcile_or_line_targets(
+        stage,
+        member.scope_revision,
+        member_construct_base(record, workpiece),
+        cursor.candidate,
+        None,
+        snapshot.member_checkpoint(bloom, workpiece),
+    );
+
+    move_effects_with_checkpoint(
+        *bloom,
+        workpiece,
+        member.scope_revision,
+        &progress,
+        targets,
+        cursor.candidate.map(|current| current.tree),
+        SealedLine::of(record, member),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -597,12 +789,43 @@ fn advance_after_pass(
         &progress,
         (targets, construct_checkpoint_base),
         displayed,
-        SealedLine::of(record, member),
+        SealedLine::of(record, member).proving_delta_from(delta_confirm_predecessor(record, cursor, next)),
     ));
     Decisions {
         outcome: Outcome::AttemptAdvanced { bloom, workpiece: workpiece.clone(), from: cursor.stage, to: next },
         effects,
     }
+}
+
+/// The proved candidate the `Verify` after a Reconcile confirms a delta against
+/// (ADR-0218 §Amendment: reconcile is scoped to the merge).
+///
+/// A fold collision sends a member back to Reconcile carrying the candidate it
+/// collided with, and that candidate's green verdict stays in the record's
+/// verify memo — the revoked claim is about resolution, not about whether the
+/// tree built. So the merge is the only thing about the reconciled candidate
+/// this bloom has never judged, and the range the mechanical lane narrows
+/// against starts at the proved candidate rather than at the member's construct
+/// base, which would carry the member's whole change into the closure a second
+/// time.
+///
+/// `None` for every other advance: any stage but Reconcile → Verify, a
+/// base-assembly Reconcile (which returns to Construct), and a lap whose
+/// starting candidate this bloom holds no verdict for. The caller then keeps
+/// the construct base it already used.
+///
+/// The saving is bounded by the closure's granularity, not the diff's:
+/// `verify.check` narrows to the reverse-dependency closure of the changed
+/// *crates*, so a merge landing in the same crates the member changed selects
+/// exactly the gates the full range would have. It is the merge that is
+/// cheaper, never the confirmation of a merge that touches everything.
+fn delta_confirm_predecessor(record: &BloomRecord, cursor: &StageProgress, next: StageId) -> Option<ProvedPredecessor> {
+    if cursor.stage != StageId::Reconcile || next != StageId::Verify {
+        return None;
+    }
+    let candidate = cursor.candidate?;
+    let proof = record.verify_proof_for(StageId::Verify, candidate.tree)?;
+    Some(ProvedPredecessor { candidate, proof: proof.evidence.detail })
 }
 
 fn retry_or_wedge(
@@ -1232,6 +1455,7 @@ mod tests {
                 movement_budget: 2,
                 reservation_millis: 1_000,
                 coalesce_millis: None,
+                red_verify: RedVerify::Refine,
                 host_class: String::from("test-host"),
             }),
         )
@@ -1778,5 +2002,82 @@ mod tests {
             }
             other => panic!("expected the later revocation to rejoin Verify, got {other:?}"),
         }
+    }
+
+    // A member at Construct holding a candidate from an admitted Reconcile
+    // completion accepts `retry --stage Verify`: the held capture moves onto
+    // its verify without another construct lap.
+    #[test]
+    fn a_retry_naming_verify_is_accepted_when_the_member_holds_a_candidate() {
+        let (snapshot, bloom) = sealed();
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "splice-conflict",
+                Fact::FoldConflict {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    checkpoint: digest(30),
+                    head: digest(31),
+                    evidence: conflict_evidence(30),
+                },
+            ),
+        );
+        let assembled = CandidateRef { tree: digest(41), checkout: digest(42) };
+        let (snapshot, advanced) = step(
+            &snapshot,
+            &event(
+                "reconcile-pass",
+                Fact::AttemptCompleted {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    stage: StageId::Reconcile,
+                    passed: true,
+                    evidence: evidence(),
+                    candidate: Some(assembled),
+                },
+            ),
+        );
+        assert!(matches!(
+            advanced.outcome,
+            Outcome::AttemptAdvanced { from: StageId::Reconcile, to: StageId::Construct, .. }
+        ));
+        let progress = snapshot.blooms[&bloom].progress[&WorkpieceId("wp".into())];
+        assert_eq!(progress.stage, StageId::Construct);
+        assert_eq!(progress.candidate, Some(assembled));
+        assert_eq!(progress.fold_checkpoint, Some(digest(31)), "the capture carries the head it reconciled onto");
+
+        let (after, retried) = step(
+            &snapshot,
+            &event(
+                "retry-verify",
+                Fact::MemberExecutorFault {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    stage: StageId::Verify,
+                    evidence: Evidence {
+                        subject: assembled.tree,
+                        kind: EvidenceKind::ExecutorFault,
+                        detail: digest(71),
+                    },
+                },
+            ),
+        );
+        let Outcome::MachineryRetried { stage, .. } = retried.outcome else {
+            panic!("expected a Verify retry, got {:?}", retried.outcome);
+        };
+        assert_eq!(stage, StageId::Verify);
+        let (stage, subject) = dispatch_stage_and_subject(&retried);
+        assert_eq!(stage, StageId::Verify);
+        assert_eq!(subject, assembled.tree);
+
+        // Tripwire (#4952): the fold round outlives the stage. Dropping the
+        // checkpoint on the way to Verify would leave the fold with no record
+        // of what this capture was reconciled onto, and the next fold would
+        // replay the conflict this reconcile already resolved.
+        let moved = after.blooms[&bloom].progress[&WorkpieceId("wp".into())];
+        assert_eq!(moved.stage, StageId::Verify);
+        assert_eq!(moved.candidate, Some(assembled));
+        assert_eq!(moved.fold_checkpoint, Some(digest(31)));
     }
 }

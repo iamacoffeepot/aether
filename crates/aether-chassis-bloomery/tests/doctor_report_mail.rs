@@ -62,6 +62,7 @@ fn a_foreign_rpc_snapshot_does_not_overwrite_the_doctors_last_report() {
             name: FORGED.into(),
             statement: "a foreign sender must not become the overlay".into(),
             passed: false,
+            pending: false,
             divergences: vec!["rpc".into()],
         }],
     });

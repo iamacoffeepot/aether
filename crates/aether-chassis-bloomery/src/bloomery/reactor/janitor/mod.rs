@@ -69,6 +69,9 @@ pub struct JanitorReactorSetup {
     /// Days a consumed evidence directory of a terminal bloom must age before
     /// an archive pass will move it.
     pub evidence_retention_days: u64,
+    /// How many published target snapshots to keep past the bases the slot
+    /// targets are currently standing on (#6047).
+    pub lane_snapshot_keep: usize,
     /// Archive-tier root. Empty resolves to `<worktree_base>/archive`.
     pub archive_base: String,
     /// How often to wake and sweep.

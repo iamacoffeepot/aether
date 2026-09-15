@@ -6,16 +6,20 @@
 //! posted to a configured Discord-compatible webhook, best-effort and never on
 //! the line's critical path.
 //!
-//! # Two volumes
+//! # Three volumes
 //!
 //! Loud conditions — wedges, host faults, parks, held decisions, refused
 //! landings, a bloom's lifecycle — always post. Quiet milestones — a bloom
 //! entering the line, a member integrating — post only when
-//! [`NotifyConfig::milestones`] is on (#5457). The difference matters because
-//! a bloom that walks cleanly raises no loud condition at all, so an operator
-//! watching only the loud channel cannot tell a healthy night from a dead
-//! coordinator. The knob gates the POST and not the ledger, so turning it on
-//! starts the milestone stream forward rather than replaying the day.
+//! [`NotifyConfig::milestones`] is on (#5457). Step-by-step progress — lane
+//! starts and captures, verify-step rows, shared-run starts and completions,
+//! head advances, reconcile laps, base-verify transitions, cursor moves —
+//! posts only when [`NotifyConfig::progress`] is on (#5978). The difference
+//! matters because a bloom that walks cleanly raises no loud condition at
+//! all, so an operator watching only the loud channel cannot tell a healthy
+//! night from a dead coordinator. Each knob gates the POST and not the
+//! ledger, so turning one on starts its stream forward rather than replaying
+//! the day.
 //!
 //! # It drains no topic
 //!
@@ -130,6 +134,9 @@ pub struct NotifyReactorSetup {
     /// Whether the channel also carries quiet milestones (#5457) — the
     /// resolved [`NotifyConfig::milestones`].
     pub milestones: bool,
+    /// Whether the channel also carries step-by-step progress (#5978) — the
+    /// resolved [`NotifyConfig::progress`].
+    pub progress: bool,
     /// How often to wake, read the document, and post what is new.
     pub poll_interval_secs: u64,
 }
