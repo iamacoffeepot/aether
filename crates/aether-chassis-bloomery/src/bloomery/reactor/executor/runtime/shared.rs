@@ -414,7 +414,22 @@ pub(super) fn drain_construction_admissions(
     };
     let nonce = super::dispatch_nonce(entry.sequence);
     let dispatch_digest = payload.dispatch.digest();
-    if let Some(retained) = store.construction_admission(dispatch_digest.as_bytes())? {
+    let retained = store.construction_admission(dispatch_digest.as_bytes())?;
+    // A retired row must not outlive the intent that minted it. Coordination
+    // emits `QueueConstructionAdmission` only for a construction it still holds
+    // queued and unadmitted, so a fresh topic row naming a dispatch whose
+    // admission was retired is a live intent meeting a dead row — and acking it
+    // away is the second way a member is stranded in Construct with no order and
+    // no wedge (issue 6051). Reviving is bounded by the same thing that bounds
+    // the first admission: only the reducer mints topic rows, so nothing here
+    // re-asks on its own.
+    let revive = match &retained {
+        Some(retained) if retained.retired => {
+            scheduler.confirm_queued_construction(store, &payload.dispatch)? == Some(true)
+        }
+        _ => false,
+    };
+    if let Some(retained) = retained.filter(|_| !revive) {
         if retained.retired || retained.nonce != nonce.0 {
             // The admitted nonce is the one the journal already carries, so a
             // topic row naming a different one is superseded, not authoritative.
@@ -440,12 +455,21 @@ pub(super) fn drain_construction_admissions(
         }
         let wall_clock_millis = payload.dispatch.transformation.limits.wall_clock_secs.saturating_mul(1_000);
         let deadline_unix_millis = now_unix_millis.saturating_add(wall_clock_millis);
-        store.record_construction_admission(
-            dispatch_digest.as_bytes(),
-            &nonce.0,
-            now_unix_millis,
-            deadline_unix_millis,
-        )?;
+        if revive {
+            store.revive_construction_admission(
+                dispatch_digest.as_bytes(),
+                &nonce.0,
+                now_unix_millis,
+                deadline_unix_millis,
+            )?;
+        } else {
+            store.record_construction_admission(
+                dispatch_digest.as_bytes(),
+                &nonce.0,
+                now_unix_millis,
+                deadline_unix_millis,
+            )?;
+        }
     }
     let event = construction_admission_event(ConstructionAdmission {
         nonce: construction_nonce_digest(&nonce),

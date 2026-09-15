@@ -100,6 +100,31 @@ impl MemberVerificationScheduler {
         self.states.get(&bloom).is_some_and(|state| current_request(state, row).is_some())
     }
 
+    /// Whether coordination still holds `dispatch` queued and unadmitted — the
+    /// intent a `QueueConstructionAdmission` row names, not the admission a
+    /// physical nonce was bound to.
+    ///
+    /// The same journal-read window as
+    /// [`confirm_construction_admission`](Self::confirm_construction_admission),
+    /// and the same reason for it: a stale projection would read a live queued
+    /// intent as spent, and the caller acts on `true` by reviving a retired
+    /// admission row, which must never resurrect an intent coordination has
+    /// moved on from.
+    pub(super) fn confirm_queued_construction(
+        &mut self,
+        store: &mut dyn StoreBackend,
+        dispatch: &aether_bloomery::ContextualAttemptDispatch,
+    ) -> rusqlite::Result<Option<bool>> {
+        self.confirm(store, |scheduler| scheduler.holds_queued_construction(dispatch))
+    }
+
+    fn holds_queued_construction(&self, dispatch: &aether_bloomery::ContextualAttemptDispatch) -> bool {
+        self.states.get(&dispatch.bloom).is_some_and(|state| {
+            state.queued_construction.get(&dispatch.workpiece.0) == Some(dispatch)
+                && !state.admitted_construction.contains_key(&dispatch.workpiece.0)
+        })
+    }
+
     /// Whether coordination still names `row`'s request the current one to
     /// verify, answered from a journal read no older than the caller's own.
     ///

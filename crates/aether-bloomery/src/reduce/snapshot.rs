@@ -1402,6 +1402,9 @@ impl Snapshot {
                 | Decision::DispatchSplice { bloom, workpiece, .. } => {
                     self.clear_member_refusal(bloom, workpiece);
                 }
+                Decision::DispatchContextualAttempt { dispatch } => {
+                    self.clear_member_refusal(&dispatch.bloom, &dispatch.workpiece);
+                }
                 Decision::DispatchAggregateVerify { bloom, .. } => self.clear_refusal(bloom, AGGREGATE_VERIFY_GATE),
                 Decision::DispatchAggregateReview { bloom, .. } => self.clear_refusal(bloom, AGGREGATE_REVIEW_GATE),
                 Decision::DispatchLand { bloom, .. } => self.clear_refusal(bloom, LAND_GATE),

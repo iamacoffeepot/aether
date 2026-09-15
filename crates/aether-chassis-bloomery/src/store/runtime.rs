@@ -669,6 +669,19 @@ pub trait StoreBackend: Send + CommissionBackend {
     fn mark_construction_admission_submitted(&mut self, dispatch: &[u8]) -> rusqlite::Result<bool>;
     fn mark_construction_admission_journaled(&mut self, dispatch: &[u8]) -> rusqlite::Result<bool>;
     fn retire_construction_admission(&mut self, dispatch: &[u8]) -> rusqlite::Result<bool>;
+    /// Re-open a retired admission under a fresh physical nonce and clocks.
+    ///
+    /// The caller establishes first that coordination still holds the dispatch
+    /// queued and unadmitted: a retired row for a live intent is a dead row
+    /// blocking the member's only way into a lane (issue 6051). A row that
+    /// reached submission is never revived.
+    fn revive_construction_admission(
+        &mut self,
+        dispatch: &[u8],
+        nonce: &str,
+        queued_unix_millis: u64,
+        deadline_unix_millis: u64,
+    ) -> rusqlite::Result<bool>;
     /// Whether one admitted construction has not reached backend submission.
     /// Admission is serialized so an idle-capacity observation cannot enqueue
     /// a fleet of stale-head intents before control returns the first dispatch.
@@ -3251,6 +3264,21 @@ impl StoreBackend for SqliteStore {
         Ok(self.conn.execute(
             "UPDATE construction_admissions SET retired = 1 WHERE dispatch = ?1 AND submitted = 0 AND retired = 0",
             [dispatch],
+        )? > 0)
+    }
+
+    fn revive_construction_admission(
+        &mut self,
+        dispatch: &[u8],
+        nonce: &str,
+        queued_unix_millis: u64,
+        deadline_unix_millis: u64,
+    ) -> rusqlite::Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE construction_admissions \
+             SET retired = 0, journaled = 0, nonce = ?2, queued_unix_millis = ?3, deadline_unix_millis = ?4 \
+             WHERE dispatch = ?1 AND submitted = 0 AND retired = 1",
+            rusqlite::params![dispatch, nonce, queued_unix_millis, deadline_unix_millis],
         )? > 0)
     }
 
