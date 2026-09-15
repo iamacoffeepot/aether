@@ -18,11 +18,12 @@ use aether_bloomery::testing::digest;
 use aether_bloomery::{
     Admit, AgentSelection, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, BloomId, CandidateRef,
     Conclusion, ConfigKind, ConfigRegistry, Digest, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend,
-    Fact, Harness, LaneObservation, ModelOverride, ModelProcessInstructions, NamedPath, Nonce, Observation, PathOrigin,
-    Provenance, RETROSPECT_READ_COMMAND, ReasoningEffort, RedispatchPayload, ReviewPass, SCOPE_REVISION_SCHEMA,
-    SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting, ScopeVerifyInput, SharedCorrespondence, SourceSnapshot,
-    StageCatalog, StageId, StageOverride, Statement, StudyPayload, TimeoutRecord, Topic, Transformation, VerifyFailure,
-    VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description, split_lane_identity,
+    Fact, Harness, LaneObservation, MembershipMutation, ModelOverride, ModelProcessInstructions, NamedPath, Nonce,
+    Observation, PathOrigin, Provenance, RETROSPECT_READ_COMMAND, ReasoningEffort, RedispatchPayload, ReviewPass,
+    SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting, ScopeVerifyInput, SharedCorrespondence,
+    SourceSnapshot, StageCatalog, StageId, StageOverride, Statement, StudyPayload, TimeoutRecord, Topic,
+    Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
+    split_lane_identity,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
@@ -535,8 +536,9 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
         configs: authorized_over(&mut store, ConfigRegistry::default()),
     };
     // A queued review belongs to a live bloom; the drain reads its membership to
-    // tell a live plan from a retired one (#4640).
-    store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
+    // tell a live plan from a retired one (#4640), and reads it per member to
+    // tell a live work order from a withdrawn member's (bloom 0f16e207).
+    store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned(), "wp-b".to_owned()]).unwrap();
     let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
 
     let (handles, ack_through, _transient) = drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
@@ -561,6 +563,64 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
     assert_eq!(stored.workpiece, "", "a bloom-level order has no member axis");
     assert_eq!(stored.displayed_digest, digest(30).as_bytes().to_vec(), "the verdict must bind the integrated tree");
     assert_eq!(stored.bloom, bloom.0.as_bytes().to_vec());
+}
+
+// Tripwire (bloom 0f16e207): a `dispatch_description` row is written at
+// dispatch and never removed, so the roster still names a member an operator
+// withdrew mid-walk. That member produced no claim and contributed no candidate
+// to the fold, so rendering its `## Task` section asks the critic to judge work
+// that is provably absent — which is exactly what it did, failing the
+// composition for three orders that were never in the tree. The withdrawal's
+// `ReleaseMembership` is what the composition reads: no `active_membership`
+// row, no obligation.
+#[test]
+fn a_withdrawn_members_work_order_is_not_an_obligation_of_the_reviewed_fold() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-live", "build the widget").unwrap();
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-gone", "wire the widget").unwrap();
+    let payload = AggregateReviewPayload {
+        profile: StageCatalog::profile_of(StageId::AggregateReview),
+        bloom: bloom.0,
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(30),
+            digest(40),
+            digest(50),
+        ),
+        pass: ReviewPass::Full,
+        configs: authorized_over(&mut store, ConfigRegistry::default()),
+    };
+    // Both sealed; then the withdrawal releases one member's row while the
+    // bloom keeps walking, exactly as `Decision::ReleaseMembership` projects.
+    store.claim_seal(payload.bloom.as_bytes(), &["wp-live".to_owned(), "wp-gone".to_owned()]).unwrap();
+    store
+        .commit(
+            &JournalWrite {
+                idempotency_key: "withdraw-wp-gone",
+                event: b"withdrawn",
+                decisions: b"decided",
+                decider: "test-build",
+            },
+            &[MembershipMutation { workpiece: "wp-gone".to_owned(), bloom: bloom.0.as_bytes().to_vec() }],
+            &[],
+            &[],
+        )
+        .unwrap();
+    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
+
+    let (handles, _ack, _transient) = drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    assert_eq!(handles.len(), 1);
+
+    let orders = backend.orders();
+    let description = orders[0].transformation.description.as_deref().unwrap();
+    assert!(description.contains("## Task — wp-live"), "the live member is still the critic's subject: {description}");
+    assert!(
+        !description.contains("wp-gone") && !description.contains("wire the widget"),
+        "a withdrawn member's work order must not be rendered as an obligation: {description}",
+    );
 }
 
 // ADR-0153 — the second aggregate roll is the delta-confirm: its prompt frames
