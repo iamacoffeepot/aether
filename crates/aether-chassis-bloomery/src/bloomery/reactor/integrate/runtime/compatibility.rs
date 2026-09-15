@@ -353,11 +353,14 @@ fn conflict_diagnostic_for(kind: &str, plan: Digest, observation: u64, paths: &[
 
 /// The shared-run placement collision's Reconcile overlay.
 ///
-/// `drain_shared_run_preparations` records this string as the fold-conflict
-/// work order of every member the `SharedRunPreparation::Conflict` names, so it
-/// is composed by the one overlay renderer — the collision path bloom
-/// `0f16e207` took, and the reason its Reconcile lap was scoped as a
-/// re-authoring rather than a merge.
+/// `drain_shared_run_preparations` records this string against the
+/// `SharedRunPreparation::Conflict` it reports. It is a *diagnostic*: none of
+/// the plan's members has been verified yet, so the reducer answers this
+/// collision by proving each member's own candidate standalone rather than
+/// handing anyone a merge (ADR-0218 §Amendment: eager integration assembles the
+/// product). It is composed by the one overlay renderer anyway, so a reader who
+/// finds it in the artifact store reads the same sections as a real lap's order.
+/// This is the collision path bloom `0f16e207` took, when it did buy a lap.
 fn shared_run_conflict_diagnostic(
     plan: &SharedRunPlan,
     input: &CompositionInput,

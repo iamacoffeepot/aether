@@ -1,10 +1,14 @@
 //! The work-order overlay a fold collision hands its Reconcile lap (ADR-0189,
 //! ADR-0218 §Amendment: reconcile is scoped to the merge).
 //!
-//! Every path that can send a member back to Reconcile — the legacy fold, the
-//! eager append, the reconcile preparation, and the shared-run placement —
-//! composes the same overlay here rather than writing its own prose. Two
-//! reasons, and the second is the expensive one.
+//! Every path that can send a member back to Reconcile composes the same
+//! overlay here rather than writing its own prose. Two live paths reach it — the
+//! legacy fold and the eager append — and both are collisions against a member
+//! that is *already green*, which is what makes a merge-only order honest
+//! (ADR-0218 §Amendment: eager integration assembles the product). The
+//! preparation and shared-run-placement renderers stay for the decisions a bloom
+//! could still be carrying across that change. Two reasons for one renderer, and
+//! the second is the expensive one.
 //!
 //! The overlay is *parsed* downstream: the executor drain reads the paths back
 //! out of `## Conflicting paths` to hold a Reconcile whose seam a sibling is
