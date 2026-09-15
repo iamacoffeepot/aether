@@ -8,14 +8,24 @@
 //! every gate — a change to it could in principle move every verdict.
 //!
 //! That argument is only true of some of xtask. The code under
-//! `xtask/src/transform/verify/` *is* the gate: it decides which crates each
-//! member compiles, how a member's exit code is read, and what excuses a
-//! failure, so a change there can move a verdict on a crate it never mentions
-//! and the whole workspace is the honest scope. The rest of xtask — the
-//! selection graph, the dist builder, the operator commands — is a tool the
-//! gate invokes. A change to it is proved by compiling xtask's own closure and
-//! then running each gate once over [`SMOKE_PACKAGE`]: if the tool still lints,
-//! documents, and tests one real crate end to end, it still works as a tool.
+//! `xtask/src/transform/` *is* the gate: it decides which crates each member
+//! compiles, how a member's exit code is read, and what excuses a failure, so a
+//! change there can move a verdict on a crate it never mentions and the whole
+//! workspace is the honest scope. `xtask/src/dist/` and its `build-wasm` front
+//! sit on the same side without being gate code at all: what they build is the
+//! component wasm and the chassis binaries the scenario suites resolve through
+//! the filesystem, so a change there moves the *inputs* of tests in crates that
+//! link nothing of xtask's. The rest of xtask — the selection graph, the
+//! operator commands, the binary entry — is a tool the gate invokes. A change
+//! to it is proved by compiling xtask's own closure and then running each gate
+//! once over [`SMOKE_PACKAGE`]: if the tool still lints, documents, and tests
+//! one real crate end to end, it still works as a tool.
+//!
+//! Where that line falls is the whole cost question (#6055). `xtask/src/bloom/`
+//! is the operator CLI: nothing links it, it builds nothing the suite reads,
+//! and reading it as a workspace-level input ran 6871 tests across 301 binaries
+//! plus the `cargo xtask dist` prepare for a candidate whose closure is one
+//! crate — 15 to 18 minutes where the closure-scoped runs beside it took 5.5.
 //!
 //! The repo-wide gate configurations sit on the first side for the same reason
 //! the gate code does: `clippy.toml` renames a lint rule for every crate,
@@ -32,14 +42,21 @@
 /// What lives here is the half of the rule that lane does not have: the
 /// distinction between the gate and the tool, which only matters to a run that
 /// is deciding how much of the tree to compile.
-const WHOLE_WORKSPACE_EXACT: &[&str] = &["Cargo.toml", "clippy.toml", "rustfmt.toml"];
+///
+/// `build_wasm.rs` is [`crate::dist`] with the chassis binaries dropped rather
+/// than a second discovery path, so it belongs with the prefix below it; it is
+/// named exactly because it is one file rather than a directory.
+const WHOLE_WORKSPACE_EXACT: &[&str] = &["Cargo.toml", "clippy.toml", "rustfmt.toml", "xtask/src/build_wasm.rs"];
 
-/// The gate code itself — everything under the module that computes a member's
-/// scope, dispatches it, and reads its verdict.
-const GATE_PREFIX: &str = "xtask/src/transform/verify/";
+/// The gate code and the build inputs it produces: everything under the
+/// transform tree that computes a member's scope, dispatches it, and reads its
+/// verdict, plus the dist builder whose artifacts the scenario suites resolve
+/// by filesystem path.
+const WHOLE_WORKSPACE_PREFIXES: &[&str] = &["xtask/src/transform/", "xtask/src/dist/"];
 
-/// The tool the gate runs through. Every path under it that is not gate code is
-/// proved by xtask's own closure plus the smoke crate.
+/// The tool the gate runs through. Every path under it that is not one of the
+/// workspace-level inputs above is proved by xtask's own closure plus the smoke
+/// crate.
 const TOOL_PREFIX: &str = "xtask/";
 
 /// The crate each gate runs once over when only the tool changed.
@@ -84,18 +101,19 @@ impl<'a> ToolChange<'a> {
     }
 }
 
-/// Whether `path` is the gate code or a repo-wide gate configuration.
+/// Whether `path` is the gate code, a build input the gate produces, or a
+/// repo-wide gate configuration.
 fn is_gate_input(path: &str) -> bool {
-    WHOLE_WORKSPACE_EXACT.contains(&path) || path.starts_with(GATE_PREFIX)
+    WHOLE_WORKSPACE_EXACT.contains(&path) || WHOLE_WORKSPACE_PREFIXES.iter().any(|prefix| path.starts_with(prefix))
 }
 
 /// Whether `path` is a change to the tool the gates run through.
 ///
 /// Callers reach this after [`is_gate_input`] has already answered no, but it
-/// is stated rather than assumed: a path under the gate prefix is never a tool
-/// path, whichever order the two are asked in.
+/// is stated rather than assumed: a workspace-level input is never a tool path,
+/// whichever order the two are asked in.
 pub(super) fn is_tool(path: &str) -> bool {
-    path.starts_with(TOOL_PREFIX) && !path.starts_with(GATE_PREFIX)
+    path.starts_with(TOOL_PREFIX) && !is_gate_input(path)
 }
 
 #[cfg(test)]
@@ -118,29 +136,52 @@ mod tests {
             "xtask/src/transform/verify/mod.rs",
             "xtask/src/transform/verify/scope.rs",
             "xtask/src/transform/verify/inputs.rs",
+            "xtask/src/transform/mod.rs",
+            "xtask/src/transform/lint_check.rs",
+            "xtask/src/dist/mod.rs",
+            "xtask/src/build_wasm.rs",
             "clippy.toml",
             "rustfmt.toml",
             "Cargo.toml",
         ] {
             assert_eq!(ToolChange::of(&strings(&[path])), ToolChange::Gate(path), "{path} is a gate input");
+            assert!(!is_tool(path), "{path} is a workspace-level input, never a tool path");
         }
     }
 
     #[test]
     fn xtask_outside_the_gate_code_is_a_tool_change() {
-        // Tripwire for the half of #6001 that must narrow. `affected/graph.rs`
-        // is the measured case: it took #5951's verify and every shared run it
-        // joined to sixty crates, on the strength of xtask being the thing that
-        // runs the gates rather than of anything linking it.
+        // Tripwire for the half of #6001 that must narrow, widened by #6055.
+        // `affected/graph.rs` is the measured case for #6001: it took #5951's
+        // verify and every shared run it joined to sixty crates, on the strength
+        // of xtask being the thing that runs the gates rather than of anything
+        // linking it. `bloom/` is #6055's: the operator CLI links nothing, feeds
+        // no suite, and took three shared runs to 15-18 minutes apiece.
         for path in [
             "xtask/src/affected/graph.rs",
-            "xtask/src/dist/mod.rs",
             "xtask/src/main.rs",
+            "xtask/src/bloom/mod.rs",
             "xtask/src/bloom/roll/coverage.rs",
             "xtask/Cargo.toml",
         ] {
             assert_eq!(ToolChange::of(&strings(&[path])), ToolChange::Tool(path), "{path} is a tool change");
             assert!(is_tool(path));
+        }
+    }
+
+    #[test]
+    fn the_dist_builder_is_a_workspace_level_input_though_nothing_links_it() {
+        // Tripwire for the direction #6055 must not overshoot. The narrowing it
+        // asks for is keyed on linkage, and by linkage alone `dist/` reads like
+        // any other operator command — nothing in the workspace depends on it.
+        // What it produces is the component wasm and the dist-resolved chassis
+        // binaries the scenario suites open through the filesystem, so a change
+        // there moves the inputs of tests in crates it shares no edge with, and
+        // `AETHER_REQUIRE_RUNTIME=1` turns a stale artifact into a red member
+        // somewhere the closure never looked. `build-wasm` is the same builder
+        // with the binaries dropped, so it answers the same way.
+        for path in ["xtask/src/dist/mod.rs", "xtask/src/dist/manifest.rs", "xtask/src/build_wasm.rs"] {
+            assert_eq!(ToolChange::of(&strings(&[path])), ToolChange::Gate(path), "{path} builds what tests read");
         }
     }
 
