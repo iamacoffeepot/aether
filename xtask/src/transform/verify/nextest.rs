@@ -275,16 +275,17 @@ fn parse_failures(log: &str) -> Vec<Failure> {
     failures
 }
 
-/// The test a nextest status line reports as failing, or `None` for any other
-/// line.
+/// A nextest per-test status line: `PASS`/`FAIL`/`TIMEOUT`/`ABORT` plus the
+/// test's stable identity, with the in-flight `(n/m)` progress counter stripped.
 ///
 /// Shape: `FAIL [   0.008s] ( 156/3737) binary-id test_name` while the run is in
 /// flight, and the same without the progress counter in the closing summary.
 /// The duration bracket is what makes this a status line rather than a test's
-/// own output that happens to open with the word.
-fn failing_test(line: &str) -> Option<String> {
+/// own output that happens to open with the word. The counter is not part of
+/// the test: two runs of different sizes must mint one key.
+pub(super) fn status_line_test(line: &str) -> Option<(&str, String)> {
     let (status, rest) = line.trim_start().split_once(' ')?;
-    if !FAILURE_STATUSES.contains(&status) {
+    if !matches!(status, "PASS" | "FAIL" | "TIMEOUT" | "ABORT") {
         return None;
     }
 
@@ -299,13 +300,20 @@ fn failing_test(line: &str) -> Option<String> {
         None => normalize(after_duration),
     };
 
-    (!test.is_empty()).then_some(test)
+    (!test.is_empty()).then_some((status, test))
+}
+
+/// The test a nextest status line reports as failing, or `None` for any other
+/// line.
+fn failing_test(line: &str) -> Option<String> {
+    let (status, test) = status_line_test(line)?;
+    FAILURE_STATUSES.contains(&status).then_some(test)
 }
 
 /// The test whose captured output opens at this line — nextest brackets each
 /// failing test's output with `--- STDOUT: <test> ---` / `--- STDERR: <test> ---`
 /// banners — or `None` for any other line.
-fn captured_output_header(line: &str) -> Option<String> {
+pub(super) fn captured_output_header(line: &str) -> Option<String> {
     let (channel, test) = line.trim().strip_prefix("---")?.strip_suffix("---")?.split_once(':')?;
     channel
         .trim()

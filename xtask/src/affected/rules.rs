@@ -8,13 +8,28 @@
 /// package-graph analysis runs — which is also what makes the
 /// same-graph-twice determinator call in [`crate::affected::select::select`]
 /// sound: a path that could change the graph never reaches it.
-const RUN_ALL_EXACT: &[&str] =
-    &["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "clippy.toml", ".github/workflows/ci.yml"];
+///
+/// The xtask entries are the crate's manifest, the binary entry that
+/// dispatches every command, and the two helpers [`crate::affected`] and
+/// [`crate::dist`] share when they compute `run_all` / `wasm_needed` and
+/// produce the artifacts the suite reads. A change elsewhere in xtask
+/// resolves through the package graph like any other crate (#5928).
+const RUN_ALL_EXACT: &[&str] = &[
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "clippy.toml",
+    ".github/workflows/ci.yml",
+    "xtask/Cargo.toml",
+    "xtask/src/main.rs",
+    "xtask/src/cargo.rs",
+    "xtask/src/inventory.rs",
+];
 
 /// Directory prefixes with the same run-everything force as
-/// [`RUN_ALL_EXACT`]: cargo config, nextest config, and this tool's own
-/// crate.
-const RUN_ALL_PREFIXES: &[&str] = &[".cargo/", ".config/", "xtask/"];
+/// [`RUN_ALL_EXACT`]: cargo config, nextest config, and the xtask modules
+/// that compute the selection or feed the suite.
+const RUN_ALL_PREFIXES: &[&str] = &[".cargo/", ".config/", "xtask/src/affected/", "xtask/src/dist/"];
 
 /// Custom determinator path rules, applied before the crate's bundled
 /// defaults (which already ignore `README*` / `LICENSE*` / `.gitignore`
@@ -64,15 +79,23 @@ mod tests {
             "rust-toolchain.toml",
             ".config/nextest.toml",
             ".cargo/config.toml",
-            "xtask/src/affected.rs",
             ".github/workflows/ci.yml",
+            "xtask/Cargo.toml",
+            "xtask/src/main.rs",
+            "xtask/src/cargo.rs",
+            "xtask/src/inventory.rs",
+            "xtask/src/affected/rules.rs",
+            "xtask/src/dist/mod.rs",
         ] {
             assert!(global_screen(&strings(&[path])).is_some(), "{path} must force run_all");
         }
 
-        for path in
-            ["crates/aether-kit-commons/src/lib.rs", "crates/aether-kit-commons/Cargo.toml", "docs/guide/testing.md"]
-        {
+        for path in [
+            "crates/aether-kit-commons/src/lib.rs",
+            "crates/aether-kit-commons/Cargo.toml",
+            "docs/guide/testing.md",
+            "xtask/src/bloom/roll/coverage.rs",
+        ] {
             assert!(global_screen(&strings(&[path])).is_none(), "{path} must not force run_all");
         }
     }

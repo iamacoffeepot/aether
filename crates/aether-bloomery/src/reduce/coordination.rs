@@ -46,6 +46,32 @@ fn workpiece_key(workpiece: &WorkpieceId) -> &str {
     workpiece.0.as_str()
 }
 
+/// The head's pin for this member version's content, when the head already
+/// carries it: the same workpiece at the same scope revision whose candidate
+/// tree is identical.
+///
+/// Tree — never checkout — is the candidate's identity: a re-capture of the
+/// same tree is the same work and the checkout is vehicle state. Git ancestry
+/// is invisible here — the reducer holds digests, not the DAG — so a
+/// candidate at a different tree digest still misses even when the head's
+/// tree contains it; the lane judges containment on the real trees and its
+/// decline resolves through the Reconcile-decline arm instead.
+pub(super) fn carried_head_pin(
+    head: &IntegrationHead,
+    workpiece: &WorkpieceId,
+    scope_revision: Digest,
+    tree: Digest,
+) -> Option<MemberPin> {
+    head.coverage
+        .iter()
+        .find(|covered| {
+            covered.workpiece == *workpiece
+                && covered.scope_revision == scope_revision
+                && covered.candidate.tree == tree
+        })
+        .cloned()
+}
+
 fn rejected(error: CoordinationError) -> Decisions {
     Decisions::rejected(Outcome::CoordinationRejected(error))
 }
@@ -215,10 +241,13 @@ fn gates_for_manifest(manifest: &PipelineManifest, command: &str) -> Vec<String>
     manifest.verifiers.runs.get(command).cloned().unwrap_or_default()
 }
 
-/// The blast radius of `changed` — every member that reaches it through a
-/// dependency edge or through a coverage set it shares, taken to a fixpoint.
-fn affected_closure(record: &BloomRecord, state: &CoordinationState, changed: &WorkpieceId) -> BTreeSet<WorkpieceId> {
-    let mut affected = BTreeSet::from([changed.clone()]);
+/// Dependents of `affected`, taken to a fixpoint over the sealed declared graph.
+///
+/// This is the dependency half of [`affected_closure`]: a member whose
+/// `depends_on` is already in the set is itself affected. Coverage expansion
+/// is the other half and is not applied here — a newly folded sibling does
+/// not yet share a composition with a run that started before it landed.
+fn expand_dependents(record: &BloomRecord, affected: &mut BTreeSet<WorkpieceId>) {
     loop {
         let before = affected.len();
         for edge in &record.dependencies {
@@ -226,10 +255,46 @@ fn affected_closure(record: &BloomRecord, state: &CoordinationState, changed: &W
                 affected.insert(edge.member.clone());
             }
         }
+        if affected.len() == before {
+            return;
+        }
+    }
+}
 
-        // A live request's input carries the context head's whole coverage, so
-        // an ejected peer reaches the fixpoint through it as surely as through
-        // an admitted or queued contribution.
+/// The members a contribution is *of*, as opposed to the ones it merely
+/// inherited from the head it was built on (#5997).
+///
+/// A [`CompositionInput`] carries the complete transitive coverage of its
+/// candidate, so a request's input names the head's folded members alongside
+/// the one member that authored the candidate. The authors are the pins whose
+/// own candidate is this input's. A composed contribution — a survivor group's
+/// node — names no such pin and is atomic over its whole coverage, so there
+/// every member carries it.
+fn carriers_of(input: &CompositionInput) -> impl Iterator<Item = &MemberPin> {
+    let authored = input.members.iter().any(|pin| pin.candidate == input.candidate);
+    input.members.iter().filter(move |pin| !authored || pin.candidate == input.candidate)
+}
+
+/// The blast radius of `changed` — every member that reaches it through a
+/// dependency edge or through a contribution whose own tree carries it, taken
+/// to a fixpoint.
+fn affected_closure(record: &BloomRecord, state: &CoordinationState, changed: &WorkpieceId) -> BTreeSet<WorkpieceId> {
+    let mut affected = BTreeSet::from([changed.clone()]);
+    loop {
+        let before = affected.len();
+        expand_dependents(record, &mut affected);
+
+        // A contribution whose coverage names an affected pin has that
+        // member's code merged into its own tree, so whoever authored that
+        // contribution is affected too. The carry runs one way (#5997): the
+        // folded members a live request *inherited* through its context head
+        // are not invalidated by the candidate that inherited them, and
+        // spreading the other way took every sibling sharing one head down
+        // with any member that left — cancelling shared runs whose tested tree
+        // never contained a line of it. What still protects those siblings
+        // from an ejected ancestor is per-pin: a queued input naming it is
+        // dropped, a node covering it stops answering, and a head covering it
+        // derives a fresh generation.
         for input in state
             .integration
             .admitted
@@ -238,7 +303,7 @@ fn affected_closure(record: &BloomRecord, state: &CoordinationState, changed: &W
             .chain(state.requests.iter().map(|request| &request.input))
         {
             if input.members.iter().any(|pin| affected.contains(&pin.workpiece)) {
-                affected.extend(input.members.iter().map(|pin| pin.workpiece.clone()));
+                affected.extend(carriers_of(input).map(|pin| pin.workpiece.clone()));
             }
         }
 
@@ -246,6 +311,53 @@ fn affected_closure(record: &BloomRecord, state: &CoordinationState, changed: &W
             return affected;
         }
     }
+}
+
+/// Whether folds between `plan`'s composition base and `head` can change the
+/// plan's answer (ADR-0218 as amended by #5938).
+///
+/// A run is retired only when a newly folded pin sits in the invalidation
+/// closure of the run's members — the same [`affected_closure`] dependency
+/// walk member-version invalidation uses, without the live-coverage expansion
+/// that would join every sibling through the shared parent head. A version
+/// change of a pin the run already tested always intersects: that member is
+/// already in the composed node. A generation change is not a closure-disjoint
+/// fold; the namespace itself moved.
+fn head_folds_intersect_plan(record: &BloomRecord, plan: &SharedRunPlan, head: &IntegrationHead) -> bool {
+    let Some(composition) = plan.composition.as_ref() else {
+        return false;
+    };
+    if composition.base == *head {
+        return false;
+    }
+    if composition.base.generation != head.generation {
+        return true;
+    }
+    let run_members = plan.requests.iter().map(|request| request.member.workpiece.clone()).collect::<BTreeSet<_>>();
+    let tested = plan
+        .requests
+        .iter()
+        .flat_map(|request| request.input.members.iter().map(|pin| pin.workpiece.clone()))
+        .chain(composition.base.coverage.iter().map(|pin| pin.workpiece.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut folded = BTreeSet::new();
+    for pin in &head.coverage {
+        if composition.base.coverage.contains(pin) {
+            continue;
+        }
+        if tested.contains(&pin.workpiece) {
+            return true;
+        }
+        folded.insert(pin.workpiece.clone());
+    }
+    if folded.is_empty() {
+        return true;
+    }
+    folded.iter().any(|changed| {
+        let mut affected = BTreeSet::from([changed.clone()]);
+        expand_dependents(record, &mut affected);
+        affected.iter().any(|member| run_members.contains(member))
+    })
 }
 
 /// Whether the invalidated closure could re-enter through the current head's
@@ -589,9 +701,11 @@ fn release_ready_dependents(record: &BloomRecord, state: &mut CoordinationState,
 
 fn retire_displaced_head_work(record: &BloomRecord, state: &mut CoordinationState, effects: &mut Vec<Decision>) {
     let head = state.integration.head.clone();
-    for run in state.runs.iter_mut().filter(|run| {
-        !run.is_terminal() && run.plan.composition.as_ref().is_some_and(|composition| composition.base != head)
-    }) {
+    for run in state
+        .runs
+        .iter_mut()
+        .filter(|run| !run.is_terminal() && !run.stale && head_folds_intersect_plan(record, &run.plan, &head))
+    {
         run.stale = true;
         effects.push(Decision::CancelSharedRun { plan: run.plan.digest() });
     }
@@ -1037,7 +1151,17 @@ pub(super) fn reduce_integration_conflicted(snapshot: &Snapshot, conflict: Integ
         scope: FailureScope::Interaction { members: input.members.clone(), evidence: evidence.detail },
     });
     let mut effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
+    // A stale append re-names members the head integrated since the plan was
+    // cut. Their pins sit in the current coverage at identical trees, so a
+    // lap would reproduce the conflicted merge only to rediscover nothing.
+    // They are already integrated at this generation: their contexts, cursors,
+    // and claims stay exactly where the head put them, and only a member the
+    // head does not carry is sent back.
+    let mut reconciled_owner: Option<WorkpieceId> = None;
     for pin in &input.members {
+        if carried_head_pin(&state.integration.head, &pin.workpiece, pin.scope_revision, pin.candidate.tree).is_some() {
+            continue;
+        }
         let Some(member) = record.spec.members().iter().find(|member| member.workpiece == pin.workpiece) else {
             return rejected(CoordinationError::MemberVersionMismatch { workpiece: pin.workpiece.clone() });
         };
@@ -1064,15 +1188,22 @@ pub(super) fn reduce_integration_conflicted(snapshot: &Snapshot, conflict: Integ
         };
         let _ = member;
         queue_context_dispatch(record, &mut next, *bloom, &pin.workpiece, &progress, context, &mut effects);
+        if reconciled_owner.is_none() {
+            reconciled_owner = Some(pin.workpiece.clone());
+        }
     }
+    // The reservation steadies the head for a member that is about to repair
+    // onto it. A member the head already carries repairs nothing, so it never
+    // owns the reservation — and when every member was carried there is no
+    // lap at all and nothing to steady.
     if next.integration.movement_count >= next.policy.movement_budget
-        && let Some(owner) = input.members.first()
+        && let Some(owner) = reconciled_owner
     {
         let Some(deadline) = observed_at_unix_millis.checked_add(next.policy.reservation_millis) else {
             return rejected(CoordinationError::InvalidPlan);
         };
         next.integration.reservation = Some(StableHeadReservation {
-            owner: owner.workpiece.clone(),
+            owner,
             generation,
             node: expected_parent,
             movement_count: next.integration.movement_count,
@@ -1278,7 +1409,7 @@ pub(super) fn reduce_candidate_prepared(
     accepted(*bloom, plan, effects)
 }
 
-fn validate_composition(record: &BloomRecord, state: &CoordinationState, plan: &CompositionPlan) -> bool {
+fn composition_requests_match(record: &BloomRecord, state: &CoordinationState, plan: &CompositionPlan) -> bool {
     if plan.bloom != state.integration.generation.bloom
         || plan.requests.is_empty()
         || plan.requests.iter().any(|request| !exact_request(record, state, request))
@@ -1298,7 +1429,6 @@ fn validate_composition(record: &BloomRecord, state: &CoordinationState, plan: &
         .filter_map(|request| input_ids.insert(request.input.digest()).then_some(request.input.clone()))
         .collect::<Vec<_>>();
     if ids.iter().collect::<BTreeSet<_>>().len() != ids.len()
-        || plan.base != state.integration.head
         || plan.inputs != inputs
         || plan.contract != state.composition_contract.bind(member_contracts)
     {
@@ -1312,6 +1442,10 @@ fn validate_composition(record: &BloomRecord, state: &CoordinationState, plan: &
             .iter()
             .flat_map(|input| &input.members)
             .all(|pin| plan.requests.iter().any(|request| request.member == *pin) || plan.base.coverage.contains(pin))
+}
+
+fn validate_composition(record: &BloomRecord, state: &CoordinationState, plan: &CompositionPlan) -> bool {
+    composition_requests_match(record, state, plan) && plan.base == state.integration.head
 }
 
 fn validate_run_plan(record: &BloomRecord, state: &CoordinationState, plan: &SharedRunPlan) -> bool {
@@ -1371,7 +1505,11 @@ fn retained_plan_current(record: &BloomRecord, state: &CoordinationState, plan: 
         exact_request(record, state, request)
             && state.requests.iter().any(|current| current.digest() == request.digest())
             && !state.claims.contains_key(workpiece_key(&request.member.workpiece))
-    }) && plan.composition.as_ref().is_none_or(|composition| validate_composition(record, state, composition))
+    }) && plan.composition.as_ref().is_none_or(|composition| {
+        composition_requests_match(record, state, composition)
+            && (composition.base == state.integration.head
+                || !head_folds_intersect_plan(record, plan, &state.integration.head))
+    })
 }
 
 pub(super) fn reduce_propose_shared_run(snapshot: &Snapshot, bloom: &BloomId, plan: &SharedRunPlan) -> Decisions {
@@ -1406,6 +1544,19 @@ pub(super) fn reduce_propose_shared_run(snapshot: &Snapshot, bloom: &BloomId, pl
         plan.digest(),
         alloc::vec![record_state(*bloom, next), Decision::DispatchSharedRunPreparation { plan: plan.clone() }],
     )
+}
+
+pub(super) fn reduce_hold_shared_run_coalesce(
+    snapshot: &Snapshot,
+    bloom: &BloomId,
+    until_unix_millis: u64,
+    waiting_for: &[WorkpieceId],
+) -> Decisions {
+    let _ = (until_unix_millis, waiting_for);
+    match active_state(snapshot, bloom) {
+        Ok(_) => accepted(*bloom, bloom.0, Vec::new()),
+        Err(error) => rejected(error),
+    }
 }
 
 fn serial_fallbacks(state: &mut CoordinationState, refused: &SharedRunPlan, effects: &mut Vec<Decision>) {
@@ -1464,14 +1615,25 @@ pub(super) fn reduce_shared_run_prepared(
         return rejected(CoordinationError::InvalidPlan);
     }
     let mut next = state.clone();
+    {
+        let run = &mut next.runs[index];
+        if !matches!(run.phase, SharedRunPhase::Preparing) || run.node.is_some() {
+            return rejected(CoordinationError::AlreadyIssued);
+        }
+        if run.stale {
+            run.phase = SharedRunPhase::Terminal;
+        }
+    }
+    if next.runs[index].stale {
+        // A run that died before it started never produces SharedRunCompleted, so
+        // unfinished requests have to be requeued here the way a cancellation would.
+        let run_snapshot = next.runs[index].clone();
+        let mut effects = Vec::new();
+        requeue_unfinished(record, &mut next, &run_snapshot, &mut effects);
+        effects.insert(0, record_state(*bloom, next));
+        return accepted(*bloom, plan, effects);
+    }
     let run = &mut next.runs[index];
-    if !matches!(run.phase, SharedRunPhase::Preparing) || run.node.is_some() {
-        return rejected(CoordinationError::AlreadyIssued);
-    }
-    if run.stale {
-        run.phase = SharedRunPhase::Terminal;
-        return accepted(*bloom, plan, alloc::vec![record_state(*bloom, next)]);
-    }
     let mut effects = Vec::new();
     match preparation {
         SharedRunPreparation::Standalone if run.plan.mode != SharedRunMode::Contextual => {
@@ -1520,10 +1682,76 @@ pub(super) fn reduce_shared_run_prepared(
             let refused = run.plan.clone();
             serial_fallbacks(&mut next, &refused, &mut effects);
         }
+        SharedRunPreparation::Conflict { input, at, evidence } if run.plan.mode == SharedRunMode::Contextual => {
+            let Some(composition) = run.plan.composition.clone() else {
+                return rejected(CoordinationError::InvalidPlan);
+            };
+            if evidence.kind != EvidenceKind::FoldConflict
+                || evidence.subject != at.tree
+                || !composition.inputs.iter().any(|expected| expected == input)
+            {
+                return rejected(CoordinationError::InvalidPlan);
+            }
+            run.phase = SharedRunPhase::Terminal;
+            let refused = run.plan.clone();
+            if let Err(error) =
+                apply_shared_run_conflict(record, &mut next, &composition, &refused, input, evidence, &mut effects)
+            {
+                return rejected(error);
+            }
+        }
         _ => return rejected(CoordinationError::InvalidPlan),
     }
     effects.insert(0, record_state(*bloom, next));
     accepted(*bloom, plan, effects)
+}
+
+fn apply_shared_run_conflict(
+    record: &BloomRecord,
+    state: &mut CoordinationState,
+    composition: &CompositionPlan,
+    refused: &SharedRunPlan,
+    input: &CompositionInput,
+    evidence: &Evidence,
+    effects: &mut Vec<Decision>,
+) -> Result<(), CoordinationError> {
+    state.diagnostics.push(CoordinationDiagnostic {
+        subject: input.digest(),
+        scope: FailureScope::Interaction { members: input.members.clone(), evidence: evidence.detail },
+    });
+    state.integration.queued.retain(|queued| queued.digest() != input.digest());
+    effects.push(Decision::RecordEvidence { bloom: composition.bloom, evidence: evidence.clone() });
+    let context =
+        ConstructContext { bloom_base: state.integration.generation.base, starting_head: composition.base.clone() };
+    for pin in &input.members {
+        if !record.spec.members().iter().any(|member| member.workpiece == pin.workpiece) {
+            return Err(CoordinationError::MemberVersionMismatch { workpiece: pin.workpiece.clone() });
+        }
+        state.contexts.insert(pin.workpiece.0.clone(), context.clone());
+        let old = record.progress.get(&pin.workpiece).copied();
+        let progress = StageProgress {
+            stage: StageId::Reconcile,
+            attempts: 1,
+            candidate: Some(pin.candidate),
+            repair_rolls: old.map_or(0, |progress| progress.repair_rolls),
+            seen_verify_failures: old.map_or(VerifyFailureSet::EMPTY, |progress| progress.seen_verify_failures),
+            fold_checkpoint: Some(composition.base.candidate.checkout),
+            fold_conflict_evidence: Some(evidence.detail),
+            reconcile_assembles_base: false,
+        };
+        queue_context_dispatch(record, state, composition.bloom, &pin.workpiece, &progress, context.clone(), effects);
+    }
+    let remaining = SharedRunPlan {
+        mode: SharedRunMode::Standalone,
+        requests: refused.requests.iter().filter(|request| !input.members.contains(&request.member)).cloned().collect(),
+        composition: None,
+        probe_budget: 0,
+        execution_attempt: 0,
+    };
+    if !remaining.requests.is_empty() {
+        serial_fallbacks(state, &remaining, effects);
+    }
+    Ok(())
 }
 
 pub(super) fn reduce_shared_run_started(
@@ -2091,6 +2319,28 @@ fn apply_failed_outcome(
         FailureScope::Interaction { .. } | FailureScope::Unattributed { .. } => {}
     }
     Ok(())
+}
+
+/// Re-queue unfinished requests so the scheduler can propose them against the
+/// current head. A never-started run has no completion to do this, and
+/// standalone fallback would pin the member to the displaced composition.
+fn requeue_unfinished(
+    record: &BloomRecord,
+    state: &mut CoordinationState,
+    run: &SharedRunRecord,
+    effects: &mut Vec<Decision>,
+) {
+    for digest in &run.unfinished {
+        let Some(request) = run.plan.requests.iter().find(|request| request.digest() == *digest) else {
+            continue;
+        };
+        if !state.requests.iter().any(|current| current.digest() == request.digest())
+            || !exact_request(record, state, request)
+        {
+            continue;
+        }
+        effects.push(Decision::QueueMemberVerification { request: Box::new(request.clone()) });
+    }
 }
 
 fn queue_run_retry(
@@ -3050,7 +3300,8 @@ mod tests {
     use super::*;
     use crate::testing::{digest, draft, membership};
     use crate::values::{
-        ConfigRegistry, Harness, ReasoningEffort, ToolPolicy, VerifyProof, Withdrawal, WithdrawalCause,
+        ConfigRegistry, ContextualResolutionClaim, Harness, ReasoningEffort, ResolutionProof, ToolPolicy, VerifyProof,
+        Withdrawal, WithdrawalCause,
     };
     use alloc::boxed::Box;
     use core::iter::once;
@@ -3065,12 +3316,18 @@ mod tests {
             max_attribution_probes: 3,
             movement_budget: 2,
             reservation_millis: 1_000,
+            coalesce_millis: None,
             host_class: String::from("test-host"),
         }
     }
 
     fn fixture() -> (BloomRecord, CoordinationState) {
-        let spec = draft(1, alloc::vec![membership("alpha", 10), membership("beta", 11)]).seal();
+        fixture_of(&[("alpha", 10), ("beta", 11)])
+    }
+
+    fn fixture_of(members: &[(&str, u8)]) -> (BloomRecord, CoordinationState) {
+        let spec =
+            draft(1, members.iter().map(|(name, revision)| membership(name, *revision)).collect::<Vec<_>>()).seal();
         let record = BloomRecord::empty(spec.clone());
         let state = initialized_effects(
             &Snapshot::new(spec.base()),
@@ -3818,6 +4075,140 @@ mod tests {
         invalidate_member_version(record, &mut state, &plan.requests[0].member.workpiece, &mut effects)
             .expect("member replacement");
         assert_eq!(state.survivor_groups[0].requests, alloc::vec![plan.requests[1].digest()]);
+    }
+
+    /// An eager bloom shaped the way the night of #5997 left one: `alpha`
+    /// folded and occupying the head, `beta` and `gamma` composed into one live
+    /// contextual run standing on that head, and `delta` holding a queued
+    /// request that inherited the same head and has not been proposed yet.
+    fn eager_bloom_with_a_live_run() -> (BloomRecord, CoordinationState, SharedRunPlan) {
+        let (mut record, mut state) = fixture_of(&[("alpha", 10), ("beta", 11), ("gamma", 12), ("delta", 13)]);
+        let folded = pin("alpha", 10, 40);
+        let head = IntegrationHead {
+            generation: state.integration.generation.digest(),
+            node: digest(90),
+            candidate: folded.candidate,
+            plan: digest(91),
+            coverage: alloc::vec![folded.clone()],
+        };
+        state.integration.head = head.clone();
+        state.integration.admitted = alloc::vec![CompositionInput {
+            node: digest(90),
+            candidate: folded.candidate,
+            members: alloc::vec![folded.clone()],
+        }];
+        for name in ["beta", "gamma", "delta"] {
+            state.contexts.insert(
+                String::from(name),
+                ConstructContext { bloom_base: state.integration.generation.base, starting_head: head.clone() },
+            );
+        }
+
+        let requests = current_requests(&mut record, &state);
+        let live = requests
+            .iter()
+            .filter(|request| matches!(request.member.workpiece.0.as_str(), "beta" | "gamma"))
+            .cloned()
+            .collect::<Vec<_>>();
+        state.requests = requests.into_iter().filter(|request| request.member.workpiece.0 != "alpha").collect();
+
+        let composition = CompositionPlan {
+            bloom: record.spec.id(),
+            base: head,
+            inputs: live.iter().map(|request| request.input.clone()).collect(),
+            contract: state.composition_contract.bind(
+                live.iter()
+                    .map(|request| MemberContractPin { request: request.digest(), contract: request.contract.digest() })
+                    .collect(),
+            ),
+            requests: live.clone(),
+        };
+        let plan = SharedRunPlan {
+            mode: SharedRunMode::Contextual,
+            requests: live.clone(),
+            composition: Some(composition),
+            probe_budget: state.policy.max_attribution_probes,
+            execution_attempt: 0,
+        };
+
+        let mut coverage = alloc::vec![folded];
+        coverage.extend(live.iter().map(|request| request.member.clone()));
+        state.runs.push(SharedRunRecord {
+            plan: plan.clone(),
+            node: Some(SharedRunNode {
+                plan: plan.digest(),
+                candidate: CandidateRef { tree: digest(60), checkout: digest(61) },
+                coverage,
+            }),
+            phase: SharedRunPhase::Running,
+            stale: false,
+            physical_run: Some(digest(62)),
+            completed: Vec::new(),
+            unfinished: plan.requests.iter().map(MemberVerifyRequest::digest).collect(),
+            latencies: Vec::new(),
+        });
+        (record, state, plan)
+    }
+
+    #[test]
+    fn withdrawing_a_queued_sibling_leaves_a_run_whose_tree_never_carried_it_running() {
+        // The plausible bug, and the one that was live (#5997): the invalidation
+        // closure spread through a shared coverage set in both directions, so
+        // the member that left dragged in the folded head its own request had
+        // inherited and, through that head, every sibling standing on it. Three
+        // in-flight runs were cancelled with no outcomes and re-proposed cold —
+        // one of them eight minutes into a compile — for a member none of them
+        // had ever tested.
+        let (record, mut state, plan) = eager_bloom_with_a_live_run();
+        let head = state.integration.head.clone();
+
+        let mut effects = Vec::new();
+        invalidate_member_version(&record, &mut state, &WorkpieceId(String::from("delta")), &mut effects)
+            .expect("the withdrawn member invalidates");
+
+        assert!(
+            !effects.iter().any(|effect| matches!(effect, Decision::CancelSharedRun { .. })),
+            "a run that never composed the withdrawn member keeps running: {effects:?}",
+        );
+        assert_eq!(state.runs[0].plan.digest(), plan.digest());
+        assert!(!state.runs[0].stale, "the live plan stays current, so its completion still admits outcomes");
+        assert_eq!(
+            state.requests.iter().map(|request| request.member.workpiece.0.as_str()).collect::<Vec<_>>(),
+            alloc::vec!["beta", "gamma"],
+            "only the withdrawn member's own request leaves",
+        );
+        assert_eq!(state.integration.head, head, "the folded sibling's head outlives a member that never reached it");
+        assert_eq!(state.integration.generation.epoch, 0, "nothing polluted the generation namespace");
+    }
+
+    #[test]
+    fn withdrawing_a_composed_member_retires_its_run_once_and_keeps_the_survivors_requests() {
+        // The other half of #5997: a member whose tree really is inside the
+        // composed node does retire the run — and the members that stay keep the
+        // exact logical requests the re-proposal reuses, rather than being sent
+        // back through a cold dispatch that re-derives them.
+        let (record, mut state, plan) = eager_bloom_with_a_live_run();
+
+        let mut effects = Vec::new();
+        invalidate_member_version(&record, &mut state, &WorkpieceId(String::from("gamma")), &mut effects)
+            .expect("the withdrawn member invalidates");
+
+        assert_eq!(
+            effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    Decision::CancelSharedRun { plan } => Some(*plan),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            alloc::vec![plan.digest()],
+            "the composing run is retired exactly once",
+        );
+        assert_eq!(
+            state.requests.iter().map(|request| request.member.workpiece.0.as_str()).collect::<Vec<_>>(),
+            alloc::vec!["beta", "delta"],
+            "the survivors keep the requests their re-proposal reuses",
+        );
     }
 
     #[test]
@@ -4609,6 +5000,188 @@ mod tests {
         (snapshot, bloom)
     }
 
+    /// One member verifying contextually against the empty head, with the sibling
+    /// ready to append. `overlapping` puts a declared edge from the verifying
+    /// member onto the folding sibling so they share an [`affected_closure`].
+    fn sibling_fold_mid_verify(
+        overlapping: bool,
+    ) -> (Snapshot, BloomId, SharedRunPlan, SharedRunNode, CompositionInput) {
+        let (mut record, mut state) = fixture();
+        if overlapping {
+            record.dependencies.push(crate::MemberDependency {
+                member: record.spec.members()[0].workpiece.clone(),
+                depends_on: record.spec.members()[1].workpiece.clone(),
+            });
+        }
+        let bloom = record.spec.id();
+        let requests = current_requests(&mut record, &state);
+        let verifying = requests[0].clone();
+        let folding = queued_input("beta", 11, 30);
+        state.requests = alloc::vec![verifying.clone()];
+        let composition = CompositionPlan {
+            bloom,
+            base: state.integration.head.clone(),
+            inputs: alloc::vec![verifying.input.clone()],
+            contract: state.composition_contract.bind(alloc::vec![MemberContractPin {
+                request: verifying.digest(),
+                contract: verifying.contract.digest(),
+            }]),
+            requests: alloc::vec![verifying.clone()],
+        };
+        let plan = SharedRunPlan {
+            mode: SharedRunMode::Contextual,
+            requests: alloc::vec![verifying],
+            composition: Some(composition),
+            probe_budget: state.policy.max_attribution_probes,
+            execution_attempt: 0,
+        };
+        let node = SharedRunNode {
+            plan: plan.digest(),
+            candidate: CandidateRef { tree: digest(60), checkout: digest(61) },
+            coverage: plan.requests.iter().map(|request| request.member.clone()).collect(),
+        };
+        state.runs.push(SharedRunRecord {
+            plan: plan.clone(),
+            node: Some(node.clone()),
+            phase: SharedRunPhase::Running,
+            stale: false,
+            physical_run: Some(digest(62)),
+            completed: Vec::new(),
+            unfinished: plan.requests.iter().map(MemberVerifyRequest::digest).collect(),
+            latencies: Vec::new(),
+        });
+        state.integration.in_flight = Some(IntegrationAppendPlan {
+            bloom,
+            generation: state.integration.generation.digest(),
+            expected_parent: state.integration.head.clone(),
+            inputs: alloc::vec![folding.clone()],
+        });
+        record.coordination = Some(Box::new(state));
+        let mut snapshot = Snapshot::new(record.spec.base());
+        snapshot.blooms.insert(bloom, record);
+        (snapshot, bloom, plan, node, folding)
+    }
+
+    fn advance_folded_sibling(snapshot: &Snapshot, bloom: &BloomId, folding: &CompositionInput) -> Decisions {
+        let append = snapshot
+            .blooms
+            .get(bloom)
+            .and_then(|record| record.coordination.as_ref())
+            .and_then(|state| state.integration.in_flight.clone())
+            .expect("sibling append is in flight");
+        let head = IntegrationHead {
+            generation: append.generation,
+            node: digest(90),
+            candidate: folding.candidate,
+            plan: append.digest(),
+            coverage: folding.members.clone(),
+        };
+        reduce_integration_advanced(snapshot, bloom, append.digest(), &head)
+    }
+
+    fn cancelled_plans(decisions: &Decisions) -> Vec<Digest> {
+        decisions
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::CancelSharedRun { plan } => Some(*plan),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_disjoint_sibling_fold_leaves_a_contextual_run_running() {
+        let (snapshot, bloom, plan, _, folding) = sibling_fold_mid_verify(false);
+        let decisions = advance_folded_sibling(&snapshot, &bloom, &folding);
+        let next = recorded(&decisions);
+        assert!(cancelled_plans(&decisions).is_empty(), "a closure-disjoint fold must not cancel the run");
+        assert!(
+            next.runs.iter().any(|run| run.plan.digest() == plan.digest() && !run.stale && run.is_running()),
+            "the verifying member keeps the plan it was already running"
+        );
+    }
+
+    #[test]
+    fn an_overlapping_sibling_fold_retires_a_contextual_run() {
+        let (snapshot, bloom, plan, _, folding) = sibling_fold_mid_verify(true);
+        let decisions = advance_folded_sibling(&snapshot, &bloom, &folding);
+        let next = recorded(&decisions);
+        assert_eq!(cancelled_plans(&decisions), alloc::vec![plan.digest()]);
+        assert!(next.runs.iter().any(|run| run.plan.digest() == plan.digest() && run.stale && run.is_running()));
+    }
+
+    #[test]
+    fn a_disjoint_behind_head_pass_integrates_onto_the_current_head() {
+        let (mut snapshot, bloom, plan, node, folding) = sibling_fold_mid_verify(false);
+        let advanced = advance_folded_sibling(&snapshot, &bloom, &folding);
+        install_recorded_state(&mut snapshot, bloom, &advanced);
+        let completion = SharedRunCompletion {
+            plan: plan.digest(),
+            run: digest(62),
+            latencies: plan
+                .requests
+                .iter()
+                .map(|request| MemberVerifyLatency {
+                    request: request.digest(),
+                    member: request.member.clone(),
+                    latency_millis: 10,
+                })
+                .collect(),
+            outcomes: plan
+                .requests
+                .iter()
+                .map(|request| MemberVerifyOutcome::PassedIn {
+                    request: request.digest(),
+                    node: node.digest(),
+                    receipt: Evidence {
+                        subject: node.candidate.tree,
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(70),
+                    },
+                })
+                .collect(),
+            unfinished: Vec::new(),
+        };
+        let decisions = reduce_shared_run_completed(&snapshot, &bloom, &completion);
+        let next = recorded(&decisions);
+        assert!(next.claims.contains_key("alpha"), "the pass is kept rather than requeued as stale");
+        assert!(
+            next.integration.queued.iter().any(|input| input.candidate == node.candidate),
+            "the proved node rebases onto the current head at integration"
+        );
+        assert!(next.runs.iter().any(|run| run.plan.digest() == plan.digest() && run.is_terminal() && !run.stale));
+        assert!(
+            !decisions.effects.iter().any(|effect| matches!(effect, Decision::QueueMemberVerification { .. })),
+            "a kept pass must not fall through the stale requeue"
+        );
+    }
+
+    #[test]
+    fn a_disjoint_behind_head_preparation_still_dispatches() {
+        let (mut snapshot, bloom, plan, node, folding) = sibling_fold_mid_verify(false);
+        {
+            let run =
+                &mut snapshot.blooms.get_mut(&bloom).expect("record").coordination.as_mut().expect("coordination").runs
+                    [0];
+            run.phase = SharedRunPhase::Preparing;
+            run.node = None;
+            run.physical_run = None;
+        }
+        let advanced = advance_folded_sibling(&snapshot, &bloom, &folding);
+        install_recorded_state(&mut snapshot, bloom, &advanced);
+        let decisions =
+            reduce_shared_run_prepared(&snapshot, &bloom, plan.digest(), &SharedRunPreparation::Contextual(node));
+        assert!(
+            decisions.effects.iter().any(|effect| {
+                matches!(effect, Decision::DispatchSharedRun { dispatch } if dispatch.plan.digest() == plan.digest())
+            }),
+            "a closure-disjoint head move must not refuse the preparation: {:?}",
+            decisions.outcome
+        );
+        assert!(cancelled_plans(&advanced).is_empty());
+    }
+
     #[test]
     fn a_nodeless_run_cannot_report_an_interaction_failure() {
         let (snapshot, bloom, plan) = active_serial_run();
@@ -4735,6 +5308,152 @@ mod tests {
         assert!(state.requests.is_empty(), "an input carrying the ejected pin cannot outlive it");
     }
 
+    fn preparing_contextual_run() -> (Snapshot, BloomId, SharedRunPlan) {
+        let (mut snapshot, bloom, plan, _) = active_contextual_run();
+        let state = snapshot.blooms.get_mut(&bloom).expect("record").coordination.as_mut().expect("coordination");
+        state.runs[0].phase = SharedRunPhase::Preparing;
+        state.runs[0].node = None;
+        state.runs[0].physical_run = None;
+        (snapshot, bloom, plan)
+    }
+
+    #[test]
+    fn a_stale_preparation_requeues_unfinished_requests() {
+        let (mut snapshot, bloom, plan) = preparing_contextual_run();
+        let unfinished = plan.requests.iter().map(MemberVerifyRequest::digest).collect::<Vec<_>>();
+        snapshot.blooms.get_mut(&bloom).expect("record").coordination.as_mut().expect("coordination").runs[0].stale =
+            true;
+
+        let decisions = reduce_shared_run_prepared(
+            &snapshot,
+            &bloom,
+            plan.digest(),
+            &SharedRunPreparation::Refused { detail: digest(80) },
+        );
+
+        let next = recorded(&decisions);
+        assert!(next.runs.iter().any(|run| run.plan.digest() == plan.digest() && run.is_terminal() && run.stale));
+        let queued = decisions
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::QueueMemberVerification { request } => Some(request.digest()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(queued, unfinished);
+        assert!(!decisions.effects.iter().any(|effect| {
+            matches!(effect, Decision::DispatchSharedRun { .. } | Decision::DispatchSharedRunPreparation { .. })
+        }));
+    }
+
+    #[test]
+    fn a_preparation_conflict_reconciles_the_collider_and_falls_back_siblings() {
+        let (snapshot, bloom, plan) = preparing_contextual_run();
+        let composition = plan.composition.as_ref().expect("contextual plan carries its composition");
+        let colliding = composition.inputs[1].clone();
+        let sibling = plan.requests[0].clone();
+        let head = composition.base.clone();
+        let evidence = Evidence { subject: head.candidate.tree, kind: EvidenceKind::FoldConflict, detail: digest(55) };
+
+        let decisions = reduce_shared_run_prepared(
+            &snapshot,
+            &bloom,
+            plan.digest(),
+            &SharedRunPreparation::Conflict {
+                input: colliding.clone(),
+                at: head.candidate,
+                evidence: evidence.clone(),
+            },
+        );
+
+        let next = recorded(&decisions);
+        assert!(next.runs.iter().any(|run| run.plan.digest() == plan.digest() && run.is_terminal()));
+        assert!(
+            !next.integration.queued.iter().any(|queued| queued.digest() == colliding.digest()),
+            "the input that would not place is withdrawn rather than left to append-conflict",
+        );
+        let reconciled = decisions
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::AdvanceStage { workpiece, progress, .. } => Some((workpiece, *progress)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            reconciled.as_slice(),
+            [(workpiece, progress)]
+                if **workpiece == colliding.members[0].workpiece
+                    && progress.stage == StageId::Reconcile
+                    && progress.fold_checkpoint == Some(head.candidate.checkout)
+                    && progress.fold_conflict_evidence == Some(evidence.detail)
+        ));
+        assert!(
+            decisions.effects.iter().any(|effect| {
+                matches!(effect, Decision::DispatchContextualAttempt { dispatch }
+                    if dispatch.stage == StageId::Reconcile
+                        && dispatch.workpiece == colliding.members[0].workpiece
+                        && dispatch.transformation.checkout == head.candidate.checkout
+                        && dispatch.transformation.inputs.as_slice() == from_ref(&colliding.candidate.tree))
+            }),
+            "the lap stands on the recorded head and carries the collider's candidate as the subject"
+        );
+        assert!(
+            !decisions.effects.iter().any(|effect| {
+                matches!(effect, Decision::DispatchSharedRunPreparation { plan: fallback }
+                    if fallback.requests.iter().any(|request| request.member == colliding.members[0]))
+            }),
+            "the collider must not spend a standalone proof on a candidate that cannot place"
+        );
+        assert!(
+            decisions.effects.iter().any(|effect| {
+                matches!(effect, Decision::DispatchSharedRunPreparation { plan: fallback }
+                    if fallback.mode == SharedRunMode::Standalone
+                        && fallback.requests.iter().any(|request| request.digest() == sibling.digest()))
+            }),
+            "a sibling that did not collide still falls back to standalone"
+        );
+        assert!(decisions.effects.iter().any(|effect| {
+            matches!(effect, Decision::RecordEvidence { evidence: recorded, .. } if recorded == &evidence)
+        }));
+    }
+
+    #[test]
+    fn a_non_conflict_preparation_refusal_still_falls_back_to_standalone() {
+        let (snapshot, bloom, plan) = preparing_contextual_run();
+        let detail = digest(70);
+
+        let decisions =
+            reduce_shared_run_prepared(&snapshot, &bloom, plan.digest(), &SharedRunPreparation::Refused { detail });
+
+        let next = recorded(&decisions);
+        assert!(next.runs.iter().any(|run| run.plan.digest() == plan.digest() && run.is_terminal()));
+        assert!(
+            next.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.scope == FailureScope::Unattributed { evidence: detail })
+        );
+        assert_eq!(
+            decisions
+                .effects
+                .iter()
+                .filter(|effect| matches!(
+                    effect,
+                    Decision::DispatchSharedRunPreparation { plan: fallback }
+                    if fallback.mode == SharedRunMode::Standalone
+                ))
+                .count(),
+            plan.requests.len(),
+        );
+        assert!(
+            !decisions.effects.iter().any(|effect| {
+                matches!(effect, Decision::DispatchContextualAttempt { dispatch } if dispatch.stage == StageId::Reconcile)
+            }),
+            "a host or contract refusal is not a composition conflict"
+        );
+    }
+
     #[test]
     fn an_append_conflict_reconciles_only_its_own_members_and_holds_the_head() {
         let (record, mut state) = fixture();
@@ -4799,6 +5518,167 @@ mod tests {
         assert!(next.integration.reservation.as_ref().is_some_and(|reservation| {
             reservation.owner == colliding.members[0].workpiece && reservation.node == head.node
         }));
+    }
+
+    /// Three members over the same generation with the head already covering
+    /// two of them, for the stale-append tests below.
+    fn three_member_head() -> (BloomRecord, CoordinationState, MemberPin, MemberPin, MemberPin) {
+        let spec =
+            draft(1, alloc::vec![membership("alpha", 10), membership("beta", 11), membership("gamma", 12)]).seal();
+        let record = BloomRecord::empty(spec.clone());
+        let mut state = initialized_effects(
+            &Snapshot::new(spec.base()),
+            &spec,
+            &record.stage_catalog,
+            &record.pipeline_manifest,
+            Some(policy()),
+        )
+        .expect("valid policy")
+        .into_iter()
+        .find_map(|effect| match effect {
+            Decision::RecordCoordinationState { state: Some(state), .. } => Some(*state),
+            _ => None,
+        })
+        .expect("coordination state");
+        let alpha = pin("alpha", 10, 40);
+        let beta = pin("beta", 11, 30);
+        let gamma = pin("gamma", 12, 50);
+        for covered in [&alpha, &beta] {
+            state.claims.insert(
+                covered.workpiece.0.clone(),
+                ContextualResolutionClaim {
+                    member: covered.clone(),
+                    proof: ResolutionProof::Standalone(VerifyProof {
+                        stage: StageId::Verify,
+                        gate_set: Digest::default(),
+                        evidence: Evidence {
+                            subject: covered.candidate.tree,
+                            kind: EvidenceKind::VerificationResult,
+                            detail: digest(70),
+                        },
+                    }),
+                },
+            );
+        }
+        state.integration.head = IntegrationHead {
+            generation: state.integration.generation.digest(),
+            node: digest(90),
+            candidate: CandidateRef { tree: digest(91), checkout: digest(92) },
+            plan: digest(89),
+            coverage: alloc::vec![alpha.clone(), beta.clone()],
+        };
+        (record, state, alpha, beta, gamma)
+    }
+
+    /// A conflicted append plan over `members`: the input names pins the head
+    /// integrated since the composition was cut, whether the parent is stale
+    /// or the merge itself collided. The plan is installed directly rather
+    /// than scheduled — a fully covered input is never append-ready, which is
+    /// exactly the shape under test.
+    fn conflicting_append(
+        record: &BloomRecord,
+        state: &mut CoordinationState,
+        members: Vec<MemberPin>,
+        candidate: CandidateRef,
+    ) -> (Snapshot, BloomId, IntegrationAppendPlan, CompositionInput, Evidence) {
+        let conflicting = CompositionInput { node: digest(51), candidate, members };
+        state.integration.queued = alloc::vec![conflicting.clone()];
+        state.integration.movement_count = state.policy.movement_budget - 1;
+        let plan = IntegrationAppendPlan {
+            bloom: record.spec.id(),
+            generation: state.integration.generation.digest(),
+            expected_parent: state.integration.head.clone(),
+            inputs: alloc::vec![conflicting.clone()],
+        };
+        state.integration.in_flight = Some(plan.clone());
+        let (snapshot, bloom) = in_flight_snapshot(record.clone(), state.clone());
+        let evidence =
+            Evidence { subject: conflicting.candidate.tree, kind: EvidenceKind::FoldConflict, detail: digest(55) };
+        (snapshot, bloom, plan, conflicting, evidence)
+    }
+
+    #[test]
+    fn an_append_conflict_skips_members_the_head_already_carries() {
+        let (record, mut state, alpha, beta, gamma) = three_member_head();
+        let (snapshot, bloom, plan, conflicting, evidence) =
+            conflicting_append(&record, &mut state, alloc::vec![alpha, beta, gamma.clone()], gamma.candidate);
+
+        let decisions = reduce_integration_conflicted(
+            &snapshot,
+            IntegrationConflict {
+                bloom: &bloom,
+                plan: plan.digest(),
+                generation: plan.generation,
+                expected_parent: plan.expected_parent.node,
+                input: &conflicting,
+                at: conflicting.candidate,
+                evidence: &evidence,
+                observed_at_unix_millis: 10,
+            },
+        );
+
+        let reconciled = decisions
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::AdvanceStage { workpiece, progress, .. } => Some((workpiece, *progress)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            reconciled.as_slice(),
+            [(workpiece, progress)]
+                if workpiece.0 == "gamma" && progress.stage == StageId::Reconcile
+        ));
+        assert_eq!(
+            decisions
+                .effects
+                .iter()
+                .filter(|effect| matches!(effect, Decision::DispatchContextualAttempt { .. }))
+                .count(),
+            1,
+            "only the member the head does not carry gets a lap"
+        );
+        let next = recorded(&decisions);
+        assert!(!next.contexts.contains_key("alpha") && !next.contexts.contains_key("beta"));
+        assert!(next.claims.contains_key("alpha") && next.claims.contains_key("beta"));
+        assert!(next.integration.reservation.as_ref().is_some_and(|reservation| { reservation.owner.0 == "gamma" }));
+    }
+
+    #[test]
+    fn an_append_conflict_covering_only_carried_members_dispatches_no_lap() {
+        let (record, mut state, alpha, beta, _) = three_member_head();
+        let candidate = beta.candidate;
+        let (snapshot, bloom, plan, conflicting, evidence) =
+            conflicting_append(&record, &mut state, alloc::vec![alpha, beta], candidate);
+
+        let decisions = reduce_integration_conflicted(
+            &snapshot,
+            IntegrationConflict {
+                bloom: &bloom,
+                plan: plan.digest(),
+                generation: plan.generation,
+                expected_parent: plan.expected_parent.node,
+                input: &conflicting,
+                at: conflicting.candidate,
+                evidence: &evidence,
+                observed_at_unix_millis: 10,
+            },
+        );
+
+        assert!(matches!(decisions.outcome, Outcome::CoordinationAdvanced { .. }));
+        assert!(
+            !decisions.effects.iter().any(|effect| {
+                matches!(effect, Decision::AdvanceStage { .. } | Decision::DispatchContextualAttempt { .. })
+            }),
+            "no cursor moves and no lap when every member is already integrated"
+        );
+        let next = recorded(&decisions);
+        assert!(next.integration.reservation.is_none(), "nothing repairs, so nothing owns a reservation");
+        assert!(
+            next.diagnostics.iter().any(|diagnostic| diagnostic.subject == conflicting.digest()),
+            "the collision is still journaled even though it dispatches nothing"
+        );
     }
 
     #[test]

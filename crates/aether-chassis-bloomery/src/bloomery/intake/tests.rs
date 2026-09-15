@@ -671,9 +671,11 @@ fn claim_for_carries_the_whole_observation() {
     let subject = Digest::from_bytes([3; 32]);
     let detail = Digest::from_bytes([4; 32]);
     let observation = LaneObservation {
+        replayed_flakes: vec!["aether-bloomery reduce::flaky".into()],
         contextual_observations: Some(br#"{"protocol":1,"documents":[]}"#.to_vec()),
         candidate: Some(CandidateRef { tree: Digest::from_bytes([5; 32]), checkout: Digest::from_bytes([6; 32]) }),
         findings: Some("critic findings".into()),
+        notes: Some("read the whole candidate".into()),
         failed_verifiers: VerifyFailureSet::one(VerifyFailure::Fmt),
         failed_verifier_names: vec!["verify.fmt".into()],
         cost: Some(StudyCost {
@@ -711,6 +713,12 @@ fn claim_for_carries_the_whole_observation() {
             title: "the drain re-reads a parked entry".to_owned(),
             body: "the ack prefix stops short, so the next tick re-selects it".to_owned(),
             surface: vec!["crates/aether-chassis-bloomery/**".into()],
+        }],
+        duration_millis: Some(21),
+        gates: vec![aether_bloomery::EvidenceGateTiming {
+            command: "verify.fmt".into(),
+            duration_millis: 10,
+            prepare_millis: None,
         }],
     };
     let name = NameEvidenceClaims::attempt_artifact_name(
@@ -1548,7 +1556,9 @@ fn an_aggregate_review_verdict_admits_a_bloom_level_completion() {
         subject: tree,
         verdict: StageVerdict::Approved,
         detail: Digest::from_bytes([8; 32]),
-        observation: LaneObservation::default(),
+        // A clean pass stamps no findings, so the note naming what was read is
+        // what makes it a review rather than an empty verdict.
+        observation: LaneObservation { notes: Some("re-read the tick-order seam".to_owned()), ..Default::default() },
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &passing).unwrap() else {
         panic!("the passing aggregate verdict is admitted");
@@ -1670,6 +1680,77 @@ fn an_aggregate_review_executor_fault_admits_its_own_fact_and_touches_no_finding
         admit_uploaded(&mut store, &fault).unwrap(),
         AdmitDecision::Refused(IntakeRefusal::UnknownNonce(_))
     ));
+}
+
+// A passing aggregate review carrying neither a finding nor a note never judged
+// the fold. It is the shape a critic leaves when its report server was dropped
+// at launch: the tools that write the findings file were unreachable, so the
+// file is empty — and an empty file is also what a clean review leaves, which is
+// how four weeks of unreviewed folds landed as reviewed.
+//
+// Two tripwires in opposite directions. Reading the findings channel alone
+// cannot separate the two, so the note is what makes the empty verdict
+// detectable at all; and folding a *noted* clean pass as a fault would wedge
+// every bloom on its review budget, because a clean review stamps no findings by
+// definition. The frozen findings are untouched either way, for the reason the
+// sibling fault above leaves them alone.
+#[test]
+fn a_passing_review_with_no_findings_and_no_notes_folds_as_a_fault() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let tree = Digest::from_bytes([30; 32]);
+    store.record_review_findings(bloom.0.as_bytes(), "", "pillar 2: the members disagree").unwrap();
+
+    let admit = |store: &mut SqliteStore, nonce: &str, notes: Option<&str>| {
+        let mut record = dispatch_record(nonce, bloom, &WorkpieceId(String::new()), tree, tree);
+        record.stage = StageId::AggregateReview;
+        record_dispatch(store, &record).unwrap();
+        let upload = UploadedEvidence {
+            nonce: Nonce(nonce.to_owned()),
+            subject: tree,
+            verdict: StageVerdict::Approved,
+            detail: Digest::from_bytes([9; 32]),
+            observation: LaneObservation { notes: notes.map(str::to_owned), ..Default::default() },
+        };
+        let AdmitDecision::Admitted(admission) = admit_uploaded(store, &upload).unwrap() else {
+            panic!("a matching aggregate verdict is admitted");
+        };
+        admission.event.fact
+    };
+
+    let empty = admit(&mut store, "n-empty", None);
+    // Tripwire: `normalize_stage_result` kinds a passing verdict `Approval`,
+    // and the reducer's fault series folds on the kind — an `Approval` here
+    // files the fact and derives nothing, leaving the bloom rendering as an
+    // ordinary one sitting quietly between dispatches.
+    if let Fact::AggregateReviewExecutorFault { evidence, .. } = &empty {
+        assert_eq!(evidence.kind, EvidenceKind::ExecutorFault, "the empty verdict is re-kinded as the fault it is");
+        assert_eq!(evidence.subject, tree, "and still binds the tree the order displayed");
+    }
+    assert!(
+        matches!(&empty, Fact::AggregateReviewExecutorFault { bloom: faulted, .. } if *faulted == bloom),
+        "a verdict with nothing in it is a lane that never judged the fold, got {empty:?}",
+    );
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), "").unwrap().as_deref(),
+        Some("pillar 2: the members disagree"),
+        "the empty verdict neither appends to the frozen findings nor clears them",
+    );
+    assert!(
+        matches!(admit(&mut store, "n-blank", Some("   ")), Fact::AggregateReviewExecutorFault { .. }),
+        "a whitespace-only note names nothing reviewed",
+    );
+
+    let noted = admit(&mut store, "n-noted", Some("read the whole fold; every member's intent survives the weave"));
+    assert!(
+        matches!(&noted, Fact::AggregateReviewCompleted { passed: true, .. }),
+        "a clean review that says what it read is a pass, got {noted:?}",
+    );
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), "").unwrap(),
+        None,
+        "and that pass clears the bloom row, exactly as a passing review always did",
+    );
 }
 
 // ADR-0195 admits ExecutorFault for dispatched member stages as its own fact,
@@ -2663,5 +2744,62 @@ fn a_passing_review_carrying_advisories_is_kinded_as_one() {
         admit_pass(&mut store, "n-blocking", Some("- JUDGMENT (critical: it drops the budget) — src/reduce.rs")),
         EvidenceKind::Approval,
         "a blocking class on a passing verdict is not an advisory — the lane would have reported a fail",
+    );
+}
+
+#[test]
+fn a_refused_construct_mismatch_preserves_its_capture_for_the_checkpoint_push() {
+    // A refused claim is a bookkeeping fault; the tree the model built is the
+    // most valuable thing on the host (#5968). A completed Construct run whose
+    // subject differs from the displayed digest still captured work, so the
+    // cycle reports it for the member checkpoint push while recovering the
+    // order as a machinery fault.
+    let workpiece = WorkpieceId("wp-checkpoint".to_owned());
+    let scope_revision = Digest::from_bytes([2; 32]);
+
+    let fake = FakeGithub::new();
+    let shell = shell(fake.clone());
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let mut record = dispatch_record("n-refused-capture", bloom, &workpiece, scope_revision, scope_revision);
+    record.stage = StageId::Construct;
+    record.candidate = scope_revision;
+    record.displayed_digest = scope_revision;
+    let handle = answered(dispatch_and_record(&shell, &mut store, None, &record, NOW_UNIX_MILLIS));
+
+    let run_id = fake.seed_run("n-refused-capture", RunStatus::Completed, Some(RunConclusion::Success));
+    fake.seed_run_artifacts(
+        run_id,
+        vec![Artifact { id: 1, name: "evidence-n-refused-capture-log".to_owned(), size_bytes: 10 }],
+    );
+
+    let captured = CandidateRef { tree: Digest::from_bytes([41; 32]), checkout: Digest::from_bytes([42; 32]) };
+    let mut claims = HashMap::new();
+    claims.insert(
+        "n-refused-capture".to_owned(),
+        UploadedEvidence {
+            nonce: Nonce("n-refused-capture".to_owned()),
+            subject: Digest::from_bytes([9; 32]),
+            verdict: StageVerdict::Approved,
+            detail: Digest::from_bytes([7; 32]),
+            observation: LaneObservation { candidate: Some(captured), ..LaneObservation::default() },
+        },
+    );
+    let claims = SeededClaims(claims);
+    let mut sink = Collector::default();
+
+    let report = run_intake_cycle(&mut store, &shell, &[handle], &claims, None, &mut sink).unwrap();
+    assert_eq!((report.completed, report.refused), (1, 1), "the mismatched upload is refused");
+    assert_eq!(report.refused_checkpoints.len(), 1, "the capture survives the refusal for the checkpoint push");
+    let checkpoint = &report.refused_checkpoints[0];
+    assert_eq!(checkpoint.bloom, bloom);
+    assert_eq!(checkpoint.workpiece, workpiece);
+    assert_eq!(checkpoint.candidate, captured, "whatever the lane committed is what is preserved");
+    assert!(
+        sink.0.iter().any(|admission| matches!(
+            &admission.event.fact,
+            Fact::MemberExecutorFault { workpiece: faulted, stage: StageId::Construct, .. } if *faulted == workpiece
+        )),
+        "the refusal is still visible on the member as a machinery fault",
     );
 }

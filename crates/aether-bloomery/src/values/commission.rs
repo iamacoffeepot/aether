@@ -56,6 +56,47 @@ pub struct ScopeRouting {
     pub model: String,
 }
 
+/// The size band a scope routed its work into — the axis a stage's wall-clock
+/// limit resolves on (#5998).
+///
+/// A closed vocabulary over the free-form [`ScopeRouting::size`] line, which is
+/// written by three producers (the scope lane's door, the markdown parser, an
+/// operator's own issue body) and normalized by none of them. Reading it as a
+/// type rather than as a string is what lets one sealed number mean a limit per
+/// band instead of one limit for every member.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum WorkpieceSize {
+    /// `S`.
+    Small,
+    /// `M`.
+    Medium,
+    /// `L`.
+    Large,
+}
+
+impl WorkpieceSize {
+    /// The band a scoped size line names, or [`Self::Medium`] when it names
+    /// nothing this vocabulary recognizes.
+    ///
+    /// Total on purpose. The line is prose an operator can author by hand, so
+    /// an unreadable one is an ordinary event rather than an error, and the
+    /// band it resolves to is the middle one — the limit every member ran under
+    /// before the bands existed. Case- and padding-insensitive because the
+    /// parse path preserves whatever was typed (`"s"` and `"l"` both appear in
+    /// the tree today).
+    #[must_use]
+    pub fn of_line(line: &str) -> Self {
+        let line = line.trim();
+        if line.eq_ignore_ascii_case("s") {
+            return Self::Small;
+        }
+        if line.eq_ignore_ascii_case("l") {
+            return Self::Large;
+        }
+        Self::Medium
+    }
+}
+
 /// An immutable, versioned scope: the structured work a commission currently
 /// intends, addressed by the digest of these bytes.
 ///
@@ -137,6 +178,29 @@ pub struct ScopeRevision {
 }
 
 impl ScopeRevision {
+    /// The first section a lane cannot work without that this revision leaves
+    /// empty, named the way a door reports it.
+    ///
+    /// `problem`, `design` and `plan` are the three the construct prompt is
+    /// rendered from, so a revision missing one dispatches a lane with a
+    /// heading and no work order. That is exactly what happened on 2026-09-14:
+    /// the doors admitted revisions carrying a one-line title and nothing else,
+    /// and six members were built from titles before a lane declined rather
+    /// than guess. Checked at every door that admits a revision rather than
+    /// enforced by the type, because the field layout is signed bytes and a
+    /// shape change is a schema bump — the emptiness rule is a door rule, and
+    /// stored revisions keep decoding.
+    ///
+    /// `declared_surface` is not here: it has its own grammar refusal, which
+    /// names the offending glob rather than the empty field.
+    #[must_use]
+    pub fn empty_required_section(&self) -> Option<&'static str> {
+        [("problem", &self.problem), ("design", &self.design), ("plan", &self.plan)]
+            .into_iter()
+            .find(|(_, body)| body.trim().is_empty())
+            .map(|(name, _)| name)
+    }
+
     /// Decode canonical bytes as a version-1 revision.
     ///
     /// The leading `schema` field is read first so a version this binary does
@@ -307,7 +371,7 @@ mod tests {
 
     use ed25519_dalek::{Signer, SigningKey};
 
-    use super::{SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting};
+    use super::{SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, WorkpieceSize};
     use crate::digest::digest_of;
     use crate::ids::{KeyId, WorkpieceId};
     use crate::sign::{AuthorityDoor, AuthorizedSigner, Ed25519KeyProvider, SignatureEnvelope, authorization_message};
@@ -505,5 +569,27 @@ mod tests {
         let base = fixture();
         let widened = base.with_widened_surface(&[String::from("crates/aether-bloomery/**")]);
         assert_eq!(widened.declared_surface, base.declared_surface);
+    }
+
+    // Tripwire: the size line is prose three producers write and none
+    // normalizes. A reader that matched it case-sensitively would resolve every
+    // lowercase `"s"` in the tree to the middle band, which is silent — the
+    // member simply runs under the wrong limit — and both spellings are already
+    // sealed in fixtures today.
+    #[test]
+    fn a_size_line_resolves_a_band_whatever_case_or_padding_it_was_written_in() {
+        for line in ["S", "s", " s ", "  S"] {
+            assert_eq!(WorkpieceSize::of_line(line), WorkpieceSize::Small, "{line:?}");
+        }
+        for line in ["L", "l", " l\n"] {
+            assert_eq!(WorkpieceSize::of_line(line), WorkpieceSize::Large, "{line:?}");
+        }
+        for line in ["M", "m", "", "XL", "medium-ish", "2"] {
+            assert_eq!(
+                WorkpieceSize::of_line(line),
+                WorkpieceSize::Medium,
+                "an unreadable size line resolves the band every member ran under before the bands: {line:?}",
+            );
+        }
     }
 }

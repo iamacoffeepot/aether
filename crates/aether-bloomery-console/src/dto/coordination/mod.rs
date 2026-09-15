@@ -218,21 +218,29 @@ impl CoordinationView {
         if self.integration.head.coverage.iter().any(|pin| pin.matches(member)) {
             return format!("folded {}", self.integration.head.candidate.checkout.prefix());
         }
-        if let Some(run) = self.runs.iter().rev().find(|run| {
+        if let Some(run) = self.live_run_for(member) {
+            return shared_run_label(run);
+        }
+        target.map_or_else(|| "pending fold".to_owned(), |target| format!("on {target}"))
+    }
+
+    /// Latest live, non-stale run that still names this exact member request
+    /// as unfinished. A contextual shared run seats the composition workpiece,
+    /// so this is the occupancy the per-member order overlay cannot see.
+    pub(crate) fn live_run_for(&self, member: &MemberView) -> Option<&SharedRunView> {
+        self.runs.iter().rev().find(|run| {
             run.is_live()
                 && !run.stale
                 && run.plan.requests.iter().any(|request| {
                     request.member.matches(member) && request.id.is_some_and(|id| run.unfinished.contains(&id))
                 })
-        }) {
-            if run.phase != "Running" {
-                return "shared queued".to_owned();
-            }
-            return run
-                .physical_run
-                .map_or_else(|| "shared queued".to_owned(), |run| format!("shared {}", run.prefix()));
-        }
-        target.map_or_else(|| "pending fold".to_owned(), |target| format!("on {target}"))
+        })
+    }
+
+    /// Whether this member still occupies a live shared verify run.
+    #[must_use]
+    pub fn has_live_run(&self, member: &MemberView) -> bool {
+        self.live_run_for(member).is_some()
     }
 
     /// Latest latency for this exact member revision and candidate. A shared
@@ -278,6 +286,13 @@ impl CoordinationView {
             lines.push(format!("  retiring shared runs  {retiring}"));
         }
         lines
+    }
+}
+
+fn shared_run_label(run: &SharedRunView) -> String {
+    match (run.phase.as_str(), run.physical_run) {
+        ("Running", Some(id)) => format!("shared Running {}", id.prefix()),
+        (phase, _) => format!("shared {phase}"),
     }
 }
 
@@ -378,9 +393,11 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert_eq!(state.member_summary(&member), "shared 07070707");
+        assert_eq!(state.member_summary(&member), "shared Running 07070707");
+        assert!(state.has_live_run(&member));
         state.runs[0].unfinished = vec![second.id.expect("complete request fixture")];
         assert_eq!(state.member_summary(&member), "pending fold");
+        assert!(!state.has_live_run(&member));
         state.runs.push(SharedRunView {
             plan: SharedRunPlanView { requests: vec![first.clone()] },
             phase: "Running".to_owned(),
@@ -388,19 +405,24 @@ mod tests {
             unfinished: vec![first.id.expect("complete request fixture")],
             ..Default::default()
         });
-        assert_eq!(state.member_summary(&member), "shared 08080808");
+        assert_eq!(state.member_summary(&member), "shared Running 08080808");
+        assert!(state.has_live_run(&member));
         state.runs[1].stale = true;
         assert_eq!(state.member_summary(&member), "pending fold");
+        assert!(!state.has_live_run(&member));
         assert!(state.detail_lines(2).iter().any(|line| line.contains("retiring shared runs  1")));
         state.runs[1].stale = false;
         // Unissued work is queued until the record becomes terminal. Terminal
         // partial runs can retain unfinished ids without remaining live work.
         state.runs[1].phase = "Ready".to_owned();
-        assert_eq!(state.member_summary(&member), "shared queued");
+        assert_eq!(state.member_summary(&member), "shared Ready");
+        assert!(state.has_live_run(&member));
         state.runs[1].phase = "Terminal".to_owned();
         assert_eq!(state.member_summary(&member), "pending fold");
+        assert!(!state.has_live_run(&member));
         state.runs[1].phase = "FuturePhase".to_owned();
         assert_eq!(state.member_summary(&member), "pending fold");
+        assert!(!state.has_live_run(&member));
     }
 
     #[test]

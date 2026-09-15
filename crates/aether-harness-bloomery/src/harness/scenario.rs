@@ -20,7 +20,8 @@ use aether_bloomery::{
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
-    ChecksState, GitDataApi, NewPullRequest, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex,
+    ChecksState, GitDataApi, GitObjectId, NewPullRequest, PullRequestApi, candidate_ref_name, landing_branch,
+    short_hex, to_hex,
 };
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, GetResult};
 use aether_chassis_bloomery::benchmark::{BenchmarkRunnerCapability, BenchmarkTick};
@@ -46,7 +47,7 @@ use aether_rpc::RpcServerHandle;
 use aether_substrate::chassis::builder::BuiltChassis;
 
 use super::digest;
-use super::drive::{member, member_with, passed};
+use super::drive::{member, member_with, passed, reviewed};
 use super::roots::FixtureRoots;
 use super::{
     BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, InstructionAuthorization, Lane, POLL,
@@ -472,6 +473,23 @@ impl ScenarioHarness {
     /// first revision could not be written.
     #[must_use]
     pub fn author_scope_revision(&self, workpiece: &str, surface: &[&str]) -> Digest {
+        // The middling band, so a scenario that is not about size dispatches
+        // under exactly the wall clock its catalog authored (#5998).
+        self.author_sized_scope_revision(workpiece, surface, "M")
+    }
+
+    /// [`author_scope_revision`](Self::author_scope_revision) with the scoped
+    /// size line stated rather than defaulted.
+    ///
+    /// The size band is what a stage's dispatched wall clock resolves at
+    /// (#5998), so a scenario about the limit has to be able to say which band
+    /// its member was routed into.
+    ///
+    /// # Panics
+    /// The commission store could not be opened, or the commission and its
+    /// first revision could not be written.
+    #[must_use]
+    pub fn author_sized_scope_revision(&self, workpiece: &str, surface: &[&str], size: &str) -> Digest {
         let mut store = self.open_store();
         let workpiece = WorkpieceId(workpiece.to_owned());
         let intent = Statement {
@@ -485,12 +503,16 @@ impl ScenarioHarness {
             schema: SCOPE_REVISION_SCHEMA,
             workpiece,
             predecessor: None,
+            // Every section the lane prompt is rendered from is filled, because
+            // the doors this revision goes through refuse an empty one: the
+            // sections are what a construct lane is handed, so a fixture that
+            // left them blank would author a commission no operator could.
             problem: String::from("the harness authored this scope"),
-            design: String::new(),
-            plan: String::new(),
+            design: String::from("the harness declares the surface and nothing else"),
+            plan: String::from("1. run the scripted lane"),
             declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
             dogfood_brief: String::new(),
-            routing: ScopeRouting { size: String::from("S"), model: String::new() },
+            routing: ScopeRouting { size: size.to_owned(), model: String::new() },
             dependencies: Vec::new(),
             description: String::new(),
             implements: Vec::new(),
@@ -1104,6 +1126,8 @@ fn in_process_env(
             defaults.operator_email
         },
         host_class: builder.host_class().to_owned(),
+        max_concurrent_lanes: builder.max_concurrent_lanes.unwrap_or(defaults.max_concurrent_lanes),
+        max_concurrent_provers: builder.max_concurrent_provers.unwrap_or(defaults.max_concurrent_provers),
         authority_backend: if builder.authority_path.is_some() {
             "local".to_owned()
         } else {
@@ -1621,7 +1645,17 @@ impl ScenarioHarness {
         let mut keys = Vec::new();
         for order in &orders {
             assert!(order.workpiece.is_empty(), "a bloom-level order carries no member axis");
-            keys.push(self.upload_admitted(&passed(order)));
+            // The review has to say what it read. Intake refuses a passing
+            // review carrying neither a finding nor a note as a lane that never
+            // judged the fold, so the two bloom-level gates upload differently:
+            // a compiler has nothing to say, a critic does.
+            let is_review = from_bytes::<StageId>(&order.stage).is_ok_and(|stage| stage == StageId::AggregateReview);
+            let upload = if is_review {
+                reviewed(order)
+            } else {
+                passed(order)
+            };
+            keys.push(self.upload_admitted(&upload));
         }
         for gate in ["aether.bloomery.aggregate_review:", "aether.bloomery.aggregate_verify:"] {
             assert!(keys.iter().any(|key| key.starts_with(gate)), "the {gate} gate ran: {keys:?}");
@@ -1691,22 +1725,71 @@ impl ScenarioHarness {
         }
     }
 
-    /// Stage the capture a construct lane would have produced.
+    /// Stage the capture a lane would have produced, and publish it to the
+    /// member's candidate ref — the substitution this cell makes for the
+    /// executor's ADR-0152 push, which shells a real `git push`.
     ///
     /// # Panics
     /// The fixture could not mint the capture commit.
     #[must_use]
     pub fn seed_capture(&self, bloom: BloomId, workpiece: &str, tree: Digest, checkout: Digest) -> CandidateRef {
+        let candidate = self.seed_unpublished_capture(workpiece, tree, checkout);
+        self.publish_capture(bloom, workpiece, &candidate);
+        candidate
+    }
+
+    /// The capture without the publish: mint the commit and record both
+    /// correspondences, leaving the candidate ref exactly where it was.
+    ///
+    /// The half of [`seed_capture`](Self::seed_capture) that stands in for a lane;
+    /// the other half stands in for the executor's push. A scenario about what a
+    /// *missed* push does to the fold needs them apart (#5992), because a
+    /// harness that always plants the ref is a harness in which no push can ever
+    /// be missed.
+    ///
+    /// # Panics
+    /// The fixture could not mint the capture commit.
+    #[must_use]
+    pub fn seed_unpublished_capture(&self, workpiece: &str, tree: Digest, checkout: Digest) -> CandidateRef {
         let tree_sha = to_hex(&tree);
         let commit = self
             .fake()
             .create_commit(&format!("capture {workpiece}"), &tree_sha, &[])
             .expect("the fixture mints the capture commit");
 
-        self.fake().seed_ref(candidate_ref_name(&bloom, workpiece).trim_start_matches("refs/"), &commit.sha);
         self.fake().seed_correspondence(&tree, &tree_sha);
         self.fake().seed_correspondence(&checkout, &commit.sha);
         CandidateRef { tree, checkout }
+    }
+
+    /// Point the member's candidate ref at `candidate`'s checkout commit — what
+    /// the executor's pusher does once an admitted capture resolves.
+    ///
+    /// # Panics
+    /// The checkout has no recorded correspondence, so there is no commit to
+    /// publish.
+    pub fn publish_capture(&self, bloom: BloomId, workpiece: &str, candidate: &CandidateRef) {
+        let commit = self
+            .fake()
+            .resolve_backend_object(&candidate.checkout)
+            .expect("the correspondence store reads")
+            .and_then(|object| GitObjectId::try_from(object).ok())
+            .expect("the capture checkout has a recorded commit");
+
+        self.fake().seed_ref(candidate_ref_name(&bloom, workpiece).trim_start_matches("refs/"), &commit.to_hex());
+    }
+
+    /// The capture commit the member's candidate ref points at, as its checkout
+    /// digest — the vehicle a combining fold will merge, comparable against the
+    /// [`CandidateRef`] a lane produced.
+    ///
+    /// # Panics
+    /// The correspondence store could not be read.
+    #[must_use]
+    pub fn candidate_ref_commit(&self, bloom: BloomId, workpiece: &str) -> Option<Digest> {
+        let sha = self.fake().ref_target(candidate_ref_name(&bloom, workpiece).trim_start_matches("refs/"))?;
+        let object = GitObjectId::from_hex(&sha)?;
+        self.fake().resolve_digest(&BackendObjectId::from(object)).expect("the correspondence store reads")
     }
 
     /// The study artifact the executor reactor filed for `(bloom, attempt)`.

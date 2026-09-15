@@ -24,6 +24,13 @@ pub struct SharedProbePreparationRequest {
     pub transformation: Transformation,
     pub profile: AgentProfile,
     pub configs: ConfigRegistry,
+    /// The candidate check's checkout. A baseline probe (empty `inputs`) names
+    /// this as `--diff-base` so the base tree is compiled over the same
+    /// reverse-dependency closure the candidate ran, rather than the whole
+    /// workspace. `None` on subset probes that already have a real range, and
+    /// on rows written before this field existed.
+    #[serde(default)]
+    pub candidate_checkout: Option<Digest>,
 }
 
 /// Exact prepared executor input stored before a probe can be submitted.
@@ -70,6 +77,11 @@ pub struct SharedStepReceipt {
     pub cost: Option<StudyCost>,
     #[serde(default)]
     pub calls: Option<Vec<StudyCall>>,
+    /// Tests this step's gate recorded as flakes — failed once, passed on a
+    /// same-input replay (#5999). The verdict on such a test is the replay's,
+    /// so it names no failing check and buys no attribution probe.
+    #[serde(default)]
+    pub replayed_flakes: Vec<String>,
     #[serde(default)]
     pub contextual_observations: Option<Vec<u8>>,
     #[serde(default)]

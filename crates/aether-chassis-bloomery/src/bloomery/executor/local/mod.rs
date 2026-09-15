@@ -25,15 +25,18 @@
 //! [`NameEvidenceClaims`](crate::bloomery::intake::NameEvidenceClaims) decodes) —
 //! no artifact-upload naming step to depend on.
 //!
-//! # The lane ceiling, and the slot a dispatch runs in
+//! # The two ceilings, and the slot a dispatch runs in
 //!
 //! A submit accepts a dispatch; it does not promise to spawn it immediately.
-//! Each lane is a whole cargo build with its own throwaway target dir, and a seal
-//! fans out one dispatch per member, so the backend runs at most
-//! [`with_max_concurrent_lanes`](LocalExecutor::with_max_concurrent_lanes)
-//! children at once and holds the rest, starting each as a running lane
-//! finishes. Every dispatch is acked as submitted either way — the ceiling is a
-//! queue, never a refusal, so nothing about it reaches the reducer.
+//! Model lanes (construct, review, scope, the bloom-level reader) count against
+//! [`with_max_concurrent_lanes`](LocalExecutor::with_max_concurrent_lanes).
+//! `verify.*` dispatches count against
+//! [`with_max_concurrent_provers`](LocalExecutor::with_max_concurrent_provers)
+//! only: a running prove does not take a model slot, and a running model does
+//! not take a prove slot (ADR-0200). With prover slots saturated, ready verify
+//! requests wait so ADR-0218 coalescing can batch them into the next plan.
+//! Every dispatch is acked as submitted either way — each ceiling is a queue,
+//! never a refusal, so nothing about it reaches the reducer.
 //!
 //! Which held dispatch goes next is the [`priority`] band's answer, not the
 //! order they arrived in (#5410): a stage resuming a live session, then a stage

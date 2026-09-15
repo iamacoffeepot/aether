@@ -169,6 +169,7 @@ CREATE TABLE IF NOT EXISTS scope_runs (
     evidence   BLOB,
     revision   BLOB,
     instructions BLOB,
+    model_override BLOB,
     UNIQUE (commission, ordinal, kind)
 );
 CREATE INDEX IF NOT EXISTS scope_runs_by_commission ON scope_runs (commission, ordinal);
@@ -243,6 +244,12 @@ pub enum CommissionError {
         /// Each uncovered path with the record that named it.
         paths: Vec<String>,
     },
+    /// A section the construct prompt is rendered from is empty, so the
+    /// revision would dispatch a lane with a heading and no work order.
+    EmptySection {
+        /// The field that is empty: `problem`, `design`, or `plan`.
+        section: String,
+    },
 }
 
 impl fmt::Display for CommissionError {
@@ -270,6 +277,9 @@ impl fmt::Display for CommissionError {
             Self::Resolved(bloom) => write!(f, "bloom {} resolved this workpiece", bloom.0.to_hex()),
             Self::SurfaceGap { paths } => {
                 write!(f, "declared surface does not cover {}", paths.join(", "))
+            }
+            Self::EmptySection { section } => {
+                write!(f, "scope revision section {section} is empty")
             }
         }
     }
@@ -632,6 +642,15 @@ fn write_revision(
     if decoded != *revision {
         return Err(CommissionError::MalformedCanonical);
     }
+    // Ahead of every store read, and for the same reason the surface grammar is
+    // checked before the glob is used: the sections a construct prompt is
+    // rendered from are non-nullable, so a revision missing one never becomes a
+    // commission's tip. Both doors that admit a revision — the operator's
+    // `POST /commissions/{id}/revisions` and the scoping run's freeze — land
+    // here, so the rule has one implementation rather than one per door.
+    if let Some(section) = decoded.empty_required_section() {
+        return Err(CommissionError::EmptySection { section: section.to_owned() });
+    }
     let digest = digest_of(&decoded);
     let txn = conn.transaction()?;
     let Some(head) = load_head(&txn, &decoded.workpiece.0)? else {
@@ -922,6 +941,10 @@ fn snapshot_projection(conn: &Connection, id: &str) -> Result<Vec<u8>, Commissio
     // the head is an index, and a title recomputed from the bytes cannot drift
     // from the intent the commission was created with.
     let title = load_statement(conn, head.intent)?.and_then(|intent| intent_title(&intent.words)).unwrap_or_default();
+    let scope = match head.current_revision {
+        Some(digest) => Some(load_revision(conn, digest)?.ok_or(CommissionError::MalformedCanonical)?.render()),
+        None => None,
+    };
     encode_row(
         &CommissionProjection {
             workpiece: head.id,
@@ -932,6 +955,7 @@ fn snapshot_projection(conn: &Connection, id: &str) -> Result<Vec<u8>, Commissio
             status: head.status.as_str().to_owned(),
             recorded_issue,
             title,
+            scope,
         },
         Some(CommissionProjection::NAME),
     )

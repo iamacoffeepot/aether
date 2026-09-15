@@ -8,8 +8,8 @@ use std::error::Error;
 use std::fmt;
 
 use super::{
-    BatchCheck, ClosureKey, HostClass, ProbeVerdict, ProofResult, ProofSource, RunnerReport, discriminate,
-    record_proof_facts,
+    BatchCheck, ClosureKey, DiscriminatedFacts, HostClass, ProbeVerdict, ProofResult, ProofSource, RunnerReport,
+    discriminate, record_proof_facts,
 };
 use crate::store::StoreBackend;
 
@@ -208,6 +208,57 @@ pub fn observed_probe_verdict(
     Ok(result.unwrap_or(ProbeVerdict::Unknown))
 }
 
+/// Named tests this bundle reported as failed, as `(gate, test_id)` pairs.
+///
+/// The test id is the stable identity stored under `test:{id}` — never nextest's
+/// in-flight progress counter. Disagreeing invocations, internal baselines
+/// (`at` set), and missing names supply no check.
+///
+/// # Errors
+/// The bundle is malformed, duplicated, or bound to another physical step.
+pub fn observed_failed_tests(bytes: &[u8], expected_nonce: &str) -> Result<Vec<(String, String)>, ContextualFactError> {
+    let documents = observation_documents(bytes)?;
+    if documents.iter().any(|document| document.nonce.as_deref() != Some(expected_nonce)) {
+        return Err(ContextualFactError::InputMismatch);
+    }
+    let mut failed = Vec::new();
+    for document in documents {
+        let mut seen = BTreeSet::new();
+        let mut by_test: BTreeMap<String, Option<ObservedResult>> = BTreeMap::new();
+        for invocation in document.invocations {
+            if !seen.insert(invocation.invocation) {
+                return Err(ContextualFactError::RepeatedInvocation);
+            }
+            if invocation.at.is_some() {
+                continue;
+            }
+            for (key, result) in invocation.outcomes {
+                let Some(test) = key.strip_prefix("test:") else {
+                    continue;
+                };
+                if test.is_empty() {
+                    continue;
+                }
+                by_test
+                    .entry(test.to_owned())
+                    .and_modify(|previous| {
+                        if *previous != Some(result) {
+                            *previous = None;
+                        }
+                    })
+                    .or_insert(Some(result));
+            }
+        }
+        failed.extend(
+            by_test
+                .into_iter()
+                .filter(|(_, result)| *result == Some(ObservedResult::Failed))
+                .map(|(test, _)| (document.gate.clone(), test)),
+        );
+    }
+    Ok(failed)
+}
+
 fn declares_gate(contract: &CompositionContract, gate: &str) -> bool {
     contract.gate_identities.iter().any(|identity| identity == gate)
 }
@@ -366,6 +417,44 @@ pub fn record_contextual_facts(
     )?)
 }
 
+/// Record one green fact per declared gate from a contextual run that already
+/// passed. A second suite is not required; that wait is why a green shared run
+/// never populated the ledger (#5948).
+///
+/// # Errors
+/// The host class does not match the sealed contract, or the proof ledger
+/// could not persist the facts.
+pub fn record_green_contextual_facts(
+    store: &mut dyn StoreBackend,
+    node: &SharedRunNode,
+    contract: &CompositionContract,
+    class_name: &HostClass,
+    dispatch: &str,
+    bloom: &[u8],
+) -> Result<usize, ContextualFactError> {
+    if class_name.digest() != contract.host_class {
+        return Err(ContextualFactError::InputMismatch);
+    }
+    let mut declared = BTreeSet::new();
+    if contract.gate_identities.iter().any(|gate| gate.is_empty() || !declared.insert(gate.as_str()))
+        || declared.is_empty()
+    {
+        return Ok(0);
+    }
+    let mut report = RunnerReport::new();
+    for gate in &contract.gate_identities {
+        report.insert(format!("gate:{gate}"), ProofResult::Green);
+    }
+    Ok(record_proof_facts(
+        store,
+        &ProofSource::Contextual { input: contextual_fact_key(node, contract) },
+        &DiscriminatedFacts::from_green_run(&report),
+        class_name,
+        dispatch,
+        bloom,
+    )?)
+}
+
 /// A refused fact is not a member verification failure.
 #[derive(Debug)]
 pub enum ContextualFactError {
@@ -495,6 +584,43 @@ mod tests {
             .expect("valid contextual fact"),
             1,
         );
+    }
+
+    #[test]
+    fn a_single_green_run_records_one_fact_per_declared_gate() {
+        // A green shared run supplies one observation. Waiting for a second
+        // suite is why production recorded nothing (#5948).
+        let mut store = SqliteStore::open(":memory:").expect("valid contextual fixture");
+        let (node, mut contract) = inputs();
+        contract.gate_identities.push("verify.clippy".to_owned());
+        assert_eq!(
+            record_green_contextual_facts(
+                &mut store,
+                &node,
+                &contract,
+                &HostClass::new("fleet"),
+                "green-run",
+                &[1; 32],
+            )
+            .expect("a green run writes"),
+            2
+        );
+        let rows = store.list_proof_facts().expect("proof facts read");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.result == "green" && row.host_class == "fleet"));
+        assert_eq!(
+            rows.iter().map(|row| row.test_id.as_str()).collect::<Vec<_>>(),
+            ["gate:verify.clippy", "gate:verify.test"]
+        );
+
+        let reuse = reuse_contextual_proof(&mut store, &node, &contract, &HostClass::new("fleet"))
+            .expect("proof lookup")
+            .expect("declared gates are green");
+        assert_eq!(
+            reuse.facts.iter().map(|fact| fact.gate.as_str()).collect::<Vec<_>>(),
+            ["verify.test", "verify.clippy"]
+        );
+        assert!(rows.iter().all(|row| row.producing_dispatch == "green-run"));
     }
 
     #[test]
@@ -930,6 +1056,63 @@ mod tests {
             observed_probe_verdict(&bytes, "step", &BatchCheck::Gate { id: "verify.test".to_owned() })
                 .expect("valid contextual fixture"),
             ProbeVerdict::Passed
+        );
+    }
+
+    #[test]
+    fn a_passing_baseline_answers_the_named_test() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "protocol": 1,
+            "documents": [{
+                "protocol": 1, "nonce": "base", "gate": "verify.test",
+                "invocations": [{
+                    "invocation": digest(11), "at": null,
+                    "outcomes": {
+                        "gate:verify.test": "passed",
+                        "test:aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack": "passed"
+                    }
+                }]
+            }]
+        }))
+        .expect("valid contextual fixture");
+        let check = BatchCheck::Test {
+            gate: "verify.test".to_owned(),
+            id: "aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack".to_owned(),
+        };
+
+        assert_eq!(
+            observed_probe_verdict(&bytes, "base", &check).expect("valid contextual fixture"),
+            ProbeVerdict::Passed
+        );
+        assert_eq!(
+            observed_failed_tests(&bytes, "base").expect("valid contextual fixture"),
+            Vec::<(String, String)>::new()
+        );
+    }
+
+    #[test]
+    fn failed_test_observations_name_the_stable_identity() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "protocol": 1,
+            "documents": [{
+                "protocol": 1, "nonce": "step", "gate": "verify.test",
+                "invocations": [{
+                    "invocation": digest(11), "at": null,
+                    "outcomes": {
+                        "gate:verify.test": "failed",
+                        "test:aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack": "failed"
+                    }
+                }]
+            }]
+        }))
+        .expect("valid contextual fixture");
+
+        assert_eq!(
+            observed_failed_tests(&bytes, "step").expect("valid contextual fixture"),
+            vec![(
+                "verify.test".to_owned(),
+                "aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack".to_owned()
+            )]
         );
     }
 

@@ -296,12 +296,18 @@ fn owed_dispatch_lifted(
     }
     let member = record.spec.members().iter().find(|member| member.workpiece == *workpiece)?;
     let (targets, construct_checkpoint_base) = reconcile_or_line_targets(
+        cursor.stage,
         member.scope_revision,
         super::splice::member_construct_base(record, workpiece),
         candidate,
         cursor.fold_checkpoint.filter(|_| cursor.stage == StageId::Reconcile),
         member_checkpoint,
     );
+    let displayed = if cursor.stage == StageId::Construct {
+        None
+    } else {
+        candidate.map(|current| current.tree)
+    };
 
     Some(move_effects_with_checkpoint(
         bloom,
@@ -309,7 +315,7 @@ fn owed_dispatch_lifted(
         member.scope_revision,
         &cursor,
         (targets, construct_checkpoint_base),
-        candidate.map(|current| current.tree),
+        displayed,
         lift.apply(SealedLine::of(record, member)),
     ))
 }

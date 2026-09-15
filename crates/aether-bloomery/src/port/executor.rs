@@ -132,6 +132,18 @@ pub struct LaneObservation {
     /// and from every lane that stamps none. Host-recorded state riding the
     /// reference, like `candidate` — never part of the artifact-name contract.
     pub findings: Option<String>,
+    /// The review critic's operator-facing notes, read by the local backend off
+    /// the evidence's top-level `notes`; `None` from the name-only Actions lane
+    /// and from every lane that stamps none.
+    ///
+    /// Its own channel rather than part of `findings`, because the two answer
+    /// different questions and only one of them decides a verdict: findings
+    /// charge the candidate, notes say what the critic read. That distinction is
+    /// what makes an empty review detectable at all — a clean pass stamps no
+    /// findings by definition, so the note naming what was reviewed is the only
+    /// evidence that a review happened, and a completion carrying neither is a
+    /// lane that never judged anything.
+    pub notes: Option<String>,
     /// The exact failed members of a `verify.check` result (ADR-0178). The
     /// local backend decodes this from the evidence body; the name-only Actions
     /// backend decodes the equivalent mask from the artifact name. Empty on a
@@ -222,9 +234,35 @@ pub struct LaneObservation {
     ///
     /// [`RetrospectFinding::normalize`]: crate::RetrospectFinding::normalize
     pub retrospect_findings: Vec<RetrospectClaim>,
+    /// Tests the gate recorded as flakes on this run — the evidence's own
+    /// `flakes` channel: failed once, passed on a same-input replay (#5999).
+    ///
+    /// Host-recorded state riding the reference like `findings` and
+    /// `suppression_requests`, and for the same reason: a flake ledger is a
+    /// list of test names and an artifact name is not a data channel. The
+    /// verdict on such a test is the replay's, so the coordinator spends no
+    /// attribution probe re-deriving it — a green run that reported one used to
+    /// buy whole-workspace base probes on a question the replay had already
+    /// settled. Empty from the name-only Actions backend and from every run
+    /// whose gate excused nothing.
+    pub replayed_flakes: Vec<String>,
     /// Raw bounded contextual gate observations read from the trusted result
     /// artifact. This is in-memory transport state and is never journaled.
     pub contextual_observations: Option<Vec<u8>>,
+    /// Umbrella wall-clock from `evidence.json` `duration_millis`, when the
+    /// backend read the file. Mechanical verify writes no study cost, so this
+    /// is the duration a shared-run step records.
+    pub duration_millis: Option<u64>,
+    /// Per-gate wall-clock receipts from `evidence.json` `gates`.
+    pub gates: Vec<EvidenceGateTiming>,
+}
+
+/// One umbrella member's wall-clock share, copied off `evidence.json`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EvidenceGateTiming {
+    pub command: String,
+    pub duration_millis: u64,
+    pub prepare_millis: Option<u64>,
 }
 
 /// A reference to one piece of evidence a run uploaded — the transport-level
@@ -393,6 +431,24 @@ pub trait ExecutorBackend {
     /// Backend-defined — a transport or backend fault, which stays retryable and
     /// leaves the order live. "No run resolves for the nonce" is not one of them.
     fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error>;
+
+    /// The tree a construct lane this backend cancelled left behind, captured
+    /// before its checkout was handed to the next dispatch (#5998).
+    ///
+    /// A lane cancelled at its sealed execution limit has usually built for the
+    /// better part of that limit, and the slot release behind the cancel resets
+    /// the checkout — so without this the work is gone. Read once per nonce,
+    /// after a cancel this backend answered `Ok`: the caller publishes it to the
+    /// member's checkpoint ref as a host effect, which is what makes an hour of
+    /// building reachable instead of reset.
+    ///
+    /// `None` is the ordinary answer: a backend that captures nothing (the
+    /// zero-secret Actions lane), a handle that named no construct run, a run
+    /// whose tree was clean, and a capture that failed all say it.
+    fn cancelled_capture(&self, handle: &WorkHandle) -> Option<CandidateRef> {
+        let _ = handle;
+        None
+    }
 
     /// Stream the references to the evidence the run uploaded, filtered to the
     /// order's nonce.

@@ -169,8 +169,12 @@ Passing, empty, or executor-fault observations cannot seed code-repair findings.
 Cancellation withdraws unstarted logical work while preserving completed
 receipts and other still-needed work. An already-running composition retains
 its immutable input until it finishes or is explicitly cancelled as a
-physical operation. Joining a required final gate preserves the original
-deadline and uses the existing outstanding-order lifecycle.
+physical operation. A later head does not itself cancel that composition
+when every fold between its composition base and the current head is
+closure-disjoint from the run's members (#5938); a closure-intersecting
+move, a generation change, or an explicit physical cancel still retires it.
+Joining a required final gate preserves the original deadline and uses the
+existing outstanding-order lifecycle.
 
 Before admission, the scheduler retains the exact proposal for every selected
 logical request in one transaction. New arrivals and a changed head cannot
@@ -387,3 +391,65 @@ the application after the full path is implemented.
   combinations and discards existing slot warmth.
 - Keep a second contextual receipt database: duplicates the journal,
   retained-result lifecycle, and ADR-0200 proof ledger.
+
+## Amendment: composition conflicts at shared-run preparation (2026-09-14, #5919)
+
+A contextual shared-run preparation that collides while folding its inputs
+is a fold conflict, not a host or contract refusal. The source reports
+`SharedRunPreparation::Conflict` naming the colliding input, the parent it
+could not place onto, and FoldConflict evidence that carries the conflicting
+paths and contribution diff. The reducer sends those members straight to
+`Reconcile` against the plan's recorded head — the same dispatch
+`Fact::IntegrationAppendConflicted` already uses — and keeps the Standalone
+fallback for `SharedRunPreparation::Refused` (host-class mismatch, invalid
+contract, unreadable delta). Spending a standalone proof on a candidate that
+cannot append is discarded work: the later append rediscovers the same
+collision and drops the claim once Reconcile authors a new tree.
+
+## Amendment: closure-disjoint head movement (2026-09-14, #5938)
+
+Contextual proof is head-exact up to closure-disjoint deltas. A running
+composition is retired on a head move only when the folds between its
+composition base and the current head intersect the `affected_closure`
+of the run's members — the same dependency blast radius member-version
+invalidation already computes. A closure-disjoint sibling fold leaves the
+run running against the node it prepared.
+
+A `PassedIn` outcome from that run is accepted against the current head when
+every intervening fold is closure-disjoint. The member's contribution then
+rebases at integration the way ADR-0207 rebases a resolved member whose
+sibling widened: the proved node is queued onto the current head, and the
+journaled `IntegrationAdvanced` folds between the two heads are the reason
+the older node still answers. A closure-intersecting move — including a
+generation change, or a version change of a pin the run already tested —
+keeps today's retirement.
+
+## Amendment: invalidation carries one way (2026-09-14, #5997)
+
+A member's invalidation — an ejection, a replacement, or a withdrawal —
+reaches the members whose own tree carries its contribution, and no further.
+A `CompositionInput` names the complete transitive coverage of its candidate,
+so a live request's input lists the folded members its context head supplied
+alongside the one member that authored the candidate. The carry runs from the
+coverage to the *author*: a candidate that merged an invalidated contribution
+is stale, while a member the invalidated candidate merely inherited is not
+made stale by the candidate that inherited it. A composed contribution — a
+survivor group's node — names no authoring pin and is atomic over its whole
+coverage, so every member in it carries it.
+
+Spreading the other way took every sibling standing on one head down with any
+member that left, which retired their shared runs, discarded the outcomes
+those runs had already earned, and re-proposed the survivors cold. What still
+protects a sibling from an ejected ancestor is per-pin rather than per-member:
+a queued or admitted input naming it is dropped, a node covering it stops
+answering an aggregate position, and a head covering it derives a fresh
+generation.
+
+A shared run is therefore retired only when the invalidated member is one of
+its own logical requests — equivalently, when the member's tree is inside the
+candidate composition it is testing, because every request in a composition
+carries its base head's coverage. A run that keeps running settles normally
+and its completion admits outcomes for the members that stay. A run that is
+retired keeps its siblings' logical requests, so the re-proposal reuses the
+exact request identities its recorded per-step rows are addressed by rather
+than re-deriving them from a cold dispatch.

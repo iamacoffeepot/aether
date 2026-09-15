@@ -94,6 +94,13 @@ pub enum WriteScopeRevisionResult {
         /// add: proposing the widening is what drives surface inflation.
         paths: Vec<String>,
     },
+    /// A section the construct prompt is rendered from is empty. Appended past
+    /// [`Self::SurfaceGap`] so the earlier variants keep their wire
+    /// discriminants.
+    EmptySection {
+        /// The empty field: `problem`, `design`, or `plan`.
+        section: String,
+    },
 }
 
 /// Persist an approval whose signature the caller has already verified.
@@ -351,6 +358,12 @@ pub enum ReopenCommissionResult {
 
 /// Open a pre-bloom scoping run (ADR-0208, #5304): write its `enqueued` row
 /// and its `Topic::ScopeDispatch` outbox row in one transaction.
+///
+/// The seat rides trailing-optional (issue 5945): a run without one dispatches
+/// the compiled Scope seat, exactly as before this field existed. The request
+/// may also name the profiles-file name the seat was resolved from, but that
+/// name is a filing-time label — the door pairs it with its digest or refuses
+/// it, and only the digest travels here.
 #[aether_data::kind(name = "aether.store.enqueue_scope_run")]
 pub struct EnqueueScopeRun {
     /// The workpiece this commission is.
@@ -358,6 +371,10 @@ pub struct EnqueueScopeRun {
     /// The observed mainline the run reads code at — `Snapshot.mainline`.
     #[serde(with = "aether_data::bytes")]
     pub base: Vec<u8>,
+    /// The `ModelOverride` config digest the run resolves its Scope seat
+    /// from. `None` dispatches the compiled seat.
+    #[serde(default)]
+    pub model_override: Option<Vec<u8>>,
 }
 
 /// Reply to [`EnqueueScopeRun`].
@@ -397,6 +414,13 @@ pub enum EnqueueScopeRunResult {
     /// The write failed.
     Err {
         /// A human-readable failure reason.
+        error: String,
+    },
+    /// The carried `model_override` digest names no stored `ModelOverride`
+    /// the run could resolve its seat from (issue 5945). Appended past
+    /// [`Self::Err`] so the earlier variants keep their wire discriminants.
+    UnknownModelOverride {
+        /// A human-readable refusal reason.
         error: String,
     },
 }

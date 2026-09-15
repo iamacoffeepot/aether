@@ -19,10 +19,10 @@ use aether_bloomery::{
     Admit, AgentSelection, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, BloomId, CandidateRef,
     Conclusion, ConfigKind, ConfigRegistry, Digest, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend,
     Fact, Harness, LaneObservation, ModelOverride, ModelProcessInstructions, NamedPath, Nonce, Observation, PathOrigin,
-    Provenance, ReasoningEffort, RedispatchPayload, ReviewPass, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA,
-    ScopeRevision, ScopeRouting, ScopeVerifyInput, SharedCorrespondence, SourceSnapshot, StageCatalog, StageId,
-    StageOverride, Statement, TimeoutRecord, Topic, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle,
-    WorkOrder, WorkpieceId, pin_workpiece_description, split_lane_identity,
+    Provenance, RETROSPECT_READ_COMMAND, ReasoningEffort, RedispatchPayload, ReviewPass, SCOPE_REVISION_SCHEMA,
+    SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting, ScopeVerifyInput, SharedCorrespondence, SourceSnapshot,
+    StageCatalog, StageId, StageOverride, Statement, StudyPayload, TimeoutRecord, Topic, Transformation, VerifyFailure,
+    VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description, split_lane_identity,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
@@ -35,7 +35,7 @@ use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::registry::Registry;
 
 use super::scope_freeze::ScopeFreeze;
-use super::strand::readopt_stranded_dispatches;
+use super::strand::{readopt_stranded_dispatches, retire_accounted_orders};
 use super::{
     BACKOFF_CAP, BaseSnapshotPort, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState,
     GitCandidatePush, NameEvidenceClaims, Stores, TickClock, TrackedHandle, admitted_candidate_pushes, backoff_delay,
@@ -56,7 +56,7 @@ use crate::bloomery::{
     UnconfiguredActionsBackend,
 };
 use crate::bloomery::{ScopeRunState, open_scope_run, scope_run_state};
-use crate::bloomery::{authorize_instructions, reference_instructions};
+use crate::bloomery::{authorize_instructions, drain_refusals, reference_instructions};
 use crate::session::SessionConfig;
 use crate::store::{
     CANDIDATE_HASH_OCCASION_SEAL, CommissionBackend, JournalWrite, OrderLifecycle, OutstandingOrder, SqliteStore,
@@ -112,6 +112,30 @@ fn drain_and_dispatch_scope(
     now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
     super::drain_and_dispatch_scope(store, None, executor, now_unix_millis)
+}
+
+fn drain_and_dispatch_study(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    reader_enabled: bool,
+    now_unix_millis: u64,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    super::drain_and_dispatch_study(store, None, executor, reader_enabled, now_unix_millis)
+}
+
+fn enqueue_study(store: &mut SqliteStore, bloom: BloomId, subject: Digest) -> u64 {
+    let payload = StudyPayload {
+        bloom: bloom.0,
+        transformation: Transformation::for_study_read(
+            &StageCatalog::binding_of(StageId::Study),
+            subject,
+            digest(0xC0),
+            digest(0xB0),
+        ),
+        profile: StageCatalog::profile_of(StageId::Study),
+        configs: authorized_over(store, ConfigRegistry::default()),
+    };
+    store.enqueue_topic(Topic::Study, &to_vec(&payload).unwrap(), None).unwrap()
 }
 
 fn drain_and_redispatch(
@@ -2081,6 +2105,62 @@ fn drain_and_dispatch_parks_a_permanent_refusal_instead_of_re_driving() {
 }
 
 #[test]
+fn drain_and_dispatch_study_submits_the_reader_on_the_landed_range() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    let subject = digest(0x51);
+    let sequence = enqueue_study(&mut store, bloom, subject);
+
+    let (handles, ack_through, transient) =
+        drain_and_dispatch_study(&mut store, &shell, true, NOW_UNIX_MILLIS).unwrap();
+
+    assert_eq!(handles.len(), 1, "the reader dispatched");
+    assert_eq!(ack_through, Some(sequence));
+    assert_eq!(transient, None);
+    let order = &backend.orders()[0];
+    assert_eq!(order.transformation.command, RETROSPECT_READ_COMMAND);
+    assert_eq!(order.transformation.inputs, [subject], "the order pins the landing receipt");
+    assert_eq!(order.transformation.checkout, digest(0xC0), "the reader checks out the landed head");
+    assert_eq!(order.transformation.diff_base, Some(digest(0xB0)), "and reads it against the bloom's sealed base");
+}
+
+#[test]
+fn drain_and_dispatch_study_journals_a_permanent_refusal_instead_of_parking_it() {
+    // Production: the Actions workflow was disabled, submit returned 422, and
+    // the drain acked the row with no StudyCompleted — the read vanished off
+    // the record. ADR-0216 wants a missing study with a reason.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let shell = failing_shell(422);
+    let bloom = BloomId(digest(1));
+    let subject = digest(0x51);
+    let sequence = enqueue_study(&mut store, bloom, subject);
+
+    let (handles, ack_through, transient) =
+        drain_and_dispatch_study(&mut store, &shell, true, NOW_UNIX_MILLIS).unwrap();
+
+    assert!(handles.is_empty(), "the refused entry never dispatched");
+    assert_eq!(ack_through, Some(sequence), "the entry is acked past rather than re-driven");
+    assert_eq!(transient, None);
+
+    store.ack_topic(Topic::Study, ack_through.unwrap()).unwrap();
+    assert!(store.drain_topic(Topic::Study).unwrap().is_empty(), "the acked entry does not re-drain");
+
+    let admits = drain_refusals(&mut store).expect("the journaled refusal drains");
+    assert_eq!(admits.len(), 1, "one refusal, one admission");
+    let event: aether_bloomery::Event = from_bytes(&admits[0].event).unwrap();
+    match event.fact {
+        Fact::StudyCompleted { bloom: read, passed, evidence } => {
+            assert_eq!(read, bloom);
+            assert!(!passed, "a refused read is a study that did not pass");
+            assert_eq!(evidence.subject, subject, "the fault binds the receipt the order pinned");
+        }
+        other => panic!("a refused study submit is StudyCompleted {{ passed: false }}, got {other:?}"),
+    }
+}
+
+#[test]
 fn drain_and_dispatch_leaves_a_transient_refusal_undrained_to_retry() {
     let mut store = SqliteStore::open(":memory:").unwrap();
     let shell = failing_shell(500);
@@ -2359,6 +2439,80 @@ fn a_failing_refine_capture_is_not_pushed_as_a_member_checkpoint() {
     assert!(
         hashes.list_candidate_hashes(bloom.0.as_bytes()).unwrap().is_empty(),
         "a refine failure journals no candidate hash",
+    );
+}
+
+#[test]
+fn a_refused_construct_capture_pushes_to_the_member_checkpoint_ref() {
+    // A refused claim is a bookkeeping fault; the tree the model built is the
+    // most valuable thing on the host (#5968). The refusal path that never
+    // admits still names the member checkpoint push through the failing
+    // construct arm, before any reset discards the checkout.
+    use crate::bloomery::intake::RefusedCheckpoint;
+
+    let bloom = BloomId(digest(1));
+    let capture = CandidateRef { tree: digest(0xAB), checkout: digest(0xAC) };
+    let store = FakeGithub::new();
+    store.seed_git_object(&capture.checkout);
+    let commit_hex = to_hex(&capture.checkout);
+    let correspondence: SharedCorrespondence = Arc::new(store);
+
+    let refused = [RefusedCheckpoint { bloom, workpiece: WorkpieceId("wp/cand".to_owned()), candidate: capture }];
+    let pending = super::refused_checkpoint_pushes(&refused, Some(&correspondence));
+    assert_eq!(pending.len(), 1, "a refused Construct capture names one checkpoint push");
+    assert_eq!(pending[0].commit_hex, commit_hex, "the push names the capture commit via correspondence");
+    assert_eq!(
+        pending[0].target_ref,
+        member_checkpoint_ref_name(&bloom, "wp/cand"),
+        "the target is the member checkpoint sibling, never the candidate ref",
+    );
+    assert_eq!(pending[0].kind, "member checkpoint");
+}
+
+// #5992 — an ADR-0189 Reconcile lap exists to produce a candidate the next fold
+// merges, and the fold merges the candidate *ref*. The stage fell to the push
+// arm's `_ => continue`, so the lap's commit stayed local-only: the fold
+// re-merged the pre-Reconcile one, collided identically, and wedged the member
+// at Reconcile with its budget spent while the cursor read healthy. Catches the
+// arm dropping Reconcile again.
+#[test]
+fn a_passing_reconcile_capture_pushes_to_the_candidate_ref() {
+    use aether_bloomery::{CandidateRef, Event, IdempotencyKey};
+
+    let bloom = BloomId(digest(1));
+    let capture = CandidateRef { tree: digest(0xAB), checkout: digest(0xAC) };
+    let store = FakeGithub::new();
+    store.seed_git_object(&capture.checkout);
+    let fact = Fact::AttemptCompleted {
+        bloom,
+        workpiece: WorkpieceId("wp-collider".to_owned()),
+        stage: StageId::Reconcile,
+        passed: true,
+        evidence: aether_bloomery::Evidence {
+            subject: digest(9),
+            kind: aether_bloomery::EvidenceKind::VerificationResult,
+            detail: digest(8),
+        },
+        candidate: Some(capture),
+    };
+    let event = Event { idempotency_key: IdempotencyKey("k".to_owned()), fact };
+    let pusher = RecordingPush::default();
+    let correspondence: SharedCorrespondence = Arc::new(store);
+    let mut hashes = SqliteStore::open(":memory:").unwrap();
+    push_admitted_candidates(
+        &mut hashes,
+        &[Admission { admit: Admit { event: to_vec(&event).unwrap() }, event }],
+        Some(&correspondence),
+        &pusher,
+    );
+
+    let issued = pusher.pushed.lock().unwrap().clone();
+    assert_eq!(issued.len(), 1, "a passing reconcile capture publishes its candidate ref");
+    assert_eq!(issued[0].0, to_hex(&capture.checkout), "the pushed sha is the reconciled capture commit");
+    assert_eq!(
+        issued[0].1,
+        candidate_ref_name(&bloom, "wp-collider"),
+        "the target is the candidate ref the next fold merges, not the member-checkpoint sibling",
     );
 }
 
@@ -3588,6 +3742,54 @@ fn a_dispatch_whose_admission_reached_the_journal_is_left_alone() {
         readopt_stranded_dispatches(&mut store).unwrap().is_empty(),
         "an accounted-for dispatch is complete, not stranded",
     );
+}
+
+// Issue 5980 — a completion that reached the journal without spending its
+// order, or a second completion reduced to a duplicate, leaves a submitted row
+// with no tracked run that relaunches until the bloom lands. Retiring
+// accounted-for orders puts those nonces out of relaunch reach.
+//
+// Catches the relaunch leaving the row behind: the stranding leg above
+// correctly reports an accounted-for dispatch as complete, not stranded — but
+// without this retire the submitted row stays for the next drain to launch
+// again, and the duplicate completion retires nothing.
+#[test]
+fn an_order_the_journal_already_accounts_for_is_retired_not_relaunched() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    let (sequence, _subject) = enqueue_dispatch_at(&mut store, bloom, "wp-reconcile", 5, StageId::Reconcile);
+    let (_handles, ack_through, _transient) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
+
+    let nonce = dispatch_nonce(sequence);
+    // The admission reached the journal without spending the order: the orphan
+    // shape — a path that advanced the member without running the intake
+    // consume, or a duplicate-reduced second completion.
+    store
+        .append_event(&JournalWrite {
+            idempotency_key: &AdmissionKey::Attempt.of(&nonce.0).0,
+            event: &[1],
+            decisions: &[2],
+            decider: "test-build",
+        })
+        .unwrap();
+    // A second, genuinely in-flight order must be left alone.
+    let (sequence_live, _subject) = enqueue_dispatch_at(&mut store, bloom, "wp-verify", 6, StageId::Verify);
+    let (_handles, ack_through, _transient) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    if let Some(through) = ack_through {
+        store.ack_topic(Topic::Dispatch, through).unwrap();
+    }
+    let live_nonce = dispatch_nonce(sequence_live);
+
+    assert_eq!(retire_accounted_orders(&mut store).unwrap(), vec![nonce.clone()], "the accounted-for order is retired");
+    assert!(store.lookup_order(&nonce.0).unwrap().is_none(), "no submitted row remains for relaunch");
+    assert!(
+        store.lookup_order(&live_nonce.0).unwrap().is_some(),
+        "an order the journal does not account for is left in flight",
+    );
+    assert!(readopt_stranded_dispatches(&mut store).unwrap().is_empty(), "the retired orphan is not stranded either");
 }
 
 // A dispatch the drain acked *without* ever submitting it — a retired plan, a
@@ -4825,4 +5027,160 @@ mod offloaded_adapter_calls {
         assert_eq!(ack_through, Some(parked_sequence), "the already-submitted row acks the re-drained entry");
         assert_eq!(backend.orders().len(), 1, "the nonce is submitted once");
     }
+}
+
+#[test]
+fn a_construct_with_a_held_candidate_displays_the_scope_revision() {
+    // Tripwire (#5968): the order issued from a Reconcile completion on a
+    // Construct-stage member carries the scope as inputs[0] while the payload
+    // still names the held candidate. The displayed digest must be the scope —
+    // the checkout the lane starts from, never the subject — so the lane's
+    // evidence binds inputs[0] and intake admits it.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    let scope = digest(10);
+    let held = CandidateRef { tree: digest(41), checkout: digest(42) };
+
+    let payload = DispatchPayload {
+        configs: authorized_over(&mut store, ConfigRegistry::default()),
+        profile: StageCatalog::line().profile_for(StageId::Construct).cloned().expect("the line binds Construct"),
+        bloom: bloom.0,
+        workpiece: WorkpieceId("wp-held".to_owned()),
+        stage: StageId::Construct,
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(StageId::Construct),
+            scope,
+            held.checkout,
+            digest(0xB0),
+        ),
+        scope_revision: scope,
+        candidate: Some(held.tree),
+    };
+    store.claim_seal(bloom.0.as_bytes(), &["wp-held".to_owned()]).unwrap();
+    let sequence = store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap(), None).unwrap();
+
+    let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    assert_eq!(handles.len(), 1, "a well-formed held-candidate Construct still dispatches");
+    assert_eq!(ack_through, Some(sequence));
+
+    let stored = store.lookup_order(&handles[0].nonce.0).unwrap().expect("the order was recorded");
+    assert_eq!(stored.displayed_digest, scope.as_bytes().to_vec(), "Construct always displays the scope revision");
+    assert_eq!(stored.candidate, scope.as_bytes().to_vec(), "the candidate column agrees with the display");
+    let record = DispatchRecord::from_stored(&stored).expect("the row decodes");
+    assert_eq!(
+        record.transformation.inputs.first(),
+        Some(&scope),
+        "the subject agrees with the displayed digest by construction",
+    );
+    assert_eq!(record.transformation.checkout, held.checkout, "the lane still starts from the held tree");
+}
+
+#[test]
+fn a_malformed_construct_whose_subject_differs_from_displayed_is_refused_before_dispatch() {
+    // A malformed order — inputs[0] naming the held tree while the display
+    // names the scope (or vice versa) — never reaches a worker: the drain
+    // refuses it at issue time and journals the refusal on the member, so no
+    // lane pays for a candidate intake must discard (#5968).
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    let scope = digest(10);
+    let held_tree = digest(41);
+
+    let payload = DispatchPayload {
+        configs: authorized_over(&mut store, ConfigRegistry::default()),
+        profile: StageCatalog::line().profile_for(StageId::Construct).cloned().expect("the line binds Construct"),
+        bloom: bloom.0,
+        workpiece: WorkpieceId("wp-malformed".to_owned()),
+        stage: StageId::Construct,
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(StageId::Construct),
+            held_tree,
+            digest(0xC0),
+            digest(0xB0),
+        ),
+        scope_revision: scope,
+        candidate: None,
+    };
+    store.claim_seal(bloom.0.as_bytes(), &["wp-malformed".to_owned()]).unwrap();
+    let sequence = store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap(), None).unwrap();
+
+    let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    assert!(handles.is_empty(), "a malformed order never reaches a worker");
+    assert_eq!(ack_through, Some(sequence), "the refused entry is acked past rather than re-driven");
+    assert!(backend.orders().is_empty(), "no work order was submitted");
+    assert!(store.list_outstanding_nonces().unwrap().is_empty(), "no order row survives a refusal at issue time");
+
+    store.ack_topic(Topic::Dispatch, sequence).unwrap();
+    let admits = drain_refusals(&mut store).expect("the journaled refusal drains");
+    assert_eq!(admits.len(), 1, "one refusal, one admission");
+    let event: aether_bloomery::Event = from_bytes(&admits[0].event).unwrap();
+    match event.fact {
+        Fact::MemberExecutorFault { workpiece, stage, .. } => {
+            assert_eq!(workpiece.0, "wp-malformed");
+            assert_eq!(stage, StageId::Construct);
+        }
+        other => panic!("a malformed dispatch journals a member fault, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_second_dispatch_for_a_member_with_a_live_order_queues_behind_it() {
+    // A Reconcile raised while its member's Construct is still live never runs
+    // beside it in the same checkout (#5968). The second entry holds unacked
+    // until the first admits.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+
+    let (first_sequence, _) = enqueue_construct_dispatch(&mut store, bloom, "wp-single", 10);
+    let second_payload = DispatchPayload {
+        configs: authorized_over(&mut store, ConfigRegistry::default()),
+        profile: StageCatalog::line().profile_for(StageId::Reconcile).cloned().expect("the line binds Reconcile"),
+        bloom: bloom.0,
+        workpiece: WorkpieceId("wp-single".to_owned()),
+        stage: StageId::Reconcile,
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(StageId::Reconcile),
+            digest(10),
+            digest(0xC0),
+            digest(0xB0),
+        ),
+        scope_revision: digest(10),
+        candidate: None,
+    };
+    let second_sequence = store.enqueue_topic(Topic::Dispatch, &to_vec(&second_payload).unwrap(), None).unwrap();
+    assert!(second_sequence > first_sequence);
+
+    let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    assert_eq!(handles.len(), 1, "only the first order dispatches while the member is busy");
+    assert_eq!(ack_through, Some(first_sequence), "the held second entry blocks the ack prefix");
+    assert_eq!(backend.orders().len(), 1);
+
+    let live = store.list_bloom_dispatch_live(bloom.0.as_bytes()).unwrap();
+    assert_eq!(live.len(), 1, "exactly one outstanding order names the member");
+    assert_eq!(live[0].workpiece, "wp-single");
+}
+
+#[test]
+fn a_same_stage_retry_dispatches_beside_the_order_it_overtakes() {
+    // The operator retry overtakes a dispatch that will never answer: the
+    // reducer mints the same stage again beside the order it overtook, which
+    // is left to the deadline sweep. The member hold is Reconcile-only, so it
+    // must not stall the retry (#5968).
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+
+    enqueue_dispatch_at(&mut store, bloom, "wp-retry", 10, StageId::Verify);
+    enqueue_dispatch_at(&mut store, bloom, "wp-retry", 10, StageId::Verify);
+
+    let (handles, _, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    assert_eq!(handles.len(), 2, "the retry dispatches beside the overtaken order");
+    assert_eq!(backend.orders().len(), 2);
 }

@@ -1210,6 +1210,7 @@ mod preview_tests {
                 max_attribution_probes: 2,
                 movement_budget: 1,
                 reservation_millis: 1_000,
+                coalesce_millis: None,
                 host_class: String::from("test"),
             },
             CompositionContractTemplate {

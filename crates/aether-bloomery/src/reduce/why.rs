@@ -51,6 +51,7 @@ use super::readiness::blocking_ancestor;
 use super::{BloomRecord, BloomStatus, Snapshot};
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::{MemberWhy, TransitionWhy, WhyDocument, WhyState};
+use crate::values::Wedge;
 
 /// The transition names, spelled once. They are the machinery's own words for
 /// these boundaries — the same five ADR-0206 names as its operator-visible set
@@ -115,6 +116,38 @@ fn member_answers(snapshot: &Snapshot, record: &BloomRecord, bloom: BloomId) -> 
         .collect()
 }
 
+/// What a wedge says about itself, reading only what the wedge and the cursor
+/// beside it already hold.
+///
+/// Every wedge spends a budget, so "its retry budget is spent" is true of all
+/// of them and distinguishes none of them. The ADR-0189 §5 re-collision is the
+/// one worth separating (#5992): the member took a Reconcile lap against a
+/// folded head, the fold came back standing on that same head with the same
+/// collision overlay, and the wedge attached it. An operator reading a bare
+/// digest cannot tell that from a lane that merely failed its own gate twice,
+/// and the two want opposite next moves — the first says the fold offered the
+/// same work again, the second says the work is wrong.
+///
+/// Both halves are stored fields: the cursor's `fold_checkpoint` is the head
+/// the member was sent to reconcile onto, and its `fold_conflict_evidence` is
+/// the overlay it was handed. The wedge carrying that same overlay is the
+/// reducer's record that the second collision was the first one over again.
+fn wedge_because(record: &BloomRecord, workpiece: &WorkpieceId, wedge: &Wedge) -> String {
+    let repeated = record.progress.get(workpiece).and_then(|cursor| {
+        let head = cursor.fold_checkpoint?;
+        (cursor.stage == StageId::Reconcile && cursor.fold_conflict_evidence == Some(wedge.evidence)).then_some(head)
+    });
+    repeated.map_or_else(
+        || format!("wedged at {:?}; its retry budget is spent", wedge.stage),
+        |head| {
+            format!(
+                "wedged at Reconcile; the second fold collision on head {} was identical to the first, so the reconcile budget is spent",
+                head.to_hex(),
+            )
+        },
+    )
+}
+
 fn member_state(
     snapshot: &Snapshot,
     record: &BloomRecord,
@@ -128,7 +161,7 @@ fn member_state(
         return (WhyState::Blocked, format!("withdrawn from the line by {}", withdrawal.operator));
     }
     if let Some(wedge) = record.wedged.get(workpiece) {
-        return (WhyState::Blocked, format!("wedged at {:?}; its retry budget is spent", wedge.stage));
+        return (WhyState::Blocked, wedge_because(record, workpiece, wedge));
     }
     if record.host_faults.contains_key(workpiece) {
         return (WhyState::Blocked, "held at Verify because the host could not run the gates".to_owned());
@@ -146,7 +179,10 @@ fn member_state(
         );
     }
     if record.deferred_dispatches.contains(workpiece) {
-        return (WhyState::Blocked, "its dispatch is deferred by the operator brake".to_owned());
+        if record.operator_hold.is_some() {
+            return (WhyState::Blocked, "its dispatch is deferred by the operator brake".to_owned());
+        }
+        return (WhyState::Blocked, deferred_reason(record));
     }
     if let Some(ancestor) = blocking_ancestor(record, workpiece) {
         return (WhyState::Blocked, format!("waiting on the declared dependency {}", ancestor.0));
@@ -271,6 +307,22 @@ fn land_rung(record: &BloomRecord, verify: &TransitionWhy, review: &TransitionWh
     rung(LAND, WhyState::Blocked, "both aggregate gates passed but the bloom is not resolved".to_owned(), None)
 }
 
+/// Why a deferred dispatch without an operator hold is still waiting.
+///
+/// The hold is only one way into [`BloomRecord::deferred_dispatches`]: an
+/// unproven base withholds entry the same way, and a sibling fold or head move
+/// can leave an entry standing after the brake lifts. Reading every entry as
+/// the brake sends an operator to `release` with nothing to release, so the
+/// brake sentence stays gated on [`BloomRecord::operator_hold`] and the rest
+/// name what actually withholds the dispatch, in the lease-eviction shape.
+fn deferred_reason(record: &BloomRecord) -> String {
+    if record.base_proven {
+        "its dispatch is deferred for a sibling fold or head move; it re-dispatches when that completes".to_owned()
+    } else {
+        "its dispatch is withheld until the base is green; it re-dispatches when the base verify passes".to_owned()
+    }
+}
+
 /// The operator brake, worded once. It stops dispatch at every rung, so the
 /// sentence has to read the same wherever it surfaces.
 fn operator_hold(record: &BloomRecord) -> Option<String> {
@@ -317,8 +369,8 @@ mod tests {
     use crate::port::{TransitionWhy, WhyState};
     use crate::reduce::gate::{RecordedRead, RecordedRefusal};
     use crate::reduce::{Event, Fact, Snapshot, reduce};
-    use crate::testing::{compiled_resolved, draft, membership};
-    use crate::values::{MemberDependency, SpendWindow};
+    use crate::testing::{compiled_resolved, draft, event, membership, step};
+    use crate::values::{Evidence, EvidenceKind, MemberDependency, SpendWindow};
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
@@ -414,5 +466,104 @@ mod tests {
         let (snapshot, _) = sealed(&[]);
 
         assert!(why_of(&snapshot, &BloomId(digest(0xAB))).is_none());
+    }
+
+    #[test]
+    fn a_deferred_member_without_a_hold_names_the_base_wait_never_the_brake() {
+        // Issue 5967: every deferred entry read as the operator brake, so a
+        // bloom sealed onto an unproven base told the operator to reach for
+        // `release` with nothing to release.
+        let spec = draft(0, vec![membership("wp-a", 1), membership("wp-b", 2)]).seal();
+        let bloom = spec.id();
+        let snapshot = Snapshot::new(digest(0));
+        let seal = Event {
+            idempotency_key: IdempotencyKey("seal".into()),
+            fact: Fact::GraphSeal { predecessor: None, spec, edges: vec![] },
+        };
+        let decided = reduce(&snapshot, &seal, &compiled_resolved(), &SpendWindow::default());
+        let snapshot = snapshot.apply(&seal, &decided, &compiled_resolved());
+        let record = snapshot.blooms.get(&bloom).expect("the bloom sealed");
+        assert!(record.operator_hold.is_none());
+        assert!(!record.base_proven);
+        assert!(!record.deferred_dispatches.is_empty(), "an unproven entry defers");
+
+        let document = why_of(&snapshot, &bloom).expect("the bloom is known");
+        let waiting = document.members.iter().find(|member| member.workpiece.0 == "wp-a").expect("the deferred member");
+
+        assert!(!waiting.because.contains("brake"), "{}", waiting.because);
+        assert!(waiting.because.contains("base"), "{}", waiting.because);
+        assert!(waiting.because.contains("re-dispatches"), "{}", waiting.because);
+    }
+
+    #[test]
+    fn a_deferred_member_after_the_brake_lifts_names_the_deferral_never_the_brake() {
+        // The reported bloom: `operator_hold` is `None` on a live run, yet the
+        // stale deferred entry still read as the brake. A sibling fold or head
+        // move can leave the entry standing after the brake lifts, so the
+        // report must name that wait instead.
+        let (mut snapshot, bloom) = sealed(&[]);
+        snapshot
+            .blooms
+            .get_mut(&bloom)
+            .expect("the bloom sealed")
+            .deferred_dispatches
+            .insert(WorkpieceId("wp-a".into()));
+
+        let document = why_of(&snapshot, &bloom).expect("the bloom is known");
+        let waiting = document.members.iter().find(|member| member.workpiece.0 == "wp-a").expect("the deferred member");
+
+        assert_eq!(waiting.state, WhyState::Blocked);
+        assert!(!waiting.because.contains("brake"), "{}", waiting.because);
+        assert!(waiting.because.contains("re-dispatches"), "{}", waiting.because);
+        assert!(
+            waiting.because.contains("sibling fold") || waiting.because.contains("head move"),
+            "{}",
+            waiting.because
+        );
+        assert!(
+            !rung(&document.chain, super::DISPATCH_MEMBER).because.contains("brake"),
+            "the chain inherits the member sentence: {}",
+            rung(&document.chain, super::DISPATCH_MEMBER).because
+        );
+    }
+
+    #[test]
+    fn a_second_identical_fold_collision_says_so_rather_than_naming_a_spent_budget() {
+        // #5992 on the reading side: three members wedged at Reconcile after the
+        // fold re-offered work from hours earlier, and every one of them read
+        // "wedged at Reconcile; its retry budget is spent" — the sentence a
+        // member that failed its own gate twice gets. The two want opposite
+        // next moves, and the fields that tell them apart were already stored.
+        let (snapshot, bloom) = sealed(&[]);
+        let collision = |key: &str| {
+            event(
+                key,
+                Fact::FoldConflict {
+                    bloom,
+                    workpiece: WorkpieceId("wp-a".into()),
+                    checkpoint: digest(30),
+                    head: digest(31),
+                    evidence: Evidence { subject: digest(30), kind: EvidenceKind::FoldConflict, detail: digest(90) },
+                },
+            )
+        };
+
+        let (snapshot, _) = step(&snapshot, &collision("first-collision"));
+        assert!(
+            !snapshot.blooms[&bloom].wedged.contains_key(&WorkpieceId("wp-a".into())),
+            "the first collision buys a reconcile lap rather than wedging",
+        );
+        let (snapshot, _) = step(&snapshot, &collision("second-collision"));
+
+        let document = why_of(&snapshot, &bloom).expect("the bloom is known");
+        let member = document
+            .members
+            .iter()
+            .find(|member| member.workpiece.0 == "wp-a")
+            .expect("every sealed member is answered");
+
+        assert_eq!(member.state, WhyState::Blocked);
+        assert!(member.because.contains("identical to the first"), "{}", member.because);
+        assert!(member.because.contains(&digest(31).to_hex()), "the head it collided on twice: {}", member.because);
     }
 }

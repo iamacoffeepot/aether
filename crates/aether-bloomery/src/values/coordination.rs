@@ -71,10 +71,17 @@ pub enum VerificationMode {
     Contextual,
 }
 
+/// Default coalescing hold when [`CoordinationPolicy::coalesce_millis`] is
+/// absent: two minutes, long enough for sibling constructs that finish a
+/// minute apart to share one run, short enough that a stuck sibling does not
+/// park a ready request until its deadline.
+pub const DEFAULT_COALESCE_MILLIS: u64 = 120_000;
+
 /// Optional sealed policy for eager integration and shared verification.
 ///
-/// Absence preserves the legacy reducer. The initial policy never waits for an
-/// arrival: bounds limit work already ready when the scheduler is asked.
+/// Absence preserves the legacy reducer. A queued contextual request whose
+/// bloom still has sibling constructs in flight waits up to
+/// [`Self::coalesce_hold_millis`] before the scheduler proposes a shared run.
 #[aether_data::kind(name = "aether.bloomery.coordination_policy", default, eq)]
 pub struct CoordinationPolicy {
     /// Member verification strategy.
@@ -94,6 +101,10 @@ pub struct CoordinationPolicy {
     pub reservation_millis: u64,
     /// Explicit execution class every contextual proof must run on.
     pub host_class: String,
+    /// How long a ready contextual request waits for sibling constructs still
+    /// in flight. `None` is [`DEFAULT_COALESCE_MILLIS`]. `Some(0)` proposes
+    /// as soon as a request is ready — the behaviour before this field existed.
+    pub coalesce_millis: Option<u64>,
 }
 
 impl CoordinationPolicy {
@@ -108,6 +119,14 @@ impl CoordinationPolicy {
             && !self.host_class.is_empty()
             && self.host_class.len() <= 128
             && self.host_class.bytes().all(|byte| byte.is_ascii_graphic())
+    }
+
+    /// The coalescing hold the scheduler applies, in milliseconds.
+    ///
+    /// Absent is [`DEFAULT_COALESCE_MILLIS`]. Zero disables the hold.
+    #[must_use]
+    pub fn coalesce_hold_millis(&self) -> u64 {
+        self.coalesce_millis.unwrap_or(DEFAULT_COALESCE_MILLIS)
     }
 }
 
@@ -696,6 +715,14 @@ pub enum SharedRunPreparation {
     Refused {
         detail: Digest,
     },
+    /// Folding the plan's inputs collided. The named input could not place
+    /// onto `at`; that is a composition conflict, not a host or contract
+    /// refusal, and the colliding members go to Reconcile.
+    Conflict {
+        input: CompositionInput,
+        at: CandidateRef,
+        evidence: Evidence,
+    },
 }
 
 /// Exact executor input of one reducer-approved physical run.
@@ -1107,6 +1134,52 @@ impl CoordinationState {
                 && run.unfinished.is_empty()
                 && node.candidate == head.candidate
                 && node.coverage == head.coverage
+                && composition.contract == self.composition_contract.bind(members)
+                && run.plan.requests.iter().all(|request| self.composition_contract.covers(request))
+                && run.completed.len() == run.plan.requests.len()
+                && run.plan.requests.iter().zip(&run.completed).all(|(request, outcome)| {
+                    matches!(outcome, MemberVerifyOutcome::PassedIn { request: proven_request, node: proven, receipt }
+                        if *proven_request == request.digest()
+                            && *proven == node.digest()
+                            && receipt.kind == crate::EvidenceKind::VerificationResult
+                            && receipt.validates(&node.candidate.tree))
+                });
+            valid.then(|| match &run.completed[0] {
+                MemberVerifyOutcome::PassedIn { receipt, .. } => receipt,
+                _ => unreachable!("validated contextual completion"),
+            })
+        })
+    }
+
+    /// The retained receipt when a settled contextual run proved `tree` under
+    /// the complete currently sealed composition contract.
+    ///
+    /// The tree-keyed sibling of [`Self::contextual_aggregate_proof`]: the
+    /// head-keyed form answers whether the current selected root may reuse its
+    /// run, this form answers whether a resolving fold may mint the legacy
+    /// aggregate-verify memo entry the landing's base receipt reads. Same
+    /// validation — a terminal green contextual run with a full contract
+    /// binding, every request passed in with a `VerificationResult` bound to
+    /// the tree — without the head equality that ties the reuse seam to the
+    /// current root.
+    #[must_use]
+    pub fn contextual_proof_for_tree(&self, tree: Digest) -> Option<&Evidence> {
+        self.runs.iter().find_map(|run| {
+            let (Some(node), Some(composition)) = (run.node.as_ref(), run.plan.composition.as_ref()) else {
+                return None;
+            };
+            let members = run
+                .plan
+                .requests
+                .iter()
+                .map(|request| MemberContractPin { request: request.digest(), contract: request.contract.digest() })
+                .collect();
+            let valid = run.plan.mode == SharedRunMode::Contextual
+                && !run.plan.requests.is_empty()
+                && run.is_terminal()
+                && !run.stale
+                && run.unfinished.is_empty()
+                && node.candidate.tree == tree
                 && composition.contract == self.composition_contract.bind(members)
                 && run.plan.requests.iter().all(|request| self.composition_contract.covers(request))
                 && run.completed.len() == run.plan.requests.len()

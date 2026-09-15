@@ -42,11 +42,10 @@ use wasm_expand::expand_wasm_actor;
 //       miss (issue #142).
 //
 //   (b) A wrapper around the user's `init`. It no longer prepends
-//       `ctx.subscribe_input::<K>()` calls — there is no
-//       `Kind::IS_INPUT`, and issue #403 moved input subscription to the
-//       substrate, which derives it from the (c) manifest below once the
-//       mailbox is registered. See `wasm_expand.rs`'s note at
-//       `wrapped_init`.
+//       subscribe calls — there is no `Kind::IS_INPUT`. Components
+//       subscribe from `wire` on the publishing cap
+//       (`WindowCapability::subscribe` / `LifecycleCapability::subscribe`).
+//       See `wasm_expand.rs`'s note at `wrapped_init`.
 //
 //   (c) Two associated consts on `C`'s inherent impl —
 //       `__AETHER_INPUTS_MANIFEST_LEN: usize` and

@@ -24,7 +24,7 @@ use aether_bloomery::{
     OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseError, Outcome, Provenance, Question,
     ResolutionClaim, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, SpendWindow, StageCatalog,
     StageId, StageProgress, Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure,
-    VerifyFailureSet, grade, reduce,
+    VerifyFailureSet, Withdrawal, WithdrawalCause, grade, reduce,
 };
 use aether_bloomery::{BloomRecord, WorkpieceId};
 use aether_data::Kind;
@@ -2222,6 +2222,128 @@ fn a_replayed_journal_reproduces_the_landed_workpiece_refusal() {
         }
         other => panic!("expected WorkpieceAlreadyLanded from the folded journal, got {other:?}"),
     }
+}
+
+// A withdrawn member never resolved: the sealed spec still lists it, and a
+// land of the remaining claim set used to refuse resealing it at the same
+// revision as if it had landed. Tripwire: the landed-set scan keys on
+// spec.members() of a Landed bloom and treats a withdrawn member as resolved.
+fn landed_after_withdrawing(leaving: &str, kept: &str) -> (Snapshot, BloomId) {
+    let spec = draft(1, vec![membership(leaving, 10), membership(kept, 11)]).seal();
+    let bloom = spec.id();
+    let journal = [
+        event("seal", Fact::Seal(spec)),
+        event(
+            "withdraw",
+            Fact::Withdraw {
+                bloom,
+                withdrawals: vec![Withdrawal {
+                    workpiece: workpiece(leaving),
+                    cause: WithdrawalCause::Operator,
+                    reason: "the scope was wrong".into(),
+                    operator: "ops".into(),
+                }],
+                cascade: false,
+            },
+        ),
+        event("integrate", Fact::Integrate { bloom, claim: claim(kept, 11, 100) }),
+        event("resolve", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }),
+        event(
+            "verify",
+            Fact::AggregateVerifyCompleted {
+                bloom,
+                passed: true,
+                evidence: Evidence { subject: digest(40), kind: EvidenceKind::VerificationResult, detail: digest(204) },
+            },
+        ),
+        event(
+            "review",
+            Fact::AggregateReviewCompleted {
+                bloom,
+                passed: true,
+                evidence: Evidence { subject: digest(40), kind: EvidenceKind::ReviewFinding, detail: digest(203) },
+                implicated: vec![],
+            },
+        ),
+        event("land", Fact::Land { bloom, new_head: digest(50) }),
+    ];
+    let landed =
+        journal.iter().fold(Snapshot::new(digest(1)).with_green_base(digest(1)), |snapshot, ev| step(&snapshot, ev).0);
+    (landed, bloom)
+}
+
+#[test]
+fn seal_admits_a_workpiece_withdrawn_from_a_landed_bloom() {
+    let (landed, bloom) = landed_after_withdrawing("issue-5937", "kept");
+    assert_eq!(landed.blooms[&bloom].status, BloomStatus::Landed);
+    assert!(
+        landed.blooms[&bloom].withdrawn.contains_key(&workpiece("issue-5937")),
+        "the landed record still names the withdrawal"
+    );
+
+    let again = draft(50, vec![membership("issue-5937", 10)]).seal();
+    let admitted = reduce(&landed, &event("reseal", Fact::Seal(again)), &compiled_resolved(), &SpendWindow::default());
+    assert!(
+        matches!(admitted.outcome, Outcome::Sealed(_)),
+        "a withdrawn member reseals at the same revision: {:?}",
+        admitted.outcome,
+    );
+
+    let sibling = draft(50, vec![membership("kept", 11)]).seal();
+    let refused =
+        reduce(&landed, &event("reseal-kept", Fact::Seal(sibling)), &compiled_resolved(), &SpendWindow::default());
+    match &refused.outcome {
+        Outcome::SealRejected(SealError::WorkpieceAlreadyLanded { workpiece: wp, bloom: landed_by }) => {
+            assert_eq!(wp, &workpiece("kept"));
+            assert_eq!(*landed_by, bloom);
+        }
+        other => panic!("the resolved sibling still refuses: {other:?}"),
+    }
+}
+
+// The supersede door shares the landed-set scan: a successor may pick up a
+// member that left a landed bloom before it resolved, and must still refuse
+// the sibling that actually landed. Tripwire: reduce_supersede grows its own
+// scan over spec.members() and forgets record.withdrawn.
+#[test]
+fn supersede_admits_a_workpiece_withdrawn_from_a_landed_bloom() {
+    let (landed, bloom) = landed_after_withdrawing("issue-5937", "kept");
+    let predecessor_spec = draft(50, vec![membership("carried", 20)]).seal();
+    let predecessor = predecessor_spec.id();
+    let (snapshot, sealed) = step(&landed, &event("seal-pred", Fact::Seal(predecessor_spec)));
+    assert!(matches!(sealed.outcome, Outcome::Sealed(_)), "the carry predecessor seals: {:?}", sealed.outcome);
+
+    let picking_up = draft(50, vec![membership("carried", 20), membership("issue-5937", 10)]).seal();
+    let admitted = reduce(
+        &snapshot,
+        &event("pick-up", Fact::Supersede { predecessor, successor: picking_up }),
+        &compiled_resolved(),
+        &SpendWindow::default(),
+    );
+    assert!(
+        matches!(admitted.outcome, Outcome::Superseded { .. }),
+        "a withdrawn member is admissible on the successor: {:?}",
+        admitted.outcome,
+    );
+
+    let adding_kept = draft(50, vec![membership("carried", 20), membership("kept", 11)]).seal();
+    let refused = reduce(
+        &snapshot,
+        &event("add-kept", Fact::Supersede { predecessor, successor: adding_kept }),
+        &compiled_resolved(),
+        &SpendWindow::default(),
+    );
+    match &refused.outcome {
+        Outcome::SupersedeRejected(SupersedeError::InvalidMember(SealError::WorkpieceAlreadyLanded {
+            workpiece: wp,
+            bloom: landed_by,
+        })) => {
+            assert_eq!(wp, &workpiece("kept"));
+            assert_eq!(*landed_by, bloom);
+        }
+        other => panic!("the resolved sibling still refuses on supersede: {other:?}"),
+    }
+    assert!(refused.effects.is_empty(), "a refused supersession claims nothing");
 }
 
 // ADR-0153 + #4696 — the fold passes two gates before the bloom resolves, and

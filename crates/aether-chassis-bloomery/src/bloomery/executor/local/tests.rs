@@ -2889,6 +2889,80 @@ fn the_lane_ceiling_holds_and_the_rest_start_in_submission_order() {
 }
 
 #[test]
+fn a_model_lane_starts_while_a_prove_holds_its_own_slot() {
+    // The plausible bug: one occupancy pool, so a running verify occupies the
+    // only ceiling and a construct that arrived later stays queued. Model lanes
+    // are network-bound; a prove must not refuse them a slot.
+    let base = TempDir::new().unwrap();
+    let (exec, started) = throttled_executor(&base, 1, true);
+    let exec = exec.with_max_concurrent_provers(1);
+
+    let prove = exec.submit(&verify_order(digest(5), &test_nonce("prove"))).unwrap();
+    let model = exec.submit(&construct_order(digest(5), &test_nonce("model"))).unwrap();
+    assert_eq!(spawned(&started), ["wo-prove", "wo-model"], "the construct starts beside the running prove");
+    assert_ne!(exec.inspect(&model).unwrap(), ExecutionStatus::Queued);
+    assert_eq!(exec.stream_evidence(&prove).unwrap().len(), 1);
+    assert_eq!(exec.stream_evidence(&model).unwrap().len(), 1);
+}
+
+#[test]
+fn a_prove_starts_while_a_model_lane_holds_its_own_slot() {
+    // Inverse of the model-not-blocked case: filling the model ceiling must
+    // not starve verify.*, or shared-run coalescing never sees a free prover.
+    let base = TempDir::new().unwrap();
+    let (exec, started) = throttled_executor(&base, 1, true);
+    let exec = exec.with_max_concurrent_provers(1);
+
+    let model = exec.submit(&construct_order(digest(5), &test_nonce("model"))).unwrap();
+    let prove = exec.submit(&verify_order(digest(5), &test_nonce("prove"))).unwrap();
+    assert_eq!(spawned(&started), ["wo-model", "wo-prove"], "the prove starts beside the running construct");
+    assert_ne!(exec.inspect(&prove).unwrap(), ExecutionStatus::Queued);
+    assert_eq!(exec.stream_evidence(&model).unwrap().len(), 1);
+    assert_eq!(exec.stream_evidence(&prove).unwrap().len(), 1);
+}
+
+#[test]
+fn a_full_prover_pool_has_no_idle_capacity_for_verify_while_a_model_lane_still_fits() {
+    // Shared-run proposal consults has_idle_capacity. If that read still keys
+    // off the model ceiling, a running prove either looks idle (a second plan
+    // starts instead of coalescing) or a free model slot looks busy (no prove
+    // is proposed while rustc is free).
+    let base = TempDir::new().unwrap();
+    let (exec, started) = throttled_executor(&base, 1, true);
+    let exec = exec.with_max_concurrent_provers(1);
+
+    let prove = exec.submit(&verify_order(digest(5), &test_nonce("prove"))).unwrap();
+    assert_eq!(spawned(&started), ["wo-prove"]);
+    assert!(
+        !exec.has_idle_capacity(&verify_order(digest(5), &test_nonce("next-prove"))),
+        "a running prove saturates the prove pool",
+    );
+    assert!(
+        exec.has_idle_capacity(&construct_order(digest(5), &test_nonce("model"))),
+        "a running prove leaves the model pool idle",
+    );
+    assert_eq!(exec.stream_evidence(&prove).unwrap().len(), 1);
+}
+
+#[test]
+fn the_prover_ceiling_queues_verifies_while_model_slots_stay_free() {
+    // A roomy model ceiling must not let verifies bypass the prove cap, or
+    // ADR-0218 coalescing has nothing to coalesce: every ready request starts
+    // its own rustc.
+    let base = TempDir::new().unwrap();
+    let (exec, started) = throttled_executor(&base, 3, true);
+    let exec = exec.with_max_concurrent_provers(1);
+
+    let first = exec.submit(&verify_order(digest(5), &test_nonce("0"))).unwrap();
+    let second = exec.submit(&verify_order(digest(5), &test_nonce("1"))).unwrap();
+    assert_eq!(spawned(&started), ["wo-0"], "only one prove runs at a time");
+    assert_eq!(exec.inspect(&second).unwrap(), ExecutionStatus::Queued);
+    exec.stream_evidence(&first).unwrap();
+    assert_eq!(spawned(&started), ["wo-0", "wo-1"], "the queued prove starts when the slot frees");
+    assert_eq!(exec.stream_evidence(&second).unwrap().len(), 1);
+}
+
+#[test]
 fn a_cancelled_dispatch_frees_its_slot_and_a_cancelled_queued_one_never_starts() {
     // Both halves of a cancel under the ceiling. A cancelled *running* lane must
     // release its slot, or a bloom whose lanes are cancelled at their deadline
@@ -2947,7 +3021,8 @@ fn a_refine_takes_the_next_lane_slot_ahead_of_the_verify_and_construct_that_queu
     // against a tree it had just built waited behind constructs that had not
     // started. What it loses while it waits is the thing that made it cheap —
     // its session ages, and the slot holding its warm target directory is handed
-    // to a stranger.
+    // to a stranger. A prove no longer sits in that model-lane queue: it starts
+    // on the prover pool, and the freed model slot still goes to the refine.
     let base = TempDir::new().unwrap();
     let store = store_dir();
     let started = Arc::new(Mutex::new(Vec::new()));
@@ -2968,25 +3043,31 @@ fn a_refine_takes_the_next_lane_slot_ahead_of_the_verify_and_construct_that_queu
     let construct = exec.submit(&construct_order(digest(5), &test_nonce("construct"))).unwrap();
     let verify = exec.submit(&verify_order(digest(5), &test_nonce("verify"))).unwrap();
     let refine = exec.submit(&construct_order(digest(5), &test_nonce("refine"))).unwrap();
-    assert_eq!(spawned(&started), ["wo-holder"], "the ceiling of one admits one child");
+    assert_eq!(
+        spawned(&started),
+        ["wo-holder", "wo-verify"],
+        "a prove does not wait for the model-lane ceiling: it starts on its own pool",
+    );
 
     exec.stream_evidence(&holder).unwrap();
     assert_eq!(
         spawned(&started),
-        ["wo-holder", "wo-refine"],
-        "the freed slot goes to the refine, however late it queued",
+        ["wo-holder", "wo-verify", "wo-refine"],
+        "the freed model slot goes to the refine, however late it queued",
     );
 
     exec.stream_evidence(&refine).unwrap();
-    assert_eq!(spawned(&started), ["wo-holder", "wo-refine", "wo-verify"], "then to the stage judging a candidate");
-
-    exec.stream_evidence(&verify).unwrap();
     assert_eq!(
         spawned(&started),
-        ["wo-holder", "wo-refine", "wo-verify", "wo-construct"],
+        ["wo-holder", "wo-verify", "wo-refine", "wo-construct"],
         "and last to the construct that has nothing waiting on it yet",
     );
     assert_eq!(exec.stream_evidence(&construct).unwrap().len(), 1, "every dispatch still resolves");
+    assert_eq!(
+        exec.stream_evidence(&verify).unwrap().len(),
+        1,
+        "the prove that started beside the holder still resolves"
+    );
 }
 
 fn claude_order(subject: Digest, nonce: &str, task: &str) -> aether_bloomery::WorkOrder {
@@ -4198,8 +4279,8 @@ fn contained_member_store(dir: &TempDir, verify: &str, queued: &str) -> SqliteSt
         workpiece: workpiece.clone(),
         predecessor: None,
         problem: "problem".to_owned(),
-        design: String::new(),
-        plan: String::new(),
+        design: "design".to_owned(),
+        plan: "plan".to_owned(),
         declared_surface: vec!["crates/owned/**".to_owned()],
         dogfood_brief: String::new(),
         routing: ScopeRouting { size: "S".to_owned(), model: String::new() },
@@ -4249,7 +4330,7 @@ fn containment_reads_the_finishing_lanes_own_tree() {
     let exec =
         LocalExecutor::new(Arc::new(ContainmentRunner { seed: Mutex::new(None) }), correspondence(), base.path())
             .with_message_store(contained_member_store(&store, &verify, &queued))
-            .with_max_concurrent_lanes(1);
+            .with_max_concurrent_provers(1);
 
     let finishing = exec.submit(&verify_order(digest(5), &verify)).unwrap();
     let _waiting = exec.submit(&verify_order(digest(5), &queued)).unwrap();
@@ -4270,6 +4351,7 @@ fn identity(stage: StageId, workpiece: &str, candidate: Digest, scope_revision: 
         stage,
         candidate: Some(candidate),
         scope_revision: Some(scope_revision),
+        deadline_unix_millis: 0,
     }
 }
 

@@ -17,6 +17,7 @@ use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::{StageId, WorkpieceId};
 use crate::values::{
     AgentProfile, ConfigScopes, Harness, PipelineManifest, ReasoningEffort, ResolvedConfigs, ResolvedModel, ToolPolicy,
+    WorkpieceSize,
 };
 
 /// The declared output name every dispatched attempt uploads its result record
@@ -122,24 +123,31 @@ pub fn is_model_lane(command: &str) -> bool {
 /// and so does [`ModelOverride::validate`](crate::values::ModelOverride::validate)
 /// — a key the seal door admits is a key some dispatch resolves.
 ///
-/// [`StageId::Scope`] stays `None`: scoping runs before a workpiece qualifies
-/// for a bloom, so a sealed per-member override can never reach it, and
-/// admitting the key would let an operator author a pin that silently never
-/// applies.
+/// [`StageId::Scope`] dispatches [`SCOPE_FILL_COMMAND`] (ADR-0208): the
+/// pre-bloom scoping run, which fills a workpiece's fields before the
+/// workpiece qualifies for a bloom. The pin that reaches it rides the scope
+/// run's own record, never a sealed per-member override — no member dispatch
+/// ever runs Scope, so a Scope entry sealed into a bloom registry resolves
+/// nowhere there — but the key is one [`ModelOverride::validate`] admits, so
+/// the run override and the seal bundles share one vocabulary for which
+/// stages run a model.
 ///
 /// [`StageId::Study`] dispatches [`RETROSPECT_READ_COMMAND`] (ADR-0216): the
 /// bloom-level reader at the tail of the line, whose binding's `process` names
 /// the host position `retrospect` the same way the two review stages' does.
+///
+/// [`ModelOverride::validate`]: crate::values::ModelOverride::validate
 #[must_use]
 pub(super) fn dispatched_command(stage: StageId) -> Option<&'static str> {
     match stage {
         StageId::Construct | StageId::Refine | StageId::Reconcile => Some(CONSTRUCT_IMPLEMENT_COMMAND),
         StageId::Review | StageId::AggregateReview => Some(REVIEW_CRITIC_COMMAND),
+        StageId::Scope => Some(SCOPE_FILL_COMMAND),
         StageId::Verify => Some(VERIFY_MEMBER_COMMAND),
         StageId::AggregateVerify => Some(VERIFY_CHECK_COMMAND),
         StageId::BaseVerify => Some(VERIFY_BASE_COMMAND),
         StageId::Study => Some(RETROSPECT_READ_COMMAND),
-        StageId::Sketch | StageId::Scope | StageId::Approve | StageId::Integrate | StageId::Land => None,
+        StageId::Sketch | StageId::Approve | StageId::Integrate | StageId::Land => None,
     }
 }
 
@@ -251,6 +259,19 @@ pub struct ExecutionLimits {
     pub wall_clock_secs: u64,
 }
 
+/// The environment key a dispatched lane learns its own deadline through
+/// (#5998): the absolute instant the coordinator cancels the run at, in Unix
+/// milliseconds.
+///
+/// The environment rather than the argv, and that is load-bearing rather than a
+/// style choice. A lane spawns `cargo xtask transform` **compiled from the
+/// sealed subject tree**, which predates any flag added here — so a new argv
+/// flag is one an already-sealed dispatch's own CLI has never heard of, and the
+/// lane dies on the unexpected argument before it does any work. An
+/// environment key an older lane does not read is simply ignored, so the same
+/// coordinator drives bases from either side of this change.
+pub const EXECUTION_DEADLINE_ENV: &str = "AETHER_BLOOMERY_EXECUTION_DEADLINE_UNIX_MILLIS";
+
 impl ExecutionLimits {
     /// The ceiling on an authored wall-clock limit: one day.
     ///
@@ -292,7 +313,76 @@ pub struct StageBinding {
     /// [`ExecutionLimits`]. Authored per stage for the same reason
     /// [`retry_budget`](Self::retry_budget) is: a model lane and a compiler lane
     /// do not converge on the same clock.
+    ///
+    /// This is the limit a member of the middling size band runs under. The
+    /// other two bands are derived from it by
+    /// [`wall_clock_at`](Self::wall_clock_at) rather than authored beside it —
+    /// see that method for why the scaling is compiled rather than sealed.
     pub wall_clock_secs: u64,
+}
+
+impl StageBinding {
+    /// This binding's limit at `size` — [`sized_wall_clock_secs`] over the
+    /// number this binding authored.
+    #[must_use]
+    pub const fn wall_clock_at(&self, size: WorkpieceSize) -> u64 {
+        sized_wall_clock_secs(self.stage, self.wall_clock_secs, size)
+    }
+}
+
+/// The limit a member the scope routed into `size` runs under at `stage`, given
+/// the stage's authored wall clock (#5998).
+///
+/// One number for every member is a calibration nobody can make right: an hour
+/// was half of what a size L member on a thorough seat needed and three times
+/// what a size S one did, so the same value either cancelled finished work or
+/// let a stuck lane hold a slot for forty spare minutes. Bloom `7a2ff988…` on
+/// 2026-09-14 cancelled two size M members and one size L one at sixty minutes,
+/// the L one with nothing captured.
+///
+/// The scaling is compiled rather than authored beside
+/// [`StageBinding::wall_clock_secs`], which is the same choice the tag / gate
+/// strings and the retry budgets beside it are — refinable without an ADR.
+/// Sealing it instead would mean a third integer in every binding, which is a
+/// wire-shape change to a value the journal's decisions rows carry inline: the
+/// sealed bytes, their schema-digest ledger line, their upcast, and the pinned
+/// fixtures that freeze them would all move, for a calibration that is not a
+/// statement an operator makes about *this* bloom. What the operator authors
+/// stays one number per stage, and it still decides every band, because every
+/// band is a function of it.
+///
+/// Only the stages a model builds in scale. Everything else runs a compiler
+/// over the candidate's reverse-dependency closure or is a host gate, and
+/// answers the same question at the same cost whatever the scope called the
+/// work.
+///
+/// A free function rather than only a method on [`StageBinding`] because the
+/// host resolves the band at dispatch, where it holds the stage and the number
+/// the reducer already copied off the binding but not the binding itself. One
+/// definition, so the two cannot answer differently.
+#[must_use]
+pub const fn sized_wall_clock_secs(stage: StageId, authored_secs: u64, size: WorkpieceSize) -> u64 {
+    if !stage_scales_with_size(stage) {
+        return authored_secs;
+    }
+    match size {
+        // Never below the authored limit's own floor: a catalog may author a
+        // one-second stage, and halving that to nothing would dispatch a limit
+        // `validate` refuses to seal.
+        WorkpieceSize::Small if authored_secs > 1 => authored_secs / 2,
+        WorkpieceSize::Small | WorkpieceSize::Medium => authored_secs,
+        WorkpieceSize::Large => authored_secs.saturating_mul(2),
+    }
+}
+
+/// Whether a stage's cost tracks the size band the scope routed the work into.
+///
+/// The three stages a model builds in do: a size S member is half an hour's
+/// work and a size L one is an afternoon's. The compiler lanes and the host
+/// gates do not — they run over the candidate's closure, which the scope's own
+/// size line says nothing about.
+const fn stage_scales_with_size(stage: StageId) -> bool {
+    matches!(stage, StageId::Construct | StageId::Refine | StageId::Reconcile)
 }
 
 /// The set of stage bindings a bloom runs (ADR-0149 §The line).
@@ -675,21 +765,16 @@ impl StageCatalog {
     /// private repository. Naming it in the catalog is what makes that choice
     /// attestable rather than an operator's ambient default.
     const MUSE_MODEL: &'static str = "muse-spark-1.2-contributor";
-    /// The model id the grok-harness stages resolve to. Named once so a
-    /// generation refresh is one edit rather than a sweep over the arms — the
-    /// same reason as [`Self::OPUS_MODEL`].
-    const GROK_MODEL: &'static str = "grok-4.6";
 
     #[must_use]
     pub fn profile_of(stage: StageId) -> AgentProfile {
         // The **dispatched model lanes** — the ones that actually fork an
         // agent CLI — are Construct and its Refine/Reconcile repair re-entries,
         // the two review positions, Scope, and the Study reader. Construct and
-        // review run muse; Scope runs grok (ADR-0208); the reader runs opus
-        // (ADR-0216 §2). That is the whole set `is_model_lane` recognizes, so
-        // this is the calibration that decides what writes the code, what
-        // judges it, what fills a workpiece before freeze, and what reads a
-        // landed batch.
+        // review run muse; Scope and the reader run opus (ADR-0146, ADR-0216
+        // §2). That is the whole set `is_model_lane` recognizes, so this is
+        // the calibration that decides what writes the code, what judges it,
+        // what fills a workpiece before freeze, and what reads a landed batch.
         //
         // The remaining stages keep their Claude calibration and it is inert:
         // Approve is a pre-seal host process and the mechanical stages run a
@@ -713,12 +798,15 @@ impl StageCatalog {
                 (Harness::Muse, Self::MUSE_MODEL, ReasoningEffort::High)
             }
             StageId::Scope => {
-                // Cost-bound deferral from opus (ADR-0208 §The seat): ADR-0146
-                // still holds that scoping is the ladder's most judgement-heavy
-                // task, but the compiled seat is grok-4.6 at high effort rather
-                // than opus so a future reader finds a decision rather than a
-                // discrepancy with that ADR.
-                (Harness::Grok, Self::GROK_MODEL, ReasoningEffort::High)
+                // The ADR-0146 calibration, restored: scoping is the ladder's
+                // most judgement-heavy task, so the compiled seat is opus at
+                // high effort. ADR-0208's cost-bound deferral onto grok-4.6 is
+                // retired — moving every scope run at once is now a per-run
+                // choice instead: a scope run may name its seat through its
+                // run override (issue 5945), resolved at enqueue before this
+                // line is consulted, so a future reader finds a decision
+                // rather than a discrepancy with that ADR.
+                (Harness::Claude, Self::OPUS_MODEL, ReasoningEffort::High)
             }
             StageId::Study => (Harness::Claude, Self::OPUS_MODEL, ReasoningEffort::High),
             StageId::Sketch
@@ -1028,6 +1116,10 @@ impl Transformation {
     /// run — `Scope::resolve` of `checkout == diff_base` yields no packages, and
     /// `args_under` would strip `--workspace` while adding no `-p`.
     ///
+    /// Attribution probes that only need the candidate check's closure use
+    /// [`Self::as_attribution_baseline`] instead of this constructor: they never
+    /// mint a whole-workspace receipt (#5944).
+    ///
     /// `binding` is the sealed catalog's `BaseVerify` binding, carrying the
     /// authored wall-clock limit this fan-out runs under. That pairing is
     /// checked rather than assumed, but only in a debug build: the sibling
@@ -1059,6 +1151,30 @@ impl Transformation {
             description: None,
             model: None,
         }
+    }
+
+    /// Bind this `verify.check` candidate invocation to an attribution baseline at `base`.
+    ///
+    /// The probe runs the same fan-out on the base tree, scoped to this candidate's
+    /// reverse-dependency closure by naming the original checkout as
+    /// [`diff_base`](Self::diff_base). The inverted range (`candidate..base`) names
+    /// the same paths as the candidate check's `base..candidate` range. This is not
+    /// a receipt-minting [`VERIFY_BASE_COMMAND`] run: `base..base` would empty the
+    /// closure, and clearing the range would fall open to the whole workspace (#5944).
+    ///
+    /// Returns `None` when this transformation is not a `verify.check` candidate
+    /// with a checkout distinct from `base`, or has no subject input — the caller
+    /// refuses the probe rather than manufacturing a green over nothing.
+    #[must_use]
+    pub fn as_attribution_baseline(&self, base: CandidateRef) -> Option<Self> {
+        if self.command != VERIFY_CHECK_COMMAND || self.checkout == base.checkout {
+            return None;
+        }
+        let mut bound = self.clone();
+        *bound.inputs.first_mut()? = base.tree;
+        bound.diff_base = Some(bound.checkout);
+        bound.checkout = base.checkout;
+        Some(bound)
     }
 
     /// The whole-bloom aggregate-review transformation (ADR-0153): the
@@ -1319,9 +1435,12 @@ mod tests {
                     "{:?} runs under muse, so its model id must be a muse id",
                     binding.stage,
                 ),
+                // No compiled seat runs grok today — Scope's cost-bound
+                // deferral onto `grok-4.6` retired with the per-run seat
+                // (issue 5945) — so this arm pins the id a future grok seat
+                // must carry rather than a constant the line still names.
                 Harness::Grok => assert_eq!(
-                    profile.model,
-                    StageCatalog::GROK_MODEL,
+                    profile.model, "grok-4.6",
                     "{:?} runs under grok, so its model id must be a grok id",
                     binding.stage,
                 ),
@@ -1402,9 +1521,13 @@ mod tests {
     // failures in a row (a sketchless dispatch, a polluted setter value)
     // permanently exhausted seven commissions the authored work never failed
     // in. An intended catalog edit.
+    // Repinned again for issue 5945: the Scope seat recalibrates from
+    // Grok/`grok-4.6` back onto Claude/opus at high effort, restoring the
+    // ADR-0146 calibration now that a scope run may name its own seat per
+    // run. An intended catalog edit — see `profile_of`.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x7d, 0xbd, 0xcb, 0x5c, 0xe4, 0xce, 0x3e, 0x39, 0x92, 0xd7, 0xbb, 0x2b, 0xcc, 0x4c, 0x6e, 0x8a, 0x9b, 0x2c,
-        0xd4, 0x30, 0x64, 0x95, 0x2b, 0xec, 0x5d, 0x37, 0x87, 0x92, 0xe0, 0xd9, 0x9c, 0xe7,
+        0x19, 0xee, 0xf1, 0xb1, 0xa0, 0x02, 0xc7, 0xac, 0xa6, 0x3e, 0x46, 0x83, 0xb8, 0x74, 0x75, 0x9b, 0x16, 0xca,
+        0xd0, 0x6b, 0xe4, 0xd2, 0xb6, 0x02, 0x57, 0x87, 0x49, 0xf7, 0x93, 0x12, 0xbb, 0x59,
     ];
 
     // Tripwire: every command a stage dispatches is classified by exactly one of
@@ -1507,6 +1630,57 @@ mod tests {
             Err(CatalogError::WallClockOutOfRange { stage: StageId::Verify, wall_clock_secs: 86_401 })
         );
         assert_eq!(catalog_with_wall_clock(StageId::Verify, 900).validate(), Ok(()));
+    }
+
+    // Tripwire: the bands. A size L member gets longer than a middling one and
+    // a size S member less, at the three stages a model builds in and nowhere
+    // else — and the middle band stays the number the catalog authored, so a
+    // bloom sealed before the bands dispatches exactly the limits it did. A
+    // resolver that flattened back would restore #5998's incident: a size L
+    // member cancelled at sixty minutes with nothing captured.
+    #[test]
+    fn a_model_built_stage_runs_longer_at_l_than_at_s_and_a_compiler_lane_does_not() {
+        for stage in [StageId::Construct, StageId::Refine, StageId::Reconcile] {
+            let binding = binding(stage);
+            assert_eq!(binding.wall_clock_at(WorkpieceSize::Medium), binding.wall_clock_secs, "{stage:?}");
+            assert!(
+                binding.wall_clock_at(WorkpieceSize::Large) > binding.wall_clock_at(WorkpieceSize::Medium),
+                "{stage:?} must give a size L member more than a middling one",
+            );
+            assert!(
+                binding.wall_clock_at(WorkpieceSize::Small) < binding.wall_clock_at(WorkpieceSize::Medium),
+                "{stage:?} must not hold a slot for a size S member as long as for a middling one",
+            );
+        }
+
+        for stage in [StageId::Verify, StageId::AggregateVerify, StageId::BaseVerify, StageId::Study] {
+            let binding = binding(stage);
+            assert_eq!(
+                [
+                    binding.wall_clock_at(WorkpieceSize::Small),
+                    binding.wall_clock_at(WorkpieceSize::Medium),
+                    binding.wall_clock_at(WorkpieceSize::Large),
+                ],
+                [binding.wall_clock_secs; 3],
+                "{stage:?} runs over the candidate's closure, which the scope's size line says nothing about",
+            );
+        }
+    }
+
+    // Tripwire: the seal door refuses a zero limit, so no band may resolve one.
+    // A one-second stage is authorable, and halving it is the one arithmetic
+    // here that can reach zero.
+    #[test]
+    fn no_band_resolves_a_limit_the_seal_door_would_refuse() {
+        let mut shortest = binding(StageId::Construct);
+        shortest.wall_clock_secs = 1;
+        for size in [WorkpieceSize::Small, WorkpieceSize::Medium, WorkpieceSize::Large] {
+            assert!(shortest.wall_clock_at(size) > 0, "{size:?} resolved a limit no worker could run under");
+        }
+
+        let mut longest = binding(StageId::Construct);
+        longest.wall_clock_secs = u64::MAX;
+        assert_eq!(longest.wall_clock_at(WorkpieceSize::Large), u64::MAX, "the L band saturates rather than wrapping");
     }
 
     #[test]
@@ -1647,6 +1821,42 @@ mod tests {
             Transformation::for_study_read(&binding(StageId::Study), subject, checkout, base).diff_base,
             Some(base),
             "the reader's subject is the landed range, not a clean checkout's working tree",
+        );
+    }
+
+    #[test]
+    fn an_attribution_baseline_inverts_the_candidate_range_instead_of_falling_open() {
+        // Tripwire: rewriting a baseline to verify.base and clearing
+        // diff_base is what made attribution re-prove the whole workspace
+        // to answer one named test (#5944). The inverted range is the
+        // candidate check's closure.
+        let subject = Digest::from_bytes([7; 32]);
+        let checkout = Digest::from_bytes([9; 32]);
+        let base_checkout = Digest::from_bytes([5; 32]);
+        let base_tree = Digest::from_bytes([4; 32]);
+        let extra = Digest::from_bytes([8; 32]);
+        let mut candidate =
+            Transformation::for_aggregate_verify(&binding(StageId::AggregateVerify), subject, checkout, base_checkout);
+        candidate.inputs.push(extra);
+
+        let Some(bound) = candidate.as_attribution_baseline(CandidateRef { tree: base_tree, checkout: base_checkout })
+        else {
+            panic!("a verify.check candidate with a distinct checkout binds");
+        };
+
+        assert_eq!(bound.command, VERIFY_CHECK_COMMAND, "attribution keeps the candidate check, not verify.base");
+        assert_eq!(bound.checkout, base_checkout, "the probe runs at the composition base");
+        assert_eq!(bound.diff_base, Some(checkout), "the original candidate is the other end of the range");
+        assert_eq!(bound.inputs, alloc::vec![base_tree, extra], "the subject is the base tree; extra inputs stay");
+        assert!(
+            candidate.as_attribution_baseline(CandidateRef { tree: base_tree, checkout }).is_none(),
+            "base..base would empty the closure"
+        );
+        assert!(
+            Transformation::for_base_verify(&binding(StageId::BaseVerify), subject, base_checkout)
+                .as_attribution_baseline(CandidateRef { tree: base_tree, checkout: base_checkout })
+                .is_none(),
+            "a receipt-minting verify.base is not an attribution probe"
         );
     }
 

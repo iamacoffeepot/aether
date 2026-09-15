@@ -327,6 +327,11 @@ pub(super) struct OrderIdentity {
     pub(super) candidate: Option<Digest>,
     /// That frozen scope revision, which is what tells the two apart.
     pub(super) scope_revision: Option<Digest>,
+    /// The absolute wall-clock instant this order is cancelled at, in Unix
+    /// milliseconds — the deadline minted from the sealed limit when the
+    /// dispatch was recorded (ADR-0177). The lane is told it, so it can plan to
+    /// leave a candidate before it (#5998).
+    pub(super) deadline_unix_millis: u64,
 }
 
 impl OrderIdentity {
@@ -408,6 +413,31 @@ impl LaneGates {
     }
 }
 
+/// Which host-resource pool a dispatch occupies.
+///
+/// Model lanes are network-bound and count against `max_concurrent_lanes`.
+/// `verify.*` dispatches are build-bound and count against
+/// `max_concurrent_provers` (ADR-0200).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LanePool {
+    Model,
+    Prover,
+}
+
+impl LanePool {
+    fn of(gates: LaneGates) -> Self {
+        if gates.is_verify {
+            Self::Prover
+        } else {
+            Self::Model
+        }
+    }
+
+    fn of_command(command: &str) -> Self {
+        Self::of(LaneGates::of(command))
+    }
+}
+
 /// One dispatch that has been accepted but not yet spawned, waiting for a lane
 /// slot under the backend's concurrency ceiling.
 ///
@@ -458,6 +488,11 @@ struct PendingRun {
     // Authorized instruction-bundle bytes a model lane consumes (ADR-0214).
     instruction_bundle: Option<Vec<u8>>,
     instruction_bundle_digest: Option<String>,
+    // When this order is cancelled, in Unix milliseconds — the deadline the
+    // dispatch was recorded with, not `now + limit`: a dispatch that waited for
+    // a lane slot launches with less of its limit left than it was sealed
+    // (#5998). `None` for a store-less backend, which has no order row.
+    deadline_unix_millis: Option<u64>,
 }
 
 impl PendingRun {
@@ -495,6 +530,7 @@ impl PendingRun {
             entrypoint: self.entrypoint.clone(),
             instruction_bundle: self.instruction_bundle.as_deref(),
             instruction_bundle_digest: self.instruction_bundle_digest.as_deref(),
+            deadline_unix_millis: self.deadline_unix_millis,
         }
     }
 }
@@ -509,10 +545,11 @@ impl PendingRun {
 struct Registry {
     runs: HashMap<String, Run>,
     waiting: VecDeque<PendingRun>,
-    // Slots held by a `start` that is in flight. The spawn shells out to git and
-    // must not hold this lock, so a reservation stands in for the run between the
+    // Starts in flight, split by pool. The spawn shells out to git and must
+    // not hold this lock, so a reservation stands in for the run between the
     // decision to start it and the registry entry it becomes.
-    starting: usize,
+    starting_model: usize,
+    starting_prover: usize,
     // Which slot indices are spoken for right now — the allocator behind the
     // canonical build paths. Held from the moment a dispatch is handed a slot
     // until the run leaves the registry, because the slot's checkout is what the
@@ -530,16 +567,47 @@ struct Registry {
     // start can overlap after enqueue; a set would drop the nonce when the
     // first guard ended. Not a lane slot — omitted from `occupied`.
     submitting: HashMap<String, usize>,
+    // Trees cancelled construct lanes left behind, captured before their slots
+    // were released (#5998). Read once per nonce by `cancelled_capture`, which
+    // is the reactor collecting the answer to the cancel it just made.
+    cancelled_captures: HashMap<String, CandidateRef>,
 }
 
 impl Registry {
-    // How many lane slots are spoken for: the spawned runs, the starts that
-    // have not yet become one, and any quarantined slot no run currently
-    // holds. A quarantined slot whose run is still tracked is already in
-    // `runs` and must not count twice.
-    fn occupied(&self, quarantined: &HashSet<usize>) -> usize {
+    // How many children `pool` currently holds: spawned runs of that pool,
+    // starts that have not yet become one, in-flight cancels, prover leases,
+    // and quarantined slot indices no run currently holds. A quarantined slot
+    // whose run is still tracked is already in `runs` and must not count twice.
+    // Untracked leftovers count against both pools: they are children this
+    // process cannot classify, and oversubscribing either ceiling is worse
+    // than refusing a start.
+    fn occupied(&self, pool: LanePool, quarantined: &HashSet<usize>) -> usize {
         let extra = quarantined.iter().filter(|slot| !self.slots.contains(slot)).count();
-        self.runs.len() + self.starting + self.cancelling.len() + self.leases.len() + extra
+        let runs = self.runs.values().filter(|run| LanePool::of(run.gates) == pool).count();
+        let starting = match pool {
+            LanePool::Model => self.starting_model,
+            LanePool::Prover => self.starting_prover,
+        };
+        let cancelling = self.cancelling.values().filter(|hold| hold.prover == (pool == LanePool::Prover)).count();
+        let leases = match pool {
+            LanePool::Prover => self.leases.len(),
+            LanePool::Model => 0,
+        };
+        runs + starting + cancelling + leases + extra
+    }
+
+    fn begin_start(&mut self, pool: LanePool) {
+        match pool {
+            LanePool::Model => self.starting_model += 1,
+            LanePool::Prover => self.starting_prover += 1,
+        }
+    }
+
+    fn end_start(&mut self, pool: LanePool) {
+        match pool {
+            LanePool::Model => self.starting_model -= 1,
+            LanePool::Prover => self.starting_prover -= 1,
+        }
     }
 
     // Claim a preferred predecessor slot when it is free, otherwise the lowest
@@ -561,17 +629,41 @@ impl Registry {
         (slot, reason)
     }
 
-    // The waiting dispatch the next free slot goes to: the highest band, and
-    // within it the one that has waited longest.
-    fn take_waiting(&mut self) -> Option<PendingRun> {
-        let bands: Vec<DispatchPriority> = self.waiting.iter().map(|pending| pending.priority).collect();
-        self.waiting.remove(next_waiting(&bands)?)
+    // The waiting dispatch the next free slot in a non-full pool goes to: the
+    // highest band among dispatches whose pool has capacity, and within it the
+    // one that has waited longest. A queued prove does not hold a model slot,
+    // so a construct can start while verifies wait for rustc.
+    fn take_waiting(&mut self, model_full: bool, prover_full: bool) -> Option<PendingRun> {
+        let eligible: Vec<(usize, DispatchPriority)> = self
+            .waiting
+            .iter()
+            .enumerate()
+            .filter(|(_, pending)| match LanePool::of(pending.gates) {
+                LanePool::Model => !model_full,
+                LanePool::Prover => !prover_full,
+            })
+            .map(|(index, pending)| (index, pending.priority))
+            .collect();
+        let bands: Vec<DispatchPriority> = eligible.iter().map(|(_, priority)| *priority).collect();
+        let index = eligible[next_waiting(&bands)?].0;
+        self.waiting.remove(index)
     }
 
-    // Whether a dispatch of `priority` has to queue rather than take a free slot
-    // now, because something already waiting would be handed that slot first.
-    fn waits_behind(&self, priority: DispatchPriority) -> bool {
-        must_wait_behind(priority, &self.waiting.iter().map(|pending| pending.priority).collect::<Vec<_>>())
+    // Whether a dispatch of `priority` in `pool` has to queue rather than take
+    // a free slot now, because something already waiting in the same pool would
+    // be handed that slot first. The other pool's queue is a different ceiling.
+    fn waits_behind(&self, priority: DispatchPriority, pool: LanePool) -> bool {
+        let bands: Vec<DispatchPriority> = self
+            .waiting
+            .iter()
+            .filter(|pending| LanePool::of(pending.gates) == pool)
+            .map(|pending| pending.priority)
+            .collect();
+        must_wait_behind(priority, &bands)
+    }
+
+    fn waiting_in(&self, pool: LanePool) -> bool {
+        self.waiting.iter().any(|pending| LanePool::of(pending.gates) == pool)
     }
 
     // Claim one named slot, reporting whether it was free. Boot reconciliation's
@@ -622,6 +714,7 @@ impl Registry {
 struct CancellingHold {
     slot: Option<usize>,
     evidence_dir: PathBuf,
+    prover: bool,
 }
 
 /// Exclusive owner of a `Run` during cancel. `Some(run)` restores on Drop;
@@ -709,10 +802,13 @@ pub struct LocalExecutor {
     correspondence: SharedCorrespondence,
     base_dir: PathBuf,
     registry: Mutex<Registry>,
-    // How many lane children may run at once. `usize::MAX` is the unthrottled
-    // seam default; production resolves it from config through
+    // How many model-lane children may run at once. `usize::MAX` is the
+    // unthrottled seam default; production resolves it from config through
     // `with_max_concurrent_lanes`.
     max_concurrent_lanes: usize,
+    // How many `verify.*` children may run at once. Independent of the model
+    // ceiling: a running prove does not take a model slot.
+    max_concurrent_provers: usize,
     // Where the per-slot cargo target directories live. The scratch root by
     // default — a target dir is then the sibling of the checkout it serves — and a
     // configured volume when the host names one it would rather build on.
@@ -782,6 +878,7 @@ impl LocalExecutor {
             base_dir,
             registry: Mutex::new(Registry::default()),
             max_concurrent_lanes: usize::MAX,
+            max_concurrent_provers: usize::MAX,
             build_jobs: DEFAULT_LANE_BUILD_JOBS,
             messages: None,
             sessions: None,
@@ -808,18 +905,18 @@ impl LocalExecutor {
         self
     }
 
-    /// Cap how many lane children this backend runs at once.
+    /// Cap how many model-lane children this backend runs at once.
     ///
-    /// Each lane is a full cargo build with its own throwaway target dir, and a
-    /// seal fans out one dispatch per member, so an uncapped backend turns member
-    /// count directly into simultaneous builds racing the same CPU and disk.
+    /// Construct, review, scope, and the bloom-level reader count here.
+    /// `verify.*` dispatches count against
+    /// [`with_max_concurrent_provers`](Self::with_max_concurrent_provers)
+    /// instead: a running prove does not take a model slot, and a running
+    /// model does not take a prove slot.
+    ///
     /// Dispatches past the ceiling wait in submission order and start as running
     /// lanes finish — a queue, never a refusal: every dispatch is acked as
     /// submitted either way, so the reducer's view of it is unchanged and no order
     /// re-drains.
-    ///
-    /// The ceiling is per backend rather than per bloom: member lanes, aggregate
-    /// lanes, and the runs re-adopted at boot all count against the same slots.
     ///
     /// A ceiling of zero would park every dispatch forever, so it resolves to one
     /// — the smallest ceiling that still makes progress.
@@ -829,6 +926,24 @@ impl LocalExecutor {
             tracing::warn!("local executor backend: a lane ceiling of zero would start nothing; using one");
         }
         self.max_concurrent_lanes = ceiling.max(1);
+        self
+    }
+
+    /// Cap how many `verify.*` children this backend runs at once.
+    ///
+    /// Member verify, `verify.base`, shared runs, and aggregate verify count
+    /// here and nowhere else. Model lanes keep
+    /// [`with_max_concurrent_lanes`](Self::with_max_concurrent_lanes). With this
+    /// ceiling saturated, ready verify requests stay queued so ADR-0218
+    /// coalescing can batch them into the next plan.
+    ///
+    /// A ceiling of zero would park every prove forever, so it resolves to one.
+    #[must_use]
+    pub fn with_max_concurrent_provers(mut self, ceiling: usize) -> Self {
+        if ceiling == 0 {
+            tracing::warn!("local executor backend: a prover ceiling of zero would start nothing; using one");
+        }
+        self.max_concurrent_provers = ceiling.max(1);
         self
     }
 
@@ -906,6 +1021,7 @@ impl LocalExecutor {
             config.local_worktree_base.clone(),
         )
         .with_max_concurrent_lanes(config.max_concurrent_lanes)
+        .with_max_concurrent_provers(config.concurrent_provers())
         .with_lane_build(&config.lane_target_base, config.lane_build_jobs)
         .with_kit_gate(true)
         .with_lane_override(lane_override);
@@ -1213,6 +1329,9 @@ impl LocalExecutor {
                 .instruction_bundle
                 .as_ref()
                 .map(|bytes| config_address(ModelProcessInstructions::NAME, bytes).to_hex()),
+            deadline_unix_millis: is_model_lane
+                .then(|| identity.as_ref().map(|order| order.deadline_unix_millis))
+                .flatten(),
         })
     }
 
@@ -1294,28 +1413,38 @@ impl LocalExecutor {
     // handing it out. A dispatch that outranks everything waiting does start
     // inline, or the band ordering would apply only to slots that free after it
     // has already parked (#5410).
+    fn ceiling(&self, pool: LanePool) -> usize {
+        match pool {
+            LanePool::Model => self.max_concurrent_lanes,
+            LanePool::Prover => self.max_concurrent_provers,
+        }
+    }
+
     fn reserve_slot(
         &self,
         priority: DispatchPriority,
         preferred: Option<usize>,
         idle_only: bool,
         physical_run: Option<Digest>,
+        pool: LanePool,
     ) -> Option<(usize, SlotChoice)> {
         let quarantined = quarantine::slots_on_disk(&self.base_dir);
         let mut registry = self.lock();
         if let Some(slot) = registry.claim_lease(physical_run) {
-            registry.starting += 1;
+            registry.begin_start(pool);
             return Some((slot, SlotChoice::Preferred));
         }
         // This submit holds one entry itself. Any other preparer may be
-        // required work that has not reached the waiting queue yet.
-        if (idle_only && (!registry.waiting.is_empty() || registry.submitting.len() > 1))
-            || registry.waits_behind(priority)
-            || registry.occupied(&quarantined) >= self.max_concurrent_lanes
+        // required work that has not reached the waiting queue yet. Only the
+        // same pool's queue can spend this slot: a waiting prove does not
+        // occupy a model lane, and a waiting model does not occupy a prove.
+        if (idle_only && (registry.waiting_in(pool) || registry.submitting.len() > 1))
+            || registry.waits_behind(priority, pool)
+            || registry.occupied(pool, &quarantined) >= self.ceiling(pool)
         {
             return None;
         }
-        registry.starting += 1;
+        registry.begin_start(pool);
         Some(registry.claim_for(preferred, &quarantined))
     }
 
@@ -1326,6 +1455,7 @@ impl LocalExecutor {
     // wedged one: nothing is running, nothing is failing, and nothing says why.
     fn enqueue(&self, pending: PendingRun) {
         let nonce = pending.nonce.clone();
+        let pool = LanePool::of(pending.gates);
         let depth = {
             let mut registry = self.lock();
             registry.waiting.push_back(pending);
@@ -1336,7 +1466,8 @@ impl LocalExecutor {
         tracing::info!(
             %nonce,
             queue_depth = depth,
-            ceiling = self.max_concurrent_lanes,
+            prover = pool == LanePool::Prover,
+            ceiling = self.ceiling(pool),
             "local executor backend: lane ceiling reached; dispatch is queued and starts when a lane finishes",
         );
     }
@@ -1610,6 +1741,7 @@ impl LocalExecutor {
             stage,
             candidate: Digest::from_slice(&order.candidate),
             scope_revision: Digest::from_slice(&order.scope_revision),
+            deadline_unix_millis: order.deadline_unix_millis,
         })
     }
 
@@ -1764,7 +1896,7 @@ impl LocalExecutor {
             Err(error) => {
                 {
                     let mut registry = self.lock();
-                    registry.starting -= 1;
+                    registry.end_start(LanePool::of(pending.gates));
                     registry.release_slot(Some(slot));
                 }
                 return Err(LocalExecutorError::Io(error));
@@ -1801,7 +1933,7 @@ impl LocalExecutor {
         };
 
         let mut registry = self.lock();
-        registry.starting -= 1;
+        registry.end_start(LanePool::of(pending.gates));
         let outcome = match started {
             Ok(process) => {
                 registry.runs.insert(
@@ -1914,13 +2046,13 @@ impl LocalExecutor {
     fn take_waiting(&self) -> Option<(PendingRun, usize, SlotChoice)> {
         let quarantined = quarantine::slots_on_disk(&self.base_dir);
         let mut registry = self.lock();
-        if registry.occupied(&quarantined) >= self.max_concurrent_lanes {
-            return None;
-        }
+        let model_full = registry.occupied(LanePool::Model, &quarantined) >= self.max_concurrent_lanes;
+        let prover_full = registry.occupied(LanePool::Prover, &quarantined) >= self.max_concurrent_provers;
         // Reserved as it is taken: the slot is spent from here, not from whenever
-        // the spawn it is handed to returns.
-        let pending = registry.take_waiting()?;
-        registry.starting += 1;
+        // the spawn it is handed to returns. A full prove pool still hands out
+        // a model slot, and the other way around.
+        let pending = registry.take_waiting(model_full, prover_full)?;
+        registry.begin_start(LanePool::of(pending.gates));
         registry.acquire_submit(&pending.nonce);
         let (slot, reason) = registry.claim_for(pending.preferred, &quarantined);
         drop(registry);
@@ -2125,6 +2257,29 @@ impl LocalExecutor {
         } else {
             self.capture_partial(&worktree_dir, nonce, message)
         }
+    }
+
+    /// Capture a cancelled construct lane's tree and hold it for the reactor's
+    /// [`cancelled_capture`](ExecutorBackend::cancelled_capture) read (#5998).
+    ///
+    /// Best-effort in every direction: a non-construct run, a run whose slot
+    /// this process could not recover (no `worktree_dir`), a clean tree, and a
+    /// git that will not commit all leave nothing behind, and the cancel
+    /// proceeds either way. Losing the tree is the status quo; losing the
+    /// cancel would leave a child burning wall clock.
+    fn retain_cancelled_capture(&self, nonce: &Nonce, run: &Run) {
+        if !run.gates.is_construct {
+            return;
+        }
+        let Some(candidate) = self.construct_capture(run.worktree_dir.clone(), nonce, false, None) else {
+            return;
+        };
+
+        tracing::info!(
+            nonce = %nonce.0,
+            "local executor backend: captured the cancelled construct lane's tree as a member checkpoint",
+        );
+        self.lock().cancelled_captures.insert(nonce.0.clone(), candidate);
     }
 
     fn fail_closed_host_fault(
@@ -2992,6 +3147,7 @@ fn judged_evidence_ref(
         observation: LaneObservation {
             candidate,
             findings: overlay.findings,
+            notes: parse_notes(bytes),
             failed_verifiers: overlay.failed_verifiers,
             failed_verifier_names,
             cost,
@@ -3007,7 +3163,10 @@ fn judged_evidence_ref(
             // only the reader writes it, and a lane that wrote none yields an
             // empty set, which is what a read with nothing to file also yields.
             retrospect_findings: parse_retrospect_findings(bytes),
+            replayed_flakes: parse_replayed_flakes(bytes),
             contextual_observations,
+            duration_millis: parse_duration_millis(bytes),
+            gates: parse_gates(bytes),
         },
     }
 }
@@ -3085,9 +3244,13 @@ impl LocalExecutor {
         // the ceiling existed. Otherwise the dispatch waits its turn — and is acked
         // as submitted either way, so the reducer's view of it never depends on how
         // busy this host happened to be.
-        if let Some((slot, reason)) =
-            self.reserve_slot(pending.priority, pending.preferred, idle_only, pending.physical_run)
-        {
+        if let Some((slot, reason)) = self.reserve_slot(
+            pending.priority,
+            pending.preferred,
+            idle_only,
+            pending.physical_run,
+            LanePool::of(pending.gates),
+        ) {
             let failed = FailedStart::of(&pending);
             if let Err(error) = self.start_reserved(pending, slot, reason) {
                 // A checkout that does not carry the order's candidate is the
@@ -3200,13 +3363,14 @@ impl ExecutorBackend for LocalExecutor {
         Ok(())
     }
 
-    fn has_idle_capacity(&self, _order: &WorkOrder) -> bool {
+    fn has_idle_capacity(&self, order: &WorkOrder) -> bool {
         // Advisory only: this runs on the reactor handler. The blocking
         // admission worker checks persisted quarantines again at reservation.
+        // Pool-aware: a full prove pool must not hide idle model capacity,
+        // and a running model must not prevent the next shared-run proposal.
+        let pool = LanePool::of_command(&order.transformation.command);
         let registry = self.lock();
-        registry.waiting.is_empty()
-            && registry.submitting.is_empty()
-            && registry.occupied(&HashSet::new()) < self.max_concurrent_lanes
+        !registry.waiting_in(pool) && registry.occupied(pool, &HashSet::new()) < self.ceiling(pool)
     }
 
     // `run` is a `&mut` reborrow from the registry guard (poll mutates the child),
@@ -3322,7 +3486,7 @@ impl ExecutorBackend for LocalExecutor {
             };
             registry.cancelling.insert(
                 handle.nonce.0.clone(),
-                CancellingHold { slot: run.slot, evidence_dir: run.evidence_dir.clone() },
+                CancellingHold { slot: run.slot, evidence_dir: run.evidence_dir.clone(), prover: run.gates.is_verify },
             );
             drop(registry);
             CancelReservation { backend: self, nonce: handle.nonce.0.clone(), run: Some(run) }
@@ -3330,6 +3494,15 @@ impl ExecutorBackend for LocalExecutor {
 
         match reservation.run_mut().process.kill() {
             Ok(()) => {
+                // The child is dead and its tree is still on disk, but the slot
+                // release below hands that checkout to the next dispatch, which
+                // resets it. A construct cancelled at its sealed limit has
+                // usually built for most of that limit, so capture the tree here
+                // — the same capture a failing construct's tree gets, landing in
+                // the same member-checkpoint ref the retry lap resumes from
+                // (#5998). After the kill so the capture cannot race the child's
+                // last write, and before the release so it cannot race the reset.
+                self.retain_cancelled_capture(&handle.nonce, reservation.run_mut());
                 if let Some(slot) = reservation.slot() {
                     quarantine::clear(&self.base_dir, slot);
                 }
@@ -3361,6 +3534,13 @@ impl ExecutorBackend for LocalExecutor {
         // The eviction above freed a lane slot; hand it to whatever is waiting.
         self.pump();
         Ok(())
+    }
+
+    fn cancelled_capture(&self, handle: &WorkHandle) -> Option<CandidateRef> {
+        // Removed rather than read: the reactor threads it onto exactly one
+        // timeout's observation, and a capture left behind would ride a later
+        // cancel of the same nonce as if that run had produced it.
+        self.lock().cancelled_captures.remove(&handle.nonce.0)
     }
 
     #[allow(clippy::significant_drop_tightening, reason = "run is a &mut reborrow; the guard must outlive it")]
@@ -3854,6 +4034,38 @@ fn parse_failed_verifier_names(bytes: &[u8]) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The tests the gate excused as flakes — failed once, passed on a same-input
+/// replay — off the evidence's own `flakes` ledger (#5999).
+///
+/// Read from the umbrella and from each gate under it, because a `verify.check`
+/// umbrella states its members' channels in `gates` while a gate dispatched on
+/// its own states its own at the top level. A malformed entry names no test and
+/// contributes nothing; the channel is absent entirely on a run that excused
+/// nothing, which is the ordinary case.
+fn parse_replayed_flakes(bytes: &[u8]) -> Vec<String> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Vec::new();
+    };
+    let mut ledgers = vec![value.get("flakes")];
+    ledgers.extend(
+        value.get("gates").and_then(serde_json::Value::as_array).into_iter().flatten().map(|gate| gate.get("flakes")),
+    );
+    let mut named = Vec::new();
+    for ledger in ledgers {
+        for test in ledger
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|excused| excused.get("test").and_then(serde_json::Value::as_str))
+        {
+            if !test.is_empty() && !named.iter().any(|current| current == test) {
+                named.push(test.to_owned());
+            }
+        }
+    }
+    named
+}
+
 /// Carry every identity the overlay named, including one the host added
 /// (containment), so admission interned the names the journaled set will hold.
 fn names_carried_to_intake(mut names: Vec<String>, overlay: VerifyFailureSet) -> Vec<String> {
@@ -3875,6 +4087,19 @@ fn unix_now_secs() -> u64 {
 fn parse_findings(bytes: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     value.get("findings").and_then(serde_json::Value::as_str).map(str::to_owned)
+}
+
+/// The evidence's top-level `notes` prose — what a review critic recorded for
+/// the operator beside its verdict. Presence-driven like [`parse_findings`], and
+/// blank-rejecting like [`parse_commit_message`]: a whitespace-only note names
+/// nothing that was reviewed, so it is the same absence as no note at all.
+fn parse_notes(bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value
+        .get("notes")
+        .and_then(serde_json::Value::as_str)
+        .map(|notes| notes.trim().to_owned())
+        .filter(|notes| !notes.is_empty())
 }
 
 /// The evidence's top-level `commit_message` prose — what the construct/refine
@@ -4042,6 +4267,30 @@ fn parse_peak_resident_bytes(bytes: &[u8]) -> Option<u64> {
     value.get("peak_resident_bytes")?.as_u64()
 }
 
+fn parse_duration_millis(bytes: &[u8]) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value.get("duration_millis")?.as_u64()
+}
+
+fn parse_gates(bytes: &[u8]) -> Vec<aether_bloomery::EvidenceGateTiming> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Vec::new();
+    };
+    let Some(gates) = value.get("gates").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    gates
+        .iter()
+        .filter_map(|gate| {
+            Some(aether_bloomery::EvidenceGateTiming {
+                command: gate.get("command")?.as_str()?.to_owned(),
+                duration_millis: gate.get("duration_millis")?.as_u64()?,
+                prepare_millis: gate.get("prepare_millis").and_then(serde_json::Value::as_u64),
+            })
+        })
+        .collect()
+}
+
 /// How a construct lane's `evidence.json` classified (#3596, #5292).
 ///
 /// Three states because a clean conclusion with no candidate is not a crash:
@@ -4108,7 +4357,23 @@ mod tests {
 
     use aether_bloomery::{RETROSPECT_READ_COMMAND, SCOPE_FILL_COMMAND};
 
-    use super::{LaneGates, contextual_observation_bundle, usable_target_base};
+    use super::{LaneGates, contextual_observation_bundle, parse_notes, usable_target_base};
+
+    // Tripwire: the review lane writes its operator notes under the evidence's
+    // top-level `notes`, and intake reads that channel to tell a critic that
+    // judged the fold from one whose report tools never connected. Reading the
+    // wrong key — or accepting a whitespace-only note as a note — decides every
+    // aggregate review in the fleet, in one direction or the other.
+    #[test]
+    fn a_reviews_notes_are_read_off_the_evidences_own_channel_and_a_blank_one_is_none() {
+        assert_eq!(
+            parse_notes(br#"{"status":"pass","notes":"  read the fold and checked the seam  "}"#).as_deref(),
+            Some("read the fold and checked the seam"),
+        );
+        assert_eq!(parse_notes(br#"{"status":"pass","notes":"   "}"#), None, "a blank note names nothing reviewed");
+        assert_eq!(parse_notes(br#"{"status":"pass","findings":"a defect"}"#), None, "findings are not notes");
+        assert_eq!(parse_notes(b"{not json"), None);
+    }
 
     #[test]
     fn contextual_observations_are_bundled_only_when_bound_to_the_order_and_gate_file() {

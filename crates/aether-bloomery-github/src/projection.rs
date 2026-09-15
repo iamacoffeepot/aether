@@ -336,27 +336,27 @@ fn render_source_comment(projection: &CommissionProjection) -> String {
 fn render_commission_fields(projection: &CommissionProjection) -> String {
     let mut body = String::new();
     let _ = writeln!(body, "- Workpiece: `{}`", projection.workpiece.0);
-    let _ = writeln!(body, "- Intent: `{}`", short_hex(&projection.intent));
-    match projection.scope_revision {
-        Some(digest) => {
-            let _ = writeln!(body, "- Scope revision: `{}`", short_hex(&digest));
+    match projection.approval_signer.as_deref() {
+        Some(signer) => {
+            let _ = writeln!(body, "- Approval: signer `{signer}`.");
         }
         None => {
-            let _ = writeln!(body, "- Scope revision: _none_");
-        }
-    }
-    match (&projection.approval_signer, projection.approval_digest) {
-        (Some(signer), Some(digest)) => {
-            let _ = writeln!(body, "- Approval: signer `{signer}` digest `{}`.", short_hex(&digest));
-        }
-        (_, Some(digest)) => {
-            let _ = writeln!(body, "- Approval: digest `{}`.", short_hex(&digest));
-        }
-        _ => {
             let _ = writeln!(body, "- Approval: _none_");
         }
     }
     let _ = writeln!(body, "- State: {}", projection.status);
+    match projection.scope.as_deref().map(str::trim).filter(|scope| !scope.is_empty()) {
+        Some(scope) => {
+            let _ = writeln!(body);
+            body.push_str(scope);
+            if !scope.ends_with('\n') {
+                body.push('\n');
+            }
+        }
+        None => {
+            let _ = writeln!(body, "- Scope: _none_");
+        }
+    }
     body
 }
 
@@ -569,6 +569,7 @@ mod tests {
             status: "open".to_owned(),
             recorded_issue,
             title: String::new(),
+            scope: None,
         }
     }
 

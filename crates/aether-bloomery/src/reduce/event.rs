@@ -378,7 +378,10 @@ pub enum Fact {
         /// [`Fact::Resolve`] carries both tree and head.
         head: Digest,
         /// The collision evidence; its `detail` names the conflicting-path
-        /// report and is what a Reconcile-budget wedge attaches.
+        /// report and is what a Reconcile-budget wedge attaches. That wedge is
+        /// held off for the one round a sibling caused rather than the member:
+        /// while another member that collided onto this same head is still
+        /// unresolved, a repeat collision buys a second round instead (#5993).
         evidence: Evidence,
     },
     /// An observation the host classified as a strict ancestor of the
@@ -909,6 +912,28 @@ pub enum Fact {
     /// The executor is ready to submit one queued constructor and asks the
     /// reducer to freeze its current head context under a physical nonce.
     RequestConstructionAdmission { admission: ConstructionAdmission },
+    /// A shared run skipped physical work because the ledger already held a
+    /// green fact for this exact contextual input (#5948).
+    ///
+    /// Names the reused gate, the contextual closure key, and the dispatch that
+    /// produced the fact, so a run that did not execute is visible on the
+    /// journal. Appended past [`Fact::RequestConstructionAdmission`] so every
+    /// prior fact keeps its wire discriminant.
+    ProofReused {
+        /// The bloom whose shared run reused the fact.
+        bloom: BloomId,
+        /// The declared gate this fact satisfied.
+        gate: String,
+        /// The contextual closure key the reused fact was addressed by.
+        closure: Digest,
+        /// The trusted dispatch nonce that produced the reused fact.
+        producing_dispatch: String,
+    },
+    /// A ready contextual verification request is waiting for sibling
+    /// constructs still in flight before the scheduler proposes a shared run.
+    /// Appended past [`Fact::ProofReused`] so every prior fact keeps its wire
+    /// discriminant.
+    HoldSharedRunCoalesce { bloom: BloomId, until_unix_millis: u64, waiting_for: Vec<WorkpieceId> },
 }
 
 impl Fact {

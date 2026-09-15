@@ -400,6 +400,20 @@ pub struct MemberMachineryFault {
     pub evidence: Digest,
 }
 
+/// One member's collision count against a single fold head (#5993).
+///
+/// The Reconcile *round*, as opposed to [`StageProgress::attempts`], which is
+/// the per-stage lane retry and resets at every advance. A round outlives the
+/// stage the way [`StageProgress::fold_checkpoint`] does, because the thing it
+/// counts is how many times the fold has handed this member the same tree.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct FoldRound {
+    /// The head those collisions named.
+    pub head: Digest,
+    /// How many collisions this member has taken against it.
+    pub rounds: u32,
+}
+
 /// The per-bloom projection record.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BloomRecord {
@@ -471,6 +485,16 @@ pub struct BloomRecord {
     /// whether its next verdict is still pending or has already come back
     /// failing, so the cursor cannot distinguish mid-flight from wedged.
     pub wedged: BTreeMap<WorkpieceId, Wedge>,
+    /// How many fold collisions each member has taken against the head it is
+    /// currently being asked to place onto (#5993).
+    ///
+    /// Folded straight off [`Fact::FoldConflict`] rather than off a decision,
+    /// the way the file-lease table is: the count is an account of what the
+    /// fold reported, and no decision carries it. A collision naming a head
+    /// this member has not stood on before restarts the count — the tree moved,
+    /// so that is a fresh round rather than a repeat of the last one.
+    #[serde(default)]
+    pub fold_rounds: BTreeMap<WorkpieceId, FoldRound>,
     /// How many times each execution slot has been dispatched — the bloom's
     /// dispatch ledger, and the source of the study grade's retry axis
     /// (ADR-0180). Journal-derived and replay-rebuilt like the rest of the
@@ -1121,6 +1145,7 @@ impl Snapshot {
         next.record_verify_series(event, decisions);
         next.record_construct_park(event, decisions);
         next.record_fold_refusal(event, decisions);
+        next.record_fold_round(event, decisions);
         next.record_refusals(decisions);
         next.record_surface_request(event, decisions);
         next.record_narrowed_composition(event, decisions);
@@ -1279,6 +1304,30 @@ impl Snapshot {
             }
             _ => {}
         }
+    }
+
+    /// Count one member's collision against the head the fold reported (#5993).
+    ///
+    /// Gated on the outcomes the door actually produces — a dispatched round or
+    /// a wedge — so a refused fact naming an unknown bloom or a non-member
+    /// plants no round. A collision naming a different head restarts the count:
+    /// the tree the member is asked to place onto moved, which ADR-0189 already
+    /// treats as a fresh round however many siblings ripple through.
+    fn record_fold_round(&mut self, event: &Event, decisions: &Decisions) {
+        let Fact::FoldConflict { bloom, workpiece, head, .. } = &event.fact else {
+            return;
+        };
+        if !matches!(decisions.outcome, Outcome::FoldConflictDispatched { .. } | Outcome::AttemptWedged { .. }) {
+            return;
+        }
+        let Some(record) = self.blooms.get_mut(bloom) else {
+            return;
+        };
+        let round = record.fold_rounds.entry(workpiece.clone()).or_insert(FoldRound { head: *head, rounds: 0 });
+        if round.head != *head {
+            *round = FoldRound { head: *head, rounds: 0 };
+        }
+        round.rounds = round.rounds.saturating_add(1);
     }
 
     /// Record (or clear) the ADR-0206 refusals this decision set carries.
@@ -2270,6 +2319,7 @@ impl BloomRecord {
             holds: BTreeSet::new(),
             progress: BTreeMap::new(),
             wedged: BTreeMap::new(),
+            fold_rounds: BTreeMap::new(),
             dispatches: BTreeMap::new(),
             integration: None,
             aggregate_rolls: 0,

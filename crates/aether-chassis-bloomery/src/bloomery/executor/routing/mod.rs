@@ -3,12 +3,14 @@
 //!
 //! One [`ExecutorBackend`] fronting both the Actions (shared-runner) and local
 //! (operator-machine) backends, selecting per order by the typed
-//! [`Transformation::command`](aether_bloomery::Transformation) id. The default
-//! routes the model-driven `construct.*` lanes to the local backend (ambient
-//! `claude` auth, ADR-0150) and everything else — the computationally-heavy
-//! mechanical verify lanes — to the zero-secret Actions backend, and the prefix
-//! set is config so any lane can be flipped to local as a release valve (Actions
-//! outage, quota, offline work).
+//! [`Transformation::command`](aether_bloomery::Transformation) id. Model lanes
+//! ([`aether_bloomery::is_model_lane`]) always take the local backend (ambient `claude` auth,
+//! ADR-0150) — construct, the critic, the scoper, and the bloom-level reader —
+//! because each forks an agent CLI under a credential the zero-secret runner
+//! deliberately lacks. The prefix set is the release valve that flips extra
+//! mechanical lanes local (Actions outage, quota, offline work); it does not
+//! have to name the model lanes for them to route correctly, so a host whose
+//! config predates `retrospect.read` still reads on the same arm as construct.
 //!
 //! # Resolving a handle's lane
 //!
@@ -24,7 +26,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::{
     BackendId, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedConstructionCheckpoint,
-    ObservedLaneWrites, WorkHandle, WorkOrder,
+    ObservedLaneWrites, WorkHandle, WorkOrder, is_model_lane,
 };
 use aether_bloomery_github::ExecutorError;
 
@@ -51,9 +53,9 @@ pub struct RoutingExecutor {
 }
 
 impl RoutingExecutor {
-    /// Build a router over both backends, routing any command whose id starts
-    /// with one of `local_prefixes` to the local backend and everything else to
-    /// Actions.
+    /// Build a router over both backends. Model lanes go local regardless of
+    /// `local_prefixes`; any other command whose id starts with one of those
+    /// prefixes goes local too; everything else goes to Actions.
     #[must_use]
     pub fn new(
         actions: Arc<dyn ExecutorBackend<Error = ExecutorError> + Send + Sync>,
@@ -64,7 +66,7 @@ impl RoutingExecutor {
     }
 
     fn lane_for_command(&self, command: &str) -> Lane {
-        if self.local_prefixes.iter().any(|prefix| command.starts_with(prefix.as_str())) {
+        if is_model_lane(command) || self.local_prefixes.iter().any(|prefix| command.starts_with(prefix.as_str())) {
             Lane::Local
         } else {
             Lane::Actions
@@ -149,6 +151,15 @@ impl ExecutorBackend for RoutingExecutor {
             Lane::Local => self.local.cancel(handle)?,
         }
         Ok(())
+    }
+
+    fn cancelled_capture(&self, handle: &WorkHandle) -> Option<aether_bloomery::CandidateRef> {
+        // The routing record survives a cancel, so the capture is collected
+        // from the same lane the cancel reached rather than from the fallback.
+        match self.lane_of(&handle.nonce.0) {
+            Lane::Actions => self.actions.cancelled_capture(handle),
+            Lane::Local => self.local.cancelled_capture(handle),
+        }
     }
 
     fn release_physical_run(&self, physical_run: &Digest) -> Result<(), Self::Error> {

@@ -15,6 +15,19 @@ use aether_bloomery::{
 };
 use serde::{Deserialize, Serialize};
 
+/// One name the flake registry knows (#5999), as the doctor reads it.
+///
+/// Its own shape rather than the store's row, because this module is compiled
+/// without the store: an invariant is a statement about state, and the reactor
+/// that has a store is what fills it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownFlake {
+    /// The nextest `binary-id test_name` pair the gate excused.
+    pub test_id: String,
+    /// How many distinct candidate trees have recorded it as a flake.
+    pub candidates: usize,
+}
+
 /// How long an undelivered source-replica topic may sit before it is a
 /// violation rather than a retry still in flight.
 pub const REPLICA_AGE_BOUND: Duration = Duration::from_mins(5);
@@ -80,6 +93,10 @@ pub enum Invariant {
     DeterministicRetryBound,
     /// An evidence directory exists for every open dispatch this host started.
     OpenDispatchHasEvidence,
+    /// A member's candidate ref carries the candidate its cursor claims.
+    MemberCandidateRefMatchesCursor,
+    /// No test is a known flake — replayed green across distinct candidates.
+    NoKnownFlake,
 }
 
 impl Invariant {
@@ -99,6 +116,8 @@ impl Invariant {
         Self::SurfaceRequestUnanswered,
         Self::DeterministicRetryBound,
         Self::OpenDispatchHasEvidence,
+        Self::MemberCandidateRefMatchesCursor,
+        Self::NoKnownFlake,
     ];
 
     /// The stable machine name `/view` and tests quote.
@@ -119,6 +138,8 @@ impl Invariant {
             Self::SurfaceRequestUnanswered => "surface_request_unanswered",
             Self::DeterministicRetryBound => "deterministic_retry_bound",
             Self::OpenDispatchHasEvidence => "open_dispatch_has_evidence",
+            Self::MemberCandidateRefMatchesCursor => "member_candidate_ref_matches_cursor",
+            Self::NoKnownFlake => "no_known_flake",
         }
     }
 
@@ -154,6 +175,12 @@ impl Invariant {
             Self::OpenDispatchHasEvidence => {
                 "an evidence directory exists for every open dispatch this host has started a lane for"
             }
+            Self::MemberCandidateRefMatchesCursor => {
+                "every member's candidate ref carries the candidate tree its journal cursor claims"
+            }
+            Self::NoKnownFlake => {
+                "no test has been replayed green as a flake across distinct candidates without being fixed or quarantined"
+            }
         }
     }
 
@@ -173,6 +200,8 @@ impl Invariant {
             Self::SurfaceRequestUnanswered => surface_request_unanswered(live),
             Self::DeterministicRetryBound => deterministic_retry_bound(live),
             Self::OpenDispatchHasEvidence => open_dispatch_has_evidence(live),
+            Self::MemberCandidateRefMatchesCursor => member_candidate_ref_matches_cursor(live),
+            Self::NoKnownFlake => no_known_flake(live),
         }
     }
 }
@@ -311,6 +340,17 @@ pub struct LiveState<'a> {
     /// How long this process has seen the live daily sha without a
     /// correspondence. `None` when the head is resolved or there is no sha.
     pub unresolved_head_age: Option<Duration>,
+    /// The tree each member's candidate ref carries, as the source read it,
+    /// keyed by bloom then workpiece.
+    ///
+    /// Only the members the source could answer for appear: an absent ref and a
+    /// commit whose tree correspondence never recorded are both unanswerable,
+    /// and an unanswerable member is left out rather than entered as a drift
+    /// nobody observed.
+    pub candidate_ref_trees: &'a [(BloomId, WorkpieceId, Digest)],
+    /// The registry's known flakes — names the gate replayed green across at
+    /// least `KNOWN_FLAKE_CANDIDATES` distinct candidates (#5999).
+    pub known_flakes: &'a [KnownFlake],
 }
 
 /// Evaluate every seed invariant against `live`.
@@ -330,6 +370,20 @@ pub fn evaluate(live: &LiveState<'_>) -> DoctorReport {
         })
         .collect();
     DoctorReport { checks }
+}
+
+/// Every known flake, loudest first (#5999).
+///
+/// The coordinator stops spending attribution probes on a replayed flake the
+/// moment the gate reports one, which removes the cost but also the signal: a
+/// test that keeps failing and passing under unrelated candidates is a real
+/// defect nobody is looking at. Naming it here is what routes it to a member
+/// with the crate in its declared surface, to be fixed or quarantined.
+fn no_known_flake(live: &LiveState<'_>) -> Vec<String> {
+    live.known_flakes
+        .iter()
+        .map(|flake| format!("{} replayed green on {} candidates", flake.test_id, flake.candidates))
+        .collect()
 }
 
 fn claim_refs_name_active_blooms(live: &LiveState<'_>) -> Vec<String> {
@@ -738,6 +792,47 @@ fn open_dispatch_has_evidence(live: &LiveState<'_>) -> Vec<String> {
         .collect()
 }
 
+/// The drift between the two things that both call themselves "the member's
+/// candidate": the journal cursor's tree and the tree the candidate ref carries
+/// (#5992).
+///
+/// They are written by different halves of the coordinator — the reducer moves
+/// the cursor when an attempt is admitted, the executor pushes the ref
+/// best-effort afterwards — and nothing compared them, so a push that never
+/// happened left a healthy-looking member whose next fold merged work from
+/// hours earlier. Reported between folds, because the fold's own guard only
+/// runs when a fold runs, and the interesting window is the hours before it.
+///
+/// A claim is read before the cursor: a resolved member's claim is what the
+/// fold will offer, and an inherited claim has no cursor at all.
+fn member_candidate_ref_matches_cursor(live: &LiveState<'_>) -> Vec<String> {
+    let mut divergences = Vec::new();
+    for (bloom, workpiece, carried) in live.candidate_ref_trees {
+        let Some(record) = live.snapshot.blooms.get(bloom) else {
+            continue;
+        };
+        let Some(claimed) = record
+            .claims
+            .get(workpiece)
+            .map(|claim| claim.candidate)
+            .or_else(|| record.progress.get(workpiece).and_then(|cursor| cursor.candidate).map(|held| held.tree))
+        else {
+            continue;
+        };
+
+        if claimed != *carried {
+            divergences.push(format!(
+                "member {} on bloom {} claims candidate {} but its candidate ref carries {}",
+                workpiece.0,
+                hex_of(&bloom.0),
+                hex_of(&claimed),
+                hex_of(carried),
+            ));
+        }
+    }
+    divergences
+}
+
 fn journal_source_digests(snapshot: &Snapshot) -> BTreeSet<Digest> {
     let mut digests = BTreeSet::new();
     digests.insert(snapshot.mainline);
@@ -796,7 +891,7 @@ fn hex_of(digest: &Digest) -> String {
 mod tests {
     use std::time::Duration;
 
-    use aether_bloomery::testing::{digest, draft, membership, splice_bloom};
+    use aether_bloomery::testing::{claim, digest, draft, membership, splice_bloom};
     use aether_bloomery::{BloomId, BloomStatus, ClaimHolder, ClaimRefKind, ClaimRefState, Snapshot, WorkpieceId};
 
     use super::{
@@ -822,6 +917,8 @@ mod tests {
             lanes_running: false,
             evidence_nonces: &[],
             unresolved_head_age: None,
+            candidate_ref_trees: &[],
+            known_flakes: &[],
         }
     }
 
@@ -1330,5 +1427,65 @@ mod tests {
 
     fn hex_of(digest: &aether_bloomery::Digest) -> String {
         super::hex_of(digest)
+    }
+
+    #[test]
+    fn a_candidate_ref_behind_the_claim_it_carries_is_named_with_both_trees() {
+        // Tripwire: #5992. A Reconcile lap's candidate was never pushed, so the
+        // member's claim named the reconciled tree while its candidate ref still
+        // carried the pre-lap one. Every existing check read one side or the
+        // other and all of them passed; the drift only surfaced hours later as
+        // the fold merging work from before the lap.
+        let spec = draft(0, vec![membership("issue-5992", 1)]).seal();
+        let bloom = spec.id();
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &spec, BloomStatus::Sealed);
+        snapshot
+            .blooms
+            .get_mut(&bloom)
+            .expect("the spliced bloom is present")
+            .claims
+            .insert(WorkpieceId("issue-5992".into()), claim("issue-5992", 1, 0xC2));
+
+        let behind = [(bloom, WorkpieceId("issue-5992".into()), digest(0xC1))];
+        let mut state = live(&snapshot, &[]);
+        state.candidate_ref_trees = &behind;
+
+        let report = evaluate(&state);
+        let check = report
+            .named(Invariant::MemberCandidateRefMatchesCursor.name())
+            .expect("the seed list includes the candidate-ref check");
+        assert!(!check.passed, "a ref carrying a tree the claim does not name is a violation: {check:?}");
+        let named = check.divergences.join(" ");
+        assert!(named.contains("issue-5992"), "the drifted member is named: {named}");
+        assert!(named.contains(&hex_of(&digest(0xC2))), "the claimed tree is named: {named}");
+        assert!(named.contains(&hex_of(&digest(0xC1))), "the tree the ref actually carries is named: {named}");
+    }
+
+    #[test]
+    fn a_candidate_ref_carrying_the_claimed_tree_is_not_a_divergence() {
+        // The other half of #5992: this check runs over every member of every
+        // active bloom on every pass, so a version of it that reported the
+        // healthy case would bury the real one under the whole fleet.
+        let spec = draft(0, vec![membership("issue-5992", 1)]).seal();
+        let bloom = spec.id();
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &spec, BloomStatus::Sealed);
+        snapshot
+            .blooms
+            .get_mut(&bloom)
+            .expect("the spliced bloom is present")
+            .claims
+            .insert(WorkpieceId("issue-5992".into()), claim("issue-5992", 1, 0xC2));
+
+        let matching = [(bloom, WorkpieceId("issue-5992".into()), digest(0xC2))];
+        let mut state = live(&snapshot, &[]);
+        state.candidate_ref_trees = &matching;
+
+        let check = evaluate(&state)
+            .named(Invariant::MemberCandidateRefMatchesCursor.name())
+            .expect("the seed list includes the candidate-ref check")
+            .clone();
+        assert!(check.passed, "a ref at the claimed tree is clean: {check:?}");
     }
 }

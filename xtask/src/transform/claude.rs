@@ -3,12 +3,14 @@
 //! `review.critic` lanes run through.
 
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
 use aether_bloomery::{ModelProcessInstructions, SCOPE_FILL_COMMAND, split_lane_identity};
 
 use crate::transform::TransformArgs;
+use crate::transform::budget::Budget;
 use crate::transform::lane::{
     Resumed, execute, export_build_dir, resume_handle_rejected, resumed_prompt, without_resume,
 };
@@ -27,10 +29,6 @@ const CLAUDE: &str = "claude";
 /// rode into the scratch worktree with the sealed base, not a cwd-relative
 /// guess.
 const CONSTRUCT_SETTINGS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/transform/claude-construct.settings.json");
-
-/// Absolute path to the review critic's read-only Claude permission policy
-/// (#5172). Same argv shape as construct; no Edit, Write, or cargo.
-const REVIEW_SETTINGS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/transform/claude-review.settings.json");
 
 /// Absolute path to the scoping lane's read-only Claude permission policy.
 /// Same git reads the other two share, plus the setter; no Edit.
@@ -55,10 +53,42 @@ fn construct_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str
 }
 
 /// The review critic's argv: identical to construct except it names the
-/// read-only settings file. The critic shares this arm and used to inherit
-/// the blanket write gate; it must not keep it.
-fn review_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str>) -> Vec<String> {
-    claude_argv(model, effort, resume, REVIEW_SETTINGS)
+/// read-only policy, which is resolved per launch rather than checked in whole.
+/// The critic shares this arm and used to inherit the blanket write gate; it
+/// must not keep it.
+fn review_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str>, settings: &str) -> Vec<String> {
+    claude_argv(model, effort, resume, settings)
+}
+
+/// The file name the launch-resolved critic policy takes inside the evidence
+/// directory.
+const RESOLVED_REVIEW_SETTINGS: &str = "review-settings.json";
+
+/// Write the critic's policy for this launch: the checked-in read-only allow
+/// list plus a read grant over `out`.
+///
+/// The checked-in file cannot carry this rule, because the path it names is
+/// minted per dispatch. The grant matters because everything the lane hands the
+/// judge — the work order it is judging against, its MCP config, the report
+/// files its tools write — lives in that directory, which sits outside the
+/// checkout the default read allowance covers. A composition review that could
+/// not read its own order stopped after seven turns and was admitted as a pass
+/// with nothing in it.
+///
+/// Resolved rather than granted blanket read: the directory the lane owns is
+/// exactly what the judge needs, and nothing else on the host becomes readable.
+fn resolve_review_settings(out: &Path) -> Result<PathBuf> {
+    let out = out.canonicalize().with_context(|| format!("canonicalize {}", out.display()))?;
+    let mut settings: serde_json::Value =
+        serde_json::from_str(include_str!("claude-review.settings.json")).context("parse the review policy")?;
+    settings["permissions"]["allow"]
+        .as_array_mut()
+        .context("the review policy has no permissions.allow array")?
+        .push(serde_json::Value::String(format!("Read({}/**)", out.display())));
+
+    let path = out.join(RESOLVED_REVIEW_SETTINGS);
+    fs::write(&path, serde_json::to_vec_pretty(&settings)?).with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
 }
 
 /// The scoping lane's argv: read-only over the tree plus the setter. A
@@ -106,14 +136,15 @@ fn claude_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str>, 
 ///
 /// Prompt caching is prefix-exact (#4985). The shared bulk leads — conventions
 /// first, then the lane instructions, subject, and work-order body — and anything
-/// that varies per lane (a leading `Workpiece:` identity header, #4984) sits in a
-/// trailing `## Lane` section.
+/// that varies per lane (a leading `Workpiece:` identity header, #4984; this
+/// dispatch's remaining execution budget, #5998) sits in the trailing sections.
 pub(super) fn assemble_construct_prompt(
     bundle: &ModelProcessInstructions,
     instructions: &str,
     subject: Option<&str>,
     task: Option<&str>,
     seeded: Option<&str>,
+    budget: Option<Budget>,
 ) -> String {
     let subject_body = subject.map_or_else(
         || bundle.subject_unspecified.clone(),
@@ -128,9 +159,14 @@ pub(super) fn assemble_construct_prompt(
     let seeded_section = seeded.map_or_else(String::new, |commit| {
         format!("\n## Seeded state\n\n{}\n\n## Seeded checkpoint\n\n`{commit}`\n", bundle.seeded_state)
     });
+    // The budget varies per dispatch — the same member launched twice has
+    // different time left — so it sits at the tail with the lane identity
+    // rather than in the cached prefix.
+    let budget_section = budget.map_or_else(String::new, Budget::section);
     let lane_section = lane_identity.map_or_else(String::new, |id| format!("\n## Lane\n\n{id}\n"));
     format!(
-        "{}\n\n{instructions}\n\n## Subject\n\n{subject_body}\n{task_section}{seeded_section}{lane_section}",
+        "{}\n\n{instructions}\n\n## Subject\n\n{subject_body}\n{task_section}{seeded_section}{budget_section}\
+         {lane_section}",
         bundle.conventions
     )
 }
@@ -184,7 +220,13 @@ fn run_headless_claude_at(
     // wrapper's reading covers the whole reaped tree rather than this process.
     let mut claude = peak.command(program);
     let mut flags = if args.command == REVIEW_CRITIC {
-        review_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref())
+        let settings = resolve_review_settings(&args.out)?;
+        review_argv(
+            args.model.as_deref(),
+            args.effort.as_deref(),
+            args.resume.as_deref(),
+            &settings.display().to_string(),
+        )
     } else if args.command == SCOPE_FILL_COMMAND {
         scope_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref())
     } else {
@@ -237,14 +279,15 @@ fn run_headless_claude_at(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
     use std::path::PathBuf;
     use std::process::Command;
     use std::str;
     use std::{env, fs, process};
 
     use super::{
-        CONSTRUCT_SETTINGS, REVIEW_SETTINGS, SCOPE_SETTINGS, construct_argv, review_argv, run_headless_claude_at,
-        scope_argv, tail,
+        CONSTRUCT_SETTINGS, RESOLVED_REVIEW_SETTINGS, SCOPE_SETTINGS, construct_argv, resolve_review_settings,
+        review_argv, run_headless_claude_at, scope_argv, tail,
     };
     use crate::transform::TransformArgs;
     use crate::transform::construct::CONSTRUCT_IMPLEMENT;
@@ -294,13 +337,44 @@ mod tests {
     }
 
     #[test]
-    fn review_argv_pins_the_read_only_settings_and_not_the_bypass() {
-        let argv = review_argv(Some("claude-opus-4-8"), Some("high"), None);
+    fn review_argv_pins_the_resolved_settings_and_not_the_bypass() {
+        let argv = review_argv(Some("claude-opus-4-8"), Some("high"), None, "/tmp/evidence/review-settings.json");
         let settings_at = argv.iter().position(|a| a == "--settings").expect("review pins its settings file");
-        assert_eq!(argv[settings_at + 1], REVIEW_SETTINGS, "the critic rides the read-only policy, not construct's");
+        assert_eq!(
+            argv[settings_at + 1],
+            "/tmp/evidence/review-settings.json",
+            "the critic rides the policy resolved for this launch, not construct's",
+        );
         assert!(
             !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
             "the critic must not inherit the blanket bypass it used to share"
+        );
+    }
+
+    // Tripwire: the evidence directory is minted per dispatch, so the checked-in
+    // file cannot name it and the judge could not read the order it was judging
+    // against — one composition review stopped after seven turns over exactly
+    // this and was still admitted as a pass. The resolution must add the grant
+    // without dropping a single checked-in rule, and must not widen the policy
+    // past that directory.
+    #[test]
+    fn the_resolved_review_policy_grants_the_evidence_directory_and_keeps_every_checked_in_rule() {
+        let out = scratch_dir("resolved-settings");
+        let path = resolve_review_settings(&out).expect("the policy resolves");
+        assert_eq!(path.file_name().and_then(OsStr::to_str), Some(RESOLVED_REVIEW_SETTINGS));
+
+        let resolved = settings_allow(&fs::read_to_string(&path).expect("read the resolved policy"));
+        let canonical = out.canonicalize().expect("the evidence directory exists");
+        assert!(
+            resolved.iter().any(|entry| entry == &format!("Read({}/**)", canonical.display())),
+            "the judge is granted its own evidence directory: {resolved:?}",
+        );
+        for rule in settings_allow(include_str!("claude-review.settings.json")) {
+            assert!(resolved.contains(&rule), "the checked-in rule {rule} survives resolution: {resolved:?}");
+        }
+        assert!(
+            resolved.iter().all(|entry| !entry.starts_with("Edit(") && !entry.starts_with("Bash(cargo")),
+            "resolution grants a read, never the write gate: {resolved:?}",
         );
     }
 
@@ -477,14 +551,22 @@ mod tests {
     }
 
     #[test]
-    fn a_review_launch_injects_mcp_config_and_the_read_only_settings() {
+    fn a_review_launch_injects_mcp_config_and_the_resolved_read_only_settings() {
         let stub = Stub::succeed();
         let args = harness_stub::args(REVIEW_CRITIC, stub.out());
         let record = drive(&stub, &args, "assembled review prompt").expect("review critic");
 
         let launches = stub.launches();
         assert_eq!(launches.len(), 1, "a cold critic forks once");
-        assert_headless_claude(&launches[0], REVIEW_SETTINGS);
+        let settings = launches[0].flag("--settings").expect("the critic names its settings file");
+        assert!(settings.ends_with(RESOLVED_REVIEW_SETTINGS), "the launch-resolved policy rides argv: {settings}");
+        assert_headless_claude(&launches[0], settings);
+        assert!(
+            settings_allow(&fs::read_to_string(settings).expect("the named policy is on disk"))
+                .iter()
+                .any(|entry| entry.starts_with("Read(") && entry.ends_with("/**)")),
+            "the policy the critic actually runs under grants its evidence directory",
+        );
         let config = launches[0].flag("--mcp-config").expect("the critic names its MCP config");
         assert!(launches[0].has("--strict-mcp-config"), "the critic refuses an unreadable MCP config");
         let path = PathBuf::from(config);

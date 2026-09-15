@@ -42,6 +42,14 @@ pub(super) enum AdmissionRefusal {
     AbsentApproval { id: String },
     /// The current revision carries no work-order text.
     EmptyDescription { id: String },
+    /// A section the construct prompt is rendered from is empty on the current
+    /// revision.
+    EmptySection {
+        /// The member whose revision is incomplete.
+        id: String,
+        /// The empty field: `problem`, `design`, or `plan`.
+        section: &'static str,
+    },
     /// The commission is cancelled or landed, so it cannot be sealed.
     NotOpen { id: String },
 }
@@ -70,6 +78,9 @@ impl AdmissionRefusal {
             }
             Self::EmptyDescription { id } => {
                 format!("member {id} has an empty description; seal fails closed")
+            }
+            Self::EmptySection { id, section } => {
+                format!("member {id} scope revision section {section} is empty; seal fails closed")
             }
             Self::NotOpen { id } => {
                 format!("member {id} commission is not open; seal fails closed")
@@ -230,6 +241,13 @@ fn admit_loaded(
     }
     if revision.workpiece.0 != id {
         return Err(AdmissionRefusal::DigestMismatch { id });
+    }
+    // The revision door refuses an empty section before the bytes are ever
+    // stored, so this is the backstop over a row written before that door
+    // existed: the seal is the last point at which a lane can still be spared a
+    // prompt with a heading and no work order.
+    if let Some(section) = revision.empty_required_section() {
+        return Err(AdmissionRefusal::EmptySection { id, section });
     }
     if revision.description.trim().is_empty() {
         return Err(AdmissionRefusal::EmptyDescription { id });

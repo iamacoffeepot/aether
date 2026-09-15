@@ -47,9 +47,10 @@ use aether_actor::runtime;
 use aether_bloomery::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, BloomId,
     CancelDispatchPayload, CandidateRef, ConfigRegistry, ConfigScopes, ContextualAttemptDispatch, Digest,
-    DispatchPayload, Event, ExecutionStatus, Fact, LaneObservation, MemberPin, ModelOverride, Nonce, RedispatchPayload,
-    ReviewPass, SharedCorrespondence, SourceSnapshot, StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailureSet,
-    WorkHandle, WorkpieceId, normalize_write_paths, pin_workpiece_description,
+    DispatchPayload, Event, ExecutionLimits, ExecutionStatus, Fact, LaneObservation, MemberPin, ModelOverride, Nonce,
+    RedispatchPayload, ReviewPass, SharedCorrespondence, SourceSnapshot, StageId, StageVerdict, TimeoutRecord, Topic,
+    VerifyFailureSet, WorkHandle, WorkpieceId, WorkpieceSize, normalize_write_paths, pin_workpiece_description,
+    sized_wall_clock_secs,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_github::{GitObjectId, candidate_ref_name, member_checkpoint_ref_name, short_hex};
@@ -68,13 +69,13 @@ use crate::bloomery::executor::OutstandingDispatch;
 use crate::bloomery::executor::{ExecutorPort, ExecutorShell, Settled};
 use crate::bloomery::intake::{
     Admission, AdmissionKey, AdmitDecision, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims,
-    PendingObservation, UploadedEvidence, admit_uploaded, dispatch_and_record, dispatch_nonce, now_unix_millis,
-    run_intake_cycle_now,
+    PendingObservation, RefusedCheckpoint, UploadedEvidence, admit_uploaded, dispatch_and_record, dispatch_nonce,
+    now_unix_millis, run_intake_cycle_now,
 };
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::bloomery::precheck::PrecheckProjection;
-use crate::bloomery::provenance::drain_refusals;
+use crate::bloomery::provenance::{ProvenanceRefusal, drain_refusals, journal_refusal};
 #[cfg(any(test, feature = "testing"))]
 use crate::bloomery::study::{StudyAdmitDecision, UploadedStudyRecord, admit_study, study_evidence_event};
 #[cfg(any(test, feature = "testing"))]
@@ -127,7 +128,7 @@ mod partial_repair;
 
 mod strand;
 
-use strand::readopt_stranded_dispatches;
+use strand::{readopt_stranded_dispatches, retire_accounted_orders};
 
 mod study;
 use study::drain_and_dispatch_study;
@@ -424,6 +425,7 @@ fn expire_overdue_orders(
     tracked: &mut Vec<TrackedHandle>,
     unobserved: &[Nonce],
     now_unix_millis: u64,
+    captures: &mut Vec<CancelledCapture>,
 ) -> Vec<Admit> {
     let Stores { store, mut artifacts } = stores;
     let expired = match store.list_expired_orders(now_unix_millis) {
@@ -447,9 +449,15 @@ fn expire_overdue_orders(
         if unobserved.iter().any(|nonce| nonce.0 == order.nonce) {
             continue;
         }
-        if let Some(admit) =
-            terminate_live_order(store, artifacts.as_deref_mut(), executor, tracked, &order, TerminationCause::Deadline)
-        {
+        if let Some(admit) = terminate_live_order(
+            store,
+            artifacts.as_deref_mut(),
+            executor,
+            tracked,
+            &order,
+            TerminationCause::Deadline,
+            captures,
+        ) {
             admits.push(admit);
         }
     }
@@ -493,6 +501,7 @@ fn terminate_live_order(
     tracked: &mut Vec<TrackedHandle>,
     order: &OutstandingOrder,
     cause: TerminationCause,
+    captures: &mut Vec<CancelledCapture>,
 ) -> Option<Admit> {
     let deadline = order.deadline_unix_millis;
     let nonce = Nonce(order.nonce.clone());
@@ -529,6 +538,12 @@ fn terminate_live_order(
             return None;
         }
     }
+    // What the cancelled lane had built, if it was a construct and left a dirty
+    // tree (#5998). Collected straight after the cancel that captured it,
+    // before anything below can decline to terminate the order: the capture is
+    // read once per nonce, and a read that never happens loses the tree the
+    // cancel went out of its way to keep.
+    let kept_tree = executor.cancelled_capture(&WorkHandle::new(nonce.clone()));
     let Some(record) = DispatchRecord::from_stored(order) else {
         latch_unterminable(tracked, &nonce);
         tracing::error!(
@@ -563,6 +578,22 @@ fn terminate_live_order(
         detail,
         observation: LaneObservation { failed_verifiers, ..LaneObservation::default() },
     };
+    // The captured tree is published as a host effect rather than carried on
+    // the observation (#5998). A cancelled member admits
+    // `Fact::MemberExecutorFault` (ADR-0195), whose payload has no candidate
+    // slot — and giving it one is a journal migration, not an incidental edit:
+    // the `event` and `decisions` schema digests, every pinned upcast, and the
+    // golden fixtures that freeze them all move. So what the ref buys today is
+    // that the work exists and is named, rather than being reset with the lane
+    // slot; a retry lap resuming from it automatically is the half that waits
+    // on that migration.
+    if let Some(candidate) = kept_tree.filter(|_| record.stage == StageId::Construct) {
+        captures.push(CancelledCapture {
+            bloom: BloomId(record.bloom.0),
+            workpiece: record.workpiece.clone(),
+            candidate,
+        });
+    }
     match admit_uploaded(store, &upload) {
         Ok(AdmitDecision::Admitted(admission)) => {
             warn_terminated(cause, &record, deadline);
@@ -713,6 +744,7 @@ fn expire_silent_orders(
     pending: &[PendingObservation],
     unobserved: &[Nonce],
     silence_millis: u64,
+    captures: &mut Vec<CancelledCapture>,
 ) -> Vec<Admit> {
     let Stores { store, mut artifacts } = stores;
     record_observed_heartbeats(tracked, pending, store);
@@ -768,6 +800,7 @@ fn expire_silent_orders(
             tracked,
             &order,
             TerminationCause::HeartbeatSilence,
+            captures,
         ) {
             admits.push(admit);
         }
@@ -1052,6 +1085,38 @@ fn shared_member_advisory(
     Ok(findings)
 }
 
+/// The size band the member's sealed scope revision routed this work into.
+///
+/// [`WorkpieceSize::Medium`] whenever the revision cannot be read — a row that
+/// is not there, a store that will not answer. That is the band every member
+/// ran under before the bands existed, so a dispatch that cannot see a size
+/// runs exactly as it did; giving it the longest band instead would let an
+/// unreadable revision buy a stuck lane twice the slot.
+fn member_size(store: &mut dyn StoreBackend, record: &DispatchRecord, sequence: u64) -> WorkpieceSize {
+    match store.load_revision(record.scope_revision) {
+        Ok(Some(revision)) => WorkpieceSize::of_line(&revision.routing.size),
+        Ok(None) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                workpiece = %record.workpiece.0,
+                "no scope revision stored for the dispatched member; running its stage's middling size band",
+            );
+            WorkpieceSize::Medium
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                workpiece = %record.workpiece.0,
+                %error,
+                "the dispatched member's scope revision would not load; running its stage's middling size band",
+            );
+            WorkpieceSize::Medium
+        }
+    }
+}
+
 fn overlay_member_advisory(
     store: &mut dyn StoreBackend,
     record: &mut DispatchRecord,
@@ -1074,6 +1139,21 @@ fn overlay_member_advisory(
     let model_override =
         resolve_config::<ModelOverride>(store, ConfigScopes::bloom_wide(&record.configs))?.unwrap_or_default();
     record.transformation.model = Some(dispatch_model(record.stage, &record.profile, &model_override));
+
+    // And the size band the member's scope routed it into (#5998), on the same
+    // channel and for the same reason: the catalog authors one limit per stage,
+    // which is the middling band, and the size line lives in the sealed scope
+    // revision — a value the reducer names by digest and never reads. An hour
+    // is half of what a size L member needs and three times what a size S one
+    // does, so a flat limit either cancels finished work or lets a stuck lane
+    // hold a slot.
+    record.transformation.limits = ExecutionLimits {
+        wall_clock_secs: sized_wall_clock_secs(
+            record.stage,
+            record.transformation.limits.wall_clock_secs,
+            member_size(store, record, sequence),
+        ),
+    };
 
     // A failing verdict's persisted findings ride the same advisory channel as
     // their own labeled section (#3656, ADR-0153), so a Refine re-entry's prompt
@@ -1251,6 +1331,47 @@ fn hold_overlapping_reconcile(
         "reconcile overlaps an outstanding sibling; holding until that resolution folds",
     );
     Ok(true)
+}
+
+/// Hold a Reconcile while the same member already runs another stage.
+/// Held, not acked, so the entry re-drains after the outstanding run admits:
+/// a Reconcile raised while its member's Construct (or Verify) is still live
+/// queues here rather than opening a second lane in that same checkout
+/// (#5968).
+///
+/// Reconcile only, deliberately. A same-stage second order is the operator
+/// retry overtaking a dispatch that will never answer: the reducer mints it
+/// beside the order it overtook, which is left to the deadline sweep, and
+/// holding it would stall the retry the operator just asked for.
+fn hold_overlapping_member_dispatch(
+    store: &mut dyn StoreBackend,
+    payload: &DispatchPayload,
+    sequence: u64,
+) -> rusqlite::Result<bool> {
+    if payload.stage != StageId::Reconcile {
+        return Ok(false);
+    }
+    for live in store.list_bloom_dispatch_live(payload.bloom.as_bytes())? {
+        if live.workpiece != payload.workpiece.0 {
+            continue;
+        }
+        let Ok(stage) = from_bytes::<StageId>(&live.stage) else {
+            continue;
+        };
+        if stage == StageId::Reconcile {
+            continue;
+        }
+        tracing::info!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            bloom = %short_hex(&payload.bloom),
+            workpiece = %payload.workpiece.0,
+            live_nonce = %live.nonce,
+            "member already runs another stage; holding this reconcile until it admits",
+        );
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// True when this outbox row already has a *live* dispatch — submitted on
@@ -1730,10 +1851,18 @@ fn submit_dispatch_entry(
 ) -> rusqlite::Result<DispatchSubmit> {
     // The record's axes come from the payload's explicit fields (ADR-0152):
     // the true scope revision always, and the displayed digest — what the
-    // returning evidence must bind to — the candidate tree when the member
-    // has one, else the scope revision. `subject` (inputs[0]) agrees with
-    // the displayed digest by reducer construction.
-    let displayed = payload.candidate.unwrap_or(payload.scope_revision);
+    // returning evidence must bind to. A Construct order always displays the
+    // scope revision: a held candidate is the checkout the lane starts from,
+    // never the subject the evidence binds to (#5968). Every other stage
+    // displays the candidate tree when the member has one, else the scope
+    // revision. `subject` (inputs[0]) must agree with the displayed digest;
+    // a malformed order is refused here, before a worker can bind to the
+    // wrong digest and pay for a candidate intake must discard.
+    let displayed = if payload.stage == StageId::Construct {
+        payload.scope_revision
+    } else {
+        payload.candidate.unwrap_or(payload.scope_revision)
+    };
     let mut record = DispatchRecord {
         nonce: dispatch_nonce(sequence),
         bloom: BloomId(payload.bloom),
@@ -1748,6 +1877,22 @@ fn submit_dispatch_entry(
         instruction_bundle: None,
         prompt_manifest: None,
     };
+    if record.transformation.inputs.first() != Some(&displayed) {
+        let subject = record.transformation.inputs.first().map_or_else(|| "none".to_owned(), Digest::to_hex);
+        let shown = displayed.to_hex();
+        let refusal = ProvenanceRefusal::SubmitRefused(format!(
+            "transformation subject {subject} does not match displayed digest {shown}"
+        ));
+        tracing::error!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            workpiece = %record.workpiece.0,
+            stage = ?record.stage,
+            "dispatch subject does not match displayed digest; refusing the order before a lane binds to it",
+        );
+        journal_refusal(store, &record, &refusal);
+        return Ok(DispatchSubmit::Refused);
+    }
 
     if let Err(error) = overlay_member_advisory(store, &mut record, sequence) {
         if let StoreConfigError::Store(error) = error {
@@ -1898,6 +2043,10 @@ fn drain_and_dispatch(
             break;
         }
         if hold_overlapping_reconcile(store, &payload, entry.sequence)? {
+            held = true;
+            continue;
+        }
+        if hold_overlapping_member_dispatch(store, &payload, entry.sequence)? {
             held = true;
             continue;
         }
@@ -2837,12 +2986,63 @@ pub fn candidate_push_at(refuse: bool, repo: impl Into<PathBuf>, remote: impl In
     }
 }
 
+/// A tree a cancelled construct lane left behind, waiting to be published to
+/// its member-checkpoint ref (#5998).
+///
+/// Its own value rather than a `LaneObservation` field because the cancel's
+/// admitted fact cannot carry it — see [`terminate_live_order`].
+struct CancelledCapture {
+    /// The bloom the cancelled member belongs to.
+    bloom: BloomId,
+    /// The member whose checkpoint ref the capture lands on.
+    workpiece: WorkpieceId,
+    /// The captured tree and its capture commit.
+    candidate: CandidateRef,
+}
+
+/// Name each cancelled construct capture's publication, so the tree a lane had
+/// built when its limit passed is reachable at a named ref rather than reset
+/// with the lane slot behind it (#5998).
+///
+/// The same ref and the same best-effort posture
+/// [`admitted_candidate_pushes`] gives a failing construct's capture: a push
+/// that does not answer leaves the commit local to the coordinator's own
+/// repository, which is still one lookup better than a checkout that was
+/// cleaned.
+fn cancelled_capture_pushes(
+    captures: &[CancelledCapture],
+    correspondence: Option<&SharedCorrespondence>,
+) -> Vec<PendingPublish> {
+    captures
+        .iter()
+        .filter_map(|capture| {
+            let commit = resolve_capture_commit(correspondence, &capture.workpiece, &capture.candidate)?;
+            Some(PendingPublish {
+                bloom: BloomId(capture.bloom.0),
+                workpiece: capture.workpiece.clone(),
+                target_ref: member_checkpoint_ref_name(&capture.bloom, &capture.workpiece.0),
+                commit_hex: commit.to_hex(),
+                kind: "cancelled member checkpoint",
+            })
+        })
+        .collect()
+}
+
 /// Name the bloom ref each admitted capture publishes to (ADR-0152). A passing
-/// construct or refine goes to [`candidate_ref_name`]; a failing construct that
-/// still captured work goes to [`member_checkpoint_ref_name`]. Refine is in the
-/// passing arm because a composition weave-repair capture is the head landing
-/// will create its branch from — skipping it leaves that commit local-only and
-/// the land loop 422s on an object the source repository has never seen.
+/// construct, refine or reconcile goes to [`candidate_ref_name`]; a failing
+/// construct that still captured work goes to [`member_checkpoint_ref_name`].
+/// Refine is in the passing arm because a composition weave-repair capture is
+/// the head landing will create its branch from — skipping it leaves that commit
+/// local-only and the land loop 422s on an object the source repository has
+/// never seen.
+///
+/// Reconcile is in it for the sharper version of the same reason (#5992): the
+/// whole point of an ADR-0189 lap is to produce a candidate the *next fold*
+/// merges, and the fold reads [`candidate_ref_name`], never the cursor. Left
+/// out, the lap's commit stayed local-only, the fold re-merged the
+/// pre-Reconcile one, raised the identical collision, and wedged the member at
+/// Reconcile with its budget spent — with the cursor still advancing, so the
+/// member read healthy the whole way.
 ///
 /// The push itself shells `git` (a force-push to the hosted repo, or a local
 /// authority's `update-ref`), so it does not happen here: the caller queues each
@@ -2860,7 +3060,7 @@ fn admitted_candidate_pushes(
             Fact::AttemptCompleted {
                 bloom,
                 workpiece,
-                stage: StageId::Construct | StageId::Refine,
+                stage: StageId::Construct | StageId::Refine | StageId::Reconcile,
                 passed: true,
                 candidate: Some(candidate),
                 ..
@@ -2884,6 +3084,31 @@ fn admitted_candidate_pushes(
             target_ref,
             commit_hex: commit.to_hex(),
             kind,
+        });
+    }
+    pending
+}
+
+/// Name the member checkpoint ref for each refused Construct capture (#5968).
+/// The same arm a failing construct's capture takes, reached from the refusal
+/// path that never admits: a refused claim is a bookkeeping fault, and the
+/// tree the model built is preserved before any reset discards it.
+fn refused_checkpoint_pushes(
+    refused: &[RefusedCheckpoint],
+    correspondence: Option<&SharedCorrespondence>,
+) -> Vec<PendingPublish> {
+    let mut pending = Vec::new();
+    for checkpoint in refused {
+        let target_ref = member_checkpoint_ref_name(&checkpoint.bloom, &checkpoint.workpiece.0);
+        let Some(commit) = resolve_capture_commit(correspondence, &checkpoint.workpiece, &checkpoint.candidate) else {
+            continue;
+        };
+        pending.push(PendingPublish {
+            bloom: checkpoint.bloom,
+            workpiece: checkpoint.workpiece.clone(),
+            target_ref,
+            commit_hex: commit.to_hex(),
+            kind: "member checkpoint",
         });
     }
     pending
@@ -3184,6 +3409,7 @@ fn pull_and_admit<Now: FnMut() -> u64>(
     // evidence, spending a retry to hide a transport blip. A deferred sweep
     // costs one poll interval and the transport re-drives; a wrong sweep
     // destroys the attempt.
+    let mut captures = Vec::new();
     let timed_out = if completion_was_observed {
         expire_overdue_orders(
             Stores { store, artifacts: artifacts.as_deref_mut() },
@@ -3191,6 +3417,7 @@ fn pull_and_admit<Now: FnMut() -> u64>(
             tracked,
             &report.unobserved,
             deadline_unix_millis,
+            &mut captures,
         )
     } else {
         Vec::new()
@@ -3209,6 +3436,7 @@ fn pull_and_admit<Now: FnMut() -> u64>(
             &report.pending,
             &report.unobserved,
             clock.heartbeat_silence_millis,
+            &mut captures,
         )
     } else {
         Vec::new()
@@ -3227,8 +3455,13 @@ fn pull_and_admit<Now: FnMut() -> u64>(
     // Name each admitted passing capture's publication so the caller can queue
     // it: the follow-on stage can be dispatched to a zero-secret Actions runner
     // that must fetch it, so it wants to be reachable on the hosted repo as
-    // soon as the push answers (ADR-0152).
-    let publications = admitted_candidate_pushes(&sink.0, correspondence);
+    // soon as the push answers (ADR-0152). Refused Construct captures ride the
+    // same member checkpoint arm so a bookkeeping refusal never discards the
+    // tree the lane built (#5968), and a cancelled lane's capture publishes the
+    // same way so a lane stopped at its limit keeps its tree (#5998).
+    let mut publications = admitted_candidate_pushes(&sink.0, correspondence);
+    publications.extend(refused_checkpoint_pushes(&report.refused_checkpoints, correspondence));
+    publications.extend(cancelled_capture_pushes(&captures, correspondence));
 
     let admits = sink.0.into_iter().map(|admission| admission.admit).chain(timed_out).chain(silenced).collect();
     (admits, publications)
@@ -3437,6 +3670,19 @@ fn observe_construct_work(
     admits
 }
 
+/// Retire orders the journal already accounts for, warning instead of failing
+/// the tick.
+///
+/// Issue 5980: a completion that reached the journal without spending its order,
+/// or a second completion reduced to a duplicate, leaves a submitted row that
+/// relaunches until the bloom lands. Retiring each turn keeps those nonces out
+/// of relaunch reach as new orphans appear; boot covers the ones already there.
+fn retire_accounted_orders_logged(store: &mut dyn StoreBackend) {
+    if let Err(error) = retire_accounted_orders(store) {
+        tracing::warn!(%error, "accounted-order retire failed; orphans re-check next turn");
+    }
+}
+
 /// One turn of the reactor's loop: drain + submit, sweep the lanes' writes,
 /// pull + admit, journal what the publisher answered, and hand every call this
 /// turn asked for to a worker.
@@ -3551,6 +3797,7 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
             Clocks { tick: &clock, now: now_unix_millis },
             correspondence.as_ref(),
         );
+        retire_accounted_orders_logged(store);
         // After the pull, because the verdict this pass reads is one the pull
         // just recorded: a scoping run's verdict lands on the commission store's
         // own ledger and has no `Fact` to ride, so the ledger is what says a run
@@ -3685,6 +3932,13 @@ impl NativeActor for ExecutorReactorCapability {
         // permanently parked. Re-queue those for the ordinary drain. A read
         // fault fails boot for the same reason the two above do.
         let restranded = readopt_stranded_dispatches(&mut store).map_err(|e| BootError::Other(Box::new(e)))?;
+        // Retire orders the journal already accounts for (issue 5980): a
+        // completion that reached the journal without spending its order, or a
+        // second completion reduced to a duplicate, leaves a submitted row with
+        // no tracked run that relaunches until the bloom lands. Consuming here
+        // puts those nonces out of relaunch reach at boot; the per-tick pass
+        // below keeps them retired as new orphans appear.
+        let retired = retire_accounted_orders(&mut store).map_err(|e| BootError::Other(Box::new(e)))?;
         // The fourth leg, and a scoping run's own (ADR-0208): a run that passed
         // while a binary without the freeze was deployed left its commission
         // with no revision, and its evidence is still on disk. A boot that
@@ -3711,6 +3965,7 @@ impl NativeActor for ExecutorReactorCapability {
             readopted = reconciled.readopted.len(),
             reclaimed = reconciled.reclaimed,
             requeued = restranded.len(),
+            retired = retired.len(),
             scopes_frozen = backfilled,
             "executor dispatch reactor mounted; polling the store for dispatch decisions",
         );

@@ -1,9 +1,9 @@
 //! Read-only live operator board for the Bloomery coordinator.
 //!
-//! A shell owns the endpoint, the resource store, a three-pane workspace,
+//! A shell owns the endpoint, the resource store, a four-pane workspace,
 //! and a stack of pushed detail frames. Two fetch threads (`live` / `bulk`)
 //! perform HTTP; the event loop only drains replies. At rest the workspace
-//! lays out board, needs-you, and quiet; a drill-in replaces the middle band
+//! lays out board, needs-you, quiet, and journal; a drill-in replaces the middle band
 //! with the top frame. The crate mirrors the REST JSON locally so hex digests
 //! deserialize and unknown enum variants degrade rather than killing the
 //! poll; it never writes back.

@@ -25,7 +25,9 @@
 //! outbox row.
 
 use aether_bloomery::control::ScopeDispatchPayload;
-use aether_bloomery::{Digest, StageCatalog, StageId, Transformation, WorkpieceId, pin_workpiece_description};
+use aether_bloomery::{
+    AgentProfile, Digest, ModelOverride, StageCatalog, StageId, Transformation, WorkpieceId, pin_workpiece_description,
+};
 use aether_data::wire::to_vec;
 
 use crate::store::{ScopeRunOpen, ScopeRunRow, StoreBackend};
@@ -61,9 +63,16 @@ pub fn scope_run_subject(commission: &WorkpieceId, intent: Digest, base: Digest)
 /// [`Transformation::for_scoping_run`](aether_bloomery::Transformation::for_scoping_run)
 /// rather than a hand-built literal, because that constructor is what keeps
 /// the dispatched wall-clock limit tied to the stage being dispatched. The
-/// binding and the seat come from the compiled line: pre-bloom means there is
-/// no sealed catalog, so the compiled line is the authority, exactly as
-/// `stage_binding` already falls back for a bloom that sealed none.
+/// binding comes from the compiled line: pre-bloom means there is no sealed
+/// catalog, so the compiled line is the authority, exactly as `stage_binding`
+/// already falls back for a bloom that sealed none.
+///
+/// The seat resolves from the run's `model_override` before that line is
+/// consulted (issue 5945): each set field of the override wins over the
+/// compiled Scope calibration, and an empty override dispatches the line. The
+/// override rides the run's own record rather than a bloom registry — there
+/// is no bloom here — and its digest is stored on the run so the journal and
+/// the console can name the model that filled the workpiece.
 ///
 /// `sketch` is the commission's intent text, threaded onto the
 /// transformation's advisory description so the lane's `## Task` section
@@ -82,6 +91,7 @@ pub fn scope_dispatch_payload(
     base: Digest,
     sketch: &str,
     instructions: Option<Digest>,
+    model_override: &ModelOverride,
 ) -> ScopeDispatchPayload {
     let binding = StageCatalog::binding_of(StageId::Scope);
     let subject = scope_run_subject(&commission, intent, base);
@@ -96,13 +106,25 @@ pub fn scope_dispatch_payload(
         stage: StageId::Scope,
         transformation,
         // The seat the drain resolves onto the dispatched transformation, so
-        // the lane forks the harness and model this line calibrates rather
-        // than the operator's ambient CLI default. No `ModelOverride` narrows
-        // it — that type is sealed into a *bloom's* registry, and there is no
-        // bloom here — so the compiled line is the whole answer.
-        profile: StageCatalog::profile_of(StageId::Scope),
+        // the lane forks the harness and model the run chose rather than the
+        // operator's ambient CLI default: the run's override resolved over
+        // the compiled line's Scope seat.
+        profile: scope_seat(model_override),
         instructions,
     }
+}
+
+/// The seat one scoping run dispatches under: the run's override resolved
+/// against the compiled line's Scope calibration.
+///
+/// The one place that rule lives for the pre-bloom path. The drain resolves
+/// the payload's profile through the default override, which falls through to
+/// exactly this seat, so what the order shows is what this computed.
+#[must_use]
+pub fn scope_seat(model_override: &ModelOverride) -> AgentProfile {
+    let calibrated = StageCatalog::profile_of(StageId::Scope);
+    let resolved = model_override.resolve(StageId::Scope, &calibrated);
+    AgentProfile { harness: resolved.harness, model: resolved.model, effort: resolved.effort, tools: calibrated.tools }
 }
 
 /// Where a commission's scoping stands, read off its append-only run ledger.
@@ -207,6 +229,10 @@ pub enum ScopeRunRefusal {
 /// termination rule says the run is over, build the payload, and write the
 /// `enqueued` row and its outbox row in one transaction.
 ///
+/// The compiled line's Scope seat runs: the same as
+/// [`open_scope_run_with_override`] with no override, kept so callers that
+/// name no seat keep compiling against the pre-seat shape.
+///
 /// Returns the outbox sequence, ordinal, and subject the run landed at — the
 /// sequence the drain mints its `dispatch_nonce` from, so a caller can name
 /// the dispatch before it happens.
@@ -220,6 +246,29 @@ pub fn open_scope_run(
     base: Digest,
     sketch: &str,
 ) -> Result<OpenedScopeRun, ScopeRunRefusal> {
+    open_scope_run_with_override(store, commission, intent, base, sketch, &ModelOverride::default(), None)
+}
+
+/// Open a scoping run whose seat resolves from `model_override` before the
+/// compiled line is consulted (issue 5945).
+///
+/// `model_override_digest` is the config address the override was resolved
+/// from, stored on the run's `enqueued` row beside the seat it produced — so
+/// the journal and the console name the model that filled the workpiece
+/// rather than the line's calibration. `None` is a run opened without an
+/// override (or with an empty one), which records no digest.
+///
+/// # Errors
+/// A refusal from the termination rule, an encode failure, or a store fault.
+pub fn open_scope_run_with_override(
+    store: &mut dyn StoreBackend,
+    commission: &WorkpieceId,
+    intent: Digest,
+    base: Digest,
+    sketch: &str,
+    model_override: &ModelOverride,
+    model_override_digest: Option<Digest>,
+) -> Result<OpenedScopeRun, ScopeRunRefusal> {
     let rows = store.list_scope_runs(&commission.0).map_err(|error| ScopeRunRefusal::Store(error.to_string()))?;
     match scope_run_state(&rows) {
         ScopeRunState::InFlight { ordinal } => return Err(ScopeRunRefusal::AlreadyInFlight { ordinal }),
@@ -231,7 +280,8 @@ pub fn open_scope_run(
     let ordinal =
         store.next_scope_run_ordinal(&commission.0).map_err(|error| ScopeRunRefusal::Store(error.to_string()))?;
     let instructions = unique_authorized_pin(store)?;
-    let payload = scope_dispatch_payload(commission.clone(), ordinal, intent, base, sketch, instructions);
+    let payload =
+        scope_dispatch_payload(commission.clone(), ordinal, intent, base, sketch, instructions, model_override);
     let encoded = to_vec(&payload).map_err(|error| ScopeRunRefusal::Encode(error.to_string()))?;
 
     let sequence = store
@@ -242,6 +292,7 @@ pub fn open_scope_run(
             base: base.as_bytes().as_slice(),
             subject: payload.subject.as_bytes().as_slice(),
             instructions: instructions.as_ref().map(|pin| pin.as_bytes().as_slice()),
+            model_override: model_override_digest.as_ref().map(|digest| digest.as_bytes().as_slice()),
             payload: &encoded,
         })
         .map_err(|error| ScopeRunRefusal::Store(error.to_string()))?;
@@ -260,10 +311,14 @@ fn unique_authorized_pin(store: &mut dyn StoreBackend) -> Result<Option<Digest>,
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery::testing::digest;
-    use aether_bloomery::{StageCatalog, StageId, WorkpieceId};
+    use std::collections::BTreeMap;
 
-    use super::{ScopeRunState, scope_run_state, scope_run_subject};
+    use aether_bloomery::testing::digest;
+    use aether_bloomery::{
+        AgentSelection, Harness, ModelOverride, ReasoningEffort, StageCatalog, StageId, StageOverride, WorkpieceId,
+    };
+
+    use super::{ScopeRunState, scope_dispatch_payload, scope_run_state, scope_run_subject};
     use crate::store::ScopeRunRow;
 
     fn row(ordinal: u64, kind: &str) -> ScopeRunRow {
@@ -275,6 +330,7 @@ mod tests {
             verdict: None,
             revision: (kind == "frozen").then(|| digest(7).as_bytes().to_vec()),
             instructions: None,
+            model_override: None,
         }
     }
 
@@ -313,6 +369,42 @@ mod tests {
         rows.push(row(budget, "enqueued"));
         rows.push(row(budget, "verdict"));
         assert_eq!(scope_run_state(&rows), ScopeRunState::Exhausted { attempts: budget });
+    }
+
+    #[test]
+    fn the_payload_seat_resolves_from_the_run_override_before_the_compiled_line() {
+        // The plausible bug: the payload always carries the compiled Scope
+        // seat, so a run that named its seat still dispatches the line — and
+        // the recorded digest names a model that never ran.
+        let commission = WorkpieceId("issue-1".to_owned());
+        let compiled = StageCatalog::profile_of(StageId::Scope);
+
+        let plain = scope_dispatch_payload(
+            commission.clone(),
+            1,
+            digest(1),
+            digest(2),
+            "sketch",
+            None,
+            &ModelOverride::default(),
+        );
+        assert_eq!(plain.profile, compiled, "no override dispatches the line");
+
+        let override_ = ModelOverride {
+            per_stage: BTreeMap::from([(
+                StageId::Scope,
+                StageOverride {
+                    agent: Some(AgentSelection { harness: Harness::Grok, model: String::from("grok-4.6") }),
+                    reasoning_effort: Some(ReasoningEffort::High),
+                },
+            )]),
+            ..ModelOverride::default()
+        };
+        let seated = scope_dispatch_payload(commission, 1, digest(1), digest(2), "sketch", None, &override_);
+        assert_eq!(seated.profile.harness, Harness::Grok, "the run's Scope pin wins over the line");
+        assert_eq!(seated.profile.model, "grok-4.6");
+        assert_eq!(seated.profile.effort, ReasoningEffort::High);
+        assert_eq!(seated.profile.tools, compiled.tools, "the override names no tools, so the line's stand");
     }
 
     #[test]

@@ -74,8 +74,8 @@ pub fn gated(command: &str) -> bool {
 /// Every variant names what was pinned and where the trail went cold, so the
 /// refusal reads without a debugger. Only [`Self::Store`] is transient — the
 /// rest are statements about immutable content, an immutable authorization
-/// set, or this host's own boot configuration, and will answer identically on
-/// every retry.
+/// set, this host's own boot configuration, or an executor that will not take
+/// the order, and will answer identically on every retry.
 #[derive(Debug)]
 pub enum ProvenanceRefusal {
     /// The dispatch's sealed configuration pins no instruction bundle. An
@@ -121,6 +121,15 @@ pub enum ProvenanceRefusal {
     /// The store faulted while resolving the pin. Transient: it says nothing
     /// about the content.
     Store(rusqlite::Error),
+    /// The executor refused the submit permanently, so the lane never ran.
+    ///
+    /// Not produced by [`admit_model_dispatch`]: the study drain sees it after
+    /// the gate has passed, when the backend itself will not take the order
+    /// (a disabled workflow, missing knobs, argv the kernel will not take).
+    /// The reader has one attempt, so this is the study going missing with
+    /// the refusal as evidence rather than a parked outbox row nobody reads
+    /// (ADR-0216).
+    SubmitRefused(String),
 }
 
 impl ProvenanceRefusal {
@@ -164,6 +173,7 @@ impl fmt::Display for ProvenanceRefusal {
                  configuration, not by failure"
             ),
             Self::Store(error) => write!(f, "instruction-bundle lookup failed: {error}"),
+            Self::SubmitRefused(detail) => write!(f, "executor refused the submit permanently: {detail}"),
         }
     }
 }

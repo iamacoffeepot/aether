@@ -125,6 +125,12 @@ impl ApiCapabilityState {
     }
 
     /// `POST /commissions/{id}/scope-runs` — open a pre-bloom scoping run.
+    ///
+    /// A `profile` with no `model_override` digest is refused rather than run
+    /// on the compiled seat: the coordinator holds no profile registry, so a
+    /// bare name is one the filing path never resolved, and running it anyway
+    /// would bill a seat nobody chose. The store resolves a carried digest to
+    /// its override and refuses that in turn when it names no `ModelOverride`.
     pub(super) fn enqueue_scope_run(&self, request: &HttpServerRequest, id: &str) -> Routed {
         if let Err(response) = authorize(request, &self.control_token) {
             return Routed::Reply(response);
@@ -133,7 +139,21 @@ impl ApiCapabilityState {
             Ok(body) => body,
             Err(error) => return Routed::Reply(error_response(400, &format!("invalid scope-run body: {error}"))),
         };
-        Routed::EnqueueScopeRun(EnqueueScopeRun { id: id.to_owned(), base: body.base.as_bytes().to_vec() })
+        if body.profile.is_some() && body.model_override.is_none() {
+            let name = body.profile.as_deref().unwrap_or_default();
+            return Routed::Reply(error_response(
+                400,
+                &format!(
+                    "unknown profile `{name}`: the coordinator holds no profile registry; resolve the profile at \
+                     filing time and send its model-override digest"
+                ),
+            ));
+        }
+        Routed::EnqueueScopeRun(EnqueueScopeRun {
+            id: id.to_owned(),
+            base: body.base.as_bytes().to_vec(),
+            model_override: body.model_override.map(|digest| digest.as_bytes().to_vec()),
+        })
     }
 
     /// `POST /commissions/{id}/revisions` — write a scope revision.
@@ -628,6 +648,9 @@ pub(super) fn revision_response(result: WriteScopeRevisionResult) -> HttpServerR
         WriteScopeRevisionResult::SurfaceGap { paths } => {
             error_response(422, &format!("declared surface does not cover {}", paths.join(", ")))
         }
+        WriteScopeRevisionResult::EmptySection { section } => {
+            error_response(422, &format!("scope revision section {section} is empty"))
+        }
     }
 }
 
@@ -777,6 +800,7 @@ pub(super) fn scope_run_response(result: EnqueueScopeRunResult) -> HttpServerRes
         EnqueueScopeRunResult::Exhausted { attempts } => {
             error_response(409, &format!("scoping run retry budget spent ({attempts} attempts)"))
         }
+        EnqueueScopeRunResult::UnknownModelOverride { error } => error_response(400, &error),
         EnqueueScopeRunResult::Err { error } => error_response(500, &format!("scope-run enqueue failed: {error}")),
     }
 }

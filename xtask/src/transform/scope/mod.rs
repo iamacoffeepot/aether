@@ -14,6 +14,7 @@ mod anchors;
 mod door;
 mod paths;
 
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf, absolute};
@@ -103,7 +104,7 @@ fn assemble_scope_prompt(
     run_dir: &Path,
     setter: &str,
 ) -> String {
-    let mut prompt = assemble_construct_prompt(bundle, &bundle.scope, subject, task, None);
+    let mut prompt = assemble_construct_prompt(bundle, &bundle.scope, subject, task, None, None);
     prompt.push_str(&emission_section(bundle, run_dir, setter));
     prompt
 }
@@ -194,6 +195,8 @@ fn finalize(args: &TransformArgs, run_dir: &Path, run: LaneRun) -> Value {
                 Ok(description) => revision.description = description,
                 Err(finding) => refusals.push(finding),
             }
+            refusals
+                .extend(revision.empty_required_section().map(|section| door::empty_section(&workpiece.0, section)));
 
             let (status, findings) = terminal(&refusals);
             stamp_scope_evidence(
@@ -275,13 +278,21 @@ struct Projection {
 /// A backticked anchor's defining paths enter it only when
 /// [`anchors::calibrate`] reads the anchor as a claim about this work: a common
 /// word resolves definitions in crates the workpiece never touches, and
-/// demanding coverage of those refuses a run for naming a word.
+/// demanding coverage of those refuses a run for naming a word. A mixed-case
+/// homonym — defined inside the surface and also, as a different item, outside
+/// the surface's reverse-dependency closure — is discounted the same way.
 fn project_verify_input(steps: &[String], surface: &[String], rev: &str) -> Result<Projection> {
     let mut named_paths = named_paths_from_plan(steps, &paths::index(rev)?);
     let mut named_symbols = Vec::new();
     let mut discounted = Vec::new();
+    let symbols = symbols_from_plan(steps);
+    let closure = if symbols.is_empty() {
+        BTreeSet::new()
+    } else {
+        anchors::surface_closure(surface)?
+    };
 
-    for symbol in symbols_from_plan(steps) {
+    for symbol in symbols {
         match references::search(&symbol, rev, surface)? {
             ReferenceSearch::Unresolvable { symbol, .. } => {
                 named_symbols.push(NamedSymbol { symbol, definitions: Vec::new() });
@@ -294,13 +305,11 @@ fn project_verify_input(steps: &[String], surface: &[String], rev: &str) -> Resu
                     .map(|classified| Definition { path: classified.path, covered: classified.covered })
                     .collect();
 
-                let anchor = anchors::calibrate(&definitions);
-                if anchor.demands_coverage() {
-                    named_paths.extend(definitions.iter().map(|definition| NamedPath {
-                        path: definition.path.clone(),
-                        origin: PathOrigin::InverseSearch { symbol: symbol.clone() },
-                    }));
-                }
+                let anchor = anchors::calibrate(&definitions, &closure);
+                named_paths.extend(anchor.demanding(&definitions, &closure).map(|definition| NamedPath {
+                    path: definition.path.clone(),
+                    origin: PathOrigin::InverseSearch { symbol: symbol.clone() },
+                }));
                 discounted.extend(anchor.note(&symbol));
 
                 let definitions = definitions.into_iter().map(|definition| definition.path).collect();
@@ -374,17 +383,20 @@ mod tests {
     use std::{env, process};
 
     #[test]
-    fn a_run_that_authored_only_problem_plan_and_surface_still_freezes_sealably() {
+    fn a_run_that_authored_the_required_sections_and_a_surface_freezes_sealably() {
         // The minimum a scoper can author, replayed and frozen the way
         // `finalize` freezes it. The seal door refuses a member whose stored
-        // revision carries an empty description, and its completeness gate
-        // counts an empty model routing as zero routings — so a revision frozen
-        // from the builder's own defaults is unsealable on both counts, which is
-        // what refused all three of 2026-09-13's lane-frozen revisions.
+        // revision carries an empty description, its completeness gate counts an
+        // empty model routing as zero routings, and every door that admits a
+        // revision refuses an empty problem, design or plan — so a revision
+        // frozen from the builder's own defaults is unsealable on all three
+        // counts, which is what refused all three of 2026-09-13's lane-frozen
+        // revisions.
         let run = env::temp_dir().join(format!("aether-scope-freeze-{}", process::id()));
         let _ = remove_dir_all(&run);
         for (kind, value) in [
             (FieldKind::Problem, "Step 3 calls a concrete path a glob. The seal door disagrees."),
+            (FieldKind::Approach, "Rewrite the step to name a directory glob."),
             (FieldKind::PlanStep, "Rewrite step 3 in xtask/src/transform/scope/scope_instructions.md."),
             (FieldKind::DeclaredSurface, "xtask/src/**"),
         ] {
@@ -394,9 +406,10 @@ mod tests {
 
         let mut revision = replay(WorkpieceId(String::from("issue-5924")), &calls)
             .finish(None, door::routing(&owned(winning_texts(&calls, FieldKind::RoutingHint))))
-            .expect("problem, plan and surface are a fillable workpiece");
+            .expect("problem, design, plan and surface are a fillable workpiece");
         assert!(!revision.routing.model.trim().is_empty(), "the gate counts this as one model routing");
         assert!(revision.description.is_empty(), "the builder renders none, so the lane has to derive one");
+        assert_eq!(revision.empty_required_section(), None, "no door refuses this revision for an empty section");
 
         revision.description = door::description(
             Some("Workpiece: issue-5924\n\nan order with no heading of its own\n"),
@@ -420,7 +433,7 @@ mod tests {
         let mut bundle = fixture_bundle();
         bundle.conventions = conventions::section(include_str!("../lane_context.md"));
         bundle.scope_emission = "Fill each authored field via cargo xtask scope set.".to_owned();
-        let construct = assemble_construct_prompt(&bundle, &bundle.construct, subject, task, None);
+        let construct = assemble_construct_prompt(&bundle, &bundle.construct, subject, task, None, None);
         let run = Path::new("/run/scope-nonce-test");
         let scope = assemble_scope_prompt(&bundle, subject, task, run, "cargo xtask");
         let prefix_len = construct.bytes().zip(scope.bytes()).take_while(|(a, b)| a == b).count();
@@ -481,6 +494,50 @@ mod tests {
         assert!(!verify_scope(&projection.input).refused(), "and the freeze is not refused for naming it");
         assert!(
             projection.discounted.iter().any(|note| note.contains("`truncate`")),
+            "the dropped demand is stated: {:?}",
+            projection.discounted,
+        );
+    }
+
+    #[test]
+    fn a_homonym_outside_the_surface_closure_does_not_refuse_the_freeze() {
+        // Reconstructs issue-5929: `Pending` is defined in the chassis and, as
+        // an unrelated item, in `aether-substrate`. One foreign crate sits
+        // under the spread limit, so spread alone kept the demand. Substrate
+        // is outside the bloomery reverse-dependency closure, so the homonym
+        // is discounted and does not enter the refusing population.
+        let steps = vec![String::from("Record the `Pending` receipt exactly as the seal path does.")];
+        let surface = vec![
+            String::from("crates/aether-bloomery/src/**"),
+            String::from("crates/aether-chassis-bloomery/src/**"),
+            String::from("crates/aether-harness-bloomery/src/**"),
+        ];
+        let Ok(projection) = project_verify_input(&steps, &surface, "HEAD") else {
+            return;
+        };
+
+        let origin = PathOrigin::InverseSearch { symbol: String::from("Pending") };
+        assert!(
+            !projection
+                .input
+                .named_paths
+                .iter()
+                .any(|named| named.origin == origin && named.path.contains("aether-substrate")),
+            "substrate Pending must not enter the refusing population: {:?}",
+            projection.input.named_paths,
+        );
+        let pending = projection
+            .input
+            .named_symbols
+            .iter()
+            .find(|named| named.symbol == "Pending")
+            .expect("the anchor is reported, not deleted");
+        assert!(
+            pending.definitions.iter().any(|path| path.contains("aether-substrate")),
+            "the homonym stays in named_symbols: {pending:?}",
+        );
+        assert!(
+            projection.discounted.iter().any(|note| note.contains("`Pending`")),
             "the dropped demand is stated: {:?}",
             projection.discounted,
         );

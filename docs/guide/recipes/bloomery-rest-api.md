@@ -459,8 +459,12 @@ class as `host_class`. An empty runtime class keeps legacy execution available
 but refuses shared work; the enabled policy has no implicit class.
 `WarmSerial` checks each member's own tree in one retained warm slot;
 `Contextual` checks an immutable composed tree and retains contextual member
-proofs. Ready work coalesces at dispatch without an arrival wait. Group size
-has no fixed two-member ceiling. Running inputs stay immutable.
+proofs. Ready work coalesces at dispatch without an arrival wait — and only
+when a prove slot is free. Model lanes
+(`AETHER_BLOOMERY_MAX_CONCURRENT_LANES`) and `verify.*` dispatches
+(`AETHER_BLOOMERY_MAX_CONCURRENT_PROVERS`) are separate host knobs; size the
+prove ceiling to one concurrent build per eight host cores. Group size has no
+fixed two-member ceiling. Running inputs stay immutable.
 
 `/view` exposes `coordination`, including the selected head and coverage,
 member starting contexts, logical requests, shared runs, outcomes, and head

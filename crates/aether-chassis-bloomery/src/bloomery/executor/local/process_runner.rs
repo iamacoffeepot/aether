@@ -292,6 +292,7 @@ impl TransformRunner for ProcessTransformRunner {
         let mut lane = self.lane_override.as_ref().unwrap_or(&spec.entrypoint).command();
         construct_lane_env(&mut lane, inherited_env());
         export_build_env(&mut lane, spec);
+        export_execution_deadline(&mut lane, spec);
         export_instruction_manifest(&mut lane, spec).map_err(LocalExecutorError::Io)?;
         lane.current_dir(spec.worktree_dir);
         // Command, `--out`, `--nonce`, and the optional `--diff-base` /
@@ -578,6 +579,20 @@ fn export_instruction_manifest(lane: &mut Command, spec: &RunSpec<'_>) -> io::Re
 ///
 /// A `build_jobs` of zero states no cap, leaving cargo's default of one job per
 /// core — an explicit `CARGO_BUILD_JOBS=0` is a cargo error, not "unlimited".
+/// Tell the lane when the coordinator cancels it (#5998).
+///
+/// The environment for the reason [`aether_bloomery::EXECUTION_DEADLINE_ENV`]
+/// states: the lane's own `xtask` is compiled from the sealed subject tree, so
+/// a new argv flag is one an already-sealed dispatch cannot parse, while an
+/// environment key an older lane does not read costs nothing. Set after
+/// [`construct_lane_env`] for the same reason the build pairing is — the
+/// constructed environment is what this adds to.
+fn export_execution_deadline(lane: &mut Command, spec: &RunSpec<'_>) {
+    if let Some(deadline_unix_millis) = spec.deadline_unix_millis {
+        lane.env(aether_bloomery::EXECUTION_DEADLINE_ENV, deadline_unix_millis.to_string());
+    }
+}
+
 fn export_build_env(lane: &mut Command, spec: &RunSpec<'_>) {
     // Unix lanes reach the slot's target through the checkout's `target`
     // symlink ([`link_slot_target`]) instead of this export: the absolute
@@ -1247,6 +1262,7 @@ mod tests {
             entrypoint: LaneProgram::default(),
             instruction_bundle: None,
             instruction_bundle_digest: None,
+            deadline_unix_millis: None,
         }
     }
 

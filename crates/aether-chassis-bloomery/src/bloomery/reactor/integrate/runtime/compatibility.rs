@@ -3,9 +3,9 @@
 use std::collections::BTreeSet;
 
 use aether_bloomery::{
-    CandidateRef, Checkpoint, CompatibilityPreview, CompatibilityPreviewPlan, CompositionPlan, Digest, Evidence,
-    EvidenceKind, IntegrateOutcome, MemberPin, MemberVerifyRequest, SharedRunMode, SharedRunNode, SharedRunPlan,
-    SharedRunPreparation, SurfacePattern, VerificationObligation,
+    CandidateRef, Checkpoint, CompatibilityPreview, CompatibilityPreviewPlan, CompositionInput, CompositionPlan,
+    Digest, Evidence, EvidenceKind, IntegrateOutcome, MemberPin, MemberVerifyRequest, SharedRunMode, SharedRunNode,
+    SharedRunPlan, SharedRunPreparation, SurfacePattern, VerificationObligation,
 };
 use aether_bloomery_github::SourceError;
 
@@ -78,8 +78,18 @@ pub(super) fn prepare_shared_run<C: CommissionBackend>(
                 head = Some(next);
             }
             Ok(IntegrateOutcome::Conflict { at, paths, diff, .. }) => {
-                let diagnostic = conflict_diagnostic_for("Shared run", plan.digest(), 0, &paths, &diff);
-                return refused_shared_with(at, diagnostic);
+                let at = CandidateRef { tree: at, checkout: head.unwrap_or(composition.base.candidate.checkout) };
+                let diagnostic = shared_run_conflict_diagnostic(plan, input, composition.base.node, &paths, &diff);
+                let evidence = Evidence {
+                    subject: at.tree,
+                    kind: EvidenceKind::FoldConflict,
+                    detail: Digest::of_wire_bytes(diagnostic.as_bytes()),
+                };
+                return SharedPreparationResult::Diagnosed {
+                    preparation: SharedRunPreparation::Conflict { input: input.clone(), at, evidence },
+                    diagnostic,
+                    parent: at.tree,
+                };
             }
             Ok(IntegrateOutcome::StaleCheckpoint { actual }) => {
                 return refused_shared(
@@ -340,6 +350,35 @@ fn conflict_diagnostic_for(kind: &str, plan: Digest, observation: u64, paths: &[
     diagnostic
 }
 
+fn shared_run_conflict_diagnostic(
+    plan: &SharedRunPlan,
+    input: &CompositionInput,
+    head: Digest,
+    paths: &[String],
+    diff: &str,
+) -> String {
+    use core::fmt::Write;
+
+    let mut diagnostic = format!(
+        "Shared run {} could not place composition {} onto head {}.\n",
+        plan.digest().to_hex(),
+        input.node.to_hex(),
+        head.to_hex(),
+    );
+    if !paths.is_empty() {
+        diagnostic.push_str("\nConflicting paths:\n");
+        for path in paths {
+            let _ = writeln!(diagnostic, "- {path}");
+        }
+    }
+    if !diff.trim().is_empty() {
+        diagnostic.push_str("\nConflicted contribution:\n\n");
+        diagnostic.push_str(diff.trim());
+        diagnostic.push('\n');
+    }
+    diagnostic
+}
+
 #[cfg(test)]
 mod tests {
     use core::fmt::Write as _;
@@ -371,6 +410,7 @@ mod tests {
         first: CandidateRef,
         second: CandidateRef,
         prepared: CandidateRef,
+        conflicted: CandidateRef,
     }
 
     fn git(repo: &Path, args: &[&str], input: &str) -> String {
@@ -424,6 +464,8 @@ mod tests {
         let second = candidate(&fake, digest(12), &second_tree, from_ref(&base_sha), "second");
         let first_sha = fake.resolve_backend_object(&first.checkout).expect("lookup").expect("first object");
         let first_sha = GitObjectId::try_from(first_sha).expect("first git id").to_hex();
+        let conflicted_tree = tree(&repo, &[("a.txt", "other")]);
+        let conflicted = candidate(&fake, digest(14), &conflicted_tree, from_ref(&base_sha), "conflicted");
         let prepared_tree = tree(&repo, &[("a.txt", "a"), ("repair.txt", "repair")]);
         let prepared = candidate(&fake, digest(13), &prepared_tree, &[base_sha, first_sha], "prepared reconcile merge");
         let source = SourceShell::new(Arc::new(GitSource::new(
@@ -432,7 +474,7 @@ mod tests {
             false,
             MainlineRef::default(),
         )));
-        SourceFixture { _root: root, fake, source, base, first, second, prepared }
+        SourceFixture { _root: root, fake, source, base, first, second, prepared, conflicted }
     }
 
     fn profile() -> AgentProfile {
@@ -596,9 +638,13 @@ mod tests {
 
         let result = prepare_shared_run(&fixture.source, &mut store, &plan(bloom, fixture.base, requests));
 
-        let SharedPreparationResult::Diagnosed { diagnostic, .. } = result else {
+        let SharedPreparationResult::Diagnosed { diagnostic, preparation, .. } = result else {
             panic!("the first member's own surface must refuse");
         };
+        assert!(
+            matches!(preparation, SharedRunPreparation::Refused { .. }),
+            "an approved-surface refusal is not a composition conflict: {preparation:?}"
+        );
         assert!(diagnostic.contains("a.txt"), "the refusal names the path its own surface omitted: {diagnostic}");
         assert!(
             fixture.fake.list_matching_refs("heads/bloom/").expect("list refs").is_empty(),
@@ -632,6 +678,34 @@ mod tests {
             panic!("the current pinned head and contribution prepare");
         };
         assert_eq!(node.coverage, vec![inherited, request.member]);
+    }
+
+    #[test]
+    fn shared_preparation_conflict_names_the_colliding_input() {
+        let fixture = source_fixture();
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        let bloom = BloomId(digest(7));
+        let first_scope = approved_scope(&mut store, "first", &["a.txt"]);
+        let second_scope = approved_scope(&mut store, "second", &["a.txt"]);
+        let requests = vec![
+            request(bloom, "first", first_scope, &fixture.base, fixture.first),
+            request(bloom, "second", second_scope, &fixture.base, fixture.conflicted),
+        ];
+
+        let result = prepare_shared_run(&fixture.source, &mut store, &plan(bloom, fixture.base, requests.clone()));
+
+        let SharedPreparationResult::Diagnosed { preparation, diagnostic, .. } = result else {
+            panic!("two members rewriting the same path must collide");
+        };
+        let SharedRunPreparation::Conflict { input, at, evidence } = preparation else {
+            panic!("the collision is a composition conflict, not a refusal: {preparation:?}");
+        };
+        assert_eq!(input, requests[1].input);
+        assert_eq!(evidence.kind, EvidenceKind::FoldConflict);
+        assert_eq!(evidence.subject, at.tree);
+        assert!(diagnostic.contains("Conflicting paths"), "{diagnostic}");
+        assert!(diagnostic.contains("a.txt"), "{diagnostic}");
+        assert!(diagnostic.contains("Conflicted contribution"), "{diagnostic}");
     }
 
     #[test]

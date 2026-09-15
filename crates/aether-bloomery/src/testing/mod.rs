@@ -328,6 +328,7 @@ impl Default for CommissionProjection {
             status: String::new(),
             recorded_issue: None,
             title: String::new(),
+            scope: None,
         }
     }
 }

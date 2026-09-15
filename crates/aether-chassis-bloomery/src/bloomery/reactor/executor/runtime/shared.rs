@@ -11,8 +11,8 @@ use aether_bloomery::{
     Evidence, EvidenceKind, ExecutionStatus, Fact, FailureScope, IdempotencyKey, MAX_VERIFIER_IDENTITIES, MemberPin,
     MemberVerifyLatency, MemberVerifyOutcome, ModelOverride, Nonce, PartialHeadRepairCompletion,
     PartialHeadRepairDispatch, PartialHeadRepairPayload, SharedRunCompletion, SharedRunDispatch,
-    SharedRunDispatchPayload, SharedRunExecution, SharedRunMode, StageId, StageVerdict, StudyCall, StudyCost, Topic,
-    VerificationObligation, VerifyFailure, VerifyFailureSet, VerifyProof, WorkHandle, WorkpieceId,
+    SharedRunDispatchPayload, SharedRunExecution, SharedRunMode, SharedRunNode, StageId, StageVerdict, StudyCall,
+    StudyCost, Topic, VerificationObligation, VerifyFailure, VerifyFailureSet, VerifyProof, WorkHandle, WorkpieceId,
     construction_nonce_digest,
 };
 use aether_data::wire::{from_bytes, to_vec};
@@ -33,9 +33,9 @@ use crate::bloomery::study::{
 };
 use crate::bloomery::{
     BatchCheck, BatchFailure, BatchMember, BatchProbeReceipt, BatchProbeRequest, BatchProgress, BatchReport,
-    ContextualProofReuse, HostClass, ProbeVerdict, ProofResult, contextual_bundle_reports, contextual_fact_key,
-    dispatch_model, findings::verification_findings_key, next_batch_probe, observed_probe_verdict,
-    record_contextual_facts, reuse_contextual_proof,
+    ContextualProofReuse, HostClass, KNOWN_FLAKE_CANDIDATES, ProbeVerdict, contextual_bundle_reports,
+    contextual_fact_key, dispatch_model, findings::verification_findings_key, next_batch_probe, observed_failed_tests,
+    observed_probe_verdict, record_contextual_facts, record_green_contextual_facts, reuse_contextual_proof,
 };
 use crate::store::{
     CommissionBackend, ConstructionAdmissionRow, OrderLifecycle, PartialHeadRepairRow, SharedRunLifecycle,
@@ -117,7 +117,11 @@ fn logical_deadline(now_unix_millis: u64, request: &aether_bloomery::MemberVerif
 }
 
 fn contextual_record(dispatch: &aether_bloomery::ContextualAttemptDispatch, nonce: Nonce) -> DispatchRecord {
-    let displayed = dispatch.candidate.unwrap_or(dispatch.scope_revision);
+    let displayed = if dispatch.stage == StageId::Construct {
+        dispatch.scope_revision
+    } else {
+        dispatch.candidate.unwrap_or(dispatch.scope_revision)
+    };
     DispatchRecord {
         nonce,
         bloom: dispatch.bloom,
@@ -1032,6 +1036,7 @@ fn submit_step(
             findings: None,
             cost: None,
             calls: None,
+            replayed_flakes: Vec::new(),
             contextual_observations: None,
             probe_verdict: Some(ProbeVerdict::Infrastructure),
         };
@@ -1247,6 +1252,12 @@ fn complete_observed_step(
         (SharedStepDescriptor::Probe(_), None) => Some(ProbeVerdict::Unknown),
         _ => None,
     };
+    let duration_millis = upload
+        .observation
+        .duration_millis
+        .or_else(|| upload.observation.cost.map(|cost| cost.duration_millis))
+        .filter(|millis| *millis > 0)
+        .unwrap_or(0);
     let receipt = SharedStepReceipt {
         invocation: Digest::of_wire_bytes(format!("{}:{}", step.nonce, upload.detail.to_hex()).as_bytes()),
         evidence: evidence_for(upload.verdict, upload.subject, upload.detail),
@@ -1256,11 +1267,12 @@ fn complete_observed_step(
         findings: upload.observation.findings,
         cost: upload.observation.cost,
         calls: upload.observation.calls,
+        replayed_flakes: upload.observation.replayed_flakes,
         contextual_observations,
         probe_verdict,
     };
     let bytes = encode_host(&receipt)?;
-    if store.complete_shared_run_step(&step.nonce, &bytes, receipt.cost.map_or(0, |cost| cost.duration_millis))? {
+    if store.complete_shared_run_step(&step.nonce, &bytes, duration_millis)? {
         project_shared_findings(store, dispatch, &receipt)?;
         if matches!(descriptor, SharedStepDescriptor::ContextualFull { .. }) {
             record_independent_contextual_facts(store, dispatch, step, &receipt, host_class)?;
@@ -1277,12 +1289,9 @@ fn record_independent_contextual_facts(
     receipt: &SharedStepReceipt,
     host_class: &HostClass,
 ) -> rusqlite::Result<()> {
-    let (SharedRunExecution::Contextual { node, .. }, Some(composition), Some(observations), Some(bloom)) = (
-        &dispatch.execution,
-        dispatch.plan.composition.as_ref(),
-        receipt.contextual_observations.as_deref(),
-        dispatch_bloom(dispatch),
-    ) else {
+    let (SharedRunExecution::Contextual { node, .. }, Some(composition), Some(bloom)) =
+        (&dispatch.execution, dispatch.plan.composition.as_ref(), dispatch_bloom(dispatch))
+    else {
         return Ok(());
     };
     if !contextual_contract_valid(dispatch)
@@ -1291,6 +1300,21 @@ fn record_independent_contextual_facts(
     {
         return Ok(());
     }
+    if receipt.verdict == StageVerdict::VerificationPassed
+        && let Err(error) = record_green_contextual_facts(
+            store,
+            node,
+            &composition.contract,
+            host_class,
+            &step.nonce,
+            bloom.0.as_bytes(),
+        )
+    {
+        tracing::warn!(%error, nonce = %step.nonce, "contextual proof facts were not recorded");
+    }
+    let Some(observations) = receipt.contextual_observations.as_deref() else {
+        return Ok(());
+    };
     let current = match contextual_bundle_reports(observations, &step.nonce, node, &composition.contract) {
         Ok(reports) => reports,
         Err(error) => {
@@ -1375,7 +1399,7 @@ fn same_contextual_fact_input(left: &SharedRunDispatch, right: &SharedRunDispatc
             == contextual_fact_key(right_node, &right_composition.contract)
 }
 
-fn contextual_receipt_matches_node(receipt: &SharedStepReceipt, node: &aether_bloomery::SharedRunNode) -> bool {
+fn contextual_receipt_matches_node(receipt: &SharedStepReceipt, node: &SharedRunNode) -> bool {
     receipt.verdict != StageVerdict::ExecutorFault
         && receipt.evidence.kind == EvidenceKind::VerificationResult
         && receipt.evidence.subject == node.candidate.tree
@@ -1398,6 +1422,7 @@ fn settle_refused_preparation(store: &mut dyn StoreBackend, step: &SharedRunStep
         findings: None,
         cost: None,
         calls: None,
+        replayed_flakes: Vec::new(),
         contextual_observations: None,
         probe_verdict: Some(ProbeVerdict::Unknown),
     };
@@ -1650,14 +1675,34 @@ fn batch_members(dispatch: &SharedRunDispatch) -> Vec<BatchMember> {
     derive_batch_members(&requests, inputs)
 }
 
-fn declared_failed_checks(dispatch: &SharedRunDispatch, receipt: &SharedStepReceipt, nonce: &str) -> Vec<BatchCheck> {
+/// The failing checks this receipt declares, minus the tests `excused` names.
+///
+/// A flake the gate already replayed green is excused (#5999): the verdict on
+/// such a test is the replay's, and a probe would spend a whole-workspace base
+/// run re-deriving a question that is already answered. A gate whose named
+/// failures are all excused still keeps today's gate-level treatment, because
+/// the gate identity's own red is a separate declaration — a nominally green
+/// umbrella with a declared raw red gate still enters diagnosis (ADR-0218).
+fn declared_failed_checks(
+    dispatch: &SharedRunDispatch,
+    receipt: &SharedStepReceipt,
+    nonce: &str,
+    excused: &BTreeSet<String>,
+) -> Vec<BatchCheck> {
     let Some(composition) = dispatch.plan.composition.as_ref() else {
         return Vec::new();
     };
-    composition
+    let named = receipt
+        .contextual_observations
+        .as_deref()
+        .and_then(|bytes| observed_failed_tests(bytes, nonce).ok())
+        .unwrap_or_default();
+    let named_gates: BTreeSet<&str> = named.iter().map(|(gate, _)| gate.as_str()).collect();
+    let mut checks: Vec<BatchCheck> = composition
         .contract
         .gate_identities
         .iter()
+        .filter(|identity| !named_gates.contains(identity.as_str()))
         .map(|identity| BatchCheck::Gate { id: identity.clone() })
         .filter(|check| {
             receipt.failed_verifier_names.iter().any(|failed| failed == check.gate())
@@ -1665,7 +1710,33 @@ fn declared_failed_checks(dispatch: &SharedRunDispatch, receipt: &SharedStepRece
                     matches!(observed_probe_verdict(bytes, nonce, check), Ok(ProbeVerdict::Failed))
                 })
         })
-        .collect()
+        .collect();
+    checks.extend(
+        named.into_iter().filter(|(_, id)| !excused.contains(id)).map(|(gate, id)| BatchCheck::Test { gate, id }),
+    );
+    checks
+}
+
+/// The tests this step must not be probed on (#5999): the flakes its own gate
+/// replayed green, and the names the registry already knows flake across
+/// distinct candidates.
+///
+/// Recording runs here rather than at intake because this is where a contextual
+/// step's receipt is read against the node it tested, and the registry's unit is
+/// `(test, candidate)` — a name that flaked twice under one candidate is one
+/// observation, and it is the spread across candidates that makes it a known
+/// flake rather than a property of one tree.
+fn excused_flakes(
+    store: &mut dyn StoreBackend,
+    node: &SharedRunNode,
+    receipt: &SharedStepReceipt,
+) -> rusqlite::Result<BTreeSet<String>> {
+    for test in &receipt.replayed_flakes {
+        store.record_replayed_flake(test, node.candidate.tree.as_bytes().as_slice())?;
+    }
+    let mut excused = receipt.replayed_flakes.iter().cloned().collect::<BTreeSet<_>>();
+    excused.extend(store.known_flakes(KNOWN_FLAKE_CANDIDATES)?.into_iter().map(|row| row.test_id));
+    Ok(excused)
 }
 
 fn contextual_run_passed(verdict: StageVerdict, failed_checks: &[BatchCheck]) -> bool {
@@ -1700,41 +1771,30 @@ fn retained_probe_receipts(
         });
     }
 
-    let (Some(bytes), SharedRunExecution::Contextual { node, .. }, Some(composition)) =
-        (initial_receipt.contextual_observations.as_deref(), &dispatch.execution, dispatch.plan.composition.as_ref())
-    else {
+    let Some(bytes) = initial_receipt.contextual_observations.as_deref() else {
         return Ok(receipts);
     };
-    let Ok(reports) = contextual_bundle_reports(bytes, &initial.nonce, node, &composition.contract) else {
-        return Ok(receipts);
-    };
+    let members: Vec<WorkpieceId> =
+        dispatch.plan.requests.iter().map(|request| request.member.workpiece.clone()).collect();
     for check in checks {
-        let key = check.observation_key();
-        for (repetition, report) in reports
-            .iter()
-            .filter(|report| report.gate == check.gate())
-            .filter_map(|report| {
-                report.report.outcomes().find(|(observed, _)| *observed == key).map(|(_, verdict)| (report, verdict))
-            })
-            .take(2)
-            .enumerate()
-        {
-            receipts.push(BatchProbeReceipt {
-                request: BatchProbeRequest {
-                    plan: dispatch.plan.digest(),
-                    members: dispatch.plan.requests.iter().map(|request| request.member.workpiece.clone()).collect(),
-                    baseline: None,
-                    check: check.clone(),
-                    repetition: u8::try_from(repetition).unwrap_or(1),
-                },
-                invocation: report.0.invocation,
-                verdict: match report.1 {
-                    ProofResult::Green => ProbeVerdict::Passed,
-                    ProofResult::Red => ProbeVerdict::Failed,
-                },
-                evidence: initial_receipt.evidence.detail,
-            });
+        let Ok(verdict) = observed_probe_verdict(bytes, &initial.nonce, check) else {
+            continue;
+        };
+        if matches!(verdict, ProbeVerdict::Unknown | ProbeVerdict::Infrastructure) {
+            continue;
         }
+        receipts.push(BatchProbeReceipt {
+            request: BatchProbeRequest {
+                plan: dispatch.plan.digest(),
+                members: members.clone(),
+                baseline: None,
+                check: check.clone(),
+                repetition: 0,
+            },
+            invocation: initial_receipt.invocation,
+            verdict,
+            evidence: initial_receipt.evidence.detail,
+        });
     }
     Ok(receipts)
 }
@@ -1773,6 +1833,7 @@ fn probe_materialization(
         .flat_map(|input| input.members.iter().map(|pin| pin.workpiece.clone()))
         .filter(|workpiece| outstanding.contains(workpiece))
         .collect::<BTreeSet<_>>();
+    let candidate_checkout = probe.members.is_empty().then_some(transformation.checkout);
     let request = SharedProbePreparationRequest {
         run: Digest::from_slice(&row.run)
             .ok_or_else(|| rusqlite::Error::InvalidParameterName("shared run identity is not a digest".to_owned()))?,
@@ -1784,6 +1845,7 @@ fn probe_materialization(
         transformation: (**transformation).clone(),
         profile: profile.clone(),
         configs: configs.clone(),
+        candidate_checkout,
     };
     let descriptor = encode_host(&SharedStepDescriptor::Probe(Box::new(request.clone())))?;
     let prepared = if materialized == selected {
@@ -1992,7 +2054,7 @@ fn contextual_terminal_outcomes(
         tracing::warn!(nonce = %step.nonce, "contextual receipt does not decode; the run holds rather than settles");
         return Ok(None);
     };
-    let checks = declared_failed_checks(dispatch, &receipt, &step.nonce);
+    let checks = declared_failed_checks(dispatch, &receipt, &step.nonce, &excused_flakes(store, node, &receipt)?);
     if contextual_run_passed(receipt.verdict, &checks) {
         return Ok(Some(
             dispatch
@@ -2131,35 +2193,104 @@ fn retain_contextual_proof_reuse(
     row: &SharedRunRow,
     dispatch: &SharedRunDispatch,
     host_class: &HostClass,
-) -> rusqlite::Result<bool> {
+) -> rusqlite::Result<Option<Vec<Admit>>> {
     if dispatch.plan.mode != SharedRunMode::Contextual
         || store.shared_run_proof_reuse(&row.run)?.is_some()
         || !store.shared_run_steps(&row.run)?.is_empty()
     {
-        return Ok(false);
+        return Ok(None);
     }
     let (SharedRunExecution::Contextual { node, .. }, Some(composition), Some(artifacts)) =
         (&dispatch.execution, dispatch.plan.composition.as_ref(), artifacts)
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let Some(witness) = reuse_contextual_proof(store, node, &composition.contract, host_class)? else {
-        return Ok(false);
+        return Ok(None);
     };
     let witness_bytes = encode_host(&witness)?;
     let parents = vec![node.digest().to_hex(), composition.contract.digest().to_hex()];
     let PutResult::Ok { digest } = artifacts.put(&witness_bytes, &parents) else {
-        return Ok(false);
+        return Ok(None);
     };
     let Some(detail) = Digest::from_hex(&digest) else {
-        return Ok(false);
+        return Ok(None);
     };
     let reuse = ReusedContextualProof {
         witness,
         evidence: Evidence { subject: node.candidate.tree, kind: EvidenceKind::VerificationResult, detail },
     };
+    let Some(bloom) = dispatch_bloom(dispatch) else {
+        store.record_shared_run_proof_reuse(&row.run, &encode_host(&reuse)?)?;
+        return Ok(Some(Vec::new()));
+    };
+    let Some(run) = Digest::from_slice(&row.run) else {
+        store.record_shared_run_proof_reuse(&row.run, &encode_host(&reuse)?)?;
+        return Ok(Some(Vec::new()));
+    };
+    let closure = contextual_fact_key(node, &composition.contract).digest();
+    let mut admits = Vec::new();
+    for fact in &reuse.witness.facts {
+        let event = Event {
+            idempotency_key: IdempotencyKey(format!("aether.bloomery.proof_reused:{}:{}", run.to_hex(), fact.gate)),
+            fact: Fact::ProofReused {
+                bloom,
+                gate: fact.gate.clone(),
+                closure,
+                producing_dispatch: fact.producing_dispatch.clone(),
+            },
+        };
+        if !store.journal_holds_any(from_ref(&event.idempotency_key.0))? {
+            admits.extend(admit(&event));
+        }
+    }
     store.record_shared_run_proof_reuse(&row.run, &encode_host(&reuse)?)?;
-    Ok(true)
+    Ok(Some(admits))
+}
+
+/// Retire scalar `Verify` orders a shared run already advances (issue 5980).
+///
+/// A member verified through a shared physical run advances off its lap via
+/// `Fact::SharedRunCompleted`, which carries no intake order to consume. A
+/// scalar `Verify` dispatched for the same member — the fallback when the
+/// shared request already existed — stays `submitted` with no tracked run
+/// behind it and relaunches until the bloom lands. Consuming those orphans
+/// here puts them out of relaunch reach; the shared steps themselves are
+/// already consumed via their receipt path, so only scalar rows match (shared
+/// steps carry a physical run, partial repairs their own ownership).
+fn retire_scalar_verifies_for_shared_completion(
+    store: &mut dyn StoreBackend,
+    bloom: BloomId,
+    dispatch: &SharedRunDispatch,
+) -> rusqlite::Result<()> {
+    let workpieces = dispatch.plan.requests.iter().map(|request| &request.member.workpiece).collect::<Vec<_>>();
+    for live in store.list_bloom_dispatch_live(bloom.0.as_bytes())? {
+        if !workpieces.iter().any(|workpiece| workpiece.0 == live.workpiece) {
+            continue;
+        }
+        let Ok(stage) = from_bytes::<StageId>(&live.stage) else {
+            continue;
+        };
+        if stage != StageId::Verify {
+            continue;
+        }
+        if store.shared_step_physical_run(&live.nonce)?.is_some() {
+            continue;
+        }
+        if store.partial_head_repair_for_nonce(&live.nonce)? {
+            continue;
+        }
+        if store.consume_order(&live.nonce)? {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %live.nonce,
+                workpiece = %live.workpiece,
+                "shared verification already advances this member; retiring its scalar verify order so it is not \
+                 relaunched",
+            );
+        }
+    }
+    Ok(())
 }
 
 fn replay_completion(
@@ -2197,6 +2328,12 @@ fn replay_completion(
     let completion = SharedRunCompletion { plan: dispatch.plan.digest(), run, outcomes, unfinished, latencies };
     let bloom = dispatch_bloom(&dispatch)
         .ok_or_else(|| rusqlite::Error::InvalidParameterName("shared run requests disagree on bloom".to_owned()))?;
+    // Retire scalar orphans this completion already advances (issue 5980). A
+    // fault warns and continues; the completion admit below is what must not
+    // be lost, and the per-tick accounted pass re-checks orphans next turn.
+    if let Err(error) = retire_scalar_verifies_for_shared_completion(store, bloom, &dispatch) {
+        tracing::warn!(%error, "scalar verify retire failed; orphans re-check next turn");
+    }
     let event = completion_event(bloom, completion);
     if store.journal_holds_any(from_ref(&event.idempotency_key.0))? {
         if matches!(executor.release_physical_run(&run), Settled::Answered(Ok(()))) {
@@ -2410,7 +2547,10 @@ pub(super) fn drive_shared_runs(
         if !matches!(current.lifecycle, SharedRunLifecycle::Ready | SharedRunLifecycle::Running) {
             continue;
         }
-        if retain_contextual_proof_reuse(store, artifacts.as_deref_mut(), &current, &dispatch, host_class)? {
+        if let Some(reused) =
+            retain_contextual_proof_reuse(store, artifacts.as_deref_mut(), &current, &dispatch, host_class)?
+        {
+            admits.extend(reused);
             admits.extend(finish_if_terminal(store, executor, &current, &dispatch, now_unix_millis)?);
             continue;
         }
@@ -2467,6 +2607,7 @@ fn cancelled_receipt(step: &SharedRunStepRow) -> SharedStepReceipt {
         findings: None,
         cost: None,
         calls: None,
+        replayed_flakes: Vec::new(),
         contextual_observations: None,
         probe_verdict: Some(ProbeVerdict::Unknown),
     }
@@ -2849,6 +2990,150 @@ mod tests {
         assert!(contextual_run_passed(StageVerdict::VerificationPassed, &[]));
     }
 
+    fn named_test_bundle(nonce: &str, test: &str, failed: bool) -> Vec<u8> {
+        let result = if failed {
+            "failed"
+        } else {
+            "passed"
+        };
+        let mut outcomes = serde_json::Map::new();
+        outcomes.insert("gate:verify.test".to_owned(), serde_json::json!(result));
+        outcomes.insert(format!("test:{test}"), serde_json::json!(result));
+        serde_json::to_vec(&serde_json::json!({
+            "protocol": 1,
+            "documents": [{
+                "protocol": 1,
+                "nonce": nonce,
+                "gate": "verify.test",
+                "invocations": [{
+                    "invocation": Digest::from_bytes([11; 32]),
+                    "at": serde_json::Value::Null,
+                    "outcomes": outcomes
+                }]
+            }]
+        }))
+        .expect("named test observation fixture encodes")
+    }
+
+    #[test]
+    fn named_failing_tests_replace_the_gate_check() {
+        let dispatch = reducer_shaped_contextual_dispatch();
+        let test = "aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack";
+        let receipt = SharedStepReceipt {
+            invocation: Digest::from_bytes([1; 32]),
+            evidence: Evidence {
+                subject: Digest::from_bytes([2; 32]),
+                kind: EvidenceKind::VerificationResult,
+                detail: Digest::from_bytes([3; 32]),
+            },
+            verdict: StageVerdict::VerificationFailed,
+            failed_verifiers: VerifyFailureSet::one(VerifyFailure::Test),
+            failed_verifier_names: vec!["verify.test".to_owned()],
+            findings: None,
+            cost: None,
+            calls: None,
+            replayed_flakes: Vec::new(),
+            contextual_observations: Some(named_test_bundle("step", test, true)),
+            probe_verdict: None,
+        };
+
+        assert_eq!(
+            declared_failed_checks(&dispatch, &receipt, "step", &BTreeSet::new()),
+            vec![BatchCheck::Test { gate: "verify.test".to_owned(), id: test.to_owned() }]
+        );
+    }
+
+    /// The receipt a green contextual step brings back when its gate named one
+    /// test as failed and `replayed` names the ones it then replayed green.
+    fn flaky_green_receipt(test: &str, replayed: &[&str]) -> SharedStepReceipt {
+        SharedStepReceipt {
+            invocation: Digest::from_bytes([1; 32]),
+            evidence: Evidence {
+                subject: Digest::from_bytes([2; 32]),
+                kind: EvidenceKind::VerificationResult,
+                detail: Digest::from_bytes([3; 32]),
+            },
+            verdict: StageVerdict::VerificationPassed,
+            failed_verifiers: VerifyFailureSet::default(),
+            failed_verifier_names: Vec::new(),
+            findings: None,
+            cost: None,
+            calls: None,
+            replayed_flakes: replayed.iter().map(|name| (*name).to_owned()).collect(),
+            contextual_observations: Some(named_test_bundle("step", test, true)),
+            probe_verdict: None,
+        }
+    }
+
+    fn contextual_node(dispatch: &SharedRunDispatch) -> SharedRunNode {
+        let SharedRunExecution::Contextual { node, .. } = &dispatch.execution else {
+            panic!("the fixture dispatch is contextual")
+        };
+        (**node).clone()
+    }
+
+    #[test]
+    fn a_flake_the_gate_replayed_green_names_no_failing_check() {
+        // The plausible bug, and the one that was live (#5999): a green shared
+        // run over three members recorded one GPU timing flake and the
+        // coordinator followed it with three whole-workspace base probes of six
+        // to thirteen minutes each — on a verdict the replay had already
+        // settled. The named-test channel still carries the first failure, so
+        // nothing but the flake ledger can tell the two apart.
+        let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+        let dispatch = reducer_shaped_contextual_dispatch();
+        let test = "aether-render pipeline::tests::the_timing_window_holds";
+        let receipt = flaky_green_receipt(test, &[test]);
+
+        let excused = excused_flakes(&mut store, &contextual_node(&dispatch), &receipt).expect("the registry records");
+        let checks = declared_failed_checks(&dispatch, &receipt, "step", &excused);
+
+        assert!(checks.is_empty(), "the verdict is the replay's, so nothing is left to probe: {checks:?}");
+        assert!(contextual_run_passed(receipt.verdict, &checks), "the run settles green");
+    }
+
+    #[test]
+    fn a_name_two_candidates_have_flaked_is_known_and_never_probed() {
+        // The registry's whole point: the GPU timing test and the git fixture
+        // both flaked repeatedly across unrelated candidates today and nothing
+        // remembered it. A name the registry knows is never probed again, even
+        // on a run whose own gate reported it as a plain failure.
+        let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+        let dispatch = reducer_shaped_contextual_dispatch();
+        let test = "aether-bloomery-github object_repo_mints_the_same_sha_as_the_local_backend";
+        for candidate in [[7_u8; 32], [8; 32]] {
+            store.record_replayed_flake(test, candidate.as_slice()).expect("the registry records");
+        }
+
+        let known = store.known_flakes(KNOWN_FLAKE_CANDIDATES).expect("the registry reads");
+        assert_eq!(known.len(), 1, "one name is known: {known:?}");
+        assert_eq!(known[0].candidates, 2, "across the two distinct candidates that recorded it");
+
+        let receipt = flaky_green_receipt(test, &[]);
+        let excused = excused_flakes(&mut store, &contextual_node(&dispatch), &receipt).expect("the registry reads");
+        let checks = declared_failed_checks(&dispatch, &receipt, "step", &excused);
+
+        assert!(checks.is_empty(), "a known flake is reported, not probed: {checks:?}");
+    }
+
+    #[test]
+    fn one_candidate_flaking_twice_is_one_observation_and_not_yet_known() {
+        // Tripwire: the registry's unit is the *distinct candidate*, not the
+        // observation. A racy fixture a member introduced flakes over and over
+        // under its own tree; that is the member's defect, and calling it a
+        // known flake would excuse the very test its candidate broke.
+        let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+        let test = "aether-substrate scheduler::tests::the_slot_closes";
+        for _ in 0..4 {
+            store.record_replayed_flake(test, [9_u8; 32].as_slice()).expect("the registry records");
+        }
+
+        assert!(
+            store.known_flakes(KNOWN_FLAKE_CANDIDATES).expect("the registry reads").is_empty(),
+            "one tree's repeats are one observation",
+        );
+    }
+
     #[test]
     fn exact_attribution_is_not_masked_by_earlier_generic_failures() {
         let member = WorkpieceId("C".to_owned());
@@ -3031,6 +3316,7 @@ mod tests {
             findings: Some("the exact composed failure".to_owned()),
             cost: None,
             calls: None,
+            replayed_flakes: Vec::new(),
             contextual_observations: None,
             probe_verdict: None,
         };
@@ -3164,6 +3450,7 @@ mod tests {
             findings: None,
             cost: None,
             calls: None,
+            replayed_flakes: Vec::new(),
             contextual_observations: Some(b"stale but parseable observations".to_vec()),
             probe_verdict: None,
         };
@@ -3199,6 +3486,7 @@ mod tests {
             findings: None,
             cost: None,
             calls: None,
+            replayed_flakes: Vec::new(),
             contextual_observations: None,
             probe_verdict: None,
         };
@@ -3292,6 +3580,145 @@ mod tests {
         };
         node.plan = Digest::of_wire_bytes(b"stale physical plan");
         assert!(!contextual_contract_valid(&stale));
+    }
+
+    fn fleet_contextual_dispatch() -> (SharedRunDispatch, HostClass) {
+        let host = HostClass::new("fleet");
+        let host_digest = host.digest();
+        let mut dispatch = reducer_shaped_contextual_dispatch();
+        for request in &mut dispatch.plan.requests {
+            request.contract.host_class = host_digest;
+        }
+        let request = &dispatch.plan.requests[0];
+        let request_digest = request.digest();
+        let contract_digest = request.contract.digest();
+        if let Some(composition) = dispatch.plan.composition.as_mut() {
+            composition.contract.host_class = host_digest;
+            composition.requests.clone_from(&dispatch.plan.requests);
+            composition.contract.members[0].request = request_digest;
+            composition.contract.members[0].contract = contract_digest;
+        }
+        if let SharedRunExecution::Contextual { node, .. } = &mut dispatch.execution {
+            node.plan = dispatch.plan.digest();
+        }
+        (dispatch, host)
+    }
+
+    fn green_contextual_receipt(node: &SharedRunNode, nonce: &str) -> SharedStepReceipt {
+        SharedStepReceipt {
+            invocation: Digest::of_wire_bytes(format!("{nonce}:invocation").as_bytes()),
+            evidence: Evidence {
+                subject: node.candidate.tree,
+                kind: EvidenceKind::VerificationResult,
+                detail: Digest::of_wire_bytes(format!("{nonce}:detail").as_bytes()),
+            },
+            verdict: StageVerdict::VerificationPassed,
+            failed_verifiers: VerifyFailureSet::default(),
+            failed_verifier_names: Vec::new(),
+            findings: None,
+            cost: None,
+            calls: None,
+            replayed_flakes: Vec::new(),
+            contextual_observations: None,
+            probe_verdict: None,
+        }
+    }
+
+    #[test]
+    fn a_green_contextual_run_records_one_fact_per_declared_gate_without_a_prior_run() {
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        let (dispatch, host) = fleet_contextual_dispatch();
+        let SharedRunExecution::Contextual { node, .. } = &dispatch.execution else {
+            panic!("contextual execution");
+        };
+        let step = SharedRunStepRow {
+            run: Digest::of_wire_bytes(b"green-run").as_bytes().to_vec(),
+            ordinal: 1,
+            nonce: "green-step".to_owned(),
+            request: None,
+            descriptor: encode_host(&SharedStepDescriptor::ContextualFull { node: node.digest() }).expect("descriptor"),
+            prepared: None,
+            receipt: None,
+            duration_millis: None,
+            release_physical_run: false,
+        };
+        let receipt = green_contextual_receipt(node, &step.nonce);
+
+        record_independent_contextual_facts(&mut store, &dispatch, &step, &receipt, &host)
+            .expect("a green run records");
+
+        let rows = store.list_proof_facts().expect("the table reads");
+        assert_eq!(rows.len(), 1, "one declared gate, one fact");
+        assert_eq!(rows[0].test_id, "gate:verify.test");
+        assert_eq!(rows[0].result, "green");
+        assert_eq!(rows[0].host_class, "fleet");
+        assert_eq!(rows[0].producing_dispatch, "green-step");
+        assert_eq!(
+            rows[0].closure_key,
+            contextual_fact_key(node, &dispatch.plan.composition.as_ref().expect("composition").contract).as_bytes()
+        );
+        assert!(
+            reuse_contextual_proof(
+                &mut store,
+                node,
+                &dispatch.plan.composition.as_ref().expect("composition").contract,
+                &host
+            )
+            .expect("proof lookup")
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn retained_proof_reuse_journals_the_gate_closure_and_producing_dispatch() {
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        let (dispatch, host) = fleet_contextual_dispatch();
+        let SharedRunExecution::Contextual { node, .. } = &dispatch.execution else {
+            panic!("contextual execution");
+        };
+        let composition = dispatch.plan.composition.as_ref().expect("composition");
+        record_green_contextual_facts(
+            &mut store,
+            node,
+            &composition.contract,
+            &host,
+            "first-green",
+            dispatch.plan.requests[0].bloom.0.as_bytes(),
+        )
+        .expect("the first green run writes");
+
+        let run = Digest::of_wire_bytes(b"reused-run");
+        let row = SharedRunRow {
+            run: run.as_bytes().to_vec(),
+            nonce: "reused".to_owned(),
+            dispatch: to_vec(&dispatch).expect("dispatch wire"),
+            lifecycle: SharedRunLifecycle::Ready,
+            next_ordinal: 0,
+            deadline_unix_millis: 10_000,
+            charged: false,
+            physical_cost: None,
+        };
+        store.record_shared_run(&row, &[]).expect("run");
+
+        let directory = tempfile::tempdir().expect("artifact root");
+        let mut artifacts = ArtifactsCapabilityState::open(directory.path()).expect("artifacts");
+        let admits = retain_contextual_proof_reuse(&mut store, Some(&mut artifacts), &row, &dispatch, &host)
+            .expect("reuse consults")
+            .expect("matching green facts skip physical work");
+
+        assert!(store.shared_run_steps(&row.run).expect("steps").is_empty());
+        assert!(store.shared_run_proof_reuse(&row.run).expect("reuse").is_some());
+        assert_eq!(admits.len(), 1, "one declared gate, one reused-proof fact");
+        let event = from_bytes::<Event>(&admits[0].event).expect("proof-reuse event decodes");
+        match event.fact {
+            Fact::ProofReused { bloom, gate, closure, producing_dispatch } => {
+                assert_eq!(bloom, dispatch.plan.requests[0].bloom);
+                assert_eq!(gate, "verify.test");
+                assert_eq!(closure, contextual_fact_key(node, &composition.contract).digest());
+                assert_eq!(producing_dispatch, "first-green");
+            }
+            other => panic!("expected ProofReused, got {other:?}"),
+        }
     }
 
     #[test]

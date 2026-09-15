@@ -34,9 +34,9 @@ use aether_actor::runtime;
 use aether_bloomery::persisted::{DECISIONS, EVENT, kind_named};
 use aether_bloomery::{
     CommissionStatus, Commit, CommitResult, ConfigRecord, Decision, Digest, Event, JournalRecord, LoadConfigs,
-    LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal,
-    ReplayJournalResult, ScopeRevision, Statement, StoreClass, SuppressionRequest, Topic, WorkpieceId,
-    decode_recorded_decisions, decode_recorded_event, schema_digest,
+    LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, ModelOverride, OutboxPayload, ReplayJournal,
+    ReplayJournalResult, ScopeRevision, StageCatalog, Statement, StoreClass, SuppressionRequest, Topic, WorkpieceId,
+    decode_config, decode_recorded_decisions, decode_recorded_event, schema_digest,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_kinds::descriptors;
@@ -47,7 +47,7 @@ use std::iter::repeat_n;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::bloomery::{ScopeRunRefusal, open_scope_run};
+use crate::bloomery::{ScopeRunRefusal, open_scope_run_with_override};
 
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -384,6 +384,11 @@ pub struct ScopeRunOpen<'a> {
     /// The instruction-bundle pin this run dispatches under, when the host
     /// selected one at creation. Same address type a bloom registry pins.
     pub instructions: Option<&'a [u8]>,
+    /// The `ModelOverride` config digest the run resolves its Scope seat
+    /// from (issue 5945), when the run named one. Stored on the `enqueued`
+    /// row beside the seat it produced, so the journal and the console name
+    /// the model that filled the workpiece.
+    pub model_override: Option<&'a [u8]>,
     /// The wire-encoded `ScopeDispatchPayload` the outbox row carries.
     pub payload: &'a [u8],
 }
@@ -409,6 +414,10 @@ pub struct ScopeRunRow {
     /// The instruction-bundle pin, on an `enqueued` row. Absent when the host
     /// authorized no unique default at creation.
     pub instructions: Option<Vec<u8>>,
+    /// The `ModelOverride` config digest the run resolves its Scope seat
+    /// from (issue 5945), on an `enqueued` row. Absent when the run named no
+    /// seat and dispatches the compiled calibration.
+    pub model_override: Option<Vec<u8>>,
 }
 
 /// One scoping run that answered and has not frozen (ADR-0208): the `verdict`
@@ -428,6 +437,16 @@ pub struct ScopeVerdictRow {
     /// The dispatch nonce, absent only for a run whose `dispatched` row was
     /// never written (a submit that was refused permanently).
     pub nonce: Option<String>,
+}
+
+/// One name the flake registry knows, with how many distinct candidates have
+/// recorded it (#5999).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlakeRow {
+    /// The nextest `binary-id test_name` pair the gate excused.
+    pub test_id: String,
+    /// How many distinct candidate trees have recorded it as a flake.
+    pub candidates: usize,
 }
 
 /// One append-only proof-fact row (ADR-0200). Column order is the wire:
@@ -528,7 +547,7 @@ pub struct JournalWrite<'a> {
 /// conversion on unknown values, re-closing the open set through the back
 /// door. The typed edge for the reducer's own topics is
 /// [`TopicOutbox`](crate::bloomery::TopicOutbox).
-pub trait StoreBackend: Send {
+pub trait StoreBackend: Send + CommissionBackend {
     /// Record an outstanding work order at its nonce (the evidence-intake
     /// registry write side, #3502). Idempotent: a nonce already outstanding is
     /// a [`RecordOutcome::Duplicate`] no-op, never a second row.
@@ -602,6 +621,7 @@ pub trait StoreBackend: Send {
     fn queued_member_verification(&mut self, request: &[u8]) -> rusqlite::Result<Option<QueuedMemberVerificationRow>>;
     fn mark_queued_member_verifications_scheduled(&mut self, requests: &[Vec<u8>]) -> rusqlite::Result<usize>;
     fn record_member_verification_proposal(&mut self, requests: &[Vec<u8>], proposal: &[u8]) -> rusqlite::Result<()>;
+    fn clear_member_verification_proposal(&mut self, requests: &[Vec<u8>]) -> rusqlite::Result<usize>;
     /// Retain cancellation even when its cross-topic dispatch has not reached
     /// the executor reactor yet.
     fn record_shared_run_cancellation(&mut self, plan: &[u8]) -> rusqlite::Result<RecordOutcome>;
@@ -1053,6 +1073,17 @@ pub trait StoreBackend: Send {
     /// Every proof-fact row, in append order — the test oracle and the
     /// consultation read a later slice will key.
     fn list_proof_facts(&mut self) -> rusqlite::Result<Vec<ProofFactRow>>;
+    /// Record that the gate replayed `test_id` green on `candidate` — a flake
+    /// (#5999). Idempotent per `(test, candidate)`: a name that flaked twice
+    /// under one tree is one observation, because it is the spread across
+    /// unrelated candidates that makes a name a property of the test rather
+    /// than of the tree under it.
+    fn record_replayed_flake(&mut self, test_id: &str, candidate: &[u8]) -> rusqlite::Result<usize>;
+    /// Every registered name recorded across at least `across` distinct
+    /// candidates, most-observed first. The coordinator spends no attribution
+    /// probe on one, and the doctor surfaces it so it is fixed or quarantined
+    /// by a member with the crate in its surface.
+    fn known_flakes(&mut self, across: usize) -> rusqlite::Result<Vec<FlakeRow>>;
     /// Drop the metrics rollup cache. The next
     /// [`fold_metrics_from_journal`](Self::fold_metrics_from_journal) rebuilds
     /// it from the journal — the tables are cache, never truth.
@@ -1711,6 +1742,14 @@ fn migrate_schema(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()>
         migration.execute_batch("ALTER TABLE scope_runs ADD COLUMN instructions BLOB;")?;
     }
 
+    // Issue 5945: the model-override digest a scoping run resolves its seat
+    // from. Added nullable with no backfill — a pre-column row ran the
+    // compiled seat, and inventing a digest would attribute a seat choice the
+    // operator never made.
+    if has_table(migration, "scope_runs")? && !has_column(migration, "scope_runs", "model_override")? {
+        migration.execute_batch("ALTER TABLE scope_runs ADD COLUMN model_override BLOB;")?;
+    }
+
     add_prompt_manifest_column(migration)?;
 
     // Versions 23 and 24 (ADR-0218): the durable shared-run projection. Created
@@ -2113,6 +2152,11 @@ CREATE TABLE IF NOT EXISTS member_dependency (
 CREATE TABLE IF NOT EXISTS notification_sent (
     notification_key   TEXT PRIMARY KEY,
     posted_unix_millis INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS flake_registry (
+    test_id   TEXT NOT NULL,
+    candidate BLOB NOT NULL,
+    PRIMARY KEY (test_id, candidate)
 );
 ";
 
@@ -2900,6 +2944,20 @@ impl StoreBackend for SqliteStore {
             )?;
         }
         transaction.commit()
+    }
+
+    fn clear_member_verification_proposal(&mut self, requests: &[Vec<u8>]) -> rusqlite::Result<usize> {
+        let transaction = self.conn.transaction()?;
+        let mut cleared = 0;
+        for request in requests {
+            cleared += transaction.execute(
+                "UPDATE shared_member_verification_queue \
+                 SET proposal = NULL WHERE request = ?1 AND scheduled = 0 AND proposal IS NOT NULL",
+                [request],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(cleared)
     }
 
     fn record_shared_run_cancellation(&mut self, plan: &[u8]) -> rusqlite::Result<RecordOutcome> {
@@ -4113,6 +4171,24 @@ impl StoreBackend for SqliteStore {
         rows.collect()
     }
 
+    fn record_replayed_flake(&mut self, test_id: &str, candidate: &[u8]) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO flake_registry (test_id, candidate) VALUES (?1, ?2)",
+            rusqlite::params![test_id, candidate],
+        )
+    }
+
+    fn known_flakes(&mut self, across: usize) -> rusqlite::Result<Vec<FlakeRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT test_id, COUNT(DISTINCT candidate) AS candidates FROM flake_registry \
+             GROUP BY test_id HAVING candidates >= ?1 ORDER BY candidates DESC, test_id",
+        )?;
+        let rows = stmt.query_map([i64::try_from(across).unwrap_or(i64::MAX)], |row| {
+            Ok(FlakeRow { test_id: row.get(0)?, candidates: usize::try_from(row.get::<_, i64>(1)?).unwrap_or(0) })
+        })?;
+        rows.collect()
+    }
+
     fn clear_metrics(&mut self) -> rusqlite::Result<()> {
         self.conn.execute_batch(
             "DELETE FROM metric_dispatch;
@@ -4352,9 +4428,17 @@ impl StoreBackend for SqliteStore {
     fn enqueue_scope_run(&mut self, run: &ScopeRunOpen<'_>) -> rusqlite::Result<u64> {
         let write = self.conn.transaction()?;
         write.execute(
-            "INSERT INTO scope_runs (commission, ordinal, kind, intent, base, subject, instructions) \
-             VALUES (?1, ?2, 'enqueued', ?3, ?4, ?5, ?6)",
-            rusqlite::params![run.commission, run.ordinal, run.intent, run.base, run.subject, run.instructions],
+            "INSERT INTO scope_runs (commission, ordinal, kind, intent, base, subject, instructions, model_override) \
+             VALUES (?1, ?2, 'enqueued', ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                run.commission,
+                run.ordinal,
+                run.intent,
+                run.base,
+                run.subject,
+                run.instructions,
+                run.model_override
+            ],
         )?;
         write.execute(
             "INSERT INTO outbox (topic, payload) VALUES (?1, ?2)",
@@ -4468,7 +4552,7 @@ impl StoreBackend for SqliteStore {
 
     fn list_scope_runs(&mut self, commission: &str) -> rusqlite::Result<Vec<ScopeRunRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT ordinal, kind, nonce, subject, verdict, revision, instructions FROM scope_runs \
+            "SELECT ordinal, kind, nonce, subject, verdict, revision, instructions, model_override FROM scope_runs \
              WHERE commission = ?1 ORDER BY sequence",
         )?;
         let rows = stmt.query_map(rusqlite::params![commission], |row| {
@@ -4480,6 +4564,7 @@ impl StoreBackend for SqliteStore {
                 verdict: row.get::<_, Option<String>>(4)?,
                 revision: row.get::<_, Option<Vec<u8>>>(5)?,
                 instructions: row.get::<_, Option<Vec<u8>>>(6)?,
+                model_override: row.get::<_, Option<Vec<u8>>>(7)?,
             })
         })?;
         rows.collect()
@@ -5020,6 +5105,14 @@ fn enqueue_scope_run_mail(store: &mut SqliteStore, mail: EnqueueScopeRun) -> Enq
     let Some(base) = Digest::from_slice(&mail.base) else {
         return EnqueueScopeRunResult::Err { error: "base is not a 32-byte digest".to_owned() };
     };
+    // The seat the run resolves before the compiled line is consulted (issue
+    // 5945): the carried digest must name a stored `ModelOverride` whose Scope
+    // pin a dispatch can actually resolve. Anything else refuses here, at the
+    // door, before a lane spins up on a seat nobody chose.
+    let model_override = match scope_run_override(store, mail.model_override.as_deref()) {
+        Ok(model_override) => model_override,
+        Err(result) => return result,
+    };
     let id = WorkpieceId(mail.id.clone());
     let view = match store.load(&id) {
         Ok(None) => return EnqueueScopeRunResult::Missing { id: mail.id },
@@ -5042,7 +5135,8 @@ fn enqueue_scope_run_mail(store: &mut SqliteStore, mail: EnqueueScopeRun) -> Enq
         }
         Err(error) => return EnqueueScopeRunResult::Err { error: error.to_string() },
     };
-    match open_scope_run(store, &id, view.head.intent, base, &sketch) {
+    let digest = mail.model_override.as_deref().and_then(Digest::from_slice);
+    match open_scope_run_with_override(store, &id, view.head.intent, base, &sketch, &model_override, digest) {
         Ok(opened) => EnqueueScopeRunResult::Ok {
             id: mail.id,
             ordinal: opened.ordinal,
@@ -5056,6 +5150,34 @@ fn enqueue_scope_run_mail(store: &mut SqliteStore, mail: EnqueueScopeRun) -> Enq
     }
 }
 
+/// Resolve a scope-run request's `model_override` digest to the override the
+/// run dispatches under, or refuse the mail.
+///
+/// `None` is a run that named no seat and dispatches the compiled line. A
+/// digest that is not 32 bytes, names no stored config, names one filed under
+/// another kind, decodes as no `ModelOverride`, or keys a stage no dispatch
+/// resolves, refuses as [`EnqueueScopeRunResult::UnknownModelOverride`] — a
+/// `400`, never a lane on a seat nobody chose.
+fn scope_run_override(store: &mut SqliteStore, digest: Option<&[u8]>) -> Result<ModelOverride, EnqueueScopeRunResult> {
+    let Some(bytes) = digest else {
+        return Ok(ModelOverride::default());
+    };
+    let unknown = |error: String| EnqueueScopeRunResult::UnknownModelOverride { error };
+    let Some(address) = Digest::from_slice(bytes) else {
+        return Err(unknown("model override is not a 32-byte digest".to_owned()));
+    };
+    let stored = store
+        .lookup_config(bytes)
+        .map_err(|error| unknown(format!("model override lookup failed: {error}")))?
+        .ok_or_else(|| unknown(format!("no stored model override at {address}")))?;
+    let model_override = decode_config::<ModelOverride>(&stored.0, &stored.1, stored.2.as_deref())
+        .map_err(|error| unknown(format!("stored config at {address} is no model override: {error}")))?;
+    model_override
+        .validate(&StageCatalog::line())
+        .map_err(|error| unknown(format!("stored model override at {address} keys no dispatched seat: {error:?}")))?;
+    Ok(model_override)
+}
+
 fn write_revision_error(error: CommissionError) -> WriteScopeRevisionResult {
     match error {
         CommissionError::MissingCommission(id) => WriteScopeRevisionResult::Missing { id },
@@ -5066,6 +5188,7 @@ fn write_revision_error(error: CommissionError) -> WriteScopeRevisionResult {
         CommissionError::MalformedCanonical => WriteScopeRevisionResult::Malformed,
         CommissionError::NotOpen => WriteScopeRevisionResult::NotOpen,
         CommissionError::SurfaceGap { paths } => WriteScopeRevisionResult::SurfaceGap { paths },
+        CommissionError::EmptySection { section } => WriteScopeRevisionResult::EmptySection { section },
         error => WriteScopeRevisionResult::Err { error: error.to_string() },
     }
 }
@@ -5112,13 +5235,22 @@ fn nonce_spellings(nonce: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::collections::BTreeMap;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
+    use aether_bloomery::{
+        AgentSelection, ConfigKind, Digest, Harness, ModelOverride, ReasoningEffort, StageId, StageOverride,
+        config_address,
+    };
+    use aether_data::Kind;
+    use aether_data::wire::to_vec;
     use rusqlite::{Connection, TransactionBehavior};
 
-    use super::{SCHEMA_VERSION, SqliteStore, connect, migrate};
+    use super::{
+        EnqueueScopeRunResult, SCHEMA_VERSION, SqliteStore, StoreBackend, connect, migrate, scope_run_override,
+    };
 
     #[test]
     fn current_schema_installs_the_precheck_discovery_index_on_reopen() {
@@ -5134,6 +5266,85 @@ mod tests {
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'outbox_by_topic_delivery')",
             [], |row| row.get::<_, bool>(0),
         ).expect("index"));
+    }
+
+    #[test]
+    fn a_scope_run_seat_resolves_from_its_stored_override_or_refuses() {
+        // The plausible bug: a carried digest that names nothing usable still
+        // opens the run, which then dispatches the compiled seat while the
+        // record names a digest — a seat nobody chose, attested as chosen.
+        let mut store = SqliteStore::open(":memory:").expect("memory store");
+
+        let plain = scope_run_override(&mut store, None).expect("no digest is no seat");
+        assert_eq!(plain, ModelOverride::default(), "a seatless run dispatches the compiled line");
+
+        let grok = ModelOverride {
+            per_stage: BTreeMap::from([(
+                StageId::Scope,
+                StageOverride {
+                    agent: Some(AgentSelection { harness: Harness::Grok, model: String::from("grok-4.6") }),
+                    reasoning_effort: Some(ReasoningEffort::High),
+                },
+            )]),
+            ..ModelOverride::default()
+        };
+        let address = grok.address();
+        store
+            .record_config(address.as_bytes(), ModelOverride::NAME, &to_vec(&grok).expect("override encodes"))
+            .expect("author");
+        let resolved = scope_run_override(&mut store, Some(address.as_bytes())).expect("a stored override resolves");
+        assert_eq!(resolved, grok, "the run dispatches under the named override");
+
+        let missing = Digest::from_bytes([0x77; 32]);
+        assert!(
+            matches!(
+                scope_run_override(&mut store, Some(missing.as_bytes())),
+                Err(EnqueueScopeRunResult::UnknownModelOverride { .. })
+            ),
+            "a digest naming no stored config refuses"
+        );
+
+        let misfiled = grok.address();
+        store
+            .record_config(
+                misfiled.as_bytes(),
+                "aether.bloomery.some_other_kind",
+                &to_vec(&grok).expect("override encodes"),
+            )
+            .expect("author");
+        assert!(
+            matches!(
+                scope_run_override(&mut store, Some(misfiled.as_bytes())),
+                Err(EnqueueScopeRunResult::UnknownModelOverride { .. })
+            ),
+            "a digest naming another kind refuses"
+        );
+
+        let garbage = config_address(ModelOverride::NAME, b"nope");
+        store.record_config(garbage.as_bytes(), ModelOverride::NAME, b"nope").expect("author");
+        assert!(
+            matches!(
+                scope_run_override(&mut store, Some(garbage.as_bytes())),
+                Err(EnqueueScopeRunResult::UnknownModelOverride { .. })
+            ),
+            "bytes that decode as no override refuse"
+        );
+
+        let sketch = ModelOverride {
+            per_stage: BTreeMap::from([(StageId::Sketch, StageOverride::default())]),
+            ..ModelOverride::default()
+        };
+        let sketch_address = sketch.address();
+        store
+            .record_config(sketch_address.as_bytes(), ModelOverride::NAME, &to_vec(&sketch).expect("override encodes"))
+            .expect("author");
+        assert!(
+            matches!(
+                scope_run_override(&mut store, Some(sketch_address.as_bytes())),
+                Err(EnqueueScopeRunResult::UnknownModelOverride { .. })
+            ),
+            "an override keying a stage no dispatch resolves refuses"
+        );
     }
 
     const LOCK_HANDOFF_BUDGET: Duration = Duration::from_secs(5);

@@ -669,6 +669,14 @@ pub struct CommissionProjection {
     /// are six distinguishable rows in an issue list rather than six copies of
     /// one constant.
     pub title: String,
+    /// Rendered work-order markdown of the current scope revision, when one
+    /// has been written.
+    ///
+    /// The adapter dumps this. It does not re-derive headings from
+    /// [`Self::scope_revision`]. Absent when the commission has no current
+    /// revision yet. Trailing optional so a queued row that predates the
+    /// field decodes as none.
+    pub scope: Option<String>,
 }
 
 /// The first markdown heading of an intent statement's words, or `None`.

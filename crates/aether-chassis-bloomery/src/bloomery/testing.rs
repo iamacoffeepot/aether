@@ -106,6 +106,12 @@ pub struct ScriptedUpload {
     pub candidate: Option<CandidateRef>,
     /// The critic's findings prose, if any.
     pub findings: Option<String>,
+    /// The critic's note naming what it reviewed, if any. A passing aggregate
+    /// review carrying neither this nor findings is refused at intake as a lane
+    /// that never judged the fold, so a scenario that lands a bloom scripts one
+    /// and a scenario about the empty verdict omits it.
+    #[serde(default)]
+    pub notes: Option<String>,
     /// The exact failed `verify.check` members (ADR-0178). Nonempty only for a
     /// failed member Verify.
     pub failed_verifiers: VerifyFailureSet,
@@ -148,6 +154,7 @@ impl ScriptedUpload {
             observation: LaneObservation {
                 candidate: self.candidate,
                 findings: self.findings,
+                notes: self.notes,
                 failed_verifiers: self.failed_verifiers,
                 cost: self.cost,
                 calls: self.calls,

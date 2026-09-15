@@ -6,7 +6,8 @@
 //! A proof fact is addressed by `(closure_key, test, result, host_class)`.
 //! [`closure_key`] hashes a package's git-addressed dependency closure;
 //! [`HostClass`] is the opaque host the coordinator supplies; [`discriminate`]
-//! is the only constructor of facts the ledger will store;
+//! constructs member, aggregate, and sweep facts, and a green contextual shared
+//! run records declared-gate facts without a second suite (#5948);
 //! [`attribute_gate_failure`] is the failure-attribution path member verify
 //! and the aggregate gate share; [`next_batch_probe`] attributes composed
 //! failures using retained subset experiments; [`run_sweep`] converts unknown facts on idle
@@ -14,6 +15,16 @@
 //! on main until the coverage map is fully green.
 //! [`apply_containment`] fails a member Verify whose candidate edited a path
 //! no declared-surface glob covers.
+
+/// How many distinct candidates a test has to flake across before the registry
+/// calls it a known flake (#5999).
+///
+/// Two, because one candidate's repeated flake is a property of that tree — a
+/// racy fixture the member itself introduced — while the same name failing and
+/// replaying green under two unrelated candidates is a property of the test.
+/// A known flake is never probed and is surfaced by the doctor, so it is fixed
+/// or quarantined by a member with the crate in its declared surface.
+pub const KNOWN_FLAKE_CANDIDATES: usize = 2;
 
 #[cfg(feature = "runtime")]
 mod attribution;
@@ -46,8 +57,8 @@ pub use containment::{
 #[cfg(feature = "runtime")]
 pub use contextual_facts::{
     ContextualFactError, ContextualProofFactReuse, ContextualProofReuse, ContextualRunnerReport,
-    contextual_bundle_reports, contextual_fact_key, observed_probe_verdict, record_contextual_facts,
-    reuse_contextual_proof,
+    contextual_bundle_reports, contextual_fact_key, observed_failed_tests, observed_probe_verdict,
+    record_contextual_facts, record_green_contextual_facts, reuse_contextual_proof,
 };
 #[cfg(feature = "runtime")]
 pub use facts::record_proof_facts;

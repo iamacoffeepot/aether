@@ -12,9 +12,11 @@ use ratatui::widgets::{Cell, Row, Table, TableState};
 use crate::cursor::Cursor;
 use crate::dto::{BloomStatus, BloomView, DigestHex, MemberView, MetricsTimeline, TimelineSpan};
 use crate::keys::{KeyHint, Outcome};
+use crate::nav::Nav;
 use crate::palette;
 use crate::screen::board::member_status_state;
 use crate::store::{ResourceKey, Store};
+use crate::warroom::Focus;
 
 use super::bucket::{
     axis_range, bucket_span, format_duration, paint_member_line, reconstructed_range, reconstructed_start,
@@ -24,6 +26,8 @@ use super::glyph::{CellKind, Silence, operator_action};
 
 const HINTS: &[KeyHint] = &[
     KeyHint { keys: "j/k", action: "select" },
+    KeyHint { keys: "Enter", action: "open" },
+    KeyHint { keys: "b", action: "time" },
     KeyHint { keys: "Esc", action: "back" },
     KeyHint { keys: "r", action: "refresh" },
     KeyHint { keys: "q", action: "quit" },
@@ -57,10 +61,19 @@ impl Timeline {
         HINTS
     }
 
-    /// The lane timeline has no Enter; the caret follows that.
     #[must_use]
-    pub fn enter_pushes() -> bool {
-        false
+    pub fn selected_focus(&self) -> Option<Focus> {
+        let workpiece = self.cursor.selected()?;
+        Some(if workpiece == WorkpieceId::COMPOSITION {
+            Focus::composition(self.bloom)
+        } else {
+            Focus::member(self.bloom, workpiece.clone())
+        })
+    }
+
+    #[must_use]
+    pub fn enter_pushes(&self) -> bool {
+        self.selected_focus().is_some()
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, store: &Store) -> Outcome {
@@ -74,6 +87,12 @@ impl Timeline {
                 self.cursor.select_prev(&rows, |row| row.workpiece.clone());
                 Outcome::Handled
             }
+            KeyCode::Enter => self.selected_focus().map_or(Outcome::Handled, |focus| Outcome::Push(Nav::focus(focus))),
+            KeyCode::Char('b') => self
+                .cursor
+                .selected()
+                .cloned()
+                .map_or(Outcome::Handled, |workpiece| Outcome::Push(Nav::time(self.bloom, workpiece))),
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -107,7 +126,7 @@ impl Timeline {
         }));
         let table_rows = rows.iter().map(|row| {
             Row::new([
-                Cell::from(row.workpiece.clone()),
+                Cell::from(workpiece_label(&row.workpiece)),
                 Cell::from(row.stage.clone()),
                 Cell::from(row.duration.clone()),
                 Cell::from(row.line.clone()),
@@ -125,7 +144,7 @@ impl Timeline {
         .style(palette::body())
         .header(header)
         .row_highlight_style(palette::cursor())
-        .highlight_symbol(super::super::caret(Self::enter_pushes()));
+        .highlight_symbol(super::super::caret(self.enter_pushes()));
         let mut state = TableState::default()
             .with_selected(self.cursor.selected_index(&rows, |row| row.workpiece.clone()))
             .with_offset(self.scroll);
@@ -146,6 +165,14 @@ struct LaneRow {
     stage: String,
     duration: String,
     line: String,
+}
+
+fn workpiece_label(workpiece: &str) -> String {
+    if workpiece.is_empty() {
+        "(bloom)".to_owned()
+    } else {
+        workpiece.to_owned()
+    }
 }
 
 fn lane_title(prefix: &str, reconstructed: bool) -> String {
@@ -216,11 +243,8 @@ fn rows_of(doc: &MetricsTimeline, store: &Store, width: usize) -> Vec<LaneRow> {
                     } else {
                         member
                             .map(|member| {
-                                member_status_state(
-                                    member,
-                                    view.is_some_and(|view| view.has_order(doc.bloom, &member.workpiece)),
-                                )
-                                .to_owned()
+                                member_status_state(member, view.is_some_and(|view| view.has_lane(doc.bloom, member)))
+                                    .to_owned()
                             })
                             .unwrap_or_default()
                     }
@@ -228,11 +252,7 @@ fn rows_of(doc: &MetricsTimeline, store: &Store, width: usize) -> Vec<LaneRow> {
                 |span| span.stage.to_string(),
             );
             LaneRow {
-                workpiece: if workpiece.is_empty() {
-                    "(bloom)".to_owned()
-                } else {
-                    workpiece
-                },
+                workpiece,
                 stage,
                 duration,
                 line: paint_member_line(
@@ -294,7 +314,8 @@ mod tests {
     use crate::nav::Nav;
     use crate::shell::Shell;
     use crate::store::Store;
-    use crossterm::event::KeyEvent;
+    use crate::warroom::Focus;
+    use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::time::Duration;
@@ -320,9 +341,105 @@ mod tests {
     }
 
     #[test]
-    fn a_screen_with_no_enter_paints_no_caret() {
-        // The plausible bug: highlight_symbol tracks TableState, so every
-        // lane row paints `>` even though Enter cannot push a frame.
+    fn b_opens_the_member_time_breakdown() {
+        // The plausible bug: the footer paints `b time` while Enter is still
+        // the only drill-in, so the operator cannot reach the breakdown from
+        // the lane they are already looking at.
+        let bloom = DigestHex::from_bytes([1; 32]);
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_timeline(
+            bloom,
+            Ok(MetricsTimeline {
+                bloom,
+                spans: vec![TimelineSpan {
+                    workpiece: "wp-a".to_owned(),
+                    stage: StageId::Construct,
+                    started_unix_millis: Some(1_000),
+                    ..TimelineSpan::default()
+                }],
+                ..MetricsTimeline::default()
+            }),
+        );
+        let mut timeline = Timeline::new(bloom);
+        timeline.reseat(&store);
+        assert_eq!(
+            timeline.handle_key(KeyEvent::from(KeyCode::Char('b')), &store),
+            Outcome::Push(Nav::time(bloom, "wp-a"))
+        );
+    }
+
+    #[test]
+    fn enter_opens_the_member_under_the_cursor() {
+        // The plausible bug: Enter is still ignored on the lane table, so the
+        // operator has to pop back to the board to open the member they are
+        // already looking at — or Enter always opens the first row.
+        let bloom = DigestHex::from_bytes([1; 32]);
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_timeline(
+            bloom,
+            Ok(MetricsTimeline {
+                bloom,
+                spans: vec![
+                    TimelineSpan {
+                        workpiece: "wp-a".to_owned(),
+                        stage: StageId::Construct,
+                        started_unix_millis: Some(1_000),
+                        ..TimelineSpan::default()
+                    },
+                    TimelineSpan {
+                        workpiece: "wp-b".to_owned(),
+                        stage: StageId::Verify,
+                        started_unix_millis: Some(2_000),
+                        ..TimelineSpan::default()
+                    },
+                ],
+                ..MetricsTimeline::default()
+            }),
+        );
+        let mut timeline = Timeline::new(bloom);
+        timeline.reseat(&store);
+        assert_eq!(
+            timeline.handle_key(KeyEvent::from(KeyCode::Enter), &store),
+            Outcome::Push(Nav::focus(Focus::member(bloom, "wp-a")))
+        );
+        assert_eq!(timeline.handle_key(KeyEvent::from(KeyCode::Char('j')), &store), Outcome::Handled);
+        assert_eq!(
+            timeline.handle_key(KeyEvent::from(KeyCode::Enter), &store),
+            Outcome::Push(Nav::focus(Focus::member(bloom, "wp-b")))
+        );
+    }
+
+    #[test]
+    fn enter_opens_the_composition_row() {
+        // The plausible bug: the composition lane is opened as a member named
+        // aether.bloomery.composition, which the detail frame cannot find.
+        let bloom = DigestHex::from_bytes([1; 32]);
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_timeline(
+            bloom,
+            Ok(MetricsTimeline {
+                bloom,
+                spans: vec![TimelineSpan {
+                    workpiece: aether_bloomery::WorkpieceId::COMPOSITION.to_owned(),
+                    stage: StageId::AggregateReview,
+                    started_unix_millis: Some(1_000),
+                    ..TimelineSpan::default()
+                }],
+                ..MetricsTimeline::default()
+            }),
+        );
+        let mut timeline = Timeline::new(bloom);
+        timeline.reseat(&store);
+        assert_eq!(
+            timeline.handle_key(KeyEvent::from(KeyCode::Enter), &store),
+            Outcome::Push(Nav::focus(Focus::composition(bloom)))
+        );
+    }
+
+    #[test]
+    fn a_row_enter_pushes_paints_the_caret() {
+        // The plausible bug: hiding the caret on rows Enter refuses also
+        // hides it where Enter now pushes a member frame.
         let bloom = DigestHex::from_bytes([1; 32]);
         let mut store = Store::new(Duration::from_secs(1));
         store.apply_timeline(
@@ -341,7 +458,7 @@ mod tests {
         let mut timeline = Timeline::new(bloom);
         let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("test backend");
         terminal.draw(|frame| timeline.render(frame, frame.area(), &store)).expect("draw");
-        assert_eq!(super::super::super::row_caret(&terminal, "wp-a"), "  ");
+        assert_eq!(super::super::super::row_caret(&terminal, "wp-a"), "> ");
     }
 
     #[test]

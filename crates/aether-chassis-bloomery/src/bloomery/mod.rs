@@ -119,8 +119,8 @@ pub use repair::{candidate_tree_digest, capture_commit_digest};
 pub use replica::{SourceReplicaShell, github_push_url, writer_marker_present};
 #[cfg(feature = "runtime")]
 pub use scope_run::{
-    OpenedScopeRun, ScopeRunRefusal, ScopeRunState, open_scope_run, scope_dispatch_payload, scope_run_state,
-    scope_run_subject,
+    OpenedScopeRun, ScopeRunRefusal, ScopeRunState, open_scope_run, open_scope_run_with_override,
+    scope_dispatch_payload, scope_run_state, scope_run_subject, scope_seat,
 };
 #[cfg(feature = "github")]
 pub use source::SourceShell;
@@ -137,16 +137,16 @@ pub use testing::{
 pub use verify::{
     Attribution, AttributionError, AttributionRequest, BaseProbe, BaseRepairWorkpiece, BatchCheck, BatchFailure,
     BatchMember, BatchProbeReceipt, BatchProbeRequest, BatchProgress, BatchReport, BloomDisposition, CoverageEntry,
-    CoverageMap, CoverageStatus, Land, LandProbe, MissingCoverage, ProbeVerdict, RepairBoard, RollDecision, RollHold,
-    SweepContext, SweepDecision, SweepOutcome, TaintSet, TestClosure, UnknownFact, attribute_gate_failure,
-    bisect_land_order, bloom_disposition, consult_proof_fact, coverage_map, decide_roll, decide_sweep,
-    next_batch_probe, record_proof_facts, repair_landed, run_sweep, unknowns,
+    CoverageMap, CoverageStatus, KNOWN_FLAKE_CANDIDATES, Land, LandProbe, MissingCoverage, ProbeVerdict, RepairBoard,
+    RollDecision, RollHold, SweepContext, SweepDecision, SweepOutcome, TaintSet, TestClosure, UnknownFact,
+    attribute_gate_failure, bisect_land_order, bloom_disposition, consult_proof_fact, coverage_map, decide_roll,
+    decide_sweep, next_batch_probe, record_proof_facts, repair_landed, run_sweep, unknowns,
 };
 #[cfg(feature = "runtime")]
 pub use verify::{
     ContextualFactError, ContextualProofFactReuse, ContextualProofReuse, ContextualRunnerReport,
-    contextual_bundle_reports, contextual_fact_key, observed_probe_verdict, record_contextual_facts,
-    reuse_contextual_proof,
+    contextual_bundle_reports, contextual_fact_key, observed_failed_tests, observed_probe_verdict,
+    record_contextual_facts, record_green_contextual_facts, reuse_contextual_proof,
 };
 
 pub use verify::{

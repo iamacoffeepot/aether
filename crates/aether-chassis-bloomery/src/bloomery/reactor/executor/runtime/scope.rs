@@ -100,10 +100,10 @@ pub(super) fn drain_and_dispatch_scope(
         // `is_model_lane` command, so the runner turns this into the lane's
         // `--harness` / `--model` / `--effort`; an order that names none leaves
         // the lane on the operator's ambient CLI default, and the receipt then
-        // attests a seat that did not run. There is no sealed `ModelOverride`
-        // to resolve against — that value belongs to a bloom's registry and a
-        // scoping run has none — so the default override falls the payload's
-        // whole profile through, which is the compiled line's Scope seat.
+        // attests a seat that did not run. The payload's profile is already
+        // the run's seat — its override resolved over the compiled line at
+        // enqueue (issue 5945), or the line itself — so the default override
+        // falls the whole profile through, which is that seat.
         let mut transformation = payload.transformation;
         transformation.model = Some(dispatch_model(payload.stage, &payload.profile, &ModelOverride::default()));
 

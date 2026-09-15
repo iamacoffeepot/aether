@@ -124,10 +124,15 @@ mod tests {
 
     use super::{resolve, shipped_path};
 
-    /// The four seat bundles: the standing all-Claude posture and the three
-    /// cross-judge overrides.
-    const SEAT_BUNDLES: [&str; 4] =
-        ["claude-every-seat", "cross-judge-opus-construct", "cross-judge-grok-construct", "grok-build-sonnet-judge"];
+    /// The five seat bundles: the standing all-Claude posture and the four
+    /// cross-judge overrides, including the muse-1.3 retest.
+    const SEAT_BUNDLES: [&str; 5] = [
+        "claude-every-seat",
+        "cross-judge-opus-construct",
+        "cross-judge-grok-construct",
+        "grok-build-sonnet-judge",
+        "muse-build-sonnet-judge",
+    ];
 
     fn write_profiles(stem: &str, text: &str) -> PathBuf {
         let path = env::temp_dir().join(format!("aether-xtask-profiles-{stem}-{}", process::id()));
@@ -235,6 +240,42 @@ mod tests {
         assert!(table.row("grok-4.6").is_some(), "adding sonnet must leave the grok row in place");
     }
 
+    #[test]
+    fn muse_build_sonnet_judge_pins_1_3_not_the_catalog_default() {
+        // The 1.3 retest cannot seal by name without this profile. The catalog
+        // still defaults construct to 1.2, so an override that copies that
+        // default (or omits the model id) would run 1.2, still resolve muse,
+        // still look like a muse retest, and still pass the cross-judge check.
+        // A table that omits the 1.3 row journals the construct seats unpriced.
+        let resolved =
+            resolve("muse-build-sonnet-judge", &shipped_path()).expect("shipped muse-build-sonnet-judge must resolve");
+
+        assert_eq!(
+            resolved.configs.iter().map(|(kind, _)| kind.as_str()).collect::<Vec<_>>(),
+            [ModelOverride::NAME, PriceTable::NAME],
+            "profile authoring order is model override then price table"
+        );
+
+        let override_ = shipped_override("muse-build-sonnet-judge");
+        for stage in [StageId::Construct, StageId::Refine, StageId::Reconcile, StageId::Scope] {
+            let (harness, model) = seat(&override_, stage);
+            let catalog_model = StageCatalog::profile_of(stage).model;
+            assert_eq!(harness, Harness::Muse.as_str(), "{stage:?} must sit on muse");
+            assert_eq!(
+                model, "muse-spark-1.3-contributor",
+                "{stage:?} is the 1.3 retest, not a later or earlier spark id"
+            );
+            assert_ne!(model, catalog_model, "{stage:?} must not silently be the catalog default {catalog_model}");
+        }
+
+        let table: PriceTable = serde_json::from_value(resolved.configs[1].1.clone())
+            .unwrap_or_else(|error| panic!("standard table is a price table: {error}"));
+        let muse =
+            table.row("muse-spark-1.3-contributor").expect("standard table must price the muse 1.3 construct seats");
+        assert!(muse.long_context.is_none(), "muse 1.3 has no published long-context band");
+        assert!(table.row("claude-sonnet-5").is_some(), "the sonnet judge stays priced");
+    }
+
     // Tripwire: a seat bundle that leaves a model lane unkeyed dispatches the
     // compiled `StageCatalog::line()` default there, and that default is muse
     // for every one of the five — so an omitted seat (`Reconcile`, dispatched
@@ -260,6 +301,17 @@ mod tests {
 
             for stage in &seats {
                 let resolved = override_.resolve(*stage, &StageCatalog::profile_of(*stage));
+                if profile == "muse-build-sonnet-judge"
+                    && matches!(*stage, StageId::Construct | StageId::Refine | StageId::Reconcile | StageId::Scope)
+                {
+                    // Construct-side muse is this profile's point, and Scope
+                    // follows the construct side (it fills what those seats
+                    // build); the 1.3 pin test is the omitted-seat equivalent
+                    // those four cannot distinguish by harness. Judge and
+                    // reader seats still must not fall through to the catalog
+                    // default.
+                    continue;
+                }
                 assert_ne!(resolved.harness, Harness::Muse, "{profile} still resolves muse at {stage:?}");
             }
         }
@@ -280,6 +332,7 @@ mod tests {
             ("cross-judge-opus-construct", Harness::Claude),
             ("cross-judge-grok-construct", Harness::Grok),
             ("grok-build-sonnet-judge", Harness::Grok),
+            ("muse-build-sonnet-judge", Harness::Muse),
         ] {
             let override_ = shipped_override(profile);
             let contestants = [StageId::Construct, StageId::Refine, StageId::Reconcile]
@@ -302,10 +355,10 @@ mod tests {
         }
     }
 
-    // Tripwire: the standing posture is one model in every seat. The three
-    // bundles are near-identical blocks, so a line copied from a cross-judge
-    // bundle into this one would route every default bloom's review to the
-    // other harness — a routing change nothing else here would notice.
+    // Tripwire: the standing posture is one model in every seat. The
+    // cross-judge bundles are near-identical blocks, so a line copied from
+    // one of them into this one would route every default bloom's review to
+    // the other harness — a routing change nothing else here would notice.
     #[test]
     fn the_default_bundle_seats_one_claude_model_in_every_lane() {
         let override_ = shipped_override("claude-every-seat");

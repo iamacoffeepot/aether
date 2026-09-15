@@ -148,6 +148,10 @@ pub enum SealError {
     /// GitHub issue state is not: bloom landings squash into the day branch, so a
     /// landed workpiece's source issue stays open until sync-back.
     ///
+    /// A member withdrawn from that bloom is not in the set: it never resolved,
+    /// so the same revision may reseal. The sealed spec still lists it; the
+    /// door reads the bloom record's withdrawn map.
+    ///
     /// Refused at the door so an operator cannot pay construct lanes to
     /// fabricate work the operating branch already carries. The re-run escape is
     /// a fresh scope revision for the same workpiece: that pair is not in the

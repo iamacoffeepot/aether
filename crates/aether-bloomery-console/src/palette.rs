@@ -150,6 +150,12 @@ pub fn body() -> Style {
     paint(Role::Text)
 }
 
+/// One-cadence flash for a HUD value that just moved.
+#[must_use]
+pub fn flash() -> Style {
+    paint(Role::Working)
+}
+
 /// Reversed cursor / search hit, blossom on ink.
 #[must_use]
 pub fn cursor() -> Style {

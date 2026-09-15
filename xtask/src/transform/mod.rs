@@ -21,6 +21,7 @@
 //!   bloom landed and stamps `retrospect_findings` as untrusted claims. It
 //!   never writes to the tree.
 
+mod budget;
 mod claude;
 pub mod construct;
 pub mod conventions;

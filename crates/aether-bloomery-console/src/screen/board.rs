@@ -1,13 +1,19 @@
 //! The Board: bloom/member table. The live table sits in the workspace board pane.
 
+use std::collections::{HashMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
 use crate::cursor::Cursor;
-use crate::dto::{BloomStatus, DigestHex, MemberView, MetricDispatch, OrderView, PrecheckView, StageId, ViewDocument};
+use crate::dto::{
+    BloomStatus, CoordinationView, DigestHex, MemberView, MetricDispatch, OrderView, PrecheckView, StageId,
+    ViewDocument,
+};
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
@@ -19,7 +25,7 @@ use super::partition::{MemberState, history_blooms, live_blooms};
 
 /// Stable identity of one selectable row. Refreshes look this up so the
 /// cursor does not walk out from under the operator when `/view` reorders.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RowId {
     Bloom { id: DigestHex },
     Member { bloom: DigestHex, workpiece: String },
@@ -118,6 +124,8 @@ pub struct Board {
     cursor: Cursor<RowId>,
     scroll: usize,
     lane: BoardLane,
+    last: HashMap<RowId, String>,
+    flashed: HashSet<RowId>,
 }
 
 impl Board {
@@ -217,6 +225,7 @@ impl Board {
 
     pub fn reseat(&mut self, store: &Store) {
         let rows = rows_from(store, self.lane);
+        self.note_flash(&rows);
         self.cursor.reseat(&rows, BoardRow::id, |id, rows| {
             if let RowId::Member { bloom, .. } = id {
                 let bloom = *bloom;
@@ -234,6 +243,31 @@ impl Board {
         self.render_table(frame, area, &rows, dimmed);
     }
 
+    fn note_flash(&mut self, rows: &[BoardRow]) {
+        let mut lit = HashSet::new();
+        let mut next = HashMap::new();
+        for row in rows {
+            let id = row.id();
+            let fingerprint = row_fingerprint(row);
+            if self.last.get(&id).is_some_and(|prev| prev != &fingerprint) {
+                lit.insert(id.clone());
+            }
+            next.insert(id, fingerprint);
+        }
+        self.last = next;
+        self.flashed = lit;
+    }
+
+    fn row_style(&self, row: &BoardRow, dimmed: bool, muted: Style) -> Style {
+        if dimmed {
+            muted
+        } else if self.flashed.contains(&row.id()) {
+            palette::flash()
+        } else {
+            muted
+        }
+    }
+
     fn render_table(&mut self, frame: &mut Frame<'_>, area: Rect, rows: &[BoardRow], dimmed: bool) {
         let muted = if dimmed {
             palette::body().add_modifier(Modifier::DIM)
@@ -246,28 +280,31 @@ impl Board {
         };
         let header = Row::new([title, "STATE", "STAGE / HEAD / PRECHECK", "AGE / VERIFY"])
             .style(palette::body().add_modifier(Modifier::BOLD).patch(muted));
-        let table_rows = rows.iter().map(|row| match row {
-            BoardRow::Bloom(bloom) => Row::new([
-                Cell::from(bloom.id_prefix.clone()),
-                Cell::from(format!("{}  {} mem", bloom.status, bloom.member_count)),
-                Cell::from(bloom.precheck.clone()),
-                Cell::from(bloom.age.clone()),
-            ])
-            .style(palette::body().add_modifier(Modifier::BOLD).patch(muted)),
-            BoardRow::Member(member) => Row::new([
-                Cell::from(format!("  {}", member.workpiece)),
-                Cell::from(member.state.clone()),
-                Cell::from(member.stage.clone()),
-                Cell::from(member.age.clone()),
-            ])
-            .style(muted),
-            BoardRow::Order(order) => Row::new([
-                Cell::from(order.workpiece.clone()),
-                Cell::from(order.state.clone()),
-                Cell::from(order.stage.clone()),
-                Cell::from(order.age.clone()),
-            ])
-            .style(palette::body().add_modifier(Modifier::BOLD).patch(muted)),
+        let table_rows = rows.iter().map(|row| {
+            let style = self.row_style(row, dimmed, muted);
+            match row {
+                BoardRow::Bloom(bloom) => Row::new([
+                    Cell::from(bloom.id_prefix.clone()),
+                    Cell::from(format!("{}  {} mem", bloom.status, bloom.member_count)),
+                    Cell::from(bloom.precheck.clone()),
+                    Cell::from(bloom.age.clone()),
+                ])
+                .style(palette::body().add_modifier(Modifier::BOLD).patch(style)),
+                BoardRow::Member(member) => Row::new([
+                    Cell::from(format!("  {}", member.workpiece)),
+                    Cell::from(member.state.clone()),
+                    Cell::from(member.stage.clone()),
+                    Cell::from(member.age.clone()),
+                ])
+                .style(style),
+                BoardRow::Order(order) => Row::new([
+                    Cell::from(order.workpiece.clone()),
+                    Cell::from(order.state.clone()),
+                    Cell::from(order.stage.clone()),
+                    Cell::from(order.age.clone()),
+                ])
+                .style(palette::body().add_modifier(Modifier::BOLD).patch(style)),
+            }
         });
         let table = Table::new(
             table_rows,
@@ -286,11 +323,11 @@ impl Board {
 }
 
 /// The one-word state `scripts/bloomery-operator.py`'s `member_status_state`
-/// prints. `has_order` is the live outstanding-order overlay `/view` now
-/// projects, so `running` means the host still holds a lane.
+/// prints. `has_lane` is a live outstanding order or an unfinished request on
+/// a live shared verify run, so `running` means the host still holds a lane.
 #[must_use]
-pub fn member_status_state(member: &MemberView, has_order: bool) -> &'static str {
-    MemberState::of(member, has_order).label()
+pub fn member_status_state(member: &MemberView, has_lane: bool) -> &'static str {
+    MemberState::of(member, has_lane).label()
 }
 
 fn rows_from(store: &Store, lane: BoardLane) -> Vec<BoardRow> {
@@ -319,8 +356,7 @@ fn rows_of(view: &ViewDocument, lane: BoardLane, dispatches: &[MetricDispatch]) 
                 .members
                 .iter()
                 .filter(|member| {
-                    bloom.coordination.is_some()
-                        || MemberState::of(member, view.has_order(bloom.id, &member.workpiece)).walks()
+                    bloom.coordination.is_some() || MemberState::of(member, view.has_lane(bloom.id, member)).walks()
                 })
                 .collect(),
             BoardLane::History => bloom.members.iter().collect(),
@@ -353,12 +389,10 @@ fn rows_of(view: &ViewDocument, lane: BoardLane, dispatches: &[MetricDispatch]) 
         }));
         for member in members {
             let order = view.order_for(bloom.id, &member.workpiece);
-            let mut row = member_row(bloom.id, member, dispatches, order);
+            let mut row = member_row(bloom.id, member, dispatches, order, view.has_lane(bloom.id, member));
             if let Some(state) = &bloom.coordination {
                 row.stage = format!("{} · {}", row.stage, state.member_summary(member));
-                if let Some((_, millis)) = state.member_latency(member) {
-                    row.age = format!("{} verify", format_duration(millis));
-                }
+                row.age = shared_age(state, member, dispatches, bloom.id, &member.workpiece, &row.age);
             }
             rows.push(BoardRow::Member(row));
         }
@@ -381,11 +415,12 @@ fn member_row(
     member: &MemberView,
     dispatches: &[MetricDispatch],
     order: Option<&OrderView>,
+    has_lane: bool,
 ) -> MemberRow {
     MemberRow {
         bloom,
         workpiece: member.workpiece.clone(),
-        state: member_status_state(member, order.is_some()).to_owned(),
+        state: member_status_state(member, has_lane).to_owned(),
         stage: member_stage(member, bloom, dispatches, order),
         age: elapsed_of(dispatches, bloom, Some(&member.workpiece)),
     }
@@ -427,16 +462,58 @@ fn elapsed_of(dispatches: &[MetricDispatch], bloom: DigestHex, workpiece: Option
     }
 }
 
+fn shared_age(
+    state: &CoordinationView,
+    member: &MemberView,
+    dispatches: &[MetricDispatch],
+    bloom: DigestHex,
+    workpiece: &str,
+    fallback: &str,
+) -> String {
+    if let Some((_, millis)) = state.member_latency(member) {
+        return format!("{} verify", format_duration(millis));
+    }
+    if state.live_run_for(member).is_some()
+        && let Some(age) = live_elapsed(dispatches, bloom, workpiece)
+    {
+        return age;
+    }
+    fallback.to_owned()
+}
+
+fn live_elapsed(dispatches: &[MetricDispatch], bloom: DigestHex, workpiece: &str) -> Option<String> {
+    let start = dispatches
+        .iter()
+        .filter(|row| row.bloom == bloom && row.workpiece == workpiece)
+        .filter_map(|row| row.recorded_unix_millis)
+        .min()?;
+    let now = unix_now_millis()?;
+    (now > start).then(|| format_duration(now - start))
+}
+
+fn unix_now_millis() -> Option<u64> {
+    SystemTime::now().duration_since(UNIX_EPOCH).ok().and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+}
+
+fn row_fingerprint(row: &BoardRow) -> String {
+    match row {
+        BoardRow::Bloom(bloom) => format!("{}|{}", bloom.status, bloom.precheck),
+        BoardRow::Member(member) => format!("{}|{}", member.state, member.stage),
+        BoardRow::Order(order) => format!("{}|{}", order.state, order.stage),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Board, BoardLane, BoardRow, member_status_state, rows_of};
     use crate::dto::{
-        BloomStatus, BloomView, CompositionCursorView, DigestHex, MemberView, MetricDispatch, OrderView,
-        PendingDecisionView, Present, StageId, ViewDocument,
+        BloomStatus, BloomView, CandidateRef, CompositionCursorView, CoordinationView, DigestHex, MemberPinView,
+        MemberRequestView, MemberView, MetricDispatch, OrderView, PendingDecisionView, Present, SharedRunPlanView,
+        SharedRunView, StageId, ViewDocument,
     };
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
-    use crate::palette::{Depth, with_depth};
+    use crate::palette::{Depth, Role, with_depth};
     use crate::shell::Shell;
     use crate::store::Store;
     use crossterm::event::{KeyCode, KeyEvent};
@@ -462,6 +539,33 @@ mod tests {
 
     fn live_order(bloom: DigestHex, workpiece: &str, stage: StageId) -> OrderView {
         OrderView { nonce: format!("dispatch-{workpiece}"), bloom, workpiece: workpiece.to_owned(), stage }
+    }
+
+    fn pinned(workpiece: &str) -> MemberView {
+        MemberView {
+            workpiece: workpiece.to_owned(),
+            scope_revision: DigestHex::from_bytes([4; 32]),
+            cursor: Some(CompositionCursorView {
+                stage: Some(StageId::Verify),
+                attempts: 1,
+                candidate: Some(CandidateRef {
+                    tree: DigestHex::from_bytes([1; 32]),
+                    checkout: DigestHex::from_bytes([2; 32]),
+                }),
+            }),
+            ..MemberView::default()
+        }
+    }
+
+    fn request_for(member: &MemberView, id: DigestHex) -> MemberRequestView {
+        MemberRequestView {
+            member: MemberPinView {
+                workpiece: member.workpiece.clone(),
+                scope_revision: member.scope_revision,
+                candidate: member.cursor.as_ref().and_then(|cursor| cursor.candidate.clone()).unwrap_or_default(),
+            },
+            id: Some(id),
+        }
     }
 
     fn dispatch(bloom: DigestHex, workpiece: &str, recorded_unix_millis: Option<u64>, sequence: u64) -> MetricDispatch {
@@ -550,6 +654,52 @@ mod tests {
         );
         assert_eq!(member_status_state(&MemberView { blocked_by: Some(String::new()), ..member("wp") }, false), "idle");
         assert_eq!(member_status_state(&member("wp"), false), "idle");
+    }
+
+    #[test]
+    fn a_member_on_a_shared_verify_run_paints_running() {
+        // The plausible bug: a contextual shared run seats the composition
+        // workpiece, so looking only at a per-member outstanding order paints
+        // the covered member idle while STAGE already names the shared run.
+        let bloom = digest(1);
+        let covered = pinned("wp-run");
+        let waiting = pinned("wp-idle");
+        let request_id = DigestHex::from_bytes([8; 32]);
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: bloom,
+                status: Some(BloomStatus::Sealed),
+                members: vec![covered.clone(), waiting],
+                coordination: Some(CoordinationView {
+                    runs: vec![SharedRunView {
+                        plan: SharedRunPlanView { requests: vec![request_for(&covered, request_id)] },
+                        phase: "Running".to_owned(),
+                        physical_run: Some(DigestHex::from_bytes([7; 32])),
+                        unfinished: vec![request_id],
+                        ..SharedRunView::default()
+                    }],
+                    ..CoordinationView::default()
+                }),
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        let rows = rows_of(&view, BoardLane::Live, &[]);
+        let members: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                BoardRow::Member(member) => {
+                    Some((member.workpiece.as_str(), member.state.as_str(), member.stage.as_str()))
+                }
+                BoardRow::Bloom(_) | BoardRow::Order(_) => None,
+            })
+            .collect();
+        assert_eq!(members.len(), 2, "{members:?}");
+        assert_eq!(members[0].0, "wp-run");
+        assert_eq!(members[0].1, "running");
+        assert!(members[0].2.contains("shared Running 07070707"), "{}", members[0].2);
+        assert_eq!(members[1].0, "wp-idle");
+        assert_eq!(members[1].1, "idle");
     }
 
     #[test]
@@ -862,6 +1012,55 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("test backend");
         terminal.draw(|frame| board.render(frame, frame.area(), &store)).expect("draw");
         assert_eq!(super::super::row_caret(&terminal, "wp"), "> ");
+    }
+
+    #[test]
+    fn a_changed_member_row_flashes_for_one_view_sample() {
+        // The plausible bug: `/view` already re-polls, but a state change is
+        // silent, so the HUD still reads as a still frame and the operator
+        // hits `r` looking for movement that already happened.
+        with_depth(Depth::Truecolor, || {
+            let bloom = digest(1);
+            let mut store = Store::new(Duration::from_secs(1));
+            store.apply_view(Ok(ViewDocument {
+                blooms: vec![BloomView {
+                    id: bloom,
+                    status: Some(BloomStatus::Sealed),
+                    members: vec![in_flight_construct("wp")],
+                    ..BloomView::default()
+                }],
+                orders: vec![live_order(bloom, "wp", StageId::Construct)],
+                ..ViewDocument::default()
+            }));
+            let mut board = Board::new();
+            board.reseat(&store);
+            store.apply_view(Ok(ViewDocument {
+                blooms: vec![BloomView {
+                    id: bloom,
+                    status: Some(BloomStatus::Sealed),
+                    members: vec![in_flight_construct("wp")],
+                    ..BloomView::default()
+                }],
+                orders: vec![live_order(bloom, "wp", StageId::Verify)],
+                ..ViewDocument::default()
+            }));
+            board.reseat(&store);
+            let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("test backend");
+            terminal.draw(|frame| board.render(frame, frame.area(), &store)).expect("draw");
+            let buffer = terminal.backend().buffer();
+            let area = buffer.area();
+            let working = Role::Working.color(Depth::Truecolor);
+            let mut saw = false;
+            for y in 0..area.height {
+                let row: String = (0..area.width).map(|x| buffer[(x, y)].symbol()).collect();
+                if !row.contains("wp") {
+                    continue;
+                }
+                saw = true;
+                assert_eq!(buffer[(4, y)].fg, working, "changed member row did not flash: {row}");
+            }
+            assert!(saw, "member row missing from board");
+        });
     }
 
     #[test]
