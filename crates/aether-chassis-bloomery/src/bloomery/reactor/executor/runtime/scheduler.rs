@@ -668,7 +668,7 @@ pub(super) fn drain_member_verifications(
 
     let mut queued = store.queued_member_verifications()?;
     let mut retired = 0usize;
-    let first = loop {
+    loop {
         let Some(first) = queued.first() else {
             return Ok(Vec::new());
         };
@@ -700,7 +700,7 @@ pub(super) fn drain_member_verifications(
         let first_payload = from_bytes::<MemberVerificationPayload>(&first.payload)
             .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
         match scheduler.confirm_current_request(store, first_payload.request.bloom, first)? {
-            Some(true) => break first,
+            Some(true) => break,
             // The projection cannot answer this turn, and the queue row is
             // durable: leave it un-acked rather than retire a live request.
             None => {
@@ -716,41 +716,100 @@ pub(super) fn drain_member_verifications(
         if retired == MAX_STALE_RETIREMENTS_PER_TURN {
             return Ok(Vec::new());
         }
-    };
-    let first_payload = from_bytes::<MemberVerificationPayload>(&first.payload)
-        .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
-    // Every read of the projection is confined here so the refusal it produces
-    // can be logged against `scheduler` afterwards rather than borrowed against
-    // it mid-decision.
-    let settled = settle_proposal(scheduler, executor, &queued, first_payload.request.bloom, now_unix_millis)?;
-    match settled {
-        ProposalOutcome::Declined(declined) => {
-            scheduler.decline(declined, queued.len());
-            Ok(Vec::new())
-        }
-        ProposalOutcome::Hold(hold) => {
-            scheduler.decline(ProposalDeclined::CoalesceHold, queued.len());
-            Ok(vec![hold])
-        }
-        ProposalOutcome::Propose { plan, requests } => {
-            scheduler.proposing();
-            let event = Event {
-                idempotency_key: IdempotencyKey(format!(
-                    "aether.bloomery.propose_shared_run:{}",
-                    plan.digest().to_hex()
-                )),
-                fact: Fact::ProposeSharedRun { bloom: first_payload.request.bloom, plan: *plan },
-            };
-            let proposal = to_vec(&event).map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
-            store.record_member_verification_proposal(&requests, &proposal)?;
-            let queued = store.queued_member_verifications()?;
-            replay_proposal(store, &queued, &proposal)
-        }
     }
+    let settlement = settle_blooms(scheduler, executor, &queued, now_unix_millis)?;
+    if settlement.proposals.is_empty() {
+        if settlement.holds.is_empty() {
+            scheduler.decline(settlement.declined.unwrap_or(ProposalDeclined::EmptySelection), queued.len());
+            return Ok(Vec::new());
+        }
+        scheduler.decline(ProposalDeclined::CoalesceHold, queued.len());
+        return Ok(settlement.holds);
+    }
+    // Every read of the projection is confined to the settlement above so the
+    // refusal each bloom produced can be logged against `scheduler` afterwards
+    // rather than borrowed against it mid-decision.
+    scheduler.proposing();
+    let mut admits = settlement.holds;
+    admits.extend(record_proposals(store, settlement.proposals)?);
+    Ok(admits)
 }
 
-/// What this turn's selection came to: one plan to propose, one coalescing
-/// hold, or the reason nothing was proposed.
+/// A settled plan awaiting its journaled proposal: its bloom, the plan, and
+/// the queue rows it covers.
+type SettledProposal = (BloomId, Box<SharedRunPlan>, Vec<Vec<u8>>);
+
+/// One turn's settlement across every bloom with queued requests: the holds to
+/// journal, the plans to propose, and the first refusal when neither happened.
+struct BloomSettlement {
+    holds: Vec<Admit>,
+    proposals: Vec<SettledProposal>,
+    declined: Option<ProposalDeclined>,
+}
+
+/// Settle every queued bloom oldest-first. Sealed selection anchors on the
+/// head of the slice it is given, so each bloom is settled over its own
+/// oldest-first view: when the head bloom holds for coalescing this turn, its
+/// hold is recorded and the loop moves on, so the hold never stalls an
+/// unrelated bloom's ready requests behind it. A bloom already holding this
+/// turn is skipped.
+fn settle_blooms(
+    scheduler: &MemberVerificationScheduler,
+    executor: &dyn ExecutorPort,
+    queued: &[QueuedMemberVerificationRow],
+    now_unix_millis: u64,
+) -> rusqlite::Result<BloomSettlement> {
+    let mut blooms = Vec::new();
+    for row in queued {
+        let Ok(payload) = from_bytes::<MemberVerificationPayload>(&row.payload) else {
+            continue;
+        };
+        if !blooms.contains(&payload.request.bloom) {
+            blooms.push(payload.request.bloom);
+        }
+    }
+    let mut settlement = BloomSettlement { holds: Vec::new(), proposals: Vec::new(), declined: None };
+    let mut holding_blooms = BTreeSet::new();
+    for bloom in blooms {
+        if holding_blooms.contains(&bloom) {
+            continue;
+        }
+        match settle_proposal(scheduler, executor, queued, bloom, now_unix_millis)? {
+            ProposalOutcome::Declined(reason) => {
+                if settlement.declined.is_none() {
+                    settlement.declined = Some(reason);
+                }
+            }
+            ProposalOutcome::Hold(hold) => {
+                holding_blooms.insert(bloom);
+                settlement.holds.push(hold);
+            }
+            ProposalOutcome::Propose { plan, requests } => {
+                settlement.proposals.push((bloom, plan, requests));
+            }
+        }
+    }
+    Ok(settlement)
+}
+
+/// Journal every settled plan and replay its durable proposal.
+fn record_proposals(store: &mut dyn StoreBackend, proposals: Vec<SettledProposal>) -> rusqlite::Result<Vec<Admit>> {
+    let mut admits = Vec::new();
+    for (bloom, plan, requests) in proposals {
+        let event = Event {
+            idempotency_key: IdempotencyKey(format!("aether.bloomery.propose_shared_run:{}", plan.digest().to_hex())),
+            fact: Fact::ProposeSharedRun { bloom, plan: *plan },
+        };
+        let proposal = to_vec(&event).map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
+        store.record_member_verification_proposal(&requests, &proposal)?;
+        let queued = store.queued_member_verifications()?;
+        admits.extend(replay_proposal(store, &queued, &proposal)?);
+    }
+    Ok(admits)
+}
+
+/// What one bloom's settlement came to: a plan to propose, a coalescing hold
+/// to journal, or the reason it proposed nothing.
 enum ProposalOutcome {
     Declined(ProposalDeclined),
     Hold(Admit),
@@ -765,15 +824,27 @@ fn settle_proposal(
     now_unix_millis: u64,
 ) -> rusqlite::Result<ProposalOutcome> {
     let Some(state) = scheduler.states.get(&bloom) else {
-        return Err(rusqlite::Error::InvalidParameterName(
-            "current member verification lost its coordination state".to_owned(),
-        ));
+        // The projection has not seen this bloom yet. Its rows stay queued for
+        // a later turn; declining the bloom rather than erroring keeps a bloom
+        // the journal has not caught up to from stalling the blooms behind it.
+        return Ok(ProposalOutcome::Declined(ProposalDeclined::EmptySelection));
     };
-    let indices = SealedPolicySelection.select(state, queued);
+    // The sealed selection anchors on the head of the slice it is given, so it
+    // runs over this bloom's own oldest-first view rather than the shared
+    // queue's head: same head-strict semantics per bloom, no cross-bloom
+    // narrowing.
+    let owned = queued
+        .iter()
+        .filter(|row| {
+            from_bytes::<MemberVerificationPayload>(&row.payload).is_ok_and(|payload| payload.request.bloom == bloom)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let indices = SealedPolicySelection.select(state, &owned);
     if indices.is_empty() {
         return Ok(ProposalOutcome::Declined(ProposalDeclined::EmptySelection));
     }
-    let rows = indices.iter().map(|index| &queued[*index]).collect::<Vec<_>>();
+    let rows = indices.iter().map(|index| &owned[*index]).collect::<Vec<_>>();
     let selected = rows.iter().filter_map(|row| current_request(state, row)).collect::<Vec<_>>();
     let plan = build_plan(state, selected);
     let Some(capacity_order) = proposal_capacity_order(&plan) else {
@@ -1389,6 +1460,84 @@ mod tests {
             panic!("expected a shared run proposal once the deadline arrives, got {event:?}");
         };
         assert_eq!(plan.requests.iter().map(MemberVerifyRequest::digest).collect::<Vec<_>>(), expected);
+    }
+
+    fn singleton_bloom(value: u8, workpiece: &str) -> (CoordinationState, MemberVerifyRequest) {
+        let bloom = BloomId(digest(value));
+        let member = pin(workpiece, value);
+        let input = CompositionInput {
+            node: member.candidate.tree,
+            candidate: member.candidate,
+            members: vec![member.clone()],
+        };
+        let verify = request(bloom, &member, input, candidate(1));
+        (state(vec![verify.clone()], 2), verify)
+    }
+
+    /// A held head bloom must not stall an unrelated bloom's ready request.
+    ///
+    /// The plausible bug (#5984): the drain narrowed selection to the head
+    /// request's bloom and returned the coalescing hold immediately, so bloom
+    /// B's ready request behind bloom A's held head waited out A's hold with a
+    /// prover idle. The hold is still journaled for A; B proposes on the same
+    /// turn.
+    #[test]
+    fn a_held_head_bloom_does_not_stall_an_unrelated_bloom() {
+        let (held_state, held_rows) = singleton_ready_with_sibling_construct(None);
+        let held_bloom = held_state.integration.generation.bloom;
+        let (ready_state, ready_request) = singleton_bloom(7, "solo");
+        let ready_bloom = ready_state.integration.generation.bloom;
+        assert_ne!(held_bloom, ready_bloom, "the test needs two blooms sharing one queue");
+        let ready_row = queued(&ready_request, 2);
+        let mut scheduler = MemberVerificationScheduler::default();
+        scheduler.states.insert(held_bloom, held_state);
+        scheduler.states.insert(ready_bloom, ready_state);
+        let mut store = SqliteStore::open(":memory:").expect("store");
+        store.enqueue_topic(Topic::MemberVerification, &held_rows[1].payload, None).expect("enqueue held head");
+        store.enqueue_topic(Topic::MemberVerification, &ready_row.payload, None).expect("enqueue ready outsider");
+        let capacity = CapacityPort(Cell::new(true));
+
+        let admits =
+            drain_member_verifications(&mut scheduler, &mut store, &capacity, 9_000).expect("both blooms drain");
+        let mut holds = 0;
+        let mut proposals = 0;
+        for admit in &admits {
+            match from_bytes::<Event>(&admit.event).expect("drain event").fact {
+                Fact::HoldSharedRunCoalesce { bloom, waiting_for, .. } => {
+                    assert_eq!(bloom, held_bloom, "the hold stays with the bloom whose sibling is constructing");
+                    assert_eq!(waiting_for, vec![WorkpieceId(String::from("alpha"))]);
+                    holds += 1;
+                }
+                Fact::ProposeSharedRun { bloom, plan } => {
+                    assert_eq!(bloom, ready_bloom, "the unrelated bloom proposes while the head bloom holds");
+                    assert_eq!(
+                        plan.requests.iter().map(MemberVerifyRequest::digest).collect::<Vec<_>>(),
+                        vec![ready_request.digest()]
+                    );
+                    proposals += 1;
+                }
+                fact => panic!("expected only a hold and a proposal, got {fact:?}"),
+            }
+        }
+        assert_eq!((holds, proposals), (1, 1), "one journaled hold and one proposal on the same turn");
+        assert!(
+            store
+                .queued_member_verification(&held_rows[1].request)
+                .expect("held lookup")
+                .expect("held row")
+                .proposal
+                .is_none(),
+            "a held request is not proposed"
+        );
+        assert!(
+            store
+                .queued_member_verification(&ready_row.request)
+                .expect("ready lookup")
+                .expect("ready row")
+                .proposal
+                .is_some(),
+            "the unrelated bloom's request carries its proposal"
+        );
     }
 
     /// The verification-queue twin of
