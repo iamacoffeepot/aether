@@ -11,8 +11,8 @@ use ratatui::widgets::{Cell, Row, Table, TableState};
 
 use crate::cursor::Cursor;
 use crate::dto::{
-    BloomStatus, CoordinationView, DigestHex, MemberView, MetricDispatch, OrderView, PrecheckView, StageId,
-    ViewDocument,
+    BloomDispatchesView, BloomStatus, CoordinationView, DigestHex, MemberView, MetricDispatch, OrderView, PrecheckView,
+    StageId, ViewDocument,
 };
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
@@ -49,6 +49,11 @@ pub struct BloomRow {
     pub member_count: usize,
     pub precheck: String,
     pub age: String,
+    /// Why this bloom's live shared runs are grouped the way they are — one
+    /// entry per run, each naming how many members it carries and the construct
+    /// base they agree on. A bloom running one member per run reads as such
+    /// here instead of looking like a bloom with nothing to coalesce.
+    pub grouping: String,
 }
 
 /// A member row under its bloom.
@@ -59,6 +64,14 @@ pub struct MemberRow {
     pub state: String,
     pub stage: String,
     pub age: String,
+    /// The members this one semantically depends on: siblings whose change
+    /// lands in a package this member's verification compiles.
+    ///
+    /// `None` when the bloom's dispatch rows have not been read, which is not
+    /// the same claim as an empty list — one says nobody looked, the other says
+    /// this member's verification compiles no sibling's write. The cell renders
+    /// them differently for exactly that reason.
+    pub depends: Option<Vec<String>>,
 }
 
 /// A bloom-less live order (the whole-workspace base verify).
@@ -278,7 +291,7 @@ impl Board {
             BoardLane::Live => "BLOOM / MEMBER",
             BoardLane::History => "HISTORY (landed · superseded)",
         };
-        let header = Row::new([title, "STATE", "STAGE / HEAD / PRECHECK", "AGE / VERIFY"])
+        let header = Row::new([title, "STATE", "STAGE / HEAD / PRECHECK", "DEPENDS", "AGE / VERIFY"])
             .style(palette::body().add_modifier(Modifier::BOLD).patch(muted));
         let table_rows = rows.iter().map(|row| {
             let style = self.row_style(row, dimmed, muted);
@@ -287,6 +300,7 @@ impl Board {
                     Cell::from(bloom.id_prefix.clone()),
                     Cell::from(format!("{}  {} mem", bloom.status, bloom.member_count)),
                     Cell::from(bloom.precheck.clone()),
+                    Cell::from(bloom.grouping.clone()),
                     Cell::from(bloom.age.clone()),
                 ])
                 .style(palette::body().add_modifier(Modifier::BOLD).patch(style)),
@@ -294,6 +308,7 @@ impl Board {
                     Cell::from(format!("  {}", member.workpiece)),
                     Cell::from(member.state.clone()),
                     Cell::from(member.stage.clone()),
+                    Cell::from(depends_cell(member.depends.as_ref())),
                     Cell::from(member.age.clone()),
                 ])
                 .style(style),
@@ -301,6 +316,7 @@ impl Board {
                     Cell::from(order.workpiece.clone()),
                     Cell::from(order.state.clone()),
                     Cell::from(order.stage.clone()),
+                    Cell::from(String::new()),
                     Cell::from(order.age.clone()),
                 ])
                 .style(palette::body().add_modifier(Modifier::BOLD).patch(style)),
@@ -308,7 +324,13 @@ impl Board {
         });
         let table = Table::new(
             table_rows,
-            [Constraint::Min(14), Constraint::Length(10), Constraint::Length(34), Constraint::Length(12)],
+            [
+                Constraint::Min(14),
+                Constraint::Length(10),
+                Constraint::Length(34),
+                Constraint::Length(18),
+                Constraint::Length(12),
+            ],
         )
         .style(palette::body())
         .header(header)
@@ -335,11 +357,28 @@ fn rows_from(store: &Store, lane: BoardLane) -> Vec<BoardRow> {
         .view()
         .value
         .as_ref()
-        .map(|view| rows_of(view, lane, store.dispatches().value.as_ref().map_or(&[][..], Vec::as_slice)))
+        .map(|view| {
+            rows_of(view, lane, store.dispatches().value.as_ref().map_or(&[][..], Vec::as_slice), &|bloom| {
+                store.bloom_dispatches(bloom).and_then(|cell| cell.value.clone())
+            })
+        })
         .unwrap_or_default()
 }
 
-fn rows_of(view: &ViewDocument, lane: BoardLane, dispatches: &[MetricDispatch]) -> Vec<BoardRow> {
+/// The per-bloom dispatch view a row build reads its closures from.
+///
+/// A lookup rather than a map, because the board renders every live bloom and
+/// the console fetches `/blooms/{id}/dispatches` on demand: a bloom whose page
+/// has not been opened yet answers `None`, and the rows say `?` rather than
+/// claiming the member depends on nothing.
+type BloomDispatchLookup<'a> = dyn Fn(DigestHex) -> Option<BloomDispatchesView> + 'a;
+
+fn rows_of(
+    view: &ViewDocument,
+    lane: BoardLane,
+    dispatches: &[MetricDispatch],
+    bloom_dispatches: &BloomDispatchLookup<'_>,
+) -> Vec<BoardRow> {
     let blooms = match lane {
         BoardLane::Live => live_blooms(view).collect::<Vec<_>>(),
         BoardLane::History => history_blooms(view).collect::<Vec<_>>(),
@@ -386,10 +425,19 @@ fn rows_of(view: &ViewDocument, lane: BoardLane, dispatches: &[MetricDispatch]) 
                 },
             ),
             age: elapsed_of(dispatches, bloom.id, None),
+            grouping: grouping_reason(bloom.coordination.as_ref()),
         }));
+        let edges = bloom_dispatches(bloom.id).map(|served| served.semantic_edges);
         for member in members {
             let order = view.order_for(bloom.id, &member.workpiece);
             let mut row = member_row(bloom.id, member, dispatches, order, view.has_lane(bloom.id, member));
+            row.depends = edges.as_ref().map(|edges| {
+                edges
+                    .iter()
+                    .filter(|edge| edge.member == member.workpiece)
+                    .map(|edge| edge.depends_on.clone())
+                    .collect()
+            });
             if let Some(state) = &bloom.coordination {
                 row.stage = format!("{} · {}", row.stage, state.member_summary(member));
                 row.age = shared_age(state, member, dispatches, bloom.id, &member.workpiece, &row.age);
@@ -423,7 +471,49 @@ fn member_row(
         state: member_status_state(member, has_lane).to_owned(),
         stage: member_stage(member, bloom, dispatches, order),
         age: elapsed_of(dispatches, bloom, Some(&member.workpiece)),
+        depends: None,
     }
+}
+
+/// The DEPENDS cell for one member.
+///
+/// Three distinct answers, because collapsing any two of them is the mistake
+/// this column exists to stop: `?` for a bloom nobody has read the closures of,
+/// `—` for a member whose verification compiles no sibling's write, and the
+/// peer names otherwise.
+fn depends_cell(depends: Option<&Vec<String>>) -> String {
+    match depends {
+        None => "?".to_owned(),
+        Some(peers) if peers.is_empty() => "—".to_owned(),
+        Some(peers) => peers.join(" "),
+    }
+}
+
+/// Why a bloom's live shared runs are grouped as they are: one entry per
+/// non-terminal run, each naming its member count and the construct base its
+/// members agree on — the key the sealed selector actually groups by.
+///
+/// A bloom with no coordination state states nothing rather than an empty
+/// reason: the selector has not run, so there is no grouping to explain.
+fn grouping_reason(coordination: Option<&CoordinationView>) -> String {
+    let Some(state) = coordination else {
+        return String::new();
+    };
+    let reasons: Vec<String> = state
+        .runs
+        .iter()
+        .filter(|run| !run.plan.requests.is_empty())
+        .map(|run| {
+            let members = run.plan.requests.len();
+            run.plan
+                .requests
+                .first()
+                .and_then(|request| request.id)
+                .map_or_else(|| format!("{members}×?"), |base| format!("{members}×{}", base.prefix()))
+        })
+        .collect();
+
+    reasons.join(" ")
 }
 
 fn member_stage(
@@ -507,9 +597,9 @@ fn row_fingerprint(row: &BoardRow) -> String {
 mod tests {
     use super::{Board, BoardLane, BoardRow, member_status_state, rows_of};
     use crate::dto::{
-        BloomStatus, BloomView, CandidateRef, CompositionCursorView, CoordinationView, DigestHex, MemberPinView,
-        MemberRequestView, MemberView, MetricDispatch, OrderView, PendingDecisionView, Present, SharedRunPlanView,
-        SharedRunView, StageId, ViewDocument,
+        BloomDispatchesView, BloomStatus, BloomView, CandidateRef, CompositionCursorView, CoordinationView, DigestHex,
+        MemberPinView, MemberRequestView, MemberView, MetricDispatch, OrderView, PendingDecisionView, Present,
+        SharedRunPlanView, SharedRunView, StageId, ViewDocument,
     };
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
@@ -524,6 +614,11 @@ mod tests {
 
     fn digest(byte: u8) -> DigestHex {
         DigestHex::from_bytes([byte; 32])
+    }
+
+    /// A board build for which no bloom's dispatch rows have been read.
+    fn no_closures(_: DigestHex) -> Option<BloomDispatchesView> {
+        None
     }
 
     fn member(workpiece: &str) -> MemberView {
@@ -684,7 +779,7 @@ mod tests {
             }],
             ..ViewDocument::default()
         };
-        let rows = rows_of(&view, BoardLane::Live, &[]);
+        let rows = rows_of(&view, BoardLane::Live, &[], &no_closures);
         let members: Vec<_> = rows
             .iter()
             .filter_map(|row| match row {
@@ -718,7 +813,7 @@ mod tests {
             orders: vec![live_order(bloom, "wp", StageId::Construct)],
             ..ViewDocument::default()
         };
-        let rows = rows_of(&view, BoardLane::Live, &[]);
+        let rows = rows_of(&view, BoardLane::Live, &[], &no_closures);
         let BoardRow::Member(member) = &rows[1] else {
             panic!("second row is the member");
         };
@@ -748,7 +843,7 @@ mod tests {
             orders: vec![live_order(digest(2), "wp-run", StageId::Construct)],
             ..ViewDocument::default()
         };
-        let live = rows_of(&view, BoardLane::Live, &[]);
+        let live = rows_of(&view, BoardLane::Live, &[], &no_closures);
         let live_ids: Vec<_> = live
             .iter()
             .filter_map(|row| match row {
@@ -780,7 +875,7 @@ mod tests {
             }],
             ..ViewDocument::default()
         };
-        let history = rows_of(&view, BoardLane::History, &[]);
+        let history = rows_of(&view, BoardLane::History, &[], &no_closures);
         assert_eq!(history.len(), 2);
         let BoardRow::Member(member) = &history[1] else {
             panic!("second history row is the member");
@@ -834,7 +929,7 @@ mod tests {
                 ..MetricDispatch::default()
             },
         ];
-        let rows = rows_of(&view, BoardLane::Live, &dispatches);
+        let rows = rows_of(&view, BoardLane::Live, &dispatches, &no_closures);
         let BoardRow::Member(member) = &rows[1] else {
             panic!("second row is the member");
         };
@@ -850,7 +945,7 @@ mod tests {
         let (view, dispatches) = ages_document();
         let live = digest(1);
         let landed = digest(2);
-        let live_rows = rows_of(&view, BoardLane::Live, &dispatches);
+        let live_rows = rows_of(&view, BoardLane::Live, &dispatches, &no_closures);
         assert_eq!(live_rows.len(), 3);
         let BoardRow::Bloom(bloom) = &live_rows[0] else {
             panic!("first live row is the bloom");
@@ -873,7 +968,7 @@ mod tests {
             BoardRow::Order(_) => true,
         }));
 
-        let history_rows = rows_of(&view, BoardLane::History, &dispatches);
+        let history_rows = rows_of(&view, BoardLane::History, &dispatches, &no_closures);
         assert_eq!(history_rows.len(), 2);
         let BoardRow::Bloom(history) = &history_rows[0] else {
             panic!("first history row is the landed bloom");
@@ -928,14 +1023,14 @@ mod tests {
             orders: vec![live_order(digest(1), "wp", StageId::Construct)],
             ..ViewDocument::default()
         };
-        let live: Vec<_> = rows_of(&view, BoardLane::Live, &[])
+        let live: Vec<_> = rows_of(&view, BoardLane::Live, &[], &no_closures)
             .into_iter()
             .filter_map(|row| match row {
                 BoardRow::Bloom(bloom) => Some(bloom.id),
                 BoardRow::Member(_) | BoardRow::Order(_) => None,
             })
             .collect();
-        let history: Vec<_> = rows_of(&view, BoardLane::History, &[])
+        let history: Vec<_> = rows_of(&view, BoardLane::History, &[], &no_closures)
             .into_iter()
             .filter_map(|row| match row {
                 BoardRow::Bloom(bloom) => Some(bloom.id),
@@ -1077,7 +1172,7 @@ mod tests {
             }],
             ..ViewDocument::default()
         };
-        let live = rows_of(&view, BoardLane::Live, &[]);
+        let live = rows_of(&view, BoardLane::Live, &[], &no_closures);
         assert_eq!(live.len(), 1);
         let BoardRow::Order(order) = &live[0] else {
             panic!("the live board names the workspace stage");
@@ -1085,6 +1180,73 @@ mod tests {
         assert_eq!(order.workpiece, "base-verify");
         assert_eq!(order.state, "running");
         assert_eq!(order.stage, "BaseVerify");
-        assert!(rows_of(&view, BoardLane::History, &[]).is_empty());
+        assert!(rows_of(&view, BoardLane::History, &[], &no_closures).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod depends_column_tests {
+    use crate::dto::{
+        BloomDispatchesView, BloomStatus, BloomView, CoordinationView, DigestHex, MemberView, SemanticEdgeView,
+        ViewDocument,
+    };
+
+    use super::{BoardLane, BoardRow, depends_cell, rows_of};
+
+    fn served(edges: &[(&str, &str)]) -> BloomDispatchesView {
+        BloomDispatchesView {
+            dispatches: Vec::new(),
+            semantic_edges: edges
+                .iter()
+                .map(|(member, depends_on)| SemanticEdgeView {
+                    member: (*member).to_owned(),
+                    depends_on: (*depends_on).to_owned(),
+                    through: vec!["aether-bloomery".to_owned()],
+                })
+                .collect(),
+        }
+    }
+
+    // The bug the owner named: a grouping that is missing because the members
+    // share no file still has a semantic dependency, and a board that renders
+    // nothing there tells the operator the members are independent. The column
+    // must name the peer.
+    #[test]
+    fn a_member_names_the_peers_its_closure_reaches() {
+        let bloom = DigestHex::from_bytes([1; 32]);
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: bloom,
+                status: Some(BloomStatus::Sealed),
+                coordination: Some(CoordinationView::default()),
+                members: vec![
+                    MemberView { workpiece: "issue-1".to_owned(), ..MemberView::default() },
+                    MemberView { workpiece: "issue-2".to_owned(), ..MemberView::default() },
+                ],
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        let edges = served(&[("issue-1", "issue-2")]);
+        let rows = rows_of(&view, BoardLane::Live, &[], &|_| Some(edges.clone()));
+
+        let members: Vec<&super::MemberRow> = rows
+            .iter()
+            .filter_map(|row| match row {
+                BoardRow::Member(member) => Some(member),
+                BoardRow::Bloom(_) | BoardRow::Order(_) => None,
+            })
+            .collect();
+        assert_eq!(depends_cell(members[0].depends.as_ref()), "issue-2", "the dependent member names its peer");
+        assert_eq!(depends_cell(members[1].depends.as_ref()), "—", "the peer depends on nobody in this direction");
+    }
+
+    // Tripwire: "nobody read this bloom's closures" and "this member reaches no
+    // sibling's write" must not render the same. A blank cell for the first is
+    // an unbacked claim of independence.
+    #[test]
+    fn an_unread_bloom_renders_a_question_rather_than_independence() {
+        assert_eq!(depends_cell(None), "?");
+        assert_eq!(depends_cell(Some(&Vec::new())), "—");
     }
 }

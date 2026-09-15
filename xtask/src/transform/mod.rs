@@ -35,6 +35,7 @@ mod lane;
 mod lint_check;
 mod messages;
 mod muse;
+mod package_closure;
 mod peak_memory;
 pub mod retrospect;
 pub mod review;

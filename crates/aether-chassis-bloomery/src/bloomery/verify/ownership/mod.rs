@@ -60,6 +60,16 @@ pub struct GateFindings {
     /// section happens to name are not a licence to charge their owners with
     /// the whole gate. Such a section bisects.
     pub complete: bool,
+    /// The paths each stated finding named, one entry per finding in section
+    /// order — the same paths [`Self::paths`] flattens, kept un-flattened.
+    ///
+    /// Attribution reads the flat set; the semantic-mention read needs the
+    /// grouping, because what makes a diagnostic a conflict signal is that
+    /// *one* finding names two members' writes at once — rustc's primary span
+    /// in the crate that failed to compile and its `note:` span at the
+    /// definition that moved. Flattened across a section, that is
+    /// indistinguishable from two independent findings in two members' files.
+    pub records: Vec<Vec<String>>,
 }
 
 /// Read a verification findings text into one entry per gate section.
@@ -117,6 +127,14 @@ fn continues_a_record(line: &str) -> bool {
     if line.trim().is_empty() || line.starts_with(char::is_whitespace) {
         return true;
     }
+    // rustc writes a diagnostic's secondary spans as unindented `note:` /
+    // `help:` lines under the primary one. They are the same diagnostic — the
+    // definition a mismatch disagrees with, the import it suggests — so a
+    // reader that starts a new record at them splits one finding into two and
+    // loses the only signal that says the two locations belong together.
+    if line.starts_with("note: ") || line.starts_with("help: ") {
+        return true;
+    }
     line.split_once('|')
         .is_some_and(|(gutter, _)| gutter.trim_end().chars().all(|column| column.is_ascii_digit() || column == '.'))
 }
@@ -129,17 +147,19 @@ fn continues_a_record(line: &str) -> bool {
 fn read_records(gate: &str, records: &[String]) -> GateFindings {
     let stated: Vec<&String> = records.iter().filter(|record| !closes_a_compilation(record)).collect();
     let mut paths: Vec<String> = Vec::new();
+    let mut per_record: Vec<Vec<String>> = Vec::new();
     let mut complete = !stated.is_empty();
     for record in stated {
         let named = named_surface(record).paths;
         complete &= !named.is_empty();
-        for path in named {
-            if !paths.contains(&path) {
-                paths.push(path);
+        for path in &named {
+            if !paths.contains(path) {
+                paths.push(path.clone());
             }
         }
+        per_record.push(named);
     }
-    GateFindings { gate: gate.to_owned(), paths, complete }
+    GateFindings { gate: gate.to_owned(), paths, complete, records: per_record }
 }
 
 /// Whether `record` is one of the notices a failed compilation closes with.
@@ -273,6 +293,59 @@ pub fn attribute_gate(findings: &GateFindings, extents: &MemberExtents) -> GateA
     GateAttribution::Attributed(
         extents.members.iter().map(|(id, _)| id).filter(|id| owners.contains(id)).cloned().collect(),
     )
+}
+
+/// One finding whose own diagnostic names more than one member's write.
+///
+/// The shape a semantic conflict presents as: member B's crate fails to compile
+/// against a value member A changed, so rustc's primary span sits in B's file
+/// and its `note: … defined here` span sits in A's. Path attribution reads that
+/// as two owners and either charges both or bisects; neither says what actually
+/// happened, which is that the two members disagree and only the one folding
+/// second has work to do.
+///
+/// Recorded, never acted on. Attribution is unchanged by this read — the
+/// annotation exists so the console can name the pair and so the bounce that
+/// follows can be classified rather than guessed at.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SemanticMention {
+    /// The gate whose section the finding sits under.
+    pub gate: String,
+    /// The member whose write the finding's first named path belongs to — the
+    /// site the diagnostic was reported at.
+    pub site: WorkpieceId,
+    /// The other members whose writes the same finding names, in the order the
+    /// finding names them.
+    pub implicated: Vec<WorkpieceId>,
+}
+
+/// Every finding in `findings` that names two or more members' writes.
+///
+/// A finding naming one owner (or none) is an ordinary attribution and yields
+/// nothing here. Paths owned by [several](PathOwner::Several) members do not
+/// discriminate and are skipped rather than guessed at, exactly as
+/// [`attribute_gate`] skips them.
+#[must_use]
+pub fn semantic_mentions(findings: &GateFindings, extents: &MemberExtents) -> Vec<SemanticMention> {
+    findings
+        .records
+        .iter()
+        .filter_map(|named| {
+            let mut owners: Vec<WorkpieceId> = Vec::new();
+            for path in named {
+                if let PathOwner::One(owner) = extents.owner(path)
+                    && !owners.contains(&owner)
+                {
+                    owners.push(owner);
+                }
+            }
+            let mut owners = owners.into_iter();
+            let site = owners.next()?;
+            let implicated: Vec<WorkpieceId> = owners.collect();
+
+            (!implicated.is_empty()).then(|| SemanticMention { gate: findings.gate.clone(), site, implicated })
+        })
+        .collect()
 }
 
 #[cfg(test)]

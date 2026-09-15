@@ -151,7 +151,8 @@ pub use verify::{
 };
 #[cfg(feature = "github")]
 pub use verify::{
-    ExtentSource, GateAttribution, GateFindings, MemberExtents, PathOwner, attribute_gate, gate_findings,
+    ExtentSource, GateAttribution, GateFindings, MemberExtents, PathOwner, SemanticMention, attribute_gate,
+    gate_findings, semantic_mentions,
 };
 
 pub use verify::{

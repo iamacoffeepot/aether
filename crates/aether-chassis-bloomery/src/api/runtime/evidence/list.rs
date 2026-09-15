@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 
-use aether_bloomery::{MetricDispatch, StageId, StudyRecord};
+use aether_bloomery::{MetricDispatch, PackageClosureView, StageId, StudyRecord};
 use aether_data::wire::from_bytes;
 
-use super::{evidence_retained, is_host_nonce, resolve_evidence_dir};
+use super::{closure, evidence_retained, is_host_nonce, resolve_evidence_dir};
 use crate::api::dto::{BloomDispatchView, BloomDispatchesView};
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::store::{BloomDispatchLive, BloomDispatchRollup};
@@ -37,6 +37,7 @@ pub fn assemble(
         };
         let verdict = retained_verdict(worktree_base, archive_base, &nonce);
         let retained = evidence_retained(worktree_base, archive_base, &nonce);
+        let closure = closure::read(worktree_base, archive_base, &nonce);
         rows.push(BloomDispatchView {
             nonce,
             workpiece: payload.workpiece,
@@ -45,6 +46,7 @@ pub fn assemble(
             verdict,
             cost,
             evidence_retained: retained,
+            closure,
         });
     }
 
@@ -63,11 +65,32 @@ pub fn assemble(
             verdict: retained_verdict(worktree_base, archive_base, &live.nonce),
             cost: None,
             evidence_retained: evidence_retained(worktree_base, archive_base, &live.nonce),
+            closure: closure::read(worktree_base, archive_base, &live.nonce),
         });
     }
 
     assign_attempts(&mut rows);
-    BloomDispatchesView { dispatches: rows }
+    let semantic_edges = closure::derive_edges(&member_closures(&rows));
+
+    BloomDispatchesView { dispatches: rows, semantic_edges }
+}
+
+/// The closure each member last recorded, one entry per workpiece.
+///
+/// Last rather than first: a member that was redispatched wrote a new tree, and
+/// the edge a stale attempt implies is an edge about code that no longer exists.
+/// A row carrying no closure contributes nothing — the member is absent from the
+/// edge set rather than present with an empty write, which would read as
+/// "this member changed no package" about a member nobody measured.
+fn member_closures(rows: &[BloomDispatchView]) -> Vec<(String, PackageClosureView)> {
+    let mut latest: BTreeMap<String, PackageClosureView> = BTreeMap::new();
+    for row in rows.iter().filter(|row| !row.workpiece.is_empty()) {
+        if let Some(closure) = row.closure.clone() {
+            latest.insert(row.workpiece.clone(), closure);
+        }
+    }
+
+    latest.into_iter().collect()
 }
 
 fn overlay_nonce(

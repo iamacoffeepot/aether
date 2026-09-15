@@ -685,6 +685,35 @@ pub struct Present {}
 pub struct BloomDispatchesView {
     #[serde(default)]
     pub dispatches: Vec<BloomDispatchView>,
+    /// Semantic dependencies between this bloom's members, derived host-side
+    /// from the package closures their construct attempts recorded.
+    #[serde(default)]
+    pub semantic_edges: Vec<SemanticEdgeView>,
+}
+
+/// One member's package closure as its construct attempt recorded it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PackageClosureView {
+    #[serde(default)]
+    pub changed_packages: Vec<String>,
+    /// `None` is the unbounded answer — a whole-workspace sweep — never
+    /// "reaches nothing".
+    #[serde(default)]
+    pub closure: Option<Vec<String>>,
+    #[serde(default)]
+    pub unbounded_reason: Option<String>,
+}
+
+/// One derived edge: `member`'s verification compiles a package `depends_on`
+/// wrote.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SemanticEdgeView {
+    #[serde(default)]
+    pub member: String,
+    #[serde(default)]
+    pub depends_on: String,
+    #[serde(default)]
+    pub through: Vec<String>,
 }
 
 /// One attempt: nonce, stage, attempt rank, verdict, cost, retention.
@@ -704,6 +733,8 @@ pub struct BloomDispatchView {
     pub cost: Option<u64>,
     #[serde(default)]
     pub evidence_retained: bool,
+    #[serde(default)]
+    pub closure: Option<PackageClosureView>,
 }
 
 /// `GET /dispatches/{nonce}` — one dispatch's evidence header.

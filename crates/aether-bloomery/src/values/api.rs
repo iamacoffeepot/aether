@@ -670,6 +670,44 @@ pub struct ErrorView {
 pub struct BloomDispatchesView {
     /// One row per attempt, oldest first.
     pub dispatches: Vec<BloomDispatchView>,
+    /// The semantic dependencies between this bloom's members, derived from the
+    /// package closures their construct attempts recorded.
+    ///
+    /// Host-derived and served beside the rows rather than journaled: the
+    /// closure is already addressable from each member's dispatch row, and the
+    /// edge is a fact about a pair of rows rather than a value the reducer owns.
+    /// Empty when no member's evidence carries a closure, which is also what a
+    /// bloom of genuinely independent members yields — the per-row
+    /// [`closure`](BloomDispatchView::closure) tells the two apart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub semantic_edges: Vec<SemanticEdgeView>,
+}
+
+/// One member's package closure as its construct attempt recorded it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageClosureView {
+    /// The workspace packages the candidate wrote into, sorted.
+    pub changed_packages: Vec<String>,
+    /// The packages that write can have broken. `None` is the *unbounded*
+    /// answer — the gate sweeps the whole workspace — never "reaches nothing".
+    #[serde(default)]
+    pub closure: Option<Vec<String>>,
+    /// Why the closure is unbounded, in the gate's own words. Present exactly
+    /// when [`closure`](Self::closure) is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unbounded_reason: Option<String>,
+}
+
+/// One derived semantic dependency: `member`'s verification compiles a package
+/// that `depends_on` wrote, so a red run cannot tell the two apart by file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticEdgeView {
+    /// The member whose closure reaches the other's write.
+    pub member: String,
+    /// The member whose write it reaches.
+    pub depends_on: String,
+    /// The packages the edge runs through, sorted — the checkable half.
+    pub through: Vec<String>,
 }
 
 /// One attempt on a bloom: a completed rollup row and/or a still-live order.
@@ -692,6 +730,11 @@ pub struct BloomDispatchView {
     pub cost: Option<u64>,
     /// Whether `{nonce}-evidence` is still on disk.
     pub evidence_retained: bool,
+    /// What this attempt's candidate wrote and what that reaches, when the
+    /// attempt's evidence is still on disk and carries the record. Absent for a
+    /// swept directory or an attempt from before the lane recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closure: Option<PackageClosureView>,
 }
 
 /// `GET /dispatches/{nonce}` — one dispatch's evidence header.

@@ -1021,7 +1021,9 @@ mod tests {
                     verdict: Some("pass".to_owned()),
                     cost: Some(1_000_000),
                     evidence_retained: true,
+                    closure: None,
                 }],
+                semantic_edges: Vec::new(),
             },
         );
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
@@ -1070,7 +1072,9 @@ mod tests {
                     verdict: Some("pass".to_owned()),
                     cost: Some(1_000_000),
                     evidence_retained: true,
+                    closure: None,
                 }],
+                semantic_edges: Vec::new(),
             },
         );
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);

@@ -67,7 +67,8 @@ pub use facts::record_proof_facts;
 pub use facts::{DiscriminatedFact, DiscriminatedFacts, ProofResult, ProofSource, RunnerReport, discriminate};
 #[cfg(feature = "github")]
 pub use ownership::{
-    ExtentSource, GateAttribution, GateFindings, MemberExtents, PathOwner, attribute_gate, gate_findings,
+    ExtentSource, GateAttribution, GateFindings, MemberExtents, PathOwner, SemanticMention, attribute_gate,
+    gate_findings, semantic_mentions,
 };
 
 #[cfg(feature = "runtime")]
