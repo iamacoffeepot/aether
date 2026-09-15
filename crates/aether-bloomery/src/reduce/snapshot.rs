@@ -1206,23 +1206,33 @@ impl Snapshot {
     /// Keyed on `passed: false` and `StageId::Construct`: a passing capture is
     /// a candidate (the cursor adopts it), and a failing Refine still discards
     /// its capture so a tree that failed its own gate is not a resume seed.
-    /// Gated on a retried or wedged outcome so a refused completion — unknown
-    /// bloom, stage mismatch — cannot plant a checkpoint the reducer rejected.
+    /// A Construct machinery fault carrying the refused `DigestMismatch`
+    /// capture seeds the same slot (#6013). Gated on the retried-or-wedged
+    /// outcome of each arm so a refused completion — unknown bloom, stage
+    /// mismatch — cannot plant a checkpoint the reducer rejected.
     /// Raises no hold and does not write the stage cursor.
     fn record_construct_checkpoint(&mut self, event: &Event, decisions: &Decisions) {
-        if !matches!(decisions.outcome, Outcome::AttemptRetried { .. } | Outcome::AttemptWedged { .. }) {
-            return;
-        }
-        let Fact::AttemptCompleted {
-            bloom,
-            workpiece,
-            stage: StageId::Construct,
-            passed: false,
-            candidate: Some(checkpoint),
-            ..
-        } = &event.fact
-        else {
-            return;
+        let (bloom, workpiece, checkpoint) = match &event.fact {
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece,
+                stage: StageId::Construct,
+                passed: false,
+                candidate: Some(checkpoint),
+                ..
+            } if matches!(decisions.outcome, Outcome::AttemptRetried { .. } | Outcome::AttemptWedged { .. }) => {
+                (bloom, workpiece, checkpoint)
+            }
+            Fact::MemberExecutorFault {
+                bloom,
+                workpiece,
+                stage: StageId::Construct,
+                candidate: Some(checkpoint),
+                ..
+            } if matches!(decisions.outcome, Outcome::MachineryRetried { .. } | Outcome::MachineryWedged { .. }) => {
+                (bloom, workpiece, checkpoint)
+            }
+            _ => return,
         };
         self.member_checkpoints.entry(*bloom).or_default().insert(workpiece.clone(), *checkpoint);
     }

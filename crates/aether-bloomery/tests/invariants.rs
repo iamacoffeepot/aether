@@ -1537,6 +1537,7 @@ fn a_member_executor_fault_retries_the_same_stage_without_charging_work_or_repai
                 workpiece: workpiece("wp"),
                 stage: StageId::Verify,
                 evidence: Evidence { subject: digest(21), kind: EvidenceKind::ExecutorFault, detail: digest(detail) },
+                candidate: None,
             },
         )
     };
@@ -1549,6 +1550,7 @@ fn a_member_executor_fault_retries_the_same_stage_without_charging_work_or_repai
             workpiece: workpiece("wp"),
             stage: StageId::Verify,
             evidence: Evidence { subject: digest(99), kind: EvidenceKind::ExecutorFault, detail: digest(60) },
+            candidate: None,
         },
     );
     assert!(matches!(
@@ -2550,7 +2552,13 @@ fn a_verify_the_host_killed_at_the_wall_clock_ejects_while_a_host_fault_retries(
     // could not carry the lane to a verdict is not the member's doing.
     let faulted = event(
         "verify-faulted",
-        Fact::MemberExecutorFault { bloom, workpiece: workpiece("wp"), stage: StageId::Verify, evidence },
+        Fact::MemberExecutorFault {
+            bloom,
+            workpiece: workpiece("wp"),
+            stage: StageId::Verify,
+            evidence,
+            candidate: None,
+        },
     );
     assert!(
         matches!(step(&ejecting, &faulted).1.outcome, Outcome::MachineryRetried { .. }),
@@ -3984,6 +3992,7 @@ fn verify_executor_fault(bloom: BloomId, key: &str, detail: u8) -> Event {
             workpiece: workpiece("wp"),
             stage: StageId::Verify,
             evidence: Evidence { subject: digest(21), kind: EvidenceKind::ExecutorFault, detail: digest(detail) },
+            candidate: None,
         },
     )
 }

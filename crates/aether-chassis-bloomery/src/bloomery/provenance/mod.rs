@@ -338,6 +338,8 @@ pub fn refusal_fault(record: &DispatchRecord, refusal: &ProvenanceRefusal) -> Ev
             workpiece: record.workpiece.clone(),
             stage: record.stage,
             evidence,
+            // A refused dispatch never ran, so no lane built a tree to keep.
+            candidate: None,
         }
     };
 

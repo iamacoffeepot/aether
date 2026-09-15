@@ -673,7 +673,11 @@ fn member_deadline_expired_event(record: &DispatchRecord, evidence: Evidence) ->
     }
 }
 
-fn member_executor_fault_event(record: &DispatchRecord, evidence: Evidence) -> Event {
+/// A refused `DigestMismatch` Construct still captured work, and the recovery
+/// fault carries that capture so the reducer seeds the member checkpoint the
+/// retry checks out (#6013). Only Construct carries one: any other stage's
+/// capture is already the cursor's, never a resume seed.
+fn member_executor_fault_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
     Event {
         idempotency_key: AdmissionKey::MemberExecutorFault.of(&record.nonce.0),
         fact: Fact::MemberExecutorFault {
@@ -681,6 +685,7 @@ fn member_executor_fault_event(record: &DispatchRecord, evidence: Evidence) -> E
             workpiece: record.workpiece.clone(),
             stage: record.stage,
             evidence,
+            candidate: upload.observation.candidate.filter(|_| record.stage == StageId::Construct),
         },
     }
 }
@@ -1163,7 +1168,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     } else if upload.verdict == StageVerdict::DeadlineExpiry && admits_member_executor_fault(record.stage) {
         member_deadline_expired_event(&record, evidence)
     } else if reached_no_verdict(upload.verdict) && admits_member_executor_fault(record.stage) {
-        member_executor_fault_event(&record, evidence)
+        member_executor_fault_event(&record, upload, evidence)
     } else if record.stage == StageId::Verify {
         verify_event(&record, upload, evidence)
     } else if admits_as_attempt_completed(record.stage) {

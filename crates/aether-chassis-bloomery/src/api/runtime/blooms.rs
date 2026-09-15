@@ -330,7 +330,16 @@ impl ApiCapabilityState {
 
         admit(&Event {
             idempotency_key: IdempotencyKey(key),
-            fact: Fact::MemberExecutorFault { bloom, workpiece: WorkpieceId(workpiece.to_owned()), stage, evidence },
+            fact: Fact::MemberExecutorFault {
+                bloom,
+                workpiece: WorkpieceId(workpiece.to_owned()),
+                stage,
+                evidence,
+                // An operator retry names no refused tree: the member keeps
+                // whatever checkpoint the journal already holds, which the
+                // redispatch still seeds from.
+                candidate: None,
+            },
         })
     }
 

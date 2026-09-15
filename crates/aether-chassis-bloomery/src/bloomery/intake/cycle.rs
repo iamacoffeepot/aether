@@ -357,6 +357,11 @@ fn refused_construct_checkpoint(
 /// A completed run whose evidence bound the wrong digest cannot retry that
 /// upload. Admit an executor fault against the order's displayed digest so
 /// the member's machinery series moves instead of waiting forever.
+///
+/// A refused Construct that still captured work carries that capture on the
+/// fault (#6013): the reducer records it as the member checkpoint the retry
+/// checks out, so the fault-driven retry resumes the refused tree instead of
+/// the sealed base the checkpoint push just saved past.
 fn recover_completed_mismatch(
     store: &mut dyn StoreBackend,
     refused: &UploadedEvidence,
@@ -367,6 +372,9 @@ fn recover_completed_mismatch(
     let Some(record) = DispatchRecord::from_stored(&stored) else {
         return Ok(None);
     };
+    let capture = refused_construct_checkpoint(store, refused)
+        .map_err(CycleError::Intake)?
+        .map(|checkpoint| checkpoint.candidate);
     let fault = UploadedEvidence {
         nonce: refused.nonce.clone(),
         subject: record.displayed_digest,
@@ -374,6 +382,7 @@ fn recover_completed_mismatch(
         detail: refused.detail,
         observation: LaneObservation {
             findings: Some("lane bound evidence to a digest the order did not display".into()),
+            candidate: capture,
             ..LaneObservation::default()
         },
     };

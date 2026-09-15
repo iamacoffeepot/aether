@@ -1039,6 +1039,7 @@ mod tests {
                 workpiece: workpiece("wp-a"),
                 stage: member.stage,
                 evidence: evidence.clone(),
+                candidate: None,
             },
         );
         assert_eq!(

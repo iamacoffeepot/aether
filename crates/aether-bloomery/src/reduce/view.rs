@@ -686,6 +686,7 @@ mod tests {
                         kind: EvidenceKind::ExecutorFault,
                         detail: digest(detail),
                     },
+                    candidate: None,
                 },
             };
             snapshot = snapshot.apply(&fault, &reduce(&snapshot, &fault, &configs, &spend), &configs);

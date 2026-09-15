@@ -200,6 +200,7 @@ fn a_retry_naming_verify_takes_the_held_capture(harness: &mut FixtureHarness, bl
             workpiece: WorkpieceId(OTHER.into()),
             stage: StageId::Verify,
             evidence: Evidence { subject: assembled.tree, kind: EvidenceKind::ExecutorFault, detail: digest(0x71) },
+            candidate: None,
         },
     );
     assert!(

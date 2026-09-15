@@ -42,6 +42,7 @@ fn a_retried_member_runs_its_stage_again_on_the_candidate_it_holds() {
             workpiece: WorkpieceId(MEMBER.into()),
             stage: StageId::Verify,
             evidence: Evidence { subject: candidate.tree, kind: EvidenceKind::ExecutorFault, detail: digest(0xAA) },
+            candidate: None,
         },
     );
     assert!(

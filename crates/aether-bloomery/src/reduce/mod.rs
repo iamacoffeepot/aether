@@ -208,8 +208,8 @@ fn reduce_completion_fact(snapshot: &Snapshot, fact: &Fact) -> Decisions {
         Fact::MemberDeadlineExpired { bloom, workpiece, stage, evidence } => {
             reduce_member_deadline_expired(snapshot, bloom, workpiece, *stage, evidence)
         }
-        Fact::MemberExecutorFault { bloom, workpiece, stage, evidence } => {
-            reduce_member_executor_fault(snapshot, bloom, workpiece, *stage, evidence)
+        Fact::MemberExecutorFault { bloom, workpiece, stage, evidence, candidate } => {
+            reduce_member_executor_fault(snapshot, bloom, workpiece, *stage, evidence, *candidate)
         }
         Fact::FoldRefused { bloom, refusal } => reduce_fold_refused(snapshot, bloom, refusal),
         Fact::BaseVerifyCompleted { base, tree, passed, evidence, failed } => {

@@ -609,6 +609,12 @@ pub enum Fact {
         /// reducer refuses a fault naming any other subject, so a report from
         /// a superseded candidate cannot spend a newer one's retries.
         evidence: Evidence,
+        /// The capture a refused `DigestMismatch` Construct still held when
+        /// the recovery fault was admitted (#6013) — `None` on every other
+        /// fault. Appended inside the variant past `evidence`, so rows the
+        /// journal wrote before it decode through the pre-checkpoint upcast
+        /// with no capture rather than failing the row.
+        candidate: Option<CandidateRef>,
     },
     /// The integrate fold refused at a named guard (ADR-0206).
     ///
@@ -950,7 +956,8 @@ pub enum Fact {
     /// clock** (ADR-0177, ADR-0218 §Amendment: low tolerance).
     ///
     /// The narrow sibling of [`Fact::MemberExecutorFault`], carrying the same
-    /// four fields and the same evidence shape. What separates them is the one
+    /// addressing fields and the same evidence shape, but never a capture —
+    /// a cancel names no digest-mismatch tree to preserve. What separates them is the one
     /// thing the reducer cannot otherwise know: whether the lane had its whole
     /// sealed allowance. A `Verify` that did, and did not finish, has answered
     /// about its own work, so a bloom on the `Eject` disposition withdraws the

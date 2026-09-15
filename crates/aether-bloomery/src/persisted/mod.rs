@@ -470,10 +470,11 @@ pub const DECISIONS_PRE_ADMIN_DIGEST: Digest =
 /// Copied verbatim from the `event` line the ledger carried as current at
 /// `11458f211` — `522b232b40b9e1092a3e547a352b81f9d65105d2dc09b0676d5efcdc31e26dd7`,
 /// the same way and for the same reason. Every admin fact is appended past
-/// `MemberDeadlineExpired`, the last fact the low-tolerance slice appended, so
-/// this upcast is the identity where
-/// [`EVENT_PRE_RED_VERIFY_DIGEST`] — a field appended *inside*
-/// `Fact::VerifyFailed` — is not.
+/// `MemberDeadlineExpired`, the last fact the low-tolerance slice appended —
+/// but rows of this era still carry the capture-less
+/// `Fact::MemberExecutorFault`, so this upcast peeks that discriminant the
+/// way [`EVENT_PRE_RED_VERIFY_DIGEST`] peeks `VerifyFailed`, rather than
+/// reading the identity.
 pub const EVENT_PRE_ADMIN_DIGEST: Digest =
     Digest::pinned("522b232b40b9e1092a3e547a352b81f9d65105d2dc09b0676d5efcdc31e26dd7");
 
@@ -488,6 +489,13 @@ const RECORD_RED_VERIFY: u32 = 76;
 /// `Fact::MemberDeadlineExpired`'s declaration index — the event column's half
 /// of the same boundary, pinned for the same reason.
 const MEMBER_DEADLINE_EXPIRED: u32 = 59;
+
+/// `Fact::MemberExecutorFault`'s declaration index. A tripwire in this
+/// module's tests pins it, for the reason [`VERIFY_FAILED`] is pinned: the
+/// pre-checkpoint event upcasts peek this discriminant to decode the
+/// capture-less body, and a fact inserted rather than appended in front of it
+/// would make that peek read some other variant's bytes.
+const MEMBER_EXECUTOR_FAULT: u32 = 28;
 
 /// The stamp on journaled decisions rows the **rescue coordinator** wrote:
 /// branch `rescue/0915-admin-binary`, commit `ce8ba124c`, the live unit from
@@ -521,6 +529,18 @@ pub const DECISIONS_RESCUE_ADMIN_DIGEST: Digest =
 /// `Fact::MemberDeadlineExpired` in front of them.
 pub const EVENT_RESCUE_ADMIN_DIGEST: Digest =
     Digest::pinned("7765f5ee28b4ac779ac5a7e0205c037fd0a91fe238a1f71023adf60037ff33cd");
+
+/// Event schema immediately before #6013 appended `candidate` to
+/// `Fact::MemberExecutorFault`.
+///
+/// Copied verbatim from the `event` line the ledger carried as current before
+/// that slice — `76e2d5e11f808c0fb338900a0f0f43e01587aaff2c9c17fb325010bbb8f35fe4` —
+/// never recomputed from live code (#5500). The new field is `Option`, but
+/// that rescues JSON only: on the positional wire a capture-less row still
+/// runs out of bytes under today's decoder, so rows of this shape read
+/// through [`upcast_event_pre_checkpoint`] with no capture.
+pub const EVENT_PRE_CHECKPOINT_DIGEST: Digest =
+    Digest::pinned("76e2d5e11f808c0fb338900a0f0f43e01587aaff2c9c17fb325010bbb8f35fe4");
 
 /// The stamp on sealed model-process instruction bundles written before
 /// ADR-0216 appended `retrospect` and `retrospect_finding_contract`.
@@ -720,12 +740,39 @@ fn decode_event_with(bytes: &[u8], decode: fn(&mut &[u8]) -> Result<Fact, WireEr
     Ok(Event { idempotency_key, fact })
 }
 
-fn decode_fact_pre_findings(cursor: &mut &[u8]) -> Result<Fact, WireError> {
-    let selector = peek_selector(cursor)?;
-    if selector != VERIFY_FAILED {
+/// Every event shape from the pre-checkpoint fold on: a
+/// `Fact::MemberExecutorFault` with four fields where today's decoder reads
+/// five, and every other discriminant unmoved.
+///
+/// The pre-admin stamp and the pre-checkpoint stamp share this one decoder:
+/// the admin facts the former predates are tails, so past the peek the live
+/// decoder reads them as it always did.
+fn upcast_event_pre_checkpoint(bytes: &[u8]) -> Result<Event, WireError> {
+    decode_event_with(bytes, decode_fact_pre_checkpoint)
+}
+
+fn decode_fact_pre_checkpoint(cursor: &mut &[u8]) -> Result<Fact, WireError> {
+    if peek_selector(cursor)? != MEMBER_EXECUTOR_FAULT {
         let (fact, rest) = take_from_bytes::<Fact>(cursor)?;
         *cursor = rest;
         return Ok(fact);
+    }
+    *cursor = &cursor[4..];
+    let (bloom, rest) = take_from_bytes(cursor)?;
+    *cursor = rest;
+    let (workpiece, rest) = take_from_bytes(cursor)?;
+    *cursor = rest;
+    let (stage, rest) = take_from_bytes(cursor)?;
+    *cursor = rest;
+    let (evidence, rest) = take_from_bytes(cursor)?;
+    *cursor = rest;
+    Ok(Fact::MemberExecutorFault { bloom, workpiece, stage, evidence, candidate: None })
+}
+
+fn decode_fact_pre_findings(cursor: &mut &[u8]) -> Result<Fact, WireError> {
+    let selector = peek_selector(cursor)?;
+    if selector != VERIFY_FAILED {
+        return decode_fact_pre_checkpoint(cursor);
     }
     *cursor = &cursor[4..];
     let (bloom, rest) = take_from_bytes(cursor)?;
@@ -775,10 +822,12 @@ fn upcast_decisions_pre_admin(bytes: &[u8]) -> Result<Decisions, WireError> {
     from_bytes(bytes)
 }
 
-/// Pre-admin-mode event rows carry the same wire layout today's decoder reads:
-/// the seven admin facts are appended past `MemberDeadlineExpired`.
+/// Pre-admin-mode event rows carry the seven admin facts past
+/// `MemberDeadlineExpired` — and the capture-less `Fact::MemberExecutorFault`
+/// every earlier shape carries too, so they read through the pre-checkpoint
+/// decoder rather than the identity.
 fn upcast_event_pre_admin(bytes: &[u8]) -> Result<Event, WireError> {
-    from_bytes(bytes)
+    upcast_event_pre_checkpoint(bytes)
 }
 
 /// Rescue-binary decision rows (see [`DECISIONS_RESCUE_ADMIN_DIGEST`]) carry
@@ -832,9 +881,11 @@ fn reshape_instructions_pre_reader(bytes: &[u8]) -> Result<Vec<u8>, WireError> {
 /// it (ADR-0187).
 ///
 /// The array is positional against [`PersistedKind::upcasts`], so the repeated
-/// entry is deliberate: the first eight registered shapes — every one before
-/// `Fact::VerifyFailed::findings` — share `upcast_event_pre_findings`, and the
-/// two after it read their own way.
+/// entries are deliberate: the first eight registered shapes — every one
+/// before `Fact::VerifyFailed::findings` — share `upcast_event_pre_findings`
+/// (which itself falls through to the pre-checkpoint reader past the
+/// findings peek), the pre-admin stamp and the pre-checkpoint stamp share
+/// `upcast_event_pre_checkpoint`, and the rescue stamp reads its own way.
 ///
 /// # Errors
 ///
@@ -856,6 +907,7 @@ pub fn decode_recorded_event(bytes: &[u8], schema: Option<&[u8]>) -> Result<Even
             upcast_event_pre_findings,
             upcast_event_pre_admin,
             upcast_event_rescue_admin,
+            upcast_event_pre_checkpoint,
         ],
     )
 }
@@ -898,6 +950,7 @@ pub static EVENT: PersistedKind = PersistedKind {
         PersistedUpcast { digest: EVENT_PRE_RED_VERIFY_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_ADMIN_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_RESCUE_ADMIN_DIGEST, reshape: None },
+        PersistedUpcast { digest: EVENT_PRE_CHECKPOINT_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };
@@ -1041,16 +1094,17 @@ mod tests {
     use aether_data::wire::to_vec;
 
     use super::{
-        DECISIONS, EVENT, EVENT_PRE_COALESCE_DIGEST, EVENT_PRE_COORDINATION_DIGEST, EVENT_PRE_PRECHECK_DIGEST,
-        EVENT_PRE_PREPARATION_CONFLICT_DIGEST, EVENT_PRE_PROOF_REUSED_DIGEST, EVENT_PRE_PROPOSE_DIGEST,
-        EVENT_PRE_RED_VERIFY_DIGEST, EVENT_PRE_STUDY_DIGEST, EVENT_RESCUE_ADMIN_DIGEST, MEMBER_DEADLINE_EXPIRED,
-        PersistedSchemaError, RECORD_COORDINATION_STATE, RECORD_RED_VERIFY, VERIFY_FAILED, decode_persisted,
-        decode_recorded_decisions, decode_recorded_event,
+        DECISIONS, EVENT, EVENT_PRE_ADMIN_DIGEST, EVENT_PRE_CHECKPOINT_DIGEST, EVENT_PRE_COALESCE_DIGEST,
+        EVENT_PRE_COORDINATION_DIGEST, EVENT_PRE_PRECHECK_DIGEST, EVENT_PRE_PREPARATION_CONFLICT_DIGEST,
+        EVENT_PRE_PROOF_REUSED_DIGEST, EVENT_PRE_PROPOSE_DIGEST, EVENT_PRE_RED_VERIFY_DIGEST, EVENT_PRE_STUDY_DIGEST,
+        EVENT_RESCUE_ADMIN_DIGEST, MEMBER_DEADLINE_EXPIRED, MEMBER_EXECUTOR_FAULT, PersistedSchemaError,
+        RECORD_COORDINATION_STATE, RECORD_RED_VERIFY, VERIFY_FAILED, decode_persisted, decode_recorded_decisions,
+        decode_recorded_event,
     };
     use crate::digest::{Digest, SCHEMA_DIGEST_DOMAIN, schema_digest};
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
     use crate::reduce::{Decision, Decisions, Event, Fact, Outcome};
-    use crate::values::{AdminNote, Evidence, EvidenceKind, RedVerify, VerifyFailure, VerifyFailureSet};
+    use crate::values::{AdminNote, CandidateRef, Evidence, EvidenceKind, RedVerify, VerifyFailure, VerifyFailureSet};
 
     fn empty_decisions() -> Decisions {
         Decisions { outcome: Outcome::Duplicate, effects: Vec::new() }
@@ -1208,6 +1262,104 @@ mod tests {
         .expect("a deadline-expiry fact encodes");
         let selector = u32::from_le_bytes(encoded[..4].try_into().expect("a selector is four bytes"));
         assert_eq!(selector, MEMBER_DEADLINE_EXPIRED);
+    }
+
+    #[test]
+    fn member_executor_fault_selector_is_its_declaration_index() {
+        // Tripwire: the pre-checkpoint event upcasts peek this discriminant
+        // to decode the capture-less body. Inserting a Fact variant in front
+        // of MemberExecutorFault would make that peek read the wrong body.
+        let encoded = to_vec(&Fact::MemberExecutorFault {
+            bloom: BloomId(Digest::default()),
+            workpiece: WorkpieceId(String::new()),
+            stage: StageId::Construct,
+            evidence: Evidence {
+                subject: Digest::default(),
+                kind: EvidenceKind::ExecutorFault,
+                detail: Digest::default(),
+            },
+            candidate: None,
+        })
+        .expect("a member-fault fact encodes");
+        let selector = u32::from_le_bytes(encoded[..4].try_into().expect("a selector is four bytes"));
+        assert_eq!(selector, MEMBER_EXECUTOR_FAULT);
+    }
+
+    /// The four-field `Fact::MemberExecutorFault` a pre-checkpoint binary
+    /// wrote: today's encoding with the appended `candidate` chopped off its
+    /// tail.
+    ///
+    /// Derived rather than hand-assembled, so the fixture cannot drift from
+    /// the variant it claims to mirror: a `None` capture is the only thing
+    /// the two shapes differ by, so removing exactly its encoded length from
+    /// today's bytes reproduces the prior row byte for byte.
+    fn member_fault_without_capture() -> Vec<u8> {
+        let event = Event {
+            idempotency_key: IdempotencyKey("aether.bloomery.member_fault:n".into()),
+            fact: Fact::MemberExecutorFault {
+                bloom: BloomId(Digest::from_bytes([3; 32])),
+                workpiece: WorkpieceId("wp-a".into()),
+                stage: StageId::Construct,
+                evidence: Evidence {
+                    subject: Digest::from_bytes([4; 32]),
+                    kind: EvidenceKind::ExecutorFault,
+                    detail: Digest::from_bytes([5; 32]),
+                },
+                candidate: None,
+            },
+        };
+        let mut bytes = to_vec(&event).expect("a member-fault event encodes");
+        let appended = to_vec(&None::<CandidateRef>).expect("an empty capture encodes").len();
+        bytes.truncate(bytes.len() - appended);
+        bytes
+    }
+
+    #[test]
+    fn a_capture_less_member_fault_row_upcasts_with_no_capture() {
+        // The pre-checkpoint upcast reads the four fields ahead of the
+        // appended one through the cursor walk — a walk that mis-sized any of
+        // them would decode garbage or refuse.
+        let decoded =
+            decode_recorded_event(&member_fault_without_capture(), Some(EVENT_PRE_CHECKPOINT_DIGEST.as_bytes()))
+                .expect("a capture-less row decodes through the pre-checkpoint upcast");
+        let Fact::MemberExecutorFault { workpiece, stage, candidate, .. } = decoded.fact else {
+            panic!("the upcast rebuilds the same variant");
+        };
+
+        assert_eq!(workpiece.0, "wp-a");
+        assert_eq!(stage, StageId::Construct);
+        assert_eq!(candidate, None, "a row written before the field carries no capture");
+    }
+
+    #[test]
+    fn every_shape_before_the_capture_field_reads_a_capture_less_row() {
+        // A field appended *inside* a variant un-identifies every shape before
+        // it, not only the one it displaced — the red-verify lesson above, now
+        // for the fault's capture. Each of these stamps must read the same
+        // row, including the pre-admin one whose decoder peeks the fault past
+        // its admin tails.
+        let bytes = member_fault_without_capture();
+        for digest in [
+            EVENT_PRE_PROPOSE_DIGEST,
+            EVENT_PRE_STUDY_DIGEST,
+            EVENT_PRE_PRECHECK_DIGEST,
+            EVENT_PRE_COORDINATION_DIGEST,
+            EVENT_PRE_PREPARATION_CONFLICT_DIGEST,
+            EVENT_PRE_PROOF_REUSED_DIGEST,
+            EVENT_PRE_COALESCE_DIGEST,
+            EVENT_PRE_RED_VERIFY_DIGEST,
+            EVENT_PRE_ADMIN_DIGEST,
+            EVENT_RESCUE_ADMIN_DIGEST,
+            EVENT_PRE_CHECKPOINT_DIGEST,
+        ] {
+            let decoded = decode_recorded_event(&bytes, Some(digest.as_bytes()))
+                .unwrap_or_else(|error| panic!("a capture-less row decodes under {digest}: {error}"));
+            let Fact::MemberExecutorFault { candidate, .. } = decoded.fact else {
+                panic!("the upcast rebuilds the same variant under {digest}");
+            };
+
+            assert_eq!(candidate, None, "a row written before the field carries no capture under {digest}");
+        }
     }
 
     /// The `Fact::AdminEnter` the rescue coordinator wrote: today's encoding

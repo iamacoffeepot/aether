@@ -507,7 +507,9 @@ pub(super) fn reduce_member_deadline_expired(
             && record.progress.get(workpiece).is_some_and(|cursor| cursor.stage == stage)
     });
     if !(ejecting && stage == StageId::Verify) {
-        return reduce_member_executor_fault(snapshot, bloom, workpiece, stage, evidence);
+        // A cancel names no digest-mismatch tree to preserve: the fault the
+        // expiry stands in for never carried a capture.
+        return reduce_member_executor_fault(snapshot, bloom, workpiece, stage, evidence, None);
     }
     let record = snapshot.blooms.get(bloom).expect("the ejecting check read this record");
 
@@ -522,14 +524,20 @@ pub(super) fn reduce_member_deadline_expired(
 }
 
 /// machinery.
+///
+/// `candidate` is the capture a refused `DigestMismatch` Construct still held
+/// (#6013) — `None` on every other fault. A Construct fault carrying one seeds
+/// the member checkpoint the same way a failing construct's capture does, so
+/// the retry checks out the refused tree instead of the sealed base.
 pub(super) fn reduce_member_executor_fault(
     snapshot: &Snapshot,
     bloom: &BloomId,
     workpiece: &WorkpieceId,
     stage: StageId,
     evidence: &Evidence,
+    candidate: Option<CandidateRef>,
 ) -> Decisions {
-    let ctx = match FaultCtx::admissible(snapshot, bloom, workpiece, stage, evidence) {
+    let ctx = match FaultCtx::admissible(snapshot, bloom, workpiece, stage, evidence, candidate) {
         Ok(ctx) => ctx,
         Err(refusal) => return Decisions::rejected(Outcome::MemberExecutorFaultRejected(refusal)),
     };
@@ -596,6 +604,9 @@ struct FaultCtx<'a> {
     /// the two differ only on the held-candidate hand-off.
     cursor: StageProgress,
     stage: StageId,
+    /// The capture a refused `DigestMismatch` Construct still held (#6013).
+    /// Only a Construct fault ever carries one; the hand-off arm ignores it.
+    candidate: Option<CandidateRef>,
 }
 
 impl<'a> FaultCtx<'a> {
@@ -616,6 +627,7 @@ impl<'a> FaultCtx<'a> {
         workpiece: &'a WorkpieceId,
         stage: StageId,
         evidence: &Evidence,
+        candidate: Option<CandidateRef>,
     ) -> Result<Self, MemberExecutorFaultError> {
         let record = snapshot
             .blooms
@@ -644,7 +656,7 @@ impl<'a> FaultCtx<'a> {
             return Err(MemberExecutorFaultError::EvidenceNotBound { expected: subject, got: evidence.subject });
         }
 
-        Ok(Self { snapshot, record, bloom, workpiece, member, cursor, stage })
+        Ok(Self { snapshot, record, bloom, workpiece, member, cursor, stage, candidate })
     }
 }
 
@@ -652,15 +664,22 @@ impl<'a> FaultCtx<'a> {
 /// order: nothing about the cursor moves, so the cursor itself is the progress
 /// the move carries. A Construct order displays no candidate — the lane is
 /// building one — while every later stage displays the capture it judges.
+///
+/// A Construct fault carrying the refused capture resolves its targets from
+/// that capture the way a failing construct resolves from its own (#6013):
+/// this event's capture is newer than anything the snapshot holds, and
+/// `apply` records it as the member checkpoint just after this reduce.
 fn redispatch_current_stage(ctx: &FaultCtx<'_>) -> [Decision; 2] {
-    let FaultCtx { snapshot, record, bloom, workpiece, member, cursor, stage } = *ctx;
+    let FaultCtx { snapshot, record, bloom, workpiece, member, cursor, stage, candidate } = *ctx;
+    let member_checkpoint =
+        candidate.filter(|_| stage == StageId::Construct).or_else(|| snapshot.member_checkpoint(bloom, workpiece));
     let targets = reconcile_or_line_targets(
         stage,
         member.scope_revision,
         member_construct_base(record, workpiece),
         cursor.candidate,
         cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile),
-        snapshot.member_checkpoint(bloom, workpiece),
+        member_checkpoint,
     );
     let displayed = if stage == StageId::Construct {
         None
@@ -688,7 +707,7 @@ fn redispatch_current_stage(ctx: &FaultCtx<'_>) -> [Decision; 2] {
 /// takes the candidate or moves, while the conflict evidence does not — that
 /// was the wedge attachment of the Reconcile stage this capture has left.
 fn hand_held_candidate_to_stage(ctx: &FaultCtx<'_>) -> [Decision; 2] {
-    let FaultCtx { snapshot, record, bloom, workpiece, member, cursor, stage } = *ctx;
+    let FaultCtx { snapshot, record, bloom, workpiece, member, cursor, stage, candidate: _ } = *ctx;
     let progress = StageProgress {
         stage,
         attempts: 1,
@@ -1257,6 +1276,68 @@ mod tests {
         }
     }
 
+    // The plausible bug (#6013): a refused DigestMismatch capture reaches the
+    // member checkpoint ref while the fault-driven retry starts from the
+    // sealed base — the recovery fault carries no capture, and the reducer
+    // records checkpoints only from failing constructs.
+    #[test]
+    fn a_construct_fault_carrying_the_refused_capture_seeds_the_retry() {
+        let (snapshot, bloom) = sealed();
+        let checkpoint = CandidateRef { tree: digest(21), checkout: digest(22) };
+        let fault = event(
+            "fault",
+            Fact::MemberExecutorFault {
+                bloom,
+                workpiece: WorkpieceId("wp".into()),
+                stage: StageId::Construct,
+                evidence: Evidence { subject: digest(10), kind: EvidenceKind::ExecutorFault, detail: digest(60) },
+                candidate: Some(checkpoint),
+            },
+        );
+        let (after, decided) = step(&snapshot, &fault);
+
+        assert!(matches!(decided.outcome, Outcome::MachineryRetried { stage: StageId::Construct, .. }));
+        assert_eq!(
+            after.member_checkpoint(&bloom, &WorkpieceId("wp".into())),
+            Some(checkpoint),
+            "the refused capture is the member checkpoint",
+        );
+        match decided.effects.iter().find(|effect| matches!(effect, Decision::DispatchAttempt { .. })) {
+            Some(Decision::DispatchAttempt { transformation, candidate, .. }) => {
+                assert_eq!(transformation.checkout, checkpoint.checkout, "the retry checks out the refused capture");
+                assert_eq!(*candidate, None, "the retry still binds the scope revision, not the checkpoint");
+                assert_eq!(
+                    transformation.diff_base,
+                    Some(digest(0)),
+                    "a seeded Construct names the member's base so the host can emit --seeded",
+                );
+            }
+            other => panic!("expected a Construct retry, got {other:?}"),
+        }
+    }
+
+    // The plausible bug: a fault without a capture invents a checkpoint, so a
+    // host outage resumes from a tree nobody built.
+    #[test]
+    fn a_construct_fault_without_a_capture_records_no_checkpoint() {
+        let (snapshot, bloom) = sealed();
+        let fault = event(
+            "fault",
+            Fact::MemberExecutorFault {
+                bloom,
+                workpiece: WorkpieceId("wp".into()),
+                stage: StageId::Construct,
+                evidence: Evidence { subject: digest(10), kind: EvidenceKind::ExecutorFault, detail: digest(60) },
+                candidate: None,
+            },
+        );
+        let (after, decided) = step(&snapshot, &fault);
+
+        assert!(matches!(decided.outcome, Outcome::MachineryRetried { stage: StageId::Construct, .. }));
+        assert_eq!(after.member_checkpoint(&bloom, &WorkpieceId("wp".into())), None);
+        assert_eq!(construct_dispatch(&decided).checkout, digest(0), "a capture-free fault still starts cold");
+    }
+
     // The plausible bug: a kill plants a checkpoint, the retry still starts
     // cold, and a later pass's capture cannot prove the journaled checkout
     // was the checkpoint the death left (#4994 acceptance 5).
@@ -1676,6 +1757,7 @@ mod tests {
                     workpiece: WorkpieceId("wp".into()),
                     stage: StageId::Construct,
                     evidence: Evidence { subject: digest(10), kind: EvidenceKind::ExecutorFault, detail: digest(60) },
+                    candidate: None,
                 },
             ),
         );
@@ -2060,6 +2142,7 @@ mod tests {
                         kind: EvidenceKind::ExecutorFault,
                         detail: digest(71),
                     },
+                    candidate: None,
                 },
             ),
         );

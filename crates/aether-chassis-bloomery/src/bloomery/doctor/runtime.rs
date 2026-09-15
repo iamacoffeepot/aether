@@ -539,6 +539,10 @@ fn redispatch_fault(member: &StandingMember) -> Event {
                 kind: EvidenceKind::ExecutorFault,
                 detail: Digest::of_wire_bytes(stamp.as_bytes()),
             },
+            // The doctor synthesizes this fault from member state; any
+            // checkpoint the member holds stays journaled and still seeds
+            // the redispatch through the snapshot fallback.
+            candidate: None,
         },
     }
 }

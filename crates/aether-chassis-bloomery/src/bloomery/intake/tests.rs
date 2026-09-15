@@ -1763,6 +1763,7 @@ fn a_member_executor_fault_admits_its_own_fact_and_consumes_the_order_once() {
     let mut store = store();
     let bloom = BloomId(Digest::from_bytes([1; 32]));
     let subject = Digest::from_bytes([30; 32]);
+    let captured = CandidateRef { tree: Digest::from_bytes([31; 32]), checkout: Digest::from_bytes([32; 32]) };
 
     for (nonce, stage) in
         [("n-f-verify", StageId::Verify), ("n-f-construct", StageId::Construct), ("n-f-refine", StageId::Refine)]
@@ -1778,16 +1779,23 @@ fn a_member_executor_fault_admits_its_own_fact_and_consumes_the_order_once() {
             detail: Digest::from_bytes([9; 32]),
             observation: LaneObservation {
                 findings: Some("the sandbox refused to start.\nVERDICT: environment".to_owned()),
+                candidate: Some(captured),
                 ..Default::default()
             },
         };
         let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
             panic!("{stage:?} member fault should be admitted");
         };
-        let Fact::MemberExecutorFault { bloom: faulted, workpiece, stage: got, evidence } = &admission.event.fact
+        let Fact::MemberExecutorFault { bloom: faulted, workpiece, stage: got, evidence, candidate } =
+            &admission.event.fact
         else {
             panic!("{stage:?} should admit MemberExecutorFault, got {:?}", admission.event.fact);
         };
+        assert_eq!(
+            *candidate,
+            upload.observation.candidate.filter(|_| stage == StageId::Construct),
+            "only a Construct fault carries the lane's capture",
+        );
         assert_eq!(*faulted, bloom);
         assert_eq!(workpiece.0, "wp");
         assert_eq!(*got, stage);
@@ -2802,5 +2810,86 @@ fn a_refused_construct_mismatch_preserves_its_capture_for_the_checkpoint_push() 
             Fact::MemberExecutorFault { workpiece: faulted, stage: StageId::Construct, .. } if *faulted == workpiece
         )),
         "the refusal is still visible on the member as a machinery fault",
+    );
+}
+
+#[test]
+fn a_refused_mismatch_capture_seeds_the_fault_driven_retry_checkout() {
+    // retrospect ab14a253 / issue 6013: the refused DigestMismatch capture is
+    // pushed to the member checkpoint ref, and the same cycle recovers the
+    // spent order as a machinery fault. That retry must start from the tree
+    // the refused lane built — not from the sealed base — or the push saves
+    // a tree no retry ever checks out.
+    let workpiece = WorkpieceId("wp-refused-retry".to_owned());
+    let scope_revision = Digest::from_bytes([2; 32]);
+    let (snapshot, bloom) = sealed_via_reducer(&workpiece, scope_revision);
+
+    let fake = FakeGithub::new();
+    let shell = shell(fake.clone());
+    let mut store = store();
+    let mut record = dispatch_record("n-refused-retry", bloom, &workpiece, scope_revision, scope_revision);
+    record.stage = StageId::Construct;
+    record.candidate = scope_revision;
+    record.displayed_digest = scope_revision;
+    let handle = answered(dispatch_and_record(&shell, &mut store, None, &record, NOW_UNIX_MILLIS));
+
+    let run_id = fake.seed_run("n-refused-retry", RunStatus::Completed, Some(RunConclusion::Success));
+    fake.seed_run_artifacts(
+        run_id,
+        vec![Artifact { id: 1, name: "evidence-n-refused-retry-log".to_owned(), size_bytes: 10 }],
+    );
+
+    let captured = CandidateRef { tree: Digest::from_bytes([41; 32]), checkout: Digest::from_bytes([42; 32]) };
+    let mut claims = HashMap::new();
+    claims.insert(
+        "n-refused-retry".to_owned(),
+        UploadedEvidence {
+            nonce: Nonce("n-refused-retry".to_owned()),
+            subject: Digest::from_bytes([9; 32]),
+            verdict: StageVerdict::Approved,
+            detail: Digest::from_bytes([7; 32]),
+            observation: LaneObservation { candidate: Some(captured), ..LaneObservation::default() },
+        },
+    );
+    let claims = SeededClaims(claims);
+    let mut sink = Collector::default();
+
+    let report = run_intake_cycle(&mut store, &shell, &[handle], &claims, None, &mut sink).unwrap();
+    assert_eq!((report.completed, report.refused), (1, 1), "the mismatched upload is refused");
+    assert_eq!(report.refused_checkpoints.len(), 1, "the capture survives for the checkpoint push");
+    let fault = sink
+        .0
+        .iter()
+        .find(|admission| {
+            matches!(
+                &admission.event.fact,
+                Fact::MemberExecutorFault { workpiece: faulted, stage: StageId::Construct, .. }
+                if *faulted == workpiece
+            )
+        })
+        .expect("the refusal recovers as a Construct machinery fault");
+    let decisions = reduce(&snapshot, &fault.event, &compiled_resolved(), &SpendWindow::default());
+    assert!(
+        matches!(decisions.outcome, Outcome::MachineryRetried { stage: StageId::Construct, .. }),
+        "the recovery fault retries the member, got {:?}",
+        decisions.outcome,
+    );
+    let retry = decisions
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            Decision::DispatchAttempt { transformation, .. } => Some(transformation),
+            _ => None,
+        })
+        .expect("the retry dispatches a fresh Construct order");
+    assert_eq!(
+        retry.checkout, captured.checkout,
+        "the fault-driven retry checks out the refused capture, not the sealed base",
+    );
+    let next = snapshot.apply(&fault.event, &decisions, &compiled_resolved());
+    assert_eq!(
+        next.member_checkpoint(&bloom, &workpiece),
+        Some(captured),
+        "the reducer holds the refused capture as the member checkpoint",
     );
 }

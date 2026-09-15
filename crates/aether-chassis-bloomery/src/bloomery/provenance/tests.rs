@@ -198,11 +198,12 @@ fn a_permanent_refusal_parks_a_member_host_fault_to_admit() {
     assert_eq!(admits.len(), 1, "one refusal, one admission");
     let event = from_bytes::<Event>(&admits[0].event).expect("the parked event decodes");
     match event.fact {
-        Fact::MemberExecutorFault { bloom, workpiece, stage, evidence } => {
+        Fact::MemberExecutorFault { bloom, workpiece, stage, evidence, candidate } => {
             assert_eq!(bloom, record.bloom);
             assert_eq!(workpiece, record.workpiece);
             assert_eq!(stage, record.stage);
             assert_eq!(evidence.subject, record.displayed_digest, "the reducer binds the fault to what was displayed");
+            assert_eq!(candidate, None, "a refused dispatch never ran, so it names no capture");
         }
         other => panic!("a refused member dispatch is a member host fault: {other:?}"),
     }
