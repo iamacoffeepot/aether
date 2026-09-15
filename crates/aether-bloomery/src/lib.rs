@@ -512,6 +512,7 @@ pub use values::MAX_OBSERVED_WRITES;
 pub use values::MAX_VERIFIER_IDENTITIES;
 pub use values::MAX_VERIFIER_IDENTITY_BYTES;
 pub use values::MECHANICAL_TAG;
+pub use values::MemberAdmission;
 pub use values::MemberCandidate;
 pub use values::MemberContractPin;
 pub use values::MemberDependency;

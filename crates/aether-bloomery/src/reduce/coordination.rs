@@ -5520,12 +5520,17 @@ mod tests {
         );
     }
 
-    /// Two members are composed only when they were built on the same tree.
+    /// Two heads neither of which extends the other are not one chain, so the
+    /// members built on them have no base to compose over at all.
     ///
-    /// Otherwise composing them would pick one member's context and silently
-    /// re-context the other, which is the same move on a smaller scale.
+    /// Composing them would have to pick one member's context and silently
+    /// re-context the other onto a tree it does not descend from — the same
+    /// move a product-based composition makes, on a smaller scale. The
+    /// permission §Amendment: grouping across heads by clean merge grants is
+    /// narrower than "different bases are fine": it is the *chain*, which is
+    /// what the sibling test below pins.
     #[test]
-    fn requests_built_on_different_contexts_have_no_shared_base() {
+    fn requests_built_on_unrelated_contexts_have_no_shared_base() {
         let (mut record, mut state) = fixture();
         let base = state.integration.head.clone();
         let later = IntegrationHead { node: digest(90), plan: digest(91), ..base.clone() };
@@ -5546,7 +5551,46 @@ mod tests {
 
         assert_eq!(state.construct_base(&requests[..1]), Some(base));
         assert_eq!(state.construct_base(&requests[1..]), Some(later));
-        assert_eq!(state.construct_base(&requests), None, "the two were not built on the same tree");
+        assert_eq!(state.construct_base(&requests), None, "the two heads are on no common chain");
+    }
+
+    /// Members built on successive heads of one product chain compose over the
+    /// newest of them, whatever order they are offered in.
+    ///
+    /// The plausible bug this catches is the one the change is for: reading
+    /// "built on the same context" as head *equality* makes every member that
+    /// was admitted after a fold unshareable with every member admitted before
+    /// it, and under eager integration that is nearly every pair — bloom `0c5a`
+    /// ran almost entirely single-member for it. The other half of the bug is
+    /// picking the wrong end of the chain: composing over the *older* base
+    /// would drop the folded sibling out of the tree under test, and the
+    /// older-based member is the one that has to move, because it is the one
+    /// whose merge preparation can refuse.
+    #[test]
+    fn requests_built_along_one_product_chain_compose_over_the_newest_base() {
+        let (mut record, mut state) = fixture();
+        let base = state.integration.head.clone();
+        let folded = pin("gamma", 12, 31);
+        let later = IntegrationHead { node: digest(90), plan: digest(91), coverage: alloc::vec![folded], ..base };
+        assert!(base.precedes(&later) && !later.precedes(&base));
+        for (index, member) in record.spec.members().to_vec().iter().enumerate() {
+            state.contexts.insert(
+                member.workpiece.0.clone(),
+                ConstructContext {
+                    bloom_base: state.integration.generation.base,
+                    starting_head: if index == 0 {
+                        base.clone()
+                    } else {
+                        later.clone()
+                    },
+                },
+            );
+        }
+        let requests = current_requests(&mut record, &state);
+        let reversed = requests.iter().rev().cloned().collect::<Vec<_>>();
+
+        assert_eq!(state.construct_base(&requests), Some(later.clone()));
+        assert_eq!(state.construct_base(&reversed), Some(later), "the newest base does not depend on offer order");
     }
 
     /// A fold is not news a queued verification is told.

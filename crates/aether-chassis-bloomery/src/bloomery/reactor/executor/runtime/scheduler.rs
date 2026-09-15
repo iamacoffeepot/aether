@@ -7,8 +7,9 @@ use std::{
 
 use aether_bloomery::{
     Admit, BloomId, CompatibilityPreview, CompositionPlan, CoordinationState, Decision, Digest, Event, Fact,
-    IdempotencyKey, MemberContractPin, MemberVerificationPayload, MemberVerifyRequest, Nonce, SharedRunMode,
-    SharedRunPlan, SharedRunRecord, Topic, VerificationMode, WorkOrder, WorkpieceId, decode_recorded_decisions,
+    IdempotencyKey, IntegrationHead, MemberContractPin, MemberVerificationPayload, MemberVerifyRequest, Nonce,
+    SharedRunMode, SharedRunPlan, SharedRunRecord, Topic, VerificationMode, WorkOrder, WorkpieceId,
+    decode_recorded_decisions,
 };
 use aether_data::wire::{from_bytes, to_vec};
 
@@ -261,13 +262,14 @@ fn proposal_capacity_order(plan: &SharedRunPlan) -> Option<WorkOrder> {
 /// The composition stands on the context its members were **constructed** on —
 /// [`CoordinationState::construct_base`] — and never on the product
 /// (ADR-0218 §Amendment: a member is verified over the context it was built on).
-/// That base is an ancestor of every candidate in the selection by construction,
-/// so the source's pinned fold fast-forwards and the node it prepares carries
-/// each member's own tree and, for a single-member selection, that member's own
-/// candidate checkout: the lane is handed the exact commit its slot last built,
-/// not a fresh composition ref over a tree a sibling's fold moved.
+/// When the selection's members were built on different heads of one product
+/// chain that base is the newest of them (§Amendment: grouping across heads by
+/// clean merge); every member's own base is then an ancestor of it, so the
+/// source's pinned fold either fast-forwards — a single-member selection is
+/// handed the exact commit its slot last built — or is an ordinary merge that
+/// preparation performs and refuses on conflict.
 ///
-/// A selection that does not agree on one base cannot be composed at all, and
+/// A selection whose bases are not on one chain cannot be composed at all, and
 /// [`SealedPolicySelection::select`] is what keeps that from being reached — a
 /// disagreeing selection here falls back to the standalone invocation rather
 /// than rebasing one member onto another's context.
@@ -369,6 +371,28 @@ fn fresh_conflict(state: &CoordinationState, queued: &[QueuedMemberVerificationR
     })
 }
 
+/// The head `request` was constructed on.
+///
+/// A request carrying no recorded context reads as the current product head,
+/// which is the same normalization [`CoordinationState::construct_base`]
+/// performs — so the selector and the plan it feeds cannot disagree about what
+/// a group's base is.
+fn construct_base_of<'a>(state: &'a CoordinationState, request: &'a MemberVerifyRequest) -> &'a IntegrationHead {
+    request.context.as_ref().map_or(&state.integration.head, |context| &context.starting_head)
+}
+
+/// The later of two construct bases on one product chain, or `None` when
+/// neither extends the other and so no composition can stand on either.
+fn newer_base<'a>(current: &'a IntegrationHead, candidate: &'a IntegrationHead) -> Option<&'a IntegrationHead> {
+    if current == candidate || candidate.precedes(current) {
+        Some(current)
+    } else if current.precedes(candidate) {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
 fn retained_survivor_group(
     state: &CoordinationState,
     queued: &[QueuedMemberVerificationRow],
@@ -453,15 +477,32 @@ impl SharedRunSelection for SealedPolicySelection {
         }
         let mut selected = Vec::new();
         let mut inputs = BTreeSet::new();
-        // Members share a run only when they share the context they were built
-        // on. Two members constructed on different trees have no common base to
-        // compose over, and picking either one's would re-context the other
-        // (ADR-0218 §Amendment: a member is verified over the context it was
-        // built on). The input digest already separates most of them — a
-        // `CompositionInput` names its candidate and its complete coverage — but
-        // the loop deliberately admits *several* distinct inputs into one plan,
-        // so the base has to be asked for directly.
-        let group_base = first_request.context.as_ref().map(|context| context.starting_head.digest());
+        // Members share a run when their construct bases lie on one product
+        // chain, not only when those bases are equal (ADR-0218 §Amendment:
+        // grouping across heads by clean merge). Eager integration moves the
+        // head after every fold, so demanding one head made almost every run
+        // single-member — bloom `0c5a`'s whole board. What the amendment
+        // forbids is re-preparing a queued candidate onto a head that moved
+        // under it, and composing an older-based candidate onto a newer base
+        // does not do that: `build_plan` picks the newest base, preparation
+        // merges each candidate onto it, and a candidate that will not merge
+        // falls back to its own base rather than being re-prepared.
+        //
+        // The selection is optimistic on purpose. Whether a merge is clean is a
+        // question for the git source, which this selector — pure over
+        // `CoordinationState`, replayed from the journal on every turn — has no
+        // handle on and must not grow one. So the chain relation is what is
+        // asked here, and the merge is asked where the source already prepares
+        // compositions.
+        //
+        // TODO(#6074): a member whose verification closure is unbounded — a
+        // workspace-level input changed, which `PackageClosure` stamps into
+        // construct evidence on `feat/issue-6074-semantic-closure-edges` — must
+        // never join a group, because its gate pass re-runs the whole workspace
+        // and charges every co-composed sibling for it. That value is not
+        // reachable from the scheduler until #6074 lands; this filter goes here
+        // when it is.
+        let mut group_base = construct_base_of(state, &first_request).clone();
         for row in queued {
             let Some(request) = current_request(state, row).filter(|request| request.bloom == first_request.bloom)
             else {
@@ -470,9 +511,9 @@ impl SharedRunSelection for SealedPolicySelection {
             if !state.composition_contract.covers(&request) {
                 continue;
             }
-            if request.context.as_ref().map(|context| context.starting_head.digest()) != group_base {
+            let Some(admitted) = newer_base(&group_base, construct_base_of(state, &request)).cloned() else {
                 continue;
-            }
+            };
             if state.survivor_groups.iter().any(|group| group.requests.contains(&request.digest())) {
                 break;
             }
@@ -495,6 +536,17 @@ impl SharedRunSelection for SealedPolicySelection {
                     })
                 })
                 .collect::<Vec<_>>();
+            // A peer joins on its input's atomicity rather than on its own
+            // base, so the group base has to absorb it as well: a selection
+            // whose bases are not on one chain has no composition base at all
+            // and would be planned as a multi-request standalone run, which the
+            // reducer refuses.
+            let Some(admitted) = peers.iter().try_fold(admitted, |base, peer| {
+                let peer = current_request(state, &queued[*peer])?;
+                newer_base(&base, construct_base_of(state, &peer)).cloned()
+            }) else {
+                continue;
+            };
             let missing = request.input.members.iter().any(|pin| {
                 !state.integration.head.coverage.contains(pin)
                     && !peers.iter().any(|peer| {
@@ -507,6 +559,7 @@ impl SharedRunSelection for SealedPolicySelection {
                 }
                 break;
             }
+            group_base = admitted;
             inputs.insert(request.input.digest());
             let previous_len = selected.len();
             for peer in peers {
@@ -639,6 +692,24 @@ fn replay_proposal(
     Ok(admits)
 }
 
+/// Say why each member is in the group being proposed.
+///
+/// A group may now span construct heads, so "these two are together" no longer
+/// implies "these two were built on the same tree"
+/// (ADR-0218 §Amendment: grouping across heads by clean merge). The plan carries
+/// the answer and [`CompositionPlan::admissions`] reads it off; logging it here
+/// is what lets an operator see a group's shape without replaying the journal.
+fn log_group(plan: &SharedRunPlan) {
+    if let Some(composition) = plan.composition.as_ref() {
+        tracing::info!(
+            target: "aether_chassis_bloomery::executor",
+            base = %composition.base.digest().to_hex(),
+            admissions = ?composition.admissions(),
+            "shared-run group composed",
+        );
+    }
+}
+
 pub(super) fn drain_member_verifications(
     scheduler: &mut MemberVerificationScheduler,
     store: &mut dyn StoreBackend,
@@ -734,6 +805,7 @@ pub(super) fn drain_member_verifications(
         }
         ProposalOutcome::Propose { plan, requests } => {
             scheduler.proposing();
+            log_group(&plan);
             let event = Event {
                 idempotency_key: IdempotencyKey(format!(
                     "aether.bloomery.propose_shared_run:{}",
@@ -988,6 +1060,53 @@ mod tests {
         (state(vec![alpha, beta, charlie], 2), rows)
     }
 
+    /// Two heads of one product chain: the pristine base the fixture's members
+    /// were admitted on, and the head a sibling's fold moved the product to.
+    /// An append writes its parent's coverage plus what it folds, so the
+    /// earlier head's coverage is a prefix of the later one's.
+    fn chain_heads() -> (IntegrationHead, IntegrationHead) {
+        let earlier = IntegrationHead {
+            generation: digest(2),
+            node: digest(1),
+            candidate: candidate(1),
+            plan: digest(3),
+            coverage: Vec::new(),
+        };
+        let folded = pin("gamma", 13);
+        let later = IntegrationHead {
+            node: digest(93),
+            candidate: folded.candidate,
+            plan: digest(94),
+            coverage: vec![folded],
+            ..earlier
+        };
+        (earlier, later)
+    }
+
+    /// The fixture reduced to one singleton request per head in `heads`, so a
+    /// selection is about the bases and nothing else — no atomic input pulling
+    /// an absent peer in, no survivor group.
+    fn two_singletons_on(heads: &[IntegrationHead]) -> (CoordinationState, Vec<QueuedMemberVerificationRow>) {
+        let (mut state, _) = fixture();
+        state.requests.remove(0);
+        let bloom_base = state.integration.generation.base;
+        for (request, head) in state.requests.iter_mut().zip(heads) {
+            request.input = CompositionInput {
+                node: request.member.candidate.tree,
+                candidate: request.member.candidate,
+                members: vec![request.member.clone()],
+            };
+            request.context = Some(ConstructContext { bloom_base, starting_head: head.clone() });
+        }
+        let rows = state
+            .requests
+            .iter()
+            .enumerate()
+            .map(|(index, request)| queued(request, u64::try_from(index).unwrap_or_default() + 1))
+            .collect();
+        (state, rows)
+    }
+
     #[test]
     fn repaired_atomic_input_is_selected_across_an_interleaved_request() {
         let (state, queued) = fixture();
@@ -1201,6 +1320,48 @@ mod tests {
         state.integration.head.coverage = vec![state.requests[0].member.clone(), state.requests[2].member.clone()];
 
         assert_eq!(SealedPolicySelection.select(&state, &queued), vec![0, 2]);
+    }
+
+    /// Two singleton members built on successive heads of one product chain go
+    /// into one run, over the newer of the two bases.
+    ///
+    /// The plausible bug: the selector admitted a request only when its
+    /// `context.starting_head` equalled the first selected request's. Eager
+    /// integration moves the head at every fold, so under that rule two members
+    /// that merely finished either side of a fold could never share a run —
+    /// which is why bloom `0c5a` ran nearly every member alone and the shared
+    /// path bought nothing.
+    #[test]
+    fn members_built_on_successive_heads_of_one_chain_share_a_run() {
+        let (earlier, later) = chain_heads();
+        let (state, queued_rows) = two_singletons_on(&[earlier, later.clone()]);
+
+        assert_eq!(SealedPolicySelection.select(&state, &queued_rows), vec![0, 1]);
+        let plan = build_plan(&state, state.requests.clone());
+        assert_eq!(plan.mode, SharedRunMode::Contextual);
+        let composition = plan.composition.as_ref().expect("a contextual plan composes");
+        assert_eq!(composition.base, later, "the group stands on the newest base among its members, not the oldest");
+        assert_eq!(
+            composition.admissions().iter().map(|admission| admission.carried_forward).collect::<Vec<_>>(),
+            vec![true, false],
+            "the plan says which member was carried forward onto a base its own fold had not reached"
+        );
+    }
+
+    /// The permission is the chain, not "any two bases".
+    ///
+    /// Two heads at the same coverage under different nodes are on no common
+    /// order — one does not descend from the other — so composing them would
+    /// re-context whichever member lost the coin toss onto a tree it does not
+    /// descend from. The selector must still refuse that pair.
+    #[test]
+    fn members_built_on_unrelated_heads_are_not_grouped() {
+        let (_, later) = chain_heads();
+        let sideways = IntegrationHead { node: digest(95), plan: digest(96), ..later.clone() };
+        let (state, queued_rows) = two_singletons_on(&[sideways, later]);
+
+        assert_eq!(SealedPolicySelection.select(&state, &queued_rows), vec![0]);
+        assert!(state.construct_base(&state.requests).is_none());
     }
 
     #[test]

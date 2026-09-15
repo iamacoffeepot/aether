@@ -266,6 +266,27 @@ impl IntegrationHead {
     pub fn covers(&self, pin: &MemberPin) -> bool {
         self.coverage.contains(pin)
     }
+
+    /// Whether `self` is a strictly earlier head than `later` on the same
+    /// product chain.
+    ///
+    /// An append writes its parent's coverage plus the pins it folds, and
+    /// refuses to re-pin a workpiece that is already covered at another
+    /// version, so along one generation's chain an earlier head's coverage is a
+    /// prefix of every later head's. A generation bump starts coverage over
+    /// from a tree the bloom re-derived, which is why heads of different
+    /// generations are never comparable and this answers `false` for them.
+    ///
+    /// Equal heads are not "earlier": callers ordering a set of bases treat
+    /// equality separately, and two heads carrying the same coverage under
+    /// different candidates (a partial-head repair in between) are on no
+    /// common order at all.
+    #[must_use]
+    pub fn precedes(&self, later: &Self) -> bool {
+        self.generation == later.generation
+            && self.coverage.len() < later.coverage.len()
+            && later.coverage.starts_with(&self.coverage)
+    }
 }
 
 /// Persisted source operation advancing one generation from one exact parent.
@@ -709,6 +730,46 @@ impl CompositionPlan {
     pub fn digest(&self) -> Digest {
         digest_of(self)
     }
+
+    /// Why each member is in this group: the head it was constructed on, and
+    /// whether that is the base the composition stands on or an earlier head of
+    /// the same product chain it is carried forward from (ADR-0218 §Amendment:
+    /// grouping across heads by clean merge).
+    ///
+    /// Read off the plan rather than stored beside it. The plan already names
+    /// every member's `ConstructContext` and the base it composes over, so the
+    /// relation between them is fixed by the plan; a stored copy would be a
+    /// second thing to keep true. The scheduler logs this at proposal and a
+    /// console renders it from the journaled `ProposeSharedRun`.
+    #[must_use]
+    pub fn admissions(&self) -> Vec<MemberAdmission> {
+        self.requests
+            .iter()
+            .map(|request| {
+                let base = request.context.as_ref().map_or(&self.base, |context| &context.starting_head);
+                MemberAdmission {
+                    workpiece: request.member.workpiece.clone(),
+                    request: request.digest(),
+                    base: base.digest(),
+                    carried_forward: base.precedes(&self.base),
+                }
+            })
+            .collect()
+    }
+}
+
+/// One member's place in a shared run's group, as [`CompositionPlan::admissions`]
+/// reads it off the plan.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MemberAdmission {
+    pub workpiece: WorkpieceId,
+    pub request: Digest,
+    /// The head the member was constructed on.
+    pub base: Digest,
+    /// Whether that head is earlier than the group's base, so this member
+    /// joined by merging forward onto a base a sibling's fold had moved to
+    /// rather than by already standing on it.
+    pub carried_forward: bool,
 }
 
 /// Physical execution shape chosen for ready logical requests.
@@ -1095,9 +1156,10 @@ impl CoordinationState {
         self.preparations.iter().find(|plan| plan.digest() == id)
     }
 
-    /// The context `requests` were constructed on, which is the only tree their
-    /// composition may stand on (ADR-0218 §Amendment: a member is verified over
-    /// the context it was built on).
+    /// The context `requests` were constructed on — the newest of them when
+    /// they differ — which is the only tree their composition may stand on
+    /// (ADR-0218 §Amendment: a member is verified over the context it was built
+    /// on).
     ///
     /// Never the product. The product is the virtual final tree the bloom is
     /// assembling and it grows every time a sibling folds; a candidate authored
@@ -1108,14 +1170,33 @@ impl CoordinationState {
     /// previous fold, and two members went red on a struct field a folded
     /// sibling had added that their own candidates never saw.
     ///
-    /// `None` when the requests do not agree on one base, which is the signal
-    /// that they cannot share a run — each is then planned alone rather than
-    /// one of them being rebased onto the other's context.
+    /// Requests need not have been constructed on the *same* head to share one
+    /// (ADR-0218 §Amendment: grouping across heads by clean merge). Sharing a
+    /// head was never the rule; the rule is that no queued candidate is
+    /// re-prepared onto a head that moved under it. When the selected bases lie
+    /// on one product chain the newest of them is the composition base, and
+    /// every older-based candidate reaches it by an ordinary merge that
+    /// preparation performs and the source refuses on conflict — at which point
+    /// the whole selection falls back to standalone runs over each member's own
+    /// base, which is exactly what a candidate that cannot merge is owed.
+    ///
+    /// `None` when the bases are not on one chain — different generations, or
+    /// two heads neither of which extends the other. Those cannot be composed
+    /// at all, so each request is planned alone rather than one of them being
+    /// rebased onto the other's context.
     #[must_use]
     pub fn construct_base(&self, requests: &[MemberVerifyRequest]) -> Option<IntegrationHead> {
-        let mut bases = requests.iter().map(|request| request.context.as_ref().map(|context| &context.starting_head));
-        let first = bases.next()?;
-        bases.all(|base| base == first).then(|| first.cloned().unwrap_or_else(|| self.integration.head.clone()))
+        let mut newest: Option<&IntegrationHead> = None;
+        for request in requests {
+            let base = request.context.as_ref().map_or(&self.integration.head, |context| &context.starting_head);
+            newest = Some(match newest {
+                None => base,
+                Some(current) if current == base || base.precedes(current) => current,
+                Some(current) if current.precedes(base) => base,
+                Some(_) => return None,
+            });
+        }
+        newest.cloned()
     }
 
     /// Whether `pin` carries an exact admitted proof in this coordination

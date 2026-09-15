@@ -90,12 +90,13 @@ pub use coordination::{
     ConstructContext, ConstructionAdmission, ConstructionCheckpoint, ContextualAttemptDispatch,
     ContextualInvocationTemplate, ContextualResolutionClaim, CoordinationDiagnostic, CoordinationPolicy,
     CoordinationState, DEFAULT_COALESCE_MILLIS, EagerIntegrationState, FailureScope, GenerationMember,
-    IntegrationAppendPlan, IntegrationGeneration, IntegrationHead, MemberContractPin, MemberPin, MemberVerifyLatency,
-    MemberVerifyOutcome, MemberVerifyRequest, PartialHeadRepairCompletion, PartialHeadRepairDispatch,
-    PartialHeadRepairPlan, PreparedCandidate, RedVerify, ResolutionProof, SharedRunCompletion, SharedRunDispatch,
-    SharedRunExecution, SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunPreparation,
-    SharedRunRecord, StableHeadReservation, SurvivorGroup, VerificationContract, VerificationMode,
-    VerificationObligation, construction_nonce_digest, host_class_digest, verification_environment_digest,
+    IntegrationAppendPlan, IntegrationGeneration, IntegrationHead, MemberAdmission, MemberContractPin, MemberPin,
+    MemberVerifyLatency, MemberVerifyOutcome, MemberVerifyRequest, PartialHeadRepairCompletion,
+    PartialHeadRepairDispatch, PartialHeadRepairPlan, PreparedCandidate, RedVerify, ResolutionProof,
+    SharedRunCompletion, SharedRunDispatch, SharedRunExecution, SharedRunMode, SharedRunNode, SharedRunPhase,
+    SharedRunPlan, SharedRunPreparation, SharedRunRecord, StableHeadReservation, SurvivorGroup, VerificationContract,
+    VerificationMode, VerificationObligation, construction_nonce_digest, host_class_digest,
+    verification_environment_digest,
 };
 pub use fields::{FieldKind, WorkpieceFact, WorkpieceFields};
 pub use finding::{

@@ -2,6 +2,7 @@
 //! builder, the in-memory correspondence double, and the eager-integration
 //! journal reads.
 
+pub mod chain;
 pub mod client;
 pub mod correspondence;
 pub mod eager;

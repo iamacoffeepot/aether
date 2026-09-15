@@ -907,3 +907,56 @@ While the hold stands the scheduler journals
 naming the bloom, the instant the hold lifts, and the in-flight sibling
 workpieces it is waiting for — so "why did nothing go out" is answerable
 without re-deriving the scheduler's state.
+
+## Amendment: grouping across heads by clean merge (2026-09-16, #6075)
+
+§Amendment: a member is verified over the context it was built on said members
+share a run "only when they share" their construct base, and the scheduler read
+that as head *equality*. Under eager integration the head moves at every fold,
+so two members that merely finished either side of one fold were unshareable —
+which is nearly every pair. Bloom `0c5a` measured it: `shared_run_members` held
+one row per run for almost the whole board, so the shared path cost a
+composition and bought nothing.
+
+Sharing a head was never the rule. The rule is that eager integration must
+never move a queued member's head in a way that invalidates it — never
+re-prepare a queued candidate onto a base it did not author against, never buy
+it a reconcile lap or a from-scratch verify it did not ask for. Composing
+candidates built on *different* heads does none of that when those heads lie on
+one product chain and the candidates merge onto the newest of them with no
+conflict.
+
+So `CoordinationState::construct_base` answers the **newest** base among a
+selection whose bases are on one chain, and `None` when they are not. The chain
+relation is `IntegrationHead::precedes`: same generation, and the earlier head's
+coverage a prefix of the later one's. That is exact rather than heuristic — an
+append writes its parent's coverage plus the pins it folds and refuses to re-pin
+a covered workpiece at another version, so coverage along one generation's chain
+is append-only, and a generation bump starts it over, which is why heads of
+different generations never compare.
+
+The merge is asked where the source already prepares compositions. The
+selector is pure over `CoordinationState` — it is replayed from the journal
+every turn and must not grow a git handle — so it groups **optimistically** on
+the chain relation alone, and `prepare_shared_run` discovers a collision when it
+places each input onto the base. A conflicting group is answered exactly as
+§Amendment: composition conflicts at shared-run preparation already answers one:
+the run is terminal and every member falls back to proving the tree it authored
+over the base it authored it on, its request byte-identical to the one the group
+carried. Nothing is re-prepared, nothing is sent to reconcile from the
+scheduler, and the collision surfaces at the fold — on a member that is green by
+the time it is asked about the merge.
+
+`CompositionPlan::admissions` reads why each member is in a group off the plan:
+the head it was constructed on, and whether that is the group's base or an
+earlier head of the chain it was carried forward from. It is derived, not
+stored — the plan already names every member's `ConstructContext` and the base
+it composes over — and the scheduler logs it at proposal so the console can show
+a group's shape without re-deriving it. Why a dropped member was dropped is
+already journaled: `SharedRunPreparation::Conflict` names the input that would
+not place, and the retained overlay carries the conflicting paths.
+
+Still open: a member whose verification closure is unbounded — a workspace-level
+input changed, so its gate pass rebuilds everything — must never join a group,
+because the whole group then pays for it. `PackageClosure` (#6074) is the value
+that answers it; the filter is a marked TODO in the selector until that lands.
