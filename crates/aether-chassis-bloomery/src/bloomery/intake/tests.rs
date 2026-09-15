@@ -671,6 +671,7 @@ fn claim_for_carries_the_whole_observation() {
     let subject = Digest::from_bytes([3; 32]);
     let detail = Digest::from_bytes([4; 32]);
     let observation = LaneObservation {
+        replayed_flakes: vec!["aether-bloomery reduce::flaky".into()],
         contextual_observations: Some(br#"{"protocol":1,"documents":[]}"#.to_vec()),
         candidate: Some(CandidateRef { tree: Digest::from_bytes([5; 32]), checkout: Digest::from_bytes([6; 32]) }),
         findings: Some("critic findings".into()),

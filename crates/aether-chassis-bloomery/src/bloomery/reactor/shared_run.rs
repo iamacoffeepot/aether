@@ -77,6 +77,11 @@ pub struct SharedStepReceipt {
     pub cost: Option<StudyCost>,
     #[serde(default)]
     pub calls: Option<Vec<StudyCall>>,
+    /// Tests this step's gate recorded as flakes — failed once, passed on a
+    /// same-input replay (#5999). The verdict on such a test is the replay's,
+    /// so it names no failing check and buys no attribution probe.
+    #[serde(default)]
+    pub replayed_flakes: Vec<String>,
     #[serde(default)]
     pub contextual_observations: Option<Vec<u8>>,
     #[serde(default)]

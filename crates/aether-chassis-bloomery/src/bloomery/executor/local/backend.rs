@@ -3120,6 +3120,7 @@ fn judged_evidence_ref(
             // only the reader writes it, and a lane that wrote none yields an
             // empty set, which is what a read with nothing to file also yields.
             retrospect_findings: parse_retrospect_findings(bytes),
+            replayed_flakes: parse_replayed_flakes(bytes),
             contextual_observations,
             duration_millis: parse_duration_millis(bytes),
             gates: parse_gates(bytes),
@@ -3972,6 +3973,38 @@ fn parse_failed_verifier_names(bytes: &[u8]) -> Vec<String> {
             failures.as_array().map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect())
         })
         .unwrap_or_default()
+}
+
+/// The tests the gate excused as flakes — failed once, passed on a same-input
+/// replay — off the evidence's own `flakes` ledger (#5999).
+///
+/// Read from the umbrella and from each gate under it, because a `verify.check`
+/// umbrella states its members' channels in `gates` while a gate dispatched on
+/// its own states its own at the top level. A malformed entry names no test and
+/// contributes nothing; the channel is absent entirely on a run that excused
+/// nothing, which is the ordinary case.
+fn parse_replayed_flakes(bytes: &[u8]) -> Vec<String> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Vec::new();
+    };
+    let mut ledgers = vec![value.get("flakes")];
+    ledgers.extend(
+        value.get("gates").and_then(serde_json::Value::as_array).into_iter().flatten().map(|gate| gate.get("flakes")),
+    );
+    let mut named = Vec::new();
+    for ledger in ledgers {
+        for test in ledger
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|excused| excused.get("test").and_then(serde_json::Value::as_str))
+        {
+            if !test.is_empty() && !named.iter().any(|current| current == test) {
+                named.push(test.to_owned());
+            }
+        }
+    }
+    named
 }
 
 /// Carry every identity the overlay named, including one the host added

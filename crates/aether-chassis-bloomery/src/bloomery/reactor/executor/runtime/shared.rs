@@ -11,8 +11,8 @@ use aether_bloomery::{
     Evidence, EvidenceKind, ExecutionStatus, Fact, FailureScope, IdempotencyKey, MAX_VERIFIER_IDENTITIES, MemberPin,
     MemberVerifyLatency, MemberVerifyOutcome, ModelOverride, Nonce, PartialHeadRepairCompletion,
     PartialHeadRepairDispatch, PartialHeadRepairPayload, SharedRunCompletion, SharedRunDispatch,
-    SharedRunDispatchPayload, SharedRunExecution, SharedRunMode, StageId, StageVerdict, StudyCall, StudyCost, Topic,
-    VerificationObligation, VerifyFailure, VerifyFailureSet, VerifyProof, WorkHandle, WorkpieceId,
+    SharedRunDispatchPayload, SharedRunExecution, SharedRunMode, SharedRunNode, StageId, StageVerdict, StudyCall,
+    StudyCost, Topic, VerificationObligation, VerifyFailure, VerifyFailureSet, VerifyProof, WorkHandle, WorkpieceId,
     construction_nonce_digest,
 };
 use aether_data::wire::{from_bytes, to_vec};
@@ -33,9 +33,9 @@ use crate::bloomery::study::{
 };
 use crate::bloomery::{
     BatchCheck, BatchFailure, BatchMember, BatchProbeReceipt, BatchProbeRequest, BatchProgress, BatchReport,
-    ContextualProofReuse, HostClass, ProbeVerdict, contextual_bundle_reports, contextual_fact_key, dispatch_model,
-    findings::verification_findings_key, next_batch_probe, observed_failed_tests, observed_probe_verdict,
-    record_contextual_facts, record_green_contextual_facts, reuse_contextual_proof,
+    ContextualProofReuse, HostClass, KNOWN_FLAKE_CANDIDATES, ProbeVerdict, contextual_bundle_reports,
+    contextual_fact_key, dispatch_model, findings::verification_findings_key, next_batch_probe, observed_failed_tests,
+    observed_probe_verdict, record_contextual_facts, record_green_contextual_facts, reuse_contextual_proof,
 };
 use crate::store::{
     CommissionBackend, ConstructionAdmissionRow, OrderLifecycle, PartialHeadRepairRow, SharedRunLifecycle,
@@ -1032,6 +1032,7 @@ fn submit_step(
             findings: None,
             cost: None,
             calls: None,
+            replayed_flakes: Vec::new(),
             contextual_observations: None,
             probe_verdict: Some(ProbeVerdict::Infrastructure),
         };
@@ -1262,6 +1263,7 @@ fn complete_observed_step(
         findings: upload.observation.findings,
         cost: upload.observation.cost,
         calls: upload.observation.calls,
+        replayed_flakes: upload.observation.replayed_flakes,
         contextual_observations,
         probe_verdict,
     };
@@ -1393,7 +1395,7 @@ fn same_contextual_fact_input(left: &SharedRunDispatch, right: &SharedRunDispatc
             == contextual_fact_key(right_node, &right_composition.contract)
 }
 
-fn contextual_receipt_matches_node(receipt: &SharedStepReceipt, node: &aether_bloomery::SharedRunNode) -> bool {
+fn contextual_receipt_matches_node(receipt: &SharedStepReceipt, node: &SharedRunNode) -> bool {
     receipt.verdict != StageVerdict::ExecutorFault
         && receipt.evidence.kind == EvidenceKind::VerificationResult
         && receipt.evidence.subject == node.candidate.tree
@@ -1416,6 +1418,7 @@ fn settle_refused_preparation(store: &mut dyn StoreBackend, step: &SharedRunStep
         findings: None,
         cost: None,
         calls: None,
+        replayed_flakes: Vec::new(),
         contextual_observations: None,
         probe_verdict: Some(ProbeVerdict::Unknown),
     };
@@ -1668,7 +1671,20 @@ fn batch_members(dispatch: &SharedRunDispatch) -> Vec<BatchMember> {
     derive_batch_members(&requests, inputs)
 }
 
-fn declared_failed_checks(dispatch: &SharedRunDispatch, receipt: &SharedStepReceipt, nonce: &str) -> Vec<BatchCheck> {
+/// The failing checks this receipt declares, minus the tests `excused` names.
+///
+/// A flake the gate already replayed green is excused (#5999): the verdict on
+/// such a test is the replay's, and a probe would spend a whole-workspace base
+/// run re-deriving a question that is already answered. A gate whose named
+/// failures are all excused still keeps today's gate-level treatment, because
+/// the gate identity's own red is a separate declaration — a nominally green
+/// umbrella with a declared raw red gate still enters diagnosis (ADR-0218).
+fn declared_failed_checks(
+    dispatch: &SharedRunDispatch,
+    receipt: &SharedStepReceipt,
+    nonce: &str,
+    excused: &BTreeSet<String>,
+) -> Vec<BatchCheck> {
     let Some(composition) = dispatch.plan.composition.as_ref() else {
         return Vec::new();
     };
@@ -1691,8 +1707,32 @@ fn declared_failed_checks(dispatch: &SharedRunDispatch, receipt: &SharedStepRece
                 })
         })
         .collect();
-    checks.extend(named.into_iter().map(|(gate, id)| BatchCheck::Test { gate, id }));
+    checks.extend(
+        named.into_iter().filter(|(_, id)| !excused.contains(id)).map(|(gate, id)| BatchCheck::Test { gate, id }),
+    );
     checks
+}
+
+/// The tests this step must not be probed on (#5999): the flakes its own gate
+/// replayed green, and the names the registry already knows flake across
+/// distinct candidates.
+///
+/// Recording runs here rather than at intake because this is where a contextual
+/// step's receipt is read against the node it tested, and the registry's unit is
+/// `(test, candidate)` — a name that flaked twice under one candidate is one
+/// observation, and it is the spread across candidates that makes it a known
+/// flake rather than a property of one tree.
+fn excused_flakes(
+    store: &mut dyn StoreBackend,
+    node: &SharedRunNode,
+    receipt: &SharedStepReceipt,
+) -> rusqlite::Result<BTreeSet<String>> {
+    for test in &receipt.replayed_flakes {
+        store.record_replayed_flake(test, node.candidate.tree.as_bytes().as_slice())?;
+    }
+    let mut excused = receipt.replayed_flakes.iter().cloned().collect::<BTreeSet<_>>();
+    excused.extend(store.known_flakes(KNOWN_FLAKE_CANDIDATES)?.into_iter().map(|row| row.test_id));
+    Ok(excused)
 }
 
 fn contextual_run_passed(verdict: StageVerdict, failed_checks: &[BatchCheck]) -> bool {
@@ -2010,7 +2050,7 @@ fn contextual_terminal_outcomes(
         tracing::warn!(nonce = %step.nonce, "contextual receipt does not decode; the run holds rather than settles");
         return Ok(None);
     };
-    let checks = declared_failed_checks(dispatch, &receipt, &step.nonce);
+    let checks = declared_failed_checks(dispatch, &receipt, &step.nonce, &excused_flakes(store, node, &receipt)?);
     if contextual_run_passed(receipt.verdict, &checks) {
         return Ok(Some(
             dispatch
@@ -2512,6 +2552,7 @@ fn cancelled_receipt(step: &SharedRunStepRow) -> SharedStepReceipt {
         findings: None,
         cost: None,
         calls: None,
+        replayed_flakes: Vec::new(),
         contextual_observations: None,
         probe_verdict: Some(ProbeVerdict::Unknown),
     }
@@ -2936,13 +2977,105 @@ mod tests {
             findings: None,
             cost: None,
             calls: None,
+            replayed_flakes: Vec::new(),
             contextual_observations: Some(named_test_bundle("step", test, true)),
             probe_verdict: None,
         };
 
         assert_eq!(
-            declared_failed_checks(&dispatch, &receipt, "step"),
+            declared_failed_checks(&dispatch, &receipt, "step", &BTreeSet::new()),
             vec![BatchCheck::Test { gate: "verify.test".to_owned(), id: test.to_owned() }]
+        );
+    }
+
+    /// The receipt a green contextual step brings back when its gate named one
+    /// test as failed and `replayed` names the ones it then replayed green.
+    fn flaky_green_receipt(test: &str, replayed: &[&str]) -> SharedStepReceipt {
+        SharedStepReceipt {
+            invocation: Digest::from_bytes([1; 32]),
+            evidence: Evidence {
+                subject: Digest::from_bytes([2; 32]),
+                kind: EvidenceKind::VerificationResult,
+                detail: Digest::from_bytes([3; 32]),
+            },
+            verdict: StageVerdict::VerificationPassed,
+            failed_verifiers: VerifyFailureSet::default(),
+            failed_verifier_names: Vec::new(),
+            findings: None,
+            cost: None,
+            calls: None,
+            replayed_flakes: replayed.iter().map(|name| (*name).to_owned()).collect(),
+            contextual_observations: Some(named_test_bundle("step", test, true)),
+            probe_verdict: None,
+        }
+    }
+
+    fn contextual_node(dispatch: &SharedRunDispatch) -> SharedRunNode {
+        let SharedRunExecution::Contextual { node, .. } = &dispatch.execution else {
+            panic!("the fixture dispatch is contextual")
+        };
+        (**node).clone()
+    }
+
+    #[test]
+    fn a_flake_the_gate_replayed_green_names_no_failing_check() {
+        // The plausible bug, and the one that was live (#5999): a green shared
+        // run over three members recorded one GPU timing flake and the
+        // coordinator followed it with three whole-workspace base probes of six
+        // to thirteen minutes each — on a verdict the replay had already
+        // settled. The named-test channel still carries the first failure, so
+        // nothing but the flake ledger can tell the two apart.
+        let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+        let dispatch = reducer_shaped_contextual_dispatch();
+        let test = "aether-render pipeline::tests::the_timing_window_holds";
+        let receipt = flaky_green_receipt(test, &[test]);
+
+        let excused = excused_flakes(&mut store, &contextual_node(&dispatch), &receipt).expect("the registry records");
+        let checks = declared_failed_checks(&dispatch, &receipt, "step", &excused);
+
+        assert!(checks.is_empty(), "the verdict is the replay's, so nothing is left to probe: {checks:?}");
+        assert!(contextual_run_passed(receipt.verdict, &checks), "the run settles green");
+    }
+
+    #[test]
+    fn a_name_two_candidates_have_flaked_is_known_and_never_probed() {
+        // The registry's whole point: the GPU timing test and the git fixture
+        // both flaked repeatedly across unrelated candidates today and nothing
+        // remembered it. A name the registry knows is never probed again, even
+        // on a run whose own gate reported it as a plain failure.
+        let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+        let dispatch = reducer_shaped_contextual_dispatch();
+        let test = "aether-bloomery-github object_repo_mints_the_same_sha_as_the_local_backend";
+        for candidate in [[7_u8; 32], [8; 32]] {
+            store.record_replayed_flake(test, candidate.as_slice()).expect("the registry records");
+        }
+
+        let known = store.known_flakes(KNOWN_FLAKE_CANDIDATES).expect("the registry reads");
+        assert_eq!(known.len(), 1, "one name is known: {known:?}");
+        assert_eq!(known[0].candidates, 2, "across the two distinct candidates that recorded it");
+
+        let receipt = flaky_green_receipt(test, &[]);
+        let excused = excused_flakes(&mut store, &contextual_node(&dispatch), &receipt).expect("the registry reads");
+        let checks = declared_failed_checks(&dispatch, &receipt, "step", &excused);
+
+        assert!(checks.is_empty(), "a known flake is reported, not probed: {checks:?}");
+    }
+
+    #[test]
+    fn one_candidate_flaking_twice_is_one_observation_and_not_yet_known() {
+        // Tripwire: the registry's unit is the *distinct candidate*, not the
+        // observation. A racy fixture a member introduced flakes over and over
+        // under its own tree; that is the member's defect, and calling it a
+        // known flake would excuse the very test its candidate broke.
+        let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+        let test = "aether-substrate scheduler::tests::the_slot_closes";
+        for _ in 0..4 {
+            store.record_replayed_flake(test, [9_u8; 32].as_slice()).expect("the registry records");
+        }
+
+        assert!(
+            store.known_flakes(KNOWN_FLAKE_CANDIDATES).expect("the registry reads").is_empty(),
+            "one tree's repeats are one observation",
         );
     }
 
@@ -3128,6 +3261,7 @@ mod tests {
             findings: Some("the exact composed failure".to_owned()),
             cost: None,
             calls: None,
+            replayed_flakes: Vec::new(),
             contextual_observations: None,
             probe_verdict: None,
         };
@@ -3261,6 +3395,7 @@ mod tests {
             findings: None,
             cost: None,
             calls: None,
+            replayed_flakes: Vec::new(),
             contextual_observations: Some(b"stale but parseable observations".to_vec()),
             probe_verdict: None,
         };
@@ -3296,6 +3431,7 @@ mod tests {
             findings: None,
             cost: None,
             calls: None,
+            replayed_flakes: Vec::new(),
             contextual_observations: None,
             probe_verdict: None,
         };
@@ -3427,6 +3563,7 @@ mod tests {
             findings: None,
             cost: None,
             calls: None,
+            replayed_flakes: Vec::new(),
             contextual_observations: None,
             probe_verdict: None,
         }

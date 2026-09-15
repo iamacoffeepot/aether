@@ -137,10 +137,10 @@ pub use testing::{
 pub use verify::{
     Attribution, AttributionError, AttributionRequest, BaseProbe, BaseRepairWorkpiece, BatchCheck, BatchFailure,
     BatchMember, BatchProbeReceipt, BatchProbeRequest, BatchProgress, BatchReport, BloomDisposition, CoverageEntry,
-    CoverageMap, CoverageStatus, Land, LandProbe, MissingCoverage, ProbeVerdict, RepairBoard, RollDecision, RollHold,
-    SweepContext, SweepDecision, SweepOutcome, TaintSet, TestClosure, UnknownFact, attribute_gate_failure,
-    bisect_land_order, bloom_disposition, consult_proof_fact, coverage_map, decide_roll, decide_sweep,
-    next_batch_probe, record_proof_facts, repair_landed, run_sweep, unknowns,
+    CoverageMap, CoverageStatus, KNOWN_FLAKE_CANDIDATES, Land, LandProbe, MissingCoverage, ProbeVerdict, RepairBoard,
+    RollDecision, RollHold, SweepContext, SweepDecision, SweepOutcome, TaintSet, TestClosure, UnknownFact,
+    attribute_gate_failure, bisect_land_order, bloom_disposition, consult_proof_fact, coverage_map, decide_roll,
+    decide_sweep, next_batch_probe, record_proof_facts, repair_landed, run_sweep, unknowns,
 };
 #[cfg(feature = "runtime")]
 pub use verify::{

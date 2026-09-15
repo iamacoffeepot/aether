@@ -20,11 +20,13 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 
-use super::invariants::{DoctorReport, LiveState, OpenDispatch, ReplicaObservation, SurfaceParkObservation, evaluate};
+use super::invariants::{
+    DoctorReport, KnownFlake, LiveState, OpenDispatch, ReplicaObservation, SurfaceParkObservation, evaluate,
+};
 use super::{DoctorReactorCapability, DoctorReactorSetup, LatestDoctorReport};
 use crate::api::BloomeryApiCapability;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
-use crate::bloomery::{ExecutorShell, SourceShell};
+use crate::bloomery::{ExecutorShell, KNOWN_FLAKE_CANDIDATES, SourceShell};
 use crate::store::{OutboxEntry, SqliteStore, StoreBackend};
 
 /// The self-addressed wake the poll timer fires each interval.
@@ -202,6 +204,12 @@ fn collect_and_evaluate(request: &mut CollectRequest<'_>) -> rusqlite::Result<Do
     let replica = observe_replica(&replica_topics, request.replica_seen, request.replica_passes, request.now);
     let surface_parks = observe_surface_parks(&replayed.snapshot, request.surface_seen, request.now);
     let ancestry = |from: &Digest, to: &Digest| request.source.and_then(|source| source.is_fast_forward(from, to).ok());
+    let known_flakes = request
+        .store
+        .known_flakes(KNOWN_FLAKE_CANDIDATES)?
+        .into_iter()
+        .map(|row| KnownFlake { test_id: row.test_id, candidates: row.candidates })
+        .collect::<Vec<_>>();
 
     Ok(evaluate(&LiveState {
         snapshot: &replayed.snapshot,
@@ -220,6 +228,7 @@ fn collect_and_evaluate(request: &mut CollectRequest<'_>) -> rusqlite::Result<Do
         lanes_running: request.lanes_running,
         evidence_nonces: &evidence_refs,
         unresolved_head_age,
+        known_flakes: &known_flakes,
     }))
 }
 

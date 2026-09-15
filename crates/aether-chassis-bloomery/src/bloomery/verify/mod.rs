@@ -16,6 +16,16 @@
 //! [`apply_containment`] fails a member Verify whose candidate edited a path
 //! no declared-surface glob covers.
 
+/// How many distinct candidates a test has to flake across before the registry
+/// calls it a known flake (#5999).
+///
+/// Two, because one candidate's repeated flake is a property of that tree — a
+/// racy fixture the member itself introduced — while the same name failing and
+/// replaying green under two unrelated candidates is a property of the test.
+/// A known flake is never probed and is surfaced by the doctor, so it is fixed
+/// or quarantined by a member with the crate in its declared surface.
+pub const KNOWN_FLAKE_CANDIDATES: usize = 2;
+
 #[cfg(feature = "runtime")]
 mod attribution;
 #[cfg(feature = "runtime")]
