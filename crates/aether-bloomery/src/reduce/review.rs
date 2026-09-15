@@ -135,6 +135,12 @@ fn contextual_memo_proof(record: &BloomRecord, tree: Digest) -> Option<VerifyPro
 /// one, carrying [`EvidenceKind::ReviewAdvisory`] — so the observations are
 /// filed on the composition's channel on the way to the landing, and a
 /// subjective finding costs a bloom nothing.
+///
+/// A blocking verdict that implicates only members an operator withdrew reads
+/// as the same kind of pass (#5327, bloom 0f16e207): those members produced no
+/// claim and contributed no candidate, so the fold was never under the
+/// obligations the critic judged it against, and neither a re-weave nor a
+/// refusal is an honest answer to it.
 pub(super) fn reduce_aggregate_review_completed(
     snapshot: &Snapshot,
     bloom: &BloomId,
@@ -156,29 +162,56 @@ pub(super) fn reduce_aggregate_review_completed(
     // An empty implication is never expanded to every member: under ADR-0191 there
     // is nothing to over-route *to*, and a verdict about the weave as a whole is
     // exactly a finding that names nobody.
-    // A withdrawn member is refused here for the reason a non-member is (#5327):
-    // the finding cannot be routed anywhere. There is no cursor to re-open and
-    // no claim the verdict could revoke.
-    if let Some(stranger) = implicated.iter().find(|wp| {
-        record.withdrawn.contains_key(wp) || !record.spec.members().iter().any(|member| member.workpiece == **wp)
-    }) {
+    if let Some(stranger) =
+        implicated.iter().find(|wp| !record.spec.members().iter().any(|member| member.workpiece == **wp))
+    {
         return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::NotAMember(
             stranger.clone(),
         )));
     }
+    // A withdrawn member is a *member the composed tree does not carry*, which
+    // is a different thing from a stranger, and used to earn the same refusal
+    // (#5327). It cannot: a refusal makes the whole verdict change nothing, so
+    // the critic's half of the composite gate never lands and the bloom sits on
+    // a fold no verdict can complete. What a withdrawn implication actually
+    // means is that the reviewer judged an obligation the fold was never under
+    // — its member produced no claim and contributed no candidate — so the
+    // finding is kept as an observation and dropped from the routing.
+    //
+    // The live remainder is what the verdict is about. If nothing is left, the
+    // whole blocking verdict was about work that is provably absent, so it is
+    // not a blocking verdict: it re-kinds to an advisory, files on the
+    // composition's channel naming the departed members it judged, and counts
+    // as the critic's pass. Nothing re-weaves — a repair lane pointed at a
+    // withdrawn member's order can only re-author work an operator removed on
+    // purpose (bloom 0f16e207).
+    let live: Vec<WorkpieceId> = implicated.iter().filter(|wp| !record.withdrawn.contains_key(*wp)).cloned().collect();
+    let about_departed_only = !passed && !implicated.is_empty() && live.is_empty();
+    let evidence = &if about_departed_only {
+        Evidence { kind: EvidenceKind::ReviewAdvisory, ..evidence.clone() }
+    } else {
+        evidence.clone()
+    };
+    let implicated = if about_departed_only {
+        implicated
+    } else {
+        live.as_slice()
+    };
+
     let rolls = record.aggregate_rolls + 1;
     let mut effects = alloc::vec![
         Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() },
         Decision::RecordAggregateRoll { bloom: *bloom, rolls },
     ];
-    if passed {
-        // A pass that still recorded judgment findings (#4961). The reviewer
-        // marked none of them blocking, so nothing here re-weaves, spends the
-        // repair budget, or delays the landing — and the observations still land
-        // on the composition's own channel, where an operator can adjudicate
-        // them and the study that files fix-forward work can read them. Filed
-        // before the resolution effects so the journal shows the finding under
-        // the verdict that raised it.
+    if passed || about_departed_only {
+        // A pass that still recorded judgment findings (#4961), or a blocking
+        // verdict re-kinded above because every member it named had left. Either
+        // way nothing here re-weaves, spends the repair budget, or delays the
+        // landing — and the observations still land on the composition's own
+        // channel, where an operator can adjudicate them and the study that
+        // files fix-forward work can read them. Filed before the resolution
+        // effects so the journal shows the finding under the verdict that
+        // raised it.
         if evidence.kind == EvidenceKind::ReviewAdvisory {
             effects.push(finding_of(*bloom, integration.tree, evidence, implicated));
         }
@@ -296,4 +329,173 @@ pub(super) fn reduce_aggregate_review_executor_fault(
     ));
 
     Decisions { outcome: Outcome::AggregateReviewExecutorFaulted { bloom: *bloom, fault, budget }, effects }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::borrow::ToOwned;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use crate::ids::{BloomId, StageId, WorkpieceId};
+    use crate::reduce::{AggregateReviewError, Decision, Decisions, Fact, Outcome, Snapshot};
+    use crate::testing::{claim, digest, draft, event, membership, step};
+    use crate::values::{CompositionFinding, Evidence, EvidenceKind, Withdrawal, WithdrawalCause};
+
+    /// Three members sealed, one withdrawn, the other two integrated and folded,
+    /// the mechanical gate already green — the position the critic's verdict
+    /// arrives at in a bloom an operator shed a member from mid-walk.
+    fn fold_missing_a_withdrawn_member() -> (Snapshot, BloomId) {
+        let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11), membership("gone", 12)]).seal();
+        let bloom = spec.id();
+        let snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
+        let (snapshot, _) = step(&snapshot, &event("seal", Fact::Seal(spec)));
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "withdraw",
+                Fact::Withdraw {
+                    bloom,
+                    withdrawals: vec![Withdrawal {
+                        workpiece: WorkpieceId("gone".to_owned()),
+                        cause: WithdrawalCause::Operator,
+                        reason: "pulled out of the wave".to_owned(),
+                        operator: "operator".to_owned(),
+                    }],
+                    cascade: false,
+                },
+            ),
+        );
+        let (snapshot, _) = step(&snapshot, &event("i-a", Fact::Integrate { bloom, claim: claim("alpha", 10, 100) }));
+        let (snapshot, _) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 101) }));
+        let (snapshot, _) = step(
+            &snapshot,
+            &event("fold", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }),
+        );
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "verify",
+                Fact::AggregateVerifyCompleted {
+                    bloom,
+                    passed: true,
+                    evidence: Evidence {
+                        subject: digest(40),
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(51),
+                    },
+                },
+            ),
+        );
+        (snapshot, bloom)
+    }
+
+    fn review_failed(bloom: BloomId, implicated: &[&str]) -> Fact {
+        Fact::AggregateReviewCompleted {
+            bloom,
+            passed: false,
+            evidence: Evidence { subject: digest(40), kind: EvidenceKind::ReviewFinding, detail: digest(60) },
+            implicated: implicated.iter().map(|name| WorkpieceId((*name).to_owned())).collect(),
+        }
+    }
+
+    fn findings(decisions: &Decisions) -> Vec<CompositionFinding> {
+        decisions
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::RecordCompositionFinding { finding, .. } => Some(finding.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Tripwire (bloom 0f16e207): a blocking verdict whose every implicated
+    // member was withdrawn judges obligations the fold was never under — those
+    // members produced no claim and contributed no candidate. Answering it with
+    // a re-weave sets a repair lane re-authoring work an operator removed on
+    // purpose; answering it with the old `NotAMember` refusal leaves the critic's
+    // half of the composite gate unfiled and the bloom on a fold no verdict can
+    // complete. It counts as the critic's pass instead, with the observation
+    // filed on the composition's channel.
+    #[test]
+    fn a_blocking_verdict_about_only_withdrawn_members_passes_the_composition() {
+        let (snapshot, bloom) = fold_missing_a_withdrawn_member();
+
+        let (_, decisions) = step(&snapshot, &event("r1", review_failed(bloom, &["gone"])));
+
+        assert!(
+            matches!(decisions.outcome, Outcome::Resolved(_)),
+            "the fold's other gate is already green, so this verdict resolves the bloom: {:?}",
+            decisions.outcome,
+        );
+        assert!(
+            !decisions.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })),
+            "nothing re-weaves for a member that left the bloom: {:?}",
+            decisions.effects,
+        );
+        assert!(
+            decisions.effects.iter().any(|effect| matches!(
+                effect,
+                Decision::RecordAggregateGatePass { stage: StageId::AggregateReview, .. }
+            )),
+            "the critic's half of the composite gate is filed: {:?}",
+            decisions.effects,
+        );
+        assert_eq!(
+            findings(&decisions).first().map(|finding| finding.implicated.clone()),
+            Some(vec![WorkpieceId("gone".to_owned())]),
+            "the dropped verdict is still filed as an observation naming the member it judged",
+        );
+        assert!(
+            decisions.effects.iter().any(|effect| matches!(
+                effect,
+                Decision::RecordEvidence { evidence, .. } if evidence.kind == EvidenceKind::ReviewAdvisory
+            )),
+            "the recorded evidence re-kinds to an advisory, so the journal says it blocked nothing",
+        );
+    }
+
+    // Tripwire (bloom 0f16e207): the live half of a mixed verdict is a real
+    // refusal of the composed tree and still re-weaves — but the finding it
+    // files must not carry the withdrawn member, or the repair lane and every
+    // reader downstream of it re-derive an obligation from the sealed spec.
+    #[test]
+    fn a_mixed_verdict_keeps_only_its_live_implication() {
+        let (snapshot, bloom) = fold_missing_a_withdrawn_member();
+
+        let (_, decisions) = step(&snapshot, &event("r1", review_failed(bloom, &["gone", "alpha"])));
+
+        assert_eq!(
+            findings(&decisions).first().map(|finding| finding.implicated.clone()),
+            Some(vec![WorkpieceId("alpha".to_owned())]),
+            "the withdrawn member is dropped from the finding's routing label: {:?}",
+            decisions.effects,
+        );
+        assert!(
+            matches!(decisions.outcome, Outcome::CompositionRewoven { .. }),
+            "a verdict still naming a live member repairs the weave: {:?}",
+            decisions.outcome,
+        );
+    }
+
+    // Tripwire (#5327): the withdrawn carve-out is not a general amnesty. A
+    // workpiece no sealed membership names is still malformed, and the whole
+    // verdict is refused before any effect applies.
+    #[test]
+    fn a_verdict_naming_a_stranger_is_still_refused() {
+        let (snapshot, bloom) = fold_missing_a_withdrawn_member();
+
+        let (_, decisions) = step(&snapshot, &event("r1", review_failed(bloom, &["wp-ghost"])));
+
+        assert!(
+            matches!(
+                decisions.outcome,
+                Outcome::AggregateReviewRejected(AggregateReviewError::NotAMember(ref wp)) if wp.0 == "wp-ghost"
+            ),
+            "a stranger keeps the refusal: {:?}",
+            decisions.outcome,
+        );
+        assert!(decisions.effects.is_empty(), "a refused verdict applies nothing: {:?}", decisions.effects);
+    }
 }
