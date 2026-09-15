@@ -961,10 +961,6 @@ pub enum AdminError {
     /// refused here — that is what makes admin mode a window rather than a set
     /// of seven independent overrides.
     NotInAdmin,
-    /// The bloom is on an ordinary operator hold that this session did not
-    /// take. Entering would clear a brake somebody else pulled on exit, which
-    /// would silently discard their reason; release it first.
-    HeldByAnotherOperator,
     /// The request names a workpiece that is neither a member of the bloom nor
     /// the reserved composition id.
     NotAWorkpiece(WorkpieceId),
