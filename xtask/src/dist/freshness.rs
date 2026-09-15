@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use cargo_metadata::Metadata;
 use sha2::{Digest, Sha256};
 
-use crate::cargo::{Profile, command};
+use crate::cargo::{Profile, WASM_TARGET, command};
 
 /// The file the key is stamped into, under the wasm profile directory — so the
 /// stamp lives and dies with the artifacts it describes. A target directory
@@ -47,15 +47,36 @@ const SKIPPED: [&str; 3] = ["target", ".git", "dist"];
 #[derive(PartialEq, Eq)]
 pub(super) struct BuildKey(String);
 
+impl BuildKey {
+    /// The digest, rendered hex — the name the shared bundle cache files this
+    /// build's output under (see [`super::cache`]). Hex rather than the raw
+    /// digest because the key is a directory name before it is anything else.
+    pub(super) fn hex(&self) -> &str {
+        &self.0
+    }
+
+    /// A key standing for a digest already computed — the seam the cache's own
+    /// tests address entries through, so they exercise the cache over a stub
+    /// bundle instead of cross-building the workspace to obtain a key.
+    #[cfg(test)]
+    pub(super) fn from_hex(hex: &str) -> Self {
+        Self(hex.to_owned())
+    }
+}
+
 /// The key for this invocation, or `None` when the tree cannot be read
 /// completely enough to key it.
 ///
 /// The inputs are the workspace members' own source trees (which is what
-/// `metadata` enumerates), the workspace manifests beside them, and the
-/// selectors that decide what gets built from them: the profile, the flag that
-/// drops the chassis bins, and the compiler's own version string.
+/// `metadata` enumerates), the workspace manifests beside them — `Cargo.lock`
+/// included, so a dependency bump rebuilds — and the selectors that decide what
+/// gets built from them: the cross-target triple, the profile, the flag that
+/// drops the chassis bins, and the compiler's own version string (which names
+/// the host triple as well as the release, so a bundle carrying host binaries
+/// cannot be shared across host platforms).
 pub(super) fn key(metadata: &Metadata, profile: Profile, no_bins: bool) -> Option<BuildKey> {
     let mut digest = Sha256::new();
+    digest.update(WASM_TARGET.as_bytes());
     digest.update(profile.as_str().as_bytes());
     digest.update([u8::from(no_bins)]);
     digest.update(rustc_version()?.as_bytes());

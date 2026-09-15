@@ -479,6 +479,18 @@ struct GateTiming {
     /// Absent when this gate has no prepare, or its prepare did not run.
     #[serde(skip_serializing_if = "Option::is_none")]
     prepare_millis: Option<u64>,
+    /// Which side of the shared bundle cache the prepare landed on (#6052):
+    /// `hit` restored this tree's wasm from another slot's build, `miss` built
+    /// and published it, `fresh` found it already in this slot's own target
+    /// directory. So a `prepare_millis` that did not fall is readable as a cache
+    /// that is not being hit, rather than as a build that is inexplicably slow.
+    ///
+    /// Absent when the prepare did not run, when the host names no cache, or
+    /// when the tree could not be keyed. Additive: the timeline reads gate
+    /// entries by key, so a lane whose evidence predates this field parses
+    /// exactly as it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prepare_cache: Option<&'static str>,
 }
 
 impl Evidence {
@@ -839,21 +851,42 @@ mod tests {
         // Tripwire: lumping the wasm cross-build into verify.test hides the
         // split the lane exists to show, and a prepare_millis on a gate that
         // never prepared reads as a zero-cost dist.
-        let fmt = GateTiming { command: "verify.fmt".into(), duration_millis: 10, prepare_millis: None };
-        let test = GateTiming { command: "verify.test".into(), duration_millis: 80, prepare_millis: Some(50) };
+        let fmt =
+            GateTiming { command: "verify.fmt".into(), duration_millis: 10, prepare_millis: None, prepare_cache: None };
+        let test = GateTiming {
+            command: "verify.test".into(),
+            duration_millis: 80,
+            prepare_millis: Some(50),
+            prepare_cache: Some("hit"),
+        };
         let fmt = serde_json::to_value(&fmt).expect("fmt serializes");
         let test = serde_json::to_value(&test).expect("test serializes");
         assert_eq!(fmt["duration_millis"], 10);
         assert!(fmt.get("prepare_millis").is_none());
+        assert!(fmt.get("prepare_cache").is_none(), "a gate that never prepared consulted no bundle cache");
         assert_eq!(test["duration_millis"], 80);
         assert_eq!(test["prepare_millis"], 50);
+        // A prepare_millis that stays high is read one way if the bundle cache
+        // was hit and another if it was not (#6052), so the receipt carries
+        // which — as a word beside the share, never in place of it.
+        assert_eq!(test["prepare_cache"], "hit");
 
         let umbrella = serde_json::to_value(
             build_evidence("verify.check", None, true, Some(0), "verify.scope.log".into(), None, None)
                 .timed(100)
                 .with_gates(vec![
-                    GateTiming { command: "verify.fmt".into(), duration_millis: 10, prepare_millis: None },
-                    GateTiming { command: "verify.test".into(), duration_millis: 80, prepare_millis: Some(50) },
+                    GateTiming {
+                        command: "verify.fmt".into(),
+                        duration_millis: 10,
+                        prepare_millis: None,
+                        prepare_cache: None,
+                    },
+                    GateTiming {
+                        command: "verify.test".into(),
+                        duration_millis: 80,
+                        prepare_millis: Some(50),
+                        prepare_cache: Some("hit"),
+                    },
                 ]),
         )
         .expect("umbrella serializes");
@@ -883,6 +916,7 @@ mod tests {
                     command: "verify.fmt".into(),
                     duration_millis: 10,
                     prepare_millis: None,
+                    prepare_cache: None,
                 }])
                 .with_carried(vec![carried]),
         )
