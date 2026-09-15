@@ -263,6 +263,30 @@ pub enum CarryRefusal {
     CarriedFailure(VerifyFailure),
 }
 
+impl CarryRefusal {
+    /// One line naming why the claim does not stand, for the findings a refused
+    /// receipt is reported with.
+    ///
+    /// Prose rather than a `Debug` rendering, because the reader is whoever is
+    /// looking at a re-verify that ran the whole umbrella and wants to know
+    /// what the lane claimed that the door would not take.
+    #[must_use]
+    pub fn reason(self) -> String {
+        match self {
+            Self::UnknownReceipt => {
+                String::from("the carried receipt is not on record for exactly the tree the claim names")
+            }
+            Self::InvalidatedGate(gate) => {
+                alloc::format!("{} was carried, but the stated delta can affect it", gate.as_str())
+            }
+            Self::NotAGate => String::from("a carried identity is not a gate the umbrella runs over the tree"),
+            Self::CarriedFailure(gate) => {
+                alloc::format!("{} was carried from a receipt that failed it", gate.as_str())
+            }
+        }
+    }
+}
+
 impl CarriedCoverage {
     /// Judge this claim against the table, given whether the ledger holds the
     /// named receipt for exactly the tree the claim names.
@@ -280,6 +304,24 @@ impl CarriedCoverage {
         if !receipt_on_record {
             return Err(CarryRefusal::UnknownReceipt);
         }
+        self.self_consistent()
+    }
+
+    /// The half of [`admissible`](Self::admissible) that needs no ledger: every
+    /// carried gate is a gate, is one the claim's own stated classes cannot
+    /// affect, was green in the receipt it names, and names that one receipt
+    /// over that one tree.
+    ///
+    /// Its own method because the evidence-intake door judges a receipt before
+    /// anything has re-folded the reducer's proof memo, so the ledger half is
+    /// out of its reach while this half is exactly in it. A claim that fails
+    /// here is refused there; a claim that passes here still has to survive the
+    /// ledger lookup wherever one is available.
+    ///
+    /// # Errors
+    ///
+    /// [`CarryRefusal`] naming the first reason the claim does not stand.
+    pub fn self_consistent(&self) -> Result<(), CarryRefusal> {
         let invalidated = invalidated_by(self.classes.iter().copied());
         for entry in &self.carried {
             let gate = VerifyFailure::from_name(&entry.gate).ok_or(CarryRefusal::NotAGate)?;

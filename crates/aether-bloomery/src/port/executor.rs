@@ -21,8 +21,8 @@ use alloc::vec::Vec;
 use crate::digest::Digest;
 use crate::ids::Nonce;
 use crate::values::{
-    CandidateRef, CompositionParents, RetrospectClaim, StudyCall, StudyCost, SuppressionRequest, SurfaceRequest,
-    Transformation, VerifyFailureSet,
+    CandidateRef, CarriedCoverage, CompositionParents, RetrospectClaim, StudyCall, StudyCost, SuppressionRequest,
+    SurfaceRequest, Transformation, VerifyFailureSet,
 };
 
 /// A fully-resolved unit of work to dispatch. The [`Transformation`] already
@@ -255,6 +255,14 @@ pub struct LaneObservation {
     pub duration_millis: Option<u64>,
     /// Per-gate wall-clock receipts from `evidence.json` `gates`.
     pub gates: Vec<EvidenceGateTiming>,
+    /// The coverage claim a re-verify made about the gates it did *not* run,
+    /// from `evidence.json` `carried` (ADR-0200's 2026-09-15 amendment).
+    ///
+    /// `None` from a run that carried nothing, which is every first verify and
+    /// every lane whose host stated no carry. `Some` is a claim the admission
+    /// door judges against the shared delta table before the receipt stands:
+    /// an unsound claim is an incomplete receipt, not a pass.
+    pub carried: Option<CarriedCoverage>,
 }
 
 /// One umbrella member's wall-clock share, copied off `evidence.json`.
