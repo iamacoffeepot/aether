@@ -2469,6 +2469,53 @@ fn a_refused_construct_capture_pushes_to_the_member_checkpoint_ref() {
     assert_eq!(pending[0].kind, "member checkpoint");
 }
 
+// #5992 — an ADR-0189 Reconcile lap exists to produce a candidate the next fold
+// merges, and the fold merges the candidate *ref*. The stage fell to the push
+// arm's `_ => continue`, so the lap's commit stayed local-only: the fold
+// re-merged the pre-Reconcile one, collided identically, and wedged the member
+// at Reconcile with its budget spent while the cursor read healthy. Catches the
+// arm dropping Reconcile again.
+#[test]
+fn a_passing_reconcile_capture_pushes_to_the_candidate_ref() {
+    use aether_bloomery::{CandidateRef, Event, IdempotencyKey};
+
+    let bloom = BloomId(digest(1));
+    let capture = CandidateRef { tree: digest(0xAB), checkout: digest(0xAC) };
+    let store = FakeGithub::new();
+    store.seed_git_object(&capture.checkout);
+    let fact = Fact::AttemptCompleted {
+        bloom,
+        workpiece: WorkpieceId("wp-collider".to_owned()),
+        stage: StageId::Reconcile,
+        passed: true,
+        evidence: aether_bloomery::Evidence {
+            subject: digest(9),
+            kind: aether_bloomery::EvidenceKind::VerificationResult,
+            detail: digest(8),
+        },
+        candidate: Some(capture),
+    };
+    let event = Event { idempotency_key: IdempotencyKey("k".to_owned()), fact };
+    let pusher = RecordingPush::default();
+    let correspondence: SharedCorrespondence = Arc::new(store);
+    let mut hashes = SqliteStore::open(":memory:").unwrap();
+    push_admitted_candidates(
+        &mut hashes,
+        &[Admission { admit: Admit { event: to_vec(&event).unwrap() }, event }],
+        Some(&correspondence),
+        &pusher,
+    );
+
+    let issued = pusher.pushed.lock().unwrap().clone();
+    assert_eq!(issued.len(), 1, "a passing reconcile capture publishes its candidate ref");
+    assert_eq!(issued[0].0, to_hex(&capture.checkout), "the pushed sha is the reconciled capture commit");
+    assert_eq!(
+        issued[0].1,
+        candidate_ref_name(&bloom, "wp-collider"),
+        "the target is the candidate ref the next fold merges, not the member-checkpoint sibling",
+    );
+}
+
 // #5102 — a passing composition Refine capture is the head landing will create
 // its branch from. Matching Construct-only left that commit local-only and the
 // land loop 422'd on an object the source repository had never seen. Catches
