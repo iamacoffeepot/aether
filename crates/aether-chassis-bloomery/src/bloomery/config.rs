@@ -429,16 +429,23 @@ pub struct CoordinatorConfig {
     /// the GitHub connection.
     #[config(env = "AETHER_BLOOMERY_ARCHIVE_BASE", default = "")]
     pub archive_base: String,
-    /// How many build jobs one lane's cargo invocations may run at once — the
-    /// `CARGO_BUILD_JOBS` every dispatch and the verify gates inside it run under
-    /// (#4912).
+    /// The build jobs one lane's cargo invocations are guaranteed — the floor
+    /// under the `CARGO_BUILD_JOBS` every dispatch and the verify gates inside it
+    /// run under (#4912, #6067).
     ///
-    /// The default is eight because that is where the measurement landed
+    /// The floor is eight because that is where the measurement landed
     /// (`spike/build-concurrency`, 2026-08-13): `-j32` beat `-j8` by 18% on a solo
     /// cold build — the crate graph's critical path dominates, not the core count
-    /// — while a `-j8` build peaks around 5 GiB. Capping each lane is therefore
+    /// — while a `-j8` build peaks around 5 GiB. Eight per lane is therefore
     /// nearly free on latency and is what lets several lanes coexist in one
     /// host's memory instead of racing it to the out-of-memory killer.
+    ///
+    /// It is a floor and not a cap because those two readings only agree while
+    /// the host is busy (#6067). A lane that is the only one on the box was
+    /// running the whole-workspace base verify on a fixed eight jobs with
+    /// twenty-four cores idle beside it; a starting lane now takes the cores the
+    /// running lanes have not claimed, down to this number. See
+    /// `executor::local::lane_build_jobs`.
     ///
     /// `0` resolves to cargo's own default (unset), which is one job per core.
     #[config(env = "AETHER_BLOOMERY_LANE_BUILD_JOBS", default = 8)]

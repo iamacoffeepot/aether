@@ -4,10 +4,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::io;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf, absolute};
 #[cfg(test)]
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread;
 #[cfg(test)]
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -229,7 +231,43 @@ const TARGET_SUFFIX: &str = "-target";
 /// How many build jobs a lane's cargo invocations run at once when nothing
 /// configures it — the seam default, mirroring
 /// [`CoordinatorConfig::lane_build_jobs`]'s, which is what production resolves.
+///
+/// A floor, not a ceiling — see [`lane_build_jobs`].
 const DEFAULT_LANE_BUILD_JOBS: usize = 8;
+
+/// The cargo job count one starting lane is given: the host's cores less the
+/// share the lanes already on the box hold, never under `floor` and never over
+/// the core count.
+///
+/// The configured number is that floor — the share a lane is guaranteed when it
+/// is sharing the host — rather than the cap it used to be. A lane alone on the
+/// box was running a whole-workspace build on a fixed eight jobs while the other
+/// twenty-four cores sat idle, and that lane is precisely the one that runs
+/// longest: the base verify builds the whole workspace three ways.
+///
+/// `busy` counts the lanes already holding a slot, each charged the floor. The
+/// arithmetic therefore hands the first lane the whole box and every later one
+/// its guaranteed share, which is a start-time decision and stays a start-time
+/// decision: a running cargo cannot be renegotiated, so a lone lane keeps the
+/// machine until it finishes and the next lane starts at the floor. That is the
+/// honest trade for never leaving the box idle — the alternative, charging every
+/// lane the floor whatever the host is doing, is the arrangement being replaced.
+///
+/// `floor` of zero states no cap at all and is passed through: that is the
+/// configured "leave `CARGO_BUILD_JOBS` unset" value, and cargo's own default is
+/// already one job per core.
+pub(super) fn lane_build_jobs(cores: usize, busy: usize, floor: usize) -> usize {
+    if floor == 0 || cores == 0 {
+        return 0;
+    }
+    cores.saturating_sub(busy.saturating_mul(floor)).clamp(floor.min(cores), cores)
+}
+
+/// Host cores this process may schedule on, or `0` when the platform will not
+/// say — which [`lane_build_jobs`] reads as "leave it to cargo".
+pub(super) fn host_cores() -> usize {
+    thread::available_parallelism().map_or(0, NonZeroUsize::get)
+}
 
 /// The streamed provider transcript a running model lane writes under its
 /// evidence directory. Its modification time is the local backend's live
@@ -2042,11 +2080,16 @@ impl LocalExecutor {
         }
         let resume = reuse.as_ref().and_then(|plan| plan.resume.clone());
         let affinity = SlotAffinity { preferred: pending.preferred, assigned: slot, reason };
+        // Sized here rather than at construction: how much of the host this lane
+        // may use is a property of what else is on it *now*, and this is the last
+        // moment before the child forks. This dispatch's own slot is already
+        // claimed, so it is not one of the lanes it has to make room for.
+        let build_jobs = lane_build_jobs(host_cores(), self.lock().slots.len().saturating_sub(1), self.build_jobs);
         let started = self.runner.start(&pending.spec(
             &worktree_dir,
             &target_dir,
             self.snapshots.as_ref(),
-            self.build_jobs,
+            build_jobs,
             resume.as_deref(),
         ));
         let (started, reuse) = match (started, resume.as_deref()) {
@@ -2063,7 +2106,7 @@ impl LocalExecutor {
                         &worktree_dir,
                         &target_dir,
                         self.snapshots.as_ref(),
-                        self.build_jobs,
+                        build_jobs,
                         None,
                     )),
                     reuse,
