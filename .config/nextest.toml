@@ -25,6 +25,15 @@ test-group = "bloomery-scenarios"
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 1 }
 
+# The same bloomery-scenarios cap as the default profile above. Restated rather
+# than inherited: a profile resolves its own `overrides` list, and
+# `cargo nextest show-config test-groups --profile ci` reports "(no matches)"
+# for a group assigned only under `[profile.default]` — the gate would have run
+# uncapped while the file read as if it were capped.
+[[profile.ci.overrides]]
+filter = "(package(=aether-chassis-bloomery) | package(=aether-harness-bloomery)) & kind(test)"
+test-group = "bloomery-scenarios"
+
 # The fork-class integration binaries — every suite that forks a real debug
 # `aether-headless` or a real coordinator and waits for it to bind — flake
 # under full-width suite runs (32 test threads on the fleet host), and each

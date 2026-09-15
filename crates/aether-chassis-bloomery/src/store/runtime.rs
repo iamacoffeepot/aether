@@ -1312,6 +1312,36 @@ impl SqliteStore {
         Ok(Self { conn, holds_journal: false })
     }
 
+    /// [`open_with_busy_timeout`](Self::open_with_busy_timeout) against a
+    /// journal a live holder already migrated, so the open runs no migration.
+    ///
+    /// [`migrate`] is unconditional by design and opens `BEGIN IMMEDIATE` to
+    /// re-issue its idempotent DDL, which takes the journal's single write
+    /// lock. That is the right cost once per process and the wrong cost for an
+    /// observer that reopens the journal on every poll: a scenario harness
+    /// re-reads outstanding orders and the commission store tens of times a
+    /// second, and each of those opens then queues for the write lock — behind
+    /// the coordinator's writes, and ahead of its next ones. Under host
+    /// contention that is enough to stall the world the observer is waiting
+    /// on, which is how a scenario that settles in a second blows a thirty
+    /// second budget on a loaded box (iamacoffeepot/aether#6081). A holder
+    /// opened this journal at boot from this same build, so an observer beside
+    /// it has nothing to bring forward.
+    ///
+    /// Not for an operator tool that may be the first to touch a journal —
+    /// that is what the migrating open is for.
+    ///
+    /// # Errors
+    /// The connection could not be opened or its pragmas could not be set.
+    pub fn open_observer(path: &str, busy_timeout: Duration) -> rusqlite::Result<Self> {
+        let conn = connect_with_busy_timeout(path, busy_timeout)?;
+        // `migrate` ends by turning this on; it is per-connection, and the
+        // commission tables' REFERENCES are enforced for this handle's writes
+        // too (ADR-0199).
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(Self { conn, holds_journal: false })
+    }
+
     /// Open `path` as its sole coordinator generation under `class`, or refuse
     /// because the journal belongs to the other world or another live
     /// generation already holds it.
