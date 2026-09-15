@@ -34,17 +34,49 @@ const LOCKFILE: &str = "Cargo.lock";
 /// `Cargo.lock` is skipped. Globs outside the surface grammar are ignored
 /// rather than treated as covering anything — the same fail-closed parse the
 /// seal door already applies.
+///
+/// The atom widens across a package's *subtrees* and stops at its root, because
+/// the approval gate resolves the tier over the declaration as written: a
+/// `src/**` surface is admitted `auto` while `crates/*/Cargo.toml` is `human`,
+/// so carrying the manifest in under the atom would hand an unattended member a
+/// file the policy routes to the owner. A member that means to edit a package's
+/// root file declares a surface the tier read can see it in.
 #[must_use]
 pub fn out_of_surface<'a>(changed: impl IntoIterator<Item = &'a str>, surface: &[String]) -> Vec<String> {
     let admitted: Vec<String> = surface.iter().map(|glob| surface_atom(glob).unwrap_or_else(|| glob.clone())).collect();
     let mut violations: Vec<String> = changed
         .into_iter()
-        .filter(|path| *path != LOCKFILE && !path_in_surface(&admitted, path))
+        .filter(|path| {
+            // The globs this path is judged against: the atom-widened surface
+            // inside a package, the declaration as written at its root.
+            let judged_against = if at_package_root(path) {
+                surface
+            } else {
+                &admitted
+            };
+            *path != LOCKFILE && !path_in_surface(judged_against, path)
+        })
         .map(str::to_owned)
         .collect();
     violations.sort();
     violations.dedup();
     violations
+}
+
+/// Whether `path` is a file at a package root — `crates/<name>/<file>` or
+/// `xtask/<file>` — rather than inside one of that package's subtrees.
+///
+/// The roots [`surface_atom`] widens to, one segment deep. A path anywhere else
+/// answers `false`, so a tree the atom does not cover is judged against the
+/// declared surface exactly as before.
+fn at_package_root(path: &str) -> bool {
+    let mut segments = path.split('/');
+    let depth = match segments.next() {
+        Some("crates") => 2,
+        Some("xtask") => 1,
+        _ => return false,
+    };
+    segments.by_ref().take(depth).count() == depth && segments.next().is_none()
 }
 
 /// The repository-relative paths `base..HEAD` changed.
@@ -164,8 +196,10 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use aether_bloomery::{StageVerdict, VerifyFailure, VerifyFailureSet};
+    use aether_bloomery::{ApprovalPolicy, ApprovalRule, StageVerdict, Tier, VerifyFailure, VerifyFailureSet};
     use tempfile::TempDir;
+
+    use crate::bloomery::approve::Gate;
 
     use super::{
         apply_containment, candidate_delta_base, candidate_violations, changed_paths, containment_findings,
@@ -220,6 +254,48 @@ mod tests {
         assert!(
             out_of_surface(["crates/owned/src/other.rs"], &surface(&["crates/owned/tests/**"])).is_empty(),
             "the atom runs both directions: tests-declared covers src too"
+        );
+    }
+
+    #[test]
+    fn a_src_surface_does_not_admit_its_crates_manifest() {
+        // Tripwire: the crate atom widens containment, but the approval gate
+        // resolves the tier over the declaration as written. `crates/owned/**`
+        // is `auto` and `crates/*/Cargo.toml` is `human`, so a `src/**` member
+        // is admitted unattended — and if the atom carried the manifest in with
+        // it, that unattended member could rewrite a file the policy routes to
+        // the owner. Both halves are asserted together because the invariant is
+        // the pair: containment must admit no path the tier read did not see.
+        let policy = ApprovalPolicy {
+            default: Tier::Judge,
+            rules: vec![
+                ApprovalRule { glob: "crates/owned/**".to_owned(), tier: Tier::Auto },
+                ApprovalRule { glob: "crates/*/Cargo.toml".to_owned(), tier: Tier::Human },
+            ],
+        };
+        let declared = surface(&["crates/owned/src/**"]);
+
+        assert_eq!(
+            Gate::new(&policy).tier_of_declaration(&declared, &[]),
+            Tier::Auto,
+            "a src-only declaration is admitted unattended",
+        );
+        assert_eq!(
+            out_of_surface(["crates/owned/Cargo.toml"], &declared),
+            ["crates/owned/Cargo.toml"],
+            "so the manifest the policy routes to the owner is outside what it may edit",
+        );
+    }
+
+    #[test]
+    fn a_whole_crate_surface_still_admits_its_manifest() {
+        // The other half: a member that declared the whole crate resolved its
+        // tier over a surface the manifest is inside, so the manifest stays
+        // contained. Narrowing that too would refuse the declaration the owner
+        // signed.
+        assert!(
+            out_of_surface(["crates/owned/Cargo.toml"], &surface(&["crates/owned/**"])).is_empty(),
+            "a crate-wide declaration covers its own manifest",
         );
     }
 
