@@ -43,7 +43,7 @@ use aether_data::wire::to_vec;
 // Unconditional: live identity cases run on Linux/macOS, while recorded identity
 // literals run everywhere. Gating this import with the live cases made the whole
 // test target refuse to compile on other hosts.
-use super::backend::OrderIdentity;
+use super::backend::{OrderIdentity, host_cores, lane_build_jobs};
 use super::identity::ProcessIdentity;
 use super::orphan::OrphanedRun;
 use super::quarantine;
@@ -1646,6 +1646,7 @@ struct SeenSpec {
     worktree: Option<PathBuf>,
     task: Option<String>,
     selected_gates: Vec<String>,
+    build_jobs: usize,
 }
 
 // A spawn seam that records the `RunSpec` it was handed, so a test can assert what
@@ -1668,6 +1669,7 @@ impl TransformRunner for CapturingRunner {
             resume: spec.resume.map(str::to_owned),
             worktree: Some(spec.worktree_dir.to_owned()),
             task: spec.task.map(str::to_owned),
+            build_jobs: spec.build_jobs,
             selected_gates: spec.selected_gates.to_vec(),
         };
         Ok(Box::new(RecordingProcess { lifecycle: RunLifecycle::Running }))
@@ -1812,6 +1814,80 @@ fn submit_spawns_the_model_lane_under_the_orders_resolved_profile() {
     // defaults to while the receipt attests the sealed profile — the same
     // divergence #4324 fixed for model and effort.
     assert_eq!(harness.as_deref(), Some("muse"), "the spawn names the order's resolved harness");
+}
+
+// Tripwire: the dispatch path must hand the lane the *sized* job count, not the
+// configured number. The per-gate target split (#6067) is the cautionary case —
+// the sizing existed, the dispatch never asked for it, and the mechanism was dead
+// in production for a fortnight while its own unit tests stayed green. Configured
+// at a floor of one, a lane alone on the box must be handed the host's cores; a
+// dispatch still passing the configured constant hands over one.
+#[test]
+fn a_lone_lane_is_dispatched_with_the_whole_box_not_the_configured_floor() {
+    let cores = host_cores();
+    if cores < 2 {
+        return;
+    }
+
+    let seen = Arc::new(Mutex::new(SeenSpec::default()));
+    let base = TempDir::new().unwrap();
+    let exec = LocalExecutor::new(Arc::new(CapturingRunner { seen: Arc::clone(&seen) }), correspondence(), base.path())
+        .with_lane_build("", 1);
+
+    exec.submit(&construct_order(digest(5), &test_nonce("solo-jobs"))).unwrap();
+
+    assert_eq!(
+        seen.lock().unwrap().build_jobs,
+        cores,
+        "the only lane on the host builds with all of it; the configured number is its floor, not its cap",
+    );
+}
+
+// The other half of the same contract, and the one a fixed-per-lane reading would
+// pass by accident: a lane that starts while another is still holding its slot
+// must make room for it. A sizing that ignored the running lanes would hand the
+// second lane the whole box too and oversubscribe the host by a factor of the
+// lane count, which is the failure the per-lane share existed to prevent.
+#[test]
+fn a_lane_starting_beside_a_running_one_leaves_it_its_share() {
+    let cores = host_cores();
+    if cores < 2 {
+        return;
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let holder = test_nonce("jobs-hold");
+    let second = test_nonce("jobs-second");
+    let exec = LocalExecutor::new(
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone())),
+        correspondence(),
+        base.path(),
+    )
+    .with_lane_build("", 1);
+
+    exec.submit(&construct_order(digest(5), &holder)).unwrap();
+    exec.submit(&construct_order(digest(5), &second)).unwrap();
+
+    let dispatched: Vec<usize> = seen.lock().unwrap().iter().map(|spec| spec.build_jobs).collect();
+    assert_eq!(
+        dispatched,
+        vec![cores, cores - 1],
+        "the first lane took the idle box; the second left the running one the share it holds",
+    );
+}
+
+// The floor itself, as arithmetic rather than as a spawn: a host cannot be made
+// to grow cores inside a test, so the crowded cases are asserted on the function
+// the two dispatch tests above prove is the one being called.
+#[test]
+fn the_configured_share_is_the_floor_a_crowded_host_never_goes_under() {
+    assert_eq!(lane_build_jobs(32, 0, 8), 32, "alone on the box, a lane takes the box");
+    assert_eq!(lane_build_jobs(32, 1, 8), 24, "one lane already running holds its own share back");
+    assert_eq!(lane_build_jobs(32, 3, 8), 8, "a full box leaves the newcomer exactly its guaranteed share");
+    assert_eq!(lane_build_jobs(32, 9, 8), 8, "and an oversubscribed one never drops below it");
+    assert_eq!(lane_build_jobs(4, 0, 8), 4, "a host smaller than the floor is still only itself");
+    assert_eq!(lane_build_jobs(32, 0, 0), 0, "a configured zero stays zero: cargo's own default, deliberately unset");
 }
 
 // The complement: an order carrying no resolved profile names neither flag, so the
@@ -3222,6 +3298,7 @@ impl TransformRunner for ReuseRunner {
             resume: spec.resume.map(str::to_owned),
             worktree: Some(spec.worktree_dir.to_owned()),
             task: spec.task.map(str::to_owned),
+            build_jobs: spec.build_jobs,
             selected_gates: spec.selected_gates.to_vec(),
         });
         if self.fail_start.as_deref() == Some(spec.nonce) {

@@ -16,7 +16,6 @@ mod workflow;
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -190,12 +189,11 @@ impl VerifyInvocation {
     /// dispatch that knows which slot this is.
     ///
     /// The build directory is the one deliberate exception, applied after this
-    /// returns (see [`export_gate_target_dir`]): a build-lane gate builds into
-    /// the slot's directory with its own suffix rather than the slot directory
-    /// itself, so the three compiling gates share no artifact lock. The value
-    /// still derives from the dispatch — the suffix is appended to the lane's
-    /// own directory — so the gate builds where the lane built, in the slot it
-    /// holds.
+    /// returns (see [`gate_target_dir`]): a split gate builds into its own
+    /// directory under the pass's target root rather than into the root itself,
+    /// so the compiling gates share no artifact lock. The value still derives
+    /// from the dispatch — the root is the lane's own directory — so the gate
+    /// builds where the lane built, in the slot it holds.
     fn command(
         &self,
         scope: &Scope,
@@ -1006,63 +1004,103 @@ fn spawnable_runs<'a>(manifest: &'a PipelineManifest, command: &str) -> Vec<&'a 
 ///
 /// Cargo takes an exclusive lock on the artifact directory for the whole of a
 /// build — a second invocation against the same one prints "Blocking waiting for
-/// file lock on artifact directory" and waits — so three compiling gates sharing
-/// one `CARGO_TARGET_DIR` serialize on it. Each gate instead builds into the
-/// slot's directory with its own suffix (see [`gate_target_dir`]):
-/// `slot-0-target-clippy` beside `slot-0-target`. The three run in parallel on
-/// one thread each, sharing only the sccache compiler cache, which keys each
-/// invocation by content and so stays shared across the three trees. The
-/// directories are per slot, never per run, so warm fingerprints survive between
-/// runs the way the single directory did; `verify.test`'s prepare builds into
-/// the test gate's directory, so it shares the member's fingerprints rather
-/// than growing a fourth tree.
+/// file lock on artifact directory" and waits — so compiling gates sharing one
+/// target directory serialize on it however many threads started them. Each
+/// split gate instead builds into `gates/<short name>` under the pass's target
+/// root (see [`gate_target_dir`]), so the lane's three cargo builds run at once,
+/// sharing only the sccache compiler cache, which keys each invocation by
+/// content and so stays shared across the trees.
 ///
 /// Everything else — the formatter, the clone detector, the dependency scan,
 /// the suppression scan, the lockfile freshness check — reads the tree and
 /// never writes an artifact, so it runs alongside the compiles unchanged.
 const BUILD_LANE_MEMBERS: [&str; 3] = ["verify.clippy", "verify.docs", "verify.test"];
 
-/// Whether this member compiles, and so builds on its own target directory —
-/// see [`BUILD_LANE_MEMBERS`].
+/// Whether this member compiles, and so contends for an artifact lock — see
+/// [`BUILD_LANE_MEMBERS`].
 fn builds_artifacts(id: &str) -> bool {
     BUILD_LANE_MEMBERS.contains(&id)
 }
 
-/// The suffix this build-lane gate appends to the slot's target directory: the
-/// member's own short name, so `verify.clippy` builds into `…-clippy`.
+/// The one compiling member that keeps the pass's target root itself rather than
+/// a directory of its own.
+///
+/// Two reasons, and either alone decides it. The slot's warm-target snapshot is
+/// taken of that root and the janitor's budget sweep addresses it, so the build
+/// worth landing warm is the one that stays there — and the test gate's is the
+/// largest, its own `cargo xtask dist` prepare included. And `trybuild`
+/// materializes its compile-fail fixtures under the target directory and
+/// normalizes the compiler's paths against the workspace, which is why a lane
+/// reaches its slot target through a `target` symlink in the checkout rather
+/// than an out-of-workspace path (#5478); this gate is the only one that runs
+/// those fixtures, and leaving it on the root leaves that arrangement untouched.
+///
+/// Two gates moved is enough to end the wait: the third has nothing left to
+/// queue behind.
+const SLOT_TARGET_MEMBER: &str = "verify.test";
+
+/// The suffix this gate's own target directory takes: the member's own short
+/// name, so `verify.clippy` builds into `gates/clippy`.
 ///
 /// Derived rather than stated, so a fourth compiling member takes its own
 /// directory with it. A stated table is a second list to keep true, and a gate
 /// that compiled into the shared directory would block on a sibling's artifact
 /// lock instead of running.
 fn gate_target_suffix(id: &str) -> Option<&str> {
-    if builds_artifacts(id) {
+    if builds_artifacts(id) && id != SLOT_TARGET_MEMBER {
         id.rsplit('.').next()
     } else {
         None
     }
 }
 
-/// This gate's own target directory: the slot's directory with the gate's
-/// suffix, or `None` for a gate that shares the slot directory — a read-only
-/// member — or when `inherited` names no slot directory at all, which is a
-/// developer running the arm by hand.
+/// This gate's own target directory under the pass's target `root`, or `None`
+/// for a gate that builds in the root itself — a read-only member, or
+/// [`SLOT_TARGET_MEMBER`].
 ///
-/// Per slot, never per run: the value derives from the lane's directory alone,
-/// so two runs in one slot resolve the same tree and the second is warm on the
-/// first's fingerprints.
-fn gate_target_dir(inherited: Option<OsString>, id: &str) -> Option<PathBuf> {
-    let suffix = gate_target_suffix(id)?;
-    let mut dir = PathBuf::from(inherited.filter(|dir| !dir.is_empty())?);
-    dir.as_mut_os_string().push(format!("-{suffix}"));
-    Some(dir)
+/// Under the root rather than beside it, so whatever already owns that directory
+/// owns these too: the janitor's per-slot target sweep and the warm-snapshot
+/// store both address the slot's tree by its one path, and a sibling directory
+/// would be invisible to both — orphaned by the sweep, cold on every warm.
+///
+/// Per slot, never per run: the value derives from the root alone, so two runs
+/// in one slot resolve the same tree and the second is warm on the first's
+/// fingerprints.
+fn gate_target_dir(root: &Path, id: &str) -> Option<PathBuf> {
+    Some(root.join("gates").join(gate_target_suffix(id)?))
 }
 
-/// Point `command`'s build at this gate's own target directory, when it has one
-/// (see [`gate_target_dir`]).
+/// The target root one umbrella pass splits its gates under: the directory the
+/// host handed this lane, or the workspace's own `target` when it handed none.
+///
+/// The fallback is the half this was missing (#6058). A fleet lane reaches its
+/// slot target through a `target` symlink inside its checkout rather than
+/// through the environment — the absolute out-of-workspace spelling is what
+/// `trybuild` cannot normalize (#5478) — so a split keyed only on
+/// `CARGO_TARGET_DIR` resolved to nothing in every lane, and the three cargo
+/// gates queued on the one artifact lock the split exists to avoid.
+///
+/// The workspace root comes from this crate's manifest rather than the process's
+/// working directory: the lane's `xtask` is compiled out of the checkout it then
+/// verifies, so the parent of its manifest is that checkout, and the answer is
+/// the one `target` cargo itself would have chosen — the slot's, through the
+/// symlink.
+#[allow(clippy::disallowed_methods)] // aether-suppression-request: the lane's build directory is a host-supplied build location, not cap config
+fn pass_target_root() -> PathBuf {
+    env::var_os("CARGO_TARGET_DIR").filter(|dir| !dir.is_empty()).map_or_else(
+        || {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .map_or_else(|| PathBuf::from("target"), |root| root.join("target"))
+        },
+        PathBuf::from,
+    )
+}
+
+/// Point `command`'s build at `dir`, when the gate it belongs to holds one.
 #[allow(clippy::disallowed_methods)] // aether-suppression-request: the gate's target directory derives from the host-dispatched slot directory (build location), not cap config
-fn export_gate_target_dir(command: &mut Command, id: &str) {
-    if let Some(dir) = gate_target_dir(env::var_os("CARGO_TARGET_DIR"), id) {
+fn export_gate_target_dir(command: &mut Command, dir: Option<&Path>) {
+    if let Some(dir) = dir {
         command.env("CARGO_TARGET_DIR", dir);
     }
 }
@@ -1393,9 +1431,9 @@ trait MemberRunner {
 struct SpawnRunner<'a> {
     cache: Option<&'a CompilerCache>,
     peak: &'a PeakMemory,
-    /// The gate this runner spawns for — what [`export_gate_target_dir`] reads
-    /// to point each candidate-tree spawn at the gate's own target directory.
-    gate: &'static str,
+    /// This gate's own target directory, when it holds one — pointed at by every
+    /// candidate-tree spawn, so a replay compiles where the member did.
+    target: Option<&'a Path>,
     /// The base checkout this member's replays share, opened by the first one
     /// that needs it and kept until the member is done.
     ///
@@ -1415,7 +1453,7 @@ struct SpawnRunner<'a> {
 impl MemberRunner for SpawnRunner<'_> {
     fn run(&mut self, invocation: &VerifyInvocation, scope: &Scope, diff_base: Option<&str>) -> Result<Captured> {
         let mut command = invocation.command(scope, diff_base, self.cache, self.peak, TestSchedule::default());
-        export_gate_target_dir(&mut command, self.gate);
+        export_gate_target_dir(&mut command, self.target);
         let output = run_captured(command)
             .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
         // The wrapper's report is taken off the stderr the member's log keeps:
@@ -1440,8 +1478,8 @@ impl MemberRunner for SpawnRunner<'_> {
 }
 
 impl<'a> SpawnRunner<'a> {
-    fn new(gate: &'static str, cache: Option<&'a CompilerCache>, peak: &'a PeakMemory) -> Self {
-        Self { gate, cache, peak, base: None, workspace: None }
+    fn new(target: Option<&'a Path>, cache: Option<&'a CompilerCache>, peak: &'a PeakMemory) -> Self {
+        Self { target, cache, peak, base: None, workspace: None }
     }
 
     /// The tree this member's base replays run in, opened on the first replay
@@ -1583,7 +1621,7 @@ impl<'a> SpawnRunner<'a> {
             // The candidate tree: the gate's own directory, so the replay reuses
             // the member's fingerprints rather than rebuilding cold into a slot
             // directory its siblings no longer share.
-            export_gate_target_dir(&mut command, self.gate);
+            export_gate_target_dir(&mut command, self.target);
         }
         sccache::export(self.cache, &mut command);
         command
@@ -2412,6 +2450,7 @@ fn run_prepare(
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
     prepared: bool,
+    target: Option<&Path>,
 ) -> Result<(PrepareFailure, Option<CacheStatus>)> {
     let Some(prepare) = invocation.should_prepare(scope, prepared) else {
         return Ok((None, None));
@@ -2425,7 +2464,7 @@ fn run_prepare(
     // Into the gate's own directory: the prepare belongs to this member, and
     // the member builds there — the shared directory would serialize the lane
     // on the artifact lock again.
-    export_gate_target_dir(&mut step, id);
+    export_gate_target_dir(&mut step, target);
     sccache::export(cache, &mut step);
     let output = run_captured(step).with_context(|| format!("spawn cargo {}", prepare.join(" ")))?;
     // Read before the success check: the pre-build is the lane's largest single
@@ -2491,13 +2530,14 @@ fn run_timed_prepare(
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
     prepared: bool,
+    target: Option<&Path>,
 ) -> Result<TimedPrepare> {
     if invocation.should_prepare(scope, prepared).is_none() {
         return Ok(TimedPrepare { failure: None, millis: None, bundle_cache: None });
     }
 
     let started = Instant::now();
-    let (failure, bundle_cache) = run_prepare(id, invocation, scope, cache, peak, prepared)?;
+    let (failure, bundle_cache) = run_prepare(id, invocation, scope, cache, peak, prepared, target)?;
     Ok(TimedPrepare { failure, millis: Some(elapsed_millis(started)), bundle_cache })
 }
 
@@ -2579,7 +2619,7 @@ fn dispatch_single(
     let schedule = TestSchedule::from_args(args);
     // A lone gate writes no gate receipt, so its prepare's cache status has
     // nowhere to be stamped; the `dist` run reported it on its own stdout.
-    let (prepare_failure, _) = run_prepare(&args.command, invocation, scope, cache, peak, schedule.prepared)?;
+    let (prepare_failure, _) = run_prepare(&args.command, invocation, scope, cache, peak, schedule.prepared, None)?;
     if let Some((log, code, outcome)) = prepare_failure {
         return Ok(MemberRun::plain(&args.command, outcome, log.into_bytes(), code));
     }
@@ -2587,7 +2627,7 @@ fn dispatch_single(
     let mut command = invocation.command(scope, args.diff_base.as_deref(), cache, peak, schedule);
     // A lone gate answers the same directory it holds inside the umbrella, so a
     // hand run warms the same tree the lane builds.
-    export_gate_target_dir(&mut command, &args.command);
+    export_gate_target_dir(&mut command, None);
     let output =
         run_captured(command).with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
     let stderr = peak.take_report(output.stderr);
@@ -3027,6 +3067,9 @@ struct GatePass<'a> {
     /// `None` when the tree has no single identity to key by — see
     /// [`memo::candidate_input`].
     input: Option<&'a str>,
+    /// The directory this pass's gates split their builds under — see
+    /// [`pass_target_root`].
+    targets: &'a Path,
 }
 
 /// Run one umbrella member and write its log, returning what it said and what
@@ -3037,7 +3080,7 @@ struct GatePass<'a> {
 /// and a gate's receipt covers exactly the work done under its identity however
 /// many gates are in flight.
 fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTiming)> {
-    let GatePass { args, full, logs, scope, closure, cache, peak, input } = *pass;
+    let GatePass { args, full, logs, scope, closure, cache, peak, input, targets } = *pass;
     let invocation = verify_command(id).expect("verify_check_members ids all resolve via verify_command");
     // The member's own prerequisite, run immediately before it rather than once
     // up front: it belongs to this member, and a member that is one day removed
@@ -3055,6 +3098,10 @@ fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTim
     // candidate cannot repair any of those, and `run_prepare` charges them to
     // the host instead.
     let gate_started = Instant::now();
+    // Resolved once for the member and its prepare alike: the pre-build is this
+    // gate's own, and a prepare that compiled somewhere else would leave the
+    // member to rebuild what it had just built.
+    let target = gate_target_dir(targets, id);
     // Ahead of the prepare, not only of the run: `verify.test`'s prepare is the
     // wasm cross-build, the largest single compile in the lane, and a member
     // with an empty closure has nothing to load the wasm for.
@@ -3062,8 +3109,8 @@ fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTim
         (run, None, None)
     } else {
         let TimedPrepare { failure: prepare_failure, millis: prepare_millis, bundle_cache } =
-            run_timed_prepare(id, &invocation, scope, cache, peak, false)?;
-        let mut runner = SpawnRunner::new(id, cache, peak);
+            run_timed_prepare(id, &invocation, scope, cache, peak, false, target.as_deref())?;
+        let mut runner = SpawnRunner::new(target.as_deref(), cache, peak);
         // Read before the member runs, so the triage that follows a failure is
         // deciding against what earlier steps recorded rather than against the
         // file this run is in the middle of writing.
@@ -3165,16 +3212,17 @@ fn check_pass(args: &TransformArgs, logs: &Path, position: Position, members: &[
     fs::write(&scope_path, scope.receipt()).with_context(|| format!("write {}", scope_path.display()))?;
     let mut log_names = vec![String::from(SCOPE_LOG)];
 
-    // One thread per member: the build-lane gates each hold their own target
-    // directory (see `BUILD_LANE_MEMBERS`), so no member shares cargo's
-    // artifact lock with another and none waits on one. The read-only members
-    // ran beside the compiles before; now everything runs beside everything.
+    // One thread per member: the compiling gates split their builds under this
+    // root (see `BUILD_LANE_MEMBERS`), so no member shares cargo's artifact lock
+    // with another and none waits on one. The read-only members ran beside the
+    // compiles before; now everything runs beside everything.
     //
     // The triage input is resolved once for the pass, before any member
     // compiles or prepares: `verify.test`'s own pre-build writes into the
     // tree, and an input read after it would describe a tree no other step
     // stood on.
     let input = memo::candidate_input();
+    let targets = pass_target_root();
     let pass = GatePass {
         args,
         full,
@@ -3184,6 +3232,7 @@ fn check_pass(args: &TransformArgs, logs: &Path, position: Position, members: &[
         cache: cache.as_ref(),
         peak: &peak,
         input: input.as_deref(),
+        targets: &targets,
     };
     let mut completed = fan_out(members, |id| run_gate(id, &pass))?;
 
@@ -3222,14 +3271,14 @@ fn check_pass(args: &TransformArgs, logs: &Path, position: Position, members: &[
 mod tests {
     use super::{
         BASE_SET_SUBJECT, BUILD_LANE_MEMBERS, Captured, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun,
-        MemberRunner, Memo, Position, SUPPRESS_MEMBER, Scope, SpawnRunner, TestSchedule, TriageInputs, VERIFY_BASE,
-        VERIFY_CHECK, VERIFY_MEMBER, VerifyInvocation, builds_artifacts, clippy_verdict, closure, distil_diagnostics,
-        effective_exit_code, empty_closure_run, environment_observations, failed_verifiers, failed_verifiers_of,
-        fan_out, gate_target_dir, gate_target_suffix, host_fault_in, member_diff_base, member_outcome,
-        member_scope_notice, operational_failure_notice, package_name, preflight_tools, prepare_failure_log,
-        render_diagnostics, replay_args, required_targets, required_tools, run_member, run_member_discriminated,
-        run_timed_prepare, selected_members, spawnable_runs, stated_selection, umbrella_status, unjudged_notice,
-        verify_check_members, verify_command, verify_findings, workflow,
+        MemberRunner, Memo, Position, SLOT_TARGET_MEMBER, SUPPRESS_MEMBER, Scope, SpawnRunner, TestSchedule,
+        TriageInputs, VERIFY_BASE, VERIFY_CHECK, VERIFY_MEMBER, VerifyInvocation, builds_artifacts, clippy_verdict,
+        closure, distil_diagnostics, effective_exit_code, empty_closure_run, environment_observations,
+        failed_verifiers, failed_verifiers_of, fan_out, gate_target_dir, gate_target_suffix, host_fault_in,
+        member_diff_base, member_outcome, member_scope_notice, operational_failure_notice, package_name,
+        preflight_tools, prepare_failure_log, render_diagnostics, replay_args, required_targets, required_tools,
+        run_member, run_member_discriminated, run_timed_prepare, selected_members, spawnable_runs, stated_selection,
+        umbrella_status, unjudged_notice, verify_check_members, verify_command, verify_findings, workflow,
     };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3747,7 +3796,7 @@ mod tests {
         let invocation = verify_command("verify.test").expect("verify.test mapped");
         let peak = peak_memory::detect();
         let cache = CompilerCache::unused();
-        let runner = SpawnRunner::new("verify.test", Some(&cache), &peak);
+        let runner = SpawnRunner::new(None, Some(&cache), &peak);
         let command = runner.replay_command(
             &invocation,
             &["aether-chassis-hub::fleetharness_binary_store fleetharness_uploads_lists_and_dedups_a_real_binary"
@@ -4328,9 +4377,16 @@ mod tests {
         // prepare_millis: 0 on every gate that never prepared, which reads as
         // a free wasm cross-build rather than as "this gate has no prepare".
         let invocation = verify_command("verify.fmt").expect("verify.fmt mapped");
-        let prepared =
-            run_timed_prepare("verify.fmt", &invocation, &Scope::resolve(None), None, &peak_memory::detect(), false)
-                .expect("a member with no prepare is a no-op");
+        let prepared = run_timed_prepare(
+            "verify.fmt",
+            &invocation,
+            &Scope::resolve(None),
+            None,
+            &peak_memory::detect(),
+            false,
+            None,
+        )
+        .expect("a member with no prepare is a no-op");
         assert!(prepared.failure.is_none());
         assert!(prepared.millis.is_none(), "a gate that never prepared must not stamp a prepare share");
         assert!(prepared.bundle_cache.is_none(), "nor a bundle-cache verdict it never asked for");
@@ -4748,51 +4804,44 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
     }
 
     #[test]
-    fn each_build_lane_gate_builds_in_a_directory_of_its_own_stable_across_runs_in_one_slot() {
-        // The parallel-build contract, both halves. Distinct: two gates sharing
-        // a directory serialize on cargo's artifact lock, which is the wait this
-        // change exists to end. Stable across two runs in one slot: the value
-        // derives from the slot's directory alone — no nonce, no process id, no
-        // clock — so the second run in a slot is warm on the first's
-        // fingerprints. The spellings are pinned because they cross the lane
-        // boundary: the slot layout and the janitor's target pruning read these
-        // names, so a rename here orphans a tree or wedges a budget.
-        let dir = |slot: &str, id: &str| {
-            gate_target_dir(Some(slot.to_owned().into()), id)
-                .unwrap_or_else(|| panic!("{id} compiles, so it holds its own target directory"))
+    fn each_split_gate_builds_under_the_pass_root_in_a_directory_of_its_own() {
+        // The parallel-build contract, all three halves. Distinct: two gates
+        // resolving one directory serialize on cargo's artifact lock, which is
+        // the wait this exists to end. Under the root, not beside it: the
+        // janitor's target sweep and the warm-snapshot store address the slot's
+        // tree by that one path, so a sibling directory is orphaned by the sweep
+        // and cold on every warm. And derived from the root alone — no nonce, no
+        // process id, no clock — so the second run in a slot is warm on the
+        // first's fingerprints.
+        let slot = Path::new("/runs/slot-3-target");
+        let dir = |root: &Path, id: &str| {
+            gate_target_dir(root, id).unwrap_or_else(|| panic!("{id} splits, so it holds its own target directory"))
         };
 
-        assert_eq!(
-            BUILD_LANE_MEMBERS.map(gate_target_suffix),
-            [Some("clippy"), Some("docs"), Some("test")],
-            "each compiling gate takes its own short name as its suffix",
-        );
-        assert_eq!(gate_target_suffix("verify.fmt"), None, "a read-only member shares the slot directory");
+        let clippy = dir(slot, "verify.clippy");
+        let docs = dir(slot, "verify.docs");
+        assert_eq!(clippy, PathBuf::from("/runs/slot-3-target/gates/clippy"));
+        assert_eq!(docs, PathBuf::from("/runs/slot-3-target/gates/docs"));
+        assert!(clippy.starts_with(slot) && docs.starts_with(slot), "both live under the tree the host already owns");
+        assert_ne!(clippy, docs, "two gates sharing one directory queue on one artifact lock");
 
-        let clippy = dir("/runs/slot-3-target", "verify.clippy");
-        let docs = dir("/runs/slot-3-target", "verify.docs");
-        let test = dir("/runs/slot-3-target", "verify.test");
-        assert_eq!(clippy, PathBuf::from("/runs/slot-3-target-clippy"));
-        assert_eq!(docs, PathBuf::from("/runs/slot-3-target-docs"));
-        assert_eq!(test, PathBuf::from("/runs/slot-3-target-test"));
-
-        assert_eq!(
-            dir("/runs/slot-3-target", "verify.clippy"),
-            clippy,
-            "the same slot resolves the same tree twice: the second run is warm",
-        );
+        assert_eq!(dir(slot, "verify.clippy"), clippy, "the same root resolves the same tree: the second run is warm");
         assert_ne!(
-            dir("/runs/slot-4-target", "verify.clippy"),
+            dir(Path::new("/runs/slot-4-target"), "verify.clippy"),
             clippy,
             "a neighbouring slot holds its own tree: sharing one would serialize two lanes on one lock",
         );
 
-        assert_eq!(gate_target_dir(Some("/runs/slot-3-target".to_owned().into()), "verify.fmt"), None);
-        assert_eq!(gate_target_dir(None, "verify.clippy"), None, "a hand run names no slot directory");
         assert_eq!(
-            gate_target_dir(Some(String::new().into()), "verify.clippy"),
+            gate_target_dir(slot, SLOT_TARGET_MEMBER),
             None,
-            "an empty directory is no directory",
+            "the test gate keeps the root itself: the warm snapshot and the trybuild fixtures are both taken there",
+        );
+        assert_eq!(gate_target_dir(slot, "verify.fmt"), None, "a read-only member writes no artifact to contend over");
+        assert_eq!(
+            BUILD_LANE_MEMBERS.iter().filter(|id| gate_target_suffix(id).is_none()).count(),
+            1,
+            "exactly one compiling gate stays on the root — a second would queue behind it",
         );
     }
 
