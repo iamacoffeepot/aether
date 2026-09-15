@@ -9,6 +9,7 @@ use aether_bloomery::{
 };
 use aether_bloomery_github::SourceError;
 
+use super::overlay::fold_conflict_overlay;
 use crate::bloomery::SourceShell;
 use crate::bloomery::coordination::{generation_namespace, preparation_namespace};
 
@@ -151,27 +152,18 @@ fn extend_coverage(coverage: &mut Vec<MemberPin>, additions: &[MemberPin]) -> Re
     Ok(())
 }
 
+/// The append collision's Reconcile overlay. The diagnostic an eager append
+/// retains and the work order its conflicted member reconciles under are the
+/// same bytes — `drain_integration_appends` stores this string under both — so
+/// it is composed by the one overlay renderer rather than spelled twice.
 fn conflict_diagnostic(plan: &IntegrationAppendPlan, input: &CompositionInput, paths: &[String], diff: &str) -> String {
-    use core::fmt::Write;
-
-    let mut diagnostic = format!(
-        "Eager append {} could not place composition {} onto head {}.\n",
+    let situation = format!(
+        "Eager append {} could not place composition {} onto head {}.",
         plan.digest().to_hex(),
         input.node.to_hex(),
         plan.expected_parent.node.to_hex(),
     );
-    if !paths.is_empty() {
-        diagnostic.push_str("\nConflicting paths:\n");
-        for path in paths {
-            let _ = writeln!(diagnostic, "- {path}");
-        }
-    }
-    if !diff.trim().is_empty() {
-        diagnostic.push_str("\nConflicted contribution:\n\n");
-        diagnostic.push_str(diff.trim());
-        diagnostic.push('\n');
-    }
-    diagnostic
+    fold_conflict_overlay(Some(&situation), paths, diff)
 }
 
 /// Mechanically prepare a reconcile result against the immutable head recorded
@@ -217,26 +209,15 @@ pub(super) enum CandidatePreparationResult {
     Stopped(String),
 }
 
+/// The preparation collision's Reconcile overlay — the same double duty as
+/// [`conflict_diagnostic`], for the lap that still will not place.
 fn preparation_conflict_diagnostic(plan: &CandidatePreparationPlan, paths: &[String], diff: &str) -> String {
-    use core::fmt::Write;
-
-    let mut diagnostic = format!(
-        "Candidate {} still conflicts with pinned head {}.\n",
+    let situation = format!(
+        "Candidate {} still conflicts with pinned head {}.",
         plan.authored.tree.to_hex(),
         plan.context.starting_head.node.to_hex(),
     );
-    if !paths.is_empty() {
-        diagnostic.push_str("\nConflicting paths:\n");
-        for path in paths {
-            let _ = writeln!(diagnostic, "- {path}");
-        }
-    }
-    if !diff.trim().is_empty() {
-        diagnostic.push_str("\nAuthored delta:\n\n");
-        diagnostic.push_str(diff.trim());
-        diagnostic.push('\n');
-    }
-    diagnostic
+    fold_conflict_overlay(Some(&situation), paths, diff)
 }
 
 #[cfg(test)]

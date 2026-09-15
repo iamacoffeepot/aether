@@ -507,13 +507,28 @@ fn request_for_dispatch(
     let member = record.spec.members().iter().find(|member| member.workpiece == *workpiece)?;
     let candidate = progress.candidate?;
     let context = state.contexts.get(workpiece_key(workpiece)).cloned();
-    let base = context.as_ref().map_or_else(
+    let head_base = context.as_ref().map_or_else(
         || CandidateRef {
             tree: snapshot.base_trees.get(&record.spec.base()).copied().unwrap_or_else(|| record.spec.base()),
             checkout: record.spec.base(),
         },
         |context| context.starting_head.candidate,
     );
+
+    // A delta-confirm after a Reconcile diffs against the proof it already
+    // holds, not against the head the merge landed on (ADR-0218). Both halves
+    // of the request move together — the contract records the range the lane is
+    // actually given, and the transformation carries the proof it stands on —
+    // so the override lives here rather than at each caller that builds a
+    // transformation.
+    let proved = delta_confirm_predecessor(state, workpiece, member.scope_revision, progress, candidate);
+    let base = proved.map_or(head_base, |(proved, _)| proved);
+    let mut transformation = transformation.clone();
+    if let Some((proved, proof)) = proved {
+        transformation.diff_base = Some(proved.checkout);
+        transformation.inputs.push(proof);
+    }
+
     let host_class = host_class_digest(&state.policy.host_class);
     let mut obligations = gates_for(record, VERIFY_MEMBER_COMMAND)
         .into_iter()
@@ -528,7 +543,7 @@ fn request_for_dispatch(
         gate_set: VerifyGateSet::member_of(&record.pipeline_manifest).digest(),
         obligations,
         diff_base: base,
-        invocation: digest_of(&InvocationIdentity { transformation, profile, configs }),
+        invocation: digest_of(&InvocationIdentity { transformation: &transformation, profile, configs }),
         environment: verification_environment_digest(&transformation.image, transformation.network, host_class),
         host_class,
     };
@@ -544,10 +559,53 @@ fn request_for_dispatch(
         attempt: progress.repair_rolls,
         context,
         contract,
-        transformation: transformation.clone(),
+        transformation,
         profile: profile.clone(),
         configs: configs.clone(),
     })
+}
+
+/// The proved candidate a coordinated `Verify` after a Reconcile confirms a
+/// delta against, and the digest of the receipt that proved it (ADR-0218
+/// §Amendment: reconcile is scoped to the merge).
+///
+/// The reducer-side sibling of
+/// [`attempt::delta_confirm_predecessor`](super::attempt) — same rule, other
+/// source of proof. A fold collision queues the Reconcile without invalidating
+/// the member's version, so the standing claim for the candidate the lap
+/// started from survives the whole lap: standalone for a member that passed its
+/// own Verify, `PassedIn` for one proved inside a settled contextual
+/// composition. Either way the merge is the only new thing, and the range the
+/// mechanical lane narrows against starts at the claim's candidate.
+///
+/// `None` unless the cursor is a Verify that carries the fold checkpoint a
+/// Reconcile was dispatched against, the claim names this member's current
+/// version, and its candidate is not the one being verified — a claim already
+/// on the candidate under test is the memo case, which reuses the verdict
+/// outright rather than confirming a delta.
+///
+/// Granularity is the closure's: `verify.check` selects by changed *crate*, so
+/// a merge inside the crates the member changed costs what the full range cost.
+/// The saving is the merge being narrow, never the confirmation being cheap.
+fn delta_confirm_predecessor(
+    state: &CoordinationState,
+    workpiece: &WorkpieceId,
+    scope_revision: Digest,
+    progress: &StageProgress,
+    candidate: CandidateRef,
+) -> Option<(CandidateRef, Digest)> {
+    if progress.stage != StageId::Verify || progress.fold_checkpoint.is_none() {
+        return None;
+    }
+    let claim = state.claims.get(workpiece_key(workpiece))?;
+    if claim.member.scope_revision != scope_revision || claim.member.candidate == candidate {
+        return None;
+    }
+    let proof = match &claim.proof {
+        ResolutionProof::Standalone(proof) => proof.evidence.detail,
+        ResolutionProof::InComposition { receipt, .. } => receipt.detail,
+    };
+    Some((claim.member.candidate, proof))
 }
 
 fn append_ready(record: &BloomRecord, state: &CoordinationState, input: &CompositionInput) -> bool {
