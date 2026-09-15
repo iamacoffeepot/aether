@@ -378,7 +378,10 @@ pub enum Fact {
         /// [`Fact::Resolve`] carries both tree and head.
         head: Digest,
         /// The collision evidence; its `detail` names the conflicting-path
-        /// report and is what a Reconcile-budget wedge attaches.
+        /// report and is what a Reconcile-budget wedge attaches. That wedge is
+        /// held off for the one round a sibling caused rather than the member:
+        /// while another member that collided onto this same head is still
+        /// unresolved, a repeat collision buys a second round instead (#5993).
         evidence: Evidence,
     },
     /// An observation the host classified as a strict ancestor of the

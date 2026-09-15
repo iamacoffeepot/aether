@@ -439,6 +439,16 @@ pub struct ScopeVerdictRow {
     pub nonce: Option<String>,
 }
 
+/// One name the flake registry knows, with how many distinct candidates have
+/// recorded it (#5999).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlakeRow {
+    /// The nextest `binary-id test_name` pair the gate excused.
+    pub test_id: String,
+    /// How many distinct candidate trees have recorded it as a flake.
+    pub candidates: usize,
+}
+
 /// One append-only proof-fact row (ADR-0200). Column order is the wire:
 /// a reshape is a migration, not an incidental edit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1063,6 +1073,17 @@ pub trait StoreBackend: Send + CommissionBackend {
     /// Every proof-fact row, in append order — the test oracle and the
     /// consultation read a later slice will key.
     fn list_proof_facts(&mut self) -> rusqlite::Result<Vec<ProofFactRow>>;
+    /// Record that the gate replayed `test_id` green on `candidate` — a flake
+    /// (#5999). Idempotent per `(test, candidate)`: a name that flaked twice
+    /// under one tree is one observation, because it is the spread across
+    /// unrelated candidates that makes a name a property of the test rather
+    /// than of the tree under it.
+    fn record_replayed_flake(&mut self, test_id: &str, candidate: &[u8]) -> rusqlite::Result<usize>;
+    /// Every registered name recorded across at least `across` distinct
+    /// candidates, most-observed first. The coordinator spends no attribution
+    /// probe on one, and the doctor surfaces it so it is fixed or quarantined
+    /// by a member with the crate in its surface.
+    fn known_flakes(&mut self, across: usize) -> rusqlite::Result<Vec<FlakeRow>>;
     /// Drop the metrics rollup cache. The next
     /// [`fold_metrics_from_journal`](Self::fold_metrics_from_journal) rebuilds
     /// it from the journal — the tables are cache, never truth.
@@ -2131,6 +2152,11 @@ CREATE TABLE IF NOT EXISTS member_dependency (
 CREATE TABLE IF NOT EXISTS notification_sent (
     notification_key   TEXT PRIMARY KEY,
     posted_unix_millis INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS flake_registry (
+    test_id   TEXT NOT NULL,
+    candidate BLOB NOT NULL,
+    PRIMARY KEY (test_id, candidate)
 );
 ";
 
@@ -4141,6 +4167,24 @@ impl StoreBackend for SqliteStore {
                 producing_dispatch: row.get(5)?,
                 producing_bloom: row.get(6)?,
             })
+        })?;
+        rows.collect()
+    }
+
+    fn record_replayed_flake(&mut self, test_id: &str, candidate: &[u8]) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO flake_registry (test_id, candidate) VALUES (?1, ?2)",
+            rusqlite::params![test_id, candidate],
+        )
+    }
+
+    fn known_flakes(&mut self, across: usize) -> rusqlite::Result<Vec<FlakeRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT test_id, COUNT(DISTINCT candidate) AS candidates FROM flake_registry \
+             GROUP BY test_id HAVING candidates >= ?1 ORDER BY candidates DESC, test_id",
+        )?;
+        let rows = stmt.query_map([i64::try_from(across).unwrap_or(i64::MAX)], |row| {
+            Ok(FlakeRow { test_id: row.get(0)?, candidates: usize::try_from(row.get::<_, i64>(1)?).unwrap_or(0) })
         })?;
         rows.collect()
     }

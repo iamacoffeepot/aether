@@ -292,6 +292,7 @@ pub use reduce::FOLD_GATE;
 pub use reduce::Fact;
 pub use reduce::FileLease;
 pub use reduce::FoldConflictError;
+pub use reduce::FoldRound;
 pub use reduce::FoldedIntegration;
 pub use reduce::Gate;
 pub use reduce::GrantAttemptsError;

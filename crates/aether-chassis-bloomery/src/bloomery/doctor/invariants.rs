@@ -15,6 +15,19 @@ use aether_bloomery::{
 };
 use serde::{Deserialize, Serialize};
 
+/// One name the flake registry knows (#5999), as the doctor reads it.
+///
+/// Its own shape rather than the store's row, because this module is compiled
+/// without the store: an invariant is a statement about state, and the reactor
+/// that has a store is what fills it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownFlake {
+    /// The nextest `binary-id test_name` pair the gate excused.
+    pub test_id: String,
+    /// How many distinct candidate trees have recorded it as a flake.
+    pub candidates: usize,
+}
+
 /// How long an undelivered source-replica topic may sit before it is a
 /// violation rather than a retry still in flight.
 pub const REPLICA_AGE_BOUND: Duration = Duration::from_mins(5);
@@ -82,6 +95,8 @@ pub enum Invariant {
     OpenDispatchHasEvidence,
     /// A member's candidate ref carries the candidate its cursor claims.
     MemberCandidateRefMatchesCursor,
+    /// No test is a known flake — replayed green across distinct candidates.
+    NoKnownFlake,
 }
 
 impl Invariant {
@@ -102,6 +117,7 @@ impl Invariant {
         Self::DeterministicRetryBound,
         Self::OpenDispatchHasEvidence,
         Self::MemberCandidateRefMatchesCursor,
+        Self::NoKnownFlake,
     ];
 
     /// The stable machine name `/view` and tests quote.
@@ -123,6 +139,7 @@ impl Invariant {
             Self::DeterministicRetryBound => "deterministic_retry_bound",
             Self::OpenDispatchHasEvidence => "open_dispatch_has_evidence",
             Self::MemberCandidateRefMatchesCursor => "member_candidate_ref_matches_cursor",
+            Self::NoKnownFlake => "no_known_flake",
         }
     }
 
@@ -161,6 +178,9 @@ impl Invariant {
             Self::MemberCandidateRefMatchesCursor => {
                 "every member's candidate ref carries the candidate tree its journal cursor claims"
             }
+            Self::NoKnownFlake => {
+                "no test has been replayed green as a flake across distinct candidates without being fixed or quarantined"
+            }
         }
     }
 
@@ -181,6 +201,7 @@ impl Invariant {
             Self::DeterministicRetryBound => deterministic_retry_bound(live),
             Self::OpenDispatchHasEvidence => open_dispatch_has_evidence(live),
             Self::MemberCandidateRefMatchesCursor => member_candidate_ref_matches_cursor(live),
+            Self::NoKnownFlake => no_known_flake(live),
         }
     }
 }
@@ -327,6 +348,9 @@ pub struct LiveState<'a> {
     /// and an unanswerable member is left out rather than entered as a drift
     /// nobody observed.
     pub candidate_ref_trees: &'a [(BloomId, WorkpieceId, Digest)],
+    /// The registry's known flakes — names the gate replayed green across at
+    /// least `KNOWN_FLAKE_CANDIDATES` distinct candidates (#5999).
+    pub known_flakes: &'a [KnownFlake],
 }
 
 /// Evaluate every seed invariant against `live`.
@@ -346,6 +370,20 @@ pub fn evaluate(live: &LiveState<'_>) -> DoctorReport {
         })
         .collect();
     DoctorReport { checks }
+}
+
+/// Every known flake, loudest first (#5999).
+///
+/// The coordinator stops spending attribution probes on a replayed flake the
+/// moment the gate reports one, which removes the cost but also the signal: a
+/// test that keeps failing and passing under unrelated candidates is a real
+/// defect nobody is looking at. Naming it here is what routes it to a member
+/// with the crate in its declared surface, to be fixed or quarantined.
+fn no_known_flake(live: &LiveState<'_>) -> Vec<String> {
+    live.known_flakes
+        .iter()
+        .map(|flake| format!("{} replayed green on {} candidates", flake.test_id, flake.candidates))
+        .collect()
 }
 
 fn claim_refs_name_active_blooms(live: &LiveState<'_>) -> Vec<String> {
@@ -880,6 +918,7 @@ mod tests {
             evidence_nonces: &[],
             unresolved_head_age: None,
             candidate_ref_trees: &[],
+            known_flakes: &[],
         }
     }
 

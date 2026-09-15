@@ -234,6 +234,18 @@ pub struct LaneObservation {
     ///
     /// [`RetrospectFinding::normalize`]: crate::RetrospectFinding::normalize
     pub retrospect_findings: Vec<RetrospectClaim>,
+    /// Tests the gate recorded as flakes on this run — the evidence's own
+    /// `flakes` channel: failed once, passed on a same-input replay (#5999).
+    ///
+    /// Host-recorded state riding the reference like `findings` and
+    /// `suppression_requests`, and for the same reason: a flake ledger is a
+    /// list of test names and an artifact name is not a data channel. The
+    /// verdict on such a test is the replay's, so the coordinator spends no
+    /// attribution probe re-deriving it — a green run that reported one used to
+    /// buy whole-workspace base probes on a question the replay had already
+    /// settled. Empty from the name-only Actions backend and from every run
+    /// whose gate excused nothing.
+    pub replayed_flakes: Vec<String>,
     /// Raw bounded contextual gate observations read from the trusted result
     /// artifact. This is in-memory transport state and is never journaled.
     pub contextual_observations: Option<Vec<u8>>,
