@@ -113,7 +113,7 @@ pub(in crate::transform) enum Scope {
 
 /// What the lockfile half of a narrowed run moved and reached.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct LockAttribution {
+pub(in crate::transform) struct LockAttribution {
     /// The resolved packages whose version, source, or dependency set moved
     /// between the base and candidate lockfiles, sorted.
     changed: Vec<String>,
