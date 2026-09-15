@@ -49,7 +49,7 @@ const PROBE_DIGEST: Digest = Digest::from_bytes([0xA5; 32]);
 /// model_override`), the way decode refusals name their row.
 #[derive(Debug, Default)]
 pub struct ReadTally {
-    /// Rows per table, in [`READ_TABLES`] order.
+    /// Rows per table, keyed by table name.
     pub rows: BTreeMap<String, usize>,
     /// One line per backend read that refused, in sweep order.
     pub refusals: Vec<String>,
