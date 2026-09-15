@@ -1588,7 +1588,15 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
 /// under version 25, so a store already stamped 25 skipped it and the first
 /// `list_scope_runs` on boot failed with "no such column". A pre-column row
 /// ran the compiled seat; nothing is backfilled.
-pub(super) const SCHEMA_VERSION: i64 = 26;
+///
+/// `27` is the stopped-order pair (issue 5969): `operator_cancelled_orders`,
+/// the tombstone that makes a cancelled lane's later upload refuse instead of
+/// admitting, and `intake_refusals`, the one standing broker refusal per member
+/// that `GET /view` left-joins onto the member's live order. Created empty and
+/// nothing is backfilled — a nonce nobody cancelled is not cancelled, and a
+/// refusal that only ever reached the host log is not a block anyone can still
+/// read off the board.
+pub(super) const SCHEMA_VERSION: i64 = 27;
 
 /// Historical TEXT stamp written beside v2 decisions rows before the digest
 /// column existed. Kept only so migration 17 can map it onto the v2 digest.
@@ -1795,6 +1803,12 @@ fn migrate_schema(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()>
     // Versions 23 and 24 (ADR-0218): the durable shared-run projection. Created
     // empty; the journal holds the coordination facts a physical run is about.
     migration.execute_batch(SHARED_RUN_TABLES)?;
+
+    // Version 27 (issue 5969): the stopped-order pair. Created empty; a store
+    // written before the cancel verb holds no cancellation to invent, and a
+    // refusal that only ever reached the host log cannot be recovered onto the
+    // member it blocked.
+    migration.execute_batch(STOPPED_ORDER_TABLES)?;
 
     migrate_proof_fact_identity(migration)?;
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -2131,23 +2145,6 @@ CREATE TABLE IF NOT EXISTS dispatch_owners (
     nonce TEXT PRIMARY KEY,
     bloom BLOB NOT NULL
 );
-CREATE TABLE IF NOT EXISTS operator_cancelled_orders (
-    nonce TEXT PRIMARY KEY,
-    reason TEXT NOT NULL,
-    operator TEXT NOT NULL,
-    cancelled_unix_millis INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS intake_refusals (
-    bloom BLOB NOT NULL,
-    workpiece TEXT NOT NULL,
-    nonce TEXT NOT NULL,
-    stage BLOB NOT NULL,
-    displayed_digest BLOB NOT NULL,
-    deadline_unix_millis INTEGER NOT NULL,
-    refusal TEXT NOT NULL,
-    recorded_unix_millis INTEGER NOT NULL,
-    PRIMARY KEY (bloom, workpiece)
-);
 CREATE TABLE IF NOT EXISTS capture_diff (
     nonce TEXT PRIMARY KEY,
     diff  TEXT NOT NULL
@@ -2263,6 +2260,39 @@ CREATE TABLE IF NOT EXISTS outbox_results (
     event        BLOB NOT NULL,
     event_schema BLOB NOT NULL,
     PRIMARY KEY (sequence, ordinal)
+);
+";
+
+/// The two ways an order stops short of admitting: the operator cancelled it,
+/// or the broker refused its upload.
+///
+/// `operator_cancelled_orders` is a tombstone, not a queue — the row outlives
+/// the outstanding order it dropped, because what it exists to do is refuse the
+/// lane's upload when that finally arrives. `intake_refusals` holds at most one
+/// standing refusal per member, keyed that way because the operator's question
+/// is "what is blocking this member now", and a refusal the next upload cleared
+/// is not an answer to it.
+///
+/// Defined here rather than in [`MIGRATIONS`] for the reason
+/// [`SHARED_RUN_TABLES`] is: one definition, executed by the versioned step, so
+/// a fresh store and a migrated one cannot be given different shapes.
+const STOPPED_ORDER_TABLES: &str = "\
+CREATE TABLE IF NOT EXISTS operator_cancelled_orders (
+    nonce TEXT PRIMARY KEY,
+    reason TEXT NOT NULL,
+    operator TEXT NOT NULL,
+    cancelled_unix_millis INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS intake_refusals (
+    bloom BLOB NOT NULL,
+    workpiece TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    stage BLOB NOT NULL,
+    displayed_digest BLOB NOT NULL,
+    deadline_unix_millis INTEGER NOT NULL,
+    refusal TEXT NOT NULL,
+    recorded_unix_millis INTEGER NOT NULL,
+    PRIMARY KEY (bloom, workpiece)
 );
 ";
 

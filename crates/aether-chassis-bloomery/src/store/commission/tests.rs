@@ -19,7 +19,7 @@ use super::{
     CommissionBackend, CommissionError, RecordCommissionApproval, RecordCommissionApprovalResult, RevisionEvidence,
 };
 use crate::bloomery::{ScopeRunRefusal, TopicOutbox, open_scope_run};
-use crate::store::runtime::{SqliteStore, StoreBackend, StoreCapabilityState};
+use crate::store::runtime::{SCHEMA_VERSION, SqliteStore, StoreBackend, StoreCapabilityState};
 use crate::store::{JournalWrite, OutboxEntry, now_unix_millis};
 
 fn memory() -> SqliteStore {
@@ -219,7 +219,7 @@ fn a_v6_store_gains_empty_commission_tables() {
     let mut store = SqliteStore::open(path).expect("a v6 store migrates");
     assert!(store.list(None).expect("list").is_empty(), "migration invents no commissions");
     let flags: i64 = store.conn.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("user_version");
-    assert_eq!(flags, 26, "the open stamps the current schema");
+    assert_eq!(flags, SCHEMA_VERSION, "the open stamps the current schema");
     assert!(
         store.load_projection(&workpiece("wp-1")).expect("load").is_none(),
         "migration invents no replica-issue numbers"
