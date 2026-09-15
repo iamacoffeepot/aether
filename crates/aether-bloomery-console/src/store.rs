@@ -15,6 +15,11 @@ use crate::dto::{
 /// Newest dispatch rows the board keeps. Matches the coordinator page ceiling so one catch-up page fills the bound.
 const DISPATCH_RETENTION: u64 = METRICS_MAX_LIMIT;
 
+/// Journal rows one filter scope accumulates before the retention bound
+/// evicts. Two of the route's largest pages, so paging back and forth across a
+/// boundary does not thrash what was just fetched.
+const JOURNAL_RETENTION: usize = 2_000;
+
 /// Which coordinator resource a screen can subscribe to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ResourceKey {
@@ -105,22 +110,36 @@ impl CoordinatorLogQuery {
     }
 }
 
-/// Query identity for one journal page. Search text lives on the screen.
+/// Query identity for one journal page.
 ///
 /// `live` is cadence only — it is not on the wire. `descending` is the
-/// route's `order` (`desc` is the default and is omitted).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// route's `order` (`desc` is the default and is omitted). `contains` is the
+/// server-side text filter: a coordinator that predates it ignores the
+/// parameter and answers unfiltered, which is why the screen filters the
+/// loaded rows again on paint.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct JournalQuery {
     pub bloom: Option<DigestHex>,
     pub from_sequence: Option<u64>,
     pub descending: bool,
     pub live: bool,
+    pub contains: Option<String>,
 }
 
 impl Default for JournalQuery {
     fn default() -> Self {
-        Self { bloom: None, from_sequence: None, descending: true, live: false }
+        Self { bloom: None, from_sequence: None, descending: true, live: false, contains: None }
     }
+}
+
+/// Which accumulated journal a page belongs to: everything the route filters
+/// on, with the cursor and the order dropped. Every page of one scope merges
+/// into one archive, so paging older does not discard what is already loaded
+/// and a refresh of the tail does not drop the history behind it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct JournalScope {
+    pub bloom: Option<DigestHex>,
+    pub contains: Option<String>,
 }
 
 impl JournalQuery {
@@ -128,16 +147,21 @@ impl JournalQuery {
     /// path, not the key, so the tail owns one cell however far it advances.
     /// A one-shot page keeps its full key.
     #[must_use]
-    pub fn stable_key(self) -> Self {
+    pub fn stable_key(&self) -> Self {
         if self.live {
-            Self { bloom: self.bloom, from_sequence: None, descending: true, live: true }
+            Self { from_sequence: None, descending: true, ..self.clone() }
         } else {
-            self
+            self.clone()
         }
     }
 
     #[must_use]
-    pub fn path(self) -> String {
+    pub fn scope(&self) -> JournalScope {
+        JournalScope { bloom: self.bloom, contains: self.contains.clone() }
+    }
+
+    #[must_use]
+    pub fn path(&self) -> String {
         let mut parts = Vec::new();
         if let Some(bloom) = self.bloom {
             parts.push(format!("bloom={}", bloom.as_hex()));
@@ -148,11 +172,34 @@ impl JournalQuery {
         if !self.descending {
             parts.push("order=asc".to_owned());
         }
+        if let Some(needle) = &self.contains {
+            parts.push(format!("contains={}", escape_segment(needle)));
+        }
         if parts.is_empty() {
             "/journal".to_owned()
         } else {
             format!("/journal?{}", parts.join("&"))
         }
+    }
+}
+
+/// Every journal row loaded for one scope, oldest first, plus how many the
+/// retention bound has evicted so a screen can say history is missing.
+#[derive(Debug, Default)]
+pub struct JournalArchive {
+    rows: Vec<JournalRecordView>,
+    dropped: usize,
+}
+
+impl JournalArchive {
+    #[must_use]
+    pub fn rows(&self) -> &[JournalRecordView] {
+        &self.rows
+    }
+
+    #[must_use]
+    pub fn dropped(&self) -> usize {
+        self.dropped
     }
 }
 
@@ -351,7 +398,8 @@ pub struct Store {
     view: Cell<ViewDocument>,
     view_cadence: Duration,
     journals: HashMap<JournalQuery, Cell<JournalPage>>,
-    journal_cursors: HashMap<Option<DigestHex>, u64>,
+    journal_archives: HashMap<JournalScope, JournalArchive>,
+    journal_cursors: HashMap<JournalScope, u64>,
     artifacts: HashMap<DigestHex, Cell<DecodedArtifact>>,
     transcripts: HashMap<TranscriptQuery, Cell<DispatchFilePage>>,
     prompts: HashMap<PromptQuery, Cell<DispatchFilePage>>,
@@ -379,6 +427,7 @@ impl Store {
             view: Cell::default(),
             view_cadence,
             journals: HashMap::new(),
+            journal_archives: HashMap::new(),
             journal_cursors: HashMap::new(),
             artifacts: HashMap::new(),
             transcripts: HashMap::new(),
@@ -407,8 +456,15 @@ impl Store {
     }
 
     #[must_use]
-    pub fn journal(&self, query: JournalQuery) -> Option<&Cell<JournalPage>> {
+    pub fn journal(&self, query: &JournalQuery) -> Option<&Cell<JournalPage>> {
         self.journals.get(&query.stable_key())
+    }
+
+    /// Every row loaded for one filter scope, oldest first. Empty for a scope
+    /// no page has landed in yet.
+    #[must_use]
+    pub fn journal_archive(&self, scope: &JournalScope) -> Option<&JournalArchive> {
+        self.journal_archives.get(scope)
     }
 
     #[must_use]
@@ -491,12 +547,14 @@ impl Store {
         self.coordinator_logs.get(query)
     }
 
+    /// One loaded record by sequence, from any scope's accumulated pages. The
+    /// archives outlive the cells a page arrived in, so a record stays
+    /// readable after the tail has moved past it.
     #[must_use]
     pub fn record(&self, sequence: u64) -> Option<&JournalRecordView> {
-        self.journals
+        self.journal_archives
             .values()
-            .filter_map(|cell| cell.value.as_ref())
-            .find_map(|page| page.records.iter().find(|record| record.sequence == sequence))
+            .find_map(|archive| archive.rows.iter().find(|record| record.sequence == sequence))
     }
 
     /// Per-resource cadence. `due` encodes the same policy; this method has no callers today.
@@ -535,12 +593,9 @@ impl Store {
             }
             ResourceKey::Journal(query) if query.live => {
                 let stable = query.stable_key();
-                self.journal_cursors.get(&stable.bloom).copied().map_or_else(
+                self.journal_cursors.get(&stable.scope()).copied().map_or_else(
                     || stable.path(),
-                    |cursor| {
-                        JournalQuery { bloom: stable.bloom, from_sequence: Some(cursor), descending: false, live: true }
-                            .path()
-                    },
+                    |cursor| JournalQuery { from_sequence: Some(cursor), descending: false, ..stable.clone() }.path(),
                 )
             }
             _ => key.path(),
@@ -663,11 +718,13 @@ impl Store {
         }
     }
 
-    pub fn apply_journal(&mut self, query: JournalQuery, result: Result<JournalPage, String>) {
-        if query.live
-            && let Ok(page) = &result
-        {
-            self.advance_journal_cursor(query.bloom, page);
+    pub fn apply_journal(&mut self, query: &JournalQuery, result: Result<JournalPage, String>) {
+        if let Ok(page) = &result {
+            let scope = query.scope();
+            if query.live {
+                self.advance_journal_cursor(scope.clone(), page);
+            }
+            merge_journal_page(self.journal_archives.entry(scope).or_default(), &page.records);
         }
         let cell = self.journals.entry(query.stable_key()).or_default();
         match result {
@@ -679,11 +736,11 @@ impl Store {
     /// The follow cursor is the furthest sequence the tail has seen: the
     /// server's continuation when the page truncated, else the highest shown
     /// record. An empty caught-up page carries neither and keeps the old cursor.
-    fn advance_journal_cursor(&mut self, bloom: Option<DigestHex>, page: &JournalPage) {
+    fn advance_journal_cursor(&mut self, scope: JournalScope, page: &JournalPage) {
         let furthest =
             page.next_from_sequence.into_iter().chain(page.records.iter().map(|record| record.sequence)).max();
         if let Some(furthest) = furthest {
-            let cursor = self.journal_cursors.entry(bloom).or_default();
+            let cursor = self.journal_cursors.entry(scope).or_default();
             *cursor = (*cursor).max(furthest);
         }
     }
@@ -691,16 +748,29 @@ impl Store {
     /// Drop journal cells no screen subscribes to. The followed tail keeps its
     /// one stable cell; a popped screen's one-shot page — and a released live
     /// cursor — goes with it, so a fresh follower reopens newest-first.
+    ///
+    /// Accumulated pages are released by scope rather than by cell, so walking
+    /// back through history keeps what it has loaded while the cell each page
+    /// arrived in is retired, and changing the filter drops the old scope's
+    /// rows instead of mixing them into the new search.
     pub fn evict_unsubscribed_journals(&mut self, subscribed: &[ResourceKey]) {
-        self.journals.retain(|query, _| subscribed.contains(&ResourceKey::Journal(*query)));
-        let live: Vec<Option<DigestHex>> = subscribed
+        self.journals.retain(|query, _| subscribed.contains(&ResourceKey::Journal(query.clone())));
+        let scopes: Vec<JournalScope> = subscribed
             .iter()
             .filter_map(|key| match key {
-                ResourceKey::Journal(query) if query.live => Some(query.bloom),
+                ResourceKey::Journal(query) => Some(query.scope()),
                 _ => None,
             })
             .collect();
-        self.journal_cursors.retain(|bloom, _| live.contains(bloom));
+        self.journal_archives.retain(|scope, _| scopes.contains(scope));
+        let live: Vec<JournalScope> = subscribed
+            .iter()
+            .filter_map(|key| match key {
+                ResourceKey::Journal(query) if query.live => Some(query.scope()),
+                _ => None,
+            })
+            .collect();
+        self.journal_cursors.retain(|scope, _| live.contains(scope));
     }
 
     pub fn apply_artifact(&mut self, digest: DigestHex, result: Result<DecodedArtifact, String>) {
@@ -831,6 +901,46 @@ fn apply<T>(cell: &mut Cell<T>, result: Result<T, String>) {
     }
 }
 
+/// Fold one journal page into a scope's archive, deduplicating on sequence.
+///
+/// The bound is applied around the page just merged rather than always at the
+/// front: paging backward through history evicts the newest rows, a live tail
+/// evicts the oldest, so the retained window follows the operator instead of
+/// discarding the page they just asked for.
+fn merge_journal_page(archive: &mut JournalArchive, page: &[JournalRecordView]) {
+    let Some(anchor) = anchor_of(page) else {
+        return;
+    };
+    let mut by_sequence: BTreeMap<u64, JournalRecordView> =
+        archive.rows.drain(..).map(|row| (row.sequence, row)).collect();
+    for row in page {
+        by_sequence.insert(row.sequence, row.clone());
+    }
+    archive.rows = by_sequence.into_values().collect();
+
+    let excess = archive.rows.len().saturating_sub(JOURNAL_RETENTION);
+    let (mut front, mut back) = (0, 0);
+    for _ in 0..excess {
+        let low = archive.rows[front].sequence;
+        let high = archive.rows[archive.rows.len() - 1 - back].sequence;
+        if anchor.abs_diff(low) > anchor.abs_diff(high) {
+            front += 1;
+        } else {
+            back += 1;
+        }
+    }
+    archive.rows.drain(archive.rows.len() - back..);
+    archive.rows.drain(..front);
+    archive.dropped = archive.dropped.saturating_add(excess);
+}
+
+/// The middle of a page's sequence range — what the operator is reading around.
+fn anchor_of(page: &[JournalRecordView]) -> Option<u64> {
+    let low = page.iter().map(|row| row.sequence).min()?;
+    let high = page.iter().map(|row| row.sequence).max()?;
+    Some(low + (high - low) / 2)
+}
+
 fn merge_dispatch_page(retained: Vec<MetricDispatch>, page: Vec<MetricDispatch>) -> Vec<MetricDispatch> {
     let mut by_sequence: BTreeMap<u64, MetricDispatch> = retained.into_iter().map(|row| (row.sequence, row)).collect();
     for row in page {
@@ -850,16 +960,30 @@ fn merge_dispatch_page(retained: Vec<MetricDispatch>, page: Vec<MetricDispatch>)
 #[cfg(test)]
 mod tests {
     use super::{
-        CommissionCapability, CoordinatorLogQuery, DispatchFileQuery, JournalQuery, Lane, LogLevel, PromptQuery,
-        ResourceKey, Store,
+        CommissionCapability, CoordinatorLogQuery, DispatchFileQuery, JOURNAL_RETENTION, JournalArchive, JournalQuery,
+        Lane, LogLevel, PromptQuery, ResourceKey, Store,
     };
     use crate::dto::{BloomView, DigestHex, JournalPage, JournalRecordView, MemberView, MetricDispatch, ViewDocument};
     use aether_bloomery::METRICS_MAX_LIMIT;
+    use std::ops::RangeInclusive;
     use std::thread;
     use std::time::Duration;
 
     fn digest(byte: u8) -> DigestHex {
         DigestHex::from_bytes([byte; 32])
+    }
+
+    fn journal_page(sequences: RangeInclusive<u64>) -> JournalPage {
+        let records: Vec<JournalRecordView> =
+            sequences.map(|sequence| JournalRecordView { sequence, ..JournalRecordView::default() }).collect();
+        JournalPage { shown: u64::try_from(records.len()).unwrap_or(0), records, ..JournalPage::default() }
+    }
+
+    fn archived(store: &Store, query: &JournalQuery) -> Vec<u64> {
+        store
+            .journal_archive(&query.scope())
+            .map(|archive| archive.rows().iter().map(|row| row.sequence).collect())
+            .unwrap_or_default()
     }
 
     fn dispatch_row(sequence: u64) -> MetricDispatch {
@@ -1000,8 +1124,13 @@ mod tests {
         assert_eq!(live.lane(), Lane::Bulk);
         assert_eq!(once.path(), "/journal");
         assert_eq!(
-            JournalQuery { from_sequence: Some(7), descending: false, live: true, bloom: None }.path(),
+            JournalQuery { from_sequence: Some(7), descending: false, live: true, ..JournalQuery::default() }.path(),
             "/journal?from_sequence=7&order=asc"
+        );
+        assert_eq!(
+            JournalQuery { contains: Some("FoldConflict".to_owned()), ..JournalQuery::default() }.path(),
+            "/journal?contains=FoldConflict",
+            "the text filter is a route parameter so a search reaches unloaded pages"
         );
         let cadence = Duration::from_millis(10);
         let mut store = Store::new(cadence);
@@ -1019,22 +1148,27 @@ mod tests {
         let mut store = Store::new(Duration::from_secs(1));
         let tail = JournalQuery { live: true, ..JournalQuery::default() };
         for sequence in 1..=8u64 {
-            let poll = JournalQuery { from_sequence: Some(sequence), descending: false, live: true, bloom: None };
+            let poll = JournalQuery {
+                from_sequence: Some(sequence),
+                descending: false,
+                live: true,
+                ..JournalQuery::default()
+            };
             let page = JournalPage {
                 records: vec![JournalRecordView { sequence, ..JournalRecordView::default() }],
                 ..JournalPage::default()
             };
-            store.apply_journal(poll, Ok(page));
+            store.apply_journal(&poll, Ok(page));
         }
         assert_eq!(store.journals.len(), 1);
-        assert!(store.journal(tail).is_some());
+        assert!(store.journal(&tail).is_some());
         assert!(store.record(8).is_some());
         assert_eq!(
-            store.request_path(&ResourceKey::Journal(tail)),
+            store.request_path(&ResourceKey::Journal(tail.clone())),
             "/journal?from_sequence=8&order=asc",
             "the next poll resumes from the furthest seen sequence"
         );
-        store.apply_journal(tail, Ok(JournalPage::default()));
+        store.apply_journal(&tail, Ok(JournalPage::default()));
         assert_eq!(store.journals.len(), 1);
         assert_eq!(
             store.request_path(&ResourceKey::Journal(tail)),
@@ -1050,20 +1184,66 @@ mod tests {
         let mut store = Store::new(Duration::from_secs(1));
         let live = JournalQuery { live: true, ..JournalQuery::default() };
         let paged = JournalQuery { bloom: Some(digest(1)), ..JournalQuery::default() };
-        store.apply_journal(live, Ok(JournalPage::default()));
-        store.apply_journal(paged, Ok(JournalPage::default()));
+        store.apply_journal(&live, Ok(JournalPage::default()));
+        store.apply_journal(&paged, Ok(JournalPage::default()));
         assert_eq!(store.journals.len(), 2);
-        store.evict_unsubscribed_journals(&[ResourceKey::Journal(live)]);
-        assert!(store.journal(paged).is_none());
-        assert!(store.journal(live).is_some());
+        store.evict_unsubscribed_journals(&[ResourceKey::Journal(live.clone())]);
+        assert!(store.journal(&paged).is_none());
+        assert!(store.journal(&live).is_some());
         store.evict_unsubscribed_journals(&[]);
-        assert!(store.journal(live).is_none());
+        assert!(store.journal(&live).is_none());
         assert_eq!(store.journals.len(), 0);
         assert_eq!(
             store.request_path(&ResourceKey::Journal(live)),
             "/journal",
             "a released tail drops its cursor, so a fresh follower reopens newest-first"
         );
+    }
+
+    #[test]
+    fn journal_pages_accumulate_per_scope_and_dedupe_on_sequence() {
+        // The plausible bug (issue 6064): each page replaces the last, so
+        // paging back through history shows one page at a time and a tail
+        // refresh drops what the operator walked to; or a filtered page joins
+        // the unfiltered rows, so a search paints records the coordinator
+        // never matched.
+        let mut store = Store::new(Duration::from_secs(1));
+        let tail = JournalQuery { live: true, ..JournalQuery::default() };
+        let older = JournalQuery { from_sequence: Some(8), ..JournalQuery::default() };
+        let filtered = JournalQuery { contains: Some("Land".to_owned()), ..JournalQuery::default() };
+        store.apply_journal(&tail, Ok(journal_page(8..=9)));
+        store.apply_journal(&older, Ok(journal_page(6..=7)));
+        store.apply_journal(&tail, Ok(journal_page(8..=10)));
+        assert_eq!(archived(&store, &tail), vec![6, 7, 8, 9, 10]);
+
+        store.apply_journal(&filtered, Ok(journal_page(2..=3)));
+        assert_eq!(archived(&store, &filtered), vec![2, 3], "a filter accumulates its own pages");
+        assert_eq!(archived(&store, &tail), vec![6, 7, 8, 9, 10], "and leaves the unfiltered ones alone");
+
+        store.evict_unsubscribed_journals(&[ResourceKey::Journal(filtered.clone())]);
+        assert_eq!(archived(&store, &tail), Vec::<u64>::new(), "clearing a filter releases the scope it replaces");
+        assert_eq!(archived(&store, &filtered), vec![2, 3]);
+    }
+
+    #[test]
+    fn the_journal_bound_evicts_away_from_the_page_just_fetched() {
+        // The plausible bug: the bound always drains the oldest rows, so
+        // walking back past the retention depth discards the older page as it
+        // arrives and the walk stalls one page short of where it was told to
+        // go. Evicting away from the page just merged keeps the walk moving.
+        let mut store = Store::new(Duration::from_secs(1));
+        let tail = JournalQuery { live: true, ..JournalQuery::default() };
+        let bound = u64::try_from(JOURNAL_RETENTION).expect("the retention bound fits a sequence");
+        store.apply_journal(&tail, Ok(journal_page(1_001..=1_000 + bound)));
+        assert_eq!(store.journal_archive(&tail.scope()).map(JournalArchive::dropped), Some(0));
+
+        let older = JournalQuery { from_sequence: Some(1_001), ..JournalQuery::default() };
+        store.apply_journal(&older, Ok(journal_page(901..=1_000)));
+        let rows = archived(&store, &tail);
+        assert_eq!(rows.len(), JOURNAL_RETENTION);
+        assert_eq!(rows.first().copied(), Some(901), "the page just fetched is retained");
+        assert_eq!(rows.last().copied(), Some(900 + bound), "the far end is what the bound gives up");
+        assert_eq!(store.journal_archive(&tail.scope()).map(JournalArchive::dropped), Some(100));
     }
 
     #[test]

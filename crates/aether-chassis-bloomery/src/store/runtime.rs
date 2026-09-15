@@ -5050,9 +5050,9 @@ impl NativeActor for StoreCapability {
 
     #[handler::single]
     fn on_page_journal(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: PageJournal) -> PageJournalResult {
-        let PageJournal { bloom, from_sequence, limit, descending, notice } = mail;
+        let PageJournal { bloom, from_sequence, limit, descending, contains, notice } = mail;
         match state.backend.replay_journal() {
-            Ok(records) => PageJournalResult::Ok { records, bloom, from_sequence, limit, descending, notice },
+            Ok(records) => PageJournalResult::Ok { records, bloom, from_sequence, limit, descending, contains, notice },
             Err(error) => PageJournalResult::Err { error: error.to_string() },
         }
     }

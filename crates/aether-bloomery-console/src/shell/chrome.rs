@@ -78,10 +78,18 @@ pub fn header(
     ascii_mark: bool,
 ) -> Paragraph<'static> {
     let age = format_age(view.sample_age());
+    // A stale header has to answer two questions the bare word never did: how
+    // old the board on screen is, and why the poll failed. The age is the last
+    // sample that landed, so it is labelled as such once the poll is failing.
+    let sample = if view.is_stale() {
+        format!("last good sample {age}")
+    } else {
+        format!("sample {age}")
+    };
     let mut spans = vec![
         mark_span(ascii_mark),
         Span::styled(" bloomery", palette::body().add_modifier(Modifier::BOLD)),
-        Span::raw(format!("  {endpoint_label}  sample {age}")),
+        Span::raw(format!("  {endpoint_label}  {sample}")),
     ];
     if view.is_stale() {
         spans.push(Span::styled("  STALE", palette::paint(Role::Loud).add_modifier(Modifier::BOLD)));

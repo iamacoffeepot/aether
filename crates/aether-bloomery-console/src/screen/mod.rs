@@ -241,7 +241,7 @@ impl Screen {
             Self::Detail(detail) => detail.subscriptions(),
             Self::DispatchList(list) => list.subscriptions(),
             Self::Journal(journal) => journal.subscriptions(),
-            Self::Record(_) => Record::subscriptions(),
+            Self::Record(record) => record.subscriptions(),
             Self::Artifact(artifact) => artifact.subscriptions(),
             Self::Transcript(transcript) => transcript.subscriptions(),
             Self::Evidence(evidence) => evidence.subscriptions(),
@@ -382,7 +382,8 @@ impl Screen {
             Self::Backlog(backlog) => backlog.reseat(store),
             Self::Workpiece(workpiece) => workpiece.reseat(store),
             Self::CoordinatorLog(log) => log.reseat(store),
-            Self::Record(_) | Self::Artifact(_) | Self::Days(_) => {}
+            Self::Record(record) => record.reseat(store),
+            Self::Artifact(_) | Self::Days(_) => {}
         }
     }
 

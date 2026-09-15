@@ -4,7 +4,7 @@
 //! ssh port-forward that looks like one). The coordinator REST surface is
 //! HTTP/1.1 JSON, the same shape `xtask/src/bloom/http.rs` drives.
 
-use std::io::{Read, Write};
+use std::io::{Error as IoError, ErrorKind, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::str;
 use std::time::Duration;
@@ -93,16 +93,39 @@ fn exchange(endpoint: &Endpoint, method: &str, path: &str, timeout: Duration) ->
         .with_context(|| format!("resolve coordinator at {}", endpoint.label()))?
         .next()
         .ok_or_else(|| anyhow!("coordinator at {} has no addresses", endpoint.label()))?;
+    let label = endpoint.label();
     let mut stream = TcpStream::connect_timeout(&addr, timeout)
-        .with_context(|| format!("connect to coordinator at {}", endpoint.label()))?;
+        .map_err(|error| anyhow!("{}", wire_reason("connect", &error, &label, timeout)))?;
     stream.set_read_timeout(Some(timeout)).context("set read timeout")?;
     stream.set_write_timeout(Some(timeout)).context("set write timeout")?;
-    stream.write_all(request.as_bytes()).context("write request")?;
-    stream.flush().context("flush request")?;
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|()| stream.flush())
+        .map_err(|error| anyhow!("{}", wire_reason("send", &error, &label, timeout)))?;
 
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).context("read response")?;
+    stream.read_to_end(&mut response).map_err(|error| anyhow!("{}", wire_reason("read", &error, &label, timeout)))?;
     parse_response(&response)
+}
+
+/// Why one exchange failed, in the operator's terms.
+///
+/// The console's stale marker paints this string and nothing else, so the
+/// difference between a coordinator that is busy, one that is not listening,
+/// and one that hung up has to survive to here. An `anyhow` context would not
+/// carry it: `Display` prints only the outermost message, so wrapping the io
+/// error in `.context("read response")` renders every failure identically.
+fn wire_reason(stage: &str, error: &IoError, label: &str, timeout: Duration) -> String {
+    match error.kind() {
+        ErrorKind::TimedOut | ErrorKind::WouldBlock => {
+            format!("timeout after {}s on {stage} to {label} (coordinator slow or wedged)", timeout.as_secs())
+        }
+        ErrorKind::ConnectionRefused => format!("connection refused by {label} (coordinator not listening)"),
+        ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::BrokenPipe => {
+            format!("connection dropped by {label} on {stage}")
+        }
+        _ => format!("{error} on {stage} to {label}"),
+    }
 }
 
 fn parse_response(response: &[u8]) -> Result<(u16, Vec<u8>)> {
@@ -123,10 +146,35 @@ fn parse_response(response: &[u8]) -> Result<(u16, Vec<u8>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Endpoint, build_request, decode_json, parse_response};
+    use super::{Endpoint, IoError, build_request, decode_json, parse_response, wire_reason};
+    use std::io::ErrorKind;
+    use std::time::Duration;
 
     fn endpoint(token: Option<&str>) -> Endpoint {
         Endpoint { host: "127.0.0.1".to_owned(), port: 8910, token: token.map(ToOwned::to_owned) }
+    }
+
+    #[test]
+    fn a_slow_coordinator_and_an_absent_one_do_not_read_the_same() {
+        // The plausible bug: the io error rides under an `anyhow` context,
+        // whose Display prints only the outermost message, so a read timeout
+        // and a refused connection both reach the header as the same word and
+        // the operator cannot tell a loaded coordinator from a dead one. The
+        // wait is the one the lane actually used, so the marker also says how
+        // long the console was willing to wait.
+        let label = "127.0.0.1:8789";
+        let wait = Duration::from_secs(5);
+        let slow = wire_reason("read", &IoError::from(ErrorKind::WouldBlock), label, wait);
+        let absent = wire_reason("connect", &IoError::from(ErrorKind::ConnectionRefused), label, wait);
+        let dropped = wire_reason("read", &IoError::from(ErrorKind::ConnectionReset), label, wait);
+        assert!(slow.contains("timeout after 5s"), "{slow}");
+        assert!(absent.contains("refused"), "{absent}");
+        assert!(dropped.contains("dropped"), "{dropped}");
+        for reason in [&slow, &absent, &dropped] {
+            assert!(reason.contains(label), "the marker must name the endpoint: {reason}");
+        }
+        assert_ne!(slow, absent);
+        assert_ne!(slow, dropped);
     }
 
     #[test]

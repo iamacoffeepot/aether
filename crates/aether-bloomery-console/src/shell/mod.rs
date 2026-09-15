@@ -23,7 +23,7 @@ use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
 use crate::screen::{Screen, compose};
-use crate::store::{DispatchFileQuery, ResourceKey, Store};
+use crate::store::{DispatchFileQuery, JournalQuery, ResourceKey, Store};
 use crate::warroom::Focus;
 use workspace::Workspace;
 
@@ -194,11 +194,7 @@ impl Shell {
             (ResourceKey::View, Ok(ResourceBody::View(view))) => self.store.apply_view(Ok(view)),
             (ResourceKey::View, Err(error)) => self.store.apply_view(Err(error)),
             (ResourceKey::View, Ok(_)) => self.store.apply_view(Err("view lane returned a non-view body".to_owned())),
-            (ResourceKey::Journal(query), Ok(ResourceBody::Journal(page))) => self.store.apply_journal(query, Ok(page)),
-            (ResourceKey::Journal(query), Err(error)) => self.store.apply_journal(query, Err(error)),
-            (ResourceKey::Journal(query), Ok(_)) => {
-                self.store.apply_journal(query, Err("journal lane returned a non-journal body".to_owned()));
-            }
+            (ResourceKey::Journal(query), outcome) => self.apply_journal_outcome(&query, outcome),
             (ResourceKey::Artifact(digest), Ok(ResourceBody::Artifact(body))) => {
                 self.store.apply_artifact(digest, Ok(body));
             }
@@ -289,6 +285,14 @@ impl Shell {
                 self.store
                     .apply_coordinator_logs(query, Err("coordinator-log lane returned a non-log body".to_owned()));
             }
+        }
+    }
+
+    fn apply_journal_outcome(&mut self, query: &JournalQuery, outcome: Result<ResourceBody, String>) {
+        match outcome {
+            Ok(ResourceBody::Journal(page)) => self.store.apply_journal(query, Ok(page)),
+            Ok(_) => self.store.apply_journal(query, Err("journal lane returned a non-journal body".to_owned())),
+            Err(error) => self.store.apply_journal(query, Err(error)),
         }
     }
 

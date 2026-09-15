@@ -350,6 +350,8 @@ pub struct PageJournal {
     pub limit: u64,
     /// Newest-first when true.
     pub descending: bool,
+    /// Text the record summary must contain, or `None` for every record.
+    pub contains: Option<String>,
     /// Clamp notice to echo onto the HTTP envelope.
     pub notice: Option<String>,
 }
@@ -370,6 +372,8 @@ pub enum PageJournalResult {
         limit: u64,
         /// Echo of [`PageJournal::descending`].
         descending: bool,
+        /// Echo of [`PageJournal::contains`].
+        contains: Option<String>,
         /// Echo of [`PageJournal::notice`].
         notice: Option<String>,
     },

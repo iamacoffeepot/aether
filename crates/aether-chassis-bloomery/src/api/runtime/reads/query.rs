@@ -32,6 +32,9 @@ pub struct JournalQuery {
     pub limit: u64,
     /// Newest-first when true (the default).
     pub descending: bool,
+    /// Restrict to records whose summary contains this text, case-sensitive.
+    /// `None` — and an empty value — is every record.
+    pub contains: Option<String>,
     /// Set when the caller named a limit above the clamp.
     pub notice: Option<String>,
 }
@@ -58,6 +61,7 @@ impl JournalQuery {
         let mut from_sequence = None;
         let mut requested_limit = None;
         let mut descending = true;
+        let mut contains = None;
         for (key, value) in pairs(query) {
             match key.as_str() {
                 "bloom" => {
@@ -69,11 +73,12 @@ impl JournalQuery {
                 "from_sequence" => from_sequence = Some(parse_u64("from_sequence", &value)?),
                 "limit" => requested_limit = Some(parse_u64("limit", &value)?),
                 "order" => descending = parse_order(&value)?,
+                "contains" => contains = (!value.is_empty()).then_some(value),
                 _ => {}
             }
         }
         let (limit, notice) = clamp_limit(requested_limit, JOURNAL_DEFAULT_LIMIT, JOURNAL_MAX_LIMIT);
-        Ok(Self { bloom, from_sequence, limit, descending, notice })
+        Ok(Self { bloom, from_sequence, limit, descending, contains, notice })
     }
 }
 

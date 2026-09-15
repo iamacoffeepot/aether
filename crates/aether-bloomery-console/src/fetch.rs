@@ -1,8 +1,8 @@
 //! Two blocking HTTP lanes off the event loop.
 //!
-//! `live` uses a 1 s timeout for `/view`. `bulk` uses 10 s for later large
-//! reads. Both run on a `thread::scope` the shell's caller owns. The shell
-//! sends requests and drains replies with `try_recv`.
+//! `live` polls `/view`; `bulk` serves the larger on-demand reads. Both run on
+//! a `thread::scope` the shell's caller owns. The shell sends requests and
+//! drains replies with `try_recv`.
 
 use std::iter;
 use std::sync::mpsc::{self, Receiver, RecvError, SendError, Sender};
@@ -17,7 +17,17 @@ use crate::dto::{
 use crate::http::{self, Endpoint};
 use crate::store::{Lane, ResourceKey};
 
-const LIVE_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long the live lane waits for `/view`.
+///
+/// Wide enough to ride out a loaded coordinator rather than to match the poll
+/// cadence: a busy fleet answers `/view` in a second or two, and a timeout cut
+/// to the cadence turned every one of those samples into an error, so the
+/// board dimmed and painted STALE while the coordinator was healthy. The lane
+/// never stacks requests behind a slow one — the store will not re-issue a
+/// resource that is still in flight — so the only cost of the wider window is
+/// how long a genuinely dead endpoint takes to say so, and the stale marker
+/// names which of the two it is.
+const LIVE_TIMEOUT: Duration = Duration::from_secs(5);
 const BULK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One fetch the shell wants a lane to perform.

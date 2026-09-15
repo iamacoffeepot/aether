@@ -1060,6 +1060,7 @@ impl NativeActor for BloomeryApiCapability {
                 from_sequence: query.from_sequence,
                 limit: query.limit,
                 descending: query.descending,
+                contains: query.contains,
                 notice: query.notice,
             }),
         )

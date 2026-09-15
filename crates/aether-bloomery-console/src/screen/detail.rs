@@ -411,7 +411,7 @@ fn bloom_lines(view: &ViewDocument, store: &Store, id: DigestHex) -> Vec<Line> {
 /// since the lane is authored and not yet enabled — and the section disappears
 /// entirely rather than rendering an empty heading.
 fn filed_rows(store: &Store, bloom: &BloomView) -> Vec<FiledRow> {
-    if let Some(journal) = store.journal(JournalQuery { bloom: Some(bloom.id), ..JournalQuery::default() })
+    if let Some(journal) = store.journal(&JournalQuery { bloom: Some(bloom.id), ..JournalQuery::default() })
         && let Some(page) = journal.value.as_ref()
         && let Some(receipt) = read_receipt(page, bloom.id)
         && let Some(list) = store.commissions().value.as_ref()

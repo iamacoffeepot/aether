@@ -1,11 +1,17 @@
-//! Page a decoded journal. The bloom filter decodes during a reverse (or
-//! forward) scan; a filter whose bloom has no recent activity may walk the
-//! whole journal to fill one page or to learn the match set is empty.
+//! Page a decoded journal. The bloom and `contains` filters decode during a
+//! reverse (or forward) scan; a filter whose match set has no recent activity
+//! may walk the whole journal to fill one page or to learn the set is empty.
+//!
+//! Both filters run before the cursor, so `truncated` and `next_from_sequence`
+//! are about matching records: following the cursor to exhaustion visits every
+//! match exactly once instead of stepping over the ones a post-page filter
+//! would have dropped.
 
 use aether_bloomery::{
     BloomId, Digest, Event, Fact, JournalRecord, Outcome, decode_recorded_decisions, decode_recorded_event,
 };
 use serde::Serialize;
+use serde_json::Value;
 
 use super::query::JournalQuery;
 
@@ -84,6 +90,9 @@ pub fn page_journal(records: &[JournalRecord], query: &JournalQuery) -> Result<J
         if query.bloom.is_some_and(|bloom| !entry_names_bloom(&entry, &bloom)) {
             continue;
         }
+        if query.contains.as_deref().is_some_and(|needle| !entry_contains(&entry, needle)) {
+            continue;
+        }
         total_matched += 1;
         if !past_cursor(entry.sequence, query) {
             continue;
@@ -140,6 +149,32 @@ fn decode_entry(record: &JournalRecord) -> Result<JournalRecordResponse, Journal
         decider: record.decider.clone(),
         recorded_unix_millis: record.recorded_unix_millis,
     })
+}
+
+/// Whether one record's summary contains `needle`.
+///
+/// The summary is the console's journal row without the parts only the console
+/// can render: the sequence, the fact variant, the outcome variant, and the
+/// idempotency key. Each field is matched on its own, so a needle can never
+/// span a column separator the console paints and the route does not — every
+/// record this filter keeps is one the console's own `record_matches` keeps
+/// too, which is what lets the console fall back to filtering loaded rows
+/// against a coordinator that predates this parameter.
+fn entry_contains(entry: &JournalRecordResponse, needle: &str) -> bool {
+    entry.sequence.to_string().contains(needle)
+        || entry.idempotency_key.contains(needle)
+        || variant_name(&entry.event.fact).is_some_and(|name| name.contains(needle))
+        || variant_name(&entry.outcome).is_some_and(|name| name.contains(needle))
+}
+
+/// Serde's variant name for one externally tagged enum value: a variant with
+/// fields serializes as a one-key object, a unit variant as that string.
+fn variant_name<T: Serialize>(value: &T) -> Option<String> {
+    match serde_json::to_value(value).ok()? {
+        Value::String(name) => Some(name),
+        Value::Object(map) => map.into_iter().next().map(|(name, _)| name),
+        _ => None,
+    }
 }
 
 fn entry_names_bloom(entry: &JournalRecordResponse, bloom: &Digest) -> bool {
