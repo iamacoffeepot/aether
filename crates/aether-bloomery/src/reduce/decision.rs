@@ -995,8 +995,9 @@ pub enum Decision {
     /// Record what this bloom does with a member whose `Verify` did not go
     /// green (ADR-0218 §Amendment: low tolerance).
     ///
-    /// Decided at seal from the sealed [`CoordinationPolicy`]'s `red_verify`,
-    /// or [`RedVerify::Eject`] when the bloom sealed no policy. Recorded rather
+    /// Decided at seal from the sealed
+    /// [`CoordinationPolicy`](crate::CoordinationPolicy)'s `red_verify`, or
+    /// [`RedVerify::Eject`] when the bloom sealed no policy. Recorded rather
     /// than re-resolved from the configuration registry at fold time, for the
     /// reason [`Self::RecordStageCatalog`] is recorded (#4944): a later binary
     /// with a different default would otherwise rewrite the disposition of a

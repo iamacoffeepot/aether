@@ -921,7 +921,8 @@ fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Ev
 /// Why this receipt's carried-coverage claim does not stand, or `None` when it
 /// carried nothing or carried soundly.
 ///
-/// Only the ledger-free half of the rule ([`CarriedCoverage::self_consistent`]):
+/// Only the ledger-free half of the rule
+/// ([`CarriedCoverage::self_consistent`](aether_bloomery::CarriedCoverage::self_consistent)):
 /// intake reads the store's order registry, never the reducer's proof memo, so
 /// "receipt R is on record for exactly tree T" is not a question it is in a
 /// position to ask. What it can ask is whether the claim refutes itself against
