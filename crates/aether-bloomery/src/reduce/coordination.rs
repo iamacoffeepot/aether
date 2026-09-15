@@ -235,17 +235,40 @@ fn expand_dependents(record: &BloomRecord, affected: &mut BTreeSet<WorkpieceId>)
     }
 }
 
+/// The members a contribution is *of*, as opposed to the ones it merely
+/// inherited from the head it was built on (#5997).
+///
+/// A [`CompositionInput`] carries the complete transitive coverage of its
+/// candidate, so a request's input names the head's folded members alongside
+/// the one member that authored the candidate. The authors are the pins whose
+/// own candidate is this input's. A composed contribution — a survivor group's
+/// node — names no such pin and is atomic over its whole coverage, so there
+/// every member carries it.
+fn carriers_of(input: &CompositionInput) -> impl Iterator<Item = &MemberPin> {
+    let authored = input.members.iter().any(|pin| pin.candidate == input.candidate);
+    input.members.iter().filter(move |pin| !authored || pin.candidate == input.candidate)
+}
+
 /// The blast radius of `changed` — every member that reaches it through a
-/// dependency edge or through a coverage set it shares, taken to a fixpoint.
+/// dependency edge or through a contribution whose own tree carries it, taken
+/// to a fixpoint.
 fn affected_closure(record: &BloomRecord, state: &CoordinationState, changed: &WorkpieceId) -> BTreeSet<WorkpieceId> {
     let mut affected = BTreeSet::from([changed.clone()]);
     loop {
         let before = affected.len();
         expand_dependents(record, &mut affected);
 
-        // A live request's input carries the context head's whole coverage, so
-        // an ejected peer reaches the fixpoint through it as surely as through
-        // an admitted or queued contribution.
+        // A contribution whose coverage names an affected pin has that
+        // member's code merged into its own tree, so whoever authored that
+        // contribution is affected too. The carry runs one way (#5997): the
+        // folded members a live request *inherited* through its context head
+        // are not invalidated by the candidate that inherited them, and
+        // spreading the other way took every sibling sharing one head down
+        // with any member that left — cancelling shared runs whose tested tree
+        // never contained a line of it. What still protects those siblings
+        // from an ejected ancestor is per-pin: a queued input naming it is
+        // dropped, a node covering it stops answering, and a head covering it
+        // derives a fresh generation.
         for input in state
             .integration
             .admitted
@@ -254,7 +277,7 @@ fn affected_closure(record: &BloomRecord, state: &CoordinationState, changed: &W
             .chain(state.requests.iter().map(|request| &request.input))
         {
             if input.members.iter().any(|pin| affected.contains(&pin.workpiece)) {
-                affected.extend(input.members.iter().map(|pin| pin.workpiece.clone()));
+                affected.extend(carriers_of(input).map(|pin| pin.workpiece.clone()));
             }
         }
 
@@ -3255,7 +3278,12 @@ mod tests {
     }
 
     fn fixture() -> (BloomRecord, CoordinationState) {
-        let spec = draft(1, alloc::vec![membership("alpha", 10), membership("beta", 11)]).seal();
+        fixture_of(&[("alpha", 10), ("beta", 11)])
+    }
+
+    fn fixture_of(members: &[(&str, u8)]) -> (BloomRecord, CoordinationState) {
+        let spec =
+            draft(1, members.iter().map(|(name, revision)| membership(name, *revision)).collect::<Vec<_>>()).seal();
         let record = BloomRecord::empty(spec.clone());
         let state = initialized_effects(
             &Snapshot::new(spec.base()),
@@ -4003,6 +4031,140 @@ mod tests {
         invalidate_member_version(record, &mut state, &plan.requests[0].member.workpiece, &mut effects)
             .expect("member replacement");
         assert_eq!(state.survivor_groups[0].requests, alloc::vec![plan.requests[1].digest()]);
+    }
+
+    /// An eager bloom shaped the way the night of #5997 left one: `alpha`
+    /// folded and occupying the head, `beta` and `gamma` composed into one live
+    /// contextual run standing on that head, and `delta` holding a queued
+    /// request that inherited the same head and has not been proposed yet.
+    fn eager_bloom_with_a_live_run() -> (BloomRecord, CoordinationState, SharedRunPlan) {
+        let (mut record, mut state) = fixture_of(&[("alpha", 10), ("beta", 11), ("gamma", 12), ("delta", 13)]);
+        let folded = pin("alpha", 10, 40);
+        let head = IntegrationHead {
+            generation: state.integration.generation.digest(),
+            node: digest(90),
+            candidate: folded.candidate,
+            plan: digest(91),
+            coverage: alloc::vec![folded.clone()],
+        };
+        state.integration.head = head.clone();
+        state.integration.admitted = alloc::vec![CompositionInput {
+            node: digest(90),
+            candidate: folded.candidate,
+            members: alloc::vec![folded.clone()],
+        }];
+        for name in ["beta", "gamma", "delta"] {
+            state.contexts.insert(
+                String::from(name),
+                ConstructContext { bloom_base: state.integration.generation.base, starting_head: head.clone() },
+            );
+        }
+
+        let requests = current_requests(&mut record, &state);
+        let live = requests
+            .iter()
+            .filter(|request| matches!(request.member.workpiece.0.as_str(), "beta" | "gamma"))
+            .cloned()
+            .collect::<Vec<_>>();
+        state.requests = requests.into_iter().filter(|request| request.member.workpiece.0 != "alpha").collect();
+
+        let composition = CompositionPlan {
+            bloom: record.spec.id(),
+            base: head,
+            inputs: live.iter().map(|request| request.input.clone()).collect(),
+            contract: state.composition_contract.bind(
+                live.iter()
+                    .map(|request| MemberContractPin { request: request.digest(), contract: request.contract.digest() })
+                    .collect(),
+            ),
+            requests: live.clone(),
+        };
+        let plan = SharedRunPlan {
+            mode: SharedRunMode::Contextual,
+            requests: live.clone(),
+            composition: Some(composition),
+            probe_budget: state.policy.max_attribution_probes,
+            execution_attempt: 0,
+        };
+
+        let mut coverage = alloc::vec![folded];
+        coverage.extend(live.iter().map(|request| request.member.clone()));
+        state.runs.push(SharedRunRecord {
+            plan: plan.clone(),
+            node: Some(SharedRunNode {
+                plan: plan.digest(),
+                candidate: CandidateRef { tree: digest(60), checkout: digest(61) },
+                coverage,
+            }),
+            phase: SharedRunPhase::Running,
+            stale: false,
+            physical_run: Some(digest(62)),
+            completed: Vec::new(),
+            unfinished: plan.requests.iter().map(MemberVerifyRequest::digest).collect(),
+            latencies: Vec::new(),
+        });
+        (record, state, plan)
+    }
+
+    #[test]
+    fn withdrawing_a_queued_sibling_leaves_a_run_whose_tree_never_carried_it_running() {
+        // The plausible bug, and the one that was live (#5997): the invalidation
+        // closure spread through a shared coverage set in both directions, so
+        // the member that left dragged in the folded head its own request had
+        // inherited and, through that head, every sibling standing on it. Three
+        // in-flight runs were cancelled with no outcomes and re-proposed cold —
+        // one of them eight minutes into a compile — for a member none of them
+        // had ever tested.
+        let (record, mut state, plan) = eager_bloom_with_a_live_run();
+        let head = state.integration.head.clone();
+
+        let mut effects = Vec::new();
+        invalidate_member_version(&record, &mut state, &WorkpieceId(String::from("delta")), &mut effects)
+            .expect("the withdrawn member invalidates");
+
+        assert!(
+            !effects.iter().any(|effect| matches!(effect, Decision::CancelSharedRun { .. })),
+            "a run that never composed the withdrawn member keeps running: {effects:?}",
+        );
+        assert_eq!(state.runs[0].plan.digest(), plan.digest());
+        assert!(!state.runs[0].stale, "the live plan stays current, so its completion still admits outcomes");
+        assert_eq!(
+            state.requests.iter().map(|request| request.member.workpiece.0.as_str()).collect::<Vec<_>>(),
+            alloc::vec!["beta", "gamma"],
+            "only the withdrawn member's own request leaves",
+        );
+        assert_eq!(state.integration.head, head, "the folded sibling's head outlives a member that never reached it");
+        assert_eq!(state.integration.generation.epoch, 0, "nothing polluted the generation namespace");
+    }
+
+    #[test]
+    fn withdrawing_a_composed_member_retires_its_run_once_and_keeps_the_survivors_requests() {
+        // The other half of #5997: a member whose tree really is inside the
+        // composed node does retire the run — and the members that stay keep the
+        // exact logical requests the re-proposal reuses, rather than being sent
+        // back through a cold dispatch that re-derives them.
+        let (record, mut state, plan) = eager_bloom_with_a_live_run();
+
+        let mut effects = Vec::new();
+        invalidate_member_version(&record, &mut state, &WorkpieceId(String::from("gamma")), &mut effects)
+            .expect("the withdrawn member invalidates");
+
+        assert_eq!(
+            effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    Decision::CancelSharedRun { plan } => Some(*plan),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            alloc::vec![plan.digest()],
+            "the composing run is retired exactly once",
+        );
+        assert_eq!(
+            state.requests.iter().map(|request| request.member.workpiece.0.as_str()).collect::<Vec<_>>(),
+            alloc::vec!["beta", "delta"],
+            "the survivors keep the requests their re-proposal reuses",
+        );
     }
 
     #[test]

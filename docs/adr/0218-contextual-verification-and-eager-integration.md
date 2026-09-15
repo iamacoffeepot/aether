@@ -423,3 +423,33 @@ journaled `IntegrationAdvanced` folds between the two heads are the reason
 the older node still answers. A closure-intersecting move — including a
 generation change, or a version change of a pin the run already tested —
 keeps today's retirement.
+
+## Amendment: invalidation carries one way (2026-09-14, #5997)
+
+A member's invalidation — an ejection, a replacement, or a withdrawal —
+reaches the members whose own tree carries its contribution, and no further.
+A `CompositionInput` names the complete transitive coverage of its candidate,
+so a live request's input lists the folded members its context head supplied
+alongside the one member that authored the candidate. The carry runs from the
+coverage to the *author*: a candidate that merged an invalidated contribution
+is stale, while a member the invalidated candidate merely inherited is not
+made stale by the candidate that inherited it. A composed contribution — a
+survivor group's node — names no authoring pin and is atomic over its whole
+coverage, so every member in it carries it.
+
+Spreading the other way took every sibling standing on one head down with any
+member that left, which retired their shared runs, discarded the outcomes
+those runs had already earned, and re-proposed the survivors cold. What still
+protects a sibling from an ejected ancestor is per-pin rather than per-member:
+a queued or admitted input naming it is dropped, a node covering it stops
+answering an aggregate position, and a head covering it derives a fresh
+generation.
+
+A shared run is therefore retired only when the invalidated member is one of
+its own logical requests — equivalently, when the member's tree is inside the
+candidate composition it is testing, because every request in a composition
+carries its base head's coverage. A run that keeps running settles normally
+and its completion admits outcomes for the members that stay. A run that is
+retired keeps its siblings' logical requests, so the re-proposal reuses the
+exact request identities its recorded per-step rows are addressed by rather
+than re-deriving them from a cold dispatch.
