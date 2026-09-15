@@ -157,6 +157,42 @@ error: command `/home/imateapot/.rustup/toolchains/1.97.1-x86_64-unknown-linux-g
 Command exited with non-zero status 101
 ";
 
+/// Bloom `0c5a157e`'s `dispatch-8330-step-1` findings, verbatim down to the end
+/// of the one diagnostic the distiller kept.
+///
+/// A `match_same_arms` lint, red because `-D warnings` is what the gate means
+/// by a failure. Three of its lines sit at column zero without being findings:
+/// the **bare `...`** rustc writes where a multi-line span is elided, the
+/// **`help:` header** of the structured suggestion, and the suggestion's own
+/// **`NNNN ~` replacement lines**, whose marker stands where the gutter pipe
+/// would.
+const SUGGESTION: &str = "\
+### verify.clippy
+
+warning: these match arms have identical bodies
+    --> crates/aether-bloomery/src/reduce/coordination.rs:1884:13
+     |
+1884 | /             MemberVerifyOutcome::PassedStandalone { .. }
+1885 | |             | MemberVerifyOutcome::PassedIn { .. }
+1886 | |             | MemberVerifyOutcome::Survived { .. } => {}
+     | |________________________________________________________^
+...
+1889 |               MemberVerifyOutcome::AwaitingSuppression { .. } => {}
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: if this is unintentional make the arms return different values
+     = note: `-W clippy::match-same-arms` implied by `-W clippy::pedantic`
+help: otherwise merge the patterns into a single arm
+     |
+1884 |             MemberVerifyOutcome::PassedStandalone { .. }
+1885 |             | MemberVerifyOutcome::PassedIn { .. }
+1886 ~             | MemberVerifyOutcome::Survived { .. } | MemberVerifyOutcome::AwaitingSuppression { .. } => {}
+1887 |             // A parked member names no failure and joins no survivor group, so
+1888 |             // it blocks nothing behind it.
+1889 ~             }
+     |
+";
+
 fn member(name: &str) -> WorkpieceId {
     WorkpieceId(name.to_owned())
 }
@@ -221,6 +257,35 @@ fn rustcs_and_cargos_closing_notices_do_not_make_a_located_gate_bisect() {
     let section = only(MISSING_FIELDS, "verify.test");
     assert_eq!(section.paths, ["xtask/src/bloom/amend/tests.rs", "xtask/src/bloom/mod.rs"]);
     assert!(section.complete, "an explain notice and a build tally are not findings that failed to name a path");
+}
+
+#[test]
+fn a_clippy_suggestion_is_part_of_the_diagnostic_it_suggests_for() {
+    // Bloom 0c5a157e's dispatch-8330. The gate held one diagnostic and that
+    // diagnostic stated its file on the line under itself, yet the section read
+    // as three further findings that named nothing — the bare elision marker,
+    // the suggestion header, and the `~` replacement lines — so a gate that had
+    // already answered "who owns this" was sent to be answered again.
+    let section = only(SUGGESTION, "verify.clippy");
+
+    assert_eq!(section.paths, ["crates/aether-bloomery/src/reduce/coordination.rs"]);
+    assert!(section.complete, "the section's one diagnostic named its path, so the gate discriminates");
+}
+
+#[test]
+fn a_warning_severity_lint_charges_the_member_whose_file_it_names() {
+    // `-D warnings` is what makes a pedantic lint red, so most clippy gates
+    // fail at warning severity rather than `error:`. The ownership reading
+    // turns on the location a diagnostic states, never on its severity word.
+    let extents = changed(&[
+        ("issue-6032", &["crates/aether-bloomery/src/reduce/coordination.rs"]),
+        ("issue-6041", &["crates/aether-bloomery/src/reduce/eject.rs"]),
+    ]);
+
+    assert_eq!(
+        attribute_gate(&only(SUGGESTION, "verify.clippy"), &extents),
+        GateAttribution::Attributed(vec![member("issue-6032")]),
+    );
 }
 
 #[test]

@@ -1492,6 +1492,23 @@ fn settle_refused_preparation(store: &mut dyn StoreBackend, step: &SharedRunStep
     store.complete_shared_run_step(&step.nonce, &encode_host(&receipt)?, 0)
 }
 
+/// How one serial step's receipt settles the member it ran for.
+///
+/// The red arm attributes to that member, and there is nothing to decide: a
+/// serial step verifies one member's own candidate standalone, so the request
+/// names the only tree the verdict was ever about. It used to report
+/// [`FailureScope::Unattributed`], which the coordination reducer reads as "no
+/// member is answerable individually" and ejects under the unresolved-
+/// attribution sentence — so bloom `0c5a157e`'s single-member `verify.member`
+/// run, red on one clippy lint that located itself precisely, withdrew its
+/// member saying its verification "never resolved which member owed the
+/// failure". There was no other member for it to have been owed by.
+///
+/// Attributing is also what makes the disposition arms mean what they say. An
+/// `Eject` bloom now names the gate in the sentence the candidate is left
+/// with, and a `Refine` bloom buys the member the repair lap its own red
+/// earns — which is the rule the reducer's own `reduce_verify_failed` already
+/// applies to a standalone verdict that arrives off this path.
 fn member_outcome(request: &aether_bloomery::MemberVerifyRequest, receipt: &SharedStepReceipt) -> MemberVerifyOutcome {
     let request_id = request.digest();
     if receipt.verdict == StageVerdict::ExecutorFault {
@@ -1509,7 +1526,7 @@ fn member_outcome(request: &aether_bloomery::MemberVerifyRequest, receipt: &Shar
     }
     MemberVerifyOutcome::Failed {
         request: request_id,
-        scope: FailureScope::Unattributed { evidence: receipt.evidence.detail },
+        scope: FailureScope::Attributed { members: vec![request.member.clone()], evidence: receipt.evidence.detail },
         failures: receipt.failed_verifiers,
         evidence: receipt.evidence.clone(),
     }
