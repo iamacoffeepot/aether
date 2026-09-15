@@ -13,8 +13,10 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_bloomery::{Event, Fact, Observation, Provenance, Statement, WorkpieceId, decode_recorded_event};
-use aether_chassis_bloomery::bloomery::open_scope_run;
+use aether_bloomery::{
+    Event, Fact, ModelOverride, Observation, Provenance, Statement, WorkpieceId, decode_recorded_event,
+};
+use aether_chassis_bloomery::bloomery::open_scope_run_with_override;
 use aether_chassis_bloomery::store::{CommissionBackend, StoreBackend};
 use aether_harness_bloomery::{HarnessBuilder, HarnessRoots};
 
@@ -33,7 +35,16 @@ fn a_scoping_run_without_an_authorized_bundle_is_refused_rather_than_run() {
     let mut store = harness.commission_store();
     let intent_digest = store.create(&commission, &intent).expect("the commission is created");
     let base = harness.view().mainline;
-    open_scope_run(&mut store, &commission, intent_digest, base, "scope sketch").expect("the run opens unpinned");
+    open_scope_run_with_override(
+        &mut store,
+        &commission,
+        intent_digest,
+        base,
+        "scope sketch",
+        &ModelOverride::default(),
+        None,
+    )
+    .expect("the run opens unpinned");
     drop(store);
 
     pump_until(&mut harness, "the refused scoping run is journaled as a host fault", |harness| {

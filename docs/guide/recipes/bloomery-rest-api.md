@@ -245,6 +245,38 @@ fails closed`). The draft's membership still names the workpiece id and the
 exact stored revision digest; the gate reconstructs surface, completeness,
 description, and approval from the store.
 
+## Scoping runs and their seat
+
+`POST /commissions/{id}/scope-runs` opens a pre-bloom scoping run on an open
+commission. **Bearer required.** The body names the tree the run reads code at
+plus the seat it dispatches under:
+
+- `base` (required): the observed mainline head, as `GET /view` reports it
+  under `mainline`. The coordinator does not invent a tree.
+- `profile` (optional): the filing-time label naming the profiles-file entry
+  the seat was resolved from. Refused without `model_override` — the
+  coordinator holds no profile registry, so a bare name is one the filing
+  path never resolved.
+- `model_override` (optional): the `ModelOverride` config digest the run
+  resolves its Scope seat from, authored through `POST /configs`. Absent,
+  the run dispatches the compiled line's Scope calibration.
+
+A digest that names no stored config, names one filed under another kind,
+decodes as no `ModelOverride`, or keys a stage no dispatch resolves is a
+`400` naming the digest. A store fault reading the configs table is a `500`:
+the coordinator failed, not the caller.
+
+The `201` reply names the run and its seat: `id`, `ordinal`, `sequence`,
+`subject`, plus `model_override` (the carried digest, absent for a seatless
+run) and `seat` (the resolved harness, model, and effort). The coordinator
+also logs the seat on its journal, and `GET /commissions/{id}` carries the
+latest run's `scope_model_override` and `scope_seat` — the same pair the
+console's commission screen renders, so the model that filled the workpiece
+is named where the work was filed. `xtask bloom scope-run` and
+`bloomery-commission scope-run` both take `--profile` / `--model-override`
+(one of the two), file the run on the resolved seat, and print the seat the
+reply echoed beside the run's address.
+
 ## A curl walkthrough
 
 This is a minimal Auto-tier `docs/guide/**` seal on the trial coordinator

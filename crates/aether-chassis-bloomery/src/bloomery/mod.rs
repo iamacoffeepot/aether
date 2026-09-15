@@ -120,8 +120,8 @@ pub use repair::{candidate_tree_digest, capture_commit_digest};
 pub use replica::{SourceReplicaShell, github_push_url, writer_marker_present};
 #[cfg(feature = "runtime")]
 pub use scope_run::{
-    OpenedScopeRun, ScopeRunRefusal, ScopeRunState, open_scope_run, open_scope_run_with_override,
-    scope_dispatch_payload, scope_run_state, scope_run_subject, scope_seat,
+    OpenedScopeRun, ScopeRunRefusal, ScopeRunState, open_scope_run_with_override, scope_dispatch_payload,
+    scope_run_state, scope_run_subject, scope_seat,
 };
 #[cfg(feature = "github")]
 pub use source::SourceShell;

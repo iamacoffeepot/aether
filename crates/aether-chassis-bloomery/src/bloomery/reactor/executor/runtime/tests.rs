@@ -57,7 +57,7 @@ use crate::bloomery::{
     ExecutorPort, ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, Settled,
     UnconfiguredActionsBackend,
 };
-use crate::bloomery::{ScopeRunState, open_scope_run, scope_run_state};
+use crate::bloomery::{ScopeRunState, open_scope_run_with_override, scope_run_state};
 use crate::bloomery::{authorize_instructions, drain_refusals, reference_instructions};
 use crate::session::SessionConfig;
 use crate::store::{
@@ -815,7 +815,16 @@ fn a_scope_run_drains_with_no_bloom_in_the_store() {
     let backend = Arc::new(CapturingBackend::default());
     let shell = ExecutorShell::new(Arc::clone(&backend));
     let (commission, intent) = seed_commission(&mut store, "wp-scope-drain");
-    let opened = open_scope_run(&mut store, &commission, intent, digest(2), "scope sketch").expect("open");
+    let opened = open_scope_run_with_override(
+        &mut store,
+        &commission,
+        intent,
+        digest(2),
+        "scope sketch",
+        &ModelOverride::default(),
+        None,
+    )
+    .expect("open");
 
     let (handles, ack_through, transient) = drain_and_dispatch_scope(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
@@ -849,7 +858,16 @@ fn the_dispatched_scope_order_carries_the_pinned_sketch() {
     let backend = Arc::new(CapturingBackend::default());
     let shell = ExecutorShell::new(Arc::clone(&backend));
     let (commission, intent) = seed_commission(&mut store, "wp-scope-sketch");
-    open_scope_run(&mut store, &commission, intent, digest(2), "the sketch body").expect("open");
+    open_scope_run_with_override(
+        &mut store,
+        &commission,
+        intent,
+        digest(2),
+        "the sketch body",
+        &ModelOverride::default(),
+        None,
+    )
+    .expect("open");
 
     drain_and_dispatch_scope(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
@@ -876,7 +894,16 @@ fn the_dispatched_scope_order_runs_under_the_lines_scope_seat() {
     let backend = Arc::new(CapturingBackend::default());
     let shell = ExecutorShell::new(Arc::clone(&backend));
     let (commission, intent) = seed_commission(&mut store, "wp-scope-seat");
-    open_scope_run(&mut store, &commission, intent, digest(2), "scope sketch").expect("open");
+    open_scope_run_with_override(
+        &mut store,
+        &commission,
+        intent,
+        digest(2),
+        "scope sketch",
+        &ModelOverride::default(),
+        None,
+    )
+    .expect("open");
 
     drain_and_dispatch_scope(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
@@ -948,7 +975,16 @@ fn answered_scope_run(
     verdict: StageVerdict,
 ) -> (WorkpieceId, Nonce, u64) {
     let (commission, intent) = seed_commission(store, id);
-    let opened = open_scope_run(store, &commission, intent, digest(2), "scope sketch").expect("open");
+    let opened = open_scope_run_with_override(
+        store,
+        &commission,
+        intent,
+        digest(2),
+        "scope sketch",
+        &ModelOverride::default(),
+        None,
+    )
+    .expect("open");
     drain_and_dispatch_scope(store, shell, NOW_UNIX_MILLIS).unwrap();
     store
         .record_scope_verdict(&commission.0, opened.ordinal, &format!("{verdict:?}"), digest(3).as_bytes().as_slice())
@@ -1068,7 +1104,16 @@ fn the_member_topic_is_undisturbed() {
     let backend = Arc::new(CapturingBackend::default());
     let shell = ExecutorShell::new(Arc::clone(&backend));
     let (commission, intent) = seed_commission(&mut store, "wp-scope-peer");
-    let opened = open_scope_run(&mut store, &commission, intent, digest(2), "scope sketch").expect("open");
+    let opened = open_scope_run_with_override(
+        &mut store,
+        &commission,
+        intent,
+        digest(2),
+        "scope sketch",
+        &ModelOverride::default(),
+        None,
+    )
+    .expect("open");
     let bloom = BloomId(digest(1));
     let (member_sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
 
@@ -1565,7 +1610,16 @@ fn an_overdue_scope_order_terminates_once() {
     let backend = Arc::new(CapturingBackend::default());
     let shell = ExecutorShell::new(Arc::clone(&backend));
     let (commission, intent) = seed_commission(&mut store, "wp-scope-overdue");
-    let opened = open_scope_run(&mut store, &commission, intent, digest(2), "scope sketch").expect("open");
+    let opened = open_scope_run_with_override(
+        &mut store,
+        &commission,
+        intent,
+        digest(2),
+        "scope sketch",
+        &ModelOverride::default(),
+        None,
+    )
+    .expect("open");
     let (handles, ack_through, _transient) = drain_and_dispatch_scope(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
     store.ack_topic(Topic::ScopeDispatch, ack_through.unwrap()).unwrap();
     let mut tracked = track(handles);

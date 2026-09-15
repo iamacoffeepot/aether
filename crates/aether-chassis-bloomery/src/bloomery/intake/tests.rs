@@ -12,11 +12,11 @@ use aether_bloomery::testing::{compiled_resolved, with_compiled_manifest};
 use aether_bloomery::{
     BloomDraft, BloomId, BloomRecord, CandidateRef, CompositionParents, Conclusion, ConfigRegistry, Decision, Digest,
     Event, Evidence, EvidenceKind, EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, Harness,
-    IdempotencyKey, LaneObservation, Membership, NetworkProfile, Nonce, Observation, Outcome, PipelineManifest,
-    PrecheckNode, PrecheckPayload, Provenance, ReasoningEffort, ResolvedModel, RetrospectClaim, Snapshot, SpendWindow,
-    StageCatalog, StageId, StageVerdict, Statement, StudyCall, StudyCost, SuppressionRequest, SurfacePathRequest,
-    SurfaceRequest, Topic, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId,
-    config_address, reduce,
+    IdempotencyKey, LaneObservation, Membership, ModelOverride, NetworkProfile, Nonce, Observation, Outcome,
+    PipelineManifest, PrecheckNode, PrecheckPayload, Provenance, ReasoningEffort, ResolvedModel, RetrospectClaim,
+    Snapshot, SpendWindow, StageCatalog, StageId, StageVerdict, Statement, StudyCall, StudyCost, SuppressionRequest,
+    SurfacePathRequest, SurfaceRequest, Topic, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder,
+    WorkpieceId, config_address, reduce,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
@@ -35,7 +35,7 @@ use super::{
     run_intake_cycle_now,
 };
 use crate::bloomery::findings::verification_findings_key;
-use crate::bloomery::open_scope_run;
+use crate::bloomery::open_scope_run_with_override;
 use crate::bloomery::{
     ExecutorPortError, ExecutorShell, LocalExecutorError, OutstandingDispatch, ReconcileLanes, ReconcileReport,
     RoutingExecutor, Settled,
@@ -1954,7 +1954,16 @@ fn a_scope_result_is_admitted_and_readable_off_its_ordinal() {
     };
     let intent_digest = store.create(&commission, &intent).expect("create commission");
     let base = Digest::from_bytes([2; 32]);
-    let opened = open_scope_run(&mut store, &commission, intent_digest, base, "scope sketch").expect("open");
+    let opened = open_scope_run_with_override(
+        &mut store,
+        &commission,
+        intent_digest,
+        base,
+        "scope sketch",
+        &ModelOverride::default(),
+        None,
+    )
+    .expect("open");
     let nonce = dispatch_nonce(opened.sequence);
     let mut record =
         dispatch_record(&nonce.0, BloomId(Digest::from_bytes([1; 32])), &commission, opened.subject, opened.subject);

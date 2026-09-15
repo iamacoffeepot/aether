@@ -32,8 +32,8 @@ use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::{ClaimHolder, ClaimRefKind};
 use crate::reduce::{Event, Outcome};
 use crate::values::{
-    CandidateRef, ConfigRegistry, Disposition, FiledFinding, Forecast, MemberDependency, Membership, ScopeRevision,
-    ScopeVerifyInput, ScopeVerifyReport, Statement, SuppressionVerdict, Workpiece,
+    AgentProfile, CandidateRef, ConfigRegistry, Disposition, FiledFinding, Forecast, MemberDependency, Membership,
+    ScopeRevision, ScopeVerifyInput, ScopeVerifyReport, Statement, SuppressionVerdict, Workpiece,
 };
 
 /// Default REST control-API port when `AETHER_HTTP_PORT` is unset — distinct
@@ -962,6 +962,18 @@ pub struct CommissionShowView {
     /// bytes, and omitting the key would let a reader mistake absence for a
     /// clean report.
     pub scope_verify: Option<ScopeVerifyReport>,
+    /// The `ModelOverride` config digest the latest scoping run resolved its
+    /// seat from (issue 6018). `None` when no run has opened yet, or when the
+    /// latest run dispatched the compiled calibration without naming one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_model_override: Option<Digest>,
+    /// The seat the latest scoping run dispatched under (issue 6018): the
+    /// run's override resolved over the compiled line's Scope calibration.
+    /// `None` when no run has opened yet. The console's commission screen
+    /// renders this, so the model that filled the workpiece is named where
+    /// the work was filed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_seat: Option<AgentProfile>,
 }
 
 /// `POST /commissions/{id}/revisions` reply.
@@ -1064,6 +1076,16 @@ pub struct ScopeRunOpenedView {
     pub sequence: u64,
     /// The run's content-addressed subject.
     pub subject: Digest,
+    /// The `ModelOverride` config digest the run resolved its seat from
+    /// (issue 6018). `None` when the run dispatched the compiled calibration
+    /// without naming one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<Digest>,
+    /// The seat the run dispatches under (issue 6018): its override resolved
+    /// over the compiled line's Scope calibration. `None` only from a
+    /// coordinator that predates the seat echo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seat: Option<AgentProfile>,
 }
 
 /// One journald entry as the coordinator log route renders it.

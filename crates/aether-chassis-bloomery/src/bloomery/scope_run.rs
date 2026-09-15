@@ -188,9 +188,9 @@ pub fn scope_run_state(rows: &[ScopeRunRow]) -> ScopeRunState {
     }
 }
 
-/// The outbox sequence, attempt ordinal, and subject a successful
-/// [`open_scope_run`] produced — enough for the REST door to name the run
-/// without reading the ledger back.
+/// The outbox sequence, attempt ordinal, subject, and seat a successful
+/// [`open_scope_run_with_override`] produced — enough for the REST door to
+/// name the run and its seat without reading the ledger back.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct OpenedScopeRun {
     /// The outbox sequence the drain mints its `dispatch_nonce` from.
@@ -199,6 +199,13 @@ pub struct OpenedScopeRun {
     pub ordinal: u64,
     /// The run's content-addressed subject.
     pub subject: Digest,
+    /// The `ModelOverride` config digest the run resolved its seat from, when
+    /// the run named one. Stored on the run's `enqueued` row beside the seat
+    /// it produced.
+    pub model_override: Option<Digest>,
+    /// The seat the run dispatches under: its override resolved over the
+    /// compiled line's Scope calibration.
+    pub seat: AgentProfile,
 }
 
 /// Why a scoping run could not be opened.
@@ -229,34 +236,18 @@ pub enum ScopeRunRefusal {
 /// termination rule says the run is over, build the payload, and write the
 /// `enqueued` row and its outbox row in one transaction.
 ///
-/// The compiled line's Scope seat runs: the same as
-/// [`open_scope_run_with_override`] with no override, kept so callers that
-/// name no seat keep compiling against the pre-seat shape.
-///
-/// Returns the outbox sequence, ordinal, and subject the run landed at — the
-/// sequence the drain mints its `dispatch_nonce` from, so a caller can name
-/// the dispatch before it happens.
-///
-/// # Errors
-/// A refusal from the termination rule, an encode failure, or a store fault.
-pub fn open_scope_run(
-    store: &mut dyn StoreBackend,
-    commission: &WorkpieceId,
-    intent: Digest,
-    base: Digest,
-    sketch: &str,
-) -> Result<OpenedScopeRun, ScopeRunRefusal> {
-    open_scope_run_with_override(store, commission, intent, base, sketch, &ModelOverride::default(), None)
-}
-
-/// Open a scoping run whose seat resolves from `model_override` before the
-/// compiled line is consulted (issue 5945).
+/// The seat resolves from `model_override` before the compiled line is
+/// consulted (issue 5945).
 ///
 /// `model_override_digest` is the config address the override was resolved
 /// from, stored on the run's `enqueued` row beside the seat it produced — so
 /// the journal and the console name the model that filled the workpiece
 /// rather than the line's calibration. `None` is a run opened without an
 /// override (or with an empty one), which records no digest.
+///
+/// Returns the outbox sequence, ordinal, subject, and seat the run landed
+/// at — the sequence the drain mints its `dispatch_nonce` from, so a caller
+/// can name the dispatch before it happens.
 ///
 /// # Errors
 /// A refusal from the termination rule, an encode failure, or a store fault.
@@ -296,7 +287,13 @@ pub fn open_scope_run_with_override(
             payload: &encoded,
         })
         .map_err(|error| ScopeRunRefusal::Store(error.to_string()))?;
-    Ok(OpenedScopeRun { sequence, ordinal, subject: payload.subject })
+    Ok(OpenedScopeRun {
+        sequence,
+        ordinal,
+        subject: payload.subject,
+        model_override: model_override_digest,
+        seat: payload.profile.clone(),
+    })
 }
 
 /// The host's selected instruction bundle: the unique authorized address, or

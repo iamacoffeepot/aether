@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::{List, ListItem, ListState};
 
 use crate::cursor::Cursor;
-use crate::dto::{BloomView, DigestHex};
+use crate::dto::{BloomView, CommissionShowView, DigestHex};
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
@@ -216,8 +216,25 @@ fn workpiece_lines(id: &str, store: &Store) -> Vec<Line> {
         }
     }
 
+    push_scope_seat(&mut lines, show);
+
     push_sealed_into(&mut lines, id, store);
     lines
+}
+
+/// The seat the commission's latest scoping run dispatched under: the
+/// harness and model that filled the workpiece, plus the override digest
+/// that named them when the run named one. Absent entirely when no run has
+/// opened yet — a commission that never scoped shows no seat rather than
+/// the line's calibration, which no run dispatched.
+fn push_scope_seat(lines: &mut Vec<Line>, show: &CommissionShowView) {
+    let Some(seat) = &show.scope_seat else {
+        return;
+    };
+    lines.push(label(RowKey::Other(5), format!("seat  {} {}", seat.harness.as_str(), seat.model)));
+    if let Some(digest) = show.scope_model_override {
+        lines.push(digest_line(RowKey::Digest(digest), "override", digest));
+    }
 }
 
 fn push_sealed_into(lines: &mut Vec<Line>, id: &str, store: &Store) {
@@ -331,6 +348,60 @@ mod tests {
         assert_eq!(
             workpiece.handle_key(KeyEvent::from(KeyCode::Enter), &store),
             Outcome::Push(Nav::focus(Focus::bloom(bloom)))
+        );
+    }
+
+    #[test]
+    fn the_commission_screen_names_the_scope_run_seat() {
+        // The seat the latest scoping run dispatched under is what filled
+        // the workpiece: the commission screen names its harness and model
+        // and the override digest that chose them, while a commission that
+        // never scoped shows no seat rather than the line's calibration.
+        let seat = aether_bloomery::AgentProfile {
+            harness: aether_bloomery::Harness::Grok,
+            model: "grok-4.6".to_owned(),
+            effort: aether_bloomery::ReasoningEffort::High,
+            tools: aether_bloomery::ToolPolicy::Full,
+        };
+        let show: CommissionShowView = serde_json::from_value(json!({
+            "id": "wp-seat",
+            "intent": digest(1).as_hex(),
+            "status": "open",
+            "scope_model_override": digest(2).as_hex(),
+            "scope_seat": serde_json::to_value(&seat).expect("the seat renders"),
+        }))
+        .expect("the console reads the coordinator's seat spelling");
+        assert_eq!(show.scope_seat, Some(seat), "the seat spelling matches the coordinator's");
+
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_commission("wp-seat".to_owned(), Ok(show));
+        let mut workpiece = Workpiece::new("wp-seat");
+        workpiece.reseat(&store);
+
+        let texts: Vec<&str> = workpiece.lines.iter().map(|line| line.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.contains("seat") && text.contains("grok") && text.contains("grok-4.6")),
+            "the seat renders on the commission screen: {texts:?}",
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("override") && text.contains(&digest(2).as_hex())),
+            "the override digest renders beside it: {texts:?}",
+        );
+
+        store.apply_commission(
+            "wp-plain".to_owned(),
+            Ok(CommissionShowView {
+                id: "wp-plain".to_owned(),
+                intent: digest(1),
+                status: "open".to_owned(),
+                ..CommissionShowView::default()
+            }),
+        );
+        let mut plain = Workpiece::new("wp-plain");
+        plain.reseat(&store);
+        assert!(
+            plain.lines.iter().all(|line| !line.text.starts_with("seat")),
+            "a commission with no runs shows no seat",
         );
     }
 }

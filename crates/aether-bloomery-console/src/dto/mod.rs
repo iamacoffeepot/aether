@@ -1072,6 +1072,17 @@ pub struct CommissionShowView {
     pub current: Option<ScopeRevisionView>,
     #[serde(default)]
     pub approvals: Vec<Value>,
+    /// The `ModelOverride` digest the latest scoping run resolved its seat
+    /// from. Absent when no run has opened yet, when the latest run took
+    /// the compiled seat, and when the coordinator predates the seat echo.
+    #[serde(default)]
+    pub scope_model_override: Option<DigestHex>,
+    /// The seat the latest scoping run dispatched under. Reused from
+    /// `aether_bloomery` rather than mirrored: the shape must match the
+    /// coordinator's exactly, and a mismatch here fails only this
+    /// commission's poll rather than the whole view.
+    #[serde(default)]
+    pub scope_seat: Option<aether_bloomery::AgentProfile>,
 }
 
 /// The current scope revision as the show route renders it.

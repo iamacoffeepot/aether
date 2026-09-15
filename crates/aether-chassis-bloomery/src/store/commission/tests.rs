@@ -5,11 +5,12 @@ use std::collections::BTreeMap;
 use aether_bloomery::control::ScopeDispatchPayload;
 use aether_bloomery::testing::{claim, draft, event as decided_event, membership as member_of};
 use aether_bloomery::{
-    AuthorityDoor, BloomId, CommissionProjection, CommissionStatus, CommissionValueError, ContentAddressed, Decision,
-    Decisions, Digest, Ed25519KeyProvider, Fact, FakeKeyProvider, KeyId, NamedPath, Observation, Outcome, PathOrigin,
-    Provenance, RetrospectClaim, RetrospectFinding, SCOPE_FILL_COMMAND, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA,
-    ScopeRevision, ScopeRouting, ScopeVerifyInput, SignatureEnvelope, StageId, Statement, Topic, WorkpieceId,
-    authorization_message, decode_row, digest_of, encode_row, filed_intent, reader_derivation,
+    AgentSelection, AuthorityDoor, BloomId, CommissionProjection, CommissionStatus, CommissionValueError,
+    ConfigKind as _, ContentAddressed, Decision, Decisions, Digest, Ed25519KeyProvider, Fact, FakeKeyProvider, Harness,
+    KeyId, ModelOverride, NamedPath, Observation, Outcome, PathOrigin, Provenance, ReasoningEffort, RetrospectClaim,
+    RetrospectFinding, SCOPE_FILL_COMMAND, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting,
+    ScopeVerifyInput, SignatureEnvelope, StageId, StageOverride, Statement, Topic, WorkpieceId, authorization_message,
+    decode_row, digest_of, encode_row, filed_intent, reader_derivation,
 };
 use aether_data::Kind;
 use aether_data::wire::{from_bytes, to_vec};
@@ -18,7 +19,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use super::{
     CommissionBackend, CommissionError, RecordCommissionApproval, RecordCommissionApprovalResult, RevisionEvidence,
 };
-use crate::bloomery::{ScopeRunRefusal, TopicOutbox, open_scope_run};
+use crate::bloomery::{ScopeRunRefusal, TopicOutbox, open_scope_run_with_override, scope_seat};
 use crate::store::runtime::{SCHEMA_VERSION, SqliteStore, StoreBackend, StoreCapabilityState};
 use crate::store::{JournalWrite, OutboxEntry, now_unix_millis};
 
@@ -987,8 +988,16 @@ fn a_scope_run_writes_its_ledger_row_and_its_outbox_row_together() {
     let commission = workpiece("wp-scope");
     let intent_digest = seed(&mut store, "wp-scope");
 
-    let opened = open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch")
-        .expect("a fresh commission opens its first scoping run");
+    let opened = open_scope_run_with_override(
+        &mut store,
+        &commission,
+        intent_digest,
+        base(),
+        "scope sketch",
+        &ModelOverride::default(),
+        None,
+    )
+    .expect("a fresh commission opens its first scoping run");
     let sequence = opened.sequence;
 
     let entries = store.drain_topic(Topic::ScopeDispatch).expect("drain");
@@ -1012,6 +1021,72 @@ fn a_scope_run_writes_its_ledger_row_and_its_outbox_row_together() {
 }
 
 #[test]
+fn a_seated_run_records_its_digest_and_seat_for_the_show_route() {
+    // The regression issue 5945 left behind: the override digest was stored
+    // but nothing outside tests read it back, so the journal named the
+    // line's calibration instead of the model that filled the workpiece. The
+    // opened view echoes both the digest and the resolved seat, and the
+    // ledger row carries the digest for the show route to read back.
+    let mut store = memory();
+    let grok = ModelOverride {
+        per_stage: BTreeMap::from([(
+            StageId::Scope,
+            StageOverride {
+                agent: Some(AgentSelection { harness: Harness::Grok, model: String::from("grok-4.6") }),
+                reasoning_effort: Some(ReasoningEffort::High),
+            },
+        )]),
+        ..ModelOverride::default()
+    };
+    let address = grok.address();
+    store
+        .record_config(address.as_bytes(), ModelOverride::NAME, &to_vec(&grok).expect("override encodes"))
+        .expect("author");
+
+    let seated = workpiece("wp-seated");
+    let seated_intent = seed(&mut store, "wp-seated");
+    let opened =
+        open_scope_run_with_override(&mut store, &seated, seated_intent, base(), "scope sketch", &grok, Some(address))
+            .expect("a seated run opens");
+    assert_eq!(opened.model_override, Some(address), "the opened view echoes the digest");
+    assert_eq!(opened.seat, scope_seat(&grok), "the opened view echoes the resolved seat");
+    assert_eq!(opened.seat.harness, Harness::Grok);
+    assert_eq!(opened.seat.model, "grok-4.6");
+
+    let rows = store.list_scope_runs(&seated.0).expect("list runs");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].model_override.as_deref().and_then(Digest::from_slice),
+        Some(address),
+        "the ledger row carries the digest for the show route",
+    );
+
+    let plain = workpiece("wp-plain");
+    let plain_intent = store
+        .create(
+            &plain,
+            &Statement {
+                words: b"scope a second workpiece".to_vec(),
+                provenance: Provenance::ObservationAttestation(Observation { source: "test".to_owned() }),
+                parents: Vec::new(),
+            },
+        )
+        .expect("create commission");
+    let opened = open_scope_run_with_override(
+        &mut store,
+        &plain,
+        plain_intent,
+        base(),
+        "scope sketch",
+        &ModelOverride::default(),
+        None,
+    )
+    .expect("a seatless run opens");
+    assert_eq!(opened.model_override, None, "no digest without an override");
+    assert_eq!(opened.seat, scope_seat(&ModelOverride::default()), "a seatless run echoes the compiled seat");
+}
+
+#[test]
 fn a_run_in_flight_refuses_a_second_lane_on_the_same_commission() {
     // The plausible bug: the door keys only on "has this commission frozen a
     // revision", so an operator double-click puts two scoping lanes on one
@@ -1021,9 +1096,26 @@ fn a_run_in_flight_refuses_a_second_lane_on_the_same_commission() {
     let commission = workpiece("wp-twice");
     let intent_digest = seed(&mut store, "wp-twice");
 
-    open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch").expect("the first run opens");
+    open_scope_run_with_override(
+        &mut store,
+        &commission,
+        intent_digest,
+        base(),
+        "scope sketch",
+        &ModelOverride::default(),
+        None,
+    )
+    .expect("the first run opens");
     assert_eq!(
-        open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch"),
+        open_scope_run_with_override(
+            &mut store,
+            &commission,
+            intent_digest,
+            base(),
+            "scope sketch",
+            &ModelOverride::default(),
+            None,
+        ),
         Err(ScopeRunRefusal::AlreadyInFlight { ordinal: 1 }),
     );
 
@@ -1033,7 +1125,16 @@ fn a_run_in_flight_refuses_a_second_lane_on_the_same_commission() {
     store.record_scope_verdict(&commission.0, 1, "VerificationFailed", why.as_bytes().as_slice()).expect("verdict");
 
     assert!(
-        open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch").is_ok(),
+        open_scope_run_with_override(
+            &mut store,
+            &commission,
+            intent_digest,
+            base(),
+            "scope sketch",
+            &ModelOverride::default(),
+            None,
+        )
+        .is_ok(),
         "an answered run inside the budget does not block the retry",
     );
     assert_eq!(
@@ -1051,7 +1152,16 @@ fn a_dispatched_run_is_reachable_from_its_nonce() {
     let mut store = memory();
     let commission = workpiece("wp-nonce");
     let intent_digest = seed(&mut store, "wp-nonce");
-    open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch").expect("open");
+    open_scope_run_with_override(
+        &mut store,
+        &commission,
+        intent_digest,
+        base(),
+        "scope sketch",
+        &ModelOverride::default(),
+        None,
+    )
+    .expect("open");
 
     store.record_scope_dispatch(&commission.0, 1, "dispatch-7").expect("record dispatch");
 
@@ -1082,7 +1192,15 @@ fn enqueuing_a_scope_run_is_one_transaction() {
         .expect("install abort trigger");
 
     let mut store = SqliteStore::open(path).expect("reopen");
-    let opened = open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch");
+    let opened = open_scope_run_with_override(
+        &mut store,
+        &commission,
+        intent_digest,
+        base(),
+        "scope sketch",
+        &ModelOverride::default(),
+        None,
+    );
     assert!(opened.is_err(), "the aborted outbox insert must refuse the open: {opened:?}");
     assert!(
         store.list_scope_runs(&commission.0).expect("list").is_empty(),
