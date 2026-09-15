@@ -99,5 +99,5 @@ pub use landing::{
     ACCEPTED_TYPES, GithubLanding, LandAcceptance, LandProposal, LandingProposal, LandingRefusal, LandingSource,
     ProposalOutcome, commission_floor_title, issue_title_is_valid, landing_floor_title,
 };
-pub use projection::{GithubProjection, canonical_issue_number};
+pub use projection::{GithubProjection, MAX_COMMISSION_BODY_CHARS, canonical_issue_number};
 pub use webhook::{MAX_CONTENT_CHARS, ReqwestWebhook, WebhookError, WebhookSink, content_body};

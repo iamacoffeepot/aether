@@ -70,6 +70,21 @@ use crate::source::landing_branch;
 /// semantics and answers no question about numbers (ADR-0149 §Addressing).
 const ISSUE_PREFIX: &str = "issue-";
 
+/// GitHub refuses issue and comment bodies over this many characters with a
+/// 422, so a commission mirror rendered verbatim fails to create or update on
+/// every drain once its revision outgrows it.
+const GITHUB_BODY_LIMIT_CHARS: usize = 65_536;
+
+/// The cap a mirrored commission's full body (banner, intent, work order,
+/// footer, and marker) stays under — below [`GITHUB_BODY_LIMIT_CHARS`] with
+/// headroom for the marker the caller appends after the bound render.
+pub const MAX_COMMISSION_BODY_CHARS: usize = 60_000;
+
+const _: () = assert!(
+    MAX_COMMISSION_BODY_CHARS < GITHUB_BODY_LIMIT_CHARS,
+    "the mirror cap must stay below the platform limit it exists to respect",
+);
+
 /// The outward projection mirror over a [`GithubApi`] client.
 pub struct GithubProjection<C> {
     client: C,
@@ -153,14 +168,18 @@ impl<C: GithubApi + CommissionProjectionApi> GithubProjection<C> {
     pub fn project_owned_commission(&self, projection: &CommissionProjection) -> Result<Option<u64>, GithubError> {
         let key = commission_key(&projection.workpiece.0);
         let digest = content_digest("bloomery.commission", projection);
+        let marker = render_marker(&Marker { key: key.clone(), digest });
+        let reserved_chars = marker.chars().count() + 2;
         if let Some(number) = canonical_issue_number(&projection.workpiece.0) {
-            self.comment_on(number, &key, digest, &render_source_comment(projection))?;
+            let human = bound_body(&render_source_comment(projection), projection, reserved_chars);
+            self.comment_on(number, &key, digest, &human)?;
             self.retire_replica(projection, number)?;
             return Ok(None);
         }
 
         let title = render_commission_title(projection);
-        let body = format!("{}\n\n{}", render_commission_body(projection), render_marker(&Marker { key, digest }));
+        let human = bound_body(&render_commission_body(projection), projection, reserved_chars);
+        let body = format!("{human}\n\n{marker}");
 
         // Only a durable recorded_issue from this projector's own create is
         // ownership. Marker search is not consulted: a match is not a receipt.
@@ -369,6 +388,70 @@ fn push_commission_content(body: &mut String, projection: &CommissionProjection)
         }
     }
     let _ = writeln!(body, "- State: {}", projection.status);
+}
+
+/// Bound a commission's marker-less human body so the marker-appended final
+/// stays under [`MAX_COMMISSION_BODY_CHARS`]. `reserved_chars` is the marker
+/// plus its separators, measured by the caller off the same marker the final
+/// carries — the bound is on the body the repository sees, not on the prefix
+/// alone.
+///
+/// An over-long intent or work order is cut on a character boundary and the
+/// declared-surface block plus the footer ride intact: the surface is what the
+/// seal door checks, so it is the one block the mirror must never paraphrase.
+/// A truncation line names the stored digest the rest can be read from.
+#[must_use]
+fn bound_body(human: &str, projection: &CommissionProjection, reserved_chars: usize) -> String {
+    let budget = MAX_COMMISSION_BODY_CHARS.saturating_sub(reserved_chars);
+    if human.chars().count() <= budget {
+        return human.to_owned();
+    }
+
+    let line = truncation_line(projection);
+    let tail = intact_tail(human);
+    let tail_chars = tail.chars().count();
+    let line_chars = line.chars().count();
+    if tail_chars + line_chars >= budget {
+        let kept: String = human.chars().take(budget.saturating_sub(line_chars)).collect();
+        return format!("{kept}{line}");
+    }
+
+    let prefix = &human[..human.len() - tail.len()];
+    let kept: String = prefix.chars().take(budget - tail_chars - line_chars).collect();
+    format!("{kept}{line}{tail}")
+}
+
+/// The line a bounded body carries where the cut happened: which stored value
+/// holds the rest. A scope cut names its revision; an intent-only commission
+/// has no revision, so its cut names the intent statement instead.
+#[must_use]
+fn truncation_line(projection: &CommissionProjection) -> String {
+    projection.scope_revision.map_or_else(
+        || {
+            let digest = short_hex(&projection.intent);
+            format!("\n… truncated; read the stored intent `{digest}`.\n")
+        },
+        |revision| {
+            let digest = short_hex(&revision);
+            format!("\n… truncated; read the stored revision `{digest}`.\n")
+        },
+    )
+}
+
+/// The suffix a bound body keeps verbatim: the declared-surface block through
+/// the footer. Without a surface heading — an intent-only commission, or a
+/// scope carrying none — the footer alone is what must survive.
+#[must_use]
+fn intact_tail(human: &str) -> &str {
+    for heading in ["\n## Declared surface\n", "\n## Declared crates\n"] {
+        if let Some(start) = human.find(heading) {
+            return &human[start..];
+        }
+    }
+    if let Some(start) = human.find("\n- Workpiece:") {
+        return &human[start..];
+    }
+    ""
 }
 
 fn member_key(bloom: BloomId, workpiece: &str) -> String {
