@@ -13,7 +13,7 @@ use super::aggregate_verify::at_park_ceiling;
 use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate, stage_binding};
 use super::boundary::EventBoundary;
 use super::eject::ejection_reason;
-use super::gate::AGGREGATE_VERIFY_GATE;
+use super::gate::{AGGREGATE_VERIFY_GATE, CONSTRUCTION_ADMISSION_GATE, Gate, Refusal};
 use super::withdraw::depart;
 use super::{BloomRecord, BloomStatus, CoordinationError, Decision, Decisions, Outcome, Snapshot, StageProgress};
 use crate::digest::{ContentAddressed, Digest, digest_of};
@@ -865,6 +865,10 @@ pub(super) fn promote_proved_repair(
     state.integration.known_red = None;
     state.integration.unproved_repair = None;
 
+    // The repair that abandoned the old product tree could not re-pin anything
+    // onto the replacement while it was still red, so the queued constructions
+    // it stranded are re-pinned here, the moment the head it produced is proved.
+    refresh_unadmitted_construction(record, state, effects);
     release_ready_dependents(record, state, effects);
     schedule_append(record, state, effects);
     finalize_selected_root(record, state, effects);
@@ -2851,6 +2855,129 @@ pub(super) fn reduce_checkpoint_observed(snapshot: &Snapshot, checkpoint: &Const
     accepted(checkpoint.bloom, checkpoint.digest(), effects)
 }
 
+/// The one construction-admission guard whose failure can still come good: the
+/// head the context names may yet be proved by a partial-head repair.
+const RED_CONTEXT_GUARD: &str = "context_head_is_not_red";
+
+/// Why this admission cannot bind, or `None` when every guard held.
+fn admission_refusal(
+    record: &BloomRecord,
+    state: &CoordinationState,
+    queued: &ContextualAttemptDispatch,
+    dispatch: &ContextualAttemptDispatch,
+) -> Option<Refusal> {
+    let workpiece = &dispatch.workpiece;
+    let context = &dispatch.context;
+    let progress = record.progress.get(workpiece);
+    Gate::new(CONSTRUCTION_ADMISSION_GATE)
+        .require(
+            "dispatch_is_the_queued_intent",
+            || queued == dispatch,
+            || reads![queued: queued.digest().to_hex(), admitted: dispatch.digest().to_hex()],
+        )
+        .require(
+            "stage_is_construct",
+            || dispatch.stage == StageId::Construct,
+            || reads![stage: format!("{:?}", dispatch.stage)],
+        )
+        .require(
+            "context_names_this_generation",
+            || context.starting_head.generation == state.integration.generation.digest(),
+            || {
+                reads![
+                    context_generation: context.starting_head.generation.to_hex(),
+                    generation: state.integration.generation.digest().to_hex(),
+                ]
+            },
+        )
+        .require(
+            "context_names_this_generations_base",
+            || context.bloom_base == state.integration.generation.base,
+            || {
+                reads![
+                    context_base: context.bloom_base.checkout.to_hex(),
+                    base: state.integration.generation.base.checkout.to_hex(),
+                ]
+            },
+        )
+        .require(
+            "checkout_is_the_contexts_head",
+            || dispatch.transformation.checkout == context.starting_head.candidate.checkout,
+            || {
+                reads![
+                    checkout: dispatch.transformation.checkout.to_hex(),
+                    context_head: context.starting_head.candidate.checkout.to_hex(),
+                ]
+            },
+        )
+        .require(
+            RED_CONTEXT_GUARD,
+            || state.integration.known_red != Some(context.starting_head.node),
+            || reads![context_head: context.starting_head.node.to_hex()],
+        )
+        .require(
+            "member_holds_no_admission",
+            || !state.admitted_construction.contains_key(workpiece_key(workpiece)),
+            || reads![member: workpiece.0.clone()],
+        )
+        .require(
+            "member_is_constructing_this_attempt",
+            || {
+                progress.is_some_and(|progress| {
+                    progress.stage == StageId::Construct && progress.attempts == dispatch.attempt
+                })
+            },
+            || {
+                reads![
+                    stage: progress.map_or_else(|| String::from("none"), |progress| format!("{:?}", progress.stage)),
+                    attempt: dispatch.attempt,
+                ]
+            },
+        )
+        .require(
+            "scope_revision_is_the_sealed_one",
+            || {
+                record
+                    .spec
+                    .members()
+                    .iter()
+                    .any(|member| member.workpiece == *workpiece && member.scope_revision == dispatch.scope_revision)
+            },
+            || reads![scope_revision: dispatch.scope_revision.to_hex()],
+        )
+        .decide(|| ())
+        .into_result()
+        .err()
+}
+
+/// Bind one queued authoring intent to the lane slot the host has just freed.
+///
+/// **The context the dispatch carries is the context it is admitted on.** The
+/// queue is drained one free slot at a time while the product folds every few
+/// minutes, so demanding that a queued dispatch still name the current
+/// `integration.head` made admission a race the member lost: the reducer
+/// answered `InvalidPlan`, the host retired the admission and acked its topic
+/// row, and the member sat in Construct with no order, no wedge and no reason
+/// (issue 6051). Re-queueing on every fold does not fix that — the next fold
+/// lands inside the same window — and it would be the wrong fix anyway. Under
+/// eager integration a fold is not news a member is told: each one proves the
+/// candidate it authored over the context it was handed, and the merge onto
+/// whatever the product has become is a later, separate lap (ADR-0218
+/// §Amendment). An author starting from a head one fold behind is that rule,
+/// not a violation of it.
+///
+/// What the guards still establish is that the context is *sound*. It must be
+/// the dispatch coordination itself queued, it must name this generation, and
+/// its head must not be the one a red verdict stands against — an author handed
+/// unproven context would write onto a tree the bloom cannot keep. A generation
+/// the bloom walked away from (an ejection, a repaired root) bumps the epoch and
+/// re-pins every queued construction through
+/// [`refresh_unadmitted_construction`], so a dispatch still carrying the old
+/// generation is genuinely stale and is refused here.
+///
+/// Every refusal files [`Decision::RecordRefusal`] against the member, because
+/// the host's answer to a refusal is to retire the admission: without the row
+/// the member's stall has no account anywhere an operator reads.
 pub(super) fn reduce_request_construction_admission(
     snapshot: &Snapshot,
     admission: &ConstructionAdmission,
@@ -2862,30 +2989,29 @@ pub(super) fn reduce_request_construction_admission(
     };
     let workpiece = &admission.dispatch.workpiece;
     let Some(queued) = state.queued_construction.get(workpiece_key(workpiece)) else {
+        // Nothing is queued under this member, so refusing strands nothing: the
+        // intent this admission names has already been spent or replaced.
         return rejected(CoordinationError::NotReady);
     };
-    if state.integration.known_red == Some(state.integration.head.node) {
-        // Every other head-pinning seam refuses while the selected head is red;
-        // admitting here would dispatch an author order onto unproven context.
-        return rejected(CoordinationError::NotReady);
+    if let Some(refusal) = admission_refusal(record, state, queued, &admission.dispatch) {
+        // A red context may yet go green under a partial-head repair, so that
+        // one guard is not-ready rather than invalid; every other names a
+        // dispatch this coordination will never admit.
+        let outcome = if refusal.guard == RED_CONTEXT_GUARD {
+            CoordinationError::NotReady
+        } else {
+            CoordinationError::InvalidPlan
+        };
+        return Decisions {
+            outcome: Outcome::CoordinationRejected(outcome),
+            effects: alloc::vec![Decision::RecordRefusal {
+                bloom,
+                workpiece: Some(workpiece.clone()),
+                refusal: refusal.recorded(),
+            }],
+        };
     }
-    if queued != &admission.dispatch
-        || admission.dispatch.stage != StageId::Construct
-        || admission.dispatch.context.starting_head != state.integration.head
-        || admission.dispatch.context.bloom_base != state.integration.generation.base
-        || admission.dispatch.transformation.checkout != state.integration.head.candidate.checkout
-        || state.admitted_construction.contains_key(workpiece_key(workpiece))
-        || record.progress.get(workpiece).is_none_or(|progress| {
-            progress.stage != StageId::Construct || progress.attempts != admission.dispatch.attempt
-        })
-        || record
-            .spec
-            .members()
-            .iter()
-            .all(|member| member.workpiece != *workpiece || member.scope_revision != admission.dispatch.scope_revision)
-    {
-        return rejected(CoordinationError::InvalidPlan);
-    }
+
     let mut next = state.clone();
     next.queued_construction.remove(workpiece_key(workpiece));
     next.admitted_construction.insert(workpiece.0.clone(), admission.clone());
@@ -3286,6 +3412,7 @@ pub(super) fn schedule(snapshot: &Snapshot, mut decisions: Decisions) -> Decisio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reduce::gate::RecordedRefusal;
     use crate::testing::{digest, draft, membership};
     use crate::values::{
         ConfigRegistry, ContextualResolutionClaim, Harness, ReasoningEffort, ResolutionProof, ToolPolicy, VerifyProof,
@@ -5386,10 +5513,14 @@ mod tests {
         assert!(decisions.effects.is_empty());
     }
 
-    #[test]
-    fn a_red_head_admits_no_new_construction_order() {
-        let (mut record, mut state) = fixture();
-        let workpiece = WorkpieceId(String::from("alpha"));
+    /// Put `workpiece` at Construct and queue the dispatch
+    /// [`queue_context_dispatch`] would mint for it against the state's current
+    /// head.
+    fn queue_construction(
+        record: &mut BloomRecord,
+        state: &mut CoordinationState,
+        workpiece: &WorkpieceId,
+    ) -> ContextualAttemptDispatch {
         record.progress.insert(
             workpiece.clone(),
             StageProgress {
@@ -5429,8 +5560,92 @@ mod tests {
             configs: ConfigRegistry::default(),
             context,
         };
-        state.queued_construction.insert(workpiece.0, dispatch.clone());
-        state.integration.head.node = digest(61);
+        state.queued_construction.insert(workpiece.0.clone(), dispatch.clone());
+        dispatch
+    }
+
+    /// Move the product forward the way a clean fold does: a new node over the
+    /// same generation, carrying one more member.
+    fn advance_product(state: &mut CoordinationState, node: u8) {
+        let candidate = CandidateRef { tree: digest(node), checkout: digest(node.saturating_add(1)) };
+        state.integration.head = IntegrationHead {
+            generation: state.integration.generation.digest(),
+            node: digest(node),
+            candidate,
+            plan: digest(node.saturating_add(2)),
+            coverage: alloc::vec![pin("beta", 11, node)],
+        };
+    }
+
+    fn member_refusal(decisions: &Decisions, workpiece: &WorkpieceId) -> Option<RecordedRefusal> {
+        decisions.effects.iter().find_map(|effect| match effect {
+            Decision::RecordRefusal { workpiece: Some(refused), refusal, .. } if refused == workpiece => {
+                Some(refusal.clone())
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_product_fold_does_not_strand_a_construction_still_queued() {
+        // Issue 6051: the lane cap drains queued constructions one at a time
+        // while the product folds under them, so by the time a queued dispatch
+        // reaches admission its context names a head one or more folds behind.
+        // The member is admitted on the context it was handed — a fold is not
+        // news a member is told (ADR-0218 §Amendment).
+        let (mut record, mut state) = fixture();
+        let workpiece = WorkpieceId(String::from("alpha"));
+        let dispatch = queue_construction(&mut record, &mut state, &workpiece);
+        advance_product(&mut state, 61);
+
+        let (snapshot, bloom) = in_flight_snapshot(record, state);
+        let admission = ConstructionAdmission { nonce: digest(60), dispatch: dispatch.clone() };
+        let decisions = reduce_request_construction_admission(&snapshot, &admission);
+
+        assert_eq!(decisions.outcome, Outcome::CoordinationAdvanced { bloom, subject: admission.digest() });
+        assert!(
+            decisions.effects.iter().any(|effect| {
+                matches!(effect, Decision::DispatchContextualAttempt { dispatch: dispatched } if *dispatched == dispatch)
+            }),
+            "the admitted order is the queued dispatch unchanged: {:?}",
+            decisions.effects,
+        );
+    }
+
+    #[test]
+    fn a_construction_queued_in_an_abandoned_generation_is_refused_with_a_reason() {
+        // The one product event a queued construction must not survive: a
+        // generation the bloom walked away from, whose ancestry it no longer
+        // owns. `refresh_unadmitted_construction` re-pins across that step, so a
+        // dispatch still naming the old generation is genuinely stale — and the
+        // refusal is filed against the member, because the host answers a
+        // refusal by retiring the admission and the member would otherwise stall
+        // with no account anywhere.
+        let (mut record, mut state) = fixture();
+        let workpiece = WorkpieceId(String::from("alpha"));
+        let dispatch = queue_construction(&mut record, &mut state, &workpiece);
+        state.integration.generation.epoch += 1;
+
+        let (snapshot, _) = in_flight_snapshot(record, state);
+        let decisions =
+            reduce_request_construction_admission(&snapshot, &ConstructionAdmission { nonce: digest(60), dispatch });
+
+        assert_eq!(decisions.outcome, Outcome::CoordinationRejected(CoordinationError::InvalidPlan));
+        let refusal = member_refusal(&decisions, &workpiece).expect("a retired admission names the member it stalled");
+        assert_eq!(refusal.gate, CONSTRUCTION_ADMISSION_GATE);
+        assert_eq!(refusal.guard, "context_names_this_generation");
+    }
+
+    #[test]
+    fn a_red_context_admits_no_construction_order() {
+        // The context an author is handed is the one that must be proved: a
+        // dispatch pinned to the head a red verdict stands against would put a
+        // lane on a tree the bloom cannot keep. It stays not-ready rather than
+        // invalid, because a partial-head repair can still prove that node.
+        let (mut record, mut state) = fixture();
+        let workpiece = WorkpieceId(String::from("alpha"));
+        advance_product(&mut state, 61);
+        let dispatch = queue_construction(&mut record, &mut state, &workpiece);
         state.integration.known_red = Some(state.integration.head.node);
 
         let mut refreshed = Vec::new();
@@ -5438,11 +5653,38 @@ mod tests {
         assert!(refreshed.is_empty(), "a red head cannot re-pin a queued construction onto itself");
 
         let (snapshot, _) = in_flight_snapshot(record, state);
-        let admission = ConstructionAdmission { nonce: digest(60), dispatch };
+        let decisions =
+            reduce_request_construction_admission(&snapshot, &ConstructionAdmission { nonce: digest(60), dispatch });
+
+        assert_eq!(decisions.outcome, Outcome::CoordinationRejected(CoordinationError::NotReady));
         assert_eq!(
-            reduce_request_construction_admission(&snapshot, &admission).outcome,
-            Outcome::CoordinationRejected(CoordinationError::NotReady),
+            member_refusal(&decisions, &workpiece).expect("the stalled member is named").guard,
+            "context_head_is_not_red",
         );
+    }
+
+    #[test]
+    fn re_pinning_a_queued_construction_moves_its_dispatch_digest() {
+        // The abandonment paths do re-pin, and the host keys an admission row by
+        // the dispatch digest. If a re-pin produced the same digest, the row the
+        // stale admission retired would key the fresh one too and the member
+        // would never leave the queue (issue 6051).
+        let (mut record, mut state) = fixture();
+        let workpiece = WorkpieceId(String::from("alpha"));
+        let queued = queue_construction(&mut record, &mut state, &workpiece);
+        advance_product(&mut state, 61);
+
+        let mut refreshed = Vec::new();
+        refresh_unadmitted_construction(&record, &mut state, &mut refreshed);
+
+        let re_pinned = refreshed
+            .iter()
+            .find_map(|effect| match effect {
+                Decision::QueueConstructionAdmission { dispatch } => Some(dispatch.clone()),
+                _ => None,
+            })
+            .expect("a re-pin queues the construction again");
+        assert_ne!(re_pinned.digest(), queued.digest());
     }
 
     #[test]
