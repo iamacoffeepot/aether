@@ -94,7 +94,7 @@ Read too broadly that check becomes the closure it is meant to avoid, so the lin
 
 **A gate is a verdict, not a name.** No `completion_gate` string is read anywhere in the workspace — `pr-open` and `ci-green` included; the field is inert vocabulary. The mechanism is `verdict_passed` over a `StageVerdict` at intake. The scope stage's gate is therefore a lane emitting a verdict, an intake arm routing it, and a retry budget.
 
-**The seat is `grok-4.6` at high effort, recorded as a cost-bound deferral.** ADR-0146's finding that scoping is the most judgement-heavy task on the ladder is not retracted, and `profile_of` still carries `OPUS_MODEL` for this stage. It is overridden on cost, deliberately and on the record, so a future session reads a decision rather than an accident. The seat is a stage-binding value and moves without an ADR.
+**The seat is `grok-4.6` at high effort, recorded as a cost-bound deferral (§Amendment: the Scope seat returns to opus).** ADR-0146's finding that scoping is the most judgement-heavy task on the ladder is not retracted, and `profile_of` still carries `OPUS_MODEL` for this stage. It is overridden on cost, deliberately and on the record, so a future session reads a decision rather than an accident. The seat is a stage-binding value and moves without an ADR.
 
 **The retired `/scope` skill is not adopted as the specification.** It is the estate's least legible process, its obligations are style-shaped rather than machine-checkable, and preserving its section layout would preserve the variation this decision removes. It is read as raw material — an inventory of what a scoper must establish — and each item survives as a typed field with a stated validator, or not at all.
 
@@ -129,3 +129,20 @@ The record shape generalizes past scoping to any journaled artifact facing the s
 - **Let the construct lane scope itself.** Collapses the prediction into the work, which removes the boundary rather than the error: a lane that writes its own surface is not contained by it, and the approval attests nothing.
 
 - **Make the whole scope verify refusing.** Rejected except for the self-consistency check: it drives surfaces toward the reverse-dependency closure and empties containment of meaning.
+
+## Amendment: the Scope seat returns to opus (2026-09-15, #6027)
+
+The cost-bound deferral above is retired. `StageCatalog::profile_of(StageId::Scope)`
+resolves to opus at high effort again — the ADR-0146 calibration, which this
+decision never retracted — so a run that names no seat dispatches the compiled
+opus seat rather than `grok-4.6`.
+
+Moving every scope run at once is now a per-run choice instead. A run names
+its seat through `ScopeRunRequest::model_override`, the `ModelOverride`
+config digest carried by `POST /commissions/{id}/scope-runs` (filed as
+`xtask bloom scope-run --profile`, which resolves the named profile through
+`POST /configs` the way seal does, or `--model-override` for the digest
+directly). The run resolves that override against the compiled line before
+the line is consulted, and `None` dispatches the line. The `**Implementation
+model:**` routing field stays what it was — a presence bit, not the seat —
+so nothing that read it needs to change.

@@ -2932,7 +2932,7 @@ fn the_lane_ceiling_holds_and_the_rest_start_in_submission_order() {
 fn a_model_lane_starts_while_a_prove_holds_its_own_slot() {
     // The plausible bug: one occupancy pool, so a running verify occupies the
     // only ceiling and a construct that arrived later stays queued. Model lanes
-    // are network-bound; a prove must not refuse them a slot.
+    // hold their own pool; a prove must not refuse them a slot.
     let base = TempDir::new().unwrap();
     let (exec, started) = throttled_executor(&base, 1, true);
     let exec = exec.with_max_concurrent_provers(1);

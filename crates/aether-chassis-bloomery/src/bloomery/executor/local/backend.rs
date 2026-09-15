@@ -416,7 +416,9 @@ impl LaneGates {
 
 /// Which host-resource pool a dispatch occupies.
 ///
-/// Model lanes are network-bound and count against `max_concurrent_lanes`.
+/// Model lanes hold a slot — a checkout plus its slot target dir — and build
+/// under bounded cargo jobs, so they count against `max_concurrent_lanes` on
+/// disk and build cost.
 /// `verify.*` dispatches are build-bound and count against
 /// `max_concurrent_provers` (ADR-0200).
 #[derive(Clone, Copy, PartialEq, Eq)]

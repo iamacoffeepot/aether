@@ -447,7 +447,8 @@ before seal, preserving every other registry entry.
     "max_serial_requests": 8,
     "max_attribution_probes": 64,
     "movement_budget": 3,
-    "reservation_millis": 300000
+    "reservation_millis": 300000,
+    "coalesce_millis": null
   }
 }
 ```
@@ -459,8 +460,13 @@ class as `host_class`. An empty runtime class keeps legacy execution available
 but refuses shared work; the enabled policy has no implicit class.
 `WarmSerial` checks each member's own tree in one retained warm slot;
 `Contextual` checks an immutable composed tree and retains contextual member
-proofs. Ready work coalesces at dispatch without an arrival wait — and only
-when a prove slot is free. Model lanes
+proofs. A ready contextual request waits up to `coalesce_millis` for sibling
+constructs still in flight before the scheduler proposes its shared run —
+`null` is the two-minute default, `0` proposes as soon as a request is ready,
+and the hold never runs past the request deadline — and only when a prove
+slot is free. While the hold stands the journal carries
+`Fact::HoldSharedRunCoalesce` naming the bloom, the instant the hold lifts,
+and the waited-for workpieces. Model lanes
 (`AETHER_BLOOMERY_MAX_CONCURRENT_LANES`) and `verify.*` dispatches
 (`AETHER_BLOOMERY_MAX_CONCURRENT_PROVERS`) are separate host knobs; size the
 prove ceiling to one concurrent build per eight host cores. Group size has no
@@ -468,7 +474,9 @@ fixed two-member ceiling. Running inputs stay immutable.
 
 `/view` exposes `coordination`, including the selected head and coverage,
 member starting contexts, logical requests, shared runs, outcomes, and head
-reservation. The board keeps folded members visible until the atomic bloom
+reservation. A standing coalesce hold is visible beside them in the journal
+as `Fact::HoldSharedRunCoalesce` with its `until_unix_millis` and
+`waiting_for` workpieces. The board keeps folded members visible until the atomic bloom
 finishes and shows each reconciliation target. Physical cost belongs once to
 the bloom; member latency and the shared-run reference describe each member's
 participation. A grouped pass never becomes a standalone proof for a parent.
