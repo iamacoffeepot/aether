@@ -22,6 +22,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use super::SqliteStore;
 use super::membership;
+use super::write_txn;
 
 pub use super::commission_kinds::{
     CancelCommission, CancelCommissionResult, CreateCommission, CreateCommissionResult, EnqueueScopeRun,
@@ -608,7 +609,7 @@ fn insert_commission(
 ) -> Result<Option<Digest>, CommissionError> {
     let intent_digest = digest_of(intent);
     let intent_bytes = encode_statement(intent);
-    let txn = conn.transaction()?;
+    let txn = write_txn::begin(conn)?;
     let exists: Option<String> =
         txn.query_row("SELECT id FROM commissions WHERE id = ?1", [&id.0], |row| row.get(0)).optional()?;
     if exists.is_some() {
@@ -652,7 +653,7 @@ fn write_revision(
         return Err(CommissionError::EmptySection { section: section.to_owned() });
     }
     let digest = digest_of(&decoded);
-    let txn = conn.transaction()?;
+    let txn = write_txn::begin(conn)?;
     let Some(head) = load_head(&txn, &decoded.workpiece.0)? else {
         return Err(CommissionError::MissingCommission(decoded.workpiece.0));
     };
@@ -672,7 +673,7 @@ fn write_revision(
         && report.refused()
     {
         drop(txn);
-        let refusal = conn.transaction()?;
+        let refusal = write_txn::begin(conn)?;
         insert_scope_verify_report(&refusal, digest, &decoded.workpiece.0, report)?;
         refusal.commit()?;
         return Err(CommissionError::SurfaceGap { paths: report.refusal_paths() });
@@ -769,7 +770,7 @@ fn persist_approval(
     let (tier, signature) = classify_approval(statement)?;
     let statement_digest = digest_of(statement);
     let statement_bytes = encode_statement(statement);
-    let txn = conn.transaction()?;
+    let txn = write_txn::begin(conn)?;
     let Some(revision) = load_revision(&txn, scope)? else {
         return Err(CommissionError::MissingRevision);
     };
@@ -817,7 +818,7 @@ fn cancel_commission(
     let intent = Digest::from_slice(&statement.words).ok_or(CommissionError::WrongSubject)?;
     let statement_digest = digest_of(statement);
     let statement_bytes = encode_statement(statement);
-    let txn = conn.transaction()?;
+    let txn = write_txn::begin(conn)?;
     let Some(head) = load_head(&txn, &id.0)? else {
         return Err(CommissionError::MissingCommission(id.0.clone()));
     };
@@ -864,7 +865,7 @@ fn reopen_commission(
 ) -> Result<Digest, CommissionError> {
     let intent = Digest::from_slice(&statement.words).ok_or(CommissionError::WrongSubject)?;
     let statement_digest = digest_of(statement);
-    let txn = conn.transaction()?;
+    let txn = write_txn::begin(conn)?;
     let Some(head) = load_head(&txn, &id.0)? else {
         return Err(CommissionError::MissingCommission(id.0.clone()));
     };
@@ -885,7 +886,7 @@ fn reopen_commission(
 }
 
 fn mark_landed(conn: &mut Connection, id: &WorkpieceId) -> Result<(), CommissionError> {
-    let txn = conn.transaction()?;
+    let txn = write_txn::begin(conn)?;
     let Some(head) = load_head(&txn, &id.0)? else {
         return Ok(());
     };
@@ -902,7 +903,7 @@ fn mark_landed(conn: &mut Connection, id: &WorkpieceId) -> Result<(), Commission
 }
 
 fn record_projection(conn: &mut Connection, id: &WorkpieceId, issue_number: u64) -> Result<(), CommissionError> {
-    let txn = conn.transaction()?;
+    let txn = write_txn::begin(conn)?;
     if load_head(&txn, &id.0)?.is_none() {
         return Err(CommissionError::MissingCommission(id.0.clone()));
     }

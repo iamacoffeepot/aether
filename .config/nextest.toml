@@ -1,5 +1,24 @@
+# Each Bloomery scenario binary boots a whole coordinator: a chassis with its
+# own scheduler worker pool (`available_parallelism() - 1` threads), a real
+# `git worktree add` per dispatch, and a real lane child per order. Run at the
+# default width — one test thread per core — a hundred-odd of those binaries put
+# an order of magnitude more runnable threads on the host than it has cores, and
+# the scenario harness's wall-clock step budgets then measure the run queue
+# rather than the world: a scenario that settles in 1.3s on a quiet host blows a
+# 30s `pump_until` budget under the crowd, and the ejection that follows is
+# charged to whichever bloom member the shared run named
+# (iamacoffeepot/aether#6081). The cap is the width these binaries actually
+# want — each is already internally parallel — not a serialization: the suite
+# stays concurrent, it just stops competing with itself.
+[test-groups]
+bloomery-scenarios = { max-threads = 8 }
+
 [profile.default]
 final-status-level = "slow"
+
+[[profile.default.overrides]]
+filter = "(package(=aether-chassis-bloomery) | package(=aether-harness-bloomery)) & kind(test)"
+test-group = "bloomery-scenarios"
 
 [profile.ci]
 # Don't fail fast in CI to run the full test suite.

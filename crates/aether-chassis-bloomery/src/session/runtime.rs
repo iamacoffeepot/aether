@@ -30,6 +30,8 @@ use super::kinds::{Acquire, AcquireResult, LeaseToken, Release, ReleaseResult, S
 use aether_actor::runtime;
 use rusqlite::{Connection, OptionalExtension};
 
+use crate::store::write_txn;
+
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 
@@ -523,7 +525,7 @@ impl SessionBackend for SqliteSessionStore {
         // Read the one pooled session for the key, then decide eligibility over
         // its fields (mirroring `evaluateEligibility`). One transaction so the
         // read and the lease-marking `UPDATE` are atomic.
-        let tx = self.conn.transaction()?;
+        let tx = write_txn::begin(&mut self.conn)?;
         let row = tx
             .query_row(
                 "SELECT session_bytes, receipt, head_hash, context_tokens, deposited_at, leased_until
@@ -619,7 +621,7 @@ impl SessionBackend for SqliteSessionStore {
         turns: u64,
         context: u64,
     ) -> rusqlite::Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = write_txn::begin(&mut self.conn)?;
         let next = Self::load_calibration(&tx, model, effort, family)?.unwrap_or_default().fold(turns, context);
         tx.execute(
             "INSERT INTO reuse_calibration (model, effort, family, observations, turn_sum, context_sum)
