@@ -33,7 +33,11 @@ impl OrphanedRun {
     /// identity from the sibling record, when one is present.
     #[must_use]
     pub fn new(nonce: Nonce, evidence_dir: &Path) -> Self {
-        Self { nonce, evidence_path: evidence_dir.join("evidence.json"), evidence_dir: evidence_dir.to_path_buf() }
+        Self {
+            nonce,
+            evidence_path: evidence_dir.join(super::process_runner::EVIDENCE_FILE),
+            evidence_dir: evidence_dir.to_path_buf(),
+        }
     }
 }
 

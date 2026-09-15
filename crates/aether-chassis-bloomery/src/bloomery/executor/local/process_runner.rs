@@ -20,6 +20,7 @@
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 use std::{fs, io};
 
 use aether_bloomery::{BackendObjectId, RETROSPECT_READ_COMMAND, is_model_lane};
@@ -70,6 +71,14 @@ const SETTINGS_PATH: &str = ".claude/settings.json";
 /// terminal, where the bytes behind a verdict scroll away. Both streams land
 /// in the one file, beside the `evidence.json` they explain.
 pub const LANE_LOG_FILE: &str = "lane.log";
+
+/// The file in the evidence directory a lane writes its authored result into.
+///
+/// Named once because three readers address it: the backend that streams the
+/// body, the orphan that reads a re-adopted run's lifecycle from its presence,
+/// and [`SealGrace`], which reads the same presence as "this lane's work is
+/// over" for a child this process still owns.
+pub const EVIDENCE_FILE: &str = "evidence.json";
 
 /// The subject line a capture commits under: the run's own message's first line
 /// when the lane wrote one, otherwise [`FALLBACK_CAPTURE_SUBJECT`].
@@ -327,7 +336,7 @@ impl TransformRunner for ProcessTransformRunner {
         let child = spawn_isolated(&mut lane).map_err(LocalExecutorError::Spawn)?;
         super::identity::record_spawned(spec.evidence_dir, child.id());
         super::identity::record_checkout_head(spec.evidence_dir, &observed);
-        Ok(Box::new(ChildProcess { child }))
+        Ok(Box::new(ChildProcess { child, seal: SealGrace::over(spec.evidence_dir) }))
     }
 
     fn release(&self, worktree_dir: &Path) -> Result<(), LocalExecutorError> {
@@ -1070,9 +1079,47 @@ fn spawn_isolated(command: &mut Command) -> io::Result<Child> {
     command.spawn()
 }
 
+/// How long a lane may stay alive after sealing its evidence before the
+/// backend stops waiting for it.
+///
+/// Long enough that a wrapper winding down normally — cargo tearing its own
+/// child down, a `/usr/bin/time` report flushing — is never interrupted, and
+/// short enough that it is not a slot the ceiling loses. On the fleet the
+/// alternative was ten minutes and counting.
+const SEALED_EVIDENCE_GRACE_SECS: u64 = 15;
+
+/// The grace one lane gets to exit on its own once its evidence is sealed.
+///
+/// Split out of [`ChildProcess`] so the rule is decidable without a lane: the
+/// grace starts at the first poll that sees evidence, and a wrapper that exits
+/// inside it is never touched.
+struct SealGrace {
+    evidence_path: PathBuf,
+    first_seen: Option<Instant>,
+}
+
+impl SealGrace {
+    fn over(evidence_dir: &Path) -> Self {
+        Self { evidence_path: evidence_dir.join(EVIDENCE_FILE), first_seen: None }
+    }
+
+    /// Whether the wrapper has now outlived its own sealed evidence.
+    ///
+    /// `sealed` is what the filesystem answered this poll and `now` when it
+    /// answered, so neither is read in here.
+    fn outlived(&mut self, sealed: bool, now: Instant) -> bool {
+        if !sealed {
+            self.first_seen = None;
+            return false;
+        }
+        now.duration_since(*self.first_seen.get_or_insert(now)) >= Duration::from_secs(SEALED_EVIDENCE_GRACE_SECS)
+    }
+}
+
 /// A live `cargo xtask transform` child.
 struct ChildProcess {
     child: Child,
+    seal: SealGrace,
 }
 
 impl RunProcess for ChildProcess {
@@ -1080,7 +1127,28 @@ impl RunProcess for ChildProcess {
         // A wait fault is not a live run; it is an observation fault, not a
         // clean nonzero exit and not a signal — the backend has to tell those
         // three apart (ADR-0195 §2).
-        RunLifecycle::from_try_wait(self.child.try_wait())
+        let lifecycle = RunLifecycle::from_try_wait(self.child.try_wait());
+        if lifecycle != RunLifecycle::Running || !self.seal.outlived(self.seal.evidence_path.exists(), Instant::now()) {
+            return lifecycle;
+        }
+        // A lane that has written `evidence.json` reached the end of its work;
+        // the wrapper still being alive after that is the wrapper's business,
+        // not the run's — and on the fleet six to eleven `xtask transform`
+        // processes sat idle at a time with their evidence already sealed, each
+        // holding a registry entry `Registry::occupied` counts against the
+        // prover ceiling until it exits (#6073). So the sealed evidence ends
+        // the wrapper rather than the backend waiting the deadline out for it.
+        //
+        // The same fail-closed exit `OrphanedRun::poll` reports for the same
+        // reason: this is an evidence observation, not a process one, so
+        // fabricating a signal or a wait fault would invent a fact (ADR-0195
+        // §2). The authored body still drives the verdict, and a missing one is
+        // the host-fault path.
+        if let Err(error) = self.kill() {
+            tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "a lane that outlived its sealed evidence could not be reaped; its next poll re-asks");
+            return RunLifecycle::Running;
+        }
+        RunLifecycle::Exited { success: false }
     }
 
     fn kill(&mut self) -> Result<(), LocalExecutorError> {
@@ -1178,9 +1246,9 @@ mod tests {
     use super::link_slot_target;
     use super::{
         CaptureIdentity, FALLBACK_CAPTURE_SUBJECT, FALLBACK_IDENTITY, LocalExecutorError, ProcessTransformRunner,
-        SETTINGS_PATH, TransformRunner, capture_subject, commitish_for, decode_object_hex, fetch_order_identities,
-        fetch_subject_if_absent, git_in, materialize_checkout, neutralize_hooks, reclaim_worktree_path, reset_checkout,
-        resolved_git_common_dir, strip_hooks, work_order_args,
+        SEALED_EVIDENCE_GRACE_SECS, SETTINGS_PATH, SealGrace, TransformRunner, capture_subject, commitish_for,
+        decode_object_hex, fetch_order_identities, fetch_subject_if_absent, git_in, materialize_checkout,
+        neutralize_hooks, reclaim_worktree_path, reset_checkout, resolved_git_common_dir, strip_hooks, work_order_args,
     };
 
     #[test]
@@ -1192,6 +1260,28 @@ mod tests {
         assert_eq!(lifecycle, RunLifecycle::ObservationFault);
         assert!(lifecycle.is_terminal());
         assert!(!lifecycle.clean_success());
+    }
+
+    #[test]
+    fn a_wrapper_gets_its_grace_after_sealing_evidence_and_no_more() {
+        // Tripwire (#6073): six to eleven `xtask transform` processes sat idle
+        // on the fleet host at a time with their evidence already written —
+        // pid 548157 of dispatch-8161 was still alive ten minutes after it —
+        // each holding a registry entry `Registry::occupied` counts against the
+        // prover ceiling. The rule is a grace, not a kill on sight: a wrapper
+        // winding down normally must never be interrupted, and the grace starts
+        // when the evidence is first *seen*, not when the run started.
+        let grace = Duration::from_secs(SEALED_EVIDENCE_GRACE_SECS);
+        let start = Instant::now();
+        let mut seal = SealGrace { evidence_path: PathBuf::from("/nonexistent"), first_seen: None };
+
+        assert!(!seal.outlived(false, start), "a lane still working has written nothing to outlive");
+        assert!(!seal.outlived(true, start + grace), "the grace starts at the first sighting, not at the run's start");
+        assert!(
+            !seal.outlived(true, start + grace + grace - Duration::from_millis(1)),
+            "inside its grace it is left alone"
+        );
+        assert!(seal.outlived(true, start + grace + grace), "past the grace the wrapper has outlived its own evidence");
     }
 
     // The plausible bug: `--seeded` is omitted on a checkpoint Construct, or

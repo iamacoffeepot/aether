@@ -40,8 +40,8 @@ use crate::bloomery::{
     settle_batch_report,
 };
 use crate::store::{
-    CommissionBackend, ConstructionAdmissionRow, OrderLifecycle, PartialHeadRepairRow, SharedRunLifecycle,
-    SharedRunMemberRow, SharedRunRow, SharedRunStepRow, StoreBackend, resolve_config,
+    CommissionBackend, ConstructionAdmissionRow, OrderLifecycle, OutstandingOrder, PartialHeadRepairRow,
+    SharedRunLifecycle, SharedRunMemberRow, SharedRunRow, SharedRunStepRow, StoreBackend, resolve_config,
 };
 use serde::de::DeserializeOwned;
 
@@ -114,8 +114,44 @@ fn first_subject(transformation: &aether_bloomery::Transformation) -> Option<Dig
     transformation.inputs.first().copied()
 }
 
-fn logical_deadline(now_unix_millis: u64, request: &aether_bloomery::MemberVerifyRequest) -> u64 {
-    now_unix_millis.saturating_add(request.transformation.limits.wall_clock_secs.saturating_mul(1_000))
+/// The `deadline_unix_millis` a shared run and its members carry until a step
+/// is actually handed to the executor.
+///
+/// The column is the instant *this attempt's* sealed wall clock runs out, and
+/// an attempt that has not started has spent none of it — so nothing reads as
+/// expired while it waits for a prover slot. `u64::MAX >> 1` rather than
+/// `u64::MAX` because the store writes the column as a signed integer, and the
+/// value has to survive that round trip unchanged.
+pub(super) const UNDISPATCHED_DEADLINE_UNIX_MILLIS: u64 = u64::MAX >> 1;
+
+/// What wall clock a shared-run step's dispatch runs under this turn.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StepClock {
+    /// The lane is already running; this turn must not re-ask for it.
+    Running,
+    /// A dispatch this build already started. The order carries the instant
+    /// its clock runs out, and a re-drive reuses it rather than renewing it.
+    Retained(u64),
+    /// The clock starts now, at the dispatch that spends it.
+    Started(u64),
+}
+
+/// Decide a step's wall clock from the order it already has, if any.
+///
+/// The sealed `wall_clock_secs` is a budget for *running*, not for waiting. A
+/// run prepared while every prover slot is full sits `Ready` for as long as the
+/// queue in front of it takes, and a deadline minted back at preparation is
+/// already spent by the time the lane starts: on bloom 0c5a157e a run queued at
+/// 21:19Z carried a 21:36Z deadline, was written off at it while undispatched,
+/// and was dispatched anyway at 22:01Z; a sibling was cancelled at 23:02Z, four
+/// minutes into a fifteen-minute budget, and charged a member host fault for it
+/// (#6073). So the clock starts here and nowhere earlier.
+fn step_clock(order: Option<&OutstandingOrder>, wall_clock_secs: u64, now_unix_millis: u64) -> StepClock {
+    match order {
+        Some(order) if order.lifecycle == OrderLifecycle::Submitted => StepClock::Running,
+        Some(order) => StepClock::Retained(order.deadline_unix_millis),
+        None => StepClock::Started(now_unix_millis.saturating_add(wall_clock_secs.saturating_mul(1_000))),
+    }
 }
 
 fn contextual_record(dispatch: &aether_bloomery::ContextualAttemptDispatch, nonce: Nonce) -> DispatchRecord {
@@ -209,13 +245,11 @@ pub(super) fn drain_shared_dispatches(
             .enumerate()
             .map(|(ordinal, request)| {
                 // Queued when the member first asked to be proven, so latency
-                // still spans every attempt; due `wall_clock_secs` from *now*,
-                // because the sealed limit bounds the run, not the wait in
-                // front of it. Inheriting the queue row's deadline handed a
-                // serial run whatever budget the wait had already spent, and a
-                // request that outwaited its own clock produced a run with no
-                // eligible member at all: no step, no outcome, and a silent
-                // completion (#6053).
+                // still spans every attempt. The wall clock is *not* minted
+                // here: preparing a run is not dispatching it, and a run that
+                // then waits out the prover ceiling would reach its lane with
+                // the whole budget already spent (#6073). `submit_step` starts
+                // it at the dispatch that spends it.
                 let queued_unix_millis = store
                     .queued_member_verification(request.digest().as_bytes())?
                     .map_or(now_unix_millis, |row| row.queued_unix_millis);
@@ -224,18 +258,13 @@ pub(super) fn drain_shared_dispatches(
                     request: request.digest().as_bytes().to_vec(),
                     ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
                     queued_unix_millis,
-                    deadline_unix_millis: logical_deadline(now_unix_millis, request),
+                    deadline_unix_millis: UNDISPATCHED_DEADLINE_UNIX_MILLIS,
                     cancelled: false,
                     outcome: None,
                     latency_millis: None,
                 })
             })
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let deadline_unix_millis = if payload.dispatch.plan.mode == SharedRunMode::Contextual {
-            members.iter().map(|member| member.deadline_unix_millis).min().unwrap_or(now_unix_millis)
-        } else {
-            members.iter().map(|member| member.deadline_unix_millis).max().unwrap_or(now_unix_millis)
-        };
         store.record_shared_run(
             &SharedRunRow {
                 run: run.as_bytes().to_vec(),
@@ -243,7 +272,7 @@ pub(super) fn drain_shared_dispatches(
                 dispatch: dispatch_bytes,
                 lifecycle: SharedRunLifecycle::Preparing,
                 next_ordinal: 0,
-                deadline_unix_millis,
+                deadline_unix_millis: UNDISPATCHED_DEADLINE_UNIX_MILLIS,
                 charged: false,
                 physical_cost: None,
             },
@@ -1009,6 +1038,31 @@ fn next_initial_step(
     }))
 }
 
+/// Whether the journal already says nobody will consume this run's verdict.
+///
+/// Three durable facts say so, and each is written before the lane it stops: a
+/// cancellation retained against the plan, a lifecycle the run has already left
+/// `Ready`/`Running` for, and a run every one of whose members is cancelled or
+/// already carries an outcome — a physical run with nothing left to answer for.
+fn terminal_run(
+    store: &mut dyn StoreBackend,
+    row: &SharedRunRow,
+    dispatch: &SharedRunDispatch,
+) -> rusqlite::Result<bool> {
+    if store.shared_run_cancelled(dispatch.plan.digest().as_bytes())? {
+        return Ok(true);
+    }
+    let Some(current) = store.lookup_shared_run(&row.run)? else {
+        return Ok(true);
+    };
+    if !matches!(current.lifecycle, SharedRunLifecycle::Ready | SharedRunLifecycle::Running) {
+        return Ok(true);
+    }
+
+    let members = store.shared_run_members(&row.run)?;
+    Ok(!members.is_empty() && members.iter().all(|member| member.cancelled || member.outcome.is_some()))
+}
+
 fn submit_step(
     store: &mut dyn StoreBackend,
     artifacts: Option<&mut ArtifactsCapabilityState>,
@@ -1019,6 +1073,16 @@ fn submit_step(
     now_unix_millis: u64,
 ) -> rusqlite::Result<()> {
     if step.receipt.is_some() || step.prepared.is_none() {
+        return Ok(());
+    }
+    // A run the journal has already recorded terminal has nowhere to put a
+    // verdict, so the lane would spend a prover slot and a full gate fan-out on
+    // an answer nobody reads — which is what bloom 0c5a157e's `dispatch-8161`
+    // did for thirty-three minutes beside the runs the bloom depended on
+    // (#6073). The read is of durable state, so a cancellation that has not
+    // reached its topic drain yet still stops the dispatch here.
+    if terminal_run(store, row, dispatch)? {
+        store.complete_shared_run_step(&step.nonce, &encode_host(&cancelled_receipt(step))?, 0)?;
         return Ok(());
     }
     let run = Digest::from_slice(&row.run)
@@ -1047,38 +1111,18 @@ fn submit_step(
         instruction_bundle: None,
         prompt_manifest: None,
     };
-    let deadline = request
-        .and_then(|request| {
-            store
-                .shared_run_members(&row.run)
-                .ok()?
-                .into_iter()
-                .find(|member| member.request == request.digest().as_bytes())
-                .map(|member| member.deadline_unix_millis)
-        })
-        .unwrap_or(row.deadline_unix_millis);
-    if deadline <= now_unix_millis {
-        store.consume_order(&step.nonce)?;
-        let detail = Digest::of_wire_bytes(format!("expired:{}:{deadline}", step.nonce).as_bytes());
-        let receipt = SharedStepReceipt {
-            invocation: detail,
-            evidence: Evidence { subject, kind: EvidenceKind::ExecutorFault, detail },
-            verdict: StageVerdict::ExecutorFault,
-            failed_verifiers: VerifyFailureSet::default(),
-            failed_verifier_names: Vec::new(),
-            findings: None,
-            cost: None,
-            calls: None,
-            replayed_flakes: Vec::new(),
-            contextual_observations: None,
-            probe_verdict: Some(ProbeVerdict::Infrastructure),
-        };
-        store.complete_shared_run_step(&step.nonce, &encode_host(&receipt)?, 0)?;
-        return Ok(());
-    }
-    if store.lookup_order(&step.nonce)?.is_some_and(|order| order.lifecycle == OrderLifecycle::Submitted) {
-        return Ok(());
-    }
+    let deadline = match step_clock(
+        store.lookup_order(&step.nonce)?.as_ref(),
+        record.transformation.limits.wall_clock_secs,
+        now_unix_millis,
+    ) {
+        StepClock::Running => return Ok(()),
+        StepClock::Retained(deadline) => deadline,
+        StepClock::Started(deadline) => {
+            store.start_shared_run_deadline(&row.run, step.request.as_deref(), deadline)?;
+            deadline
+        }
+    };
 
     // Derived from this step's own durable descriptor rather than carried
     // beside it: the probe's `BatchCheck` is the sealed statement of what the
@@ -1665,6 +1709,12 @@ fn fold_serial_receipts(
 
 /// Record a host fault for every serial member whose own deadline passed
 /// without a step ever running for it.
+///
+/// A member this build minted carries [`UNDISPATCHED_DEADLINE_UNIX_MILLIS`]
+/// until `submit_step` starts its clock, so it cannot be caught here: a member
+/// that was never dispatched never spent a budget (#6073). What still reaches
+/// this scan is a row an older build wrote at run preparation, which is the
+/// live journal across the upgrade.
 ///
 /// [`next_initial_step`] will not start a member the clock has already run out
 /// on, so without this the run reaches its terminal scan with that member
@@ -2909,13 +2959,20 @@ pub(super) fn drive_shared_runs(
             admits.extend(replay_completion(store, &current, executor)?);
             continue;
         }
-        if row.lifecycle == SharedRunLifecycle::Completing
-            && store.shared_run_steps(&row.run)?.iter().all(|step| step.receipt.is_some())
-        {
-            if !row.charged {
-                release_terminal_physical_run(executor, &row)?;
+        if row.lifecycle == SharedRunLifecycle::Completing {
+            // A terminal run's lane is burning a prover slot and the host's
+            // wall clock for a verdict nothing will consume, and `finish_if_
+            // terminal` below waits on exactly that receipt — so on the fleet
+            // it ran to completion and the run waited for it (#6073). A cancel
+            // that cannot settle this turn re-asks on the next one; the
+            // completion this gates is re-derived either way.
+            cancel_live_steps(store, executor, &row)?;
+            if store.shared_run_steps(&row.run)?.iter().all(|step| step.receipt.is_some()) {
+                if !row.charged {
+                    release_terminal_physical_run(executor, &row)?;
+                }
+                charge_physical_run(store, artifacts.as_deref_mut(), &row, &dispatch)?;
             }
-            charge_physical_run(store, artifacts.as_deref_mut(), &row, &dispatch)?;
         }
         for step in store.shared_run_steps(&row.run)?.into_iter().filter(|step| step.receipt.is_none()) {
             if settle_refused_preparation(store, &step)? {
@@ -3652,6 +3709,53 @@ mod tests {
         assert_eq!(total.cost_micro_usd, 40);
         assert_eq!(total.duration_millis, 60);
         assert_eq!(total.turns, 3);
+    }
+
+    #[test]
+    fn a_steps_wall_clock_starts_at_dispatch_and_no_redrive_renews_it() {
+        // Tripwire (#6073): the sealed `wall_clock_secs` is a budget for
+        // running. Bloom 0c5a157e minted it at run preparation, so
+        // `dispatch-8161` reached its lane 41 minutes after a 17-minute clock
+        // had already run out, and `dispatch-8333-step-1` was cancelled four
+        // minutes into a fifteen-minute budget and charged a host fault. The
+        // two halves that fix is made of are both here: a step with no order
+        // starts the clock now, and a step whose order this build already
+        // recorded keeps the instant that order carries.
+        let dispatched_at = 1_700_000_000_000;
+        let wall_clock_secs = 900;
+
+        assert_eq!(
+            step_clock(None, wall_clock_secs, dispatched_at),
+            StepClock::Started(dispatched_at + 900_000),
+            "a step reaching a lane for the first time is given its whole sealed budget from now",
+        );
+
+        let order = OutstandingOrder {
+            nonce: "dispatch-8333-step-1".to_owned(),
+            bloom: Vec::new(),
+            workpiece: "issue-6029".to_owned(),
+            scope_revision: Vec::new(),
+            candidate: Vec::new(),
+            displayed_digest: Vec::new(),
+            stage: Vec::new(),
+            transformation: Vec::new(),
+            configs: Vec::new(),
+            profile: Vec::new(),
+            deadline_unix_millis: dispatched_at + 900_000,
+            prompt_manifest: None,
+            lifecycle: OrderLifecycle::Submitting,
+        };
+
+        assert_eq!(
+            step_clock(Some(&order), wall_clock_secs, dispatched_at + 600_000),
+            StepClock::Retained(dispatched_at + 900_000),
+            "a re-drive ten minutes in runs out the clock its own dispatch started, never a renewed one",
+        );
+        assert_eq!(
+            step_clock(Some(&OutstandingOrder { lifecycle: OrderLifecycle::Submitted, ..order }), wall_clock_secs, 0),
+            StepClock::Running,
+            "a lane already running is not re-asked for at all",
+        );
     }
 
     #[test]

@@ -19,6 +19,8 @@
 use std::path::Path;
 use std::{fs, io};
 
+use super::super::process_runner::EVIDENCE_FILE;
+
 use aether_bloomery::{
     CONSTRUCT_IMPLEMENT_COMMAND, Digest, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND,
     VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VerifyFailure, VerifyFailureSet,
@@ -463,25 +465,38 @@ fn wrong_subject(displayed: Option<&str>) -> String {
     }
 }
 
-/// Apply an outcome: write the candidate into `worktree` when there is one, and
-/// the evidence into `out` when there is any.
+/// Write the outcome's candidate into `worktree`, when it has one.
+///
+/// Separate from [`apply_evidence`] because the two halves happen at different
+/// moments in a lane's life: the work lands in the worktree while the lane is
+/// still running, and the evidence is the statement that it has stopped. A
+/// parked [`LaneMode::NeverExits`](super::LaneMode::NeverExits) run sits
+/// between them (#6073).
 ///
 /// # Errors
 /// A directory could not be created or a file could not be written.
-pub fn apply(outcome: &Outcome, worktree: &Path, out: &Path) -> io::Result<()> {
-    if let Some(candidate) = &outcome.candidate {
-        let path = worktree.join(outcome.candidate_path.unwrap_or(CANDIDATE_FILE));
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(path, candidate)?;
+pub fn apply_candidate(outcome: &Outcome, worktree: &Path) -> io::Result<()> {
+    let Some(candidate) = &outcome.candidate else {
+        return Ok(());
+    };
+    let path = worktree.join(outcome.candidate_path.unwrap_or(CANDIDATE_FILE));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
-    if let Some(evidence) = &outcome.evidence {
-        fs::create_dir_all(out)?;
-        fs::write(out.join("evidence.json"), evidence)?;
-        write_verify_test_observations(out, evidence)?;
-    }
-    Ok(())
+    fs::write(path, candidate)
+}
+
+/// Seal the outcome's evidence into `out`, when it has any.
+///
+/// # Errors
+/// A directory could not be created or a file could not be written.
+pub fn apply_evidence(outcome: &Outcome, out: &Path) -> io::Result<()> {
+    let Some(evidence) = &outcome.evidence else {
+        return Ok(());
+    };
+    fs::create_dir_all(out)?;
+    fs::write(out.join(EVIDENCE_FILE), evidence)?;
+    write_verify_test_observations(out, evidence)
 }
 
 fn write_verify_test_observations(out: &Path, evidence: &[u8]) -> io::Result<()> {
@@ -588,14 +603,16 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         let worktree = tempfile::tempdir().unwrap();
         let run = outcome(VERIFY_CHECK_COMMAND, "n-fail", LaneMode::Fail);
-        super::apply(&run, worktree.path(), out.path()).unwrap();
+        super::apply_candidate(&run, worktree.path()).unwrap();
+        super::apply_evidence(&run, out.path()).unwrap();
         let document: Value =
             serde_json::from_slice(&fs::read(out.path().join("verify.test.observations.json")).unwrap()).unwrap();
         assert_eq!(document["gate"], "verify.test");
         assert_eq!(document["invocations"][0]["outcomes"][format!("test:{}", super::NAMED_TEST)], "failed");
 
         let pass = outcome(VERIFY_BASE_COMMAND, "n-pass", LaneMode::Pass);
-        super::apply(&pass, worktree.path(), out.path()).unwrap();
+        super::apply_candidate(&pass, worktree.path()).unwrap();
+        super::apply_evidence(&pass, out.path()).unwrap();
         let passed: Value =
             serde_json::from_slice(&fs::read(out.path().join("verify.test.observations.json")).unwrap()).unwrap();
         assert_eq!(passed["invocations"][0]["outcomes"][format!("test:{}", super::NAMED_TEST)], "passed");

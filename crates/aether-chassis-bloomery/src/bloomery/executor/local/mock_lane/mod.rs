@@ -161,19 +161,27 @@ fn run_recorded(parse_from: Vec<String>, recorded: Vec<String>, worktree: &Path)
 
     let outcome =
         evidence::outcome_for(&args.command, &args.nonce, mode, args.subject.as_deref(), script.verify_report.as_ref());
-    evidence::apply(&outcome, worktree, &args.out)?;
+    evidence::apply_candidate(&outcome, worktree)?;
 
     if mode == LaneMode::NeverExits {
         // Park rather than spin: most scenarios let their own budget end this
         // run. A grouping scenario may explicitly release several parked
         // children together, after all of them crossed the real spawn and Git
         // write boundary but before the executor observes any completion.
+        //
+        // Before the seal, because a real lane writes `evidence.json` last and
+        // the backend now reads that file as "this run's work is over" —
+        // reaping a wrapper that outlives its own evidence rather than holding
+        // a prover slot for it (#6073). A park after the seal would be that
+        // linger rather than a lane still working.
         let release = release_marker(script_dir, &args.nonce);
         while !release.try_exists()? {
             thread::sleep(RELEASE_POLL);
         }
         fs::write(released_marker(script_dir, &args.nonce), [])?;
     }
+
+    evidence::apply_evidence(&outcome, &args.out)?;
 
     Ok(outcome.exit_code)
 }

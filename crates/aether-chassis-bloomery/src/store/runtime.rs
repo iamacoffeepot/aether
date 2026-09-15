@@ -688,6 +688,25 @@ pub trait StoreBackend: Send + CommissionBackend {
     fn has_pending_construction_admission(&mut self) -> rusqlite::Result<bool>;
     /// Cancel every still-unfinished association for one immutable request.
     fn cancel_shared_run_member(&mut self, request: &[u8]) -> rusqlite::Result<bool>;
+    /// Start the sealed wall clock of one shared-run attempt, at the dispatch
+    /// that spends it.
+    ///
+    /// The budget `wall_clock_secs` buys is for *running*. A run prepared while
+    /// every prover slot is full sits `Ready` for as long as the queue in front
+    /// of it takes, and a deadline minted back at preparation is already spent
+    /// when the lane finally starts: on bloom 0c5a157e a run queued at 21:19Z
+    /// carried a 21:36Z deadline, was written off at it undispatched, and was
+    /// dispatched anyway at 22:01Z — while a sibling was cancelled four minutes
+    /// into a fifteen-minute budget and charged a host fault for it (#6073).
+    /// So a member carries no reachable deadline until this write, and a step
+    /// naming no request (a contextual node runs for every member the run
+    /// carries) starts the clock for all of them.
+    fn start_shared_run_deadline(
+        &mut self,
+        run: &[u8],
+        request: Option<&[u8]>,
+        deadline_unix_millis: u64,
+    ) -> rusqlite::Result<bool>;
     fn record_shared_run_member_outcome(
         &mut self,
         run: &[u8],
@@ -3287,6 +3306,33 @@ impl StoreBackend for SqliteStore {
             "UPDATE shared_run_members SET cancelled = 1 WHERE request = ?1 AND outcome IS NULL",
             rusqlite::params![request],
         )? > 0)
+    }
+
+    fn start_shared_run_deadline(
+        &mut self,
+        run: &[u8],
+        request: Option<&[u8]>,
+        deadline_unix_millis: u64,
+    ) -> rusqlite::Result<bool> {
+        let deadline = recorded_column(deadline_unix_millis);
+        let transaction = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let started = match request {
+            Some(request) => transaction.execute(
+                "UPDATE shared_run_members SET deadline_unix_millis = ?3 \
+                 WHERE run = ?1 AND request = ?2 AND outcome IS NULL",
+                rusqlite::params![run, request, deadline],
+            )?,
+            None => transaction.execute(
+                "UPDATE shared_run_members SET deadline_unix_millis = ?2 WHERE run = ?1 AND outcome IS NULL",
+                rusqlite::params![run, deadline],
+            )?,
+        };
+        transaction.execute(
+            "UPDATE shared_runs SET deadline_unix_millis = ?2 WHERE run = ?1",
+            rusqlite::params![run, deadline],
+        )?;
+        transaction.commit()?;
+        Ok(started > 0)
     }
 
     fn record_shared_run_member_outcome(

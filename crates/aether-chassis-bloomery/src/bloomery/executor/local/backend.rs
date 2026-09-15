@@ -3747,7 +3747,7 @@ impl ExecutorBackend for LocalExecutor {
             }
         };
         let host_fault = HostFaultCause::from_lifecycle(run.lifecycle);
-        let evidence_path = run.evidence_dir.join("evidence.json");
+        let evidence_path = run.evidence_dir.join(super::process_runner::EVIDENCE_FILE);
         let mut bytes = match fs::read(&evidence_path) {
             Ok(bytes) => bytes,
             Err(read_error) => {
