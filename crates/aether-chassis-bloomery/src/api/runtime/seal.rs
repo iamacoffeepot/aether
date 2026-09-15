@@ -990,7 +990,7 @@ fn seal_dependency_resolution(
 mod tests {
     use aether_bloomery::{
         ApprovalPolicy, BloomDraft, BloomId, ConfigRegistry, Digest, Evidence, EvidenceKind, Fact, MemberDependency,
-        Membership, Observation, Provenance, Statement, Tier, WorkpieceId,
+        Membership, Observation, Provenance, Statement, Tier, WorkpieceId, coarsen,
     };
 
     use super::{
@@ -1379,6 +1379,28 @@ mod tests {
         assert!(!body.contains("no stored approval"), "must not read as absent approval: {body}");
         assert!(!body.contains("stale"), "must not read as stale: {body}");
         assert!(!body.contains("malformed"), "must not read as malformed: {body}");
+    }
+
+    #[test]
+    fn a_src_only_surface_seals_and_is_admitted_as_its_crate() {
+        // Tripwire (issue 6030): `src` and `tests` are one compilation unit, so
+        // a revision declaring only `src/**` must seal — the granularity check
+        // passes a subtree — and the estate admits it as the whole crate, which
+        // is what keeps the `tests/` edit the change needs inside the surface.
+        let policy = ApprovalPolicy { default: Tier::Auto, rules: Vec::new() };
+        let gate = Gate::new(&policy);
+        let members = [member("wp-a", 1)];
+        let projections = [projection("wp-a", 1, &["crates/example-a/src/**"])];
+
+        let (sealed, pending) =
+            resolve_seal_memberships(&gate, &policy, &members, &projections).expect("a src-only subtree seals");
+        assert_eq!(sealed.len(), 1, "the member is admitted");
+        assert!(pending.is_empty(), "an auto-tier member forms inline");
+        assert_eq!(
+            coarsen(&policy, &projections[0].declared_surface),
+            vec!["crates/example-a/**".to_owned()],
+            "the door admits the declaration as its crate",
+        );
     }
 
     #[test]

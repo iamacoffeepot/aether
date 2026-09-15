@@ -690,6 +690,7 @@ pub use values::signed_reopen;
 pub use values::sized_wall_clock_secs;
 pub use values::split_lane_identity;
 pub use values::surface_additions;
+pub use values::surface_atom;
 pub use values::surface_intersection;
 pub use values::surface_union;
 pub use values::tier_verdict;

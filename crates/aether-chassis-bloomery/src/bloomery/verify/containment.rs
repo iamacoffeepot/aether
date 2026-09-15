@@ -21,20 +21,25 @@ use aether_bloomery_git::command::{self, GitCommandError};
 /// module, and the name has to be in scope here for [`out_of_surface`], which
 /// calls it unqualified.
 pub use aether_bloomery::path_in_surface;
+use aether_bloomery::surface_atom;
 
 /// The workspace lockfile any member's rebuild may rewrite.
 const LOCKFILE: &str = "Cargo.lock";
 
 /// Paths in `changed` that sit outside every glob in `surface`.
 ///
+/// The surface is read as the seal admits it: a sub-crate entry is its crate's
+/// atom, because a crate's `src` and `tests` are one compilation unit and a
+/// surface cutting between them would refuse the correct change (issue 6030).
 /// `Cargo.lock` is skipped. Globs outside the surface grammar are ignored
 /// rather than treated as covering anything — the same fail-closed parse the
 /// seal door already applies.
 #[must_use]
 pub fn out_of_surface<'a>(changed: impl IntoIterator<Item = &'a str>, surface: &[String]) -> Vec<String> {
+    let admitted: Vec<String> = surface.iter().map(|glob| surface_atom(glob).unwrap_or_else(|| glob.clone())).collect();
     let mut violations: Vec<String> = changed
         .into_iter()
-        .filter(|path| *path != LOCKFILE && !path_in_surface(surface, path))
+        .filter(|path| *path != LOCKFILE && !path_in_surface(&admitted, path))
         .map(str::to_owned)
         .collect();
     violations.sort();
@@ -203,10 +208,39 @@ mod tests {
     }
 
     #[test]
-    fn an_exact_glob_does_not_cover_a_sibling() {
+    fn a_src_surface_covers_its_crates_tests() {
+        // Tripwire (issue 6030): `src` and `tests` are one compilation unit. A
+        // member declaring `src/**` whose change touches the crate's `tests/`
+        // is contained — before the crate atom this named the tests path and
+        // failed Verify, parking a correct change for an amendment round trip.
+        assert!(
+            out_of_surface(["crates/owned/tests/golden.rs"], &surface(&["crates/owned/src/**"])).is_empty(),
+            "a tests path under a declared src tree is inside the admitted surface"
+        );
+        assert!(
+            out_of_surface(["crates/owned/src/other.rs"], &surface(&["crates/owned/tests/**"])).is_empty(),
+            "the atom runs both directions: tests-declared covers src too"
+        );
+    }
+
+    #[test]
+    fn a_src_surface_still_names_another_crate() {
+        // The atom widens within its crate, never across crates: a sibling
+        // crate's `tests/` is still a violation under a `src/**` surface.
         assert_eq!(
-            out_of_surface(["crates/owned/src/other.rs"], &surface(&["crates/owned/src/lib.rs"])),
-            ["crates/owned/src/other.rs"],
+            out_of_surface(["crates/other/tests/golden.rs"], &surface(&["crates/owned/src/**"])),
+            ["crates/other/tests/golden.rs"],
+        );
+    }
+
+    #[test]
+    fn an_exact_glob_does_not_cover_a_sibling() {
+        // Docs trees carry no atom, so the exact-vs-sibling contract is pinned
+        // here; under `crates/` an exact entry is admitted as its crate (see
+        // the atom tests above).
+        assert_eq!(
+            out_of_surface(["docs/guide/other.md"], &surface(&["docs/guide/testing.md"])),
+            ["docs/guide/other.md"],
         );
     }
 
