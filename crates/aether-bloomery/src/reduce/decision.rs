@@ -17,8 +17,8 @@ use crate::values::{
     CompositionFinding, ConfigRegistry, ContextualAttemptDispatch, CoordinationState, Evidence, IntegrationAppendPlan,
     MemberCandidate, MemberDependency, MemberVerifyRequest, OperatorHold, OperatorProposal, OperatorRepair,
     OrphanClaimRelease, OrphanClaimReleaseCompletion, PartialHeadRepairDispatch, PipelineManifest, PrecheckNode,
-    PrecheckPlan, PrecheckState, ResolutionClaim, ResolvedBloom, SharedRunDispatch, SharedRunPlan, SpendQuiesce,
-    StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge, Withdrawal,
+    PrecheckPlan, PrecheckState, RedVerify, ResolutionClaim, ResolvedBloom, SharedRunDispatch, SharedRunPlan,
+    SpendQuiesce, StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -990,4 +990,20 @@ pub enum Decision {
     QueueConstructionAdmission { dispatch: ContextualAttemptDispatch },
     /// Repair one exact red eager head under composition ownership.
     DispatchPartialHeadRepair { dispatch: PartialHeadRepairDispatch },
+    /// Record what this bloom does with a member whose `Verify` did not go
+    /// green (ADR-0218 §Amendment: low tolerance).
+    ///
+    /// Decided at seal from the sealed [`CoordinationPolicy`]'s `red_verify`,
+    /// or [`RedVerify::Eject`] when the bloom sealed no policy. Recorded rather
+    /// than re-resolved from the configuration registry at fold time, for the
+    /// reason [`Self::RecordStageCatalog`] is recorded (#4944): a later binary
+    /// with a different default would otherwise rewrite the disposition of a
+    /// bloom that is already walking under the old one.
+    ///
+    /// It is its own row rather than a field on
+    /// [`Self::RecordCoordinationState`] because that state exists only for a
+    /// bloom that opted into shared verification, and the disposition governs
+    /// every bloom. Appended past every prior effect so their discriminants are
+    /// unchanged.
+    RecordRedVerify { bloom: BloomId, red_verify: RedVerify },
 }

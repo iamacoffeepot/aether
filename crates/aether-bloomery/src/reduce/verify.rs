@@ -6,12 +6,13 @@
 use alloc::vec::Vec;
 
 use super::attempt::{DispatchTargets, SealedLine, move_effects, wedged};
+use super::eject::{eject, ejection_reason};
 use super::operator_hold::owed_resume_dispatch;
 use super::{
     BloomRecord, BloomStatus, Decision, Decisions, HostFaultError, Outcome, Snapshot, StageProgress, VerifyFailedError,
 };
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{Evidence, Membership, VerifyFailure, VerifyFailureSet, Wedge};
+use crate::values::{Evidence, Membership, RedVerify, VerifyFailure, VerifyFailureSet, Wedge};
 
 /// Reduce one admitted failing member-Verify verdict.
 ///
@@ -28,6 +29,7 @@ pub(super) fn reduce_verify_failed(
     workpiece: &WorkpieceId,
     evidence: &Evidence,
     failed_verifiers: VerifyFailureSet,
+    findings: &str,
 ) -> Decisions {
     let Some(record) = snapshot.blooms.get(bloom) else {
         return Decisions::rejected(Outcome::VerifyFailedRejected(VerifyFailedError::UnknownOrInactiveBloom));
@@ -87,6 +89,23 @@ pub(super) fn reduce_verify_failed(
     // taking the candidate path either.
     if failed_verifiers == VerifyFailureSet::one(VerifyFailure::Preflight) {
         return host_fault_hold(*bloom, workpiece, evidence, String::new(), effects);
+    }
+
+    // Low tolerance (ADR-0218 §Amendment): the verdict is real, it is about
+    // this member's own tree, and the bloom's sealed disposition says a member
+    // that did not go green leaves rather than buying a repair lap. Ahead of
+    // both accounting arms below, because neither ledger is answering a
+    // question any more — there is no next verdict for a seen set to be
+    // compared against and no next lap for a roll to pay for.
+    if record.red_verify == RedVerify::Eject {
+        return eject(
+            snapshot,
+            record,
+            bloom,
+            workpiece,
+            &ejection_reason("its verify came back red", failed_verifiers, evidence, findings),
+            effects,
+        );
     }
 
     let line =

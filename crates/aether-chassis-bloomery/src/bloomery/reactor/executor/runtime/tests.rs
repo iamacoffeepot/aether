@@ -39,10 +39,10 @@ use super::scope_freeze::ScopeFreeze;
 use super::strand::{readopt_stranded_dispatches, retire_accounted_orders};
 use super::{
     BACKOFF_CAP, BaseSnapshotPort, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState,
-    GitCandidatePush, NameEvidenceClaims, Stores, TickClock, TrackedHandle, admitted_candidate_pushes, backoff_delay,
-    candidate_push_at, default_candidate_push, dispatch_origin, drain_and_cancel, fold_drain_backoff, is_silent,
-    is_stale, journal_publications, next_backoff, observe_heartbeat, seed_dispatches, seed_tracked,
-    select_stale_handles, silence_from, timeout_verdict,
+    GitCandidatePush, NameEvidenceClaims, Stores, TerminationCause, TickClock, TrackedHandle,
+    admitted_candidate_pushes, backoff_delay, candidate_push_at, default_candidate_push, dispatch_origin,
+    drain_and_cancel, fold_drain_backoff, is_silent, is_stale, journal_publications, next_backoff, observe_heartbeat,
+    seed_dispatches, seed_tracked, select_stale_handles, silence_from, timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -1533,12 +1533,25 @@ fn a_timeout_is_an_executor_fault_on_every_dispatched_stage() {
         StageId::Study,
     ] {
         assert_eq!(
-            timeout_verdict(stage),
+            timeout_verdict(stage, TerminationCause::Deadline),
+            Some((StageVerdict::DeadlineExpiry, VerifyFailureSet::EMPTY)),
+            "{stage:?} must expire on its wall clock with no invented verifier",
+        );
+        // Tripwire (ADR-0218 §Amendment: low tolerance): a lane the host
+        // stopped hearing from is not a lane that used its allowance, and the
+        // two must not share a verdict — one ejects the member and the other
+        // keeps its budget.
+        assert_eq!(
+            timeout_verdict(stage, TerminationCause::HeartbeatSilence),
             Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
-            "{stage:?} must expire as a host fault with no invented verifier",
+            "{stage:?} must terminate a silent lane as a host fault",
         );
     }
-    assert_eq!(timeout_verdict(StageId::Integrate), None, "a stage no executor runs cannot expire");
+    assert_eq!(
+        timeout_verdict(StageId::Integrate, TerminationCause::Deadline),
+        None,
+        "a stage no executor runs cannot expire"
+    );
 }
 
 #[test]
@@ -1566,8 +1579,8 @@ fn an_overdue_scope_order_terminates_once() {
     let verdict = rows.iter().find(|row| row.kind == "verdict" && row.ordinal == opened.ordinal);
     assert_eq!(
         verdict.and_then(|row| row.verdict.as_deref()),
-        Some("ExecutorFault"),
-        "the fault is recorded on the run ledger",
+        Some("DeadlineExpiry"),
+        "the expiry is recorded on the run ledger",
     );
     assert!(
         tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE + 60_000).is_empty(),
@@ -1594,13 +1607,13 @@ fn an_order_that_outlives_its_sealed_limit_is_cancelled_as_a_host_fault() {
 
     assert_eq!(backend.cancelled(), vec![nonce], "the hung run is reclaimed");
     assert_eq!(
-        timeout_verdict(StageId::Construct),
-        Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
-        "the producer classifies the deadline as a host fault",
+        timeout_verdict(StageId::Construct, TerminationCause::Deadline),
+        Some((StageVerdict::DeadlineExpiry, VerifyFailureSet::EMPTY)),
+        "the producer classifies the deadline as an expiry, not a host fault",
     );
-    // Intake admits a dispatched member-stage ExecutorFault as a member
-    // machinery fault and redispatches the cancelled order. The cancel and
-    // the verdict are this test's surface; admission is not.
+    // Intake admits a dispatched member-stage expiry as a member machinery
+    // fact and redispatches the cancelled order. The cancel and the verdict
+    // are this test's surface; admission is not.
     let _ = admits;
 }
 
@@ -1707,13 +1720,13 @@ fn a_restart_neither_extends_nor_resets_a_deadline() {
     assert!(tracked.is_empty(), "the consumed order is no longer tracked");
     assert_eq!(admits.len(), 1, "the expired order admits a host fault rather than deferring");
     match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
-        Fact::MemberExecutorFault { bloom, workpiece, stage, evidence } => {
+        Fact::MemberDeadlineExpired { bloom, workpiece, stage, evidence } => {
             assert_eq!(bloom, BloomId(digest(1)));
             assert_eq!(workpiece.0, "wp-hung");
             assert_eq!(stage, StageId::Construct);
             assert_eq!(evidence.kind, aether_bloomery::EvidenceKind::ExecutorFault);
         }
-        other => panic!("expected a Fact::MemberExecutorFault, got {other:?}"),
+        other => panic!("expected a Fact::MemberDeadlineExpired, got {other:?}"),
     }
 
     assert!(
@@ -1748,11 +1761,12 @@ fn a_cancel_that_faults_leaves_the_expired_order_live_to_retry() {
 #[test]
 fn a_verify_timeout_names_no_verifier_it_cannot_know() {
     // A timeout cannot know which verifier would have failed, and inventing
-    // one spends a repair roll. ExecutorFault carries the empty set; that is
-    // the producer contract, independent of whether intake yet admits it.
+    // one spends a repair roll. The expiry verdict carries the empty set; that
+    // is the producer contract, independent of what the reducer then does with
+    // the member (ADR-0218 §Amendment: low tolerance).
     assert_eq!(
-        timeout_verdict(StageId::Verify),
-        Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
+        timeout_verdict(StageId::Verify, TerminationCause::Deadline),
+        Some((StageVerdict::DeadlineExpiry, VerifyFailureSet::EMPTY)),
         "a Verify deadline names no verifier and is not a candidate failure",
     );
 }
@@ -1949,9 +1963,9 @@ fn a_cycle_that_faulted_partway_does_not_expire_the_handles_it_never_inspected()
     assert_eq!(store.list_outstanding_nonces().unwrap().len(), 2, "both orders survive the blip");
 
     // The transport recovers on the next tick: the finished lane admits its own
-    // passing verdict, and only the genuinely silent one times out — as the
-    // member machinery fault #5091 admits, not a failing attempt that would
-    // spend the work budget.
+    // passing verdict, and only the order still running past its deadline
+    // expires — as the member-stage expiry the sweep admits, not a failing
+    // attempt that would spend the work budget.
     let admits = tick(&mut store, &working, &mut tracked, AT_THE_DEADLINE);
 
     let mut passed = false;
@@ -1959,17 +1973,17 @@ fn a_cycle_that_faulted_partway_does_not_expire_the_handles_it_never_inspected()
     for admit in &admits {
         match from_bytes::<aether_bloomery::Event>(&admit.event).unwrap().fact {
             Fact::AttemptCompleted { passed: true, .. } => passed = true,
-            Fact::MemberExecutorFault { workpiece, stage, evidence, .. } => {
+            Fact::MemberDeadlineExpired { workpiece, stage, evidence, .. } => {
                 assert_eq!(workpiece.0, "wp-silent");
                 assert_eq!(stage, StageId::Construct);
                 assert_eq!(evidence.kind, aether_bloomery::EvidenceKind::ExecutorFault);
                 silent_fault = true;
             }
-            other => panic!("expected a passing attempt or a silent-order machinery fault, got {other:?}"),
+            other => panic!("expected a passing attempt or an expired-order fact, got {other:?}"),
         }
     }
     assert!(passed, "the finished lane keeps its own verdict");
-    assert!(silent_fault, "the silent timeout is a host fault, not a second attempt");
+    assert!(silent_fault, "the overdue order expires, rather than admitting a second attempt");
     assert_eq!(admits.len(), 2);
 }
 
@@ -4104,9 +4118,9 @@ fn progress_extends_only_the_silence_window() {
     let _ = tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + 2 * SILENCE_MILLIS);
     assert_eq!(backend.cancelled(), vec![nonce], "the same stamp left to go quiet reaches the threshold");
     assert_eq!(
-        timeout_verdict(StageId::Construct),
+        timeout_verdict(StageId::Construct, TerminationCause::HeartbeatSilence),
         Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
-        "silence uses the same host-fault verdict a deadline does",
+        "silence keeps the host-fault verdict",
     );
 }
 
@@ -4208,12 +4222,13 @@ fn a_duplicate_silence_tick_cancels_once() {
 }
 
 #[test]
-fn a_silence_fault_is_the_same_host_fault_a_timeout_is() {
-    // #5091 owns the machinery counter; this issue only reports the host
-    // observation through the deadline reaper's existing failed-attempt
-    // admission. A silence fault must therefore be the same verdict a
-    // timeout is — so when #5091 remounts the classification, both causes
-    // move together — and must not invent a second retry authority here.
+fn a_silence_fault_reports_a_host_fault_where_a_timeout_reports_an_expiry() {
+    // A silent lane and an expired one share the whole cancel → timeout-record
+    // → intake path and differ in exactly one place: the verdict
+    // (ADR-0218 §Amendment: low tolerance). A lane that used its full sealed
+    // allowance has answered about its own work and its member is ejected; a
+    // lane the host stopped hearing from has not, and keeps its budget. Neither
+    // invents a second retry authority here.
     let mut store = SqliteStore::open(":memory:").unwrap();
     let backend = HeartbeatBackend::new();
     let shell = heartbeat_shell(&backend);
@@ -4223,9 +4238,9 @@ fn a_silence_fault_is_the_same_host_fault_a_timeout_is() {
 
     let _ = tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS);
     assert_eq!(
-        timeout_verdict(StageId::Construct),
+        timeout_verdict(StageId::Construct, TerminationCause::HeartbeatSilence),
         Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
-        "silence retries the same host-fault path a timeout would",
+        "silence stays the host-fault path",
     );
     assert_eq!(backend.cancelled(), vec![nonce]);
 }

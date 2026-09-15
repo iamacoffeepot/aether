@@ -193,6 +193,22 @@ pub enum WithdrawalCause {
         /// The withdrawn ancestor.
         on: WorkpieceId,
     },
+    /// The member's terminal `Verify` did not go green and the bloom's sealed
+    /// [`RedVerify`](crate::RedVerify) disposition is `Eject` (ADR-0218
+    /// §Amendment: low tolerance) — a red verdict, a run the host killed at its
+    /// sealed wall clock, or an attribution that never resolved which member
+    /// owed the failure.
+    ///
+    /// One cause rather than three, because the three answer the same question
+    /// for whoever reads the record: this member's work did not pass and nobody
+    /// is going to repair it inside this bloom. *Which* of the three it was is
+    /// the first clause of [`Withdrawal::reason`], where a reader is already
+    /// looking, rather than a discriminant every consumer of the outward
+    /// `cause` string would have to learn.
+    ///
+    /// Appended past [`Self::Dependency`] so the prior causes keep their wire
+    /// discriminants.
+    Verify,
 }
 
 /// One member's terminal departure from a walking bloom (#5327).

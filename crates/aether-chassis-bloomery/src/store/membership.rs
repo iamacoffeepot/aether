@@ -122,7 +122,7 @@ mod tests {
         AgentProfile, BloomId, BloomRecord, CandidateRef, CompositionContractTemplate, CompositionInput,
         CompositionPlan, ConfigRegistry, ContextualInvocationTemplate, CoordinationPolicy, CoordinationState, Evidence,
         EvidenceKind, ExecutionLimits, GenerationMember, Harness, MemberContractPin, MemberPin, MemberVerifyOutcome,
-        MemberVerifyRequest, NetworkProfile, ReasoningEffort, ResolutionProof, SharedRunMode, SharedRunNode,
+        MemberVerifyRequest, NetworkProfile, ReasoningEffort, RedVerify, ResolutionProof, SharedRunMode, SharedRunNode,
         SharedRunPhase, SharedRunPlan, StageId, ToolPolicy, Transformation, VerificationContract, VerificationMode,
         VerificationObligation, VerifyProof, Withdrawal, WithdrawalCause, WorkpieceId,
     };
@@ -225,6 +225,7 @@ mod tests {
                 movement_budget: 1,
                 reservation_millis: 1_000,
                 coalesce_millis: None,
+                red_verify: RedVerify::Refine,
                 host_class: "membership-test".to_owned(),
             },
             template.clone(),

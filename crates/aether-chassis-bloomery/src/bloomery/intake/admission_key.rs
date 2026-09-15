@@ -41,6 +41,11 @@ pub enum AdmissionKey {
     BaseVerify,
     /// A member stage whose executor could not judge the subject (ADR-0195).
     MemberExecutorFault,
+    /// A member stage the host cancelled at its sealed wall clock (ADR-0177,
+    /// ADR-0218 §Amendment: low tolerance). Its own key rather than sharing
+    /// [`Self::MemberExecutorFault`]'s, so a replayed expiry is a no-op against
+    /// the journal instead of colliding with a fault on the same nonce.
+    MemberDeadlineExpired,
     /// A construct-family lane that declined and named the declared-surface
     /// paths its work requires (ADR-0207). Dispatch-accounting like the rest:
     /// the order is consumed and the verdict reached the reducer, so a
@@ -94,7 +99,7 @@ impl AdmissionKey {
     /// of these is the durable statement that the dispatch reached the
     /// reducer as a verdict. [`Self::Study`] is deliberately absent: it
     /// rides the same nonce but must not satisfy the strand check.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Attempt,
         Self::Integrate,
         Self::VerifyFailed,
@@ -104,6 +109,7 @@ impl AdmissionKey {
         Self::AggregateVerify,
         Self::BaseVerify,
         Self::MemberExecutorFault,
+        Self::MemberDeadlineExpired,
         Self::SurfaceRequest,
         Self::Scope,
         Self::StudyCompleted,
@@ -122,6 +128,7 @@ impl AdmissionKey {
             Self::AggregateVerify => "aether.bloomery.aggregate_verify",
             Self::BaseVerify => "aether.bloomery.base_verify",
             Self::MemberExecutorFault => "aether.bloomery.member_executor_fault",
+            Self::MemberDeadlineExpired => "aether.bloomery.member_deadline_expired",
             Self::LeaseObservation => "aether.bloomery.lease_observation",
             Self::SurfaceRequest => "aether.bloomery.surface_request",
             Self::Study => "aether.bloomery.study",

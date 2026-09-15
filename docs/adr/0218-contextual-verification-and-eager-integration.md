@@ -763,3 +763,57 @@ member proved; the product's evidence names the product tree; and the aggregate
 proof at landing still requires the final product to be proved under matching
 candidate and ordered coverage. Membership remains atomic at Resolve: folding
 early does not land members early.
+
+## Amendment: low tolerance, a red or slow verify ejects (2026-09-15)
+
+A member verification is fifteen minutes of a compiler or it is not a
+verification. `Verify` and `AggregateVerify` recalibrate from one hour to a
+900-second ceiling; the stages a model builds in keep their hour, because an
+hour is a budget to author something and a gate authors nothing. The limit
+remains sealed catalog calibration under ADR-0177 — refinable per stage, still
+nonzero and finite — so a bloom that wants a different ceiling authors one.
+
+A member whose `Verify` does not go green leaves the bloom. `CoordinationPolicy`
+gains `red_verify: RedVerify::{Eject, Refine}`, default `Eject`, and every seal
+records the resolved disposition on its bloom record so a bloom that sealed no
+policy answers it too; a policy sealed before the field upcasts to `Eject`,
+because the disposition is a standing instruction rather than a reconstruction
+of what a bloom once ran under. Under `Eject` three verdicts end the same way —
+a red verdict, a run the host cancelled at the sealed wall clock, and an
+attribution that never resolved which member owed the failure — and the ending
+is the ADR-0149 withdrawal an operator's `xtask bloom withdraw` performs: the
+lane is cancelled, the claim ref and the membership are released, the member is
+skipped by every completeness fold, and **the candidate stays on its ref**. No
+`Refine` is dispatched, no repair roll is spent, and no ADR-0178 verifier
+identity is recorded, because the accounting those ledgers do is about a next
+lap that is not coming. `Refine` seals today's repair loop unchanged for a bloom
+that asks for it.
+
+The departure carries its evidence. `Fact::VerifyFailed` gains `findings`
+alongside its typed `failed_verifiers` — advisory prose, never an accounting
+input, exactly as ADR-0178 requires — and the reducer composes both plus the
+evidence digest into the withdrawal's reason, which is what the GitHub mirror
+renders on the member. Someone picking the candidate up reads what stopped it
+without opening the journal. `WithdrawalCause` gains `Verify`, one cause for all
+three verdicts, because the three answer the same question for a reader: this
+member's work did not pass and nobody is repairing it inside this bloom.
+
+An aggregate verify that comes back red or dies on its wall clock has no member
+to eject, so the bloom parks instead: the finding is filed on the composition's
+channel, the fold is held as the owner's decision context, and an operator hold
+names the aggregate and its evidence so "why did nothing else go out" is
+answerable without the journal. Nothing further is dispatched and the ADR-0191
+re-weave is not spent. A bloom already on an operator's own hold keeps it.
+
+The evidence. On 2026-09-15, bloom `0f16e207`: member issue-5978 spent sixty
+minutes inside one verify run — a thirteen-minute red step plus five attribution
+probes — produced no outcome at all, and was re-run; issue-5969 failed its member
+verify at 09:47 and sat. Refine laps cost seven minutes of model time each plus a
+fresh full verify. The owner's instruction was fifteen minutes, low tolerance,
+and eject rather than wait.
+
+The cost is deliberate. A member that would have gone green on its second lap now
+leaves and is re-scoped into a later bloom, which is more human attention per
+member and fewer members landed per bloom. That trade is the decision: a lap is
+only worth its price when the bloom can tell that the next one will converge, and
+nothing in the journal has ever been able to tell that.

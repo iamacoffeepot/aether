@@ -223,6 +223,7 @@ fn withdrawn_view(withdrawal: &Withdrawal) -> WithdrawnView {
     let (cause, depends_on) = match &withdrawal.cause {
         WithdrawalCause::Operator => ("operator", None),
         WithdrawalCause::Dependency { on } => ("dependency", Some(on.clone())),
+        WithdrawalCause::Verify => ("verify", None),
     };
     WithdrawnView {
         cause: cause.into(),
@@ -326,7 +327,7 @@ mod tests {
     use crate::reduce::{BloomStatus, Event, Fact, Outcome, RecordedRead, RecordedRefusal, Snapshot, reduce};
     use crate::values::{
         BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, OperatorHold,
-        Question, ResolutionClaim, SpendWindow, VerifyFailureSet, Wedge,
+        Question, RedVerify, ResolutionClaim, SpendWindow, VerifyFailureSet, Wedge,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -832,6 +833,10 @@ mod tests {
         let bloom = spec.id();
         let mut snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         snapshot = step(&snapshot, &event("seal", Fact::Seal(spec))).0;
+        // The composition re-weave this case drives to its ceiling runs only
+        // for a bloom that sealed it: the default disposition parks a red fold
+        // instead (ADR-0218 §Amendment: low tolerance).
+        snapshot.blooms.get_mut(&bloom).expect("the seal folded").red_verify = RedVerify::Refine;
         snapshot = step(&snapshot, &event("integrate", Fact::Integrate { bloom, claim: claim("wp", 1, 10) })).0;
         snapshot = step(
             &snapshot,

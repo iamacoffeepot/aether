@@ -22,7 +22,7 @@ use crate::values::{
     MemberVerifyRequest, NetworkProfile, OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease,
     OrphanClaimReleaseCompletion, PartialHeadRepairDispatch, PartialHeadRepairPlan, PipelineManifest,
     PrecheckDiagnostic, PrecheckMember, PrecheckNode, PrecheckPlan, PrecheckPolicy, PrecheckResult, PrecheckState,
-    PreparedCandidate, ReasoningEffort, ResolutionClaim, ResolutionProof, ResolvedBloom, ResolvedModel,
+    PreparedCandidate, ReasoningEffort, RedVerify, ResolutionClaim, ResolutionProof, ResolvedBloom, ResolvedModel,
     SharedRunDispatch, SharedRunExecution, SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan,
     SharedRunRecord, SpendQuiesce, StableHeadReservation, StageBinding, StageCatalog, SurvivorGroup, ToolPolicy,
     Transformation, VerificationContract, VerificationMode, VerificationObligation, VerifyFailure, VerifyFailureSet,
@@ -175,6 +175,7 @@ fn coordination_state(
         movement_budget: 2,
         reservation_millis: 30_000,
         coalesce_millis: None,
+        red_verify: RedVerify::Refine,
         host_class: "fixture".into(),
     };
     let template = CompositionContractTemplate {
@@ -1002,6 +1003,9 @@ pub fn representative() -> Decisions {
     effects.extend(proposal_records());
     effects.push(dispatch_study(bloom));
     effects.push(Decision::RecordPipelineManifest { bloom, manifest: pipeline_manifest() });
+    // The non-default disposition, so the fixture freezes a discriminant the
+    // enum's `Default` would not reach on its own.
+    effects.push(Decision::RecordRedVerify { bloom, red_verify: RedVerify::Refine });
     effects.extend(precheck_records(bloom));
     effects.extend(coordination_records(bloom));
 

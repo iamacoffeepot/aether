@@ -22,8 +22,8 @@ use aether_bloomery::{
     Fact, GrantAttemptsError, HostFaultError, KeyId, LandError, LandingRejectedError, Membership,
     ORPHAN_CLAIM_RELEASE_WORDS, Observation, OperatorHold, OperatorHoldError, OperatorRepair, OperatorRepairError,
     OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseError, Outcome, Provenance, Question,
-    ResolutionClaim, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, SpendWindow, StageCatalog,
-    StageId, StageProgress, Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure,
+    RedVerify, ResolutionClaim, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, SpendWindow,
+    StageCatalog, StageId, StageProgress, Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure,
     VerifyFailureSet, Withdrawal, WithdrawalCause, grade, reduce,
 };
 use aether_bloomery::{BloomRecord, WorkpieceId};
@@ -974,6 +974,7 @@ fn a_failing_aggregate_verify_repairs_the_weave_then_parks_at_the_ceiling() {
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
     let (snapshot, _) = step(&snapshot, &event("i-a", Fact::Integrate { bloom, claim: claim("alpha", 10, 100) }));
     let (snapshot, _) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 101) }));
     let (snapshot, _) =
@@ -2470,6 +2471,149 @@ fn verifier_set(failures: &[VerifyFailure]) -> VerifyFailureSet {
     failures.iter().copied().collect()
 }
 
+// The low-tolerance rule (ADR-0218 §Amendment, 2026-09-15). The plausible bugs
+// are all "the eject happened, but…": a departure that still dispatches the
+// repair lap it was supposed to replace, one that spends a roll or a verifier
+// identity against a member that is no longer in the line, or one that leaves
+// nothing behind for the person who has to pick the candidate up.
+#[test]
+fn a_red_verify_ejects_the_member_and_dispatches_no_repair() {
+    let (snapshot, bloom) = at_verify("wp");
+    // `at_verify` puts the bloom on the repair loop; this case is the default.
+    let mut snapshot = snapshot;
+    snapshot.blooms.get_mut(&bloom).expect("sealed").red_verify = RedVerify::Eject;
+
+    let failed = event(
+        "verify-red",
+        Fact::VerifyFailed {
+            bloom,
+            workpiece: workpiece("wp"),
+            evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(71) },
+            failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+            findings: String::from("wp/src/lib.rs:12 needless_borrow"),
+        },
+    );
+    let (after, decided) = step(&snapshot, &failed);
+
+    assert!(matches!(decided.outcome, Outcome::MembersWithdrawn { terminal: true, .. }), "{:?}", decided.outcome);
+    assert!(
+        !decided.effects.iter().any(|effect| matches!(
+            effect,
+            Decision::DispatchAttempt { .. } | Decision::AdvanceStage { .. } | Decision::RecordWedge { .. }
+        )),
+        "an ejection reaches none of the attempt vocabulary: {:?}",
+        decided.effects,
+    );
+
+    let record = after.blooms.get(&bloom).expect("the bloom is still in the snapshot");
+    let departure = record.withdrawn.get(&workpiece("wp")).expect("the member left");
+    assert_eq!(departure.cause, WithdrawalCause::Verify);
+    // Everything the person picking the candidate up needs, in the one field
+    // the GitHub mirror renders: which gate said no, where the full output is,
+    // and what it actually said.
+    assert!(departure.reason.contains("verify.clippy"), "{}", departure.reason);
+    assert!(departure.reason.contains(&digest(71).to_hex()), "{}", departure.reason);
+    assert!(departure.reason.contains("needless_borrow"), "{}", departure.reason);
+    assert!(
+        !record.progress.contains_key(&workpiece("wp")),
+        "an ejected member sits at no stage, so nothing later dispatches it",
+    );
+}
+
+// The wall-clock half. The plausible bug is the one the amendment had to be
+// written around: an expiry and a host fault arrive as the same evidence, so a
+// reducer that told them apart by anything other than the fact intake built
+// would either eject a member whose host fell over, or keep re-running a gate
+// that has already had its whole allowance.
+#[test]
+fn a_verify_the_host_killed_at_the_wall_clock_ejects_while_a_host_fault_retries() {
+    let (mut ejecting, bloom) = at_verify("wp");
+    ejecting.blooms.get_mut(&bloom).expect("sealed").red_verify = RedVerify::Eject;
+
+    let evidence = Evidence { subject: digest(10), kind: EvidenceKind::ExecutorFault, detail: digest(72) };
+    let expired = event(
+        "verify-expired",
+        Fact::MemberDeadlineExpired {
+            bloom,
+            workpiece: workpiece("wp"),
+            stage: StageId::Verify,
+            evidence: evidence.clone(),
+        },
+    );
+
+    let (after, decided) = step(&ejecting, &expired);
+    assert!(matches!(decided.outcome, Outcome::MembersWithdrawn { .. }), "{:?}", decided.outcome);
+    let departure = after.blooms[&bloom].withdrawn.get(&workpiece("wp")).expect("the member left");
+    assert!(departure.reason.contains("exceeded the sealed wall clock"), "{}", departure.reason);
+
+    // The same evidence under the fault fact keeps the member: a host that
+    // could not carry the lane to a verdict is not the member's doing.
+    let faulted = event(
+        "verify-faulted",
+        Fact::MemberExecutorFault { bloom, workpiece: workpiece("wp"), stage: StageId::Verify, evidence },
+    );
+    assert!(
+        matches!(step(&ejecting, &faulted).1.outcome, Outcome::MachineryRetried { .. }),
+        "a host fault keeps its retry budget",
+    );
+}
+
+// The other half of the knob: a bloom that seals `Refine` keeps ADR-0153's
+// loop. Without this, `Eject` could be unconditional and nothing would notice.
+#[test]
+fn a_bloom_that_sealed_refine_still_repairs_a_red_verify() {
+    let (snapshot, bloom) = at_verify("wp");
+    let (_, decided) = step(
+        &snapshot,
+        &verify_failed("verify-red", bloom, "wp", digest(10), 71, verifier_set(&[VerifyFailure::Clippy])),
+    );
+
+    assert!(matches!(decided.outcome, Outcome::RefineReentered { rolls: 0, .. }), "{:?}", decided.outcome);
+}
+
+// The whole-bloom half. A red fold implicates no member, so there is nobody to
+// eject — the plausible bug is that it therefore falls through to the ADR-0191
+// re-weave and spends a paid lap on a combination no verdict has accepted.
+#[test]
+fn a_red_aggregate_verify_parks_the_bloom_under_a_hold_without_re_weaving() {
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&snapshot, &event("i-a", Fact::Integrate { bloom, claim: claim("alpha", 10, 100) }));
+    let (snapshot, _) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 101) }));
+    let (snapshot, _) =
+        step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
+
+    let (after, decided) = step(
+        &snapshot,
+        &event(
+            "fold-red",
+            Fact::AggregateVerifyCompleted {
+                bloom,
+                passed: false,
+                evidence: Evidence { subject: digest(40), kind: EvidenceKind::VerificationResult, detail: digest(52) },
+            },
+        ),
+    );
+
+    assert!(matches!(decided.outcome, Outcome::AggregateVerifyParked { rolls: 1, .. }), "{:?}", decided.outcome);
+    assert!(
+        !decided.effects.iter().any(|effect| matches!(
+            effect,
+            Decision::DispatchAttempt { .. } | Decision::DispatchAggregateVerify { .. }
+        )),
+        "a parked fold dispatches nothing further: {:?}",
+        decided.effects,
+    );
+
+    let record = after.blooms.get(&bloom).expect("the bloom is still in the snapshot");
+    let hold = record.operator_hold.as_ref().expect("the park raises an operator hold");
+    assert!(hold.reason.contains(&digest(40).to_hex()), "the hold names the fold: {}", hold.reason);
+    assert!(hold.reason.contains(&digest(52).to_hex()), "and its evidence: {}", hold.reason);
+    assert_eq!(record.claims.len(), 2, "every member's resolution stands — the fold is what did not build");
+}
+
 fn verify_failed(
     key: &str,
     bloom: BloomId,
@@ -2485,6 +2629,7 @@ fn verify_failed(
             workpiece: workpiece(member),
             evidence: Evidence { subject, kind: EvidenceKind::VerificationResult, detail: digest(detail) },
             failed_verifiers,
+            findings: String::new(),
         },
     )
 }
@@ -2510,11 +2655,35 @@ fn containment_refused(
     )
 }
 
+/// A one-member bloom sitting at terminal `Verify`, on the ADR-0153 repair
+/// loop.
+///
+/// The disposition is planted rather than sealed through the config registry
+/// (ADR-0218 §Amendment: low tolerance): the default ejects a member whose
+/// Verify came back red, and every case below this line is about what the
+/// repair loop does with one — the roll ledger, the seen set, the wedge at the
+/// ceiling, the grant that re-opens it. Sealing a real coordination policy
+/// would also switch on shared verification, which is a different line.
+/// Put a sealed bloom on the ADR-0153 repair loop.
+///
+/// The default disposition ejects a member whose `Verify` came back red
+/// (ADR-0218 §Amendment: low tolerance), so every case about what the repair
+/// loop does with one — the roll ledger, the seen set, the wedge at its
+/// ceiling, the grant that re-opens it — has to say so. Set on the record
+/// rather than sealed through the config registry because sealing a real
+/// coordination policy also switches on shared verification, which queues the
+/// member's work instead of dispatching it: a different line entirely.
+fn on_repair_loop(mut snapshot: Snapshot, bloom: BloomId) -> Snapshot {
+    snapshot.blooms.get_mut(&bloom).expect("the seal folded").red_verify = RedVerify::Refine;
+    snapshot
+}
+
 fn at_verify(member: &str) -> (Snapshot, BloomId) {
     let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership(member, 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
     let (snapshot, _) = step(
         &snapshot,
         &event(
@@ -2926,6 +3095,7 @@ fn a_failing_capture_is_discarded_and_the_retry_targets_the_prior_candidate() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
 
     // Construct passes with a capture, then Verify fails with none (mechanical
     // lanes carry no capture) — the candidate rides the cursor into the Refine
@@ -2954,6 +3124,7 @@ fn a_failing_capture_is_discarded_and_the_retry_targets_the_prior_candidate() {
                 workpiece: workpiece("wp"),
                 evidence: Evidence { subject: first.tree, kind: EvidenceKind::VerificationResult, detail: digest(80) },
                 failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+                findings: String::new(),
             },
         ),
     );
@@ -3003,6 +3174,7 @@ fn verifier_failure_accounting_uses_per_member_union_and_intersection() {
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
     let pass = |key: &str, member: &str, stage: StageId, subject: Digest| {
         event(
             key,
@@ -3085,6 +3257,7 @@ fn an_unjudged_verify_redispatches_verify_while_a_named_failure_still_refines() 
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
     let candidate = CandidateRef { tree: digest(30), checkout: digest(31) };
     let (snapshot, _) = step(
         &snapshot,
@@ -3288,6 +3461,7 @@ fn repeated_verify_failure_wedges_at_budget_with_exact_terminal_set() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
     let pass = |key: &str, stage: StageId| {
         event(
             key,
@@ -3418,6 +3592,7 @@ fn a_grant_on_a_verify_wedge_resumes_at_refine_with_its_candidate() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
 
     let completion = |key: &str, stage: StageId, candidate: Option<CandidateRef>| {
         event(
@@ -3511,6 +3686,7 @@ fn a_successor_starts_with_fresh_verifier_history() {
     let predecessor_spec = draft(1, vec![membership("wp", 10)]).seal();
     let predecessor = predecessor_spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(predecessor_spec)));
+    let snapshot = on_repair_loop(snapshot, predecessor);
     let construct = event(
         "construct",
         Fact::AttemptCompleted {
@@ -4063,7 +4239,8 @@ proptest! {
         let base = Snapshot::new(digest(1)).with_green_base(digest(1));
         let spec = draft(1, vec![membership("wp", 10)]).seal();
         let bloom = spec.id();
-        let (mut snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+        let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+        let mut snapshot = on_repair_loop(snapshot, bloom);
 
         for (i, passed) in passes.into_iter().enumerate() {
             let cursor = snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).copied().unwrap();
@@ -4414,6 +4591,7 @@ mod sealed_catalog {
             .expect("sealing dispatches the entry stage");
 
         let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1)).apply(&seal, &decided, &configs);
+        snapshot = super::on_repair_loop(snapshot, bloom);
         let construct_pass = event(
             "construct-pass",
             Fact::AttemptCompleted {
@@ -4435,6 +4613,7 @@ mod sealed_catalog {
                 workpiece: workpiece("wp"),
                 evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(71) },
                 failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+                findings: String::new(),
             },
         );
         let decided = reduce(&snapshot, &verify_failed, &configs, &SpendWindow::default());
@@ -5134,6 +5313,7 @@ fn a_repair_lap_that_leaves_the_tree_unchanged_reuses_its_verify_verdict() {
     let bloom = spec.id();
     let candidate = CandidateRef { tree: digest(100), checkout: digest(102) };
     let (snapshot, _) = step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
     let (snapshot, constructed) = step(
         &snapshot,
         &event(
@@ -5166,6 +5346,7 @@ fn a_repair_lap_that_leaves_the_tree_unchanged_reuses_its_verify_verdict() {
                 workpiece: workpiece("wp"),
                 evidence: Evidence { subject: digest(100), kind: EvidenceKind::VerificationResult, detail: digest(70) },
                 failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+                findings: String::new(),
             },
         ),
     );
@@ -5783,6 +5964,7 @@ fn an_operator_repair_re_enters_a_wedged_member_at_verify_with_the_gates_intact(
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
     let fail = |key: &str| {
         event(
             key,
@@ -5879,6 +6061,7 @@ fn an_operator_repair_re_enters_a_wedged_member_at_verify_with_the_gates_intact(
                 workpiece: workpiece("wp"),
                 evidence: Evidence { subject: digest(60), kind: EvidenceKind::VerificationResult, detail: digest(62) },
                 failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+                findings: String::new(),
             },
         ),
     );
@@ -6340,6 +6523,7 @@ fn no_fact_family_dispatches_a_member_of_a_held_bloom() {
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (sealed, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let sealed = on_repair_loop(sealed, bloom);
     // A member at terminal Verify holding a candidate and a sibling still on its
     // first `Construct` attempt — between them, the position every dispatching
     // member fact below acts from.
@@ -6730,6 +6914,7 @@ fn a_repeat_over_one_tree_records_an_anomaly_that_survives_its_repair_lap() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
 
     let captured = CandidateRef { tree: digest(21), checkout: digest(22) };
     let pass = |key: &str, stage: StageId| {

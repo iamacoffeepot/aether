@@ -26,6 +26,16 @@ carry the stamps `decisions cd1234d2…` and `event 55af52a6…`.
 `28a3ba3a8bd3477f805b52cedb7cadd5a575cadaf050f1ae61cb62fddc444a2a`; they
 carry the stamps `decisions a6311d65…` and `event 9e55e67b…`.
 
+`pre-red-verify-decisions.bin` and `pre-red-verify-event.bin` are the
+`decisions.bin` and `containment-refused-event.bin` of
+`9dd10de5cbb8bc2b36d41bfe570732f6519664d5`, the last commit before
+`CoordinationPolicy::red_verify` and `Fact::VerifyFailed::findings`. Raw
+sha256 `dd824e31a3e762e070e44ffa56f2aef566763a4963d36defdc71030b652c9d02` and
+`28a3ba3a8bd3477f805b52cedb7cadd5a575cadaf050f1ae61cb62fddc444a2a`; they
+carry the stamps `decisions b67ebb69…` and `event 37e4b124…`. The event row
+is the first whose upcast is not the identity: `findings` is appended inside
+`Fact::VerifyFailed` rather than past every discriminant.
+
 `schema-digests.txt` pins a *history*: one kind-and-digest line per
 persisted shape, oldest first. A shape change appends a line and
 registers an upcast. Regenerating this file only appends a newly current

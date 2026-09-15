@@ -88,6 +88,23 @@ pub const VERIFY_LANE_IMAGE: &str = "iama/verify:1";
 /// [`VERIFY_LANE_IMAGE`] for the same reason.
 pub const VERIFY_LANE_NETWORK: NetworkProfile = NetworkProfile::None;
 
+/// The compiled line's execution limit for the two mechanical gate stages,
+/// [`StageId::Verify`] and [`StageId::AggregateVerify`]: fifteen minutes
+/// (ADR-0218 §Amendment: low tolerance).
+///
+/// The rest of the line still calibrates at an hour, which is a model's budget
+/// to *author* something. A gate authors nothing — it runs a compiler over a
+/// checked-out tree under [`VERIFY_LANE_IMAGE`] and reaches nothing — so the
+/// only thing an hour buys a gate is an hour of a wedged one holding a slot.
+/// Bloom `0f16e207` on 2026-09-15 spent sixty minutes on one member's verify
+/// run (a thirteen-minute red step plus five attribution probes) and came out
+/// with no outcome at all, then re-ran it.
+///
+/// Named rather than repeated at the two arms because the pair is one
+/// calibration: a gate ceiling raised for `Verify` alone would let the
+/// aggregate gate outlive every member it folds.
+pub const GATE_WALL_CLOCK_SECS: u64 = 900;
+
 /// Whether a typed command names a **model lane** — a lane whose worker runs a
 /// model and therefore needs a credential, a resolved model, and a reasoning
 /// effort, as opposed to the mechanical lanes that run a compiler and nothing
@@ -612,10 +629,13 @@ impl StageCatalog {
     /// `aether-chassis-bloomery` constructs compiled-line bindings directly in
     /// its executor, reactor-runtime, and study fixtures.
     ///
-    /// Every arm calibrates `wall_clock_secs` at one hour. That is the initial
-    /// calibration, refinable per stage without an ADR like the tag/gate strings
-    /// and the retry budgets beside it; a custom catalog may author anything
-    /// [`validate`](Self::validate) accepts.
+    /// Every arm calibrates `wall_clock_secs` at one hour except the two gate
+    /// stages, [`StageId::Verify`] and [`StageId::AggregateVerify`], which sit
+    /// at [`GATE_WALL_CLOCK_SECS`] — fifteen minutes (ADR-0218 §Amendment: low
+    /// tolerance). These are the initial calibrations, refinable per stage
+    /// without an ADR like the tag/gate strings and the retry budgets beside
+    /// them; a custom catalog may author anything [`validate`](Self::validate)
+    /// accepts.
     #[must_use]
     pub fn binding_of(stage: StageId) -> StageBinding {
         let (consumes, produces, process, completion_gate, retry_budget, wall_clock_secs): (
@@ -635,7 +655,7 @@ impl StageCatalog {
             // Two scoping attempts, not one: a run that fails once has usually
             // failed on something a second pass fixes; a run that fails twice
             // is not converging, and a third lap buys another full hour
-            // (`wall_clock_secs` is `3_600` across the line) against a sketch
+            // (`wall_clock_secs` is `3_600` on every model lane) against a sketch
             // that is probably the actual problem — wedging puts it in front
             // of an operator, where an unscopeable sketch belongs.
             // Budget 4, not 2: the run ledger is append-only and exhaustion is
@@ -659,9 +679,14 @@ impl StageCatalog {
             StageId::Construct => {
                 (&["bloom.ready"], &["bloom.candidate"], CONSTRUCT_IMPLEMENT_COMMAND, "pr-open", 2, 3_600)
             }
-            StageId::Verify => {
-                (&["bloom.candidate"], &["bloom.verify_evidence"], "transform.verify", "ci-green", 3, 3_600)
-            }
+            StageId::Verify => (
+                &["bloom.candidate"],
+                &["bloom.verify_evidence"],
+                "transform.verify",
+                "ci-green",
+                3,
+                GATE_WALL_CLOCK_SECS,
+            ),
             StageId::Refine => {
                 (&["bloom.verify_evidence"], &["bloom.candidate"], CONSTRUCT_IMPLEMENT_COMMAND, "ci-green", 3, 3_600)
             }
@@ -682,7 +707,7 @@ impl StageCatalog {
                 "aggregate-verify",
                 "aggregate-ci-green",
                 2,
-                3_600,
+                GATE_WALL_CLOCK_SECS,
             ),
             StageId::AggregateReview => (
                 &["bloom.integration"],
@@ -1525,9 +1550,16 @@ mod tests {
     // Grok/`grok-4.6` back onto Claude/opus at high effort, restoring the
     // ADR-0146 calibration now that a scope run may name its own seat per
     // run. An intended catalog edit — see `profile_of`.
+    // Repinned again for ADR-0218 §Amendment: low tolerance — `Verify` and
+    // `AggregateVerify` recalibrate from one hour to `GATE_WALL_CLOCK_SECS`,
+    // fifteen minutes, so both bindings' `wall_clock_secs` move and the line
+    // with them. A recalibration is an intended catalog edit; what makes this
+    // one worth stating is that it is the first that *shortens* a stage, and
+    // the shortening is the enforcement — a gate past fifteen minutes is
+    // cancelled and its member ejected rather than re-run.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x19, 0xee, 0xf1, 0xb1, 0xa0, 0x02, 0xc7, 0xac, 0xa6, 0x3e, 0x46, 0x83, 0xb8, 0x74, 0x75, 0x9b, 0x16, 0xca,
-        0xd0, 0x6b, 0xe4, 0xd2, 0xb6, 0x02, 0x57, 0x87, 0x49, 0xf7, 0x93, 0x12, 0xbb, 0x59,
+        0x4f, 0x7d, 0xc5, 0xfd, 0x78, 0xaa, 0xc3, 0xe3, 0xda, 0xcd, 0xca, 0xa0, 0x39, 0x1b, 0x30, 0xe7, 0x14, 0xe4,
+        0x87, 0xf7, 0x2b, 0xec, 0x04, 0x32, 0x7f, 0xd8, 0xb3, 0xf1, 0x6e, 0xba, 0x2d, 0x5c,
     ];
 
     // Tripwire: every command a stage dispatches is classified by exactly one of
@@ -1887,7 +1919,7 @@ mod tests {
     #[test]
     fn every_dispatch_constructor_copies_the_limit_off_the_binding_it_was_handed() {
         let mut shortened = binding(StageId::Verify);
-        shortened.wall_clock_secs = 900;
+        shortened.wall_clock_secs = 450;
         // Each aggregate binding keeps its own `stage` and re-authors only the
         // limit, to a value the compiled line never produces and distinct from
         // the member half's — so a constructor reaching for a hard-coded 3_600
@@ -1905,7 +1937,7 @@ mod tests {
 
         assert_eq!(
             Transformation::for_member_stage(&shortened, subject, checkout, base).limits.wall_clock_secs,
-            900,
+            450,
             "the re-authored binding's limit reaches the dispatch"
         );
         assert_eq!(

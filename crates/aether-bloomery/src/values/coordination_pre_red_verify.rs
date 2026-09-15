@@ -1,15 +1,15 @@
-//! Frozen pre-coalesce wire shapes of [`CoordinationPolicy`] and
-//! [`CoordinationState`] (ADR-0187 / #5947).
+//! Frozen pre-red-verify wire shapes of [`CoordinationPolicy`] and
+//! [`CoordinationState`] (ADR-0187 / ADR-0218 §Amendment: low tolerance).
 //!
-//! #5947 appended `coalesce_millis` to the sealed policy. The wire encoding is
-//! positional and untagged, so a policy sealed without that field cannot be
-//! read by a decoder that expects it — it runs out of bytes — and a journaled
-//! [`CoordinationState`] that carries the old policy sits in the middle of
-//! `Decision::RecordCoordinationState`, so the same missing field shifts every
-//! later byte of that variant. This module freezes the eight-field policy and
-//! the coordination state that embeds it so those rows upcast instead of
-//! aborting replay. Never edit these fields: a later policy change adds its
-//! own frozen mirror beside this one.
+//! The low-tolerance amendment appended `red_verify` to the sealed policy. The
+//! wire encoding is positional and untagged, so a policy sealed without that
+//! field cannot be read by a decoder that expects it — it runs out of bytes —
+//! and a journaled [`CoordinationState`] that carries the old policy sits in
+//! the middle of `Decision::RecordCoordinationState`, so the same missing field
+//! shifts every later byte of that variant. This module freezes the nine-field
+//! policy and the coordination state that embeds it so those rows upcast
+//! instead of aborting replay. Never edit these fields: a later policy change
+//! adds its own frozen mirror beside this one.
 //!
 //! These types exist to *decode*. The identities themselves are the pinned
 //! digest literals in the persisted registry, never computed from these types
@@ -22,17 +22,17 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use super::coordination_pre_red_verify::CoordinationPolicyPreRedVerify;
 use super::{
     CandidatePreparationPlan, CompatibilityPreviewPlan, CompatibilityPreviewRecord, CompositionContractTemplate,
     ConstructContext, ConstructionAdmission, ConstructionCheckpoint, ContextualAttemptDispatch,
     ContextualResolutionClaim, CoordinationDiagnostic, CoordinationPolicy, CoordinationState, EagerIntegrationState,
-    MemberVerifyRequest, PartialHeadRepairPlan, PreparedCandidate, SharedRunRecord, SurvivorGroup, VerificationMode,
+    MemberVerifyRequest, PartialHeadRepairPlan, PreparedCandidate, RedVerify, SharedRunRecord, SurvivorGroup,
+    VerificationMode,
 };
 
-/// Pre-#5947 [`CoordinationPolicy`]: eight fields, no coalescing hold.
+/// Pre-amendment [`CoordinationPolicy`]: nine fields, no red-verify disposition.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct CoordinationPolicyPreCoalesce {
+pub struct CoordinationPolicyPreRedVerify {
     pub verification: VerificationMode,
     pub eager_integration: bool,
     pub max_run_members: u32,
@@ -41,21 +41,19 @@ pub struct CoordinationPolicyPreCoalesce {
     pub movement_budget: u32,
     pub reservation_millis: u64,
     pub host_class: String,
+    pub coalesce_millis: Option<u64>,
 }
 
-impl From<CoordinationPolicyPreCoalesce> for CoordinationPolicy {
-    /// Carry a pre-coalesce policy forward with the hold absent.
+impl From<CoordinationPolicyPreRedVerify> for CoordinationPolicy {
+    /// Carry a pre-amendment policy forward on [`RedVerify::Eject`].
     ///
-    /// Absent is [`super::DEFAULT_COALESCE_MILLIS`]: a bloom sealed before the
-    /// field existed still has sibling constructs finishing minutes apart, and
-    /// inventing a zero hold here would keep the per-member runs the field
-    /// exists to stop.
-    fn from(prior: CoordinationPolicyPreCoalesce) -> Self {
-        // Chained through the next era's frozen shape rather than filling
-        // today's fields directly: each era decides exactly the field it
-        // introduced, so a third change adds one hop instead of another copy
-        // of every decision before it.
-        Self::from(CoordinationPolicyPreRedVerify {
+    /// Deliberately not the [`RedVerify::Refine`] such a bloom actually ran
+    /// under. The knob is a standing operator instruction rather than a record
+    /// of what a bloom once did, and the instruction of 2026-09-15 is that a
+    /// member which has not gone green leaves rather than buying another lap.
+    /// A bloom that wants the old loop seals `Refine` explicitly.
+    fn from(prior: CoordinationPolicyPreRedVerify) -> Self {
+        Self {
             verification: prior.verification,
             eager_integration: prior.eager_integration,
             max_run_members: prior.max_run_members,
@@ -64,17 +62,18 @@ impl From<CoordinationPolicyPreCoalesce> for CoordinationPolicy {
             movement_budget: prior.movement_budget,
             reservation_millis: prior.reservation_millis,
             host_class: prior.host_class,
-            coalesce_millis: None,
-        })
+            coalesce_millis: prior.coalesce_millis,
+            red_verify: RedVerify::Eject,
+        }
     }
 }
 
-/// Pre-#5947 [`CoordinationState`]: the policy field is
-/// [`CoordinationPolicyPreCoalesce`]. Every other field matches today's
+/// Pre-amendment [`CoordinationState`]: the policy field is
+/// [`CoordinationPolicyPreRedVerify`]. Every other field matches today's
 /// layout.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct CoordinationStatePreCoalesce {
-    pub policy: CoordinationPolicyPreCoalesce,
+pub struct CoordinationStatePreRedVerify {
+    pub policy: CoordinationPolicyPreRedVerify,
     pub composition_contract: CompositionContractTemplate,
     pub integration: EagerIntegrationState,
     pub requests: Vec<MemberVerifyRequest>,
@@ -96,8 +95,8 @@ pub struct CoordinationStatePreCoalesce {
     pub final_dispatched: bool,
 }
 
-impl From<CoordinationStatePreCoalesce> for CoordinationState {
-    fn from(prior: CoordinationStatePreCoalesce) -> Self {
+impl From<CoordinationStatePreRedVerify> for CoordinationState {
+    fn from(prior: CoordinationStatePreRedVerify) -> Self {
         Self {
             policy: CoordinationPolicy::from(prior.policy),
             composition_contract: prior.composition_contract,

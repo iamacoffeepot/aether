@@ -61,9 +61,11 @@ use aether_data::wire::{Error as WireError, from_bytes, take_from_bytes, to_vec}
 use serde::de::DeserializeOwned;
 
 use crate::digest::{Digest, encode_hex, schema_digest};
+use crate::ids::IdempotencyKey;
 use crate::reduce::decisions_v1::DecisionsV1;
-use crate::reduce::{Decision, Decisions, Event, Outcome};
+use crate::reduce::{Decision, Decisions, Event, Fact, Outcome};
 use crate::values::coordination_pre_coalesce::{CoordinationPolicyPreCoalesce, CoordinationStatePreCoalesce};
+use crate::values::coordination_pre_red_verify::{CoordinationPolicyPreRedVerify, CoordinationStatePreRedVerify};
 use crate::values::process_instructions_pre_reader::ModelProcessInstructionsPreReader;
 use crate::values::{
     ApprovalPolicy, CoordinationPolicy, CoordinationState, ModelOverride, ModelProcessInstructions, PipelineManifest,
@@ -411,6 +413,42 @@ pub const COORDINATION_POLICY_PRE_COALESCE_DIGEST: Digest =
 /// inserted rather than appended cannot silently decode the wrong body.
 const RECORD_COORDINATION_STATE: u32 = 64;
 
+/// Journal schema immediately before `CoordinationPolicy::red_verify` and
+/// `Fact::VerifyFailed::findings` (ADR-0218 §Amendment: low tolerance).
+///
+/// Copied from the `decisions` line the ledger carried as current at
+/// `9dd10de5cbb8bc2b36d41bfe570732f6519664d5` —
+/// `b67ebb69993a150cbafd49a46c36360665d2e8adf50be79ddd345b2cc2323782`.
+pub const DECISIONS_PRE_RED_VERIFY_DIGEST: Digest =
+    Digest::pinned("b67ebb69993a150cbafd49a46c36360665d2e8adf50be79ddd345b2cc2323782");
+
+/// Event schema immediately before `Fact::VerifyFailed::findings`.
+///
+/// Copied from the `event` line the ledger carried as current at
+/// `9dd10de5cbb8bc2b36d41bfe570732f6519664d5` —
+/// `37e4b124a8f78eb6d8397ce3881f199322b8873653d7bb168b133bcbb0db70c3`. Unlike
+/// every event upcast above it, this one is not the identity: the findings
+/// field is *appended inside* an existing variant rather than past every
+/// discriminant, so a row that carries `VerifyFailed` runs out of bytes under
+/// today's decoder and has to be read through its frozen shape.
+pub const EVENT_PRE_RED_VERIFY_DIGEST: Digest =
+    Digest::pinned("37e4b124a8f78eb6d8397ce3881f199322b8873653d7bb168b133bcbb0db70c3");
+
+/// Sealed [`CoordinationPolicy`] schema immediately before `red_verify`.
+///
+/// Copied from the `aether.bloomery.coordination_policy` line the ledger
+/// carried as current at `9dd10de5cbb8bc2b36d41bfe570732f6519664d5` —
+/// `4fdf5e1ec4e5aea5a4c78e5adb2db7c7a8860094a381d052006d91084c25a0a0`.
+pub const COORDINATION_POLICY_PRE_RED_VERIFY_DIGEST: Digest =
+    Digest::pinned("4fdf5e1ec4e5aea5a4c78e5adb2db7c7a8860094a381d052006d91084c25a0a0");
+
+/// `Fact::VerifyFailed`'s declaration index. A tripwire in this module's tests
+/// pins it, for the reason [`RECORD_COORDINATION_STATE`] is pinned: the
+/// pre-red-verify event upcast peeks this discriminant to decode the
+/// findings-less body, and a fact inserted rather than appended in front of it
+/// would make that peek read some other variant's bytes.
+const VERIFY_FAILED: u32 = 13;
+
 /// The stamp on sealed model-process instruction bundles written before
 /// ADR-0216 appended `retrospect` and `retrospect_finding_contract`.
 pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
@@ -445,6 +483,7 @@ pub fn decode_recorded_decisions(bytes: &[u8], schema: Option<&[u8]>) -> Result<
             upcast_decisions_pre_precheck,
             upcast_decisions_pre_coordination,
             upcast_decisions_pre_coalesce,
+            upcast_decisions_pre_red_verify,
         ],
     )
 }
@@ -583,6 +622,83 @@ fn upcast_event_pre_coalesce(bytes: &[u8]) -> Result<Event, WireError> {
     from_bytes(bytes)
 }
 
+/// Pre-red-verify event rows carry a `Fact::VerifyFailed` with four fields
+/// where today's decoder reads five, so a row carrying that variant is decoded
+/// through its frozen body and re-formed with no findings.
+///
+/// Every other variant decodes as it always did, so the peek is on the
+/// discriminant alone and the rest of the vocabulary goes through the live
+/// decoder untouched.
+fn upcast_event_pre_red_verify(bytes: &[u8]) -> Result<Event, WireError> {
+    let (idempotency_key, rest) = take_from_bytes::<IdempotencyKey>(bytes)?;
+    let mut cursor = rest;
+    let fact = decode_fact_pre_red_verify(&mut cursor)?;
+    if !cursor.is_empty() {
+        return Err(WireError::TrailingBytes);
+    }
+    Ok(Event { idempotency_key, fact })
+}
+
+fn decode_fact_pre_red_verify(cursor: &mut &[u8]) -> Result<Fact, WireError> {
+    let selector =
+        u32::from_le_bytes(cursor.get(..4).and_then(|slice| slice.try_into().ok()).ok_or(WireError::UnexpectedEof)?);
+    if selector != VERIFY_FAILED {
+        let (fact, rest) = take_from_bytes::<Fact>(cursor)?;
+        *cursor = rest;
+        return Ok(fact);
+    }
+    *cursor = &cursor[4..];
+    let (bloom, rest) = take_from_bytes(cursor)?;
+    *cursor = rest;
+    let (workpiece, rest) = take_from_bytes(cursor)?;
+    *cursor = rest;
+    let (evidence, rest) = take_from_bytes(cursor)?;
+    *cursor = rest;
+    let (failed_verifiers, rest) = take_from_bytes(cursor)?;
+    *cursor = rest;
+    Ok(Fact::VerifyFailed { bloom, workpiece, evidence, failed_verifiers, findings: String::new() })
+}
+
+/// Pre-red-verify rows carry a nine-field policy inside
+/// `RecordCoordinationState`, the same position and for the same reason the
+/// pre-coalesce rows carry an eight-field one.
+fn upcast_decisions_pre_red_verify(bytes: &[u8]) -> Result<Decisions, WireError> {
+    let (outcome, rest) = take_from_bytes::<Outcome>(bytes)?;
+    let mut cursor = rest;
+    let count = read_u32(&mut cursor)? as usize;
+    let mut effects = Vec::with_capacity(count);
+    for _ in 0..count {
+        effects.push(decode_decision_pre_red_verify(&mut cursor)?);
+    }
+    if !cursor.is_empty() {
+        return Err(WireError::TrailingBytes);
+    }
+    Ok(Decisions { outcome, effects })
+}
+
+fn decode_decision_pre_red_verify(cursor: &mut &[u8]) -> Result<Decision, WireError> {
+    let selector =
+        u32::from_le_bytes(cursor.get(..4).and_then(|slice| slice.try_into().ok()).ok_or(WireError::UnexpectedEof)?);
+    if selector != RECORD_COORDINATION_STATE {
+        let (decision, rest) = take_from_bytes::<Decision>(cursor)?;
+        *cursor = rest;
+        return Ok(decision);
+    }
+    *cursor = &cursor[4..];
+    let (bloom, rest) = take_from_bytes(cursor)?;
+    *cursor = rest;
+    let (state, rest) = take_from_bytes::<Option<Box<CoordinationStatePreRedVerify>>>(cursor)?;
+    *cursor = rest;
+    Ok(Decision::RecordCoordinationState { bloom, state: state.map(|prior| Box::new(CoordinationState::from(*prior))) })
+}
+
+/// Pre-amendment policies carry nine fields where today's decoder reads ten, so
+/// the row is decoded through its frozen shape and re-encoded on
+/// [`crate::RedVerify::Eject`].
+fn reshape_coordination_policy_pre_red_verify(bytes: &[u8]) -> Result<Vec<u8>, WireError> {
+    to_vec(&CoordinationPolicy::from(from_bytes::<CoordinationPolicyPreRedVerify>(bytes)?))
+}
+
 /// Pre-ADR-0216 bundles carry seventeen fields where today's decoder reads
 /// nineteen, so the row is decoded through its frozen shape and re-encoded
 /// with both reader fields empty.
@@ -610,6 +726,7 @@ pub fn decode_recorded_event(bytes: &[u8], schema: Option<&[u8]>) -> Result<Even
             upcast_event_pre_preparation_conflict,
             upcast_event_pre_proof_reused,
             upcast_event_pre_coalesce,
+            upcast_event_pre_red_verify,
         ],
     )
 }
@@ -629,6 +746,7 @@ pub static DECISIONS: PersistedKind = PersistedKind {
         PersistedUpcast { digest: DECISIONS_PRE_PRECHECK_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_COORDINATION_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_COALESCE_DIGEST, reshape: None },
+        PersistedUpcast { digest: DECISIONS_PRE_RED_VERIFY_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };
@@ -646,6 +764,7 @@ pub static EVENT: PersistedKind = PersistedKind {
         PersistedUpcast { digest: EVENT_PRE_PREPARATION_CONFLICT_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_PROOF_REUSED_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_COALESCE_DIGEST, reshape: None },
+        PersistedUpcast { digest: EVENT_PRE_RED_VERIFY_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };
@@ -680,10 +799,16 @@ pub static COORDINATION_POLICY: PersistedKind = PersistedKind {
     name: CoordinationPolicy::NAME,
     schema: &<CoordinationPolicy as Schema>::SCHEMA,
     bootstrap: Bootstrap::Current,
-    upcasts: &[PersistedUpcast {
-        digest: COORDINATION_POLICY_PRE_COALESCE_DIGEST,
-        reshape: Some(reshape_coordination_policy_pre_coalesce),
-    }],
+    upcasts: &[
+        PersistedUpcast {
+            digest: COORDINATION_POLICY_PRE_COALESCE_DIGEST,
+            reshape: Some(reshape_coordination_policy_pre_coalesce),
+        },
+        PersistedUpcast {
+            digest: COORDINATION_POLICY_PRE_RED_VERIFY_DIGEST,
+            reshape: Some(reshape_coordination_policy_pre_red_verify),
+        },
+    ],
     current: OnceLock::new(),
 };
 
@@ -783,11 +908,13 @@ mod tests {
     use aether_data::wire::to_vec;
 
     use super::{
-        DECISIONS, EVENT, PersistedSchemaError, RECORD_COORDINATION_STATE, decode_persisted, decode_recorded_decisions,
+        DECISIONS, EVENT, EVENT_PRE_RED_VERIFY_DIGEST, PersistedSchemaError, RECORD_COORDINATION_STATE, VERIFY_FAILED,
+        decode_persisted, decode_recorded_decisions, decode_recorded_event,
     };
     use crate::digest::{Digest, SCHEMA_DIGEST_DOMAIN, schema_digest};
-    use crate::ids::BloomId;
-    use crate::reduce::{Decision, Decisions, Event, Outcome};
+    use crate::ids::{BloomId, IdempotencyKey, WorkpieceId};
+    use crate::reduce::{Decision, Decisions, Event, Fact, Outcome};
+    use crate::values::{Evidence, EvidenceKind, VerifyFailure, VerifyFailureSet};
 
     fn empty_decisions() -> Decisions {
         Decisions { outcome: Outcome::Duplicate, effects: Vec::new() }
@@ -815,6 +942,74 @@ mod tests {
             .expect("an empty coordination record encodes");
         let selector = u32::from_le_bytes(encoded[..4].try_into().expect("a selector is four bytes"));
         assert_eq!(selector, RECORD_COORDINATION_STATE);
+    }
+
+    /// The four-field `Fact::VerifyFailed` a pre-red-verify binary wrote:
+    /// today's encoding with the appended `findings` chopped off its tail.
+    ///
+    /// Derived rather than hand-assembled, so the fixture cannot drift from the
+    /// variant it claims to mirror: an empty `String` is the only thing the two
+    /// shapes differ by, so removing exactly its encoded length from today's
+    /// bytes reproduces the prior row byte for byte.
+    fn verify_failed_without_findings() -> Vec<u8> {
+        let event = Event {
+            idempotency_key: IdempotencyKey("aether.bloomery.verify_failed:n".into()),
+            fact: Fact::VerifyFailed {
+                bloom: BloomId(Digest::from_bytes([3; 32])),
+                workpiece: WorkpieceId("wp-a".into()),
+                evidence: Evidence {
+                    subject: Digest::from_bytes([4; 32]),
+                    kind: EvidenceKind::VerificationResult,
+                    detail: Digest::from_bytes([5; 32]),
+                },
+                failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+                findings: String::new(),
+            },
+        };
+        let mut bytes = to_vec(&event).expect("a verify-failed event encodes");
+        let appended = to_vec(&String::new()).expect("an empty string encodes").len();
+        bytes.truncate(bytes.len() - appended);
+        bytes
+    }
+
+    #[test]
+    fn verify_failed_selector_is_its_declaration_index() {
+        // Tripwire: the pre-red-verify event upcast peeks this discriminant to
+        // decode the findings-less body. Inserting a Fact variant in front of
+        // VerifyFailed would make that peek read the wrong body.
+        let encoded = to_vec(&Fact::VerifyFailed {
+            bloom: BloomId(Digest::default()),
+            workpiece: WorkpieceId(String::new()),
+            evidence: Evidence {
+                subject: Digest::default(),
+                kind: EvidenceKind::VerificationResult,
+                detail: Digest::default(),
+            },
+            failed_verifiers: VerifyFailureSet::EMPTY,
+            findings: String::new(),
+        })
+        .expect("a verify-failed fact encodes");
+        let selector = u32::from_le_bytes(encoded[..4].try_into().expect("a selector is four bytes"));
+        assert_eq!(selector, VERIFY_FAILED);
+    }
+
+    #[test]
+    fn a_findings_less_verify_failed_row_upcasts_with_empty_findings() {
+        // The one registered event upcast that is not the identity: `findings`
+        // is appended *inside* a variant, so a row carrying it runs out of
+        // bytes under today's decoder. What this proves is that the hand-rolled
+        // cursor walk reads every field ahead of the appended one correctly —
+        // a walk that mis-sized any of them would decode garbage or refuse.
+        let decoded =
+            decode_recorded_event(&verify_failed_without_findings(), Some(EVENT_PRE_RED_VERIFY_DIGEST.as_bytes()))
+                .expect("a findings-less row decodes through the pre-red-verify upcast");
+        let Fact::VerifyFailed { workpiece, failed_verifiers, findings, .. } = decoded.fact else {
+            panic!("the upcast rebuilds the same variant");
+        };
+
+        assert_eq!(workpiece.0, "wp-a");
+        assert_eq!(failed_verifiers, VerifyFailureSet::one(VerifyFailure::Clippy));
+        assert!(findings.is_empty(), "a row written before the field carries no findings");
     }
 
     #[test]

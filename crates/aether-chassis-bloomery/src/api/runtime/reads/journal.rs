@@ -138,6 +138,7 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
         | Fact::ResumeHostFault { bloom, .. }
         | Fact::SpliceAssembled { bloom, .. }
         | Fact::MemberExecutorFault { bloom, .. }
+        | Fact::MemberDeadlineExpired { bloom, .. }
         | Fact::FoldRefused { bloom, .. }
         | Fact::ContainmentRefused { bloom, .. }
         | Fact::SurfaceRequested { bloom, .. }

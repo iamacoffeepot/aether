@@ -16,6 +16,7 @@ mod composition;
 mod config;
 mod coordination;
 pub(crate) mod coordination_pre_coalesce;
+pub(crate) mod coordination_pre_red_verify;
 mod fields;
 mod finding;
 mod granularity;
@@ -85,7 +86,7 @@ pub use coordination::{
     CoordinationState, DEFAULT_COALESCE_MILLIS, EagerIntegrationState, FailureScope, GenerationMember,
     IntegrationAppendPlan, IntegrationGeneration, IntegrationHead, MemberContractPin, MemberPin, MemberVerifyLatency,
     MemberVerifyOutcome, MemberVerifyRequest, PartialHeadRepairCompletion, PartialHeadRepairDispatch,
-    PartialHeadRepairPlan, PreparedCandidate, ResolutionProof, SharedRunCompletion, SharedRunDispatch,
+    PartialHeadRepairPlan, PreparedCandidate, RedVerify, ResolutionProof, SharedRunCompletion, SharedRunDispatch,
     SharedRunExecution, SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunPreparation,
     SharedRunRecord, StableHeadReservation, SurvivorGroup, VerificationContract, VerificationMode,
     VerificationObligation, construction_nonce_digest, host_class_digest, verification_environment_digest,
@@ -132,9 +133,9 @@ pub use scope_verify::{
 pub use spend::{SpendCeiling, SpendQuiesce, SpendWindow};
 pub use stage::{
     Attempt, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CatalogError, DispatchKey, EXECUTION_DEADLINE_ENV,
-    ExecutionLimits, NetworkProfile, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND, StageBinding,
-    StageCatalog, Transformation, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK,
-    VERIFY_MEMBER_COMMAND, is_model_lane, sized_wall_clock_secs,
+    ExecutionLimits, GATE_WALL_CLOCK_SECS, NetworkProfile, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND,
+    SCOPE_FILL_COMMAND, StageBinding, StageCatalog, Transformation, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND,
+    VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VERIFY_MEMBER_COMMAND, is_model_lane, sized_wall_clock_secs,
 };
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 #[cfg(not(target_arch = "wasm32"))]

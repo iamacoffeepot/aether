@@ -20,9 +20,9 @@ use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BaseReceipt, BloomSpec, CandidateRef, CompositionFinding, CompositionParents, ConfigScopes,
     CoordinationState, DispatchKey, Evidence, EvidenceKind, MemberDependency, OperatorHold, OperatorProposal,
-    OperatorRepair, OrphanClaimReleaseRecord, PipelineManifest, PrecheckState, ResolutionClaim, ResolvedConfigs,
-    SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet,
-    VerifyProof, VerifyReuse, Wedge, Withdrawal,
+    OperatorRepair, OrphanClaimReleaseRecord, PipelineManifest, PrecheckState, RedVerify, ResolutionClaim,
+    ResolvedConfigs, SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree,
+    VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 // Only [`Snapshot::with_green_base`] names it, and that door is behind the same cfg.
 // A plain import would be an unused one on a lib-scoped build, where the fixture
@@ -761,6 +761,17 @@ pub struct BloomRecord {
     /// Optional journal-derived shared verification and eager-head state.
     #[serde(default)]
     pub coordination: Option<Box<CoordinationState>>,
+    /// What this bloom does with a member whose `Verify` did not go green
+    /// (ADR-0218 §Amendment: low tolerance).
+    ///
+    /// Journal-derived from [`Decision::RecordRedVerify`], which every seal
+    /// decides. `#[serde(default)]` is the [`withdrawn`](Self::withdrawn)
+    /// precedent for a JSON reader that predates the field, and the default is
+    /// [`RedVerify::Eject`] — which is also what a bloom sealed before the row
+    /// existed reads as, deliberately: the disposition is a standing
+    /// instruction rather than a record of what a bloom once did.
+    #[serde(default)]
+    pub red_verify: RedVerify,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
 }
@@ -1216,7 +1227,7 @@ impl Snapshot {
     /// digest on every lap — keying a generation off it would read every
     /// repair the member ever makes as a repeat of the last.
     fn record_verify_series(&mut self, event: &Event, decisions: &Decisions) {
-        let Fact::VerifyFailed { bloom, workpiece, evidence, failed_verifiers } = &event.fact else {
+        let Fact::VerifyFailed { bloom, workpiece, evidence, failed_verifiers, .. } = &event.fact else {
             return;
         };
         if failed_verifiers.is_empty() {
@@ -1815,9 +1826,9 @@ impl Snapshot {
             | Decision::AdvanceMainline { .. }
             | Decision::RecordObservation { .. }
             | Decision::EmitReceipt(..) => self.apply_lifecycle_effect(effect),
-            Decision::RecordStageCatalog { .. } | Decision::RecordPipelineManifest { .. } => {
-                self.apply_sealed_line_effect(effect);
-            }
+            Decision::RecordStageCatalog { .. }
+            | Decision::RecordPipelineManifest { .. }
+            | Decision::RecordRedVerify { .. } => self.apply_sealed_line_effect(effect),
             Decision::RecordCompositionFinding { .. }
             | Decision::RecordAdjudication { .. }
             | Decision::RecordOperatorRepair { .. } => self.apply_composition_effect(effect),
@@ -2129,6 +2140,11 @@ impl Snapshot {
                     record.pipeline_manifest.clone_from(manifest);
                 }
             }
+            Decision::RecordRedVerify { bloom, red_verify } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.red_verify = *red_verify;
+                }
+            }
             _ => {}
         }
     }
@@ -2304,7 +2320,7 @@ impl BloomRecord {
     /// An empty record over `spec`: compiled-line catalog, sealed status,
     /// empty collections, and zeroed counters.
     ///
-    /// The one 31-field literal. Production sealed-record construction and every
+    /// The one 32-field literal. Production sealed-record construction and every
     /// test fixture fill from here, so a new field has a single home rather than
     /// steering placement across four test copies.
     #[must_use]
@@ -2313,6 +2329,7 @@ impl BloomRecord {
             spec,
             stage_catalog: StageCatalog::line(),
             pipeline_manifest: PipelineManifest::compiled(),
+            red_verify: RedVerify::default(),
             status: BloomStatus::Sealed,
             claims: BTreeMap::new(),
             evidence: Vec::new(),

@@ -268,11 +268,15 @@ mod tests {
     use aether_data::wire::to_vec;
 
     use super::*;
-    use crate::persisted::{COORDINATION_POLICY_PRE_COALESCE_DIGEST, MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST};
+    use crate::persisted::{
+        COORDINATION_POLICY_PRE_COALESCE_DIGEST, COORDINATION_POLICY_PRE_RED_VERIFY_DIGEST,
+        MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST,
+    };
     use crate::values::ModelProcessInstructions;
     use crate::values::coordination_pre_coalesce::CoordinationPolicyPreCoalesce;
+    use crate::values::coordination_pre_red_verify::CoordinationPolicyPreRedVerify;
     use crate::values::process_instructions_pre_reader::ModelProcessInstructionsPreReader;
-    use crate::values::{CoordinationPolicy, DEFAULT_COALESCE_MILLIS, VerificationMode};
+    use crate::values::{CoordinationPolicy, DEFAULT_COALESCE_MILLIS, RedVerify, VerificationMode};
 
     #[aether_data::kind(name = "aether.bloomery.test_resolve_alpha", eq)]
     struct Alpha {
@@ -468,5 +472,50 @@ mod tests {
             "a pre-coalesce policy names no hold, and none may be invented as a sealed zero"
         );
         assert_eq!(decoded.coalesce_hold_millis(), DEFAULT_COALESCE_MILLIS);
+    }
+    #[test]
+    fn a_pre_red_verify_coordination_policy_resolves_on_eject() {
+        // Tripwire (ADR-0218 §Amendment: low tolerance): a policy sealed before
+        // the disposition existed ran the repair loop, and this upcast
+        // deliberately does *not* reconstruct that. The disposition is a
+        // standing instruction, so an old policy reads as `Eject` — which is
+        // the whole point of the amendment, and the one place a reader could
+        // reasonably expect the opposite.
+        let prior = CoordinationPolicyPreRedVerify {
+            verification: VerificationMode::Contextual,
+            eager_integration: true,
+            max_run_members: 32,
+            max_serial_requests: 8,
+            max_attribution_probes: 64,
+            movement_budget: 3,
+            reservation_millis: 300_000,
+            host_class: String::from("fleet"),
+            coalesce_millis: Some(5_000),
+        };
+
+        let decoded: CoordinationPolicy = decode_config(
+            CoordinationPolicy::NAME,
+            &to_vec(&prior).expect("a pre-red-verify policy encodes"),
+            Some(COORDINATION_POLICY_PRE_RED_VERIFY_DIGEST.as_bytes()),
+        )
+        .expect("a policy stamped 4fdf5e1e… decodes through the pre-red-verify upcast");
+
+        assert_eq!(decoded.red_verify, RedVerify::Eject);
+        assert_eq!(decoded.coalesce_millis, prior.coalesce_millis, "every field ahead of the appended one survives");
+        assert_eq!(decoded.host_class, prior.host_class);
+    }
+
+    #[test]
+    fn a_policy_sealed_today_keeps_the_disposition_it_named() {
+        // The other half of the tripwire above: the upcast's answer must not
+        // leak into a policy that stated its own. A bloom that seals `Refine`
+        // keeps the ADR-0153 repair loop.
+        let policy = CoordinationPolicy { red_verify: RedVerify::Refine, ..CoordinationPolicy::default() };
+
+        let decoded: CoordinationPolicy =
+            decode_config(CoordinationPolicy::NAME, &to_vec(&policy).expect("a policy encodes"), None)
+                .expect("a policy written by this binary decodes as itself");
+
+        assert_eq!(decoded.red_verify, RedVerify::Refine);
     }
 }
