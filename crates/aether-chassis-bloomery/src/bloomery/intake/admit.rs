@@ -719,8 +719,16 @@ fn reached_no_verdict(verdict: StageVerdict) -> bool {
 /// reached a verdict is exactly the "study missing" case the ADR names, and it
 /// has to be admitted rather than refused: a refusal leaves the order live, and
 /// nothing will ever answer it — the bloom has landed and no retry is bought.
+///
+/// The whole-bloom mechanical gate is the fifth (#6061), and it was the one
+/// left out. Every argument above applies to it verbatim: a compiler lane the
+/// host cancelled at its sealed wall clock judged the fold no more than a
+/// silent critic judged it. Refusing it latched the order as unterminable, so
+/// on 2026-09-15 a bloom sat on the board with an aggregate verify "in flight"
+/// behind a process that had already been killed, and the only recovery was an
+/// operator `bloom admin rerun`.
 fn admits_executor_fault(stage: StageId) -> bool {
-    matches!(stage, StageId::AggregateReview | StageId::BaseVerify | StageId::Study)
+    matches!(stage, StageId::AggregateReview | StageId::AggregateVerify | StageId::BaseVerify | StageId::Study)
         || admits_member_executor_fault(stage)
 }
 
@@ -790,6 +798,27 @@ fn aggregate_verify_event(record: &DispatchRecord, upload: &UploadedEvidence, ev
     Event {
         idempotency_key: AdmissionKey::AggregateVerify.of(&record.nonce.0),
         fact: Fact::AggregateVerifyCompleted { bloom: record.bloom, passed: verdict_passed(upload.verdict), evidence },
+    }
+}
+
+/// The admission event for a whole-bloom mechanical gate that reached no
+/// verdict at all (#6061) — the sibling of
+/// [`aggregate_review_executor_fault_event`] for the compiler.
+///
+/// Both no-verdict shapes fold into it, the wall-clock expiry and the
+/// environment stamp alike, for the reason the critic's pair does not split
+/// them either: at this gate there is no member whose budget the distinction
+/// would protect, so the two are one fact and the reducer's single answer is to
+/// re-run the gate.
+///
+/// No findings, no failed verifiers, no roll: nothing was judged, so the fact
+/// carries the fault evidence and nothing else. The idempotency key is its own,
+/// so a replayed fault is a no-op against the journal rather than colliding
+/// with the completion key a later real verdict on the same order would carry.
+fn aggregate_verify_executor_fault_event(record: &DispatchRecord, evidence: Evidence) -> Event {
+    Event {
+        idempotency_key: AdmissionKey::AggregateVerifyExecutorFault.of(&record.nonce.0),
+        fact: Fact::AggregateVerifyExecutorFault { bloom: record.bloom, evidence },
     }
 }
 
@@ -1194,7 +1223,14 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
             event
         }
     } else if record.stage == StageId::AggregateVerify {
-        aggregate_verify_event(&record, upload, evidence)
+        // A speculative run keeps its own completion shape, which already has a
+        // `HostFault` arm of its own: only a real bloom's gate has a fold to
+        // re-run and a series to count it against.
+        if reached_no_verdict(upload.verdict) && !record.is_precheck() {
+            aggregate_verify_executor_fault_event(&record, evidence)
+        } else {
+            aggregate_verify_event(&record, upload, evidence)
+        }
     } else if record.stage == StageId::BaseVerify {
         base_verify_event(&record, upload, evidence)
     } else if record.stage == StageId::Study {

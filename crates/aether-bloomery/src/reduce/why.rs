@@ -48,7 +48,7 @@ use alloc::vec::Vec;
 
 use super::aggregate_verify::at_park_ceiling;
 use super::readiness::blocking_ancestor;
-use super::{BloomRecord, BloomStatus, Snapshot};
+use super::{AggregateFault, BloomRecord, BloomStatus, Snapshot};
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::{MemberWhy, TransitionWhy, WhyDocument, WhyState};
 use crate::values::Wedge;
@@ -71,12 +71,26 @@ pub fn why_of(snapshot: &Snapshot, bloom: &BloomId) -> Option<WhyDocument> {
     let dispatch = dispatch_rung(record, &members);
     let fold = fold_rung(snapshot, record, *bloom, &dispatch);
     let verify = stored_refusal(
-        aggregate_rung(record, AGGREGATE_VERIFY, StageId::AggregateVerify, record.aggregate_verify_rolls, &fold),
+        aggregate_rung(
+            record,
+            AGGREGATE_VERIFY,
+            StageId::AggregateVerify,
+            record.aggregate_verify_rolls,
+            record.aggregate_verify_fault.as_ref(),
+            &fold,
+        ),
         snapshot,
         bloom,
     );
     let review = stored_refusal(
-        aggregate_rung(record, AGGREGATE_REVIEW, StageId::AggregateReview, record.aggregate_rolls, &fold),
+        aggregate_rung(
+            record,
+            AGGREGATE_REVIEW,
+            StageId::AggregateReview,
+            record.aggregate_rolls,
+            record.aggregate_fault.as_ref(),
+            &fold,
+        ),
         snapshot,
         bloom,
     );
@@ -246,14 +260,15 @@ fn fold_rung(snapshot: &Snapshot, record: &BloomRecord, bloom: BloomId, dispatch
 /// One aggregate gate: done once it has passed on the held fold, blocked at its
 /// park ceiling, otherwise waiting on the fold.
 ///
-/// `rolls` is the gate's own roll counter — the two gates keep separate ones,
-/// and reading the wrong one is how a bloom parked at the verify ceiling
-/// reports a healthy review.
+/// `rolls` is the gate's own roll counter and `fault` its own executor-fault
+/// series — the two gates keep separate ones of each, and reading the wrong one
+/// is how a bloom parked at the verify ceiling reports a healthy review.
 fn aggregate_rung(
     record: &BloomRecord,
     name: &'static str,
     stage: StageId,
     rolls: u32,
+    fault: Option<&AggregateFault>,
     fold: &TransitionWhy,
 ) -> TransitionWhy {
     if record.aggregate_passed.contains(&stage) {
@@ -272,6 +287,18 @@ fn aggregate_rung(
     }
     if at_park_ceiling(record, stage, rolls) {
         return rung(name, WhyState::Blocked, format!("{rolls} rolls have spent this gate's sealed budget"), None);
+    }
+    // A gate whose lane keeps being cancelled or faulting spends no roll, so
+    // without this sentence a bloom re-running the same gate for the third time
+    // reads identically to one that dispatched it once (#6061).
+    if let Some(fault) = fault.filter(|fault| record.integration.as_ref().is_some_and(|fold| fold.tree == fault.subject))
+    {
+        return rung(
+            name,
+            WhyState::InFlight,
+            format!("this gate's executor reached no verdict {} times on the held fold and was redispatched", fault.rolls),
+            None,
+        );
     }
     if fold.state == WhyState::Done {
         return rung(name, WhyState::InFlight, format!("dispatched against the held fold after {rolls} rolls"), None);

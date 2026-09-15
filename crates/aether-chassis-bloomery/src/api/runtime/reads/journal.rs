@@ -181,6 +181,7 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
         | Fact::GrantAttempts { bloom, .. }
         | Fact::VerifyFailed { bloom, .. }
         | Fact::AggregateReviewExecutorFault { bloom, .. }
+        | Fact::AggregateVerifyExecutorFault { bloom, .. }
         | Fact::FoldConflict { bloom, .. }
         | Fact::OperatorAdjudication { bloom, .. }
         | Fact::OperatorRepair { bloom, .. }

@@ -1457,6 +1457,7 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::GrantAttempts { bloom, .. }
         | Fact::VerifyFailed { bloom, .. }
         | Fact::AggregateReviewExecutorFault { bloom, .. }
+        | Fact::AggregateVerifyExecutorFault { bloom, .. }
         | Fact::FoldConflict { bloom, .. }
         | Fact::OperatorAdjudication { bloom, .. }
         | Fact::OperatorRepair { bloom, .. }
@@ -1566,6 +1567,7 @@ fn collect_decision_blooms(effect: &Decision, into: &mut BTreeSet<BloomId>) {
         | Decision::RecordWedge { bloom, .. }
         | Decision::DispatchAggregateVerify { bloom, .. }
         | Decision::RecordAggregateVerifyRoll { bloom, .. }
+        | Decision::RecordAggregateFault { bloom, .. }
         | Decision::RecordLandingRoll { bloom, .. }
         | Decision::SetUnresolved { bloom, .. }
         | Decision::RecordVerifyProof { bloom, .. }
@@ -1826,6 +1828,7 @@ fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError>
         | Decision::RecordIntegration { .. }
         | Decision::RecordAggregateRoll { .. }
         | Decision::RecordAggregateVerifyRoll { .. }
+        | Decision::RecordAggregateFault { .. }
         | Decision::RecordVerifyProof { .. }
         | Decision::RecordVerifyReuse { .. }
         | Decision::RecordLandingRoll { .. }

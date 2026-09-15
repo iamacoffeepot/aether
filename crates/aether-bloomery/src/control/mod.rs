@@ -430,6 +430,7 @@ impl Topic {
             | Decision::RecordIntegration { .. }
             | Decision::RecordAggregateRoll { .. }
             | Decision::RecordAggregateVerifyRoll { .. }
+            | Decision::RecordAggregateFault { .. }
             | Decision::RecordLandingRoll { .. }
             | Decision::SetUnresolved { .. }
             | Decision::RevokeResolution { .. }

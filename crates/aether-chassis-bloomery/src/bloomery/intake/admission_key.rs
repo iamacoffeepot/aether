@@ -37,6 +37,13 @@ pub enum AdmissionKey {
     AggregateReviewExecutorFault,
     /// A whole-bloom aggregate-verify verdict.
     AggregateVerify,
+    /// An aggregate verify whose lane never reached a verdict — cancelled at
+    /// its sealed wall clock, or stamped `ExecutorFault` (#6061). Its own key
+    /// beside [`Self::AggregateVerify`] for the reason the critic's pair has
+    /// one: a replayed fault is then a no-op against the journal rather than a
+    /// collision with the completion key a later real verdict on the same order
+    /// would carry.
+    AggregateVerifyExecutorFault,
     /// A whole-workspace base-verify verdict (ADR-0200).
     BaseVerify,
     /// A member stage whose executor could not judge the subject (ADR-0195).
@@ -99,7 +106,7 @@ impl AdmissionKey {
     /// of these is the durable statement that the dispatch reached the
     /// reducer as a verdict. [`Self::Study`] is deliberately absent: it
     /// rides the same nonce but must not satisfy the strand check.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Attempt,
         Self::Integrate,
         Self::VerifyFailed,
@@ -107,6 +114,7 @@ impl AdmissionKey {
         Self::AggregateReview,
         Self::AggregateReviewExecutorFault,
         Self::AggregateVerify,
+        Self::AggregateVerifyExecutorFault,
         Self::BaseVerify,
         Self::MemberExecutorFault,
         Self::MemberDeadlineExpired,
@@ -126,6 +134,7 @@ impl AdmissionKey {
             Self::AggregateReview => "aether.bloomery.aggregate_review",
             Self::AggregateReviewExecutorFault => "aether.bloomery.aggregate_review_executor_fault",
             Self::AggregateVerify => "aether.bloomery.aggregate_verify",
+            Self::AggregateVerifyExecutorFault => "aether.bloomery.aggregate_verify_executor_fault",
             Self::BaseVerify => "aether.bloomery.base_verify",
             Self::MemberExecutorFault => "aether.bloomery.member_executor_fault",
             Self::MemberDeadlineExpired => "aether.bloomery.member_deadline_expired",

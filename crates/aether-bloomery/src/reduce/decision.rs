@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use super::gate::RecordedRefusal;
-use super::{FoldedIntegration, StageProgress};
+use super::{AggregateFault, FoldedIntegration, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::ProjectedReceipt;
@@ -1056,5 +1056,28 @@ pub enum Decision {
         workpiece: WorkpieceId,
         /// The host dispatch nonce to cancel and consume.
         nonce: String,
+    },
+    /// Record one composite gate's executor-fault series against the held fold
+    /// (ADR-0176, #6061).
+    ///
+    /// The series used to be derived inside the `RecordEvidence` fold from
+    /// "this evidence names the held fold's tree", which is true of both
+    /// aggregate gates at once: the critic and the compiler judge one fold, so
+    /// the derivation could not say which of them faulted, and the mechanical
+    /// gate's own lifecycle would have spent the critic's sealed budget. Naming
+    /// the stage is what makes the two series independent, and it is also what
+    /// lets an admin-absorbed fault charge nobody — a session emits the
+    /// evidence row and no series row at all.
+    ///
+    /// Snapshot-only. Appended so the prior decisions' wire discriminants are
+    /// unchanged.
+    RecordAggregateFault {
+        /// The bloom whose gate could not run.
+        bloom: BloomId,
+        /// Which composite gate faulted — `AggregateVerify` or
+        /// `AggregateReview`.
+        stage: StageId,
+        /// The series this fault produced, keyed to the held fold.
+        fault: AggregateFault,
     },
 }

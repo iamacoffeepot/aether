@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use super::composition::{Refusal, finding_of, reweave};
 use super::{
-    AggregateReviewError, AggregateReviewFault, BloomRecord, BloomStatus, Decision, Decisions, FoldedIntegration,
+    AggregateFault, AggregateReviewError, BloomRecord, BloomStatus, Decision, Decisions, FoldedIntegration,
     Outcome, Snapshot,
 };
 use crate::digest::Digest;
@@ -307,11 +307,14 @@ pub(super) fn reduce_aggregate_review_executor_fault(
         return super::admin::absorbed_fault(*bloom, None, evidence);
     }
 
-    // The same rule the `RecordEvidence` fold applies, read here so the ceiling
-    // decides against the count the record will actually reach.
-    let fault = AggregateReviewFault::next(record.aggregate_fault.as_ref(), integration.tree, evidence.detail);
+    // Computed here and filed beside the evidence, so the ceiling decides
+    // against the count the record will actually reach.
+    let fault = AggregateFault::next(record.aggregate_fault.as_ref(), integration.tree, evidence.detail);
     let budget = record.stage_catalog.retry_budget_of(StageId::AggregateReview).unwrap_or(1);
-    let mut effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
+    let mut effects = alloc::vec![
+        Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() },
+        Decision::RecordAggregateFault { bloom: *bloom, stage: StageId::AggregateReview, fault },
+    ];
 
     if fault.rolls >= budget {
         return Decisions { outcome: Outcome::AggregateReviewExecutorWedged { bloom: *bloom, fault, budget }, effects };

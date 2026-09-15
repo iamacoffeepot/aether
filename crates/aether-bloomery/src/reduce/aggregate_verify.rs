@@ -17,7 +17,10 @@ use super::boundary::EffectBoundary;
 use super::composition::{Refusal, finding_of, reweave};
 use super::gate::{AGGREGATE_REVIEW_GATE, AGGREGATE_VERIFY_GATE};
 use super::verify_memo::proof_of;
-use super::{AggregateVerifyError, BloomRecord, BloomStatus, Decision, Decisions, Outcome, Snapshot};
+use super::{
+    AggregateFault, AggregateVerifyError, BloomRecord, BloomStatus, Decision, Decisions, FoldedIntegration, Outcome,
+    Snapshot,
+};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId};
 use crate::reads;
@@ -198,6 +201,32 @@ pub(super) fn owed_aggregate_review(
     }
 }
 
+/// The bloom record and the integration fold a fold-bound aggregate-verify
+/// result may act on, or the refusal it earns.
+///
+/// The three refusals every aggregate-verify result makes, in one place — the
+/// mechanical gate's copy of [`super::review`]'s `held_fold_under_review`: an
+/// unknown or inactive bloom, no held integration, and evidence naming a tree
+/// other than the held fold's. The last is the load-bearing one: a stale result
+/// from a superseded fold must not act on a newer integration, whether it
+/// carries a verdict or an executor fault.
+fn held_fold_under_verify<'a>(
+    snapshot: &'a Snapshot,
+    bloom: &BloomId,
+    evidence: &Evidence,
+) -> Result<(&'a BloomRecord, &'a FoldedIntegration), AggregateVerifyError> {
+    let record = snapshot
+        .blooms
+        .get(bloom)
+        .filter(|record| record.status == BloomStatus::Sealed)
+        .ok_or(AggregateVerifyError::UnknownOrInactiveBloom)?;
+    let integration = record.integration.as_ref().ok_or(AggregateVerifyError::NoPendingIntegration)?;
+    if !evidence.validates(&integration.tree) {
+        return Err(AggregateVerifyError::SubjectMismatch { expected: integration.tree, got: evidence.subject });
+    }
+    Ok((record, integration))
+}
+
 /// Reduce a whole-bloom aggregate-verify verdict — the composition workpiece's
 /// `Verify` (ADR-0191 §2).
 ///
@@ -219,23 +248,10 @@ pub(super) fn reduce_aggregate_verify_completed(
     passed: bool,
     evidence: &Evidence,
 ) -> Decisions {
-    let Some(record) = snapshot.blooms.get(bloom) else {
-        return Decisions::rejected(Outcome::AggregateVerifyRejected(AggregateVerifyError::UnknownOrInactiveBloom));
+    let (record, integration) = match held_fold_under_verify(snapshot, bloom, evidence) {
+        Ok(held) => held,
+        Err(refusal) => return Decisions::rejected(Outcome::AggregateVerifyRejected(refusal)),
     };
-    if record.status != BloomStatus::Sealed {
-        return Decisions::rejected(Outcome::AggregateVerifyRejected(AggregateVerifyError::UnknownOrInactiveBloom));
-    }
-    let Some(integration) = record.integration.as_ref() else {
-        return Decisions::rejected(Outcome::AggregateVerifyRejected(AggregateVerifyError::NoPendingIntegration));
-    };
-    // The verdict must bind the exact tree the held fold produced — a stale
-    // verdict from a superseded fold cannot act on a newer integration.
-    if !evidence.validates(&integration.tree) {
-        return Decisions::rejected(Outcome::AggregateVerifyRejected(AggregateVerifyError::SubjectMismatch {
-            expected: integration.tree,
-            got: evidence.subject,
-        }));
-    }
 
     let rolls = record.aggregate_verify_rolls + 1;
     let mut effects = alloc::vec![
@@ -311,6 +327,99 @@ pub(super) fn reduce_aggregate_verify_completed(
     effects.extend(repair.effects);
 
     Decisions { outcome: repair.outcome, effects }
+}
+
+/// Reduce an aggregate-verify executor fault — the dispatched mechanical gate
+/// reporting that it could not judge the fold at all (#6061).
+///
+/// The compiler-side twin of
+/// [`super::review::reduce_aggregate_review_executor_fault`], and separate from
+/// [`reduce_aggregate_verify_completed`] for the same reason: nothing here is a
+/// verdict about a tree. The fold stays held, every member keeps its claim and
+/// its cursor, no finding is filed, and
+/// [`aggregate_verify_rolls`](BloomRecord::aggregate_verify_rolls) is untouched
+/// — a lane that was cancelled at its wall clock consumed no verdict. While the
+/// sealed `AggregateVerify` budget allows, the *same* tree and head go back out
+/// under a fresh order.
+///
+/// At the ceiling the bloom parks under an operator hold rather than recording
+/// the silent wedge the critic's series records. The two differ because their
+/// evidence differs: a critic that could not run still leaves a bloom whose
+/// mechanical gate may yet pass, while this one leaves a fold no compiler has
+/// judged and nothing on the board that says so. Before this path existed the
+/// intake refused the timeout outright, the order stayed live, and the bloom
+/// showed an aggregate verify in flight behind a process that had already been
+/// killed — which is the failure the hold's sentence is written to answer.
+pub(super) fn reduce_aggregate_verify_executor_fault(
+    snapshot: &Snapshot,
+    bloom: &BloomId,
+    evidence: &Evidence,
+) -> Decisions {
+    let (record, integration) = match held_fold_under_verify(snapshot, bloom, evidence) {
+        Ok(held) => held,
+        Err(refusal) => return Decisions::rejected(Outcome::AggregateVerifyRejected(refusal)),
+    };
+
+    // ADR-0219, the same hook the critic's fault and a member's fault carry:
+    // inside an admin session the outage is recorded and charged to nobody,
+    // because the operator is the one moving the fold and a spent roll would
+    // wedge the gate they are about to re-run.
+    if super::admin::absorbs_faults(record) {
+        return super::admin::absorbed_fault(*bloom, None, evidence);
+    }
+
+    let fault = AggregateFault::next(record.aggregate_verify_fault.as_ref(), integration.tree, evidence.detail);
+    let budget = record.stage_catalog.retry_budget_of(StageId::AggregateVerify).unwrap_or(DEFAULT_RETRY_BUDGET);
+    let mut effects = alloc::vec![
+        Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() },
+        Decision::RecordAggregateFault { bloom: *bloom, stage: StageId::AggregateVerify, fault },
+    ];
+
+    if fault.rolls >= budget {
+        effects.extend(parked_on_the_outage(record, *bloom, integration.tree, fault));
+        return Decisions { outcome: Outcome::AggregateVerifyExecutorParked { bloom: *bloom, fault, budget }, effects };
+    }
+
+    // The same held tree and head, under a fresh order: the fold was never
+    // judged, so re-running the gate is the whole retry — not a re-weave, and
+    // not a member lap. The roll stays the gate's own unspent cursor, and the
+    // helper is what withholds that work order under an operator hold (#5100).
+    effects.extend(aggregate_verify_dispatch(record, *bloom, integration.tree, integration.head));
+
+    Decisions { outcome: Outcome::AggregateVerifyExecutorFaulted { bloom: *bloom, fault, budget }, effects }
+}
+
+/// Park a bloom whose mechanical gate never ran, under an operator hold naming
+/// the outage (#6061) — the terminal half of
+/// [`reduce_aggregate_verify_executor_fault`].
+///
+/// No finding is filed, unlike [`parked_on_the_fold`]: a finding is a statement
+/// about a tree somebody read, and nobody read this one. What is recorded is
+/// the question that holds the fold as the owner's decision context and the
+/// hold that answers "why did nothing else go out" from `why` without reading
+/// the journal.
+fn parked_on_the_outage(record: &BloomRecord, bloom: BloomId, tree: Digest, fault: AggregateFault) -> Vec<Decision> {
+    let mut effects = alloc::vec![Decision::RecordReviewPark { bloom, question: Some(fault.evidence) }];
+    // An already-held bloom keeps the hold it has, exactly as the red-fold park
+    // beside this one does: the operator's own words outrank a machine-authored
+    // sentence.
+    if record.operator_hold.is_none() {
+        effects.push(Decision::RecordOperatorHold {
+            bloom,
+            hold: OperatorHold {
+                reason: format!(
+                    "the aggregate verify over fold {} never reached a verdict {} times running — its lane was \
+                     cancelled or its executor faulted — so the fold is unjudged rather than red; read the fault \
+                     report under evidence {} and release the hold once the environment is repaired",
+                    tree.to_hex(),
+                    fault.rolls,
+                    fault.evidence.to_hex()
+                ),
+                operator: HOLDING_DECIDER.to_owned(),
+            },
+        });
+    }
+    effects
 }
 
 /// Park a bloom whose fold did not build, under an operator hold naming the

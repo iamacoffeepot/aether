@@ -522,6 +522,25 @@ pub const DECISIONS_RESCUE_ADMIN_DIGEST: Digest =
 pub const EVENT_RESCUE_ADMIN_DIGEST: Digest =
     Digest::pinned("7765f5ee28b4ac779ac5a7e0205c037fd0a91fe238a1f71023adf60037ff33cd");
 
+/// The stamp on journaled decision rows written before #6061 appended
+/// [`Decision::RecordAggregateFault`].
+///
+/// Copied verbatim from the `decisions` line the ledger carried as current at
+/// `451f4cf95`, never recomputed (#5500). Its rows carry today's wire layout:
+/// the slice appended one `Decision` variant and two `Outcome` variants, each
+/// past every discriminant a row of that era could hold.
+pub const DECISIONS_PRE_AGGREGATE_VERIFY_FAULT_DIGEST: Digest =
+    Digest::pinned("cb23090e24674178e173da9037c2036449db4939af7bbdb1abd5138dcff404a1");
+
+/// The stamp on journaled event rows written before #6061 appended
+/// [`Fact::AggregateVerifyExecutorFault`] — the event column's half of
+/// [`DECISIONS_PRE_AGGREGATE_VERIFY_FAULT_DIGEST`].
+///
+/// Its rows carry today's wire layout for the same reason: the fact is appended
+/// past `Fact::AdminDropLap`, which was the tail.
+pub const EVENT_PRE_AGGREGATE_VERIFY_FAULT_DIGEST: Digest =
+    Digest::pinned("76e2d5e11f808c0fb338900a0f0f43e01587aaff2c9c17fb325010bbb8f35fe4");
+
 /// The stamp on sealed model-process instruction bundles written before
 /// ADR-0216 appended `retrospect` and `retrospect_finding_contract`.
 pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
@@ -559,6 +578,7 @@ pub fn decode_recorded_decisions(bytes: &[u8], schema: Option<&[u8]>) -> Result<
             upcast_decisions_pre_red_verify,
             upcast_decisions_pre_admin,
             upcast_decisions_rescue_admin,
+            upcast_decisions_pre_aggregate_verify_fault,
         ],
     )
 }
@@ -789,6 +809,20 @@ fn upcast_event_pre_admin(bytes: &[u8]) -> Result<Event, WireError> {
 /// discriminants, same pre-amendment policy — so those effects go through that
 /// decoder unchanged. At or above it, the effect is one of the three ADR-0219
 /// appended, and restamping the selector is the whole of the migration.
+/// Pre-#6061 decision rows carry the same wire layout today's decoder reads:
+/// the slice appended `Decision::RecordAggregateFault` and two `Outcome`
+/// variants, all three past every discriminant a row of that era could hold.
+fn upcast_decisions_pre_aggregate_verify_fault(bytes: &[u8]) -> Result<Decisions, WireError> {
+    from_bytes(bytes)
+}
+
+/// Pre-#6061 event rows carry the same wire layout today's decoder reads:
+/// `Fact::AggregateVerifyExecutorFault` is appended past `Fact::AdminDropLap`,
+/// which was the tail, so no discriminant a row of that era could hold moved.
+fn upcast_event_pre_aggregate_verify_fault(bytes: &[u8]) -> Result<Event, WireError> {
+    from_bytes(bytes)
+}
+
 fn upcast_decisions_rescue_admin(bytes: &[u8]) -> Result<Decisions, WireError> {
     decode_decisions_with(bytes, decode_decision_rescue_admin)
 }
@@ -856,6 +890,7 @@ pub fn decode_recorded_event(bytes: &[u8], schema: Option<&[u8]>) -> Result<Even
             upcast_event_pre_findings,
             upcast_event_pre_admin,
             upcast_event_rescue_admin,
+            upcast_event_pre_aggregate_verify_fault,
         ],
     )
 }
@@ -878,6 +913,7 @@ pub static DECISIONS: PersistedKind = PersistedKind {
         PersistedUpcast { digest: DECISIONS_PRE_RED_VERIFY_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_ADMIN_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_RESCUE_ADMIN_DIGEST, reshape: None },
+        PersistedUpcast { digest: DECISIONS_PRE_AGGREGATE_VERIFY_FAULT_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };
@@ -898,6 +934,7 @@ pub static EVENT: PersistedKind = PersistedKind {
         PersistedUpcast { digest: EVENT_PRE_RED_VERIFY_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_ADMIN_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_RESCUE_ADMIN_DIGEST, reshape: None },
+        PersistedUpcast { digest: EVENT_PRE_AGGREGATE_VERIFY_FAULT_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };

@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AdjudicationError, AdminError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
+    AdjudicationError, AdminError, AdmitEvidenceError, AdoptAnswerError, AggregateFault, AggregateReviewError,
     AggregateVerifyError, AttemptCompletedError, BaseReverifyError, CoordinationError, Decision, FoldConflictError,
     GrantAttemptsError, HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError,
     MemberExecutorFaultError, NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError,
@@ -331,7 +331,7 @@ pub enum Outcome {
         /// The bloom whose review could not run.
         bloom: BloomId,
         /// The fault series this fault produced, keyed to the held fold.
-        fault: AggregateReviewFault,
+        fault: AggregateFault,
         /// The sealed `AggregateReview` retry budget the series is bounded by.
         budget: u32,
     },
@@ -346,7 +346,7 @@ pub enum Outcome {
         /// The wedged bloom.
         bloom: BloomId,
         /// The terminal fault series.
-        fault: AggregateReviewFault,
+        fault: AggregateFault,
         /// The sealed budget the series exhausted.
         budget: u32,
     },
@@ -880,6 +880,38 @@ pub enum Outcome {
     },
     /// An admin fact was refused (ADR-0219).
     AdminRejected(AdminError),
+    /// The whole-bloom mechanical gate could not run and the same held fold was
+    /// redispatched to it (#6061) — a bounded retry of the *compiler*, not a
+    /// repair of anything.
+    ///
+    /// The mechanical twin of [`Outcome::AggregateReviewExecutorFaulted`]:
+    /// nothing about the bloom's work moved, the fold is still held, every
+    /// claim still stands, and no member left its cursor. Appended so the prior
+    /// outcomes' wire discriminants are unchanged, like the variant below.
+    AggregateVerifyExecutorFaulted {
+        /// The bloom whose mechanical gate could not run.
+        bloom: BloomId,
+        /// The fault series this fault produced, keyed to the held fold.
+        fault: AggregateFault,
+        /// The sealed `AggregateVerify` retry budget the series is bounded by.
+        budget: u32,
+    },
+    /// The mechanical gate's executor faults reached the sealed budget, so the
+    /// bloom parks under an operator hold naming the outage (#6061).
+    ///
+    /// A park rather than the silent wedge its critic-side sibling records: a
+    /// gate that never ran leaves no finding to read, so the reason has to be
+    /// written down somewhere an operator looks — the hold is what `why` reads
+    /// back, and it is what stops every other dispatch while nobody is looking
+    /// at a fold no compiler has judged.
+    AggregateVerifyExecutorParked {
+        /// The parked bloom.
+        bloom: BloomId,
+        /// The terminal fault series.
+        fault: AggregateFault,
+        /// The sealed budget the series exhausted.
+        budget: u32,
+    },
 }
 
 impl Outcome {

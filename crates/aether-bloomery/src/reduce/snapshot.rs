@@ -619,9 +619,21 @@ pub struct BloomRecord {
     /// budget on a verdict it never gave, and charging a member's
     /// [`repair_rolls`](StageProgress::repair_rolls) would spend a candidate's
     /// repair budget on a host outage. Journal-derived and replay-rebuilt like
-    /// the rest of the record: folded from the evidence log, so it survives a
-    /// restart and a redispatch of the same fold continues the series.
-    pub aggregate_fault: Option<AggregateReviewFault>,
+    /// the rest of the record: written by
+    /// [`Decision::RecordAggregateFault`](crate::Decision::RecordAggregateFault),
+    /// so it survives a restart and a redispatch of the same fold continues the
+    /// series.
+    pub aggregate_fault: Option<AggregateFault>,
+    /// The aggregate-verify executor faults this bloom has taken on the fold it
+    /// currently holds (#6061); `None` until one arrives.
+    ///
+    /// The mechanical gate's own series, beside the critic's above, on the same
+    /// axis [`aggregate_verify_rolls`](Self::aggregate_verify_rolls) sits beside
+    /// [`aggregate_rolls`](Self::aggregate_rolls). A compiler lane that was
+    /// cancelled at its wall clock judged the fold no more than a silent critic
+    /// judged it, and neither outage is the other's to pay for.
+    #[serde(default)]
+    pub aggregate_verify_fault: Option<AggregateFault>,
     /// The composition workpiece's findings channel (ADR-0191 §4 / §5): every
     /// verdict that refused the composed tree, in admission order.
     ///
@@ -1020,15 +1032,20 @@ impl Excuse {
     }
 }
 
-/// A bloom's run of aggregate-review executor faults against one held fold
-/// (ADR-0176) — how many times the dispatched review could not judge that exact
-/// tree, and what the latest of them reported.
+/// A bloom's run of composite-gate executor faults against one held fold
+/// (ADR-0176, #6061) — how many times a dispatched aggregate gate could not
+/// judge that exact tree, and what the latest of them reported.
+///
+/// One series per gate, never one shared between them: the critic and the
+/// compiler fault for independent reasons and carry independent sealed
+/// budgets, so a compiler outage that spent the critic's retries would wedge a
+/// gate that had answered every time it ran.
 ///
 /// Keyed to the subject rather than to the bloom: a different fold is a
 /// different subject and begins its own series, so a bloom that re-integrated
 /// after an outage is not carrying the previous fold's spent retries.
 #[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct AggregateReviewFault {
+pub struct AggregateFault {
     /// The fold tree the faults are against — the held integration's tree.
     pub subject: Digest,
     /// How many faults this subject has taken, the latest one included.
@@ -1037,7 +1054,7 @@ pub struct AggregateReviewFault {
     pub evidence: Digest,
 }
 
-impl AggregateReviewFault {
+impl AggregateFault {
     /// The series a fault on `subject` reporting `evidence` produces from
     /// `previous`: one more roll when it names the same subject, a fresh series
     /// at one when it does not.
@@ -1698,9 +1715,9 @@ impl Snapshot {
     /// Fold the held composition and the composite-gate ledger that judges it.
     ///
     /// Split out of [`apply_effect`](Self::apply_effect) so the parent match
-    /// stays inside its line budget, and grouped because these four rows are
+    /// stays inside its line budget, and grouped because these five rows are
     /// one subject: the fold that is held, the gates that have passed it, and
-    /// the rolls each of them has spent.
+    /// the rolls and executor faults each of them has spent.
     fn apply_fold_effect(&mut self, effect: &Decision) {
         match effect {
             Decision::RecordIntegration { bloom, integration } => {
@@ -1736,6 +1753,20 @@ impl Snapshot {
             Decision::RecordAggregateVerifyRoll { bloom, rolls } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.aggregate_verify_rolls = *rolls;
+                }
+            }
+            // The series the deciding reducer already computed, filed against
+            // the gate it names. A stage that is not a composite gate reaches
+            // no arm here: only the two aggregate positions have a series, and
+            // an unrecognized stage must leave both alone rather than land in
+            // whichever one a catch-all happened to pick.
+            Decision::RecordAggregateFault { bloom, stage, fault } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    match stage {
+                        StageId::AggregateReview => record.aggregate_fault = Some(*fault),
+                        StageId::AggregateVerify => record.aggregate_verify_fault = Some(*fault),
+                        _ => {}
+                    }
                 }
             }
             _ => {}
@@ -1861,7 +1892,8 @@ impl Snapshot {
             Decision::RecordIntegration { .. }
             | Decision::RecordAggregateGatePass { .. }
             | Decision::RecordAggregateRoll { .. }
-            | Decision::RecordAggregateVerifyRoll { .. } => self.apply_fold_effect(effect),
+            | Decision::RecordAggregateVerifyRoll { .. }
+            | Decision::RecordAggregateFault { .. } => self.apply_fold_effect(effect),
             Decision::RecordVerifyProof { .. } | Decision::RecordVerifyReuse { .. } => {
                 self.apply_verify_memo_effect(effect);
             }
@@ -2433,6 +2465,7 @@ impl BloomRecord {
             verify_proofs: BTreeMap::new(),
             verify_reuses: Vec::new(),
             aggregate_fault: None,
+            aggregate_verify_fault: None,
             composition_findings: Vec::new(),
             adjudications: Vec::new(),
             operator_repairs: Vec::new(),
@@ -2555,14 +2588,21 @@ impl BloomRecord {
     }
 
     /// Fold one admitted evidence artifact into the record: the log entry, plus
-    /// whatever derived state its kind carries.
+    /// the one piece of derived state a kind still carries.
     ///
-    /// Two kinds carry derived state, both by the same rule — a hold or a fault
-    /// series is *read out of* the evidence log rather than written by a fact of
-    /// its own, so replay rebuilds it for free and no second decision can
-    /// desynchronize from it. They sit together here for the same reason
-    /// [`Snapshot::apply_dispatch_effect`] groups the dispatch arms: the shape is
-    /// only visible when the derivations are in one place.
+    /// A pending-decision hold is *read out of* the evidence log rather than
+    /// written by a decision of its own, so replay rebuilds it for free and no
+    /// second decision can desynchronize from it.
+    ///
+    /// The aggregate fault series used to be derived here too, keyed on "this
+    /// evidence names the held fold's tree". That predicate cannot tell one
+    /// composite gate from the other — both bind the same fold — so the moment
+    /// the mechanical gate gained a fault lifecycle of its own (#6061) a
+    /// compiler outage would have spent the critic's sealed budget. Both series
+    /// are written by [`Decision::RecordAggregateFault`] instead, which names
+    /// the stage, and an admin-absorbed fault (ADR-0219) charges nobody because
+    /// it emits no such decision rather than because it happened to bind
+    /// another subject.
     fn record_evidence(&mut self, evidence: &Evidence) {
         // Append in admission order — the evidence log is a growing
         // journal-derived history, not a keyed latest-wins map.
@@ -2574,25 +2614,8 @@ impl BloomRecord {
             EvidenceKind::Question => {
                 self.holds.insert(evidence.detail);
             }
-            // An executor-fault admission derives the aggregate-review fault
-            // series (ADR-0176), keyed to the subject it names — so a fault on a
-            // fresh fold starts over rather than inheriting the previous fold's
-            // spent retries.
-            EvidenceKind::ExecutorFault => {
-                // Only the bloom-scoped aggregate-review series folds here
-                // (ADR-0176). A member-stage fault (ADR-0195) binds a member
-                // subject, not the held fold, and records its roll via
-                // `RecordMemberMachinery`. Folding every ExecutorFault here
-                // would charge the critic's series for a member-stage outage.
-                if self.integration.as_ref().is_some_and(|fold| fold.tree == evidence.subject) {
-                    self.aggregate_fault = Some(AggregateReviewFault::next(
-                        self.aggregate_fault.as_ref(),
-                        evidence.subject,
-                        evidence.detail,
-                    ));
-                }
-            }
-            EvidenceKind::Approval
+            EvidenceKind::ExecutorFault
+            | EvidenceKind::Approval
             | EvidenceKind::VerificationResult
             | EvidenceKind::ReviewFinding
             | EvidenceKind::ResolutionClaim

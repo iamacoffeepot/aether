@@ -283,7 +283,7 @@ pub use reduce::AdminError;
 pub use reduce::AdmitEvidenceError;
 pub use reduce::AdoptAnswerError;
 pub use reduce::AggregateReviewError;
-pub use reduce::AggregateReviewFault;
+pub use reduce::AggregateFault;
 pub use reduce::AggregateVerifyError;
 pub use reduce::AttemptCompletedError;
 pub use reduce::AwaitingSurface;

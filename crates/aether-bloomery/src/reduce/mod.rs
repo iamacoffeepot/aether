@@ -80,7 +80,7 @@ pub use gate::{
 pub use outcome::{Decisions, Outcome};
 pub use seal::is_active_unlanded;
 pub use snapshot::{
-    AggregateReviewFault, AwaitingSurface, BloomRecord, BloomStatus, Excuse, FileLease, FoldRound, FoldedIntegration,
+    AggregateFault, AwaitingSurface, BloomRecord, BloomStatus, Excuse, FileLease, FoldRound, FoldedIntegration,
     HostFaultHold, LeaseEviction, MemberMachineryFault, MemberPark, NarrowedComposition, Snapshot, StageProgress,
 };
 pub use view::view_of;
@@ -92,7 +92,7 @@ use admin::{
     reduce_admin_cancel_lane, reduce_admin_drop_lap, reduce_admin_enter, reduce_admin_exit, reduce_admin_rerun,
     reduce_admin_set_candidate, reduce_admin_waive,
 };
-use aggregate_verify::reduce_aggregate_verify_completed;
+use aggregate_verify::{reduce_aggregate_verify_completed, reduce_aggregate_verify_executor_fault};
 use attempt::{reduce_attempt_completed, reduce_member_deadline_expired, reduce_member_executor_fault};
 use base_verify::{reduce_base_reverify, reduce_base_verify_completed};
 use coordination::{
@@ -199,6 +199,9 @@ fn reduce_completion_fact(snapshot: &Snapshot, fact: &Fact) -> Decisions {
         Fact::AggregateReviewExecutorFault { bloom, evidence } => {
             reduce_aggregate_review_executor_fault(snapshot, bloom, evidence)
         }
+        Fact::AggregateVerifyExecutorFault { bloom, evidence } => {
+            reduce_aggregate_verify_executor_fault(snapshot, bloom, evidence)
+        }
         Fact::FoldConflict { bloom, workpiece, checkpoint, head, evidence } => {
             reduce_fold_conflict(snapshot, bloom, workpiece, *checkpoint, *head, evidence)
         }
@@ -270,6 +273,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         | Fact::VerifyFailed { .. }
         | Fact::ContainmentRefused { .. }
         | Fact::AggregateReviewExecutorFault { .. }
+        | Fact::AggregateVerifyExecutorFault { .. }
         | Fact::FoldConflict { .. }
         | Fact::VerifyHostFault { .. }
         | Fact::MemberExecutorFault { .. }

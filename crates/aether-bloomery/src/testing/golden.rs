@@ -9,7 +9,8 @@ use core::iter::once;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::port::{ClaimRefKind, ProjectedReceipt};
 use crate::reduce::{
-    Decision, Decisions, Event, Fact, FoldedIntegration, Outcome, RecordedRead, RecordedRefusal, StageProgress,
+    AggregateFault, Decision, Decisions, Event, Fact, FoldedIntegration, Outcome, RecordedRead, RecordedRefusal,
+    StageProgress,
 };
 use crate::values::{
     Adjudication, AdminAct, AdminActKind, AdminNote, AgentProfile, BaseReceipt, BaseVerdict, CandidatePreparationPlan,
@@ -920,6 +921,11 @@ fn bloom_lifecycle_records(bloom: BloomId, successor: BloomId, workpiece: &Workp
         Decision::RecordObservation { head: digest(10) },
         Decision::RecordAggregateRoll { bloom, rolls: 1 },
         Decision::RecordAggregateVerifyRoll { bloom, rolls: 2 },
+        Decision::RecordAggregateFault {
+            bloom,
+            stage: StageId::AggregateVerify,
+            fault: AggregateFault { subject: digest(9), rolls: 1, evidence: digest(11) },
+        },
         Decision::RecordLandingRoll { bloom, rolls: 3 },
         Decision::RecordWedge {
             bloom,

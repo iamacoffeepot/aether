@@ -1045,6 +1045,32 @@ pub enum Fact {
         /// Which lap, and on whose word.
         drop: AdminLapDrop,
     },
+    /// The whole-bloom mechanical gate reported that it could not judge the
+    /// fold at all (#6061) — the compiler's twin of
+    /// [`Fact::AggregateVerifyExecutorFault`]'s critic-side sibling,
+    /// [`Fact::AggregateReviewExecutorFault`].
+    ///
+    /// Both shapes of "no verdict" admit here: a lane the host cancelled at its
+    /// sealed wall clock, and one whose environment stamped `ExecutorFault`.
+    /// Neither judged the composed tree, so the reducer records the fault
+    /// against the held fold, charges no member and no
+    /// [`aggregate_verify_rolls`](crate::BloomRecord::aggregate_verify_rolls),
+    /// and re-dispatches the same tree while the sealed `AggregateVerify`
+    /// budget allows. What it replaces is a refusal: before this fact existed
+    /// the intake had nothing for the verdict to become, so a timed-out
+    /// aggregate verify left its order live forever and the bloom sat on the
+    /// board as in-flight with no lane behind it.
+    ///
+    /// Appended past [`Fact::AdminDropLap`] so the prior facts' wire
+    /// discriminants are unchanged.
+    AggregateVerifyExecutorFault {
+        /// The bloom whose mechanical gate could not run.
+        bloom: BloomId,
+        /// The fault evidence, bound to the held fold's tree — the reducer
+        /// refuses a fault naming any other subject, so a report from a
+        /// superseded fold cannot spend a newer fold's retries.
+        evidence: Evidence,
+    },
 }
 
 impl Fact {
