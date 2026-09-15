@@ -218,7 +218,7 @@ impl Scope {
         }
 
         let workspace = Workspace::load()?;
-        let (extra, note) = smoke_check(tool);
+        let (extra, note) = smoke_check(&tool);
         Self::closure_over(&workspace, changed, changed, extra, None, note)
     }
 
@@ -296,7 +296,7 @@ impl Scope {
         }
 
         let attribution = LockAttribution::of(&attributed.changed, &reached);
-        let (mut extra, note) = smoke_check(tool);
+        let (mut extra, note) = smoke_check(&tool);
         extra.extend(reached);
         Self::closure_over(&workspace, &rest, changed, extra, Some(attribution), note)
     }
@@ -457,7 +457,9 @@ impl Scope {
                     },
                 );
                 if let Some(note) = note {
-                    receipt.push_str(&format!("smoke check: {note}\n"));
+                    receipt.push_str("smoke check: ");
+                    receipt.push_str(note);
+                    receipt.push('\n');
                 }
                 if let Some(attribution) = lock {
                     receipt.push_str(&attribution.receipt_line());
@@ -584,8 +586,8 @@ fn lockfile_at(revision: &str) -> Result<String> {
 /// A tool change proves itself by compiling xtask's own closure and then
 /// running each gate once over one real crate — the smoke check that says the
 /// tool still drives a gate end to end.
-fn smoke_check(tool: ToolChange<'_>) -> (BTreeSet<String>, Option<String>) {
-    match tool {
+fn smoke_check(tool: &ToolChange<'_>) -> (BTreeSet<String>, Option<String>) {
+    match *tool {
         ToolChange::Tool(path) => (
             BTreeSet::from([SMOKE_PACKAGE.to_owned()]),
             Some(format!(
