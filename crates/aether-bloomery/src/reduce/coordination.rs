@@ -2245,6 +2245,13 @@ struct SharedCompletionContext<'a> {
     attributed: &'a BTreeSet<WorkpieceId>,
 }
 
+/// Why a member the shared run named leaves under [`RedVerify::Eject`].
+const ATTRIBUTED_EJECTION: &str = "its shared verification attributed the failing gate to it";
+
+/// Why a set the shared run could not separate leaves under the same
+/// disposition: nobody is answerable individually, so the set goes together.
+const UNRESOLVED_EJECTION: &str = "its shared verification never resolved which member owed the failure";
+
 fn apply_attributed_failure(
     context: &SharedCompletionContext<'_>,
     state: &mut CoordinationState,
@@ -2283,6 +2290,15 @@ fn apply_failed_outcome(
     state.claims.remove(workpiece_key(&request.member.workpiece));
     effects.push(Decision::RecordEvidence { bloom: context.bloom, evidence: evidence.clone() });
     match scope {
+        // The member the run named owes the failure, and the bloom's sealed
+        // disposition says a member that did not go green leaves rather than
+        // buying a repair lap — the same low-tolerance rule the standalone
+        // verify path already applies (ADR-0218 §Amendment). Without this arm
+        // an attributed contextual red was the one red an `Eject` bloom
+        // answered with a `Refine` (#6054).
+        FailureScope::Attributed { members, .. } if context.record.red_verify == RedVerify::Eject => {
+            eject_contextual(context, members, ATTRIBUTED_EJECTION, failures, evidence, effects);
+        }
         FailureScope::Attributed { members, .. } => {
             apply_attributed_failure(context, state, members, failures, evidence.detail, effects)?;
         }
@@ -2313,17 +2329,18 @@ fn apply_failed_outcome(
         // (ADR-0218 §Amendment: low tolerance); under `Refine` this stays the
         // no-op it has always been, and the scheduler re-proposes them.
         FailureScope::Interaction { members, .. } if context.record.red_verify == RedVerify::Eject => {
-            eject_contextual(context, members, failures, evidence, effects);
+            eject_contextual(context, members, UNRESOLVED_EJECTION, failures, evidence, effects);
         }
         FailureScope::Unattributed { .. } if context.record.red_verify == RedVerify::Eject => {
-            eject_contextual(context, from_ref(&request.member), failures, evidence, effects);
+            eject_contextual(context, from_ref(&request.member), UNRESOLVED_EJECTION, failures, evidence, effects);
         }
         FailureScope::Interaction { .. } | FailureScope::Unattributed { .. } => {}
     }
     Ok(())
 }
 
-/// Withdraw every member of one unresolved contextual failure.
+/// Withdraw every member of one contextual failure the bloom's sealed
+/// disposition ejects on, under the `cause` that failure is named by.
 ///
 /// One [`depart`] over the whole set rather than one per member: what the
 /// remainder arithmetic answers — is the bloom empty now, did this complete the
@@ -2338,6 +2355,7 @@ fn apply_failed_outcome(
 fn eject_contextual(
     context: &SharedCompletionContext<'_>,
     members: &[MemberPin],
+    cause: &str,
     failures: VerifyFailureSet,
     evidence: &Evidence,
     effects: &mut Vec<Decision>,
@@ -2348,12 +2366,7 @@ fn eject_contextual(
         .map(|member| Withdrawal {
             workpiece: member.workpiece.clone(),
             cause: WithdrawalCause::Verify,
-            reason: ejection_reason(
-                "its shared verification never resolved which member owed the failure",
-                failures,
-                evidence,
-                "",
-            ),
+            reason: ejection_reason(cause, failures, evidence, ""),
             operator: String::from("bloomery"),
         })
         .collect();
@@ -4546,7 +4559,11 @@ mod tests {
 
     #[test]
     fn independent_attributions_schedule_one_repair_for_each_distinct_member() {
-        let (snapshot, bloom, plan, node) = active_contextual_run();
+        let (mut snapshot, bloom, plan, node) = active_contextual_run();
+        // Stated, not inherited: `BloomRecord::empty` keeps the `Eject`
+        // default, and an attributed red under that disposition withdraws the
+        // member rather than dispatching the repair this test is about (#6054).
+        snapshot.blooms.get_mut(&bloom).expect("the fixture bloom").red_verify = RedVerify::Refine;
         let outcomes = plan
             .requests
             .iter()
@@ -4588,6 +4605,56 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(repairs.len(), plan.requests.len());
+    }
+
+    #[test]
+    fn an_attributed_member_is_withdrawn_rather_than_repaired_under_the_eject_disposition() {
+        // Tripwire (#6054): an attributed contextual red was the one red an
+        // `Eject` bloom answered with a `Refine`. The standalone verify path
+        // has ejected on it since ADR-0218's amendment; the shared-run
+        // completion has to agree, or the disposition means different things
+        // depending on which physical shape happened to prove the member.
+        let (snapshot, bloom, plan, node) = active_contextual_run();
+        let charged = plan.requests[0].clone();
+        let detail = digest(90);
+        let completion = SharedRunCompletion {
+            plan: plan.digest(),
+            run: digest(62),
+            outcomes: alloc::vec![MemberVerifyOutcome::Failed {
+                request: charged.digest(),
+                scope: FailureScope::Attributed { members: alloc::vec![charged.member.clone()], evidence: detail },
+                failures: once(crate::VerifyFailure::Fmt).collect(),
+                evidence: Evidence { subject: node.candidate.tree, kind: EvidenceKind::VerificationResult, detail },
+            }],
+            unfinished: plan.requests.iter().skip(1).map(MemberVerifyRequest::digest).collect(),
+            latencies: alloc::vec![MemberVerifyLatency {
+                request: charged.digest(),
+                member: charged.member.clone(),
+                latency_millis: 10,
+            }],
+        };
+
+        let decisions = reduce_shared_run_completed(&snapshot, &bloom, &completion);
+
+        assert!(
+            decisions.effects.iter().any(|effect| matches!(
+                effect,
+                Decision::RecordWithdrawal { withdrawal, .. }
+                    if withdrawal.workpiece == charged.member.workpiece
+                        && withdrawal.cause == WithdrawalCause::Verify
+            )),
+            "the charged member leaves: {:?}",
+            decisions.effects,
+        );
+        assert!(
+            !decisions.effects.iter().any(|effect| matches!(
+                effect,
+                Decision::AdvanceStage { workpiece, progress, .. }
+                    if *workpiece == charged.member.workpiece && progress.stage == StageId::Refine
+            )),
+            "and buys no repair lap: {:?}",
+            decisions.effects,
+        );
     }
 
     #[test]
