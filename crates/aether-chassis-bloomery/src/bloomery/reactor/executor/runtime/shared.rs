@@ -1955,12 +1955,22 @@ struct ContextualSettlement {
 /// The extent each member's ownership of a named path is read against
 /// (ADR-0218, amended 2026-09-15).
 ///
-/// The candidate's own delta against the composition base first: it is what the
-/// member actually wrote, so a member whose surface merely covers a path it
-/// never touched is not charged with it. The declared surface is the fallback
-/// for a source that cannot answer — a fixture backend that retains no objects,
-/// an unreadable delta — and the answer says which was used, because the two
-/// are not equally strong evidence.
+/// The candidate's own delta first: it is what the member actually wrote, so a
+/// member whose surface merely covers a path it never touched is not charged
+/// with it. The declared surface is the fallback for a source that cannot
+/// answer — a fixture backend that retains no objects, an unreadable delta —
+/// and the answer says which was used, because the two are not equally strong
+/// evidence.
+///
+/// That delta is read against the member's **own construct base** — the
+/// starting head its lane was handed, carried on the request's
+/// `ConstructContext` — and not against the composition's base (#6054). The
+/// composition base is the product head, which moves every time a sibling
+/// folds; a candidate authored before that fold does not descend from it, so
+/// `changed_paths` answered "changed-path base … is not an ancestor of …" for
+/// every member of every run after the first fold and attribution silently
+/// dropped to the coarse surface reading. The member's construct base is the
+/// tree its verify proves it against in the first place.
 fn member_extents(
     store: &mut dyn StoreBackend,
     source: Option<&SourceShell>,
@@ -1973,12 +1983,15 @@ fn member_extents(
             .requests
             .iter()
             .map(|request| {
+                let base = contextual_delta_base(request, composition);
                 source
-                    .changed_paths(&composition.base.candidate, &request.member.candidate)
+                    .changed_paths(base, &request.member.candidate)
                     .inspect_err(|error| {
                         tracing::info!(
                             target: "aether_chassis_bloomery::executor",
                             workpiece = %request.member.workpiece.0,
+                            base = %base.checkout.to_hex(),
+                            candidate = %request.member.candidate.checkout.to_hex(),
                             %error,
                             "contextual attribution: a candidate delta is unreadable; the declared surfaces stand in",
                         );
@@ -2007,24 +2020,43 @@ fn member_extents(
     Some(MemberExtents { source: ExtentSource::DeclaredSurface, members: surfaces })
 }
 
+/// The revision one member's candidate delta is read from: the head its own
+/// construct lane was handed (#6054).
+///
+/// The composition's base is the product head, and the product head moves every
+/// time a sibling folds. A candidate authored before that fold does not descend
+/// from it, so reading the delta against the composition base asks git for a
+/// range that does not exist and answers "changed-path base … is not an
+/// ancestor of …" — which is what bloom 9680c483 logged on every member of
+/// every run, dropping attribution to the coarse declared-surface reading.
+///
+/// The composition base stands in only for a request that carries no context at
+/// all, where there is nothing better to measure from.
+fn contextual_delta_base<'a>(
+    request: &'a aether_bloomery::MemberVerifyRequest,
+    composition: &'a aether_bloomery::CompositionPlan,
+) -> &'a aether_bloomery::CandidateRef {
+    request.context.as_ref().map_or(&composition.base.candidate, |context| &context.starting_head.candidate)
+}
+
 /// Attribute what the step-0 findings already answer, and hand back the checks
 /// that still need a probe (ADR-0218, amended 2026-09-15).
 ///
 /// Two readings, in order. A gate whose findings name paths that each belong to
-/// exactly one member charges those members and buys nothing. Then a *gate*
-/// red on a run with a single non-inherited member charges that member with
-/// whatever the findings left open: there is no other candidate in the
-/// composition, so a bisection over it can only re-derive the one answer
-/// available.
+/// exactly one member charges those members and buys nothing. Then a run with a
+/// single member charges that member with whatever the findings left open:
+/// there is no other candidate in the composition, so a bisection over it can
+/// only re-derive the one answer available.
 ///
-/// Two shapes are held back from that second reading, and both for the same
-/// reason — they are the shapes where the base, not the member, can be the
-/// cause. An inherited member keeps the bisection because
-/// [`BatchFailure::Inherited`] is the claim that a late member is not
-/// answerable for the head it started on. A named failing *test*
-/// ([`BatchCheck::Test`]) keeps it because a test can be red on the base
-/// already, and its baseline is one cheap exact question rather than a whole
-/// suite — the same reason the flake and legacy-excusal machinery reads it.
+/// That second reading used to hold back an inherited member and a named
+/// failing test, each on the argument that the base rather than the member can
+/// be the cause. Neither survives contact with a composition of one (#6054).
+/// Every contextual request carries a construct context, so "inherited"
+/// excluded every real run and the walk bisected a single member as a matter of
+/// course — bloom 9680c483's two red runs probed until their deadline and were
+/// recorded as expired rather than red. And a base-red test is answered
+/// upstream by the gate's own replay and the excusal ledgers, not by a
+/// whole-suite baseline this run would pay minutes for.
 fn attribute_from_findings(
     dispatch: &SharedRunDispatch,
     receipt: &SharedStepReceipt,
@@ -2033,7 +2065,7 @@ fn attribute_from_findings(
 ) -> (Vec<BatchFailure>, Vec<BatchCheck>, AttributionProvenance) {
     let sections = receipt.findings.as_deref().map(gate_findings).unwrap_or_default();
     let solitary = match dispatch.plan.requests.as_slice() {
-        [request] if request.context.is_none() => Some(request.member.workpiece.clone()),
+        [request] => Some(request.member.workpiece.clone()),
         _ => None,
     };
     let mut failures = Vec::new();
@@ -2061,7 +2093,7 @@ fn attribute_from_findings(
                         "contextual attribution: the findings do not discriminate; this gate bisects",
                     );
                 }
-                let Some(member) = solitary.clone().filter(|_| matches!(check, BatchCheck::Gate { .. })) else {
+                let Some(member) = solitary.clone() else {
                     remaining.push(check.clone());
                     continue;
                 };
@@ -3119,9 +3151,9 @@ mod tests {
     use crate::store::{RecordOutcome, SqliteStore};
     use aether_bloomery::{
         AgentProfile, BackendId, CandidateRef, CompositionContract, CompositionInput, CompositionPlan, ConfigRegistry,
-        ContextualInvocationTemplate, ExecutionLimits, Harness, IntegrationHead, MemberContractPin, MemberPin,
-        MemberVerifyRequest, NetworkProfile, ObservedLaneWrites, ReasoningEffort, SharedRunNode, SharedRunPlan,
-        ToolPolicy, Transformation, VerificationContract, VerificationObligation, WorkOrder,
+        ConstructContext, ContextualInvocationTemplate, ExecutionLimits, Harness, IntegrationHead, MemberContractPin,
+        MemberPin, MemberVerifyRequest, NetworkProfile, ObservedLaneWrites, ReasoningEffort, SharedRunNode,
+        SharedRunPlan, ToolPolicy, Transformation, VerificationContract, VerificationObligation, WorkOrder,
     };
 
     struct ReleasePort {
@@ -3282,6 +3314,40 @@ mod tests {
             },
             plan,
         }
+    }
+
+    #[test]
+    fn a_members_delta_is_read_from_its_own_construct_base_not_the_moving_product_head() {
+        // Tripwire (#6054): the composition base is the product head, and a
+        // sibling's fold moves it past the tree this member's lane was given.
+        // Reading the delta from there asks git for a range whose base is not
+        // an ancestor of the candidate, which is the error bloom 9680c483
+        // logged on every member of every run — and the fallback it dropped to,
+        // the declared surface, is a permission rather than a record.
+        let dispatch = reducer_shaped_contextual_dispatch();
+        let composition = dispatch.plan.composition.as_ref().expect("a contextual plan carries its composition");
+        let started_on = CandidateRef {
+            tree: Digest::of_wire_bytes(b"pre-fold-tree"),
+            checkout: Digest::of_wire_bytes(b"pre-fold-checkout"),
+        };
+        let mut request = dispatch.plan.requests[0].clone();
+        request.context = Some(ConstructContext {
+            bloom_base: composition.base.candidate,
+            starting_head: IntegrationHead { candidate: started_on, ..composition.base.clone() },
+        });
+
+        assert_eq!(
+            *contextual_delta_base(&request, composition),
+            started_on,
+            "a member that started before the fold is measured from the head it started on",
+        );
+
+        request.context = None;
+        assert_eq!(
+            *contextual_delta_base(&request, composition),
+            composition.base.candidate,
+            "a request carrying no context has nothing better than the composition base",
+        );
     }
 
     fn step(request: Digest, ordinal: u32, completed: bool) -> SharedRunStepRow {

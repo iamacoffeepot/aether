@@ -25,6 +25,26 @@ use super::containment::path_in_surface;
 /// assembles it.
 const GATE_HEADING: &str = "### ";
 
+/// The lines a failed build closes with rather than a finding: rustc's abort
+/// and explain notices, cargo's per-crate tally and build-failed line, and the
+/// verify lane's own exit report.
+///
+/// They name no path because they are counts and pointers, not diagnostics.
+/// Read as findings they say "a finding under this gate names no path", which
+/// sends every red rustc gate to the probe walk however precisely its real
+/// diagnostics located themselves — bloom 9680c483, where two single-member
+/// runs bought probes until their deadline over sections whose every
+/// diagnostic carried a `-->`.
+const CLOSING_NOTICES: [&str; 7] = [
+    "error: aborting due to",
+    "error: could not compile",
+    "error: command ",
+    "warning: build failed",
+    "For more information about this",
+    "Some errors have detailed explanations",
+    "Command exited with non-zero status",
+];
+
 /// One failing gate's findings, read for the paths they name.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct GateFindings {
@@ -49,7 +69,9 @@ pub struct GateFindings {
 /// every diagnostic shape this repository produces — rustc/clippy/rustdoc's
 /// `error:` opener, nextest's `binary-id test_name` record head, the suppression
 /// scanner's `path:line — …` line, rustfmt's `Diff in …` — starts a record at
-/// column zero and indents whatever continues it.
+/// column zero and indents whatever continues it — save for rustc's
+/// source-snippet gutter and its `...` elision marker, which sit at column zero
+/// and still belong to the diagnostic above them.
 #[must_use]
 pub fn gate_findings(findings: &str) -> Vec<GateFindings> {
     let mut sections: Vec<(String, Vec<String>)> = Vec::new();
@@ -61,24 +83,54 @@ pub fn gate_findings(findings: &str) -> Vec<GateFindings> {
         let Some((_, records)) = sections.last_mut() else {
             continue;
         };
-        if line.trim().is_empty() || line.starts_with(char::is_whitespace) {
-            if let Some(record) = records.last_mut() {
+        match records.last_mut() {
+            Some(record) if continues_a_record(line) => {
                 record.push('\n');
                 record.push_str(line);
             }
-        } else {
-            records.push(line.to_owned());
+            // A section whose first content line is already indented has no
+            // record for that line to continue, and dropping it drops the
+            // diagnostic's `-->` with it. Opening a record on it reads the
+            // block; a blank line before any record is still nothing.
+            _ if !line.trim().is_empty() => records.push(line.to_owned()),
+            _ => {}
         }
     }
 
     sections.iter().map(|(gate, records)| read_records(gate, records)).collect()
 }
 
+/// Whether `line` belongs to the record above it rather than opening its own.
+///
+/// Blank and indented lines do, which is the ordinary case. Two column-zero
+/// shapes do as well:
+///
+/// - **rustc's source-snippet gutter.** The line number is right-aligned in a
+///   gutter sized to the widest number in the block, so the widest one starts
+///   at column zero — `110 |         let recorded = …`. It is the source the
+///   diagnostic's own `-->` already located, and reading it as a finding of its
+///   own manufactures a finding that names no path out of every snippet rustc
+///   prints.
+/// - **The elision marker** rustc writes in that same gutter — `...   |` —
+///   where a multi-line span skips the middle of a function.
+fn continues_a_record(line: &str) -> bool {
+    if line.trim().is_empty() || line.starts_with(char::is_whitespace) {
+        return true;
+    }
+    line.split_once('|')
+        .is_some_and(|(gutter, _)| gutter.trim_end().chars().all(|column| column.is_ascii_digit() || column == '.'))
+}
+
 /// One section's records folded into the paths they name.
+///
+/// A [closing notice](CLOSING_NOTICES) is neither: it contributes no path and
+/// does not count against the section's completeness, because it is the
+/// compilation's own summary rather than a finding whose owner is in question.
 fn read_records(gate: &str, records: &[String]) -> GateFindings {
+    let stated: Vec<&String> = records.iter().filter(|record| !closes_a_compilation(record)).collect();
     let mut paths: Vec<String> = Vec::new();
-    let mut complete = !records.is_empty();
-    for record in records {
+    let mut complete = !stated.is_empty();
+    for record in stated {
         let named = named_surface(record).paths;
         complete &= !named.is_empty();
         for path in named {
@@ -88,6 +140,20 @@ fn read_records(gate: &str, records: &[String]) -> GateFindings {
         }
     }
     GateFindings { gate: gate.to_owned(), paths, complete }
+}
+
+/// Whether `record` is one of the notices a failed compilation closes with.
+fn closes_a_compilation(record: &str) -> bool {
+    let head = record.lines().next().unwrap_or_default();
+    CLOSING_NOTICES.iter().any(|notice| head.starts_with(notice)) || tallies_warnings(head)
+}
+
+/// Whether `head` is cargo's per-crate tally rather than a warning of its own —
+/// `warning: `aether-chassis-bloomery` (lib) generated 3 warnings`.
+fn tallies_warnings(head: &str) -> bool {
+    head.starts_with("warning: ")
+        && head.contains(" generated ")
+        && (head.ends_with(" warning") || head.ends_with(" warnings"))
 }
 
 /// What a member's ownership of a named path is decided against.
